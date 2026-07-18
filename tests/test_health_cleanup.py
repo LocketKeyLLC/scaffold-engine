@@ -30,7 +30,7 @@ def _run(coro):
 # /health — direct-call tests
 # ---------------------------------------------------------------------------
 
-def _call_health(pg_up=True, ollama_up=True, milvus_up=True):
+def _call_health(pg_up=True, ollama_up=True, milvus_up=True, pg_base_exc=False):
     """Call ``app.main.health()`` with mocked backends; return the dict.
 
     Mock points (post-X.17):
@@ -58,7 +58,12 @@ def _call_health(pg_up=True, ollama_up=True, milvus_up=True):
     mock_connect_cm.__aenter__ = AsyncMock(return_value=mock_conn)
     mock_connect_cm.__aexit__ = AsyncMock(return_value=False)
     mock_engine = MagicMock()
-    if pg_up:
+    if pg_base_exc:
+        # §17.603 — _check_pg catches Exception, so a BaseException escapes and
+        # gather(return_exceptions=True) returns it in place of the dict.
+        import asyncio as _asyncio
+        mock_engine.connect.side_effect = _asyncio.CancelledError()
+    elif pg_up:
         mock_engine.connect.return_value = mock_connect_cm
     else:
         mock_engine.connect.side_effect = ConnectionError("PG down")
@@ -364,6 +369,15 @@ class TestHealthDegradedStates:
 
     def test_unhealthy_when_ollama_down(self):
         result = _call_health(ollama_up=False)
+        assert result["status"] == "unhealthy"
+
+    def test_pg_check_base_exception_normalized_not_500(self):
+        """§17.603 — a BaseException from the pg check (returned by gather)
+        must be normalized to 'down', not dereferenced (['status']) into a
+        TypeError that 500s the unauthenticated /health. Redis/sidecars already
+        had this guard; pg/ollama/milvus didn't."""
+        result = _call_health(pg_base_exc=True)
+        assert result["checks"]["postgresql"]["status"] == "down"
         assert result["status"] == "unhealthy"
 
 

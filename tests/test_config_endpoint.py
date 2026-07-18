@@ -41,6 +41,26 @@ def test_config_endpoint_returns_every_field(client):
     )
 
 
+def test_config_default_factory_fields_report_real_default(client):
+    """§17.603 — default_factory fields (tool_call_coax_models,
+    alert_kind_cooldowns, node_escalation_order) must report their PRODUCED
+    default, not 'PydanticUndefined'. finfo.default is undefined for factory
+    fields, which also made is_default always False (reported as overridden
+    even on the built-in default)."""
+    from app.config import Settings
+    factory_fields = [
+        n for n, fi in Settings.model_fields.items()
+        if fi.default_factory is not None
+    ]
+    assert factory_fields, "expected >=1 default_factory Settings field"
+    fields = {f["name"]: f for f in client.get("/config").json()["fields"]}
+    for name in factory_fields:
+        assert "PydanticUndefined" not in str(fields[name]["default"]), (
+            name, fields[name]["default"]
+        )
+        assert isinstance(fields[name]["is_default"], bool)
+
+
 def test_config_endpoint_redacts_secret_str_fields(client):
     """SecretStr-typed fields (scaffold_api_key, openai_api_key) must
     never expose their value."""

@@ -21994,6 +21994,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.603 Fix — Low audit findings: /config + /health operator-surface robustness (2026-07-18)
+
+Two `app/main.py` diagnostic-endpoint bugs.
+
+- **`/config` reported `PydanticUndefined` for every `default_factory` field** (`get_config`). It read `finfo.default`, which pydantic v2 sets to `PydanticUndefined` for factory fields (`tool_call_coax_models`, `alert_kind_cooldowns`, `node_escalation_order`), so those showed `default='PydanticUndefined'` and `is_default=False` even on the built-in default — wrong config-provenance on the surface operators paste into bug reports. **Fix:** `finfo.get_default(call_default_factory=True)`.
+- **`/health` could 500 on a pg/ollama/milvus `BaseException`** (`health`). `gather(..., return_exceptions=True)` can return a `BaseException` (e.g. per-task `CancelledError`) in place of a check dict; redis + the sidecars/probes were defensively normalized to `'down'`, but pg/ollama/milvus were dereferenced (`['status']`) raw — a `TypeError` that 500s the *unauthenticated* /health, the exact failure the other guards prevent. **Fix:** apply the same `isinstance(x, BaseException) → 'down'` normalization to pg/ollama/milvus before building the checks dict.
+
+**Verification:** `test_config_endpoint.py` + `test_health_cleanup.py` = **56 passed** — new `test_config_default_factory_fields_report_real_default` (no field reports `PydanticUndefined`) and `test_pg_check_base_exception_normalized_not_500` (a pg-check `CancelledError` normalizes to `down`, no 500).
+
 ### §17.602 Fix — Low audit findings: cancellation-shield two more DB writes (2026-07-18)
 
 Two spots that write a terminal status on `CancelledError` but could lose it under a second/drain cancellation — mirroring the established §17.155/§17.530 shielded-finalize pattern.

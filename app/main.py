@@ -975,6 +975,20 @@ async def health():
             "most_recent_at": None,
             "by_comm": {},
         }
+    # §17.603 — pg/ollama/milvus were dereferenced (['status']) below WITHOUT
+    # the BaseException guard redis/sidecars/probes get above. A per-task
+    # BaseException from gather (e.g. a CancelledError) would TypeError-500 the
+    # unauthenticated /health — the exact failure those guards were added to
+    # prevent. Normalize the same way before building the checks dict.
+    if isinstance(pg, BaseException):
+        logger.warning("health_pg_check_raised: %s", pg)
+        pg = {"status": "down", "latency_ms": 0}
+    if isinstance(ollama, BaseException):
+        logger.warning("health_ollama_check_raised: %s", ollama)
+        ollama = {"status": "down", "latency_ms": 0}
+    if isinstance(milvus, BaseException):
+        logger.warning("health_milvus_check_raised: %s", milvus)
+        milvus = {"status": "down", "latency_ms": 0}
     reranker = _check_reranker_state(getattr(app, "state", None))
     checks = {
         "postgresql": pg, "ollama": ollama, "milvus": milvus,
@@ -1115,7 +1129,12 @@ async def get_config():
     out: list[dict] = []
     for name, finfo in fields_meta.items():
         live_value = getattr(_live_settings, name)
-        default = finfo.default
+        # §17.603 — resolve default_factory fields (tool_call_coax_models,
+        # alert_kind_cooldowns, node_escalation_order). finfo.default is
+        # PydanticUndefined for those, so the reported default AND the
+        # is_default comparison were wrong for every factory field (always
+        # shown as overridden even on the built-in default).
+        default = finfo.get_default(call_default_factory=True)
         type_repr = str(finfo.annotation).replace("typing.", "")
 
         if _is_secret_field(name, live_value):
