@@ -2010,6 +2010,7 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.615 node/execution cluster: topology-aware truncation, sizing convergence evidence guard, size stage_error on non-persist, async confirm off the threadpool, decompose TOCTOU advisory lock (2026-07-18 audit #14/26/27/35/36); #12 DB-session-across-LLM deferred (default-off, needs live-LLM verify).
 - ✅ §17.616 RAG/provenance batching: one batched exact-hash dedup query + multi-row provenance INSERT (2026-07-18 audit #31/33); #32 fetch_cache SCAN deferred (needs shared-Redis infra change).
 - ✅ §17.617 wired half-wired features: JobSummary parent_job_id/component_index populated + status.py class rename, assist divergence_count surfaced (2026-07-18 audit #19/13); #16 SO disputed-claim + #20 handoff_policy deferred (unverifiable feature work).
+- ✅ §17.618 CLOSEOUT of the 2026-07-18 multi-agent audit: 34 confirmed + #42 doc-drift resolved (§17.608–617), 4 deferred (#12/16/20/32), #41 reviewed-intentional. Ledger in AUDIT_2026-07-18.md.
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22032,6 +22033,26 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
 
 ---
+
+### §17.618 Closeout — 2026-07-18 whole-repo multi-agent improvement audit (2026-07-18)
+
+**Closes the 2026-07-18 multi-agent improvement audit** (§17.608–618). Methodology: 15 subsystem finders × 4 dimensions (reliability/performance/quality/feature), each finding vetted by two independent adversarial skeptics (correctness + intentionality lenses), then deduped/ranked — 55 raw → 40 confirmed + 9 contested. The two-skeptic gauntlet held to the documented ~31% true-positive prior; **zero critical data-loss/corruption/auth-bypass defects** surfaced, confirming a mature, well-hardened codebase. Full ledger: `AUDIT_2026-07-18.md`.
+
+**Resolved — 34 confirmed + 2 contested-doc:**
+- §17.608 rerank cap mismatch (#1, High) · §17.609 SSE lifecycle #2/#9/#39 (High) · §17.610 cloud retry/backoff + provider bugs #3/#29/#38 (High)
+- §17.611 router quick-wins #4/5/8/10/17/18/21/22/23/37/40 · §17.612 SSRF drift #6 · §17.613 defensive-guard cluster #7/15/24/25/28/30/34
+- §17.614 node prompt-edit #11 · §17.615 node/execution #14/26/27/35/36 · §17.616 RAG/provenance batching #31/33 · §17.617 wired features #13/19
+- **#42 (contested doc-drift):** two docstring corrections — `app/sim/report.py` now states the report is deliberately criticality-blind where `_check_constraints`'s convergence gate is not (not a mirror-mismatch bug); `app/modules/dag_generator.py` scopes its "validation logic" line to the structural dependency/dead-end checks that exist (dropped the overstated "I/O contract auditing").
+
+**Deferred (4) — genuine work needing verification/decisions I would not ship unverified:**
+- **#12** compile-synthesis holds a DB session across LLM calls — a 3-path finalize transaction refactor whose synthesis path needs a live-LLM integration run; trigger (`compile_synthesis`) is default-OFF.
+- **#32** fetch_cache SCANs the shared 2GB Redis keyspace to count keys — accurate fix needs a dedicated Redis counter/logical-DB (infra change) validated against the live shared instance; current SCAN is throttled/non-blocking/fail-open.
+- **#16** StackOverflow disputed-claim ingest — needs a second live-StackExchange unaccepted-answers fetch pass, unverifiable offline.
+- **#20** assist `handoff_policy` auto-handoff — `handoff_step` is a streaming executor generator; auto-invoking it from the transactional `submit_step` is an architectural decision (background vs streaming surface) needing assist-flow integration testing.
+
+**Reviewed, no change — #41 (contested, deliberate):** DAG generation's `SELECT ... FOR UPDATE OF j` held across LLM round-trips is load-bearing (makes the check-then-insert idempotency guard race-free) and row-scoped (only blocks another writer to a job row that doesn't exist mid-generation). The skeptic split favored "intentional"; the "fix" is the same risky transaction-split as #12. Left as designed.
+
+Each resolved batch shipped with its own §-entry + regression tests, verified against the dev-image suite per batch. The four deferrals are tracked here for a focused follow-up.
 
 ### §17.617 Fix — wire up half-wired features: JobSummary decomposition fields + assist divergence (2026-07-18)
 

@@ -30,11 +30,16 @@ What gets joined:
                   │   render as "[content unavailable]" rather than
                   │   failing the report.
 
-Per-constraint status classification mirrors §17.147's
-``_check_constraints`` logic exactly — ``ok`` / ``out_of_tolerance``
+Per-constraint status classification uses §17.147's
+``_check_constraints`` vocabulary — ``ok`` / ``out_of_tolerance``
 / ``violated_min`` / ``violated_max`` / ``not_measured`` / ``skipped``.
-The same rule that gated the sizing loop's convergence is the rule
-that labels each row in the measurement table.
+§17.617 (audit #42) — the report is deliberately criticality-BLIND where
+the convergence gate is not: ``_classify_constraint`` labels EVERY unmeasured
+measurable constraint ``not_measured`` (rendering its real criticality
+alongside for honesty), whereas ``_check_constraints`` only turns an unmeasured
+constraint into a convergence gap when it is ``required``. So the table can show
+``not_measured`` rows on a run the sizer still called converged (all such rows
+were preferred/best_effort). This is intentional, not a mirror-mismatch bug.
 
 Non-converged sizings ARE renderable (per the §17.148 design choice):
 the Markdown carries a prominent banner and the audit section

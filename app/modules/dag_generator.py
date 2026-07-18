@@ -4,7 +4,9 @@ Takes a refined brief (from Step 10) → LLM decomposition → validated DAG.
 Reuses Workflow Architect validation logic:
   - Kahn-based cycle detection
   - Strategy inference (sequential/parallel/hybrid/conditional)
-  - I/O contract auditing
+  - structural dependency checks (dangling depends_on refs, dead-end/orphan
+    nodes) — §17.617 (audit #42): the earlier "I/O contract auditing" wording
+    overstated this; validation is structural-graph, not per-node I/O typing.
 
 Persists nodes to dag_nodes table. Job transitions: planning → executing.
 
