@@ -117,6 +117,19 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
     running_node = next(
         (n["node_key"] for n in nodes if n["status"] == "running"), None,
     )
+    # §17.599 — for assisted_* statuses, resolve the real assist session id so
+    # the {session_id} recovery links don't point at the job id (they differ,
+    # so the job-id link 404s). Only queried on the assist branch.
+    session_id = None
+    if str(job.status).startswith("assisted_"):
+        session_id = (await db.execute(
+            text(
+                "SELECT id FROM assist_sessions WHERE job_id = :jid "
+                "AND status IN ('active', 'paused') "
+                "ORDER BY last_activity_at DESC LIMIT 1"
+            ),
+            {"jid": str(job_id)},
+        )).scalar()
     actions = next_actions_for(
         job.status,
         str(job_id),
@@ -124,6 +137,7 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         blocked_node_key=blocked_node,
         running_node_key=running_node,
         error_summary=getattr(job, "error_summary", None),
+        session_id=str(session_id) if session_id else None,
     )
 
     # Sprint J.3.b — surface a lightweight cost/latency totals block.

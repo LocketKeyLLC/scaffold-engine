@@ -162,12 +162,19 @@ async def get_status(
     # here so the renderers showed bare UUIDs.
     query = """
         SELECT j.id, j.title, j.status, j.created_at, j.updated_at,
-               COALESCE(n.node_count, 0) AS node_count
+               COALESCE(n.node_count, 0) AS node_count,
+               s.id AS session_id
         FROM jobs j
         LEFT JOIN (
             SELECT job_id, COUNT(*) AS node_count
             FROM dag_nodes GROUP BY job_id
         ) n ON n.job_id = j.id
+        -- §17.599 — active assist session for assisted_* recovery links.
+        LEFT JOIN LATERAL (
+            SELECT id FROM assist_sessions
+            WHERE job_id = j.id AND status IN ('active', 'paused')
+            ORDER BY last_activity_at DESC LIMIT 1
+        ) s ON TRUE
     """
     params: dict = {"limit": limit}
     if status_filter:
@@ -184,7 +191,10 @@ async def get_status(
             node_count=row.node_count,
             created_at=row.created_at.isoformat() if row.created_at else None,
             updated_at=row.updated_at.isoformat() if row.updated_at else None,
-            next_actions=next_actions_for(row.status, str(row.id)),
+            next_actions=next_actions_for(
+                row.status, str(row.id),
+                session_id=str(row.session_id) if row.session_id else None,
+            ),
         )
         for row in jobs_result
     ]
@@ -217,12 +227,22 @@ async def get_work(db=Depends(get_db)) -> WorkResponse:
     job_rows = await db.execute(
         text("""
             SELECT j.id, j.title, j.status, j.job_type, j.error_summary,
-                   j.updated_at, COALESCE(n.node_count, 0) AS node_count
+                   j.updated_at, COALESCE(n.node_count, 0) AS node_count,
+                   s.id AS session_id
             FROM jobs j
             LEFT JOIN (
                 SELECT job_id, COUNT(*) AS node_count
                 FROM dag_nodes GROUP BY job_id
             ) n ON n.job_id = j.id
+            -- §17.599 — the active assist session (if any) so assisted_* jobs'
+            -- {session_id} recovery links resolve to the real session id, not
+            -- the job id (they differ; the job-id link 404s).
+            LEFT JOIN LATERAL (
+                SELECT id FROM assist_sessions
+                WHERE job_id = j.id AND status IN ('active', 'paused')
+                ORDER BY last_activity_at DESC
+                LIMIT 1
+            ) s ON TRUE
             WHERE j.status NOT IN ('completed', 'failed', 'cancelled')
             ORDER BY j.updated_at DESC
         """),
@@ -237,7 +257,8 @@ async def get_work(db=Depends(get_db)) -> WorkResponse:
             node_count=row.node_count,
             updated_at=row.updated_at.isoformat() if row.updated_at else None,
             next_actions=next_actions_for(
-                row.status, str(row.id), error_summary=row.error_summary
+                row.status, str(row.id), error_summary=row.error_summary,
+                session_id=str(row.session_id) if row.session_id else None,
             ),
         )
         for row in job_rows

@@ -244,9 +244,13 @@ class _FakeSession:
     job->'executing' flip, the scoped node claim (reads .mappings().first()),
     and the restore-to-'assisted_executing' (reads .scalar())."""
 
-    def __init__(self, rec, claimed=_CLAIMED_T1):
+    def __init__(self, rec, claimed=_CLAIMED_T1, scalar_value="active"):
         self._rec = rec
         self._claimed = claimed
+        # Value returned by .scalar() — the restore reads the session status
+        # ("active" to proceed) and the §17.599 finalize reads the job status
+        # ("completed" to finalize the session).
+        self._scalar_value = scalar_value
 
     async def __aenter__(self):
         return self
@@ -257,7 +261,7 @@ class _FakeSession:
     async def execute(self, stmt, params=None):
         self._rec.append(("execute", str(stmt), params))
         r = MagicMock()
-        r.scalar.return_value = "active"  # db3 SELECT sees an active session
+        r.scalar.return_value = self._scalar_value
         r.mappings.return_value.first.return_value = self._claimed  # claim row
         return r
 
@@ -393,6 +397,69 @@ async def test_handoff_all_remaining_uses_execute_all_nodes(monkeypatch):
     assert all_called["hit"] is True
     assert next_called["hit"] is False
     assert any("assist_handoff_done" in e for e in events)
+
+
+@pytest.mark.asyncio
+async def test_handoff_finalizes_session_when_job_completes(monkeypatch):
+    """§17.599 — when the handoff drives the job to 'completed', the assist
+    session is transitioned out of 'active' so /assist/_chatmap stops routing
+    plain chat into a done session and the idle reaper doesn't mislabel it."""
+    rec: list = []
+    monkeypatch.setattr(
+        assist_agent, "async_session",
+        lambda: _FakeSession(rec, scalar_value="completed"),
+    )
+
+    async def _fake_exec_all(job_id):
+        yield 'event: node\ndata: {}\n\n'
+
+    monkeypatch.setattr(
+        "app.modules.execution_agent.execute_all_nodes", _fake_exec_all,
+    )
+
+    events = [
+        ev async for ev in assist_agent.handoff_step(
+            session_id="sess-1", node_key="T1", mode="all_remaining",
+            db=_handoff_db(),
+        )
+    ]
+    assert any("assist_handoff_done" in e for e in events)
+    finalize = [
+        c for c in rec
+        if c[0] == "execute" and "assist_sessions" in c[1]
+        and "'completed'" in c[1]
+    ]
+    assert finalize, "session was not finalized to 'completed' after job complete"
+
+
+@pytest.mark.asyncio
+async def test_handoff_does_not_finalize_when_job_not_complete(monkeypatch):
+    """§17.599 — a single-node handoff that leaves the job running must NOT
+    finalize the session (the operator continues in assist)."""
+    rec: list = []
+    monkeypatch.setattr(
+        assist_agent, "async_session",
+        lambda: _FakeSession(rec, scalar_value="active"),
+    )
+
+    async def _fake_exec_next(job_id, preclaimed_node=None):
+        return {"status": "done", "node_key": "T1", "title": "T1",
+                "verified": True, "job_complete": False}
+
+    monkeypatch.setattr(
+        "app.modules.execution_agent.execute_next_node", _fake_exec_next,
+    )
+
+    async for _ in assist_agent.handoff_step(
+        session_id="sess-1", node_key="T1", mode="single", db=_handoff_db(),
+    ):
+        pass
+    finalize = [
+        c for c in rec
+        if c[0] == "execute" and "assist_sessions" in c[1]
+        and "'completed'" in c[1]
+    ]
+    assert not finalize, "session finalized despite job not complete"
 
 
 @pytest.mark.asyncio

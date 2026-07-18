@@ -468,6 +468,7 @@ def next_actions_for(
     blocked_node_key: str | None = None,
     running_node_key: str | None = None,
     error_summary: str | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve the registry into concrete actions for one job's current state.
 
@@ -510,16 +511,23 @@ def next_actions_for(
             action["reason_kind"] = reason_kind
             prepend.append(action)
 
+    # §17.599 — the assisted_* actions use {session_id} in their /assist
+    # command + endpoint templates, but assist_sessions.id != jobs.id, so
+    # filling session_id with job_id produced 404-ing links. Use the real
+    # session_id when the caller supplies it; fall back to job_id only for
+    # legacy callers that don't (no assisted_* action is reachable without a
+    # session, so the fallback never renders a wrong assist link in practice).
+    sid = session_id or job_id
     resolved: list[dict[str, Any]] = []
     for entry in (*prepend, *template):
         action = dict(entry)  # copy so we don't mutate the registry
         if action.get("command"):
             action["command"] = action["command"].format(
-                job_id=job_id, node_key=node_key, session_id=job_id,
+                job_id=job_id, node_key=node_key, session_id=sid,
             )
         if action.get("endpoint"):
             action["endpoint"] = action["endpoint"].format(
-                job_id=job_id, node_key=node_key, session_id=job_id,
+                job_id=job_id, node_key=node_key, session_id=sid,
             )
         resolved.append(action)
     return resolved

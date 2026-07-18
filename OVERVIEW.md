@@ -21994,6 +21994,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.599 Fix — Medium audit findings, group 4/5: assist/handoff subsystem (2026-07-18)
+
+Two assist-mode defects (companions to the §17.594 H1 single-handoff-scope fix).
+
+- **Assist session never finalized after a handoff completes the job** (`app/modules/assist_agent.py`). When the autonomous executor (single-mode last node, or `all_remaining`) drove the job to `completed`, the §17.410 restore left the job terminal but nothing transitioned the `assist_session` out of `active` — `_maybe_finalize_session` is only reachable from `submit_step`. Result: `/assist/_chatmap` kept auto-routing plain chat into a done session, and the idle reaper mislabeled it `abandoned`. **Fix:** a shielded finalize step in `handoff_step`'s `finally` reads the job status and, if `completed`, flips the session to `completed` (both modes). Deliberately does NOT re-compile the deliverable (the executor already set `compiled_output`) — it only settles the session row.
+- **Recovery actions rendered `job_id` in place of `session_id`** (`app/modules/recovery.py` + `routers/status.py` + `modules/execution_handler.py`). `next_actions_for()` hard-coded `session_id=job_id` when filling the `{session_id}` `/assist` command + endpoint templates for `assisted_*` statuses, but `assist_sessions.id != jobs.id`, so `/assist next <id>` and `/assist/<id>/next` pointed at the wrong id (404). **Fix:** `next_actions_for` takes an optional `session_id` (falls back to `job_id` for legacy callers); the three render paths thread the real session — `/work` and the dashboard via a `LEFT JOIN LATERAL` onto the active `assist_sessions`, `/exec/status` via a scoped lookup on the `assisted_*` branch.
+
+**Verification:** `test_recovery.py` + `test_recovery_reaper_hints.py` + `test_assist_agent.py` + `test_execution_handler_module.py` + `test_status_logs.py` = **109 passed** — new: `test_assist_actions_use_session_id_not_job_id`, `test_assist_actions_fall_back_to_job_id_when_no_session`, `test_handoff_finalizes_session_when_job_completes`, `test_handoff_does_not_finalize_when_job_not_complete`. Both new `LATERAL`-join queries validated against live Postgres.
+
 ### §17.598 Fix — Medium audit findings, group 3/5: transaction/cancellation durability (2026-07-18)
 
 Two spots where "best-effort" cleanup silently dropped a durable write by sharing a poisoned transaction.

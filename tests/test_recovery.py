@@ -94,6 +94,29 @@ def test_assist_statuses_emit_assist_commands():
     assert any(a["command"] and "/assist resume" in a["command"] for a in actions)
 
 
+def test_assist_actions_use_session_id_not_job_id():
+    """§17.599 — assisted_* {session_id} links must render the real session id,
+    not the job id (assist_sessions.id != jobs.id, so the job-id link 404s)."""
+    actions = next_actions_for(
+        "assisted_executing", "job-abc", session_id="sess-xyz",
+    )
+    assist = [a for a in actions if a.get("command") and "/assist" in a["command"]]
+    assert assist, "expected /assist actions for assisted_executing"
+    for a in assist:
+        assert "sess-xyz" in a["command"] and "job-abc" not in a["command"]
+        if a.get("endpoint") and "/assist/" in a["endpoint"]:
+            assert "sess-xyz" in a["endpoint"] and "job-abc" not in a["endpoint"]
+
+
+def test_assist_actions_fall_back_to_job_id_when_no_session():
+    """§17.599 — legacy callers that don't supply session_id keep the old
+    job_id fill (no assisted_* action is reachable without a session, so this
+    fallback doesn't render a wrong link in practice)."""
+    actions = next_actions_for("assisted_executing", "job-abc")
+    assist = [a for a in actions if a.get("command") and "/assist" in a["command"]]
+    assert assist and all("job-abc" in a["command"] for a in assist)
+
+
 def test_resolved_action_does_not_mutate_registry():
     """Ensure next_actions_for returns deep-enough copies that callers
     can't accidentally edit the global registry."""

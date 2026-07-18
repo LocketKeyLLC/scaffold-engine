@@ -1392,6 +1392,40 @@ async def handoff_step(
                 )
                 raise
 
+        # §17.599 — if the handoff drove the job to terminal 'completed',
+        # finalize the assist session so /assist/_chatmap stops auto-routing
+        # plain chat into a done session and the idle reaper doesn't mislabel
+        # it 'abandoned'. Covers both modes: single-mode auto-completes only on
+        # the last node (§17.594), all_remaining completes when the DAG
+        # finishes. Deliberately does NOT re-compile (the executor already set
+        # compiled_output) — this only settles the session row. Shielded so a
+        # client disconnect can't strand the session 'active'.
+        async def _finalize_session_if_job_done() -> None:
+            async with async_session() as db4:
+                jstatus = (await db4.execute(
+                    text("SELECT status FROM jobs WHERE id = :jid"),
+                    {"jid": job_id},
+                )).scalar()
+                if jstatus == "completed":
+                    await db4.execute(
+                        text(
+                            "UPDATE assist_sessions SET status = 'completed', "
+                            "completed_at = NOW(), updated_at = NOW() "
+                            "WHERE id = :sid AND status IN ('active', 'paused')"
+                        ),
+                        {"sid": session_id},
+                    )
+                    await db4.commit()
+
+        try:
+            await asyncio.shield(_finalize_session_if_job_done())
+        except asyncio.CancelledError:
+            logger.warning(
+                "assist_handoff_finalize_cancel_propagated_but_shielded: "
+                "session_id=%s job_id=%s", session_id, job_id,
+            )
+            raise
+
     yield _sse("assist_handoff_done", {
         "session_id": session_id,
         "node_key": node_key,
