@@ -625,6 +625,20 @@ async def advance_design_stage(
             )
             yield _sse("done", {"ok": False})
             return
+        # §17.615 (audit #27) — the sizer can return ok=False WITHOUT raising and
+        # without persisting (unconfirmed spec, unsupported design.kind): sizing_id
+        # is None, which str()'d to the literal "None" above. Emit stage_error
+        # (surfacing the sizer's errors) instead of a stage_done that both
+        # misreports a non-persisted failure as a completed artifact-producing
+        # stage AND hands clients the invalid UUID string "None".
+        if sizing_dict.get("sizing_id") == "None":
+            await _set_job_status(db, job_id, "failed")
+            yield _sse("stage_error", {
+                "stage": stage,
+                "errors": sizing_dict.get("errors") or ["sizing produced no persisted result"],
+            })
+            yield _sse("done", {"ok": False})
+            return
         yield _sse("stage_done", sizing_dict)
         if not converged_flag:
             # Job stays in ``executing`` — operator can re-run size

@@ -15,7 +15,7 @@ Coverage:
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -61,8 +61,12 @@ def fake_long_client():
 @pytest.fixture
 def fake_async_long_client():
     """Mock AsyncClient. ``aiter_execute_all`` is set per-test to an
-    async-generator function so each case can drive the SSE stream."""
-    return MagicMock()
+    async-generator function so each case can drive the SSE stream.
+    ``confirm`` is an AsyncMock (§17.615 — post_confirm now awaits it as an
+    async background task rather than the sync long_client)."""
+    m = MagicMock()
+    m.confirm = AsyncMock()
+    return m
 
 
 @pytest.fixture
@@ -794,25 +798,26 @@ class TestPostConfirm:
         assert resp.status_code == 302
         assert resp.headers["location"] == "/web/jobs/job-abc?run=1"
 
-    def test_calls_long_client_confirm_with_feedback(self, client, fake_long_client):
+    def test_calls_long_client_confirm_with_feedback(self, client, fake_async_long_client):
         client.post(
             "/web/jobs/job-abc/confirm",
             data={"feedback": "Focus on Python only."},
         )
-        fake_long_client.confirm.assert_called_once()
+        # §17.615 — confirm now runs as an async background task on the event loop.
+        fake_async_long_client.confirm.assert_called_once()
         # confirm signature: (job_id, *, feedback, ...). Extract from args.
-        call = fake_long_client.confirm.call_args
+        call = fake_async_long_client.confirm.call_args
         assert call.args[0] == "job-abc" or call.kwargs.get("job_id") == "job-abc"
         assert call.kwargs.get("feedback") == "Focus on Python only."
 
-    def test_blank_feedback_passes_none(self, client, fake_long_client):
+    def test_blank_feedback_passes_none(self, client, fake_async_long_client):
         """Whitespace-only feedback should normalize to None so the
         SDK / orchestrator skip the no-op refinement path."""
         client.post(
             "/web/jobs/job-xyz/confirm",
             data={"feedback": "   "},
         )
-        call = fake_long_client.confirm.call_args
+        call = fake_async_long_client.confirm.call_args
         assert call.kwargs.get("feedback") is None
 
 

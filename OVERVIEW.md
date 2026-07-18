@@ -2006,6 +2006,8 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.611 API/router quick-win cluster: /config int-redaction, /logs ordering, gt_list count, recent_jobs_costs window, artifact list projection, partial-results count, dead const, double-parse, dup query, node-action UUID guard, /health probe timeouts (2026-07-18 audit #4/5/8/10/17/18/21/22/23/37/40).
 - ✅ §17.612 SSRF drift closed: topic-mode fetch + verify-recheck now route through / re-check the §17.93 hardened fetch guard (byte cap + post-redirect host check) (2026-07-18 audit #6).
 - ✅ §17.613 sibling defensive-guard cluster: rm-gate anchoring, gt drift-filter, case-insensitive CodeGen/Shell, assist_done JSON guards, gap-analysis-failure retry, model_ab rowcount audit, deduped provenance warning (2026-07-18 audit #7/15/24/25/28/30/34).
+- ✅ §17.614 node prompt edits honored: prompt_template (not optimized_prompt) is the editable+invalidating field (2026-07-18 audit #11).
+- ✅ §17.615 node/execution cluster: topology-aware truncation, sizing convergence evidence guard, size stage_error on non-persist, async confirm off the threadpool, decompose TOCTOU advisory lock (2026-07-18 audit #14/26/27/35/36); #12 DB-session-across-LLM deferred (default-off, needs live-LLM verify).
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22028,6 +22030,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
 
 ---
+
+### §17.615 Fix — node/execution reliability cluster (5 audit findings) + #12 deferred (2026-07-18)
+
+2026-07-18 audit batch 7.
+
+- **#14 node-count truncation dropped the deliverable** (`app/modules/dag_generator.py`). `_enforce_node_count` kept the lowest-numbered `max_count` nodes and tail-dropped the rest; the terminal synthesis/output node is a SINK (nothing depends on it) and typically highest-numbered, so it was silently deleted and the persist-time fallback re-marked a mutilated leaf as deliverable — the user's artifact never produced, no error. **Fix:** topology-aware truncation — preserve sink (terminal/deliverable) nodes, drop from the middle (higher-numbered non-sinks).
+- **#26 sizing declared convergence with nothing measured** (`app/sim/device_sizing.py`, `app/sim/digital_sizing.py`). `converged = ngspice_ok and not gaps`, but `_check_constraints` only emits gaps for measurable+required constraints — a spec with all-non-measurable or all-preferred constraints yielded empty gaps and reported "Converged: yes" against an empty measurements dict. **Fix:** require ≥1 measurement mapped to a spec constraint before converging (both analog + digital sizers).
+- **#27 size stage emitted `sizing_id='None'` + `stage_done` on a non-persisted failure** (`app/sim/design_pipeline.py`). When the sizer returns `ok=False` without persisting, `sizing_id` is None → stringified to `"None"` and emitted as a completed stage. **Fix:** emit `stage_error` (with the sizer's errors) when `sizing_id` is `"None"`.
+- **#35 background confirm pinned a shared threadpool token for 512-1450s** (`app/web/routes.py`). `post_confirm` scheduled a SYNC `_kick_off` (blocking `long_client.confirm`) as a Starlette BackgroundTask → `run_in_threadpool` on AnyIO's default 40-token limiter, the SAME pool serving every sync `def` web route. **Fix:** make `_kick_off` async (async client); Starlette awaits async background tasks on the event loop, so no threadpool token is held while the loopback awaits.
+- **#36 `/decompose` inflight-cap was a TOCTOU race** (`app/routers/workflow.py`). The count-check and `create_and_run_decomposition` were unsynchronized, so two concurrent calls could both pass the cap and both fan out. **Fix:** `pg_advisory_xact_lock` before the count, held on the shared `db` session until `create_and_run_decomposition` commits — serializing the whole count→insert critical section (releases before the background pipelines spawn).
+
+**Deferred — #12 (compile synthesis holds a DB session across LLM calls).** `_compile_output(job_id, db)` is awaited inside the open finalize session in all three finalize paths; when `compile_synthesis` is enabled (per-job override; global default OFF) it makes model_router LLM calls while holding a pooled connection, contradicting the no-session-across-LLM policy. The correct fix (compute synthesized text with no session held, then re-open a fast session for the `compiled_output` UPDATE, mirroring §17.598 artifact isolation) is a real refactor across the compile module + 3 finalize call sites whose synthesis path needs a live-LLM integration run to verify — deliberately deferred rather than shipped unverified. Trigger is default-off, so impact is limited to operators enabling per-job synthesis.
+
+**Verification:** `make test` subset — dag_generator/decomposition(+concurrency)/device_sizing/digital_sizing/design_pipeline/web_ui = **212 passed** (+2 regression: truncation preserves terminal sink, post_confirm async background task).
 
 ### §17.614 Fix — node prompt edits were silently discarded on re-execution (2026-07-18)
 

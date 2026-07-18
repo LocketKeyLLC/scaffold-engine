@@ -729,6 +729,22 @@ async def size_device(
         ))
 
         if ngspice_ok and not gaps:
+            # §17.615 (audit #26) — don't declare convergence with nothing
+            # verified. _check_constraints only emits gaps for measurable+required
+            # constraints, so a spec whose constraints are all non-measurable
+            # (cost.*/physical.*) or all preferred/best_effort yields empty gaps
+            # and would report "Converged: yes" against an empty measurements dict.
+            # Require ≥1 measurement mapped to a spec constraint as actual evidence.
+            spec_ids = {
+                c.get("id") for c in spec_json.get("constraints", [])
+                if c.get("id") is not None
+            }
+            if not (set(measurements) & spec_ids):
+                loop_errors.append(
+                    "no measurable constraints to verify — the sizing produced no "
+                    "measurement mapped to a spec constraint; cannot confirm convergence"
+                )
+                break
             converged = True
             break
 

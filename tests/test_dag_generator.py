@@ -212,6 +212,25 @@ class TestEnforceNodeCount:
         not hasattr(_dag_gen, "_enforce_node_count"),
         reason="_enforce_node_count not exposed",
     )
+    def test_truncation_preserves_terminal_sink(self):
+        """§17.615 (audit #14) — the terminal/deliverable node is a sink (nothing
+        depends on it) and is highest-numbered; truncation must preserve it, not
+        tail-drop it and silently orphan the deliverable."""
+        # Linear chain T1..T12 — T12 is the terminal sink (the deliverable).
+        dag = [
+            {"id": f"T{i}", "title": f"Step {i}", "tool": "LLM",
+             "depends_on": [f"T{i-1}"] if i > 1 else []}
+            for i in range(1, 13)
+        ]
+        result = _dag_gen._enforce_node_count(dag)
+        kept_ids = {t["id"] for t in result}
+        assert len(result) <= 10
+        assert "T12" in kept_ids, "terminal sink (deliverable) must survive truncation"
+
+    @pytest.mark.skipif(
+        not hasattr(_dag_gen, "_enforce_node_count"),
+        reason="_enforce_node_count not exposed",
+    )
     def test_within_range_unchanged(self):
         """DAGs with 3-5 nodes pass through unchanged."""
         dag = [

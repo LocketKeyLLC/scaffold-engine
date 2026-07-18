@@ -990,12 +990,35 @@ def _enforce_node_count(
         )
 
     if len(tasks) > max_count:
-        # Sort by node_key, keep first max_count
-        sorted_tasks = sorted(tasks, key=lambda t: int(re.sub(r"\D", "", t.get("id", "0")) or "0"))
-        kept = sorted_tasks[:max_count]
-        dropped = sorted_tasks[max_count:]
-        dropped_keys = {t["id"] for t in dropped}
+        # §17.615 (audit #14) — topology-aware truncation. The terminal
+        # synthesis/output node is a SINK (nothing depends on it) and is
+        # typically the highest-numbered, so the old tail-drop silently deleted
+        # the deliverable — and the persist-time fallback then re-marked a
+        # mutilated leaf as deliverable, so the user's requested artifact was
+        # never produced with NO error. Preserve sink (terminal/deliverable)
+        # nodes and drop from the middle (higher-numbered non-sinks) instead.
+        def _num(t: dict) -> int:
+            return int(re.sub(r"\D", "", t.get("id", "0")) or "0")
+
+        depended_upon = {d for t in tasks for d in t.get("depends_on", [])}
+        sinks = [t for t in tasks if t["id"] not in depended_upon]
+        non_sinks = sorted((t for t in tasks if t["id"] in depended_upon), key=_num)
+
+        if len(sinks) >= max_count:
+            # Pathological: more terminal nodes than the cap — can't keep them
+            # all. Keep the lowest-numbered sinks; the deliverable is still among
+            # the preserved terminals.
+            logger.warning(
+                "dag_truncate_sink_overflow: sinks=%d exceeds max_count=%d",
+                len(sinks), max_count,
+            )
+            kept = sorted(sinks, key=_num)[:max_count]
+        else:
+            slots = max_count - len(sinks)
+            kept = sorted(non_sinks[:slots] + sinks, key=_num)
+
         kept_keys = {t["id"] for t in kept}
+        dropped_keys = {t["id"] for t in tasks} - kept_keys
 
         # Rewrite depends_on to remove references to dropped nodes
         for task in kept:
@@ -1004,8 +1027,8 @@ def _enforce_node_count(
             ]
 
         logger.warning(
-            "dag_truncated: original_count=%d kept_count=%d dropped_keys=%s",
-            len(tasks), max_count, sorted(dropped_keys),
+            "dag_truncated: original_count=%d kept_count=%d dropped_keys=%s sinks_preserved=%d",
+            len(tasks), len(kept), sorted(dropped_keys), len(sinks),
         )
         return kept
 

@@ -141,6 +141,13 @@ async def decompose_endpoint(body: IdeaInput, db=Depends(get_db)):
         # LLM failed" so the caller/logs aren't blind to an extraction error.
         reason = "single_focus" if components else "extraction_unavailable"
         return {"decomposed": False, "components": components, "reason": reason}
+    # §17.615 (audit #36) — serialize the check-and-create so two concurrent
+    # /decompose calls can't both observe inflight below the cap and both fan
+    # out, overrunning decompose_max_inflight_components. This xact-level advisory
+    # lock is held on `db` until create_and_run_decomposition commits (its inserts
+    # share this session), covering the whole count→insert critical section, and
+    # releases before the background component pipelines spawn.
+    await db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": 9717615})
     # §17.531 — global fan-out cap: bound the total number of autonomous
     # component pipelines in flight across ALL umbrellas (cost / DoS guard).
     inflight = (await db.execute(

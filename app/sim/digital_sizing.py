@@ -541,6 +541,19 @@ async def size_digital_device(
         ))
 
         if verilator_ok and not gaps:
+            # §17.615 (audit #26) — see device_sizing: require ≥1 measurement
+            # mapped to a spec constraint before converging, else a spec with no
+            # measurable/required constraints reports convergence against nothing.
+            spec_ids = {
+                c.get("id") for c in spec_json.get("constraints", [])
+                if c.get("id") is not None
+            }
+            if not (set(measurements) & spec_ids):
+                loop_errors.append(
+                    "no measurable constraints to verify — the sizing produced no "
+                    "measurement mapped to a spec constraint; cannot confirm convergence"
+                )
+                break
             converged = True
             break
 

@@ -704,7 +704,7 @@ async def post_confirm(
     job_id: str,
     background_tasks: BackgroundTasks,
     feedback: str | None = Form(None),
-    long_client=Depends(get_sdk_long_client),
+    async_long_client=Depends(get_sdk_async_long_client),
 ):
     """Sprint J.2.b / §17.456 — kick off Phase 2 (research → ingest → compile)
     as a background task, then auto-chain into execution (parity with the chat
@@ -720,9 +720,17 @@ async def post_confirm(
     """
     feedback_clean = (feedback or "").strip() or None
 
-    def _kick_off():
+    # §17.615 (audit #35) — the confirm runs Phase 2 for 512-1450s. The old form
+    # was a SYNC background task (long_client.confirm), which Starlette runs via
+    # run_in_threadpool on AnyIO's default 40-token limiter — the SAME pool that
+    # serves every sync `def` web route (jobs_list, job_detail, the §17.455 poll),
+    # pinning a slot for the whole Phase-2 duration with nothing bounding
+    # concurrent confirms. Making _kick_off ASYNC (async client) moves it onto the
+    # event loop instead: Starlette awaits async background tasks directly, so no
+    # threadpool token is held while the loopback awaits.
+    async def _kick_off():
         try:
-            long_client.confirm(job_id, feedback=feedback_clean)
+            await async_long_client.confirm(job_id, feedback=feedback_clean)
         except Exception as exc:
             logger.exception(
                 "web_confirm_background_failed: job=%s error=%s",
