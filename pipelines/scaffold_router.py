@@ -2746,11 +2746,12 @@ class Pipeline:
         keep = self.valves.keepalive_interval
         max_idle = max(300, 5 * keep)
         # The read-timeout drives how often a silent server triggers a
-        # ReadTimeout and we emit a heartbeat. Tying it to ``keep`` keeps
-        # the heartbeat cadence honest: each ReadTimeout cycle covers
-        # exactly ``keep`` wall-clock seconds, so ``idle_seconds += keep``
-        # below counts real elapsed time. Lower bound 30s to avoid
-        # thrashing on tiny keep values.
+        # ReadTimeout and we emit a heartbeat. §17.609 — each ReadTimeout
+        # cycle covers ``read_timeout`` wall-clock seconds, NOT ``keep``:
+        # the 30s lower bound means a small keepalive_interval (default 10)
+        # still waits 30s per silent cycle. The stall accumulator below must
+        # therefore add ``read_timeout``; adding ``keep`` undercounted elapsed
+        # time 3× at the default, firing the stall guard at ~900s not ~300s.
         read_timeout = max(30, keep)
 
         try:
@@ -2831,7 +2832,7 @@ class Pipeline:
                     if stop_event is not None and stop_event.is_set():
                         event_queue.put(("done", None, None))
                         return
-                    idle_seconds += keep
+                    idle_seconds += read_timeout  # §17.609 — true per-cycle wall time
                     if idle_seconds >= max_idle:
                         event_queue.put((
                             "event", "stream_stalled",

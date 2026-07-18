@@ -1049,14 +1049,30 @@ async def run_stream(
     on the listening ``<ul>`` appends each fragment as it arrives.
 
     Terminal events (pipeline_complete, error, blocked, execution_*)
-    cause the generator to break; the EventSource on the browser side
-    closes when the response completes.
+    cause the generator to emit a distinct ``close`` SSE frame and stop.
+    The browser ``<ul sse-close="close">`` listens for that frame and calls
+    ``EventSource.close()`` — without it (§17.609) the EventSource treats the
+    clean stream end as a dropped connection, auto-reconnects, re-POSTs
+    ``/execute/all``, hits the completed-job guard, renders THAT as another
+    terminal message, and loops forever appending error banners.
+
+    §17.609 — heartbeats are forwarded as SSE comment lines (``: keep-alive``)
+    so a long single node still produces frames and idle-timeout proxies don't
+    tear the connection down (which would itself feed the reconnect loop).
     """
 
     async def _gen():
         try:
-            async for evt in async_long_client.aiter_execute_all(job_id):
+            async for evt in async_long_client.aiter_execute_all(
+                job_id, include_heartbeats=True,
+            ):
                 event_name = evt.get("event") if isinstance(evt, dict) else None
+                # Keepalive heartbeats surface as {"event": "heartbeat"}; forward
+                # them as SSE comment lines (no visible fragment) to hold the
+                # connection open behind idle-timeout proxies.
+                if event_name == "heartbeat":
+                    yield ": keep-alive\n\n"
+                    continue
                 data = evt.get("data") if isinstance(evt, dict) else {}
                 if not isinstance(data, dict):
                     data = {"raw": str(data)}
@@ -1065,6 +1081,8 @@ async def run_stream(
                 # prefix and trailing blank line per event.
                 yield f"event: message\ndata: {line}\n\n"
                 if event_name in _TERMINAL_EVENTS:
+                    # Tell the browser to stop the EventSource — no reconnect.
+                    yield "event: close\ndata: done\n\n"
                     return
         except Exception as exc:  # streaming failed mid-flight
             logger.exception(
@@ -1072,6 +1090,8 @@ async def run_stream(
             )
             err_html = _render_event_html("error", {"message": str(exc)})
             yield f"event: message\ndata: {err_html}\n\n"
+            # Close on the error path too, else the reconnect loop resumes.
+            yield "event: close\ndata: done\n\n"
 
     return StreamingResponse(
         _gen(),

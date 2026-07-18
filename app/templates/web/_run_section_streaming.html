@@ -2,12 +2,13 @@
   <h2>Executing…</h2>
   <p class="meta">
     Live progress streamed from <code>/execute/all</code>. The connection
-    closes automatically when the pipeline completes or fails. Refresh
-    the page to see the final compiled output.
+    closes when the server sends its terminal <code>close</code> frame
+    (§17.609). Refresh the page to see the final compiled output.
   </p>
   <ul class="run-event-feed"
       hx-ext="sse"
       sse-connect="/web/jobs/{{ job_id }}/run/stream"
       sse-swap="message"
+      sse-close="close"
       hx-swap="beforeend"></ul>
 </section>

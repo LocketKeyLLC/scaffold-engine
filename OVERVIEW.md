@@ -2001,6 +2001,7 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.606 `classify` gets a generous budget + empty-guard; skipped-human node marked `verified`; `to_milvus` emits `title`.
 - ✅ §17.607 SDK gains `ConflictError` (409); CLI `_stream_research` uses the real `_stream` (dead `_aiter_sse` ref removed).
 - ✅ §17.608 rerank cap mismatch fixed: `max_pairs` plumbed through so `RERANK_MAX_CANDIDATES > 20` no longer silently disables reranking (2026-07-18 audit #1).
+- ✅ §17.609 web SSE lifecycle: terminal `close` frame + `sse-close` stops the reconnect-storm; heartbeats forwarded; stall counter uses true per-cycle time (2026-07-18 audit #2/#39/#9).
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22023,6 +22024,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
 
 ---
+
+### §17.609 Fix — web SSE run-stream reconnect-storm + heartbeats + stall-counter 3× undercount (2026-07-18)
+
+2026-07-18 audit #2 (High) + #39 + #9 — the streaming layer. Three clustered SSE-lifecycle bugs.
+
+- **Web run-stream reconnect-storm** (`app/web/routes.py`, `app/templates/web/_run_section_streaming.html`). `run_stream` rendered even terminal events as `event: message` then returned. With no close signal the browser EventSource treated the clean stream end as a dropped connection, auto-reconnected, re-POSTed `/execute/all`, hit the completed-job guard, rendered THAT as another terminal message, and looped forever appending error banners + re-running DB queries. **Fix:** emit a distinct `event: close\ndata: done` frame after a terminal event (and on the error path) and add `sse-close="close"` to the `<ul>` so the vendored htmx-ext-sse calls `source.close()`. The template's "closes automatically" comment (which was simply false) is corrected.
+- **No heartbeats behind idle-timeout proxies** (#39). `run_stream` called `aiter_execute_all` with the default `include_heartbeats=False`, so the orchestrator's `: keepalive` frames were stripped and a long single node produced zero frames — vulnerable to proxy idle-timeout teardown (which then fed the reconnect loop). **Fix:** pass `include_heartbeats=True` and forward heartbeat events as `: keep-alive` SSE comment lines (no visible fragment).
+- **SSE stall detection undercounted elapsed time 3×** (`pipelines/scaffold_router.py`). Each silent `ReadTimeout` cycle waits `read_timeout = max(30, keep)` seconds, but the stall accumulator added only `keep` (default 10) — so `idle_seconds` grew 3× too slowly and the `stream_stalled` guard fired at ~900s instead of the intended ~300s. **Fix:** `idle_seconds += read_timeout`; corrected the comment that asserted the wrong invariant.
+
+**Verification:** `make test` subset — `tests/test_web_ui.py` = **88 passed** (+3 regression: terminal close frame, error-path close frame, heartbeat-as-comment); `tests/test_scaffold_router_sse.py --noconftest` = **6 passed**. `make check-sse-events` in sync; SSE inventory test 6 passed (the web `close` frame is a browser control frame, outside the orchestrator event registry).
 
 ### §17.608 Fix — rerank cap mismatch silently disabled reranking for max_candidates > 20 (2026-07-18)
 

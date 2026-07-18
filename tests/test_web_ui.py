@@ -1026,6 +1026,41 @@ class TestRunStream:
         assert "run-event-other" in body
         assert "future_event_kind" in body
 
+    def test_terminal_event_emits_close_frame(self, client, fake_async_long_client):
+        """§17.609 — the terminal event must be followed by an `event: close`
+        frame so the browser EventSource (sse-close="close") stops and does NOT
+        reconnect-storm the completed job."""
+        fake_async_long_client.aiter_execute_all = _async_iter_factory([
+            {"event": "pipeline_complete", "data": {"passed": 1, "failed": 0}},
+        ])
+        resp = client.get("/web/jobs/j-run/run/stream")
+        assert "event: close" in resp.text
+
+    def test_error_path_emits_close_frame(self, client, fake_async_long_client):
+        """§17.609 — the mid-stream error path also emits the close frame,
+        else the reconnect loop resumes after the error banner."""
+        async def _raising(*args, **kwargs):
+            yield {"event": "node_done", "data": {"node_key": "T1", "title": "x"}}
+            raise RuntimeError("boom")
+        fake_async_long_client.aiter_execute_all = _raising
+        resp = client.get("/web/jobs/j-run/run/stream")
+        assert "run-event-error" in resp.text
+        assert "event: close" in resp.text
+
+    def test_heartbeat_forwarded_as_sse_comment(self, client, fake_async_long_client):
+        """§17.609 — heartbeat events are forwarded as `: keep-alive` SSE
+        comment lines (not rendered as visible <li> fragments) so idle-timeout
+        proxies don't tear down a long single-node stream."""
+        fake_async_long_client.aiter_execute_all = _async_iter_factory([
+            {"event": "heartbeat", "data": None},
+            {"event": "pipeline_complete", "data": {}},
+        ])
+        resp = client.get("/web/jobs/j-run/run/stream")
+        body = resp.text
+        assert ": keep-alive" in body
+        # Heartbeat must NOT produce a visible event fragment.
+        assert body.count("event: message") == 1  # only pipeline_complete
+
 
 @pytest.mark.smoke
 class TestSseExtensionLoaded:
