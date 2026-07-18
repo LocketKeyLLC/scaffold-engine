@@ -71,3 +71,46 @@ def test_no_recommend_when_candidate_has_errors(caplog):
         scheduler._log_model_ab_recommendation("codegen", ["m1", "m2"], summary)
     assert any("model_ab_no_change" in r.getMessage() for r in caplog.records)
     assert not any("model_ab_recommend" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# §17.602 — scheduler-drain cancel must still record the scheduled_jobs result
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_model_ab_drain_cancel_still_writes_result(monkeypatch):
+    """A CancelledError (scheduler drain) must record last_status='cancelled'
+    via the shielded finally, then re-raise — not drop the result-write."""
+    import asyncio
+    from unittest.mock import MagicMock
+    import app.scheduler as scheduler
+
+    rec = []
+
+    class _FakeDb:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def execute(self, stmt, params=None):
+            rec.append((str(stmt), params))
+            return MagicMock()
+
+        async def commit(self):
+            pass
+
+    monkeypatch.setattr(scheduler, "async_session", lambda: _FakeDb())
+    monkeypatch.setattr("app.utils.http_clients.init_clients", lambda: None)
+
+    async def _boom(*a, **k):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("scripts.model_ab.run_model_ab_task", _boom)
+
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler._execute_model_ab_job(1, "codegen:mytask", "modelA,modelB")
+
+    writes = [p for (s, p) in rec if "scheduled_jobs" in s]
+    assert writes, "result-write was dropped on drain cancel"
+    assert writes[0]["st"] == "cancelled"

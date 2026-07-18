@@ -510,6 +510,15 @@ async def _execute_model_ab_job(schedule_id: int, topic: str, depth: str) -> Non
     except asyncio.TimeoutError:
         status = "timeout"
         logger.error('event="model_ab_timeout" schedule_id=%s', schedule_id)
+    except asyncio.CancelledError:
+        # §17.602 — scheduler-drain (§17.137) cancels in-flight jobs on shutdown.
+        # CancelledError is a BaseException, so the `except Exception` below never
+        # caught it and the scheduled_jobs result-write in the finally was
+        # dropped. Mark + re-raise; the finally does the write under
+        # asyncio.shield (mirrors §17.155 in _execute_research_job).
+        status = "cancelled"
+        logger.warning('event="model_ab_drain_cancelled" schedule_id=%s', schedule_id)
+        raise
     except Exception as exc:  # noqa: BLE001 — fail-soft governance job
         status = "failed"
         logger.exception('event="model_ab_failed" schedule_id=%s err=%s', schedule_id, exc)
@@ -519,7 +528,8 @@ async def _execute_model_ab_job(schedule_id: int, topic: str, depth: str) -> Non
             job = _scheduler.get_job(f"schedule_{schedule_id}")
             if job is not None:
                 next_run = job.next_run_time
-        try:
+
+        async def _write_result() -> None:
             async with async_session() as db:
                 await db.execute(text("""
                     UPDATE scheduled_jobs
@@ -530,6 +540,16 @@ async def _execute_model_ab_job(schedule_id: int, topic: str, depth: str) -> Non
                     WHERE id = :id
                 """), {"ts": started, "st": status, "nr": next_run, "id": schedule_id})
                 await db.commit()
+
+        try:
+            # §17.602 — shield so the result-write commits even when this
+            # coroutine is being drain-cancelled (the except above re-raised).
+            await asyncio.shield(_write_result())
+        except asyncio.CancelledError:
+            logger.warning(
+                'event="model_ab_result_write_shielded" schedule_id=%s '
+                '— UPDATE continues on loop', schedule_id)
+            raise
         except Exception:
             logger.exception('event="model_ab_result_write_failed" schedule_id=%s', schedule_id)
 

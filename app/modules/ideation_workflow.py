@@ -576,8 +576,13 @@ async def research_and_compile(
         logger.warning(
             "phase2_cancelled: job_id=%s reason=client_disconnect", job_id,
         )
-        async with async_session() as cancel_db:
-            await _cancel_job(cancel_db, job_id, "client_disconnect")
+        # §17.602 — shield the cancel-status write so a second cancellation
+        # (double-cancel) can't abort it mid-await, stranding the job in
+        # 'researching'. Mirrors the §17.530 shielded rollup in decomposition.
+        async def _do_cancel() -> None:
+            async with async_session() as cancel_db:
+                await _cancel_job(cancel_db, job_id, "client_disconnect")
+        await asyncio.shield(_do_cancel())
         raise
     except Exception as e:
         err = f"phase2 exception: {e}"

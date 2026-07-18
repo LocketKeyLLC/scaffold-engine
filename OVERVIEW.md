@@ -21994,6 +21994,15 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.602 Fix — Low audit findings: cancellation-shield two more DB writes (2026-07-18)
+
+Two spots that write a terminal status on `CancelledError` but could lose it under a second/drain cancellation — mirroring the established §17.155/§17.530 shielded-finalize pattern.
+
+- **`research_and_compile` cancel-write unshielded** (`app/modules/ideation_workflow.py`). The `except asyncio.CancelledError` handler wrote `status='cancelled'` via a bare `await`, so a double-cancellation could abort it mid-await, stranding the job in `researching`. **Fix:** wrap the write in `asyncio.shield(_do_cancel())`.
+- **Scheduled model-A/B job dropped its result-write on drain** (`app/scheduler.py`). The finally's `scheduled_jobs` UPDATE was guarded only by `except Exception` — which doesn't catch the `CancelledError` a scheduler-drain raises — so on shutdown the run's result was never recorded. **Fix:** add an `except asyncio.CancelledError` (mark `cancelled` + re-raise) and run the finally write under `asyncio.shield`, exactly like the research sibling `_execute_research_job` (§17.155).
+
+**Verification:** `test_ideation_phase2_cancel.py` + `test_model_ab_scheduled.py` + `test_scheduler.py` = **all green** — new `test_model_ab_drain_cancel_still_writes_result` asserts the shielded result-write records `last_status='cancelled'` then re-raises.
+
 ### §17.601 Fix — Low audit findings: llm_parsing raw-first JSON parse (2026-07-18)
 
 First of the Low-severity audit batch. Both `parse_json_object` and `parse_json_array` (`app/utils/llm_parsing.py`) ran `strip_think_tags` + `_strip_markdown_fences` on the raw text BEFORE `json.loads`. Two silent-corruption paths: the think-tag OPEN regex (`<(?:think|thinking)>.*` DOTALL) deletes from a literal `<think>` substring to end-of-text, and the fence stripper removes ```` ``` ```` anywhere — both can legitimately appear INSIDE a JSON string value (a code sample, a literal tag), so already-valid JSON got mangled. **Fix:** try `json.loads(raw)` verbatim first; only fall through to the strip+repair chain when the raw text doesn't parse. Mirrored the fast path in `diagnose_json_object_parse` so its error reporting stays consistent. **Verification:** `test_llm_parsing.py` = **20 passed** (+4: literal-`<think>`/backticks-in-value preserved for object+array; fence/think strip still works when raw is invalid).
