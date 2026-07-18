@@ -103,6 +103,16 @@ async def test_wrong_key_raises_401(_api_key_set):
 
 
 @pytest.mark.smoke
+async def test_non_ascii_key_raises_401_not_typeerror(_api_key_set):
+    """§17.596 — a non-ASCII X-API-Key (latin-1 header decode) must yield a
+    clean 401, not a `TypeError: comparing strings with non-ASCII characters`
+    from secrets.compare_digest that escapes to a 500 + error_logs row."""
+    with pytest.raises(HTTPException) as exc_info:
+        await _api_key_set.require_api_key(_mk_request("/dag/abc"), key="café\xff")
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.smoke
 async def test_explicit_auth_disabled_returns_empty(_api_key_unset):
     """SCAFFOLD_AUTH_DISABLED=1 with no key set bypasses auth (the dev opt-out).
 

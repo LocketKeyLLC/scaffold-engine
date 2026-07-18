@@ -58,7 +58,18 @@ async def require_api_key(
     if settings.scaffold_auth_disabled:
         return ""
 
-    if key is None or not secrets.compare_digest(key, _RAW_KEY):
+    # §17.596 — HTTP headers decode as latin-1, so a non-ASCII byte in the
+    # X-API-Key value yields a str that secrets.compare_digest rejects with
+    # `TypeError: comparing strings with non-ASCII characters`. Left uncaught
+    # it escapes the auth dependency as a 500 + an error_logs row (and can trip
+    # the unresolved-errors watchdog at threshold=1) instead of the intended
+    # 401 — the same failure class §17.441 fixed for RecursionError. Treat the
+    # TypeError as a failed comparison.
+    try:
+        ok = key is not None and secrets.compare_digest(key, _RAW_KEY)
+    except TypeError:
+        ok = False
+    if not ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key",

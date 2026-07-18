@@ -73,7 +73,16 @@ CLOUD_MODELS = frozenset({
 
 
 def _is_cloud(model: str) -> bool:
-    return model in CLOUD_MODELS or model.endswith("-cloud")
+    # §17.596 — Ollama cloud tags use BOTH suffix forms: "-cloud"
+    # (qwen3.5:397b-cloud) and ":cloud" (kimi-k2.7-code:cloud,
+    # qwen3-coder-next:cloud, the shipped coder/verifier/extract roles). Match
+    # both so cloud roles get cloud_timeout instead of the ~30-min local_timeout
+    # that aborts genuinely slow cloud calls early.
+    return (
+        model in CLOUD_MODELS
+        or model.endswith("-cloud")
+        or model.endswith(":cloud")
+    )
 
 def _timeout_for(model: str) -> int:
     return settings.cloud_timeout if _is_cloud(model) else settings.local_timeout
@@ -867,7 +876,25 @@ async def validate_models(overrides: dict | None = None) -> Optional[list[str]]:
         "model_router", "model_fallback", "model_cloud_alt",
         "model_research_extract",
     ]
-    needed = {role: get_model(role, overrides) for role in OLLAMA_ROLES}
+
+    # §17.596 — only validate roles actually routed to Ollama. A role bound to
+    # openai/anthropic (via overrides[f"{role}_provider"] or settings.
+    # {role}_provider) resolves to a tag like gpt-4o / claude-* that will never
+    # appear in Ollama's /api/tags — including it here lands it in `missing` and
+    # `_require_valid_models` raises a spurious 422 that blocks core endpoints.
+    # Mirrors provider_for_role()'s precedence without importing the provider
+    # machinery (this module must stay importable if app.providers fails init).
+    def _role_provider(role: str) -> str:
+        key = f"{role}_provider"
+        if overrides and key in overrides:
+            return overrides[key]
+        return getattr(settings, key, None) or "ollama"
+
+    needed = {
+        role: get_model(role, overrides)
+        for role in OLLAMA_ROLES
+        if _role_provider(role) == "ollama"
+    }
 
     try:
         resp = await _get_client().get(

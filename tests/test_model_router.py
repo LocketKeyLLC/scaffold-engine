@@ -24,6 +24,17 @@ def test_is_cloud_recognizes_configured_cloud_models():
 
 
 @pytest.mark.smoke
+def test_is_cloud_recognizes_colon_cloud_suffix():
+    """§17.596 — Ollama cloud tags also use the ':cloud' suffix (the shipped
+    coder/verifier/extract roles). These must route to cloud_timeout, not the
+    ~30-min local_timeout."""
+    assert model_router._is_cloud("kimi-k2.7-code:cloud") is True
+    assert model_router._is_cloud("qwen3-coder-next:cloud") is True
+    from app.config import settings
+    assert model_router._timeout_for("kimi-k2.7-code:cloud") == settings.cloud_timeout
+
+
+@pytest.mark.smoke
 def test_is_cloud_false_for_local_model():
     assert model_router._is_cloud("qwen2.5:7b") is False
 
@@ -38,6 +49,35 @@ def test_timeout_for_cloud_uses_cloud_timeout():
 def test_timeout_for_local_uses_local_timeout():
     from app.config import settings
     assert model_router._timeout_for("qwen2.5:7b") == settings.local_timeout
+
+
+@pytest.mark.smoke
+async def test_validate_models_skips_non_ollama_role(monkeypatch):
+    """§17.596 — a role routed to a non-ollama provider resolves to a tag
+    (gpt-4o / claude-*) that never appears in Ollama /api/tags. It must NOT be
+    reported missing, else _require_valid_models raises a spurious 422 that
+    blocks core endpoints."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "model_verifier_provider", "openai", raising=False)
+    monkeypatch.setattr(settings, "model_verifier", "gpt-4o", raising=False)
+
+    # Mocked /api/tags lists the remaining ollama-routed role tags, NOT gpt-4o.
+    tag_names = {
+        settings.model_general, settings.model_coder, settings.model_router,
+        settings.model_fallback, settings.model_cloud_alt,
+        settings.model_research_extract,
+    }
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json = MagicMock(return_value={"models": [{"name": n} for n in tag_names]})
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+
+    with patch.object(model_router, "_get_client", return_value=client):
+        missing = await model_router.validate_models()
+
+    assert missing is not None, "Ollama should be reachable in this mock"
+    assert not any("model_verifier" in m for m in missing), missing
 
 
 # ---------------------------------------------------------------------------
