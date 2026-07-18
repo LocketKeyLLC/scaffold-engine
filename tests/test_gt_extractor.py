@@ -150,3 +150,24 @@ class TestGitHubTargetConfig:
         hdr = gt._new_toon_header("knowledge/rag-systems.toon")
         expected = f"{gt.settings.gt_github_owner}/{gt.settings.gt_github_repo}"
         assert expected in hdr
+
+
+class TestFormatToonRowsDriftTolerance:
+    """§17.613 (audit #15) — format_toon_rows must not crash on LLM field-type
+    drift: string elements (phase2_distill_shape_drift) and tags-as-list."""
+
+    def test_skips_non_dict_entries(self):
+        rows = gt.format_toon_rows([
+            {"title": "Real Entry", "content": "body", "tags": "a,b"},
+            "a bare string the model drifted into",  # would AttributeError pre-fix
+        ])
+        # Only the dict entry produced a row; no crash on the string.
+        assert len(rows) == 1
+        assert "real-entry" in rows[0]
+
+    def test_accepts_tags_as_list(self):
+        rows = gt.format_toon_rows([
+            {"title": "T", "content": "c", "tags": ["Alpha", "Beta"]},
+        ])
+        assert len(rows) == 1
+        assert "alpha,beta" in rows[0]

@@ -1228,7 +1228,15 @@ def assist_done(
         yield f"❌ Session `{session_id}` not found."; return
     if r.status_code >= 400:
         yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
-    sess = r.json()
+    # §17.613 (audit #25) — guard the JSON decode like every sibling handler
+    # (§17.268/275); a non-JSON 200 body would raise mid-yield (the §17.505
+    # TransferEncodingError surface).
+    try:
+        sess = r.json()
+    except ValueError as e:
+        yield f"❌ Assist done: orchestrator returned non-JSON body ({e}); raw: {r.text[:200]}"; return
+    if not isinstance(sess, dict):
+        yield f"❌ Assist done: orchestrator reply not a dict; raw: {str(sess)[:200]}"; return
     # Clear chat memory when a user explicitly invokes /assist done on a
     # terminal session — the next /assist <job_id> in this chat starts
     # cleanly. Pause/resume intentionally do NOT forget; user expects
@@ -1236,6 +1244,10 @@ def assist_done(
     if sess.get("status") in ("completed", "abandoned", "cancelled"):
         assist_forget(pipe, chat_id)
     job_id = sess.get("job_id")
+    if not job_id:
+        # §17.613 (audit #25) — avoid GET /exec/status/None when the session
+        # has no job yet.
+        yield "⚠️ Session has no associated job yet — no compiled output."; return
     try:
         r2 = _ss(pipe).get(
             f"{pipe.valves.orchestrator_url}/exec/status/{job_id}",
@@ -1246,7 +1258,12 @@ def assist_done(
         yield f"❌ Connection error: {e}"; return
     if r2.status_code >= 400:
         yield f"⚠️ Compiled output not available (HTTP {r2.status_code})."; return
-    d = r2.json()
+    try:
+        d = r2.json()
+    except ValueError as e:
+        yield f"⚠️ Compiled output not available (non-JSON body: {e})."; return
+    if not isinstance(d, dict):
+        yield "⚠️ Compiled output not available (unexpected reply shape)."; return
     compiled = d.get("compiled_output") or "_(no compiled output yet)_"
     sess_status = sess.get("status")
     job_status = d.get("status", "?")

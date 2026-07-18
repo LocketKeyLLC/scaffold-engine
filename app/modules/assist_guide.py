@@ -598,7 +598,10 @@ async def extract_substitutions(
 # verb in prose ("this removes the file") must NOT trip the gate; only an
 # actual command form does. (compiled regex, human-readable why).
 _DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\brm\s+(-[a-zA-Z]*\s+)*-?[a-zA-Z]*[rf]"), "recursive/forced file deletion (rm -rf)"),
+    # §17.613 (audit #7) — require an actual dash-flag bearing r/f/R. The old
+    # pattern needed no leading dash, so `rm file.conf` and even the safe
+    # `rm -i file` tripped the gate — crying wolf trains operators to ignore it.
+    (re.compile(r"\brm\s+(-\S*\s+)*-\S*[rfR]"), "recursive/forced file deletion (rm -rf)"),
     (re.compile(r"--no-preserve-root"), "rm targeting / (--no-preserve-root)"),
     (re.compile(r"\bdd\b\s+(if|of)="), "raw disk write (dd)"),
     (re.compile(r"\bmkfs(\.\w+)?\b"), "format filesystem (mkfs)"),

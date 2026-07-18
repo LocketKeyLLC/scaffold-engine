@@ -1263,9 +1263,23 @@ async def _execute_iteration_loop(
             })
             break
 
-        queries = gaps.get("gap_queries", [])
-        if not queries:
+        new_queries = gaps.get("gap_queries", [])
+        if not new_queries:
+            # §17.613 (audit #28) — distinguish a parse FAILURE from a genuine
+            # no-gaps result. _analyze_gaps returns the gap_analysis_failed
+            # sentinel (coverage=0, gap_queries=[]) whose docstring promises NOT
+            # to terminate early; but `if not queries: break` did exactly that,
+            # ending the run after one pass (common on the CPU verifier model).
+            # On the sentinel, reuse this iteration's queries for one more pass
+            # (max_iterations bounds the loop). A real no-gaps result still breaks.
+            if gaps.get("reason") == "gap_analysis_failed":
+                logger.info(
+                    "gap_analysis_failed_retry: reusing queries for another pass "
+                    "(iter=%s/%s)", state.iteration, state.max_iterations,
+                )
+                continue
             break
+        queries = new_queries
 
 
 # =============================================================================

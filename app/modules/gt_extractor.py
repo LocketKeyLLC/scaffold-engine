@@ -173,12 +173,19 @@ def sanitize_toon_content(text: str) -> str:
 def format_toon_rows(entries: list[dict]) -> list[str]:
     """Convert knowledge entries to TOON data rows."""
     rows = []
-    for i, entry in enumerate(entries):
-        eid = i + 1
-        title = entry.get("title", "unknown").strip().lower().replace(" ", "-")
+    eid = 0
+    for entry in entries:
+        # §17.613 (audit #15) — skip non-dict drift elements instead of raising.
+        if not isinstance(entry, dict):
+            continue
+        eid += 1
+        title = str(entry.get("title", "unknown")).strip().lower().replace(" ", "-")
         content = sanitize_toon_content(entry.get("content", ""))
+        # tags may drift to a list (model emits an array) — accept both.
+        raw_tags = entry.get("tags", "")
+        tag_items = [str(t) for t in raw_tags] if isinstance(raw_tags, list) else str(raw_tags).split(",")
         tags = sanitize_toon_content(
-            ",".join(t.strip().lower() for t in entry.get("tags", "").split(","))
+            ",".join(t.strip().lower() for t in tag_items)
         )
         raw_source = entry.get("source", "pending-verification").strip() or "pending-verification"
         source = sanitize_toon_content(raw_source)
@@ -669,7 +676,12 @@ async def extract_ground_truths(
             "error": "LLM did not produce a valid entries array",
             "raw_output": (resp.text or "")[:500],
         }
-    entries = args["entries"]
+    # §17.613 (audit #15) — filter non-dict elements, mirroring distill_entries'
+    # guard for the documented phase2_distill_shape_drift case (the model can
+    # emit an array of strings). A string element would make format_toon_rows
+    # call entry.get(...) on a str → AttributeError → unhandled 500 (/gt has no
+    # try/except), breaking this function's status-dict contract.
+    entries = [e for e in args["entries"] if isinstance(e, dict)]
 
     if not entries:
         return {

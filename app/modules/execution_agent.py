@@ -1288,7 +1288,9 @@ async def execute_next_node(
     # (no cost otherwise). Gates the N-candidate generate below.
     _best_of_n_eligible = False
     if (settings.best_of_n_enabled and _upstream_block
-            and (tool or "") not in ("CodeGen", "Shell")):
+            # §17.613 (audit #24) — case-insensitive, else a hand-edited
+            # tool='codegen'/'shell' row slips past and has its code CoVe-rewritten.
+            and (tool or "").lower() not in ("codegen", "shell")):
         try:
             async with async_session() as _dbn:
                 _r = await _dbn.execute(
@@ -1579,7 +1581,8 @@ async def execute_next_node(
     # output against the evidence it was given and CoVe-revise IN PLACE if it
     # drifted, so the corrected text is what gets persisted (line below) +
     # consumed by downstream nodes. Fail-soft + no-op when the valve is off.
-    if verify_status == "pass" and _upstream_block and (tool or "") not in ("CodeGen", "Shell"):
+    # §17.613 (audit #24) — case-insensitive CodeGen/Shell exclusion (see best-of-N gate above).
+    if verify_status == "pass" and _upstream_block and (tool or "").lower() not in ("codegen", "shell"):
         output = await _maybe_node_grounding(
             job_id, node_id, output, _upstream_block, tool=tool,
         )

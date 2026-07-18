@@ -53,21 +53,30 @@ CONFIDENCE_BY_SOURCE: dict[str, float] = {
 }
 DEFAULT_CONFIDENCE: float = 0.60
 
+# §17.613 (audit #34) — dedupe the unknown-source_type warning. confidence_for
+# is called once per ingested entry, so an unmapped/misspelled source_type
+# otherwise floods the log with one identical WARNING per entry (proportional to
+# batch size). Warn once per distinct type instead.
+_warned_source_types: set[str] = set()
+
 
 def confidence_for(source_type: str, override: float | None = None) -> float:
     """Return confidence_score for an entry.
 
     Explicit ``override`` (caller-supplied) always wins; otherwise look up
     in ``CONFIDENCE_BY_SOURCE``. Unknown source_types fall back to
-    ``DEFAULT_CONFIDENCE`` with a warning log line.
+    ``DEFAULT_CONFIDENCE`` with a warning log line (deduped per type).
     """
     if override is not None:
         return float(override)
     if source_type not in CONFIDENCE_BY_SOURCE:
-        logger.warning(
-            "confidence_unknown_source_type: source_type=%r falling_back_to=%.2f",
-            source_type, DEFAULT_CONFIDENCE,
-        )
+        if source_type not in _warned_source_types:
+            _warned_source_types.add(source_type)
+            logger.warning(
+                "confidence_unknown_source_type: source_type=%r falling_back_to=%.2f "
+                "(warned once per type)",
+                source_type, DEFAULT_CONFIDENCE,
+            )
         return DEFAULT_CONFIDENCE
     return CONFIDENCE_BY_SOURCE[source_type]
 

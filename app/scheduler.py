@@ -531,7 +531,7 @@ async def _execute_model_ab_job(schedule_id: int, topic: str, depth: str) -> Non
 
         async def _write_result() -> None:
             async with async_session() as db:
-                await db.execute(text("""
+                result = await db.execute(text("""
                     UPDATE scheduled_jobs
                     SET last_run_at = :ts, last_status = :st,
                         run_count = run_count + 1,
@@ -540,6 +540,14 @@ async def _execute_model_ab_job(schedule_id: int, topic: str, depth: str) -> Non
                     WHERE id = :id
                 """), {"ts": started, "st": status, "nr": next_run, "id": schedule_id})
                 await db.commit()
+                # §17.613 (audit #30) — mirror the research path's audit line so a
+                # model_ab schedule deleted mid-run leaves a trace, not a silent no-op.
+                if result.rowcount == 0:
+                    logger.warning(
+                        'event="model_ab_result_write_skipped" '
+                        'schedule_id=%s reason="row_missing"',
+                        schedule_id,
+                    )
 
         try:
             # §17.602 — shield so the result-write commits even when this

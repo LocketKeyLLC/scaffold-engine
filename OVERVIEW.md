@@ -2005,6 +2005,7 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.610 cloud role-routed calls get retry/backoff via `_retry_provider_call` (+529 retryable, regex classifier); native-tool telemetry recorded; Anthropic mid-stream errors propagate (2026-07-18 audit #3/#29/#38).
 - ✅ §17.611 API/router quick-win cluster: /config int-redaction, /logs ordering, gt_list count, recent_jobs_costs window, artifact list projection, partial-results count, dead const, double-parse, dup query, node-action UUID guard, /health probe timeouts (2026-07-18 audit #4/5/8/10/17/18/21/22/23/37/40).
 - ✅ §17.612 SSRF drift closed: topic-mode fetch + verify-recheck now route through / re-check the §17.93 hardened fetch guard (byte cap + post-redirect host check) (2026-07-18 audit #6).
+- ✅ §17.613 sibling defensive-guard cluster: rm-gate anchoring, gt drift-filter, case-insensitive CodeGen/Shell, assist_done JSON guards, gap-analysis-failure retry, model_ab rowcount audit, deduped provenance warning (2026-07-18 audit #7/15/24/25/28/30/34).
 
 **Process note:** mid-audit, running two full `make test` suites concurrently briefly stressed Milvus and produced spurious retrieval-golden failures — a diagnostic detour, not a code regression (the corpus gap was pre-existing; §17.595 fixed the real cause). One-command corpus-restore after a wipe: `docker exec scaffold-orchestrator python scripts/seed_corpus_remainder.py` (§17.595, seeds all 5 curated golden docs).
 
@@ -22027,6 +22028,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 **§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
 
 ---
+
+### §17.613 Fix — sibling defensive-guard divergence cluster (7 audit findings) (2026-07-18)
+
+2026-07-18 audit batch 6 — near-identical code paths that diverged because a hardening pattern was adopted in one place and not its twin.
+
+- **#7 destructive-command gate cried wolf on ordinary `rm`** (`app/modules/assist_guide.py`). The regex `\brm\s+(-[a-zA-Z]*\s+)*-?[a-zA-Z]*[rf]` needed no dash and matched any first token containing r/f — `rm config.conf`, `rm myfile`, even the safe `rm -i file` all flagged as "rm -rf". Crying wolf trains operators to ignore the gate. **Fix:** `\brm\s+(-\S*\s+)*-\S*[rfR]` — require an actual dash-flag bearing r/f/R.
+- **#15 gt_extractor crashed on field-type drift** (`app/modules/gt_extractor.py`). `extract_ground_truths` read `args['entries']` with only a list check (unlike `distill_entries`' per-element dict-filter), so a string element made `format_toon_rows` call `.get()` on a str → AttributeError → unhandled 500 (/gt has no try/except). **Fix:** mirror the dict-filter; harden `format_toon_rows` to skip non-dicts and accept tags as list or str.
+- **#24 grounding gates used case-SENSITIVE CodeGen/Shell exclusion** (`app/modules/execution_agent.py`). Best-of-N and per-node grounding did `(tool or '') not in ('CodeGen','Shell')` while the rest of the module is case-insensitive — a hand-edited `tool='codegen'` row slipped past and had its code CoVe-rewritten as prose. **Fix:** `.lower() not in ('codegen','shell')` at both sites.
+- **#25 `assist_done` omitted the JSON-decode guards** every sibling assist handler has (`pipelines/_vendor/_assist_handlers.py`). Bare `r.json()`/`r2.json()` would raise mid-yield on a non-JSON 200 body (the §17.505 TransferEncodingError surface). **Fix:** wrap both in the sibling `try/except ValueError` + `isinstance(dict)` guard; guard falsy `job_id` before `GET /exec/status`.
+- **#28 failed gap analysis terminated topic research after one pass** (`app/modules/research_agent.py`), contradicting its own docstring. `_analyze_gaps` returned the `gap_analysis_failed` sentinel (coverage=0, gap_queries=[]) but `if not queries: break` ended the run. **Fix:** on the sentinel, `continue` to reuse the iteration's queries for another pass (max_iterations bounds it); a real no-gaps result still breaks.
+- **#30 model_ab scheduled write skipped the rowcount audit** the research path has (`app/scheduler.py`). A model_ab schedule deleted mid-run no-op'd silently. **Fix:** capture `result.rowcount` and emit `model_ab_result_write_skipped` on 0.
+- **#34 `confidence_for` warned once per entry** for an unmapped `source_type` (`app/modules/provenance.py`), flooding the log proportional to batch size. **Fix:** dedupe via a module-level `_warned_source_types` set — warn once per distinct type.
+
+**Verification:** `make test` subset — assist_guide/gt_extractor/provenance/scheduler/execution_agent grounding = **149 passed** across the group (+3 regression: rm-flag anchoring, format_toon_rows drift ×2); assist pipeline handlers (`--noconftest`) = **67 passed**.
 
 ### §17.612 Fix — SSRF/fetch-guard drift: two research fetch paths bypassed the §17.93 guard (2026-07-18)
 

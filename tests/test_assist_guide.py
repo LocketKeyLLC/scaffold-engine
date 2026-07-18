@@ -628,6 +628,18 @@ def test_scan_destructive_no_false_positive_on_prose():
     assert assist_guide.scan_destructive(text) == []
 
 
+def test_scan_destructive_rm_requires_actual_flag():
+    """§17.613 (audit #7) — the rm detector must anchor on a real -r/-f/-R flag.
+    Ordinary rm and the interactive-SAFE `rm -i` must NOT trip the gate (crying
+    wolf blunts it for the genuine `rm -rf` case); the destructive forms must."""
+    # Non-destructive rm forms — no r/f/R flag → must NOT fire.
+    for safe in ("rm config.conf", "rm myfile", "rm -i file", "rm ./notes.md"):
+        assert assist_guide.scan_destructive(safe) == [], f"false positive on: {safe!r}"
+    # Genuinely destructive forms — must fire.
+    for danger in ("rm -rf /tmp/x", "rm -fr build", "rm -r dir", "rm -f a.txt", "rm -R dir"):
+        assert assist_guide.scan_destructive(danger), f"missed: {danger!r}"
+
+
 def test_scan_destructive_dedups_by_line():
     text = "rm -rf /tmp/x\nrm -rf /tmp/x\n"
     assert len(assist_guide.scan_destructive(text)) == 1
