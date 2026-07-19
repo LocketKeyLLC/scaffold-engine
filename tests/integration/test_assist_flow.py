@@ -96,6 +96,51 @@ async def test_full_walkthrough(seeded_job):
 
 @pytest.mark.validate
 @pytest.mark.asyncio
+async def test_full_walkthrough_from_awaiting_assist(seeded_job):
+    """§17.625 regression — a job PARKED by the §17.624 hands-on gate in
+    'awaiting_assist' must walk start→submit-all→completed just like a
+    'planning' job. The original bug: start_assist_session omitted
+    'awaiting_assist' from its status-transition IN-list, so the job stayed
+    parked and _maybe_finalize_session (WHERE status IN assisted_*) never
+    flipped it to 'completed' — the walkthrough finished but the job hung."""
+    job_id = seeded_job
+    # Park it as the hands-on gate would.
+    async with async_session() as db:
+        await db.execute(
+            text("UPDATE jobs SET status = 'awaiting_assist' WHERE id = :id"),
+            {"id": job_id},
+        )
+        await db.commit()
+        out = await assist_agent.start_assist_session(
+            job_id=job_id, replan_policy="disabled", db=db,
+        )
+        sid = out["session_id"]
+    assert out["reopened"] is False and out["pending_steps"] == 3
+
+    for expected_key in ("T1", "T2", "T3"):
+        async with async_session() as db:
+            step = await assist_agent.get_next_step(session_id=sid, db=db)
+        assert step is not None and step["node_key"] == expected_key
+        async with async_session() as db:
+            await assist_agent.submit_step(
+                session_id=sid, node_key=expected_key,
+                evidence=f"did {expected_key}", evidence_kind="text",
+                action="submit", db=db,
+            )
+
+    async with async_session() as db:
+        sess = await assist_agent.get_session(session_id=sid, db=db)
+        job_row = (await db.execute(
+            text("SELECT status, deliverable_kind FROM jobs WHERE id = :id"),
+            {"id": job_id},
+        )).mappings().first()
+    assert sess["status"] == "completed"
+    assert job_row["status"] == "completed"        # the bug: stayed awaiting_assist
+    assert job_row["deliverable_kind"] == "assist_completed"
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
 async def test_skip_then_continue(seeded_job):
     """Skipping a node still satisfies downstream deps."""
     job_id = seeded_job

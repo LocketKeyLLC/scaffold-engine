@@ -173,6 +173,16 @@ async def test_start_session_on_awaiting_assist_seeds_directly():
         if c.args and "UPDATE dag_nodes" in str(c.args[0])
         and "SET status = 'pending'" in str(c.args[0])
     ]
+    # §17.625 regression — the job-status transition UPDATE must list
+    # 'awaiting_assist' in its WHERE IN-list, else a parked job never enters
+    # assisted_executing and _maybe_finalize_session can never mark it
+    # 'completed' at the end of the walkthrough.
+    transition = [
+        c for c in db.execute.await_args_list
+        if c.args and "SET status = 'assisted_executing'" in str(c.args[0])
+    ]
+    assert transition, "no job→assisted_executing transition UPDATE issued"
+    assert "awaiting_assist" in str(transition[0].args[0])
 
 
 @pytest.mark.smoke

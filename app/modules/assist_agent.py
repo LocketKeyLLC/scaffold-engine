@@ -189,9 +189,13 @@ async def start_assist_session(
             {"jid": job_id},
         )
 
-    # 3. Job status transition (idempotent). Includes the re-open statuses so a
-    # completed/cancelled job moves back to assisted_executing; completed_at is
-    # cleared (harmless no-op for the non-terminal start paths).
+    # 3. Job status transition (idempotent). Includes the re-open statuses
+    # (completed/cancelled → §17.623) AND awaiting_assist (§17.624 hands-on
+    # gate) so the job moves into assisted_executing; without awaiting_assist
+    # here the job stays parked through the whole walkthrough and
+    # _maybe_finalize_session (WHERE status IN assisted_*) can never mark it
+    # 'completed'. completed_at is cleared (harmless no-op for the non-terminal
+    # start paths).
     await db.execute(
         text("""
             UPDATE jobs
@@ -199,7 +203,7 @@ async def start_assist_session(
                    updated_at = NOW()
              WHERE id = :id
                AND status IN ('planning', 'executing', 'blocked', 'failed',
-                              'completed', 'cancelled')
+                              'completed', 'cancelled', 'awaiting_assist')
         """),
         {"id": job_id},
     )
