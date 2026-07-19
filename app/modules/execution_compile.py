@@ -488,6 +488,51 @@ def _prepend_plan_only_banner(
     return banner + text
 
 
+async def render_plan_preview(job_id: str, db) -> str:
+    """§17.624 — render a PARKED job's DAG as a human-executable plan.
+
+    Unlike ``_compile_output`` this reads each node's *plan* (title +
+    description), not its output, because a hands-on job parked in
+    ``awaiting_assist`` has never run — its nodes are still ``pending`` and
+    ``output_text`` is NULL. Ordered by ``execution_order`` so the plan reads
+    top-to-bottom the way the operator will perform it under /assist.
+    """
+    title_row = (await db.execute(
+        text("SELECT title FROM jobs WHERE id = :jid"), {"jid": job_id},
+    )).mappings().first()
+    job_title = (title_row or {}).get("title") or "Plan"
+    rows = (await db.execute(
+        text(
+            "SELECT node_key, title, description, tool "
+            "FROM dag_nodes WHERE job_id = :jid "
+            "ORDER BY execution_order NULLS LAST, node_key"
+        ),
+        {"jid": job_id},
+    )).mappings().all()
+    parts = [f"# {job_title} — Plan", ""]
+    for i, r in enumerate(rows, 1):
+        tool = r.get("tool") or "LLM"
+        parts.append(f"## {i}. {r['title']}")
+        parts.append(f"`{r['node_key']}` · tool: `{tool}`")
+        desc = (r.get("description") or "").strip()
+        if desc:
+            parts.append("")
+            parts.append(desc)
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+async def compile_awaiting_assist_plan(
+    job_id: str, db, *, nonexec_count: int, total: int,
+) -> str:
+    """§17.624 — the deliverable for a hands-on job PARKED in awaiting_assist:
+    the rendered plan with the §17.506 PLAN-NOT-EXECUTED / run-/assist banner
+    on top. Reuses the same banner the autonomous plan_only path uses so the
+    two surfaces read identically."""
+    body = await render_plan_preview(job_id, db)
+    return _prepend_plan_only_banner(body, nonexec_count, total, job_id) or body
+
+
 async def compute_deliverable_kind(
     job_id: str, db, *, assist_completed: bool = False,
 ) -> str:

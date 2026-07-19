@@ -3089,6 +3089,11 @@
             "title": "Assisted Running",
             "type": "integer"
           },
+          "awaiting_assist": {
+            "default": 0,
+            "title": "Awaiting Assist",
+            "type": "integer"
+          },
           "awaiting_confirmation": {
             "default": 0,
             "title": "Awaiting Confirmation",
@@ -8214,7 +8219,8 @@
                     "assisted_executing",
                     "assisted_running",
                     "assisted_paused",
-                    "aggregating"
+                    "aggregating",
+                    "awaiting_assist"
                   ],
                   "type": "string"
                 },

@@ -198,10 +198,12 @@ class TestUmbrellaCompile:
     """§17.533 — on completion the umbrella stitches its children's outputs into
     one deliverable; a failed umbrella does not."""
 
-    def _counts(self, total, terminal, done):
+    def _counts(self, total, terminal, done, awaiting=0):
         r = MagicMock()
         r.mappings.return_value.first.return_value = {
             "total": total, "terminal": terminal, "done": done,
+            # §17.624 — roll-up now also counts children parked in awaiting_assist.
+            "awaiting": awaiting,
         }
         return r
 
@@ -266,7 +268,7 @@ class TestRollupUmbrella:
         return db
 
     async def test_completed_when_all_terminal_and_one_done(self):
-        db = self._db_returning({"total": 3, "terminal": 3, "done": 1})
+        db = self._db_returning({"total": 3, "terminal": 3, "done": 1, "awaiting": 0})
         await dc._rollup_umbrella(db, "umb")
         update = db.execute.call_args_list[-1]
         assert "UPDATE jobs SET status" in str(update.args[0])
@@ -274,12 +276,20 @@ class TestRollupUmbrella:
         db.commit.assert_awaited()
 
     async def test_failed_when_all_terminal_and_none_done(self):
-        db = self._db_returning({"total": 2, "terminal": 2, "done": 0})
+        db = self._db_returning({"total": 2, "terminal": 2, "done": 0, "awaiting": 0})
         await dc._rollup_umbrella(db, "umb")
         assert db.execute.call_args_list[-1].args[1]["s"] == "failed"
 
+    async def test_awaiting_assist_when_any_child_parked(self):
+        # §17.624 — a parked child makes the whole umbrella awaiting_assist,
+        # even if others completed; the deliverable is still compiled.
+        db = self._db_returning({"total": 3, "terminal": 3, "done": 2, "awaiting": 1})
+        await dc._rollup_umbrella(db, "umb")
+        assert db.execute.call_args_list[-1].args[1]["s"] == "awaiting_assist"
+        db.commit.assert_awaited()
+
     async def test_noop_while_children_still_running(self):
-        db = self._db_returning({"total": 3, "terminal": 2, "done": 1})
+        db = self._db_returning({"total": 3, "terminal": 2, "done": 1, "awaiting": 0})
         await dc._rollup_umbrella(db, "umb")
         assert db.execute.call_count == 1          # SELECT only; no UPDATE
         db.commit.assert_not_awaited()

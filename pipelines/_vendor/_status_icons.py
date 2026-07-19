@@ -46,4 +46,6 @@ STATUS_ICONS: dict[str, str] = {
     "blocked":   "🚫",
     "completed": "✅",
     "cancelled": "🚫",
+    # §17.624 — hands-on job parked as a plan; needs the operator via /assist.
+    "awaiting_assist": "🙋",
 }

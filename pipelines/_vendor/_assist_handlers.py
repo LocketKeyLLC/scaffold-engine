@@ -619,20 +619,37 @@ def assist_start(
         if d.get("reason") == "umbrella":
             kids = d.get("children") or []
             done = sum(1 for c in kids if c.get("status") == "completed")
+            # §17.624 — components whose DAG was predominantly hands-on are
+            # parked in 'awaiting_assist' (not auto-completed); those DO need the
+            # operator to step through them via /assist <component_id>.
+            parked = [c for c in kids if c.get("status") == "awaiting_assist"]
             lines = [
                 f"📦 **This is a multi-part job** — its {len(kids)} component(s) "
-                f"run **automatically**. There's nothing to step through here.",
+                f"run **automatically** where the engine can.",
                 "",
-                f"Progress: **{done}/{len(kids)}** components completed.",
+                f"Progress: **{done}/{len(kids)}** completed"
+                + (f", **{len(parked)}** need you (hands-on)." if parked else "."),
                 "",
             ]
             for c in kids:
                 icon = "✅" if c.get("status") == "completed" else (
+                    "🙋" if c.get("status") == "awaiting_assist" else  # §17.624
                     "❌" if c.get("status") in ("failed", "cancelled", "blocked")
                     else "⏳")
                 lines.append(
                     f"- {icon} {c.get('title', '')} — `{c.get('status', '')}`"
                 )
+            if parked:
+                lines += [
+                    "",
+                    "🙋 **These components need you** — they're hands-on work on "
+                    "real systems, so they were planned but **not** auto-executed. "
+                    "Step through each yourself:",
+                ]
+                for c in parked:
+                    lines.append(
+                        f"- `{c.get('title', '')}` → `/assist {c.get('job_id', '')}`"
+                    )
             lines += [
                 "",
                 f"Watch progress or read the assembled result with "

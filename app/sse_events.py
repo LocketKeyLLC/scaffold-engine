@@ -98,6 +98,9 @@ PIPELINE_COMPLETE = "pipeline_complete"
 DAG_GENERATED = "dag_generated"
 EXECUTION_FAILED = "execution_failed"
 BLOCKED = "blocked"
+# §17.624 — the hands-on assist gate parked the job as a plan (predominantly
+# Shell/human DAG) instead of auto-executing it; a literal _sse("awaiting_assist"…).
+AWAITING_ASSIST = "awaiting_assist"
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +163,7 @@ ALL_EVENT_NAMES = frozenset({
     EXTRACTOR_FALLBACK, QUALITY_GATE_FILTERED, CONTRADICTIONS_DETECTED,
     AWAITING_REPLY, PIPELINE_COMPLETE,
     # DAG / job-terminal
-    DAG_GENERATED, EXECUTION_FAILED, BLOCKED,
+    DAG_GENERATED, EXECUTION_FAILED, BLOCKED, AWAITING_ASSIST,
     # design
     STAGE_START, STAGE_DONE, STAGE_ERROR, CANCELLED,
     # consumer-synthesized

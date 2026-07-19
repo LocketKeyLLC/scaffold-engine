@@ -56,6 +56,10 @@ class StatusCounts(BaseModel):
     # discarded by the valid_keys filter in get_status. Parity with
     # app.schemas.JOB_STATUSES is asserted in test_status_endpoint.py.
     aggregating: int = 0
+    # §17.624 — hands-on assist gate parks a predominantly-Shell/human job here
+    # (plan generated, nodes pending, operator drives it via /assist). Parity
+    # with app.schemas.JOB_STATUSES is asserted in test_status_logs.py.
+    awaiting_assist: int = 0
 
 
 class RecentJobSummary(BaseModel):

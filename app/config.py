@@ -867,6 +867,21 @@ class Settings(BaseSettings):
     # silently downgrading.
     shell_tool_enabled: bool = Field(default=False)
 
+    # §17.624 — hands-on assist gate. When True (default), the autonomous
+    # executor inspects a freshly-generated DAG before running it: if the
+    # majority of nodes are non-autonomously-executable (Shell steps while
+    # shell_tool_enabled is False, or human steps), it PARKS the job in
+    # 'awaiting_assist' with the plan (nodes left 'pending') instead of
+    # fabricating runbook "done" output and rolling up to a misleading
+    # 'completed'. The operator then drives real execution via /assist.
+    # Set False to restore the old behavior (autonomous runbook generation +
+    # the §17.506 PLAN-NOT-EXECUTED banner).
+    hands_on_assist_gate_enabled: bool = Field(default=True)
+    # Fraction of a DAG's nodes that must be non-executable for the gate to
+    # fire. 0.5 → strict majority hands-on parks the job; a mostly-LLM DAG with
+    # a stray Shell step still runs autonomously.
+    hands_on_assist_gate_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+
     # Manual prompt-edit cap (POST /prompts/{job_id}/{node_key}). Both
     # the orchestrator-side update_prompt() and the OWUI prompt_inspector
     # pipeline pre-check against this value so the user sees a consistent

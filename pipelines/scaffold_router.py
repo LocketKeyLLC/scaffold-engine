@@ -3550,6 +3550,7 @@ class Pipeline:
                 "blocked": "⛔", "awaiting_confirmation": "⏸️",
                 "executing": "⏳", "running": "⏳", "planning": "🧠",
                 "researching": "🔍", "refining": "✏️", "pending": "⏳",
+            "awaiting_assist": "🙋",  # §17.624 hands-on plan → /assist
             }
             lines.append("")
             lines.append(f"**Recent jobs (last {len(recent)}):**")
@@ -3635,6 +3636,7 @@ class Pipeline:
             "blocked": "⛔", "awaiting_confirmation": "⏸️",
             "executing": "⏳", "running": "⏳", "planning": "🧠",
             "researching": "🔍", "refining": "✏️", "pending": "⏳",
+            "awaiting_assist": "🙋",  # §17.624 hands-on plan → /assist
         }.get(j.get("status", ""), "")
         full_id = j.get("id") or ""
         short = full_id[:8]
@@ -4619,9 +4621,10 @@ class Pipeline:
         total = data.get("children_total", len(children))
         done = data.get("children_completed", 0)
         status = data.get("job_status", "aggregating")
-        head_icon = {"completed": "✅", "failed": "❌"}.get(status, "⏳")
+        head_icon = {"completed": "✅", "failed": "❌", "awaiting_assist": "🙋"}.get(status, "⏳")
         child_icon = {
             "completed": "✅", "failed": "❌", "cancelled": "🛑", "blocked": "⏸️",
+            "awaiting_assist": "🙋",  # §17.624 hands-on plan → /assist
         }
         lines = [
             f"{head_icon} **Umbrella** `{job_id}` — {status} "

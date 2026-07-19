@@ -174,6 +174,92 @@ async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> No
             "execute_all_nodes_cleanup_failed: job=%s error=%s", job_id, exc,
         )
 
+def _node_is_nonexecutable(tool: str | None) -> bool:
+    """§17.624 — a node the autonomous executor cannot really run, so running it
+    only fabricates runbook/skip text: a ``Shell`` step with no shell backend
+    wired (``shell_tool_enabled`` False), or a ``human`` / ``human_review`` step
+    (auto-skipped in auto mode). Mirrors the two short-circuits in
+    ``execute_next_node`` (§17.359 Shell-runbook, H3 human-skip)."""
+    t = (tool or "").lower()
+    if t in ("human", "human_review"):
+        return True
+    if t == "shell" and not settings.shell_tool_enabled:
+        return True
+    return False
+
+
+async def _classify_dag_executability(db: AsyncSession, job_id: str) -> dict:
+    """§17.624 — count non-autonomously-executable nodes vs total and decide
+    whether the DAG is predominantly hands-on (the gate threshold). Deterministic
+    — reads the DAG's tool tags, no LLM call."""
+    rows = (await db.execute(
+        text("SELECT tool FROM dag_nodes WHERE job_id = :jid"),
+        {"jid": job_id},
+    )).mappings().all()
+    total = len(rows)
+    nonexec = sum(1 for r in rows if _node_is_nonexecutable(r["tool"]))
+    hands_on = (
+        total > 0
+        and nonexec > total * settings.hands_on_assist_gate_threshold
+    )
+    return {"total": total, "nonexec": nonexec, "hands_on": hands_on}
+
+
+async def _park_job_awaiting_assist(
+    db: AsyncSession, job_id: str, cls: dict,
+) -> dict:
+    """§17.624 — park a hands-on job in ``awaiting_assist``: leave its nodes
+    ``pending`` (no fabricated output), set the deliverable to the rendered plan
+    + PLAN-NOT-EXECUTED banner, and stamp ``deliverable_kind='plan_only'``. The
+    operator then drives real execution via /assist (which seeds steps from the
+    still-pending nodes). Returns the SSE summary dict."""
+    claimed = (await db.execute(
+        text(
+            "UPDATE jobs SET status = 'awaiting_assist', updated_at = now() "
+            "WHERE id = :jid AND status IN ('running', 'executing') "
+            "RETURNING id"
+        ),
+        {"jid": job_id},
+    )).first()
+    if claimed is None:
+        # Lost ownership (a racing runner/reaper moved the row). Report without
+        # further writes — the other owner is authoritative.
+        return {
+            "job_id": job_id, "status": "unknown", "parked": False,
+            "hands_on_nodes": cls["nonexec"], "total_nodes": cls["total"],
+        }
+    from app.modules.execution_compile import compile_awaiting_assist_plan
+    plan = await compile_awaiting_assist_plan(
+        job_id, db, nonexec_count=cls["nonexec"], total=cls["total"],
+    )
+    await db.execute(
+        text(
+            "UPDATE jobs SET compiled_output = :co, "
+            "compiled_output_synthesized = FALSE, "
+            "deliverable_kind = 'plan_only', updated_at = now() WHERE id = :jid"
+        ),
+        {"co": plan, "jid": job_id},
+    )
+    await db.commit()
+    logger.info(
+        "hands_on_gate_parked: job=%s nonexec=%d/%d -> awaiting_assist",
+        job_id, cls["nonexec"], cls["total"],
+    )
+    return {
+        "job_id": job_id,
+        "status": "awaiting_assist",
+        "parked": True,
+        "hands_on_nodes": cls["nonexec"],
+        "total_nodes": cls["total"],
+        "message": (
+            f"{cls['nonexec']} of {cls['total']} steps are hands-on actions on "
+            f"real systems — parked as a plan, not auto-executed. Run "
+            f"`/assist {job_id}` to carry them out with the engine guiding "
+            f"and verifying each step."
+        ),
+    }
+
+
 def _spawn_cleanup_task(job_id: str, exit_reason: str | None) -> asyncio.Task:
     """Schedule cleanup as a detached task with a strong ref to prevent GC."""
     task = asyncio.create_task(_cleanup_stuck_running_job(job_id, exit_reason))
@@ -1974,6 +2060,8 @@ async def execute_all_nodes(
         execution_cancelled — abnormal exit via client disconnect (best-effort, #2)
         error               — fatal error, pipeline halted
         blocked             — no actionable nodes, dependencies not satisfied
+        awaiting_assist     — §17.624 hands-on gate parked the job as a plan
+                              (predominantly Shell/human DAG); run /assist
     """
 
     def _sse(event: str, data: dict) -> str:
@@ -2124,6 +2212,23 @@ async def execute_all_nodes(
                     logger.error("auto_dag_generation_failed: job=%s error=%s", job_id, exc)
                     yield _sse("error", {"message": f"DAG generation failed: {exc}"})
                     return
+
+        # §17.624 — hands-on assist gate (A). A freshly-planned DAG that is
+        # predominantly non-autonomously-executable (Shell steps with no shell
+        # backend, or human steps) would only fabricate runbook "done" output
+        # and then mislead with a 'completed' status. Park it as a plan in
+        # 'awaiting_assist' (nodes left pending) so /assist drives real
+        # execution. Runs after DAG-gen (tools assigned) and before BOTH the
+        # parallel and serial execute paths. Setting the job away from 'running'
+        # here makes the finally-block cleanup a no-op (status != 'running').
+        if settings.hands_on_assist_gate_enabled:
+            async with async_session() as db:
+                _cls = await _classify_dag_executability(db, job_id)
+            if _cls["hands_on"]:
+                async with async_session() as db:
+                    parked = await _park_job_awaiting_assist(db, job_id, _cls)
+                yield _sse("awaiting_assist", parked)
+                return
 
         # §17.568 — PROTOTYPE parallel-frontier path (valve, default OFF).
         # When off, the serial loop below runs unchanged (byte-identical). The

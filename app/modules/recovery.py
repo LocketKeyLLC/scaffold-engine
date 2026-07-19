@@ -114,6 +114,27 @@ NEXT_ACTIONS: dict[str, list[dict[str, Any]]] = {
             "node_specific": False,
         },
     ],
+    # §17.624 — the hands-on assist gate parked this job as a plan (predominantly
+    # Shell/human DAG); nodes are pending and the operator drives execution.
+    "awaiting_assist": [
+        {
+            "action": "start_assist",
+            "command": "/assist {job_id}",
+            "endpoint": "/assist/start",
+            "method": "POST",
+            "description": "This is a hands-on plan on real systems — step through "
+                           "it yourself with the engine guiding and verifying each step.",
+            "node_specific": False,
+        },
+        {
+            "action": "view_plan",
+            "command": "/results {job_id}",
+            "endpoint": "/exec/status/{job_id}",
+            "method": "GET",
+            "description": "Review the generated plan before starting.",
+            "node_specific": False,
+        },
+    ],
     "executing": [
         {
             "action": "wait",

@@ -27,6 +27,9 @@ JobStatus = Literal[
     "assisted_executing", "assisted_running", "assisted_paused",
     # §17.525 — umbrella job alive while its component children still run.
     "aggregating",
+    # §17.624 — hands-on assist gate parked the job as a plan (predominantly
+    # Shell/human DAG); nodes stay pending, operator drives it via /assist.
+    "awaiting_assist",
 ]
 
 # Runtime-iterable mirror of JobStatus, derived directly from the Literal

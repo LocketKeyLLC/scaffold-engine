@@ -222,19 +222,31 @@ async def _rollup_umbrella(db: AsyncSession, umbrella_id: str) -> None:
         text("""
             SELECT count(*) AS total,
                    count(*) FILTER (
-                       WHERE status IN ('completed','failed','cancelled','blocked')
+                       WHERE status IN ('completed','failed','cancelled',
+                                        'blocked','awaiting_assist')
                    ) AS terminal,
-                   count(*) FILTER (WHERE status = 'completed') AS done
+                   count(*) FILTER (WHERE status = 'completed') AS done,
+                   count(*) FILTER (WHERE status = 'awaiting_assist') AS awaiting
             FROM jobs WHERE parent_job_id = :u
         """),
         {"u": umbrella_id},
     )).mappings().first()
     if not row or not row["total"] or row["terminal"] != row["total"]:
         return
-    new_status = "completed" if row["done"] > 0 else "failed"
+    # §17.624 — a component parked by the hands-on assist gate is terminal for
+    # roll-up (autonomous processing is done) but the umbrella as a whole still
+    # needs the operator. Surface awaiting_assist rather than a misleading
+    # 'completed' when ANY child is parked; otherwise the prior completed/failed
+    # rule stands.
+    if row["awaiting"] > 0:
+        new_status = "awaiting_assist"
+    elif row["done"] > 0:
+        new_status = "completed"
+    else:
+        new_status = "failed"
     compiled = (
         await _compile_umbrella_deliverable(db, umbrella_id)
-        if new_status == "completed" else None
+        if new_status in ("completed", "awaiting_assist") else None
     )
     # COALESCE keeps any prior compiled_output if a racing finalizer already set
     # it; the status='aggregating' guard makes the finalize itself single-winner.

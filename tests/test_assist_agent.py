@@ -140,6 +140,43 @@ async def test_start_session_returns_session_dict_and_commits():
 
 @pytest.mark.smoke
 @pytest.mark.asyncio
+async def test_start_session_on_awaiting_assist_seeds_directly():
+    """§17.624 — a job parked in 'awaiting_assist' by the hands-on gate starts
+    assist WITHOUT a re-open reset (nodes are already pending): reopened is
+    False and the normal seed path runs (no dag_nodes/assist_steps reset)."""
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _result(mappings_first={
+            "id": "job-h", "status": "awaiting_assist",
+            "job_type": "component", "node_count": 7,
+        }),
+        _result(mappings_first={
+            "id": "sess-h", "job_id": "job-h", "status": "active",
+            "handoff_policy": "manual", "replan_policy": "context_only",
+        }),
+        _result(),                          # UPDATE jobs status
+        _result(),                          # INSERT seed assist_steps
+        _result(scalar=7),                  # SELECT total
+        _result(scalar=7),                  # SELECT pending
+    ]
+    out = await assist_agent.start_assist_session(
+        job_id="77777777-7777-7777-7777-777777777777", db=db,
+    )
+    assert out["reopened"] is False
+    assert out["pending_steps"] == 7
+    assert db.commit.await_count == 1
+    # No dag_nodes RESET update should have run (that's the re-open path only).
+    # The seed INSERT ... SELECT FROM dag_nodes is expected; the reset is an
+    # `UPDATE dag_nodes SET status = 'pending'`.
+    assert not [
+        c for c in db.execute.await_args_list
+        if c.args and "UPDATE dag_nodes" in str(c.args[0])
+        and "SET status = 'pending'" in str(c.args[0])
+    ]
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
 async def test_start_session_umbrella_returns_assist_unavailable():
     """§17.561 — /assist on an umbrella job returns structured guidance, not a
     phantom empty session. No INSERT/UPDATE, no commit; child rollup attached."""

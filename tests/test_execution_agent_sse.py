@@ -168,6 +168,10 @@ class TestExecuteAllNodesAbnormalExit:
         """RuntimeError from execute_next_node → finally marks job 'failed' + emits execution_failed SSE."""
         guard_result = MagicMock(); guard_result.rowcount = 1
         dag_check = MagicMock(); dag_check.scalar.return_value = 1
+        # §17.624 — the hands-on gate reads the DAG's tool tags after DAG-gen;
+        # one LLM node → not hands-on → gate doesn't park, loop runs as before.
+        dag_tools = MagicMock()
+        dag_tools.mappings.return_value.all.return_value = [{"tool": "LLM"}]
         cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "running"
         cleanup_update = MagicMock()
 
@@ -175,6 +179,7 @@ class TestExecuteAllNodesAbnormalExit:
         db.execute = AsyncMock(side_effect=[
             guard_result,     # Session 1 guard UPDATE
             dag_check,        # Session 3 DAG COUNT
+            dag_tools,        # §17.624 hands-on gate: SELECT tool FROM dag_nodes
             cleanup_status,   # finally: SELECT status
             cleanup_update,   # finally: UPDATE status='failed'
         ])
@@ -214,12 +219,15 @@ class TestExecuteAllNodesAbnormalExit:
         """CancelledError from execute_next_node → finally marks 'cancelled' + re-raises."""
         guard_result = MagicMock(); guard_result.rowcount = 1
         dag_check = MagicMock(); dag_check.scalar.return_value = 1
+        # §17.624 — hands-on gate reads tool tags; one LLM node → not hands-on.
+        dag_tools = MagicMock()
+        dag_tools.mappings.return_value.all.return_value = [{"tool": "LLM"}]
         cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "running"
         cleanup_update = MagicMock()
 
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[
-            guard_result, dag_check, cleanup_status, cleanup_update,
+            guard_result, dag_check, dag_tools, cleanup_status, cleanup_update,
         ])
         db.commit = AsyncMock()
 
