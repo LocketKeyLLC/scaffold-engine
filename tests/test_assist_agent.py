@@ -46,10 +46,13 @@ async def test_start_session_rejects_unknown_job():
 @pytest.mark.smoke
 @pytest.mark.asyncio
 async def test_start_session_rejects_invalid_status():
+    # 'researching' is neither a valid live-start status nor a terminal re-open
+    # status (§17.623), so it is still rejected. ('completed' now re-opens — see
+    # test_start_session_reopens_completed_job.)
     db = AsyncMock()
     db.execute.side_effect = [
         _result(mappings_first={
-            "id": "abc", "status": "completed",
+            "id": "abc", "status": "researching",
             "job_type": "legacy", "node_count": 5,
         }),
     ]
@@ -57,6 +60,44 @@ async def test_start_session_rejects_invalid_status():
         await assist_agent.start_assist_session(
             job_id="11111111-1111-1111-1111-111111111111", db=db,
         )
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_start_session_reopens_completed_job():
+    """§17.623 — /assist on a 'completed' job re-opens it for a hands-on redo:
+    it resets DAG nodes + assist_steps to pending and returns reopened=True,
+    instead of the old confusing "already completed" 409."""
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _result(mappings_first={
+            "id": "job-9", "status": "completed",
+            "job_type": "component", "node_count": 7,
+        }),
+        _result(mappings_first={
+            "id": "sess-9", "job_id": "job-9", "status": "active",
+            "handoff_policy": "manual", "replan_policy": "context_only",
+        }),
+        _result(),                          # UPDATE dag_nodes reset (re-open)
+        _result(),                          # UPDATE jobs status
+        _result(),                          # INSERT seed assist_steps
+        _result(),                          # UPDATE assist_steps reset (re-open)
+        _result(scalar=7),                  # SELECT total
+        _result(scalar=7),                  # SELECT pending
+    ]
+    out = await assist_agent.start_assist_session(
+        job_id="99999999-9999-9999-9999-999999999999", db=db,
+    )
+    assert out["reopened"] is True
+    assert out["pending_steps"] == 7
+    assert db.commit.await_count == 1
+    # The dag_nodes reset must have run — assert one UPDATE targeted dag_nodes
+    # back to pending.
+    reset_sqls = [
+        str(c.args[0]) for c in db.execute.await_args_list
+        if c.args and "dag_nodes" in str(c.args[0]) and "'pending'" in str(c.args[0])
+    ]
+    assert reset_sqls, "re-open did not reset dag_nodes to pending"
 
 
 @pytest.mark.smoke

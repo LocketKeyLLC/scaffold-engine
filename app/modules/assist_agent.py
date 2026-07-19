@@ -43,6 +43,15 @@ _VALID_START_STATUSES = (
     "assisted_executing", "assisted_running", "assisted_paused",
 )
 
+# §17.623 — a job that already ran to a terminal state can be RE-OPENED into
+# assist mode for a hands-on redo. The trigger case: a hardware/infra job (e.g.
+# a home-lab build) that decomposed and ran autonomously, fabricating per-node
+# "done" evidence, then refused `/assist` with a confusing "already completed"
+# 409. Re-open resets every DAG node to pending so the assist session seeds a
+# full walkthrough; the job-level compiled_output is left as the archive and is
+# regenerated when the assist session finalizes.
+_TERMINAL_REOPEN_STATUSES = ("completed", "cancelled")
+
 
 async def start_assist_session(
     *,
@@ -59,10 +68,17 @@ async def start_assist_session(
     Umbrella jobs and any job with 0 DAG nodes return early with
     ``{"assist_unavailable": True, ...}`` and NO side effects (§17.561).
 
+    A job in a terminal ``completed``/``cancelled`` status is RE-OPENED
+    (§17.623): its DAG nodes are reset to pending, prior per-node output is
+    cleared, and the job returns to ``assisted_executing`` for a hands-on redo.
+    The return dict carries ``reopened: True`` in that case.
+
     Side effects (all in one transaction) for assistable jobs:
       - INSERT assist_sessions row (or no-op if it exists)
+      - (re-open only) reset dag_nodes -> pending, clearing output_text
       - UPDATE jobs.status -> 'assisted_executing'
       - INSERT one assist_steps row per `dag_nodes` row in pending status
+      - (re-open only) reset any pre-existing assist_steps -> pending
     """
     # §17.521 — validate job_id is a UUID BEFORE it reaches the query. A
     # non-UUID (e.g. a pasted job TITLE like "DeFruscio HomeLab") otherwise
@@ -131,10 +147,12 @@ async def start_assist_session(
             "children_total": len(children),
         }
 
-    if row["status"] not in _VALID_START_STATUSES:
+    reopening = row["status"] in _TERMINAL_REOPEN_STATUSES
+    if not reopening and row["status"] not in _VALID_START_STATUSES:
         raise ValueError(
             f"job {job_id} is in status {row['status']!r}; "
-            f"assist mode requires one of {_VALID_START_STATUSES}"
+            f"assist mode requires one of "
+            f"{_VALID_START_STATUSES + _TERMINAL_REOPEN_STATUSES}"
         )
 
     # 2. Idempotent insert. ON CONFLICT collapses concurrent starts.
@@ -151,12 +169,33 @@ async def start_assist_session(
     )).mappings().first()
     session_id = str(sess_row["id"])
 
-    # 3. Job status transition (idempotent).
+    # §17.623 — re-open reset. The job already ran to a terminal state; reset
+    # every non-pending DAG node so the assist session seeds a full redo. Clear
+    # the fabricated per-node output_text so it can't pollute the assist
+    # upstream-context (the job-level compiled_output stays as the archive).
+    if reopening:
+        await db.execute(
+            text("""
+                UPDATE dag_nodes
+                   SET status = 'pending', output_text = NULL,
+                       started_at = NULL, completed_at = NULL,
+                       retry_count = 0, updated_at = NOW()
+                 WHERE job_id = :jid AND status <> 'pending'
+            """),
+            {"jid": job_id},
+        )
+
+    # 3. Job status transition (idempotent). Includes the re-open statuses so a
+    # completed/cancelled job moves back to assisted_executing; completed_at is
+    # cleared (harmless no-op for the non-terminal start paths).
     await db.execute(
         text("""
-            UPDATE jobs SET status = 'assisted_executing', updated_at = NOW()
+            UPDATE jobs
+               SET status = 'assisted_executing', completed_at = NULL,
+                   updated_at = NOW()
              WHERE id = :id
-               AND status IN ('planning', 'executing', 'blocked', 'failed')
+               AND status IN ('planning', 'executing', 'blocked', 'failed',
+                              'completed', 'cancelled')
         """),
         {"id": job_id},
     )
@@ -173,6 +212,22 @@ async def start_assist_session(
         {"sid": session_id, "jid": job_id},
     )
 
+    # §17.623 — re-open of a job that had a PRIOR assist session (session row
+    # reused via ON CONFLICT): the INSERT above no-ops on existing (session,
+    # node) rows, so reset any non-pending step back to pending for a clean redo.
+    if reopening:
+        await db.execute(
+            text("""
+                UPDATE assist_steps
+                   SET status = 'pending', evidence = NULL, evidence_kind = NULL,
+                       presented_at = NULL, submitted_at = NULL,
+                       committed_at = NULL, divergence = FALSE,
+                       replan_triggered = FALSE, updated_at = NOW()
+                 WHERE session_id = :sid AND status <> 'pending'
+            """),
+            {"sid": session_id},
+        )
+
     total = (await db.execute(
         text("SELECT COUNT(*) FROM assist_steps WHERE session_id = :sid"),
         {"sid": session_id},
@@ -187,8 +242,9 @@ async def start_assist_session(
 
     await db.commit()
     logger.info(
-        "assist_session_started session_id=%s job_id=%s total_steps=%d pending=%d",
-        session_id, job_id, total, pending,
+        "assist_session_started session_id=%s job_id=%s total_steps=%d "
+        "pending=%d reopened=%s prev_status=%s",
+        session_id, job_id, total, pending, reopening, row["status"],
     )
     return {
         "session_id": session_id,
@@ -198,6 +254,10 @@ async def start_assist_session(
         "replan_policy": sess_row["replan_policy"],
         "total_steps": total,
         "pending_steps": pending,
+        # §17.623 — True when this start re-opened a terminal (completed/
+        # cancelled) job for a hands-on redo. The pipeline surfaces a banner so
+        # the operator knows the prior autonomous output was archived.
+        "reopened": reopening,
     }
 
 

@@ -653,6 +653,18 @@ def assist_start(
     assist_remember(pipe, chat_id, session_id=sid)
     resp_job_id = d.get("job_id", job_id)
     pending = d.get("pending_steps", "?")
+    # §17.623 — re-open banner. The job had already run to a terminal state
+    # (typically an autonomous run that fabricated "done" evidence); assist
+    # re-opened it and reset its nodes for a hands-on redo. Tell the operator
+    # so they don't think their earlier output vanished silently.
+    if isinstance(d, dict) and d.get("reopened"):
+        yield (
+            f"♻️ **Re-opened `{resp_job_id}` for a hands-on redo.** This job had "
+            f"already finished (it ran autonomously), but assist reset its "
+            f"{pending} step(s) back to pending so you can do them yourself. "
+            f"The prior autonomous deliverable is archived — still viewable with "
+            f"`/results {resp_job_id}`.\n\n---\n\n"
+        )
     yield (
         f"🤝 **Assist session started** — `{sid}`\n\n"
         f"Job `{resp_job_id}` is now in `assisted_executing` ({pending} pending step(s)).\n\n"
