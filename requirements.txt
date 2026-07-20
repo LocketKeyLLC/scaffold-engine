@@ -42,7 +42,7 @@ markdown-it-py==4.2.0
 # --- OpenAPI ingestion (4.5d) ---
 openapi-spec-validator==0.9.0
 jinja2==3.1.6  # §17.585 — was 3.1.4 (GHSA-q2x7-8rv6-6q7h)
-prance==25.4.8.0
+prance==26.7.19.0
 
 # --- Observability (X.26) ---
 # Prometheus metrics surface; always loaded so `/metrics` is on by default.
