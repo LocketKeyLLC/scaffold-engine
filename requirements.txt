@@ -14,7 +14,7 @@ json_repair==0.61.4
 pydantic==2.13.4
 pydantic-settings==2.14.2
 pymilvus==3.0.0
-redis==7.4.0
+redis==8.0.1
 requests==2.34.2
 # sentence-transformers 5.x is softly-breaking vs 4.x; we only use
 # CrossEncoder(...).predict(...) which is API-stable (#86).
