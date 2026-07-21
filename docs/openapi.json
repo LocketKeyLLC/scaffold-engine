@@ -294,6 +294,32 @@
         "title": "AssistHandoffInput",
         "type": "object"
       },
+      "AssistInterpretInput": {
+        "properties": {
+          "message": {
+            "description": "The operator's plain-language message.",
+            "title": "Message",
+            "type": "string"
+          },
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Defaults to the session's current step.",
+            "title": "Node Key"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "AssistInterpretInput",
+        "type": "object"
+      },
       "AssistResearchInput": {
         "properties": {
           "node_key": {
@@ -3672,6 +3698,31 @@
         ]
       }
     },
+    "/assist/candidates": {
+      "get": {
+        "description": "Jobs a user could step through in Assist Mode (natural-language start).",
+        "operationId": "assist_candidates_assist_candidates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Candidates",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/start": {
       "post": {
         "operationId": "assist_start_assist_start_post",
@@ -4219,6 +4270,62 @@
           }
         ],
         "summary": "Assist Handoff",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/interpret": {
+      "post": {
+        "description": "§17.626 — classify a plain-language turn into an assist intent so the\npipeline can route it (advance / skip / submit / fix / finalize / pause /\nquestion) without the operator typing a /assist subcommand. Fail-soft: an\nunresolvable step or classifier hiccup returns intent='question'.",
+        "operationId": "assist_interpret_assist__session_id__interpret_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistInterpretInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Interpret",
         "tags": [
           "Assist"
         ]

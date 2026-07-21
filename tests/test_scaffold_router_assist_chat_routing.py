@@ -87,10 +87,13 @@ class TestActiveAssistSessionGate:
 @pytest.mark.smoke
 class TestPipeRouting:
     def _drive(self, pipe, msg, *, recall, body=CHAT_BODY):
+        # §17.626 — active-session plain text now enters via `_assist_nl_turn`
+        # (classify-and-route), which supersedes the §17.537 always-guide method.
+        # Same signature, so the call_args assertions below are unchanged.
         with patch.object(pipe, "_assist_recall", return_value=recall), \
              patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
              patch.object(
-                 pipe, "_assist_chat_turn",
+                 pipe, "_assist_nl_turn",
                  side_effect=lambda *a, **k: iter(["GUIDE_OUTPUT"]),
              ) as guide:
             out = "".join(pipe.pipe(msg, "model-id", _multiturn(msg), body))
@@ -279,7 +282,7 @@ class TestPipeRoutesViaHistoryWithoutChatId:
         with patch.object(pipe, "_get_assist_session", return_value=sess), \
              patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
              patch.object(
-                 pipe, "_assist_chat_turn",
+                 pipe, "_assist_nl_turn",  # §17.626 — new active-session entry point
                  side_effect=lambda *a, **k: iter(["GUIDE_OUTPUT"]),
              ) as guide:
             out = "".join(pipe.pipe("what's my next step", "model-id", msgs, NO_CID_BODY))
@@ -298,7 +301,7 @@ class TestPipeRoutesViaHistoryWithoutChatId:
             {"role": "user", "content": "what about networking"},
         ]
         with patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
-             patch.object(pipe, "_assist_chat_turn") as guide:
+             patch.object(pipe, "_assist_nl_turn") as guide:
             out = "".join(pipe.pipe("what about networking", "model-id", msgs, NO_CID_BODY))
         assert "TRIAGE_OUTPUT" in out
         guide.assert_not_called()

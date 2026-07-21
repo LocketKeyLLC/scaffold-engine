@@ -29,8 +29,14 @@ def pipe():
 
 
 def _drive_pipe(pipe, user_message: str, messages: list[dict]) -> str:
-    """Run pipe() with triage stubbed so we don't hit the LLM."""
-    with patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT"):
+    """Run pipe() with triage stubbed so we don't hit the LLM.
+
+    §17.626 — natural-language assist START runs before the nudge and would
+    otherwise make a live `/assist/candidates` call. The nudge is the FALLBACK
+    for when no existing job matches, so stub the start to 'no match' (None) to
+    exercise that fallback deterministically."""
+    with patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT"), \
+         patch.object(pipe, "_assist_try_natural_start", return_value=None):
         return "".join(pipe.pipe(user_message, "model-id", messages, {}))
 
 

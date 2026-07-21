@@ -83,6 +83,13 @@ class AssistFixInput(BaseModel):
     node_key: Optional[str] = None
 
 
+class AssistInterpretInput(BaseModel):
+    message: str = Field(description="The operator's plain-language message.")
+    node_key: Optional[str] = Field(
+        default=None, description="Defaults to the session's current step."
+    )
+
+
 class AssistEnvInput(BaseModel):
     profile: Optional[str] = Field(
         default=None, description="Free-text environment profile (OS, shell, package manager)."
@@ -193,6 +200,15 @@ async def assist_start(body: AssistStartInput, db=Depends(get_db)):
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+# §17.626 — declared BEFORE `/assist/{session_id}` so the literal path wins the
+# route match (FastAPI matches in declaration order; otherwise `candidates`
+# binds to `{session_id}`).
+@router.get("/assist/candidates")
+async def assist_candidates(db=Depends(get_db)):
+    """Jobs a user could step through in Assist Mode (natural-language start)."""
+    return {"candidates": await assist_agent.list_assist_candidates(db=db)}
 
 
 @router.get("/assist/{session_id}")
@@ -329,6 +345,17 @@ async def assist_fix(session_id: str, body: AssistFixInput, db=Depends(get_db)):
         if "not found" in msg:
             raise HTTPException(status_code=404, detail=msg)
         raise HTTPException(status_code=409, detail=msg)
+
+
+@router.post("/assist/{session_id}/interpret")
+async def assist_interpret(session_id: str, body: AssistInterpretInput, db=Depends(get_db)):
+    """§17.626 — classify a plain-language turn into an assist intent so the
+    pipeline can route it (advance / skip / submit / fix / finalize / pause /
+    question) without the operator typing a /assist subcommand. Fail-soft: an
+    unresolvable step or classifier hiccup returns intent='question'."""
+    return await assist_agent.classify_session_turn(
+        session_id=session_id, message=body.message, node_key=body.node_key, db=db,
+    )
 
 
 @router.put("/assist/{session_id}/env")

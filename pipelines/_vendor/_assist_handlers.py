@@ -163,17 +163,20 @@ def extract_fenced(msg: str) -> tuple[str, str]:
 
 
 def render_step(step: dict) -> str:
-    """Format a /assist/next response as markdown chat output.
+    """Format the INTRO for a /assist/next step — shown before the walkthrough.
 
-    Prompts use the short (no-session-id) form since chat memory is on
-    by default. The explicit `<session_id>` form still works — users
-    in a different chat or with `assist_session_memory_enabled=false`
-    should paste it; see `/assist help`.
+    §17.626 — plain-language, jargon-light. The operator sees WHAT this step is;
+    the actual how-to walkthrough streams right after (assist_next), and
+    ``render_step_footer`` then tells them how to report back in plain words.
+    Engine internals (node key, tool, dependency keys, the raw LLM prompt) are
+    demoted to a muted subtitle + collapsed reference blocks so the useful
+    content leads.
     """
     if step.get("status") in ("completed", "abandoned", "cancelled"):
         return (
-            f"✅ **Session `{step['session_id']}` is {step['status']}.** "
-            f"Run `/assist done` to view the compiled output."
+            f"✅ **This job is {step['status']}.** "
+            f"Say **\"show me the result\"** (or `/assist done`) to see the "
+            f"compiled output."
         )
     if not step.get("node_key"):
         counts = step.get("step_counts", {})
@@ -183,47 +186,73 @@ def render_step(step: dict) -> str:
         # step is submitted/skipped (session about to finalize) or the rest are
         # waiting on dependencies.
         return (
-            f"⏳ **No step ready right now.**\n\n"
-            f"Step roll-up: {counts_str}\n\n"
-            f"Either all steps are submitted/skipped, or the remaining ones are "
-            f"waiting on dependencies. Use `/assist done` to finish, or check "
-            f"`/jobs` for status."
+            f"⏳ **Nothing to do right now.**\n\n"
+            f"Either every step is finished, or the remaining ones are waiting on "
+            f"earlier steps to complete. (Progress: {counts_str}.)\n\n"
+            f"Say **\"show me the result\"** to wrap up, or check `/jobs` for status."
         )
+    # §17.512 — when the orchestrator re-surfaces an already-presented step
+    # (nothing new claimable), tell the user this is their current step, not a
+    # new one — so this reads as recovery, not a skip.
+    re_shown = (
+        "↩️ _Picking up your current step — finish it, or say **\"skip\"** to "
+        "move on._\n\n" if step.get("re_presented") else ""
+    )
+    title = step.get("title") or "This step"
+    # Muted subtitle: the engine internals a power user might want, de-emphasized
+    # so they don't lead. Node key is shown because the slash-command aliases
+    # (`/assist submit <node_key>`) still accept it.
+    sub_bits = [f"step `{step['node_key']}`"]
+    tool = step.get("tool")
+    if tool and tool.upper() != "LLM":
+        sub_bits.append(f"tool `{tool}`")
+    deps = step.get("depends_on") or []
+    if deps:
+        sub_bits.append("comes after " + ", ".join(f"`{d}`" for d in deps))
+    subtitle = " · ".join(sub_bits)
+
     upstream = step.get("upstream_outputs") or {}
     upstream_block = ""
     if upstream:
-        upstream_block = "**Upstream outputs:**\n\n"
+        upstream_block = "<details>\n<summary>Results from earlier steps</summary>\n\n"
         for nk, txt in upstream.items():
             preview = txt if len(txt) <= 800 else txt[:800] + f"\n… [{len(txt) - 800} more chars]"
             upstream_block += f"_{nk}:_\n```\n{preview}\n```\n\n"
-    deps = step.get("depends_on") or []
-    deps_str = ", ".join(deps) if deps else "(none)"
-    # §17.512 — when the orchestrator re-surfaces an already-presented step
-    # (nothing new claimable), tell the user this is their current step, not a
-    # new one — so re-running `/assist next` reads as recovery, not a skip.
-    re_shown = (
-        "↩️ _Re-showing your current step (submit or `/assist skip` it to "
-        "move on)._\n\n" if step.get("re_presented") else ""
+        upstream_block += "</details>\n\n"
+    # §17.486 — the human-facing walkthrough (streamed separately) is the primary
+    # content; the raw LLM task prompt is demoted to a collapsed reference.
+    raw_block = (
+        f"<details>\n<summary>Show the exact task (for reference)</summary>\n\n"
+        f"```\n{step.get('base_prompt', '')}\n```\n\n</details>\n\n"
     )
     return (
         f"{re_shown}"
-        f"### Step `{step['node_key']}` — {step.get('title', '?')}\n\n"
-        f"**Tool:** `{step.get('tool', 'LLM')}`  |  "
-        f"**Domain:** `{step.get('domain') or 'n/a'}`  |  "
-        f"**Depends on:** {deps_str}\n\n"
+        f"### 📋 {title}\n\n"
+        f"_{subtitle}_\n\n"
         f"{upstream_block}"
-        # §17.486 — the human-facing walkthrough (generated separately) is now
-        # the primary content; the raw LLM task prompt is demoted to a
-        # collapsed block for operators who want the underlying instruction.
-        f"<details>\n<summary>Raw task prompt (underlying instruction)</summary>\n\n"
-        f"```\n{step.get('base_prompt', '')}\n```\n\n</details>\n\n"
-        f"**When done, submit your evidence:**\n\n"
-        f"```\n"
-        f"/assist submit\n"
-        f"<paste your output here — newlines and indentation preserved>\n"
-        f"```\n\n"
-        f"_Code fences (```) are optional. Content after the command "
-        f"line is captured as-is._\n"
+        f"{raw_block}"
+    )
+
+
+def render_step_footer(step: dict) -> str:
+    """§17.626 — the natural-language 'what to do when you're done' block, shown
+    AFTER the walkthrough. This is what replaces the old `/assist submit` code
+    fence: the operator just talks back to the engine.
+
+    Slash commands stay as power-user aliases (mentioned once, muted); the
+    primary path is plain conversation, which the router classifies into
+    submit / skip / fix / next (§17.626)."""
+    return (
+        "\n\n---\n\n"
+        "**When you're done, just tell me what happened** — paste any command "
+        "output, or say what you did or decided. I'll check it and move you to "
+        "the next step.\n\n"
+        "- Nothing to paste? A short _\"done\"_ works.\n"
+        "- Want to pass on this one? Say _\"skip\"_.\n"
+        "- Hit a problem? Tell me the error (_\"it failed with …\"_) and I'll help "
+        "you fix it.\n\n"
+        "_Prefer commands? `/assist submit`, `/assist skip`, and `/assist fix` "
+        "still work._\n"
     )
 
 
@@ -727,16 +756,20 @@ def assist_next(
     # §17.486 — auto-generate the human walkthrough for the claimed step.
     # Separate POST so the slow LLM call doesn't block the fast /next claim;
     # force=False hits the cache when this step was already guided.
-    if step.get("node_key") and getattr(pipe.valves, "assist_auto_guide", True):
-        _cmd = (assist_guide_stream_cmd
-                if getattr(pipe.valves, "assist_stream", True) else assist_guide_cmd)
-        if _cmd is assist_guide_cmd:
-            yield "\n_Generating walkthrough…_\n\n"
-        yield from _cmd(
-            pipe, session_id, node_key=step["node_key"],
-            research=getattr(pipe.valves, "assist_guide_research", True),
-            force=False, chat_id=chat_id,
-        )
+    if step.get("node_key"):
+        if getattr(pipe.valves, "assist_auto_guide", True):
+            _cmd = (assist_guide_stream_cmd
+                    if getattr(pipe.valves, "assist_stream", True) else assist_guide_cmd)
+            if _cmd is assist_guide_cmd:
+                yield "\n_Generating walkthrough…_\n\n"
+            yield from _cmd(
+                pipe, session_id, node_key=step["node_key"],
+                research=getattr(pipe.valves, "assist_guide_research", True),
+                force=False, chat_id=chat_id,
+            )
+        # §17.626 — natural-language 'report back when done' footer, after the
+        # walkthrough so the how-to leads and the call-to-action trails.
+        yield render_step_footer(step)
 
 
 def assist_submit(
@@ -1128,6 +1161,229 @@ def assist_chat_turn(
         research=pipe.valves.assist_guide_research, force=True,
         chat_id=chat_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# §17.626 — natural-language turns. Plain chat in an active session drives the
+# whole flow (advance / skip / submit / fix / finalize / pause) without the
+# operator typing a /assist subcommand. Obvious short verbs are matched here
+# with no LLM; substantive/ambiguous messages hit the /interpret classifier.
+# ---------------------------------------------------------------------------
+
+_FAST_INTENT_PHRASES = {
+    "advance": {
+        "next", "next step", "next one", "continue", "go on", "keep going",
+        "move on", "moving on", "proceed", "onward", "what's next", "whats next",
+        "next please", "ok next", "okay next",
+    },
+    "skip": {
+        "skip", "skip this", "skip it", "skip this step", "skip step",
+        "skip this one", "pass", "pass on this",
+    },
+    "pause": {
+        "pause", "pause this", "stop for now", "hold on", "take a break",
+        "pause please",
+    },
+    "finalize": {
+        "show me the result", "show the result", "show result", "show results",
+        "show me the results", "compiled output", "wrap up", "wrap it up",
+        "finish the job", "finish up", "we're done", "were done", "all done here",
+        "that's everything", "thats everything",
+    },
+}
+_FAST_INTENT_LOOKUP = {
+    phrase: intent
+    for intent, phrases in _FAST_INTENT_PHRASES.items()
+    for phrase in phrases
+}
+
+
+def fast_classify_turn(msg: str) -> str | None:
+    """Intent for an unambiguous short verb phrase (whole-message match), else
+    None. Deterministic — no LLM. 'done' is intentionally absent: it's ambiguous
+    (submit-this-step vs finalize-the-job), so it goes to the classifier."""
+    norm = (msg or "").strip().lower().strip(".!?,;: ").strip()
+    return _FAST_INTENT_LOOKUP.get(norm)
+
+
+def assist_interpret(
+    pipe, session_id: str, message: str, *, node_key: str | None = None,
+) -> dict:
+    """POST /assist/{sid}/interpret → intent dict. Fail-soft → question so a
+    classifier/endpoint hiccup degrades to the guide/refine turn."""
+    fallback = {"intent": "question", "evidence": "", "error_text": "",
+                "node_key": node_key}
+    try:
+        r = _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/interpret",
+            json={"message": message, "node_key": node_key},
+            headers=pipe._auth_headers(),
+            timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
+        )
+        if r.status_code < 400:
+            d = r.json()
+            if isinstance(d, dict) and d.get("intent"):
+                return d
+    except (requests.exceptions.RequestException, ValueError) as e:
+        pipe.logger.debug("assist_interpret failed: %s", e)
+    return fallback
+
+
+def _recall_node_key(pipe, chat_id: str | None, node_key: str | None) -> str | None:
+    if node_key:
+        return node_key
+    return (assist_recall(pipe, chat_id) or {}).get("last_node_key")
+
+
+def assist_nl_turn(
+    pipe, session_id: str, msg: str, *,
+    node_key: str | None = None, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.626 — route a plain-language message in an ACTIVE assist session.
+
+    Fast-path the obvious verbs; classify the rest via /interpret; default to the
+    step-guidance turn (pre-§17.626 behavior) for questions/refinements. Slash
+    commands remain available and bypass this entirely (dispatched earlier)."""
+    intent = fast_classify_turn(msg)
+    evidence, error_text = "", ""
+    if intent is None:
+        d = assist_interpret(pipe, session_id, msg, node_key=node_key)
+        intent = d.get("intent") or "question"
+        evidence = d.get("evidence") or ""
+        error_text = d.get("error_text") or ""
+        node_key = d.get("node_key") or node_key
+
+    if intent == "advance":
+        yield from assist_next(pipe, session_id, chat_id=chat_id); return
+    if intent == "pause":
+        yield from assist_simple_post(pipe, session_id, "pause"); return
+    if intent == "finalize":
+        yield from assist_done(pipe, session_id, chat_id=chat_id); return
+    if intent == "skip":
+        nk = _recall_node_key(pipe, chat_id, node_key)
+        if not nk:
+            yield ("Which step should I skip? Say _\"next\"_ to pull up the "
+                   "current one first."); return
+        yield from assist_skip(pipe, session_id, nk, chat_id=chat_id); return
+    if intent == "submit":
+        nk = _recall_node_key(pipe, chat_id, node_key)
+        if not nk:
+            # No step claimed yet — pull the next one instead of a dead-end.
+            yield from assist_next(pipe, session_id, chat_id=chat_id); return
+        ev = (evidence or msg).strip() or "Operator confirmed this step is complete."
+        yield "_📝 Recording what you did for this step…_\n\n"
+        yield from assist_submit(pipe, session_id, nk, ev, chat_id=chat_id); return
+    if intent == "fix":
+        nk = _recall_node_key(pipe, chat_id, node_key)
+        yield "_🔧 Sounds like something went wrong — let me help…_\n\n"
+        yield from assist_fix_cmd(
+            pipe, session_id, (error_text or msg), node_key=nk, chat_id=chat_id,
+        ); return
+    # question (default) — the existing guide/refine turn.
+    yield from assist_chat_turn(pipe, session_id, msg, node_key=node_key, chat_id=chat_id)
+
+
+# ---------------------------------------------------------------------------
+# §17.626 — natural-language START. When there's no active session and the
+# message reads as assist intent, map it to an existing assistable job.
+# ---------------------------------------------------------------------------
+
+_START_STOPWORDS = {
+    "the", "and", "for", "with", "you", "your", "our", "can", "please", "help",
+    "assist", "let", "lets", "want", "need", "would", "like", "get", "got",
+    "set", "setup", "install", "installation", "configure", "configuration",
+    "deploy", "build", "run", "running", "implement", "finish", "complete",
+    "step", "through", "walk", "using", "use", "job", "task", "project", "this",
+    "that", "into", "onto", "over", "from", "out", "new", "make", "start",
+    "work", "working", "system", "server", "one", "some", "any", "all",
+}
+
+
+def _start_tokens(s: str) -> set:
+    return {
+        w for w in re.findall(r"[a-z0-9]+", (s or "").lower())
+        if len(w) > 2 and w not in _START_STOPWORDS
+    }
+
+
+def match_assist_candidate(msg: str, candidates: list) -> tuple:
+    """Score `candidates` (each {job_id,title,status,...}) against `msg` by
+    distinctive-token overlap. Returns ``(best_candidate_or_None, ambiguous)``:
+
+    - ``(None, False)``  — no signal (best overlap is 0); caller falls through
+      to planning/triage instead of hijacking a new-idea message.
+    - ``(cand, False)``  — one confident, unique match (start it).
+    - ``(cand, True)``   — a weak or tied match (offer the list to choose).
+    """
+    mt = _start_tokens(msg)
+    if not mt or not candidates:
+        return None, False
+    scored = sorted(
+        ((len(mt & _start_tokens(c.get("title", ""))), c) for c in candidates),
+        key=lambda x: x[0], reverse=True,
+    )
+    best_score, best = scored[0]
+    second_score = scored[1][0] if len(scored) > 1 else 0
+    if best_score == 0:
+        return None, False
+    ambiguous = best_score < 2 or second_score >= best_score
+    return best, ambiguous
+
+
+def fetch_assist_candidates(pipe) -> list:
+    """GET /assist/candidates → list (fail-soft → [])."""
+    try:
+        r = _ss(pipe).get(
+            f"{pipe.valves.orchestrator_url}/assist/candidates",
+            headers=pipe._auth_headers(),
+            timeout=pipe.valves.request_timeout,
+        )
+        if r.status_code < 400:
+            d = r.json()
+            if isinstance(d, dict):
+                return d.get("candidates") or []
+    except (requests.exceptions.RequestException, ValueError) as e:
+        pipe.logger.debug("fetch_assist_candidates failed: %s", e)
+    return []
+
+
+def render_candidate_list(candidates: list) -> str:
+    """Offer the assistable jobs to choose from (ambiguous natural-start)."""
+    lines = [
+        "🤝 **I can walk you through one of these, step by step — which job?**",
+        "",
+    ]
+    for c in candidates[:8]:
+        lines.append(
+            f"- **{c.get('title', '(untitled)')}** — `{c.get('status', '?')}` · "
+            f"start with `/assist {c.get('job_id', '')}`"
+        )
+    if len(candidates) > 8:
+        lines.append(f"- …and {len(candidates) - 8} more (`/here` lists all).")
+    lines += [
+        "",
+        "_Paste the `/assist <id>` for the one you mean. Want to plan something "
+        "new instead? Just describe it and I'll help you scope it._",
+    ]
+    return "\n".join(lines)
+
+
+def try_natural_start(pipe, msg: str, chat_id: str | None):
+    """§17.626 — attempt to START an assist session from a natural sentence.
+
+    Returns a generator (start stream or candidate list) when it handles the
+    message, or ``None`` to signal 'not an existing job — fall through to
+    planning/triage'. Kept as a plain function (not a generator) so the caller
+    can make the start-vs-list-vs-fallthrough decision before yielding."""
+    candidates = fetch_assist_candidates(pipe)
+    if not candidates:
+        return None
+    match, ambiguous = match_assist_candidate(msg, candidates)
+    if match is None:
+        return None  # no job matched — this is a new idea, let triage handle it.
+    if not ambiguous:
+        return assist_start(pipe, match["job_id"], chat_id=chat_id)
+    return iter([render_candidate_list(candidates)])
 
 
 def assist_research_cmd(

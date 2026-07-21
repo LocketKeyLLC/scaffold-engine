@@ -723,6 +723,101 @@ async def run_step_fix(
     return {"session_id": session_id, "node_key": nk, "title": ctx.title, **res}
 
 
+async def classify_session_turn(
+    *, session_id: str, message: str, node_key: str | None = None, db,
+) -> dict:
+    """§17.626 — classify an operator's plain-language message against the
+    session's current step. Returns ``{intent, evidence, error_text, node_key,
+    title}``. Fail-soft: an unresolvable step or classifier error yields
+    ``intent='question'`` (the pre-§17.626 guide/refine behavior)."""
+    from app.config import settings
+    from app.modules import assist_guide
+
+    fallback = {
+        "intent": "question", "evidence": "", "error_text": "",
+        "node_key": node_key, "title": None,
+    }
+    if not (message or "").strip():
+        return fallback
+    # §17.626 — master toggle. Off ⇒ every substantive message is a guide/refine
+    # turn (pre-§17.626 behavior). The pipeline's deterministic fast-path still
+    # handles the obvious verbs (next/skip/pause/finalize) client-side.
+    if not settings.assist_nl_turns_enabled:
+        return fallback
+    sess = (await db.execute(
+        text("""
+            SELECT id, job_id, status, current_node_key
+              FROM assist_sessions WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess or sess["status"] not in ("active", "paused"):
+        return fallback
+    nk = node_key or sess["current_node_key"]
+    if not nk:
+        # No current step to ground on — treat substantive text as a question
+        # (the caller will fall through to guidance / usage).
+        return fallback
+    try:
+        node_row, ctx = await _assemble_ctx_for_node(
+            db=db, job_id=str(sess["job_id"]), node_key=nk,
+        )
+    except ValueError:
+        return fallback
+    res = await assist_guide.classify_turn(
+        message=message, title=ctx.title, task_prompt=ctx.base_prompt,
+        tool=ctx.tool,
+    )
+    res["node_key"] = nk
+    res["title"] = ctx.title
+    return res
+
+
+# §17.626 — statuses from which a job can be stepped through in Assist Mode.
+# Mirrors the guard in assist_agent.start_session / the umbrella handling in
+# the router; awaiting_assist is a component parked for hands-on work (§17.624),
+# and terminal jobs are re-openable for a hands-on redo (§17.623).
+ASSIST_ELIGIBLE_STATUSES = (
+    "planning", "executing", "running", "blocked", "failed",
+    "assisted_executing", "assisted_running", "awaiting_assist",
+    "completed", "cancelled",
+)
+
+
+async def list_assist_candidates(*, db, limit: int = 25) -> list[dict]:
+    """§17.626 — jobs a user could step through in Assist Mode, newest first.
+
+    Returns ``[{job_id, title, status, node_count}]``. Excludes umbrella jobs
+    with no DAG of their own (they run autonomously through component children)
+    and 0-node jobs (nothing to assist). Used by the natural-language 'start'
+    path to map a phrase like 'set up proxmox' to an existing job."""
+    rows = (await db.execute(
+        text("""
+            SELECT j.id, j.title, j.status, j.job_type,
+                   (SELECT COUNT(*) FROM dag_nodes n WHERE n.job_id = j.id) AS node_count
+              FROM jobs j
+             WHERE j.status = ANY(:statuses)
+             ORDER BY j.created_at DESC
+             LIMIT :lim
+        """),
+        {"statuses": list(ASSIST_ELIGIBLE_STATUSES), "lim": limit},
+    )).mappings().all()
+    out: list[dict] = []
+    for r in rows:
+        # Umbrella jobs assist via their components, not directly; skip 0-node.
+        if (r.get("job_type") or "") == "umbrella":
+            continue
+        if not r.get("node_count"):
+            continue
+        out.append({
+            "job_id": str(r["id"]),
+            "title": r["title"],
+            "status": r["status"],
+            "node_count": int(r["node_count"]),
+        })
+    return out
+
+
 # ── Environment capture (§17.487 — concrete commands, not placeholders) ────
 
 

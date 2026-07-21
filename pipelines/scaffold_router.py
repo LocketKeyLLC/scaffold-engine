@@ -1414,16 +1414,28 @@ class Pipeline:
             or self._active_assist_session_via_history(messages)
         )
         if active:
-            yield from self._assist_chat_turn(
+            # §17.626 — plain text in an active session is an intent, not just a
+            # refine hint: classify it and route (submit/skip/next/fix/…).
+            yield from self._assist_nl_turn(
                 active["session_id"], msg,
                 node_key=active.get("last_node_key"), chat_id=cid,
             )
             return
 
-        # §17.504 — assist-intent nudge. Free-text "assist with…" / "help me
-        # implement…" looks like Assist Mode but routes to triage. Surface the
-        # real `/assist <job_id>` entry point; the planning reply still runs.
+        # §17.626 — natural-language assist START. No active session, but the
+        # message reads as "help me do <existing job>": map it to an assistable
+        # job and start stepping through it — no `/assist <job_id>` required. A
+        # strong unique match starts immediately; an ambiguous one offers a
+        # pick-list; no match at all returns None so a genuinely-new idea falls
+        # through to the planner below (never hijacked). Supersedes the §17.504
+        # nudge for the case where a real target job exists.
         if self._looks_like_assist_intent(msg):
+            started = self._assist_try_natural_start(msg, cid)
+            if started is not None:
+                yield from started
+                return
+            # §17.504 — no assistable job matched; surface the entry point and
+            # let the planning reply run for what is, apparently, a new idea.
             yield self._ASSIST_NUDGE
 
         yield self._call_triage(messages)
@@ -1984,6 +1996,23 @@ class Pipeline:
         yield from _assist.assist_chat_turn(
             self, session_id, refine, node_key=node_key, chat_id=chat_id,
         )
+
+    def _assist_nl_turn(
+        self, session_id: str, msg: str, *,
+        node_key: str | None = None, chat_id: str | None = None,
+    ) -> Generator[str, None, None]:
+        """§17.626 — route a plain-language assist-session turn to the right
+        action (advance/skip/submit/fix/finalize/pause/question). Supersedes the
+        §17.537 always-guide behavior so the operator drives the flow by talking."""
+        yield from _assist.assist_nl_turn(
+            self, session_id, msg, node_key=node_key, chat_id=chat_id,
+        )
+
+    def _assist_try_natural_start(self, msg: str, chat_id: str | None):
+        """§17.626 — attempt to START assist from a natural sentence. Returns a
+        generator (start stream / candidate list) or None to fall through to
+        planning/triage."""
+        return _assist.try_natural_start(self, msg, chat_id)
 
     def _session_id_from_history(self, messages: List[dict]) -> str | None:
         """§17.539 — most-recent assist session id named in an assistant turn.

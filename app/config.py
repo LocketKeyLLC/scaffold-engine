@@ -651,6 +651,17 @@ class Settings(BaseSettings):
     assist_auto_guide: bool = True
     assist_guide_research: bool = True
     assist_guide_model_role: str = "model_general"
+    # §17.626 — natural-language assist turns. When a chat has an active assist
+    # session, plain text is classified into an intent (advance / skip / submit /
+    # fix / finalize / pause / question) so the operator drives the whole flow by
+    # talking, not by /assist subcommands (the subcommands remain as aliases).
+    # A single cheap tool_call per substantive message (obvious verbs like
+    # "next"/"skip" are matched deterministically in the pipeline with no LLM).
+    # Uses the verifier model (kimi) — reliable native tool-calling, already
+    # loaded — rather than the slow thinking model. Fail-soft: on any classify
+    # error the turn falls back to 'question' (the pre-§17.626 guide behavior).
+    assist_nl_turns_enabled: bool = True
+    assist_classify_model_role: str = "model_verifier"
     assist_guide_max_tokens: int = Field(default=8192, ge=512, le=16384)
     assist_guide_max_research_queries: int = Field(default=3, ge=0, le=8)
     # §17.487 — Tier 1 "close the loop". On /assist submit, judge whether the

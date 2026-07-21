@@ -62,14 +62,35 @@ _RUNBOOK_HUMAN_FRAMING = (
     "done."
 )
 
-GUIDE_SYSTEM_CODEGEN = """You are a hands-on co-pilot guiding a human operator through ONE code step of a larger plan. The reader will create and run this code themselves.
+_HEADING_META_RULE = (
+    "IMPORTANT — the parenthetical text under each heading below tells YOU what "
+    "to write there; it is guidance for you, not text for the reader. Write the "
+    "heading line as the exact short heading shown (e.g. `## Goal`) and NOTHING "
+    "else on that line. NEVER copy the parenthetical guidance into your answer — "
+    "the reader must see clean headings like `## Goal`, `## Steps`, followed by "
+    "your actual content."
+)
 
-Output structure (in this order, omit sections that don't apply):
-- ## What you're building — one or two sentences on the deliverable and where the file goes.
-- ## Code — the complete implementation in a single fenced code block. Real, working code, not a sketch. One implementation, not alternatives.
-- ## Run this — numbered, copy-paste-ready terminal commands to save, install deps, and run/test it. Use fenced code blocks. One command group per step.
-- ## Verify — how the operator confirms it worked: the expected output paired with the exact command that produces it.
-- ## Inputs needed — any value you could not determine (paths, names, keys). Each MUST appear in the code or commands as a <SCREAMING_SNAKE_CASE> placeholder, never as a guessed concrete value.
+GUIDE_SYSTEM_CODEGEN = f"""You are a hands-on co-pilot guiding a human operator through ONE code step of a larger plan. The reader will create and run this code themselves.
+
+{_HEADING_META_RULE}
+
+Use these section headings, in order, and omit any that don't apply:
+
+## What you're building
+(One or two sentences on the deliverable and where the file goes.)
+
+## Code
+(The complete implementation in a single fenced code block. Real, working code, not a sketch. One implementation, not alternatives.)
+
+## Run this
+(Numbered, copy-paste-ready terminal commands to save, install deps, and run/test it. Use fenced code blocks. One command group per step.)
+
+## Verify
+(How the operator confirms it worked: the expected output paired with the exact command that produces it.)
+
+## Inputs needed
+(Any value you could not determine — paths, names, keys. Each MUST appear in the code or commands as a <SCREAMING_SNAKE_CASE> placeholder, never as a guessed concrete value.)
 
 Hard rules:
 - Never write past-tense narration ("Created the file", "Ran it and got…", "Output confirmed…"). The human runs it, not you.
@@ -80,14 +101,26 @@ Hard rules:
 
 Produce the walkthrough for THIS step only. Nothing more."""
 
-GUIDE_SYSTEM_NONCODE = """You are a hands-on co-pilot guiding a human operator through ONE non-coding step of a larger plan. The deliverable is a decision, a written artifact, a configuration in a UI, or a manual action — not code or shell commands.
+GUIDE_SYSTEM_NONCODE = f"""You are a hands-on co-pilot guiding a human operator through ONE non-coding step of a larger plan. The deliverable is a decision, a written artifact, a configuration in a UI, or a manual action — not code or shell commands.
 
-Output structure (in this order, omit sections that don't apply):
-- ## Goal — one or two sentences: what this step produces and why it matters to the steps that follow.
-- ## Steps — a NUMBERED list the operator follows in order. Each step is one concrete action ("Open X and click Y", "Decide between A and B — pick A because…", "Write a paragraph covering Z"). Be specific enough to act on without guessing.
-- ## What to decide — when the step is a decision, lay out the real options with the trade-off that picks the winner, then state the recommended choice. Do not leave the decision hanging.
-- ## Done when — the observable signal that the step is complete (a file exists, a setting shows X, the document covers the listed points).
-- ## Inputs needed — anything the operator must supply that you could not determine. Mark each as a <PLACEHOLDER>, never a guessed value.
+{_HEADING_META_RULE}
+
+Use these section headings, in order, and omit any that don't apply:
+
+## Goal
+(One or two sentences: what this step produces and why it matters to the steps that follow.)
+
+## Steps
+(A NUMBERED list the operator follows in order. Each step is one concrete action — "Open X and click Y", "Decide between A and B — pick A because…", "Write a paragraph covering Z". Be specific enough to act on without guessing.)
+
+## What to decide
+(When the step is a decision, lay out the real options with the trade-off that picks the winner, then state the recommended choice. Do not leave the decision hanging. Omit this heading entirely when the step is not a decision.)
+
+## Done when
+(The observable signal that the step is complete — a file exists, a setting shows X, the document covers the listed points.)
+
+## Inputs needed
+(Anything the operator must supply that you could not determine. Mark each as a <PLACEHOLDER>, never a guessed value.)
 
 Hard rules:
 - Never write past-tense narration as if you performed the step ("Configured…", "Decided…", "Wrote…"). The human does it.
@@ -97,13 +130,23 @@ Hard rules:
 
 Produce the walkthrough for THIS step only. Nothing more."""
 
-GUIDE_SYSTEM_FIX = """You are a hands-on co-pilot helping a human operator who hit a problem while performing ONE step of a larger plan. They will paste the error / what went wrong; you diagnose it and give them the exact commands to recover and finish the step.
+GUIDE_SYSTEM_FIX = f"""You are a hands-on co-pilot helping a human operator who hit a problem while performing ONE step of a larger plan. They will paste the error / what went wrong; you diagnose it and give them the exact commands to recover and finish the step.
 
-Output structure (in this order, omit sections that don't apply):
-- ## Diagnosis — what the error means and the most likely cause, in 1-3 sentences. Be concrete; name the actual failing thing.
-- ## Fix — numbered, copy-paste-ready commands or edits that resolve it. Use fenced code blocks. If there are multiple plausible causes, lead with the most likely and label the alternatives.
-- ## Then — what to run to confirm it's fixed and how to complete the original step.
-- ## If that fails — the next thing to check or try, so the operator isn't stuck.
+{_HEADING_META_RULE}
+
+Use these section headings, in order, and omit any that don't apply:
+
+## Diagnosis
+(What the error means and the most likely cause, in 1-3 sentences. Be concrete; name the actual failing thing.)
+
+## Fix
+(Numbered, copy-paste-ready commands or edits that resolve it. Use fenced code blocks. If there are multiple plausible causes, lead with the most likely and label the alternatives.)
+
+## Then
+(What to run to confirm it's fixed and how to complete the original step.)
+
+## If that fails
+(The next thing to check or try, so the operator isn't stuck.)
 
 Hard rules:
 - Address THIS error and THIS task. Don't restate the whole step from scratch unless the fix requires it.
@@ -498,6 +541,127 @@ async def verify_step_success(
         "reason": reason,
         "suggestion": (args.get("suggestion") or "").strip(),
         "grounded_by": grounded_by,
+    }
+
+
+# ── Natural-language turn classification (§17.626) ─────────────────────────
+# When a chat has an ACTIVE assist session, plain text is an intent, not a new
+# idea. This classifier maps the message to one of the assist verbs so the
+# operator drives the flow by talking. Obvious verbs are matched deterministically
+# in the pipeline (no LLM); this handles the substantive/ambiguous messages —
+# principally telling "I did it, here's the output" (submit) from "how do I do
+# this?" (question) from "it broke with X" (fix), using the current step as context.
+
+ASSIST_INTENTS = (
+    "advance", "skip", "submit", "fix", "finalize", "pause", "question",
+)
+
+_CLASSIFY_TURN_TOOL = model_router.Tool(
+    name="classify_turn",
+    description=(
+        "Classify what the operator wants to do next in an interactive, "
+        "step-by-step assist session. They are currently on ONE specific step "
+        "(given). Choose exactly one intent."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "intent": {
+                "type": "string",
+                "enum": list(ASSIST_INTENTS),
+                "description": (
+                    "advance = move on to the next step ('next', 'ok what's "
+                    "next', 'move on'). "
+                    "skip = skip/pass on the current step. "
+                    "submit = they DID the step or are reporting the result / "
+                    "pasting output / stating the decision they made — record it "
+                    "and continue. "
+                    "fix = they hit an error or something isn't working and want "
+                    "help recovering. "
+                    "finalize = they want to finish the whole job and see the "
+                    "compiled result ('show me the result', 'we're all done'). "
+                    "pause = stop for now. "
+                    "question = they're asking how to do the step, for "
+                    "clarification, or refining the guidance — NOT reporting that "
+                    "it's done. This is the safe default when unsure."
+                ),
+            },
+            "evidence": {
+                "type": "string",
+                "description": (
+                    "When intent=submit: the operator's result to record for the "
+                    "step (their pasted output, or a short restatement of the "
+                    "decision/action they reported). Omit otherwise."
+                ),
+            },
+            "error_text": {
+                "type": "string",
+                "description": (
+                    "When intent=fix: the error or problem they described, as "
+                    "concretely as they gave it. Omit otherwise."
+                ),
+            },
+        },
+        "required": ["intent"],
+    },
+)
+
+_CLASSIFY_SYSTEM = (
+    "You route messages in a hands-on assist session where a human operator is "
+    "working through a plan ONE step at a time, with the engine as co-pilot. "
+    "Given the current step and the operator's message, decide what they want. "
+    "Key distinctions: a message that STATES a result or decision ('I picked "
+    "ZFS', 'done, output was 0 errors', pasted command output) is `submit`; a "
+    "message that ASKS ('should I use ZFS or LVM?', 'how do I do this?') is "
+    "`question`; a message reporting a failure ('it errored with…', 'not "
+    "working') is `fix`. Call classify_turn exactly once."
+)
+
+
+async def classify_turn(
+    *, message: str, title: str, task_prompt: str, tool: str,
+    role: str | None = None,
+) -> dict:
+    """Classify an operator's plain-language turn into an assist intent.
+
+    Returns ``{"intent": <one of ASSIST_INTENTS>, "evidence": str,
+    "error_text": str}``. Fail-soft: on any model/parse error returns
+    ``intent='question'`` so a flaky classifier degrades to the pre-§17.626
+    guide/refine behavior rather than misfiring a submit/skip."""
+    role = role or settings.assist_classify_model_role
+    fallback = {"intent": "question", "evidence": "", "error_text": ""}
+    user = (
+        f"Current step: {title}\n\n"
+        f"What the step asks:\n{(task_prompt or '')[:1500]}\n\n"
+        f"Tool for this step: {tool or 'LLM'}\n\n"
+        f"Operator's message:\n{message[:2000]}\n\n"
+        "Call classify_turn."
+    )
+    try:
+        resp = await model_router.tool_call(
+            [
+                {"role": "system", "content": _CLASSIFY_SYSTEM},
+                {"role": "user", "content": user},
+            ],
+            [_CLASSIFY_TURN_TOOL],
+            role=role,
+            temperature=0.0,
+            max_tokens=512,
+            tool_choice="auto",
+        )
+    except Exception as exc:  # network / provider error — never block the turn
+        logger.warning("assist_classify_turn_failed: %s", exc)
+        return fallback
+    if not resp.success or not resp.tool_calls:
+        return fallback
+    args = resp.tool_calls[0].arguments or {}
+    intent = args.get("intent")
+    if intent not in ASSIST_INTENTS:
+        return fallback
+    return {
+        "intent": intent,
+        "evidence": (args.get("evidence") or "").strip(),
+        "error_text": (args.get("error_text") or "").strip(),
     }
 
 

@@ -287,33 +287,32 @@ class TestSlashFormParity:
 @pytest.mark.smoke
 class TestRenderStepHelpUpdate:
 
-    def test_help_text_advertises_no_fence_path(self, pipe):
-        """The /assist next output teaches the operator how to submit.
-        §17.308 simplified to a single 3-backtick example + a 'fences
-        optional' note. Pin those so a future re-tightening doesn't
-        regress the discovered simpler shape."""
-        out = _vendor.render_step({
-            "session_id": "x", "status": "ready_to_run",
+    def test_footer_teaches_natural_language_reporting(self, pipe):
+        """§17.626 — the old `/assist submit` code fence became a natural-
+        language footer ('just tell me what happened'). Pin the plain-words
+        call-to-action + the skip/fix affordances so the conversational
+        shape doesn't silently regress to command-only."""
+        out = _vendor.render_step_footer({
             "node_key": "T2", "title": "do thing",
-            "tool": "LLM", "domain": "eng", "depends_on": [],
-            "base_prompt": "do the thing",
         })
-        assert "newlines and indentation preserved" in out
-        assert "Code fences" in out and "optional" in out
+        assert "just tell me what happened" in out.lower()
+        assert "skip" in out.lower()
+        # slash commands stay available as muted aliases.
+        assert "/assist submit" in out
 
-    def test_help_text_does_not_use_four_backticks(self, pipe):
-        """Pre-§17.308 the example was wrapped in 4 backticks (nested
-        fence). Post-§17.308 it's a single 3-backtick block — cleaner
-        to read + doesn't render as a nested code block in OWUI."""
-        out = _vendor.render_step({
+    def test_step_and_footer_do_not_use_four_backticks(self, pipe):
+        """Pre-§17.308 the submit example was wrapped in 4 backticks (nested
+        fence). The intro + footer must stay clear of 4-backtick nesting so
+        OWUI doesn't render a broken nested code block."""
+        step = {
             "session_id": "x", "status": "ready_to_run",
             "node_key": "T2", "title": "do thing",
             "tool": "LLM", "domain": "eng", "depends_on": [],
             "base_prompt": "do the thing",
-        })
-        assert "````" not in out, (
-            "§17.308: render_step still uses 4-backtick nesting — the "
-            "shape was simplified to a single 3-backtick block."
+        }
+        combined = _vendor.render_step(step) + _vendor.render_step_footer(step)
+        assert "````" not in combined, (
+            "render_step/footer reintroduced 4-backtick nesting."
         )
 
 
