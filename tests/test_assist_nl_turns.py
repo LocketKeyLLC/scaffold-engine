@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests._scaffold_router_setup import Pipeline, _mod
+from tests._scaffold_router_setup import Pipeline, _make_response, _mod
 
 _ah = _mod._assist
 
@@ -72,6 +72,11 @@ def _route(pipe, msg, *, intent_dict=None, recall_nk="T1"):
         "assist_done": "FINALIZE",
         "assist_simple_post": "PAUSE",
         "assist_chat_turn": "QUESTION",
+        "assist_status": "STATUS",
+        "assist_plan": "PLAN",
+        "assist_handoff": "HANDOFF",
+        "assist_research_cmd": "ASK",
+        "assist_env_cmd": "ENV",
     }
     patchers = {name: MagicMock(side_effect=lambda *a, _s=s, **k: iter([_s]))
                 for name, s in stubs.items()}
@@ -239,3 +244,175 @@ def test_render_step_leads_with_title_not_jargon():
     # Title leads; the old jargon header (Tool | Domain | Depends on) is gone.
     assert out.index("Decide ZFS vs LVM") < out.index("`T1`")
     assert "Domain:" not in out
+
+
+# ── §17.627 — new intents route to engine components ──────────────────────
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("msg,intent", [
+    ("where am i", "status"),
+    ("progress", "status"),
+    ("show me the plan", "explain_plan"),
+    ("all the steps", "explain_plan"),
+    ("you do the rest", "handoff"),
+    ("do it for me", "handoff"),
+])
+def test_fast_classify_new_verbs(msg, intent):
+    assert _ah.fast_classify_turn(msg) == intent
+
+
+@pytest.mark.smoke
+def test_handoff_routes_to_executor(pipe):
+    out, stubs, _ = _route(pipe, "you handle this one",
+                           intent_dict={"intent": "handoff", "node_key": "T1"})
+    assert "HANDOFF" in out
+    args, _ = stubs["assist_handoff"].call_args
+    assert args[2] == "T1" and args[3] == "single"
+
+
+@pytest.mark.smoke
+def test_handoff_all_remaining_mode(pipe):
+    # "the rest" → all_remaining (fast-path handoff, mode read from the message).
+    out, stubs, _ = _route(pipe, "you do the rest")
+    assert "HANDOFF" in out
+    assert stubs["assist_handoff"].call_args[0][3] == "all_remaining"
+
+
+@pytest.mark.smoke
+def test_ask_routes_to_research(pipe):
+    out, stubs, _ = _route(
+        pipe, "is ZFS safe on non-ECC RAM?",
+        intent_dict={"intent": "ask", "query": "is ZFS safe without ECC RAM"},
+    )
+    assert "ASK" in out
+    # the researched query (not the raw chat) is what gets looked up.
+    assert stubs["assist_research_cmd"].call_args[0][2] == "is ZFS safe without ECC RAM"
+
+
+@pytest.mark.smoke
+def test_status_and_plan_route(pipe):
+    assert "STATUS" in _route(pipe, "where am i")[0]
+    assert "PLAN" in _route(pipe, "show me the plan")[0]
+
+
+@pytest.mark.smoke
+def test_set_env_parses_substitutions(pipe):
+    out, stubs, _ = _route(
+        pipe, "my host IP is HOST_IP=10.0.0.5 on Ubuntu 24.04",
+        intent_dict={"intent": "set_env"},
+    )
+    assert "ENV" in out
+    _, kwargs = stubs["assist_env_cmd"].call_args
+    assert kwargs["substitutions"] == {"HOST_IP": "10.0.0.5"}
+    assert "Ubuntu 24.04" in (kwargs["profile"] or "")
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("msg,level", [
+    ("explain more, I'm a beginner", "detailed"),
+    ("just give me the commands", "terse"),
+])
+def test_set_verbosity_reads_level(pipe, msg, level):
+    out, stubs, _ = _route(pipe, msg, intent_dict={"intent": "set_verbosity"})
+    assert "ENV" in out
+    assert stubs["assist_env_cmd"].call_args.kwargs["verbosity"] == level
+
+
+# ── §17.627 — verbosity / handoff-mode helpers ────────────────────────────
+
+
+@pytest.mark.smoke
+def test_verbosity_helper():
+    assert _ah._verbosity_from_message("please be more detailed") == "detailed"
+    assert _ah._verbosity_from_message("too verbose, shorter") == "terse"
+    assert _ah._verbosity_from_message("go on") == "normal"
+
+
+@pytest.mark.smoke
+def test_handoff_mode_helper():
+    assert _ah._handoff_mode_from_message("do the rest for me") == "all_remaining"
+    assert _ah._handoff_mode_from_message("you do this one") == "single"
+
+
+# ── §17.627 — pick-list follow-up (resolve_candidate_pick) ─────────────────
+
+
+_PENDING = ["j1", "j2", "j3"]
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("msg,expected", [
+    ("1", "j1"),
+    ("2", "j2"),
+    ("number 3", "j3"),
+    ("the second one", "j2"),
+    ("first", "j1"),
+    ("last", "j3"),
+    ("9", None),           # out of range
+    ("nonsense", None),    # no positional, no name match (no candidates fetched)
+])
+def test_resolve_candidate_pick_positional(pipe, msg, expected):
+    with patch.object(_ah, "fetch_assist_candidates", MagicMock(return_value=[])):
+        assert _ah.resolve_candidate_pick(pipe, msg, _PENDING) == expected
+
+
+@pytest.mark.smoke
+def test_resolve_candidate_pick_by_name(pipe):
+    cands = [
+        {"job_id": "j1", "title": "Proxmox VE Installation", "status": "planning"},
+        {"job_id": "j2", "title": "Firewall Gateway", "status": "planning"},
+    ]
+    with patch.object(_ah, "fetch_assist_candidates", MagicMock(return_value=cands)):
+        assert _ah.resolve_candidate_pick(pipe, "the proxmox one", ["j1", "j2"]) == "j1"
+
+
+@pytest.mark.smoke
+def test_candidate_list_embeds_hidden_marker():
+    out = _ah.render_candidate_list([
+        {"job_id": "j1", "title": "A", "status": "planning"},
+        {"job_id": "j2", "title": "B", "status": "planning"},
+    ])
+    assert "<!--ASSIST_PICK:j1,j2-->" in out
+
+
+# ── §17.627 — assist_plan renders the DAG ─────────────────────────────────
+
+
+@pytest.mark.smoke
+def test_pipe_pick_list_followup_starts_job(pipe):
+    # Prior turn showed a pick-list (hidden UUID marker); a bare "1" starts the
+    # first job (checked BEFORE the <2-char noise guard would swallow it).
+    j1 = "11111111-1111-1111-1111-111111111111"
+    j2 = "22222222-2222-2222-2222-222222222222"
+    history = [
+        {"role": "user", "content": "help me with the homelab"},
+        {"role": "assistant", "content": f"which job?\n<!--ASSIST_PICK:{j1},{j2}-->"},
+        {"role": "user", "content": "1"},
+    ]
+    with patch.object(pipe, "_call_triage", return_value="TRIAGE") as triage, \
+         patch.object(_ah, "assist_start",
+                      MagicMock(side_effect=lambda *a, **k: iter(["STARTED"]))) as start:
+        out = "".join(pipe.pipe("1", "model-id", history, {}))
+    assert "STARTED" in out
+    assert "TRIAGE" not in out           # the noise guard / triage never ran
+    triage.assert_not_called()
+    assert start.call_args[0][1] == j1
+
+
+@pytest.mark.smoke
+def test_assist_plan_renders_dag_with_current_marker(pipe):
+    sess = {"job_id": "job-1", "current_node_key": "T2"}
+    dag = {"nodes": [
+        {"node_key": "T1", "title": "First", "status": "done"},
+        {"node_key": "T2", "title": "Second", "status": "presented"},
+        {"node_key": "T3", "title": "Third", "status": "pending"},
+    ]}
+    with patch.object(_mod._HTTP_SESSION, "get", side_effect=[
+        _make_response(200, sess), _make_response(200, dag),
+    ]):
+        out = "".join(_ah.assist_plan(pipe, "s1"))
+    assert "The plan" in out and "3 step" in out
+    assert "✅ First" in out
+    assert "👉" in out and "you're here" in out  # current step marked
+    assert "1 done" in out

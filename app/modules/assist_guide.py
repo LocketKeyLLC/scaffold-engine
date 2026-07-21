@@ -553,7 +553,9 @@ async def verify_step_success(
 # this?" (question) from "it broke with X" (fix), using the current step as context.
 
 ASSIST_INTENTS = (
-    "advance", "skip", "submit", "fix", "finalize", "pause", "question",
+    "advance", "skip", "submit", "fix", "finalize", "pause",
+    "handoff", "status", "explain_plan", "set_env", "set_verbosity",
+    "ask", "question",
 )
 
 _CLASSIFY_TURN_TOOL = model_router.Tool(
@@ -570,20 +572,21 @@ _CLASSIFY_TURN_TOOL = model_router.Tool(
                 "type": "string",
                 "enum": list(ASSIST_INTENTS),
                 "description": (
-                    "advance = move on to the next step ('next', 'ok what's "
-                    "next', 'move on'). "
+                    "advance = move on to the next step ('next', 'ok what's next', 'move on'). "
                     "skip = skip/pass on the current step. "
-                    "submit = they DID the step or are reporting the result / "
-                    "pasting output / stating the decision they made — record it "
-                    "and continue. "
-                    "fix = they hit an error or something isn't working and want "
-                    "help recovering. "
-                    "finalize = they want to finish the whole job and see the "
-                    "compiled result ('show me the result', 'we're all done'). "
+                    "submit = they DID the step or are reporting the result / pasting output / "
+                    "stating the decision they made — record it and continue. "
+                    "fix = they hit an error or something isn't working and want help recovering. "
+                    "finalize = finish the whole job and see the compiled result ('show me the result', 'we're all done'). "
                     "pause = stop for now. "
-                    "question = they're asking how to do the step, for "
-                    "clarification, or refining the guidance — NOT reporting that "
-                    "it's done. This is the safe default when unsure."
+                    "handoff = they want the ENGINE to do this step (or the rest) automatically for them "
+                    "('you do it', 'run it for me', 'just handle the rest', 'automate this'). "
+                    "status = they want their progress / where they are ('where am I', 'how many left', 'status'). "
+                    "explain_plan = they want the whole plan / all the steps / the big picture ('what's the overall plan', 'show me all the steps'). "
+                    "set_env = they're telling you about their machine/environment ('I'm on Ubuntu 24.04 with apt', 'my host IP is 10.0.0.5', 'I use bash'). "
+                    "set_verbosity = they want more or less detail in the instructions ('explain more', 'be more detailed', 'just give me the commands', 'too verbose'). "
+                    "ask = a factual lookup that benefits from web/knowledge-base search — versions, current commands, comparisons, 'what is X', 'what's the latest', 'is X safe' — where a researched, cited answer helps more than re-showing the step. "
+                    "question = they want help understanding or ADJUSTING this step's instructions (clarify, redo for a different OS, more detail on one part) — the safe default when unsure."
                 ),
             },
             "evidence": {
@@ -601,6 +604,13 @@ _CLASSIFY_TURN_TOOL = model_router.Tool(
                     "concretely as they gave it. Omit otherwise."
                 ),
             },
+            "query": {
+                "type": "string",
+                "description": (
+                    "When intent=ask: the factual question to research, phrased "
+                    "as a clear standalone query. Omit otherwise."
+                ),
+            },
         },
         "required": ["intent"],
     },
@@ -609,12 +619,15 @@ _CLASSIFY_TURN_TOOL = model_router.Tool(
 _CLASSIFY_SYSTEM = (
     "You route messages in a hands-on assist session where a human operator is "
     "working through a plan ONE step at a time, with the engine as co-pilot. "
-    "Given the current step and the operator's message, decide what they want. "
-    "Key distinctions: a message that STATES a result or decision ('I picked "
-    "ZFS', 'done, output was 0 errors', pasted command output) is `submit`; a "
-    "message that ASKS ('should I use ZFS or LVM?', 'how do I do this?') is "
-    "`question`; a message reporting a failure ('it errored with…', 'not "
-    "working') is `fix`. Call classify_turn exactly once."
+    "Given the current step and the operator's message, decide what they want.\n\n"
+    "Key distinctions:\n"
+    "- STATES a result/decision ('I picked ZFS', 'done, 0 errors', pasted output) → submit\n"
+    "- reports a FAILURE ('it errored with…', 'not working', 'command not found') → fix\n"
+    "- wants the ENGINE to do the work ('you do this', 'run it for me', 'handle the rest') → handoff\n"
+    "- a FACTUAL lookup ('what's the difference between ZFS and LVM', 'latest Proxmox version', 'is ZFS safe on non-ECC') → ask\n"
+    "- wants to CLARIFY/ADJUST this step's instructions ('how do I do this', 'redo for macOS', 'more detail on part 2') → question\n"
+    "- tells you about their MACHINE ('I'm on Ubuntu 24.04', 'IP is 10.0.0.5') → set_env\n"
+    "Call classify_turn exactly once."
 )
 
 
@@ -625,11 +638,11 @@ async def classify_turn(
     """Classify an operator's plain-language turn into an assist intent.
 
     Returns ``{"intent": <one of ASSIST_INTENTS>, "evidence": str,
-    "error_text": str}``. Fail-soft: on any model/parse error returns
-    ``intent='question'`` so a flaky classifier degrades to the pre-§17.626
-    guide/refine behavior rather than misfiring a submit/skip."""
+    "error_text": str, "query": str}``. Fail-soft: on any model/parse error
+    returns ``intent='question'`` so a flaky classifier degrades to the guide/
+    refine behavior rather than misfiring a submit/skip/handoff."""
     role = role or settings.assist_classify_model_role
-    fallback = {"intent": "question", "evidence": "", "error_text": ""}
+    fallback = {"intent": "question", "evidence": "", "error_text": "", "query": ""}
     user = (
         f"Current step: {title}\n\n"
         f"What the step asks:\n{(task_prompt or '')[:1500]}\n\n"
@@ -662,6 +675,7 @@ async def classify_turn(
         "intent": intent,
         "evidence": (args.get("evidence") or "").strip(),
         "error_text": (args.get("error_text") or "").strip(),
+        "query": (args.get("query") or "").strip(),
     }
 
 

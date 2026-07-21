@@ -734,7 +734,7 @@ async def classify_session_turn(
     from app.modules import assist_guide
 
     fallback = {
-        "intent": "question", "evidence": "", "error_text": "",
+        "intent": "question", "evidence": "", "error_text": "", "query": "",
         "node_key": node_key, "title": None,
     }
     if not (message or "").strip():

@@ -106,3 +106,39 @@ async def test_classify_turn_swallows_provider_exception():
             message="next", title="t", task_prompt="p", tool="LLM",
         )
     assert out["intent"] == "question"
+
+
+# ── §17.627 — expanded intent surface ─────────────────────────────────────
+
+
+@pytest.mark.smoke
+def test_expanded_intent_enum_covers_components():
+    for i in ("handoff", "status", "explain_plan", "set_env",
+              "set_verbosity", "ask"):
+        assert i in assist_guide.ASSIST_INTENTS
+
+
+@pytest.mark.asyncio
+async def test_classify_turn_ask_returns_query():
+    resp = _classify_resp({"intent": "ask",
+                           "query": "is ZFS safe without ECC RAM"})
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=resp)):
+        out = await assist_guide.classify_turn(
+            message="wait is zfs ok without ecc?", title="Storage",
+            task_prompt="Decide ZFS vs LVM", tool="LLM",
+        )
+    assert out["intent"] == "ask"
+    assert out["query"] == "is ZFS safe without ECC RAM"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["handoff", "status", "explain_plan", "set_env"])
+async def test_classify_turn_passes_through_new_intents(intent):
+    resp = _classify_resp({"intent": intent})
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=resp)):
+        out = await assist_guide.classify_turn(
+            message="whatever", title="t", task_prompt="p", tool="LLM",
+        )
+    assert out["intent"] == intent

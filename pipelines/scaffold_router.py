@@ -978,6 +978,12 @@ class Pipeline:
         r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
     )
 
+    # §17.627 — hidden ordered-id marker rendered by the natural-start pick-list
+    # (`render_candidate_list`), recovered on the next turn to resolve a short
+    # selector reply ("1" / "the proxmox one") back to a job. Mirrors the
+    # §17.444 pending-brief marker recovery pattern.
+    _ASSIST_PICK_RE = re.compile(r"<!--ASSIST_PICK:([0-9a-fA-F,\-]+)-->")
+
     _ASSIST_NUDGE = (
         "💡 **Looking for Assist Mode?** Typing \"assist\" / \"help me "
         "implement\" in chat starts a *planning* conversation (below), not "
@@ -1376,6 +1382,21 @@ class Pipeline:
             and self._is_first_turn(messages)
         ):
             yield self._WELCOME_PREAMBLE
+
+        # §17.627 — natural-start disambiguation follow-up. If the previous turn
+        # offered an assist candidate pick-list, a short selector reply ("1",
+        # "the proxmox one", "second") starts that job. Checked BEFORE the noise
+        # guard so a bare "1" isn't swallowed. A non-matching reply falls through
+        # to normal routing (maybe it's a new idea after all).
+        if not msg.startswith("/"):
+            pending = self._extract_pending_candidates(messages)
+            if pending:
+                picked = _assist.resolve_candidate_pick(self, msg, pending)
+                if picked:
+                    yield from _assist.assist_start(
+                        self, picked, chat_id=self._chat_id_from_body(body),
+                    )
+                    return
 
         # §17.349 — guard against single-char / noise input (e.g. the
         # bare "a" case from the §17.342 transcript). The triage prompt
@@ -2031,6 +2052,20 @@ class Pipeline:
             if match:
                 return match.group(1)
         return None
+
+    def _extract_pending_candidates(self, messages: List[dict]) -> list[str]:
+        """§17.627 — ordered candidate job_ids from the most-recent assist
+        pick-list in history (the `<!--ASSIST_PICK:…-->` marker), or []."""
+        for m in reversed(messages or []):
+            if m.get("role") != "assistant":
+                continue
+            content = m.get("content")
+            if not isinstance(content, str):
+                continue
+            match = self._ASSIST_PICK_RE.search(content)
+            if match:
+                return [x for x in match.group(1).split(",") if x]
+        return []
 
     def _get_assist_session(self, session_id: str) -> dict | None:
         """§17.539 — GET /assist/{sid} → session dict (status, current_node_key,

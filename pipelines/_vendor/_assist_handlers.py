@@ -247,12 +247,13 @@ def render_step_footer(step: dict) -> str:
         "**When you're done, just tell me what happened** — paste any command "
         "output, or say what you did or decided. I'll check it and move you to "
         "the next step.\n\n"
-        "- Nothing to paste? A short _\"done\"_ works.\n"
-        "- Want to pass on this one? Say _\"skip\"_.\n"
-        "- Hit a problem? Tell me the error (_\"it failed with …\"_) and I'll help "
-        "you fix it.\n\n"
-        "_Prefer commands? `/assist submit`, `/assist skip`, and `/assist fix` "
-        "still work._\n"
+        "- Nothing to paste? A short _\"done\"_ works.  ·  Pass on it? _\"skip\"_.\n"
+        "- Hit a problem? Tell me the error (_\"it failed with …\"_) and I'll fix it.\n"
+        "- Want me to just do it? _\"you handle this one\"_ (or _\"you do the rest\"_).\n"
+        "- Need a fact? Ask (_\"is ZFS safe on non-ECC?\"_) — I'll research it.\n"
+        "- Lost? _\"where am I\"_ or _\"show me the plan\"_.\n\n"
+        "_Prefer commands? `/assist submit`, `/assist skip`, `/assist fix`, "
+        "`/assist handoff`, `/assist research` still work._\n"
     )
 
 
@@ -1190,6 +1191,20 @@ _FAST_INTENT_PHRASES = {
         "finish the job", "finish up", "we're done", "were done", "all done here",
         "that's everything", "thats everything",
     },
+    "status": {
+        "status", "where am i", "progress", "my progress", "how far am i",
+        "how much is left", "how many left", "how many steps left",
+    },
+    "explain_plan": {
+        "the plan", "show me the plan", "show the plan", "what's the plan",
+        "whats the plan", "all the steps", "show all steps", "overview",
+        "the big picture", "show me all the steps", "what are all the steps",
+    },
+    "handoff": {
+        "you do it", "do it for me", "you do this one", "you do this",
+        "handle it", "run it for me", "automate this", "you do the rest",
+        "do the rest", "take over", "you handle it", "you take this one",
+    },
 }
 _FAST_INTENT_LOOKUP = {
     phrase: intent
@@ -1235,22 +1250,118 @@ def _recall_node_key(pipe, chat_id: str | None, node_key: str | None) -> str | N
     return (assist_recall(pipe, chat_id) or {}).get("last_node_key")
 
 
+# Verbosity keyword heuristics (§17.627) — used when the classifier routes a
+# message to set_verbosity; we read the level from the raw words.
+_TERSE_HINTS = (
+    "terse", "just the command", "just commands", "just give me the command",
+    "less detail", "too verbose", "too long", "shorter", "brief", "concise",
+    "less wordy", "cut the",
+)
+_DETAILED_HINTS = (
+    "more detail", "detailed", "explain more", "more thorough", "verbose",
+    "step by step", "walk me through", "more context", "explain why",
+    "beginner", "eli5", "in depth", "in-depth",
+)
+
+
+def _verbosity_from_message(msg: str) -> str:
+    low = (msg or "").lower()
+    if any(h in low for h in _TERSE_HINTS):
+        return "terse"
+    if any(h in low for h in _DETAILED_HINTS):
+        return "detailed"
+    return "normal"
+
+
+_HANDOFF_ALL_HINTS = (
+    "the rest", "everything else", "remaining", "all of them", "all the rest",
+    "rest of", "whole thing", "everything", "all steps", "finish it all",
+)
+
+
+def _handoff_mode_from_message(msg: str) -> str:
+    low = (msg or "").lower()
+    return "all_remaining" if any(h in low for h in _HANDOFF_ALL_HINTS) else "single"
+
+
+def assist_plan(
+    pipe, session_id: str, *, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.627 — render the whole DAG as a natural plan overview (explain_plan).
+
+    Pulls the session's job_id, then GET /dag/{job_id}, and lists every step
+    with a status icon, marking the current one. Uses the full engine's DAG —
+    the same node graph the autonomous executor runs — so the operator sees the
+    big picture, not just the current step."""
+    try:
+        r = _ss(pipe).get(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}",
+            headers=pipe._auth_headers(), timeout=pipe.valves.request_timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code >= 400:
+        yield f"❌ Couldn't load the plan (HTTP {r.status_code})."; return
+    try:
+        sess = r.json()
+    except ValueError:
+        yield "❌ Couldn't load the plan (bad reply)."; return
+    job_id = sess.get("job_id")
+    current = sess.get("current_node_key")
+    if not job_id:
+        yield "⚠️ This session has no plan yet."; return
+    try:
+        r2 = _ss(pipe).get(
+            f"{pipe.valves.orchestrator_url}/dag/{job_id}",
+            headers=pipe._auth_headers(), timeout=pipe.valves.request_timeout,
+        )
+        dag = r2.json() if r2.status_code < 400 else {}
+    except (requests.exceptions.RequestException, ValueError):
+        dag = {}
+    nodes = dag.get("nodes") or []
+    if not nodes:
+        yield "⚠️ No steps found for this job yet."; return
+    icons = {"done": "✅", "skipped": "⏭", "failed": "❌", "blocked": "⛔",
+             "running": "🔄", "pending": "⚪", "presented": "⚪",
+             "awaiting_input": "⚪"}
+    done = sum(1 for n in nodes if n.get("status") == "done")
+    lines = [f"### 🗺 The plan — {len(nodes)} step(s), {done} done\n"]
+    for i, n in enumerate(nodes, 1):
+        nk = n.get("node_key")
+        icon = icons.get(n.get("status", ""), "⚪")
+        title = n.get("title", "(untitled)")
+        if nk and nk == current:
+            lines.append(f"{i}. 👉 {icon} **{title}** ← you're here")
+        else:
+            lines.append(f"{i}. {icon} {title}")
+    lines.append(
+        "\n_Say **\"next\"** to work the current step, **\"you do the rest\"** to "
+        "hand off, or ask me about any step._"
+    )
+    yield "\n".join(lines)
+
+
 def assist_nl_turn(
     pipe, session_id: str, msg: str, *,
     node_key: str | None = None, chat_id: str | None = None,
 ) -> Generator[str, None, None]:
-    """§17.626 — route a plain-language message in an ACTIVE assist session.
+    """§17.626/§17.627 — route a plain-language message in an ACTIVE assist
+    session to the right engine component.
 
-    Fast-path the obvious verbs; classify the rest via /interpret; default to the
-    step-guidance turn (pre-§17.626 behavior) for questions/refinements. Slash
-    commands remain available and bypass this entirely (dispatched earlier)."""
+    Fast-path the obvious verbs (no LLM); classify the rest via /interpret; then
+    route: advance/skip/submit/fix/finalize/pause + handoff (autonomous executor,
+    which brings RAG grounding, sim tools, sandbox + verifier), ask (RAG/web
+    research), status/explain_plan (the DAG), set_env/set_verbosity (environment
+    capture). Falls back to the step-guidance turn for questions/refinements.
+    Slash commands bypass this entirely (dispatched earlier)."""
     intent = fast_classify_turn(msg)
-    evidence, error_text = "", ""
+    evidence, error_text, query = "", "", ""
     if intent is None:
         d = assist_interpret(pipe, session_id, msg, node_key=node_key)
         intent = d.get("intent") or "question"
         evidence = d.get("evidence") or ""
         error_text = d.get("error_text") or ""
+        query = d.get("query") or ""
         node_key = d.get("node_key") or node_key
 
     if intent == "advance":
@@ -1259,6 +1370,10 @@ def assist_nl_turn(
         yield from assist_simple_post(pipe, session_id, "pause"); return
     if intent == "finalize":
         yield from assist_done(pipe, session_id, chat_id=chat_id); return
+    if intent == "status":
+        yield from assist_status(pipe, session_id); return
+    if intent == "explain_plan":
+        yield from assist_plan(pipe, session_id, chat_id=chat_id); return
     if intent == "skip":
         nk = _recall_node_key(pipe, chat_id, node_key)
         if not nk:
@@ -1278,6 +1393,29 @@ def assist_nl_turn(
         yield "_🔧 Sounds like something went wrong — let me help…_\n\n"
         yield from assist_fix_cmd(
             pipe, session_id, (error_text or msg), node_key=nk, chat_id=chat_id,
+        ); return
+    if intent == "handoff":
+        nk = _recall_node_key(pipe, chat_id, node_key)
+        if not nk:
+            yield ("Which step should I take? Say _\"next\"_ first, then _\"you "
+                   "do this one\"_."); return
+        yield from assist_handoff(pipe, session_id, nk, _handoff_mode_from_message(msg))
+        return
+    if intent == "ask":
+        nk = _recall_node_key(pipe, chat_id, node_key)
+        yield from assist_research_cmd(
+            pipe, session_id, (query or msg).strip(), node_key=nk, chat_id=chat_id,
+        ); return
+    if intent == "set_env":
+        subs = dict(re.findall(r"([A-Za-z_]\w*)=(\S+)", msg))
+        profile = re.sub(r"[A-Za-z_]\w*=\S+", "", msg).strip(" ,\t") or None
+        yield from assist_env_cmd(
+            pipe, session_id, profile=profile, substitutions=subs or None,
+            chat_id=chat_id,
+        ); return
+    if intent == "set_verbosity":
+        yield from assist_env_cmd(
+            pipe, session_id, verbosity=_verbosity_from_message(msg), chat_id=chat_id,
         ); return
     # question (default) — the existing guide/refine turn.
     yield from assist_chat_turn(pipe, session_id, msg, node_key=node_key, chat_id=chat_id)
@@ -1306,7 +1444,7 @@ def _start_tokens(s: str) -> set:
     }
 
 
-def match_assist_candidate(msg: str, candidates: list) -> tuple:
+def match_assist_candidate(msg: str, candidates: list, *, min_score: int = 2) -> tuple:
     """Score `candidates` (each {job_id,title,status,...}) against `msg` by
     distinctive-token overlap. Returns ``(best_candidate_or_None, ambiguous)``:
 
@@ -1314,6 +1452,11 @@ def match_assist_candidate(msg: str, candidates: list) -> tuple:
       to planning/triage instead of hijacking a new-idea message.
     - ``(cand, False)``  — one confident, unique match (start it).
     - ``(cand, True)``   — a weak or tied match (offer the list to choose).
+
+    ``min_score`` is the confidence bar for a non-ambiguous match (default 2
+    distinctive shared tokens). The disambiguation follow-up (§17.627) lowers it
+    to 1: once a pick-list is already on screen, a unique single-token match
+    ("the proxmox one") is enough to start.
     """
     mt = _start_tokens(msg)
     if not mt or not candidates:
@@ -1326,8 +1469,41 @@ def match_assist_candidate(msg: str, candidates: list) -> tuple:
     second_score = scored[1][0] if len(scored) > 1 else 0
     if best_score == 0:
         return None, False
-    ambiguous = best_score < 2 or second_score >= best_score
+    ambiguous = best_score < min_score or second_score >= best_score
     return best, ambiguous
+
+
+_ORDINAL_WORDS = {
+    "first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2,
+    "fourth": 3, "4th": 3, "fifth": 4, "5th": 4,
+}
+
+
+def resolve_candidate_pick(pipe, msg: str, pending_ids: list) -> str | None:
+    """§17.627 — map a short selector reply to one of the pending candidate
+    job_ids after a pick-list was shown, or None. Handles positional ("1",
+    "the second one", "last") and name ("the proxmox one") selectors."""
+    if not pending_ids:
+        return None
+    norm = (msg or "").strip().lower().strip(".!?,;: ")
+    m = re.fullmatch(r"(?:number\s*|option\s*|#\s*)?(\d{1,2})", norm)
+    if m:
+        idx = int(m.group(1)) - 1
+        return pending_ids[idx] if 0 <= idx < len(pending_ids) else None
+    if norm in ("last", "the last one", "last one"):
+        return pending_ids[-1]
+    words = set(norm.split())
+    for word, idx in _ORDINAL_WORDS.items():
+        if word in words:
+            return pending_ids[idx] if idx < len(pending_ids) else None
+    # Name selector — restrict live candidates to the pending set and take a
+    # unique single-token match (lower bar: we're already disambiguating).
+    pend = set(pending_ids)
+    cands = [c for c in fetch_assist_candidates(pipe) if c.get("job_id") in pend]
+    if not cands:
+        return None
+    match, ambiguous = match_assist_candidate(msg, cands, min_score=1)
+    return match.get("job_id") if (match and not ambiguous) else None
 
 
 def fetch_assist_candidates(pipe) -> list:
@@ -1362,9 +1538,15 @@ def render_candidate_list(candidates: list) -> str:
         lines.append(f"- …and {len(candidates) - 8} more (`/here` lists all).")
     lines += [
         "",
-        "_Paste the `/assist <id>` for the one you mean. Want to plan something "
-        "new instead? Just describe it and I'll help you scope it._",
+        "_Just tell me which — the **number**, the **name** (\"the proxmox one\"), "
+        "or paste its `/assist <id>`. Want to plan something new instead? Just "
+        "describe it._",
     ]
+    # §17.627 — hidden ordered-id marker so a short selector reply on the next
+    # turn ("1", "the proxmox one") maps back to a job. HTML comment → invisible
+    # in the rendered chat but preserved in the raw history OWUI replays.
+    ids = ",".join(c.get("job_id", "") for c in candidates[:8])
+    lines.append(f"\n<!--ASSIST_PICK:{ids}-->")
     return "\n".join(lines)
 
 
