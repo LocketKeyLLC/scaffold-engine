@@ -142,6 +142,54 @@ KNOWN_SUBCOMMANDS: dict = {
     "/node": ("reset", "del", "delete", "remove", "edit", "reorder", "help"),
 }
 
+# §17.628 — deterministic fast-path for engine-wide natural-language command
+# routing. Whole-message phrase → read-only intent, no LLM, always treated as
+# high-confidence. Only unambiguous, self-contained phrasings belong here; a
+# message that needs a slot (a RAG query, a job name) or could be conversation
+# is left to the /route classifier. Mirrors `_FAST_INTENT_PHRASES` in the
+# in-session assist NL layer.
+_FAST_COMMAND_PHRASES: dict = {
+    "status": {
+        "what's running", "whats running", "what is running", "what's going on",
+        "whats going on", "what have i got running", "what jobs are running",
+        "anything running", "any jobs running", "job status", "show status",
+    },
+    "jobs_list": {
+        "list my jobs", "list jobs", "show my jobs", "show jobs", "my jobs",
+        "what jobs do i have", "recent jobs",
+    },
+    "model_list": {
+        "list models", "show models", "what models are set", "which models",
+        "what models are routed", "current models",
+    },
+    "model_available": {
+        "available models", "installed models", "what models do i have",
+        "what's in ollama", "whats in ollama",
+    },
+    "model_probe": {
+        "probe models", "are the models up", "ping the models", "check models",
+    },
+    "help": {
+        "help", "what can you do", "what can i do", "how do i use this",
+        "commands", "show commands", "what commands", "how does this work",
+    },
+}
+_FAST_COMMAND_LOOKUP: dict = {
+    phrase: intent
+    for intent, phrases in _FAST_COMMAND_PHRASES.items()
+    for phrase in phrases
+}
+
+
+def _fast_classify_command(msg: str) -> str | None:
+    """Read-only intent for an unambiguous whole-message phrase, else None.
+    Deterministic — no LLM. Only intents needing NO slot are eligible here
+    (rag_query / jobs_find / results all require an argument, so they go to the
+    /route classifier)."""
+    norm = (msg or "").strip().lower().strip(".!?,;: ").strip()
+    return _FAST_COMMAND_LOOKUP.get(norm)
+
+
 _PLACEHOLDER_RE = re.compile(r"^[<\[(].+[>\])]$")
 _PLACEHOLDER_TOKENS = frozenset({
     "query", "topic", "url", "message", "id", "session_id", "job_id",
@@ -592,6 +640,20 @@ class Pipeline:
         # §17.493 — stream the walkthrough token-by-token (SSE) instead of a
         # blocking POST + full result. Off → the §17.486 non-streamed path.
         assist_stream: bool = True
+
+        # §17.628 — engine-wide natural-language command routing. When a chat
+        # has NO active assist session, a plain sentence that clearly names a
+        # read-only engine action (status / results / RAG query / jobs+model
+        # listing / help) is routed to that component instead of triage. Only
+        # high-confidence, required-slot-satisfied classifications intercept;
+        # anything ambiguous or idea-shaped falls through to the planner
+        # untouched (triage stays the default). Flip off to force slash-command
+        # -only access to those reads. Fail-soft: a classifier hiccup → triage.
+        nl_command_routing_enabled: bool = True
+        # Timeout (s) for the POST /route classifier call (short — one cheap
+        # tool-call on the verifier role). Kept separate from request_timeout so
+        # a slow classifier can be bounded without touching the read handlers.
+        nl_command_route_timeout: int = 20
 
         # §17.300 — first-turn welcome preamble. When a brand-new chat
         # receives a natural-language message, the pipeline prepends a
@@ -1458,6 +1520,19 @@ class Pipeline:
             # §17.504 — no assistable job matched; surface the entry point and
             # let the planning reply run for what is, apparently, a new idea.
             yield self._ASSIST_NUDGE
+
+        # §17.628 — engine-wide natural-language command routing. Before falling
+        # through to the planner, check whether this plain message clearly names
+        # a read-only engine action (status / results / RAG query / jobs+model
+        # listing / help) and, if so, drive that component. High-confidence
+        # intercept only: ambiguous or idea-shaped input returns None here and
+        # continues to triage untouched. Placed AFTER the assist paths (an
+        # active session or a "help me do X" start both take precedence) and
+        # BEFORE triage (so a clear read isn't misread as a new idea).
+        handled = self._nl_command_route(msg, messages, chat_id=cid)
+        if handled is not None:
+            yield from handled
+            return
 
         yield self._call_triage(messages)
 
@@ -3566,6 +3641,162 @@ class Pipeline:
             self.logger.exception("Command `%s` failed", cmd)
             return ("⚠️ Internal error processing command. "
                     "See server logs for details.")
+
+    # ------------------------------------------------------------------
+    # §17.628 — engine-wide natural-language command routing
+    #
+    # Sibling to the §17.626/§17.627 in-session assist NL flow, for the TOP
+    # level (no active session). A plain sentence that clearly names a
+    # read-only engine action is translated to the canonical slash string and
+    # dispatched through the EXISTING `_handle_command` — no duplicated logic.
+    # Two-tier, mirroring `fast_classify_turn` + `/interpret`:
+    #   1. `_fast_classify_command` — deterministic whole-message phrase match,
+    #      no LLM, always high-confidence.
+    #   2. `POST /route` — the classifier; only intercepts on confidence='high'
+    #      AND a satisfied required slot. Everything else → None (triage).
+    # ------------------------------------------------------------------
+    def _nl_command_route(
+        self, msg: str, messages: List[dict], *, chat_id: str | None = None,
+    ):
+        """Decide whether a plain message is a read-only engine command and, if
+        so, return a generator that yields the handled reply. Returns ``None``
+        to fall through to triage (the caller then runs the planner).
+
+        The decision is made BEFORE yielding — mirrors ``try_natural_start`` —
+        so triage is never partially pre-empted by a command that turns out not
+        to apply."""
+        if not self.valves.nl_command_routing_enabled:
+            return None
+
+        intent = _fast_classify_command(msg)
+        data = {"query": "", "job_ref": ""}
+        if intent is None:
+            d = self._classify_command(msg)
+            intent = d.get("intent") or "none"
+            # High-confidence intercept: an ambiguous read still goes to the
+            # planner. This is the "won't hijack a conversation" guarantee.
+            if intent == "none" or d.get("confidence") != "high":
+                return None
+            data = d
+
+        # Required-slot gate — never intercept into an empty query/find.
+        query = (data.get("query") or "").strip()
+        if intent in ("rag_query", "jobs_find") and not query:
+            return None
+
+        return self._dispatch_nl_command(intent, data, msg, chat_id=chat_id)
+
+    def _classify_command(self, msg: str) -> dict:
+        """POST /route → intent dict. Fail-soft → intent='none' so a classifier
+        or endpoint hiccup degrades to triage rather than misfiring."""
+        fallback = {"intent": "none", "confidence": "low", "query": "", "job_ref": ""}
+        try:
+            r = _HTTP_SESSION.post(
+                f"{self.valves.orchestrator_url}/route",
+                json={"message": msg},
+                headers=self._auth_headers(),
+                timeout=getattr(self.valves, "nl_command_route_timeout", 20),
+            )
+            if r.status_code < 400:
+                d = r.json()
+                if isinstance(d, dict) and d.get("intent"):
+                    return d
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self.logger.debug("nl _classify_command failed: %s", e)
+        return fallback
+
+    def _dispatch_nl_command(
+        self, intent: str, data: dict, msg: str, *, chat_id: str | None = None,
+    ):
+        """Translate a resolved read-only intent to its canonical slash string
+        and run it through the existing `_handle_command`. Generator: yields the
+        rendered reply (a friendly '(understood …)' lead-in makes the NL→command
+        mapping visible so the operator learns the surface)."""
+        query = (data.get("query") or "").strip()
+
+        # (intent → canonical slash command). None means "handled inline below".
+        simple = {
+            "status": "/status",
+            "help": "/help",
+            "jobs_list": "/jobs list",
+            "model_list": "/model list",
+            "model_available": "/model available",
+            "model_probe": "/model probe",
+            "rag_query": f"/rag {query}",
+            "jobs_find": f"/jobs find {query}",
+        }
+        if intent in simple:
+            yield self._handle_command(simple[intent], chat_id=chat_id)
+            return
+
+        if intent == "results":
+            yield from self._nl_results(data, chat_id=chat_id)
+            return
+
+        # Unknown/unsupported intent slipped through — degrade gracefully.
+        yield self._call_triage_from_msg(msg)
+
+    def _nl_results(self, data: dict, *, chat_id: str | None = None):
+        """Resolve a job reference for `results` and dispatch `/results`.
+
+        - explicit/uniquely-matched job → `/results <id>`
+        - ambiguous name → the assist-style pick-list (reused renderer)
+        - no ref → `/results` (falls back to active-job recall)
+        - named but no match → clarify, don't silently show the wrong job."""
+        ref = (data.get("job_ref") or "").strip()
+        if not ref:
+            yield self._handle_command("/results", chat_id=chat_id)
+            return
+        match, ambiguous, cands = self._resolve_job_ref(ref)
+        if match and not ambiguous:
+            yield self._handle_command(
+                f"/results {match['job_id']}", chat_id=chat_id,
+            )
+            return
+        if match and ambiguous and cands:
+            # Reuse the §17.627 pick-list renderer + hidden ordered-id marker so
+            # a short selector reply ("1", "the proxmox one") resolves next turn.
+            yield _assist.render_candidate_list(cands)
+            return
+        yield (
+            f"I couldn't find a job matching “{ref}”. Try `/jobs list` to see "
+            f"recent jobs, or `/jobs find {ref}` to search."
+        )
+
+    def _resolve_job_ref(self, ref: str):
+        """Token-match a job name/topic against recent jobs (GET /jobs).
+
+        Returns ``(match_or_None, ambiguous, candidates)`` where candidates are
+        normalized ``{job_id,title,status}`` dicts — the same shape
+        `_assist.match_assist_candidate` / `render_candidate_list` expect, so
+        the assist pick-list machinery is reused verbatim."""
+        cands: List[dict] = []
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/jobs",
+                params={"limit": 25},
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+            if r.status_code < 400:
+                jobs = (r.json() or {}).get("jobs") or []
+                cands = [
+                    {"job_id": j.get("id"), "title": j.get("title", ""),
+                     "status": j.get("status", "")}
+                    for j in jobs if j.get("id")
+                ]
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self.logger.debug("nl _resolve_job_ref failed: %s", e)
+        if not cands:
+            return None, False, []
+        match, ambiguous = _assist.match_assist_candidate(ref, cands)
+        return match, ambiguous, cands
+
+    def _call_triage_from_msg(self, msg: str) -> str:
+        """Fallback triage call from a raw string (no message list). Used only
+        on the defensive unknown-intent branch; the normal path uses the full
+        message history via `_call_triage`."""
+        return self._call_triage([{"role": "user", "content": msg}])
 
     # ------------------------------------------------------------------
     # /status renderer

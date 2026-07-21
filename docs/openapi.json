@@ -2835,6 +2835,19 @@
         "title": "ResumeJobInput",
         "type": "object"
       },
+      "RouteInput": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "RouteInput",
+        "type": "object"
+      },
       "ScheduleCreate": {
         "properties": {
           "cron_expression": {
@@ -7887,6 +7900,51 @@
         "summary": "Research Verify Endpoint",
         "tags": [
           "Research"
+        ]
+      }
+    },
+    "/route": {
+      "post": {
+        "description": "Classify a plain-language top-level message into a read-only engine\nintent (status / results / rag_query / jobs_list / jobs_find / model_* /\nhelp), so the OWUI pipeline can drive the right component by talking.\n\nFail-soft: a classifier hiccup or a non-command message returns\n``intent='none'`` (confidence ``low``); the pipeline then falls through to\ntriage untouched.",
+        "operationId": "route_command_route_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RouteInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Route Command",
+        "tags": [
+          "Route"
         ]
       }
     },

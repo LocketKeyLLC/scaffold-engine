@@ -583,6 +583,7 @@ from app.routers.prompts import router as prompts_router  # noqa: E402
 from app.routers.rag import router as rag_router  # noqa: E402
 from app.routers.nodes import router as nodes_router  # noqa: E402 — §17.478
 from app.routers.artifacts import router as artifacts_router  # noqa: E402 — §17.565
+from app.routers.route import router as route_router  # noqa: E402 — §17.628
 app.include_router(workflow_router)
 app.include_router(research_router)
 app.include_router(jobs_router)
@@ -592,6 +593,7 @@ app.include_router(prompts_router)
 app.include_router(rag_router)
 app.include_router(nodes_router)
 app.include_router(artifacts_router)
+app.include_router(route_router)
 
 
 # Sprint X.26 — Prometheus exposition. No auth (Prometheus scrapers
