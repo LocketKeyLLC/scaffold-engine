@@ -641,6 +641,18 @@ class Pipeline:
         # blocking POST + full result. Off → the §17.486 non-streamed path.
         assist_stream: bool = True
 
+        # §17.633 — cross-chat assist continuity. OWUI sends no chat_id and a
+        # NEW chat has no session marker in history, so neither the chatmap nor
+        # the history-recovery path can find in-progress assist work started in
+        # another chat. With this on, a plain natural message that references an
+        # in-progress job ("continue the proxmox setup") or reads as resuming
+        # work ("what's next", "where were we") reconnects to it — re-presenting
+        # the current step and re-emitting the marker so THIS chat tracks it. A
+        # new chat's first turn also surfaces any in-progress work as a banner.
+        # Off → the pre-§17.633 behavior (in-progress work is only reachable
+        # from its original chat or via an explicit `/assist <job_id>`).
+        assist_continuity_enabled: bool = True
+
         # §17.628 — engine-wide natural-language command routing. When a chat
         # has NO active assist session, a plain sentence that clearly names a
         # read-only engine action (status / results / RAG query / jobs+model
@@ -1434,16 +1446,11 @@ class Pipeline:
                 yield result
             return
 
-        # §17.300 — first-touch welcome preamble. Natural-language input
-        # AND brand-new chat AND valve enabled → prepend the canonical
-        # flow + jump-in commands so the operator sees the surface
-        # without typing `/help` first. Triage still runs and answers
-        # their actual question; the preamble is additive.
-        if (
-            self.valves.show_welcome_on_first_turn
-            and self._is_first_turn(messages)
-        ):
-            yield self._WELCOME_PREAMBLE
+        # §17.300 / §17.633 — first-touch orientation is deferred to JUST BEFORE
+        # the planner (see the end of pipe()) so it only shows when the turn is
+        # actually a new idea — not when the message reconnects to in-progress
+        # work or drives a command. Prevents the "👋 Welcome, describe what you
+        # want to build" preamble from prefacing a resume.
 
         # §17.627 — natural-start disambiguation follow-up. If the previous turn
         # offered an assist candidate pick-list, a short selector reply ("1",
@@ -1520,20 +1527,24 @@ class Pipeline:
             )
             return
 
-        # §17.626 — natural-language assist START. No active session, but the
-        # message reads as "help me do <existing job>": map it to an assistable
-        # job and start stepping through it — no `/assist <job_id>` required. A
-        # strong unique match starts immediately; an ambiguous one offers a
-        # pick-list; no match at all returns None so a genuinely-new idea falls
-        # through to the planner below (never hijacked). Supersedes the §17.504
-        # nudge for the case where a real target job exists.
-        if self._looks_like_assist_intent(msg):
-            started = self._assist_try_natural_start(msg, cid)
-            if started is not None:
-                yield from started
+        # §17.633 — cross-chat continuity (supersedes the narrow §17.626 start).
+        # No session is bound to THIS chat, but the operator may be continuing
+        # IN-PROGRESS assist work from another chat (the common case: OWUI sent
+        # no chat_id AND a new chat has no session marker, so the two discovery
+        # paths above both no-op). Reconnect on a topic reference ("continue the
+        # proxmox setup", "help me finish the firewall") OR a resume phrasing
+        # ("what's next", "where were we"): a strong/unique match resumes the
+        # session immediately (re-presenting the step + re-emitting the marker so
+        # THIS chat tracks it), ambiguous → pick-list, no signal → None so a
+        # genuinely-new idea falls through to the planner untouched.
+        if self.valves.assist_continuity_enabled:
+            reconnect = self._reconnect_in_progress(msg, cid)
+            if reconnect is not None:
+                yield from reconnect
                 return
-            # §17.504 — no assistable job matched; surface the entry point and
-            # let the planning reply run for what is, apparently, a new idea.
+        # §17.504 — assist-intent phrasing but nothing to reconnect to: surface
+        # the entry point, then let the planner handle the apparently-new idea.
+        if self._looks_like_assist_intent(msg):
             yield self._ASSIST_NUDGE
 
         # §17.628 — engine-wide natural-language command routing. Before falling
@@ -1548,6 +1559,21 @@ class Pipeline:
         if handled is not None:
             yield from handled
             return
+
+        # §17.300 / §17.633 — first-turn orientation, shown only now that we've
+        # decided this turn is a new idea (not a reconnect / command). If the
+        # operator has in-progress assist work from another chat, the
+        # in-progress banner takes precedence (more relevant + how to resume);
+        # otherwise the first-touch welcome preamble orients a brand-new user.
+        if self._is_first_turn(messages):
+            banner = (
+                self._in_progress_banner()
+                if self.valves.assist_continuity_enabled else ""
+            )
+            if banner:
+                yield banner
+            elif self.valves.show_welcome_on_first_turn:
+                yield self._WELCOME_PREAMBLE
 
         yield self._call_triage(messages)
 
@@ -2124,6 +2150,74 @@ class Pipeline:
         generator (start stream / candidate list) or None to fall through to
         planning/triage."""
         return _assist.try_natural_start(self, msg, chat_id)
+
+    # §17.633 — resume phrasings: a plain message that reads as "let's carry on"
+    # even with no job named. Substring-matched (lowercased). Kept reasonably
+    # specific so a genuinely-new idea isn't mistaken for a resume.
+    _RESUME_PHRASES = (
+        "continue", "keep going", "keep working", "carry on", "resume",
+        "where were we", "where did we leave", "left off", "pick up where",
+        "pick up from", "what's next", "whats next", "what is next",
+        "next step", "back to work", "back to the", "get back to",
+        "let's finish", "lets finish", "finish setting up", "finish up",
+        "let's keep", "lets keep", "pick back up",
+    )
+
+    def _looks_like_resume(self, msg: str) -> bool:
+        low = (msg or "").lower()
+        return any(p in low for p in self._RESUME_PHRASES)
+
+    def _reconnect_in_progress(self, msg: str, chat_id: str | None):
+        """§17.633 — reconnect a chat with no bound session to IN-PROGRESS assist
+        work started elsewhere. Returns a generator (resume stream / pick-list)
+        or None to fall through to the planner.
+
+        `/assist/candidates` returns in-progress jobs (assisted_executing +
+        awaiting_assist). `assist_start` is idempotent on an active session
+        (re-presents the current step + re-emits the marker so THIS chat tracks
+        it) and starts an awaiting_assist one — so reconnection is just picking
+        the right job and calling it."""
+        cands = _assist.fetch_assist_candidates(self)
+        if not cands:
+            return None
+        # Strong, unique topic match (≥2 distinctive shared tokens) → resume now.
+        match, ambiguous = _assist.match_assist_candidate(msg, cands)
+        if match and not ambiguous:
+            return _assist.assist_start(self, match["job_id"], chat_id=chat_id)
+        if self._looks_like_resume(msg):
+            # Resume intent present → a single distinctive topic token is enough
+            # to pick one ("continue proxmox" shares just "proxmox" with the long
+            # title). Unique → resume; else offer the in-progress list.
+            m2, amb2 = _assist.match_assist_candidate(msg, cands, min_score=1)
+            if m2 and not amb2:
+                return _assist.assist_start(self, m2["job_id"], chat_id=chat_id)
+            if len(cands) == 1:
+                return _assist.assist_start(self, cands[0]["job_id"], chat_id=chat_id)
+            return iter([_assist.render_candidate_list(cands)])
+        # Topic matched but ambiguous (tied / weak) → let the operator choose.
+        if match and ambiguous:
+            return iter([_assist.render_candidate_list(cands)])
+        return None
+
+    def _in_progress_banner(self) -> str:
+        """§17.633 — a brief, additive reminder of in-progress assist work for a
+        new chat's first turn. Empty string when there is none (no banner)."""
+        cands = _assist.fetch_assist_candidates(self)
+        if not cands:
+            return ""
+        lines = [f"📌 **You have {len(cands)} task(s) in progress:**", ""]
+        for c in cands[:5]:
+            lines.append(
+                f"- **{c.get('title', '(untitled)')}** — `{c.get('status', '?')}`"
+            )
+        if len(cands) > 5:
+            lines.append(f"- …and {len(cands) - 5} more.")
+        lines += [
+            "",
+            "_Say **\"continue <name>\"** (e.g. \"continue proxmox\") to pick up "
+            "where you left off — or just describe something new._\n\n---\n",
+        ]
+        return "\n".join(lines)
 
     def _session_id_from_history(self, messages: List[dict]) -> str | None:
         """§17.539 — most-recent assist session id named in an assistant turn.

@@ -90,8 +90,14 @@ class TestPipeRouting:
         # §17.626 — active-session plain text now enters via `_assist_nl_turn`
         # (classify-and-route), which supersedes the §17.537 always-guide method.
         # Same signature, so the call_args assertions below are unchanged.
+        # §17.633 — isolate the session-routing gate under test: stub the
+        # cross-chat reconnection + in-progress banner (both make live
+        # /assist/candidates calls) so these assertions don't depend on what
+        # in-progress jobs happen to exist in the test orchestrator.
         with patch.object(pipe, "_assist_recall", return_value=recall), \
              patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
+             patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+             patch.object(pipe, "_in_progress_banner", return_value=""), \
              patch.object(
                  pipe, "_assist_nl_turn",
                  side_effect=lambda *a, **k: iter(["GUIDE_OUTPUT"]),

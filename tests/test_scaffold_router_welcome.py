@@ -38,8 +38,13 @@ def _enable_welcome(pipe):
 
 def _drive_pipe(pipe, user_message: str, messages: list[dict]) -> str:
     """Run pipe() and join the chunks. Triage is stubbed so we don't hit
-    the LLM."""
-    with patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT"):
+    the LLM. §17.633 — the welcome preamble is the brand-new-operator path
+    (no in-progress work); stub the cross-chat continuity so these tests
+    isolate the welcome from whatever in-progress jobs exist live (the
+    in-progress banner takes precedence over the welcome when work exists)."""
+    with patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT"), \
+         patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+         patch.object(pipe, "_in_progress_banner", return_value=""):
         chunks = list(pipe.pipe(user_message, "model-id", messages, {}))
     return "".join(chunks)
 
