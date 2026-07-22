@@ -3685,6 +3685,9 @@ class Pipeline:
         "model_set": ("model_role", "model_name"),
         "optimize": ("prompt",),
         "jobs_rename": ("job_ref", "new_name"),
+        "jobs_delete": ("target_ref",),
+        "schedule_delete": ("target_ref",),
+        "research_delete": ("target_ref",),
     }
 
     # §17.629 — pending-confirm marker for the expensive writes. A confirm card
@@ -3795,6 +3798,9 @@ class Pipeline:
         if intent == "schedule_add":
             yield self._confirm_schedule(data)
             return
+        if intent in ("jobs_delete", "schedule_delete", "research_delete"):
+            yield from self._nl_delete(intent, data, chat_id=chat_id)
+            return
 
         # Unknown/unsupported intent slipped through — degrade gracefully.
         yield self._call_triage_from_msg(msg)
@@ -3895,6 +3901,89 @@ class Pipeline:
         match, ambiguous = _assist.match_assist_candidate(ref, cands)
         return match, ambiguous, cands
 
+    # ---- §17.630 destructive intents (always confirmed) ------------------
+
+    # (intent → resolver attr name, human noun, the slash+token that actually
+    # deletes). The confirm card is the gate; the slash below runs only on the
+    # affirmative follow-up via `_execute_nl_action`.
+    _NL_DELETE_SPEC = {
+        "jobs_delete": ("_resolve_job_ref", "job", "/jobs delete"),
+        "schedule_delete": ("_resolve_schedule_ref", "schedule", "/schedule delete"),
+        "research_delete": ("_resolve_research_ref", "research session", "/research/delete"),
+    }
+
+    def _nl_delete(self, intent: str, data: dict, *, chat_id: str | None = None):
+        """Resolve the named delete target and render a stark confirm card.
+
+        Nothing is removed here — the card embeds an `_NL_CONFIRM` marker that
+        `_execute_nl_action` fires only on an affirmative follow-up. A unique
+        match → confirm; ambiguous → marker-less disambiguation; no match →
+        clarify (never delete the wrong thing)."""
+        resolver_name, noun, slash = self._NL_DELETE_SPEC[intent]
+        ref = (data.get("target_ref") or "").strip()
+        match, ambiguous, cands = getattr(self, resolver_name)(ref)
+        if match and not ambiguous:
+            label = match.get("title") or match["job_id"]
+            summary = (
+                f"⚠️ **Permanently delete this {noun}?**\n\n"
+                f"- **{label}** (`{match['job_id']}`)\n\n"
+                f"This can't be undone."
+            )
+            yield self._render_nl_confirm(
+                intent, {"id": match["job_id"], "label": label, "noun": noun},
+                summary,
+            )
+            return
+        if match and ambiguous and cands:
+            yield self._render_job_disambiguation(cands, f"delete", slash)
+            return
+        yield (
+            f"I couldn't find a {noun} matching “{ref}” to delete. Try "
+            f"`{slash.rsplit(' ', 1)[0]} list` to see what's there."
+        )
+
+    def _resolve_named_ref(
+        self, url: str, list_key: str, id_field: str, title_field: str,
+        ref: str, *, params: dict | None = None,
+    ):
+        """Generic token-match of `ref` against a named list endpoint. Returns
+        ``(match_or_None, ambiguous, candidates)`` in the normalized
+        ``{job_id,title,status}`` shape `match_assist_candidate` expects."""
+        cands: List[dict] = []
+        try:
+            r = _HTTP_SESSION.get(
+                url, params=params or {}, headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+            if r.status_code < 400:
+                items = (r.json() or {}).get(list_key) or []
+                cands = [
+                    {"job_id": str(it.get(id_field)),
+                     "title": it.get(title_field, ""),
+                     "status": it.get("status", "")}
+                    for it in items if it.get(id_field) is not None
+                ]
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self.logger.debug("nl _resolve_named_ref(%s) failed: %s", list_key, e)
+        if not cands:
+            return None, False, []
+        match, ambiguous = _assist.match_assist_candidate(ref, cands)
+        return match, ambiguous, cands
+
+    def _resolve_schedule_ref(self, ref: str):
+        """Match a schedule by topic against GET /schedule."""
+        return self._resolve_named_ref(
+            f"{self.valves.orchestrator_url}/schedule", "schedules", "id", "topic",
+            ref,
+        )
+
+    def _resolve_research_ref(self, ref: str):
+        """Match a research session by topic against GET /research/sessions."""
+        return self._resolve_named_ref(
+            f"{self.valves.orchestrator_url}/research/sessions", "sessions", "id",
+            "topic", ref, params={"limit": 25},
+        )
+
     # ---- §17.629 confirm cards for the expensive writes ------------------
 
     _DEPTH_ETA = {"shallow": "~20–30 min", "medium": "~40–60 min", "deep": "60+ min"}
@@ -3982,6 +4071,21 @@ class Pipeline:
             tz = (slots.get("tz") or "UTC").strip()
             cmd = f'/schedule add "{cron}" --depth={depth} --tz={tz} {topic}'
             yield self._handle_schedule(cmd)
+            return
+        # §17.630 — destructive: fire the underlying delete WITH its confirm
+        # token (the NL confirm card was the human gate).
+        if intent == "jobs_delete":
+            yield self._handle_command(
+                f"/jobs delete {slots.get('id', '')} confirm", chat_id=chat_id,
+            )
+            return
+        if intent == "schedule_delete":
+            yield self._handle_schedule(f"/schedule delete {slots.get('id', '')}")
+            return
+        if intent == "research_delete":
+            yield from self._handle_research_mgmt(
+                f"/research/delete {slots.get('id', '')} confirm",
+            )
             return
         yield "⚠️ That confirmation expired — please ask again."
 

@@ -64,7 +64,15 @@ _WRITE_INTENTS = (
     "optimize",        # optimize a prompt                  → /optimize <prompt>
     "jobs_rename",     # rename a job                       → /jobs rename <id> <n>
 )
-COMMAND_INTENTS = _READ_INTENTS + _WRITE_INTENTS + ("none",)
+# Destructive intents (§17.630, Phase 3). ALWAYS confirmed in the pipeline —
+# the named target is resolved and echoed, and nothing deletes without an
+# explicit affirmative follow-up.
+_DESTRUCTIVE_INTENTS = (
+    "jobs_delete",     # delete a job                  → /jobs delete <id> confirm
+    "schedule_delete", # delete a research schedule    → /schedule delete <id>
+    "research_delete", # delete a research session     → /research/delete <id> confirm
+)
+COMMAND_INTENTS = _READ_INTENTS + _WRITE_INTENTS + _DESTRUCTIVE_INTENTS + ("none",)
 
 _CONFIDENCE = ("high", "medium", "low")
 _DEPTHS = ("shallow", "medium", "deep")
@@ -116,6 +124,14 @@ _ROUTE_TOOL = model_router.Tool(
                     "this prompt better: ...'); put the prompt text in prompt. "
                     "jobs_rename = rename an existing job ('rename job abc to Home Lab Setup'); put the job "
                     "reference in job_ref and the new title in new_name. "
+                    # --- destructive (Phase 3) ---
+                    "jobs_delete = DELETE/remove a job ('delete the kubernetes job', 'remove that old CLI "
+                    "job'); put the job name/id in target_ref. "
+                    "schedule_delete = DELETE/remove a recurring research SCHEDULE ('delete the weekly "
+                    "kubernetes schedule', 'stop the monday research'); put the schedule topic/id in target_ref. "
+                    "research_delete = DELETE/remove a past RESEARCH SESSION ('delete the proxmox research', "
+                    "'remove that research on zfs'); put the session topic/id in target_ref. "
+                    "(All deletes are confirmed with the operator before anything is removed.) "
                     # --- the safe default ---
                     "none = ANYTHING else — describing/building a multi-step deliverable ('build a CLI that "
                     "…', 'set up proxmox on my box', 'make me an app'), a general question, or chit-chat. "
@@ -204,6 +220,14 @@ _ROUTE_TOOL = model_router.Tool(
                     "For intent=jobs_rename: the new title for the job. Omit otherwise."
                 ),
             },
+            "target_ref": {
+                "type": "string",
+                "description": (
+                    "For intent=jobs_delete / schedule_delete / research_delete: how "
+                    "the operator referred to the thing to delete — a name/topic "
+                    "fragment or an id. Omit otherwise."
+                ),
+            },
         },
         "required": ["intent", "confidence"],
     },
@@ -214,10 +238,11 @@ _ROUTE_SYSTEM = (
     "The operator typed a plain message (no slash command). Decide if it is a "
     "request to run one of the engine's actions (see the tool), and how "
     "confident you are.\n\n"
-    "Two families of action exist: READS (status, results, searching the "
-    "knowledge base, listing jobs/models, help) and WRITES (run web research on "
-    "a topic, schedule recurring research, set/reset a model role, optimize a "
-    "prompt, rename a job).\n\n"
+    "Three families of action exist: READS (status, results, searching the "
+    "knowledge base, listing jobs/models, help), WRITES (run web research on a "
+    "topic, schedule recurring research, set/reset a model role, optimize a "
+    "prompt, rename a job), and DELETES (remove a job, a research schedule, or a "
+    "past research session — always confirmed before anything is removed).\n\n"
     "Critical distinction — a WRITE action here is a SINGLE engine operation. A "
     "request to BUILD, CREATE, or SET UP a multi-step software/infrastructure "
     "deliverable ('build a CLI that converts screenshots to PDF', 'set up "
@@ -244,7 +269,7 @@ async def classify_command(*, message: str, role: str | None = None) -> dict:
     fallback = {
         "intent": "none", "confidence": "low", "query": "", "job_ref": "",
         "topic": "", "depth": "", "cron": "", "tz": "", "model_role": "",
-        "model_name": "", "prompt": "", "new_name": "",
+        "model_name": "", "prompt": "", "new_name": "", "target_ref": "",
     }
     text = (message or "").strip()
     if not text:
@@ -298,4 +323,5 @@ async def classify_command(*, message: str, role: str | None = None) -> dict:
         "model_name": _s("model_name"),
         "prompt": _s("prompt"),
         "new_name": _s("new_name"),
+        "target_ref": _s("target_ref"),
     }

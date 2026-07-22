@@ -442,3 +442,159 @@ class TestPipeConfirmFlow:
             out = "".join(pipe.pipe("actually never mind, tell me a joke", "m", history, {}))
         assert "TRIAGE" in out
         launch.assert_not_called()           # confirm discarded, nothing ran
+
+
+# ===========================================================================
+# §17.630 — Phase 3: destructive intents (always confirmed)
+# ===========================================================================
+
+
+@pytest.mark.smoke
+class TestPhase3RequiredSlots:
+    @pytest.mark.parametrize("intent", ["jobs_delete", "schedule_delete", "research_delete"])
+    def test_missing_target_falls_through(self, pipe, intent):
+        clf = {"intent": intent, "confidence": "high"}   # no target_ref
+        with patch.object(pipe, "_classify_command", return_value=clf):
+            assert pipe._nl_command_route("delete something", _hist("x")) is None
+
+
+@pytest.mark.smoke
+class TestNlDelete:
+    """A delete resolves the target and renders a confirm card — nothing is
+    removed in _dispatch (only _execute_nl_action deletes)."""
+    @pytest.mark.parametrize("intent,resolver,noun", [
+        ("jobs_delete", "_resolve_job_ref", "job"),
+        ("schedule_delete", "_resolve_schedule_ref", "schedule"),
+        ("research_delete", "_resolve_research_ref", "research session"),
+    ])
+    def test_unique_match_renders_confirm(self, pipe, intent, resolver, noun):
+        resolved = ({"job_id": "id-7", "title": "kubernetes news"}, False,
+                    [{"job_id": "id-7", "title": "kubernetes news"}])
+        with patch.object(pipe, resolver, return_value=resolved), \
+             patch.object(pipe, "_handle_command") as hc, \
+             patch.object(pipe, "_handle_schedule") as hs, \
+             patch.object(pipe, "_handle_research_mgmt") as hr:
+            out = "".join(pipe._dispatch_nl_command(intent, {"target_ref": "kube"}, "raw"))
+        assert "NL_CONFIRM:" in out              # gated behind confirm
+        assert "Permanently delete" in out
+        assert noun in out
+        assert "id-7" in out
+        # NOTHING fired yet:
+        hc.assert_not_called(); hs.assert_not_called(); hr.assert_not_called()
+
+    def test_ambiguous_lists_without_marker(self, pipe):
+        cands = [{"job_id": "a", "title": "kube one", "status": "running"},
+                 {"job_id": "b", "title": "kube two", "status": "running"}]
+        with patch.object(pipe, "_resolve_job_ref", return_value=(cands[0], True, cands)):
+            out = "".join(pipe._nl_delete("jobs_delete", {"target_ref": "kube"}))
+        assert "ASSIST_PICK" not in out and "NL_CONFIRM" not in out
+        assert "/jobs delete <id>" in out
+
+    def test_no_match_clarifies(self, pipe):
+        with patch.object(pipe, "_resolve_schedule_ref", return_value=(None, False, [])):
+            out = "".join(pipe._nl_delete("schedule_delete", {"target_ref": "nope"}))
+        assert "couldn't find a schedule" in out.lower()
+        assert "NL_CONFIRM" not in out
+
+
+@pytest.mark.smoke
+class TestDeleteResolvers:
+    def test_schedule_ref_normalizes(self, pipe):
+        body = {"schedules": [
+            {"id": 5, "topic": "kubernetes security news", "cron_expression": "0 9 * * 1"},
+            {"id": 6, "topic": "postgres releases"},
+        ]}
+        with patch.object(_mod._HTTP_SESSION, "get", return_value=_make_response(200, body)):
+            match, ambiguous, cands = pipe._resolve_schedule_ref("kubernetes security")
+        assert match["job_id"] == "5"          # id stringified
+        assert ambiguous is False
+        assert {c["job_id"] for c in cands} == {"5", "6"}
+
+    def test_research_ref_normalizes(self, pipe):
+        body = {"sessions": [
+            {"id": "sess-1", "topic": "zfs on non-ecc ram"},
+            {"id": "sess-2", "topic": "proxmox clustering guide"},
+        ]}
+        with patch.object(_mod._HTTP_SESSION, "get", return_value=_make_response(200, body)):
+            match, ambiguous, cands = pipe._resolve_research_ref("proxmox clustering")
+        assert match["job_id"] == "sess-2"
+        assert ambiguous is False
+
+
+@pytest.mark.smoke
+class TestExecuteDelete:
+    """Only after an affirmative does _execute_nl_action fire the underlying
+    delete — and it must carry the handler's own confirm token."""
+    def test_jobs_delete_uses_confirm_token(self, pipe):
+        pend = {"intent": "jobs_delete", "slots": {"id": "job-3", "label": "old"}}
+        with patch.object(pipe, "_handle_command", return_value="DELETED") as hc:
+            out = "".join(pipe._execute_nl_action(pend, chat_id="c1"))
+        assert out == "DELETED"
+        hc.assert_called_once_with("/jobs delete job-3 confirm", chat_id="c1")
+
+    def test_schedule_delete_dispatches(self, pipe):
+        pend = {"intent": "schedule_delete", "slots": {"id": "9"}}
+        with patch.object(pipe, "_handle_schedule", return_value="GONE") as hs:
+            out = "".join(pipe._execute_nl_action(pend))
+        assert out == "GONE"
+        hs.assert_called_once_with("/schedule delete 9")
+
+    def test_research_delete_uses_confirm_token(self, pipe):
+        pend = {"intent": "research_delete", "slots": {"id": "sess-1"}}
+        with patch.object(pipe, "_handle_research_mgmt",
+                          side_effect=lambda cmd: iter([f"R::{cmd}"])) as hr:
+            out = "".join(pipe._execute_nl_action(pend))
+        assert "R::/research/delete sess-1 confirm" in out
+        hr.assert_called_once()
+
+
+@pytest.mark.smoke
+class TestPipeDeleteFlow:
+    def test_delete_shows_confirm_then_affirmative_removes(self, pipe):
+        clf = {"intent": "jobs_delete", "confidence": "high", "target_ref": "kube"}
+        resolved = ({"job_id": "job-3", "title": "kubernetes job"}, False,
+                    [{"job_id": "job-3", "title": "kubernetes job"}])
+        # Turn 1: NL delete request → confirm card, nothing removed.
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE"), \
+             patch.object(pipe, "_classify_command", return_value=clf), \
+             patch.object(pipe, "_resolve_job_ref", return_value=resolved), \
+             patch.object(pipe, "_handle_command") as hc:
+            card = "".join(pipe.pipe("delete the kubernetes job", "m",
+                                     _hist("delete the kubernetes job"), {}))
+        assert "NL_CONFIRM:" in card and "Permanently delete" in card
+        hc.assert_not_called()
+
+        # Turn 2: card in history + "yes" → the delete fires with confirm token.
+        history = [
+            {"role": "user", "content": "delete the kubernetes job"},
+            {"role": "assistant", "content": card},
+            {"role": "user", "content": "yes"},
+        ]
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE") as triage, \
+             patch.object(pipe, "_classify_command") as clf2, \
+             patch.object(pipe, "_handle_command", return_value="DELETED") as hc2:
+            out = "".join(pipe.pipe("yes", "m", history, {}))
+        assert "DELETED" in out
+        triage.assert_not_called()
+        clf2.assert_not_called()
+        hc2.assert_called_once_with("/jobs delete job-3 confirm", chat_id=None)
+
+    def test_delete_confirm_then_no_does_not_remove(self, pipe):
+        card = pipe._render_nl_confirm(
+            "jobs_delete", {"id": "job-3", "label": "kube"}, "⚠️ Permanently delete?")
+        history = [
+            {"role": "user", "content": "delete the kube job"},
+            {"role": "assistant", "content": card},
+            {"role": "user", "content": "no wait, cancel that"},
+        ]
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE"), \
+             patch.object(pipe, "_classify_command",
+                          return_value={"intent": "none", "confidence": "low"}), \
+             patch.object(pipe, "_handle_command") as hc:
+            out = "".join(pipe.pipe("no wait, cancel that", "m", history, {}))
+        # The delete must NOT fire on a non-affirmative reply.
+        assert not any("delete" in str(c).lower() for c in
+                       [call.args[0] for call in hc.call_args_list])

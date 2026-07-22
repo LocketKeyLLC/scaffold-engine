@@ -44,7 +44,7 @@ async def _classify(args, *, success=True, message="hello"):
 
 
 @pytest.mark.smoke
-def test_intent_surface_is_phase1_plus_phase2():
+def test_intent_surface_is_complete():
     assert set(command_guide.COMMAND_INTENTS) == {
         # Phase 1 — reads
         "status", "results", "rag_query", "jobs_list", "jobs_find",
@@ -52,15 +52,20 @@ def test_intent_surface_is_phase1_plus_phase2():
         # Phase 2 — mutating/expensive
         "research_topic", "schedule_add", "model_set", "model_reset",
         "optimize", "jobs_rename",
+        # Phase 3 — destructive (always confirmed in the pipeline)
+        "jobs_delete", "schedule_delete", "research_delete",
         # safe default
         "none",
     }
 
 
 @pytest.mark.smoke
-def test_no_destructive_intents_until_phase3():
-    # delete/cancel are Phase 3 (always-confirm) — they must NOT be routable yet.
-    for banned in ("delete", "cancel", "remove", "purge"):
+def test_destructive_intents_are_the_only_delete_verbs():
+    # Exactly three delete intents exist; the pipeline gates all behind a
+    # confirm. No cancel/purge intent leaked in.
+    deletes = [i for i in command_guide.COMMAND_INTENTS if "delete" in i]
+    assert set(deletes) == {"jobs_delete", "schedule_delete", "research_delete"}
+    for banned in ("cancel", "purge", "wipe", "drop"):
         assert not any(banned in i for i in command_guide.COMMAND_INTENTS), banned
 
 
@@ -157,14 +162,26 @@ async def test_jobs_rename_carries_ref_and_new_name():
 
 
 @pytest.mark.asyncio
-async def test_fallback_carries_all_write_slots_empty():
+async def test_fallback_carries_all_slots_empty():
     # Fail-soft dict must contain every slot key so callers can .get safely.
     with patch.object(command_guide.model_router, "tool_call",
                       new=AsyncMock(side_effect=RuntimeError("x"))):
         out = await command_guide.classify_command(message="research something")
     for k in ("topic", "depth", "cron", "tz", "model_role", "model_name",
-              "prompt", "new_name", "query", "job_ref"):
+              "prompt", "new_name", "query", "job_ref", "target_ref"):
         assert out[k] == ""
+
+
+# ── destructive intents (Phase 3) carry target_ref ────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["jobs_delete", "schedule_delete", "research_delete"])
+async def test_delete_intents_carry_target_ref(intent):
+    out = await _classify({"intent": intent, "confidence": "high",
+                           "target_ref": "kubernetes"})
+    assert out["intent"] == intent
+    assert out["target_ref"] == "kubernetes"
 
 
 # ── fail-soft → none ───────────────────────────────────────────────────────
