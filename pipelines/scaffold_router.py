@@ -1460,6 +1460,21 @@ class Pipeline:
                     )
                     return
 
+        # §17.629 — pending NL-command confirm follow-up. If the previous turn
+        # rendered a confirm card for an expensive write (research / schedule)
+        # and this turn is an affirmative ("go"/"yes"), fire the stashed action.
+        # Checked BEFORE the noise guard (a bare "go" mustn't be swallowed) and
+        # gated on the valve. A non-affirmative reply discards the pending
+        # action and falls through to normal routing (the operator changed
+        # their mind or is refining).
+        if not msg.startswith("/") and self.valves.nl_command_routing_enabled:
+            pend = self._extract_pending_nl_confirm(messages)
+            if pend and self._is_affirmative(msg):
+                yield from self._execute_nl_action(
+                    pend, chat_id=self._chat_id_from_body(body),
+                )
+                return
+
         # §17.349 — guard against single-char / noise input (e.g. the
         # bare "a" case from the §17.342 transcript). The triage prompt
         # is expensive (cloud roundtrip, ~7-10 s) and unhelpful on input
@@ -3643,24 +3658,53 @@ class Pipeline:
                     "See server logs for details.")
 
     # ------------------------------------------------------------------
-    # §17.628 — engine-wide natural-language command routing
+    # §17.628 / §17.629 — engine-wide natural-language command routing
     #
     # Sibling to the §17.626/§17.627 in-session assist NL flow, for the TOP
-    # level (no active session). A plain sentence that clearly names a
-    # read-only engine action is translated to the canonical slash string and
-    # dispatched through the EXISTING `_handle_command` — no duplicated logic.
+    # level (no active session). A plain sentence that clearly names an engine
+    # action is translated to the canonical slash string and dispatched through
+    # the EXISTING `_handle_command`/`_handle_*` — no duplicated logic.
     # Two-tier, mirroring `fast_classify_turn` + `/interpret`:
     #   1. `_fast_classify_command` — deterministic whole-message phrase match,
     #      no LLM, always high-confidence.
     #   2. `POST /route` — the classifier; only intercepts on confidence='high'
     #      AND a satisfied required slot. Everything else → None (triage).
+    # §17.629 (Phase 2) adds mutating/expensive intents: the two that commit
+    # real cost (research_topic, schedule_add) render a confirm card and fire
+    # only on an affirmative follow-up; the cheap/reversible ones (model_set/
+    # reset, optimize, jobs_rename) run directly.
     # ------------------------------------------------------------------
+
+    # Required slots per intent — an intent with an unsatisfied slot falls
+    # through to triage rather than intercepting into an empty action.
+    _NL_REQUIRED_SLOTS: dict = {
+        "rag_query": ("query",),
+        "jobs_find": ("query",),
+        "research_topic": ("topic",),
+        "schedule_add": ("cron", "topic"),
+        "model_set": ("model_role", "model_name"),
+        "optimize": ("prompt",),
+        "jobs_rename": ("job_ref", "new_name"),
+    }
+
+    # §17.629 — pending-confirm marker for the expensive writes. A confirm card
+    # embeds this HTML comment carrying the JSON action; on the next turn an
+    # affirmative reply ("go"/"yes") recovers + fires it. HTML comment → hidden
+    # in the rendered chat but preserved in the raw history OWUI replays (same
+    # mechanism as the §17.627 `<!--ASSIST_PICK-->` pick-list marker).
+    _NL_CONFIRM_MARKER_RE = re.compile(r"<!--NL_CONFIRM:(\{.*?\})-->", re.DOTALL)
+    _NL_AFFIRMATIVE: frozenset = frozenset({
+        "go", "yes", "y", "yep", "yeah", "yup", "ok", "okay", "sure",
+        "do it", "run it", "run", "confirm", "confirmed", "proceed",
+        "go ahead", "yes please", "launch", "start", "start it", "go for it",
+    })
+
     def _nl_command_route(
         self, msg: str, messages: List[dict], *, chat_id: str | None = None,
     ):
-        """Decide whether a plain message is a read-only engine command and, if
-        so, return a generator that yields the handled reply. Returns ``None``
-        to fall through to triage (the caller then runs the planner).
+        """Decide whether a plain message is an engine command and, if so,
+        return a generator that yields the handled reply. Returns ``None`` to
+        fall through to triage (the caller then runs the planner).
 
         The decision is made BEFORE yielding — mirrors ``try_natural_start`` —
         so triage is never partially pre-empted by a command that turns out not
@@ -3669,7 +3713,7 @@ class Pipeline:
             return None
 
         intent = _fast_classify_command(msg)
-        data = {"query": "", "job_ref": ""}
+        data: dict = {}
         if intent is None:
             d = self._classify_command(msg)
             intent = d.get("intent") or "none"
@@ -3679,17 +3723,17 @@ class Pipeline:
                 return None
             data = d
 
-        # Required-slot gate — never intercept into an empty query/find.
-        query = (data.get("query") or "").strip()
-        if intent in ("rag_query", "jobs_find") and not query:
-            return None
+        # Required-slot gate — never intercept into an empty query/find/action.
+        for slot in self._NL_REQUIRED_SLOTS.get(intent, ()):
+            if not (data.get(slot) or "").strip():
+                return None
 
         return self._dispatch_nl_command(intent, data, msg, chat_id=chat_id)
 
     def _classify_command(self, msg: str) -> dict:
         """POST /route → intent dict. Fail-soft → intent='none' so a classifier
         or endpoint hiccup degrades to triage rather than misfiring."""
-        fallback = {"intent": "none", "confidence": "low", "query": "", "job_ref": ""}
+        fallback = {"intent": "none", "confidence": "low"}
         try:
             r = _HTTP_SESSION.post(
                 f"{self.valves.orchestrator_url}/route",
@@ -3708,13 +3752,17 @@ class Pipeline:
     def _dispatch_nl_command(
         self, intent: str, data: dict, msg: str, *, chat_id: str | None = None,
     ):
-        """Translate a resolved read-only intent to its canonical slash string
-        and run it through the existing `_handle_command`. Generator: yields the
-        rendered reply (a friendly '(understood …)' lead-in makes the NL→command
-        mapping visible so the operator learns the surface)."""
+        """Translate a resolved intent to its canonical slash string and run it
+        through the existing handler. Generator: yields the rendered reply.
+
+        Reads + cheap/reversible writes run immediately. The two expensive
+        writes (research_topic, schedule_add) instead render a confirm card
+        (`_render_nl_confirm`) and fire only on the affirmative follow-up
+        handled in `pipe()` — so a one-sentence misfire never launches a 40-min
+        run or a recurring schedule."""
         query = (data.get("query") or "").strip()
 
-        # (intent → canonical slash command). None means "handled inline below".
+        # (intent → canonical slash command) for the direct, single-shot cases.
         simple = {
             "status": "/status",
             "help": "/help",
@@ -3722,8 +3770,14 @@ class Pipeline:
             "model_list": "/model list",
             "model_available": "/model available",
             "model_probe": "/model probe",
+            "model_reset": "/model reset",
             "rag_query": f"/rag {query}",
             "jobs_find": f"/jobs find {query}",
+            "optimize": f"/optimize {(data.get('prompt') or '').strip()}",
+            "model_set": (
+                f"/model set {(data.get('model_role') or '').strip()} "
+                f"{(data.get('model_name') or '').strip()}"
+            ),
         }
         if intent in simple:
             yield self._handle_command(simple[intent], chat_id=chat_id)
@@ -3731,6 +3785,15 @@ class Pipeline:
 
         if intent == "results":
             yield from self._nl_results(data, chat_id=chat_id)
+            return
+        if intent == "jobs_rename":
+            yield from self._nl_rename(data, chat_id=chat_id)
+            return
+        if intent == "research_topic":
+            yield self._confirm_research(data)
+            return
+        if intent == "schedule_add":
+            yield self._confirm_schedule(data)
             return
 
         # Unknown/unsupported intent slipped through — degrade gracefully.
@@ -3740,7 +3803,8 @@ class Pipeline:
         """Resolve a job reference for `results` and dispatch `/results`.
 
         - explicit/uniquely-matched job → `/results <id>`
-        - ambiguous name → the assist-style pick-list (reused renderer)
+        - ambiguous name → a plain disambiguation list (ids + `/results <id>`);
+          NOT the assist pick-list, whose "1" follow-up starts a session
         - no ref → `/results` (falls back to active-job recall)
         - named but no match → clarify, don't silently show the wrong job."""
         ref = (data.get("job_ref") or "").strip()
@@ -3754,14 +3818,53 @@ class Pipeline:
             )
             return
         if match and ambiguous and cands:
-            # Reuse the §17.627 pick-list renderer + hidden ordered-id marker so
-            # a short selector reply ("1", "the proxmox one") resolves next turn.
-            yield _assist.render_candidate_list(cands)
+            yield self._render_job_disambiguation(cands, "see results for", "/results")
             return
         yield (
             f"I couldn't find a job matching “{ref}”. Try `/jobs list` to see "
             f"recent jobs, or `/jobs find {ref}` to search."
         )
+
+    def _nl_rename(self, data: dict, *, chat_id: str | None = None):
+        """Resolve a job reference for `jobs_rename` and dispatch `/jobs rename`.
+        Rename is reversible, so a unique match runs directly; ambiguity lists
+        the candidates (the new title is preserved in the hint)."""
+        ref = (data.get("job_ref") or "").strip()
+        new_name = (data.get("new_name") or "").strip()
+        match, ambiguous, cands = self._resolve_job_ref(ref)
+        if match and not ambiguous:
+            yield self._handle_command(
+                f"/jobs rename {match['job_id']} {new_name}", chat_id=chat_id,
+            )
+            return
+        if match and ambiguous and cands:
+            yield self._render_job_disambiguation(
+                cands, "rename", f"/jobs rename", suffix=f" {new_name}",
+            )
+            return
+        yield (
+            f"I couldn't find a job matching “{ref}” to rename. Try `/jobs list` "
+            f"to see recent jobs."
+        )
+
+    def _render_job_disambiguation(
+        self, cands: list, verb: str, slash: str, *, suffix: str = "",
+    ) -> str:
+        """Plain (non-stateful) job disambiguation for results/rename. Unlike
+        the assist pick-list, this carries NO hidden marker — a bare "1" reply
+        would otherwise be captured by the assist-start pick resolver. Operators
+        pick by pasting the explicit `<slash> <id>` line."""
+        lines = [
+            f"I found a few jobs that could match — which one do you want to "
+            f"{verb}?", "",
+        ]
+        for c in cands[:8]:
+            lines.append(
+                f"- `{c.get('job_id', '')}` — {c.get('title', '(untitled)')} "
+                f"(`{c.get('status', '?')}`)"
+            )
+        lines += ["", f"Reply with `{slash} <id>{suffix}` using an id above."]
+        return "\n".join(lines)
 
     def _resolve_job_ref(self, ref: str):
         """Token-match a job name/topic against recent jobs (GET /jobs).
@@ -3791,6 +3894,96 @@ class Pipeline:
             return None, False, []
         match, ambiguous = _assist.match_assist_candidate(ref, cands)
         return match, ambiguous, cands
+
+    # ---- §17.629 confirm cards for the expensive writes ------------------
+
+    _DEPTH_ETA = {"shallow": "~20–30 min", "medium": "~40–60 min", "deep": "60+ min"}
+
+    def _render_nl_confirm(self, intent: str, slots: dict, summary: str) -> str:
+        """A confirm card: human summary + a hidden action marker recovered on
+        the affirmative follow-up. `slots` must be JSON-serializable + minimal
+        (only what `_execute_nl_action` needs)."""
+        marker = f"<!--NL_CONFIRM:{json.dumps({'intent': intent, 'slots': slots})}-->"
+        return (
+            f"{summary}\n\n"
+            "_Reply **go** (or **yes**) to run it, or tell me what to change._\n"
+            f"{marker}"
+        )
+
+    def _confirm_research(self, data: dict) -> str:
+        topic = (data.get("topic") or "").strip()
+        depth = (data.get("depth") or "").strip() or "medium"
+        eta = self._DEPTH_ETA.get(depth, "~40–60 min")
+        summary = (
+            f"🔬 **Research this?**\n\n"
+            f"- **Topic:** {topic}\n"
+            f"- **Depth:** {depth} ({eta} on this host, CPU-only)"
+        )
+        return self._render_nl_confirm(
+            "research_topic", {"topic": topic, "depth": depth}, summary,
+        )
+
+    def _confirm_schedule(self, data: dict) -> str:
+        topic = (data.get("topic") or "").strip()
+        depth = (data.get("depth") or "").strip() or "medium"
+        cron = (data.get("cron") or "").strip()
+        tz = (data.get("tz") or "").strip() or "UTC"
+        summary = (
+            f"🗓 **Schedule recurring research?**\n\n"
+            f"- **Topic:** {topic}\n"
+            f"- **Cron:** `{cron}` ({tz})\n"
+            f"- **Depth:** {depth}"
+        )
+        return self._render_nl_confirm(
+            "schedule_add",
+            {"topic": topic, "depth": depth, "cron": cron, "tz": tz},
+            summary,
+        )
+
+    def _extract_pending_nl_confirm(self, messages: List[dict]) -> dict | None:
+        """Recover the pending NL action from the most recent assistant turn's
+        confirm marker, or None. Only the immediately-preceding assistant turn
+        counts — a stale marker further back does not re-fire."""
+        for m in reversed(messages):
+            if m.get("role") != "assistant":
+                continue
+            content = m.get("content", "")
+            if isinstance(content, str):
+                mt = self._NL_CONFIRM_MARKER_RE.search(content)
+                if mt:
+                    try:
+                        d = json.loads(mt.group(1))
+                        if isinstance(d, dict) and d.get("intent"):
+                            return d
+                    except ValueError:
+                        return None
+            return None  # most recent assistant turn had no confirm marker
+        return None
+
+    def _is_affirmative(self, msg: str) -> bool:
+        norm = (msg or "").strip().lower().strip(".!,;: ").strip()
+        return norm in self._NL_AFFIRMATIVE
+
+    def _execute_nl_action(
+        self, pending: dict, *, chat_id: str | None = None,
+    ):
+        """Fire a confirmed expensive write. Generator — research streams SSE."""
+        intent = pending.get("intent")
+        slots = pending.get("slots") or {}
+        if intent == "research_topic":
+            topic = (slots.get("topic") or "").strip()
+            depth = (slots.get("depth") or "medium").strip()
+            yield from self._handle_research(f"/research {topic} --depth={depth}")
+            return
+        if intent == "schedule_add":
+            topic = (slots.get("topic") or "").strip()
+            depth = (slots.get("depth") or "medium").strip()
+            cron = (slots.get("cron") or "").strip()
+            tz = (slots.get("tz") or "UTC").strip()
+            cmd = f'/schedule add "{cron}" --depth={depth} --tz={tz} {topic}'
+            yield self._handle_schedule(cmd)
+            return
+        yield "⚠️ That confirmation expired — please ask again."
 
     def _call_triage_from_msg(self, msg: str) -> str:
         """Fallback triage call from a raw string (no message list). Used only

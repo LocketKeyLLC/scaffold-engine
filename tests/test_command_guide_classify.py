@@ -40,18 +40,27 @@ async def _classify(args, *, success=True, message="hello"):
         return await command_guide.classify_command(message=message)
 
 
-# ── intent surface is read-only + Phase-1 exact ───────────────────────────
+# ── intent surface (Phase 1 reads + Phase 2 writes; no destructive verbs) ──
 
 
 @pytest.mark.smoke
-def test_intent_surface_is_read_only_phase1():
-    # No mutating/expensive verbs (research/schedule/delete/set) may appear —
-    # Phase 1 is reads only; those land later behind confirms.
+def test_intent_surface_is_phase1_plus_phase2():
     assert set(command_guide.COMMAND_INTENTS) == {
+        # Phase 1 — reads
         "status", "results", "rag_query", "jobs_list", "jobs_find",
-        "model_list", "model_available", "model_probe", "help", "none",
+        "model_list", "model_available", "model_probe", "help",
+        # Phase 2 — mutating/expensive
+        "research_topic", "schedule_add", "model_set", "model_reset",
+        "optimize", "jobs_rename",
+        # safe default
+        "none",
     }
-    for banned in ("delete", "research", "schedule", "set", "cancel", "confirm"):
+
+
+@pytest.mark.smoke
+def test_no_destructive_intents_until_phase3():
+    # delete/cancel are Phase 3 (always-confirm) — they must NOT be routable yet.
+    for banned in ("delete", "cancel", "remove", "purge"):
         assert not any(banned in i for i in command_guide.COMMAND_INTENTS), banned
 
 
@@ -93,6 +102,69 @@ async def test_slots_are_stripped():
     out = await _classify({"intent": "jobs_find", "confidence": "high",
                            "query": "  kubernetes  "})
     assert out["query"] == "kubernetes"
+
+
+# ── write intents (Phase 2) carry their slots ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_research_topic_carries_topic_and_depth():
+    out = await _classify({"intent": "research_topic", "confidence": "high",
+                           "topic": "postgres tuning", "depth": "deep"})
+    assert out["intent"] == "research_topic"
+    assert out["topic"] == "postgres tuning"
+    assert out["depth"] == "deep"
+
+
+@pytest.mark.asyncio
+async def test_invalid_depth_dropped():
+    out = await _classify({"intent": "research_topic", "confidence": "high",
+                           "topic": "x", "depth": "extreme"})
+    assert out["depth"] == ""  # not one of shallow/medium/deep
+
+
+@pytest.mark.asyncio
+async def test_schedule_add_carries_cron_topic_tz():
+    out = await _classify({"intent": "schedule_add", "confidence": "high",
+                           "topic": "AI papers", "cron": "0 9 * * 1",
+                           "tz": "America/New_York", "depth": "medium"})
+    assert out["cron"] == "0 9 * * 1"
+    assert out["topic"] == "AI papers"
+    assert out["tz"] == "America/New_York"
+
+
+@pytest.mark.asyncio
+async def test_model_set_carries_role_and_name():
+    out = await _classify({"intent": "model_set", "confidence": "high",
+                           "model_role": "coder", "model_name": "kimi-k2.7-code:cloud"})
+    assert out["model_role"] == "coder"
+    assert out["model_name"] == "kimi-k2.7-code:cloud"
+
+
+@pytest.mark.asyncio
+async def test_optimize_carries_prompt():
+    out = await _classify({"intent": "optimize", "confidence": "high",
+                           "prompt": "Write a haiku about DAGs"})
+    assert out["prompt"] == "Write a haiku about DAGs"
+
+
+@pytest.mark.asyncio
+async def test_jobs_rename_carries_ref_and_new_name():
+    out = await _classify({"intent": "jobs_rename", "confidence": "high",
+                           "job_ref": "homelab", "new_name": "Home Lab Setup"})
+    assert out["job_ref"] == "homelab"
+    assert out["new_name"] == "Home Lab Setup"
+
+
+@pytest.mark.asyncio
+async def test_fallback_carries_all_write_slots_empty():
+    # Fail-soft dict must contain every slot key so callers can .get safely.
+    with patch.object(command_guide.model_router, "tool_call",
+                      new=AsyncMock(side_effect=RuntimeError("x"))):
+        out = await command_guide.classify_command(message="research something")
+    for k in ("topic", "depth", "cron", "tz", "model_role", "model_name",
+              "prompt", "new_name", "query", "job_ref"):
+        assert out[k] == ""
 
 
 # ── fail-soft → none ───────────────────────────────────────────────────────

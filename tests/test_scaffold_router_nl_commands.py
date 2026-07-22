@@ -135,6 +135,11 @@ class TestDispatchMapping:
         ("model_probe", {}, "/model probe"),
         ("rag_query", {"query": "postgres tuning"}, "/rag postgres tuning"),
         ("jobs_find", {"query": "homelab"}, "/jobs find homelab"),
+        # Phase 2 direct (cheap/reversible) writes:
+        ("model_reset", {}, "/model reset"),
+        ("model_set", {"model_role": "coder", "model_name": "kimi:cloud"},
+         "/model set coder kimi:cloud"),
+        ("optimize", {"prompt": "write a haiku"}, "/optimize write a haiku"),
     ])
     def test_slash_translation(self, pipe, intent, data, expected):
         with patch.object(pipe, "_handle_command", return_value="OK") as hc:
@@ -165,15 +170,18 @@ class TestResultsResolution:
         assert out == "RES"
         hc.assert_called_once_with("/results job-42", chat_id="c1")
 
-    def test_ambiguous_shows_pick_list(self, pipe):
-        cands = [{"job_id": "a", "title": "proxmox one"},
-                 {"job_id": "b", "title": "proxmox two"}]
+    def test_ambiguous_shows_plain_disambiguation_not_assist_pick(self, pipe):
+        cands = [{"job_id": "a", "title": "proxmox one", "status": "completed"},
+                 {"job_id": "b", "title": "proxmox two", "status": "running"}]
         resolved = (cands[0], True, cands)
         with patch.object(pipe, "_resolve_job_ref", return_value=resolved), \
              patch.object(pipe, "_handle_command") as hc:
             out = "".join(pipe._nl_results({"job_ref": "proxmox"}, chat_id="c1"))
-        # Reuses the assist pick-list renderer + hidden ordered-id marker.
-        assert "ASSIST_PICK:a,b" in out
+        # MUST NOT carry the assist pick-list marker — a bare "1" follow-up would
+        # otherwise be captured by the assist-start resolver and START a session.
+        assert "ASSIST_PICK" not in out
+        assert "`a`" in out and "`b`" in out          # ids listed for explicit pick
+        assert "/results <id>" in out
         hc.assert_not_called()
 
     def test_no_match_clarifies(self, pipe):
@@ -246,3 +254,191 @@ class TestPipeEndToEnd:
             out = "".join(pipe.pipe("/jobs", "model-id", _hist("/jobs"), {}))
         assert "JOBS" in out
         nl.assert_not_called()
+
+
+# ===========================================================================
+# §17.629 — Phase 2: mutating / expensive intents
+# ===========================================================================
+
+
+@pytest.mark.smoke
+class TestPhase2RequiredSlots:
+    """A write intent missing a required slot falls through to triage rather
+    than firing an empty/half action."""
+    @pytest.mark.parametrize("intent,data", [
+        ("research_topic", {"confidence": "high"}),                       # no topic
+        ("schedule_add", {"confidence": "high", "topic": "x"}),           # no cron
+        ("schedule_add", {"confidence": "high", "cron": "0 9 * * 1"}),    # no topic
+        ("model_set", {"confidence": "high", "model_role": "coder"}),     # no name
+        ("model_set", {"confidence": "high", "model_name": "kimi"}),      # no role
+        ("optimize", {"confidence": "high"}),                            # no prompt
+        ("jobs_rename", {"confidence": "high", "job_ref": "x"}),          # no new_name
+        ("jobs_rename", {"confidence": "high", "new_name": "Y"}),         # no job_ref
+    ])
+    def test_missing_slot_falls_through(self, pipe, intent, data):
+        clf = {"intent": intent, **data}
+        with patch.object(pipe, "_classify_command", return_value=clf):
+            assert pipe._nl_command_route("do a thing", _hist("x")) is None
+
+    def test_full_slots_intercept(self, pipe):
+        clf = {"intent": "research_topic", "confidence": "high",
+               "topic": "postgres tuning", "depth": "deep"}
+        with patch.object(pipe, "_classify_command", return_value=clf):
+            assert pipe._nl_command_route("research postgres", _hist("x")) is not None
+
+
+@pytest.mark.smoke
+class TestJobsRename:
+    def test_unique_match_renames(self, pipe):
+        resolved = ({"job_id": "job-9", "title": "old"}, False,
+                    [{"job_id": "job-9", "title": "old"}])
+        data = {"job_ref": "old", "new_name": "New Title"}
+        with patch.object(pipe, "_resolve_job_ref", return_value=resolved), \
+             patch.object(pipe, "_handle_command", return_value="RENAMED") as hc:
+            out = "".join(pipe._nl_rename(data, chat_id="c1"))
+        assert out == "RENAMED"
+        hc.assert_called_once_with("/jobs rename job-9 New Title", chat_id="c1")
+
+    def test_ambiguous_lists_without_marker(self, pipe):
+        cands = [{"job_id": "a", "title": "lab one", "status": "completed"},
+                 {"job_id": "b", "title": "lab two", "status": "completed"}]
+        with patch.object(pipe, "_resolve_job_ref", return_value=(cands[0], True, cands)), \
+             patch.object(pipe, "_handle_command") as hc:
+            out = "".join(pipe._nl_rename({"job_ref": "lab", "new_name": "X"}, chat_id="c1"))
+        assert "ASSIST_PICK" not in out
+        assert "/jobs rename <id> X" in out           # new title preserved in hint
+        hc.assert_not_called()
+
+    def test_no_match_clarifies(self, pipe):
+        with patch.object(pipe, "_resolve_job_ref", return_value=(None, False, [])), \
+             patch.object(pipe, "_handle_command") as hc:
+            out = "".join(pipe._nl_rename({"job_ref": "nope", "new_name": "X"}, chat_id="c1"))
+        assert "couldn't find a job" in out.lower()
+        hc.assert_not_called()
+
+
+@pytest.mark.smoke
+class TestConfirmCards:
+    """Expensive writes render a confirm card and do NOT fire directly."""
+    def test_research_renders_confirm_not_launch(self, pipe):
+        data = {"topic": "zfs tuning", "depth": "deep"}
+        with patch.object(pipe, "_handle_research") as launch:
+            out = "".join(pipe._dispatch_nl_command("research_topic", data, "raw"))
+        assert "NL_CONFIRM:" in out          # hidden action marker present
+        assert "zfs tuning" in out
+        assert "deep" in out
+        launch.assert_not_called()           # nothing runs until confirmed
+
+    def test_schedule_renders_confirm_not_create(self, pipe):
+        data = {"topic": "ai news", "cron": "0 9 * * 1", "tz": "UTC", "depth": "medium"}
+        with patch.object(pipe, "_handle_schedule") as create:
+            out = "".join(pipe._dispatch_nl_command("schedule_add", data, "raw"))
+        assert "NL_CONFIRM:" in out
+        assert "0 9 * * 1" in out
+        create.assert_not_called()
+
+
+@pytest.mark.smoke
+class TestConfirmFollowup:
+    def _confirm_msg(self, pipe, intent, slots):
+        card = pipe._render_nl_confirm(intent, slots, "summary")
+        return [
+            {"role": "user", "content": "research zfs deeply"},
+            {"role": "assistant", "content": card},
+            {"role": "user", "content": "go"},
+        ]
+
+    def test_extract_recovers_pending_action(self, pipe):
+        msgs = self._confirm_msg(pipe, "research_topic", {"topic": "zfs", "depth": "deep"})
+        pend = pipe._extract_pending_nl_confirm(msgs)
+        assert pend["intent"] == "research_topic"
+        assert pend["slots"]["topic"] == "zfs"
+
+    def test_no_marker_returns_none(self, pipe):
+        msgs = [{"role": "assistant", "content": "just a normal reply"},
+                {"role": "user", "content": "go"}]
+        assert pipe._extract_pending_nl_confirm(msgs) is None
+
+    def test_only_most_recent_assistant_turn_counts(self, pipe):
+        card = pipe._render_nl_confirm("research_topic", {"topic": "old"}, "s")
+        msgs = [
+            {"role": "assistant", "content": card},         # stale confirm
+            {"role": "user", "content": "never mind"},
+            {"role": "assistant", "content": "ok, what else?"},  # newest, no marker
+            {"role": "user", "content": "go"},
+        ]
+        assert pipe._extract_pending_nl_confirm(msgs) is None
+
+    @pytest.mark.parametrize("word,ok", [
+        ("go", True), ("yes", True), ("Yes!", True), ("run it", True),
+        ("go ahead", True), ("no", False), ("make it shallow", False),
+        ("wait", False), ("", False),
+    ])
+    def test_affirmative_detection(self, pipe, word, ok):
+        assert pipe._is_affirmative(word) is ok
+
+    def test_execute_research_fires_handle_research(self, pipe):
+        pend = {"intent": "research_topic", "slots": {"topic": "zfs", "depth": "deep"}}
+        with patch.object(pipe, "_handle_research",
+                          side_effect=lambda cmd: iter([f"RUN::{cmd}"])) as hr:
+            out = "".join(pipe._execute_nl_action(pend))
+        assert "RUN::/research zfs --depth=deep" in out
+        hr.assert_called_once()
+
+    def test_execute_schedule_fires_handle_schedule(self, pipe):
+        pend = {"intent": "schedule_add",
+                "slots": {"topic": "ai news", "cron": "0 9 * * 1", "tz": "UTC", "depth": "medium"}}
+        with patch.object(pipe, "_handle_schedule", return_value="SCHEDULED") as hs:
+            out = "".join(pipe._execute_nl_action(pend))
+        assert out == "SCHEDULED"
+        cmd = hs.call_args[0][0]
+        assert cmd.startswith('/schedule add "0 9 * * 1"')
+        assert "--depth=medium" in cmd and "ai news" in cmd
+
+
+@pytest.mark.smoke
+class TestPipeConfirmFlow:
+    def test_research_nl_shows_confirm_then_affirmative_launches(self, pipe):
+        # Turn 1: NL research request → confirm card, nothing launched.
+        clf = {"intent": "research_topic", "confidence": "high",
+               "topic": "zfs tuning", "depth": "deep"}
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE"), \
+             patch.object(pipe, "_classify_command", return_value=clf), \
+             patch.object(pipe, "_handle_research") as launch:
+            card = "".join(pipe.pipe("research zfs tuning deeply",
+                                     "m", _hist("research zfs tuning deeply"), {}))
+        assert "NL_CONFIRM:" in card
+        launch.assert_not_called()
+
+        # Turn 2: the card is in history + user says "go" → launch fires.
+        history = [
+            {"role": "user", "content": "research zfs tuning deeply"},
+            {"role": "assistant", "content": card},
+            {"role": "user", "content": "go"},
+        ]
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE") as triage, \
+             patch.object(pipe, "_classify_command") as clf2, \
+             patch.object(pipe, "_handle_research",
+                          side_effect=lambda cmd: iter([f"RUN::{cmd}"])) as launch2:
+            out = "".join(pipe.pipe("go", "m", history, {}))
+        assert "RUN::/research zfs tuning --depth=deep" in out
+        triage.assert_not_called()
+        clf2.assert_not_called()             # affirmative short-circuits classification
+
+    def test_non_affirmative_after_confirm_falls_through(self, pipe):
+        card = pipe._render_nl_confirm("research_topic", {"topic": "zfs", "depth": "deep"}, "s")
+        history = [
+            {"role": "user", "content": "research zfs"},
+            {"role": "assistant", "content": card},
+            {"role": "user", "content": "actually never mind, tell me a joke"},
+        ]
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE") as triage, \
+             patch.object(pipe, "_classify_command",
+                          return_value={"intent": "none", "confidence": "low"}), \
+             patch.object(pipe, "_handle_research") as launch:
+            out = "".join(pipe.pipe("actually never mind, tell me a joke", "m", history, {}))
+        assert "TRIAGE" in out
+        launch.assert_not_called()           # confirm discarded, nothing ran
