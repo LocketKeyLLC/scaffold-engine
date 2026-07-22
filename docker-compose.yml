@@ -277,7 +277,7 @@ services:
       MODEL_ROUTER: ${MODEL_ROUTER:-qwen3.5:397b-cloud}
       MODEL_CODER: ${MODEL_CODER:-kimi-k2.7-code:cloud}  # §17.575 — REVERTED §17.572 swap: qwen3-coder-next intermittently omits main() on cli-entrypoint (live test flaky); kimi is faithful
       MODEL_VERIFIER: ${MODEL_VERIFIER:-kimi-k2.7-code:cloud}  # §17.567 — A/B'd: kimi 30/30 @1.34s vs qwen3.5 30/30 @6.12s (verdict-match)
-      MODEL_GENERAL: ${MODEL_GENERAL:-qwen3.5:397b-cloud}
+      MODEL_GENERAL: ${MODEL_GENERAL:-deepseek-v4-pro:cloud}  # §17.632 — A/B'd: deepseek-v4-pro 5/5 non-empty @5.6s vs qwen3.5 5/5 @19.2s (3.4× faster, equal/better synthesis quality, clean punctuation)
       MODEL_CLOUD_ALT: ${MODEL_CLOUD_ALT:-qwen3.5:397b-cloud}
       # MODEL_FALLBACK stays local by default (§17.346) — fallback must be
       # different from primary to actually help on cloud-side failure.

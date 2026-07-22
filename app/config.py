@@ -267,11 +267,15 @@ class Settings(BaseSettings):
     model_embedder_pipeline: str = "nomic-embed-text"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     model_coder: str = "kimi-k2.7-code:cloud"  # §17.575 — reverted §17.572 (see docker-compose.yml MODEL_CODER, decisive)
-    model_general: str = "qwen3.5:397b-cloud"
+    # §17.632 — was qwen3.5:397b-cloud; A/B'd (synthesis probe, 5 reps) →
+    # deepseek-v4-pro:cloud is 3.4× faster (5.6s vs 19.2s) at equal reliability
+    # (5/5 non-empty) and equal/better synthesis quality with clean punctuation.
+    # Env-overridable (docker-compose MODEL_GENERAL is decisive — 3-site sync).
+    model_general: str = "deepseek-v4-pro:cloud"
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit
-    # #6.1 default, slower on CPU). "model_general" = cloud 235b (faster,
-    # network required). Override: IDEATION_MODEL_ROLE.
+    # #6.1 default, slower on CPU). "model_general" = the flagship cloud
+    # generalist (faster, network required). Override: IDEATION_MODEL_ROLE.
     ideation_model_role: str = "model_general"
     # §17.144 — Spec-capture extractor role. Default model_general
     # because the extractor must follow the spec_schema.json contract

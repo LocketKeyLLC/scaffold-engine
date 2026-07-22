@@ -697,7 +697,7 @@ class Pipeline:
         # Model overrides — §17.346 flipped router/coder/verifier defaults to
         # the same cloud model as §17.344's triage flip. Keep in sync with
         # app/config.py Settings defaults; the per-role rationale lives there.
-        model_general: str = "qwen3.5:397b-cloud"
+        model_general: str = "deepseek-v4-pro:cloud"  # §17.632 — A/B'd 3.4× faster than qwen3.5 at equal synthesis quality; keep in sync w/ config.py + compose MODEL_GENERAL
         # §17.567 — A/B'd (model_ab.py --task verifier): kimi 30/30 @ 1.34s vs
         # qwen3.5 30/30 @ 6.12s. Keep in sync with app/config.py:model_verifier.
         model_verifier: str = "kimi-k2.7-code:cloud"

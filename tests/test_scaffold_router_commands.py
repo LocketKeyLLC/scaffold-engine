@@ -566,7 +566,7 @@ class TestModelCommand:
         result = pipe._handle_model("/model reset")
         assert "Reset to defaults" in result
         assert "general" in result
-        assert pipe.valves.model_general == "qwen3.5:397b-cloud"
+        assert pipe.valves.model_general == "deepseek-v4-pro:cloud"  # §17.632 A/B swap
         # §17.346: model_verifier default flipped qwen2.5:7b → cloud;
         # §17.440: migrated qwen3-vl:235b-instruct-cloud → qwen3.5:397b-cloud;
         # §17.567: A/B-driven swap qwen3.5:397b-cloud → kimi-k2.7-code:cloud

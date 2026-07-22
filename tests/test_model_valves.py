@@ -349,4 +349,4 @@ class TestPayloadInclusion:
         overrides = pipe._model_overrides()
         assert overrides["model_verifier"] == "custom-verifier:3b"
         # Other roles unchanged
-        assert overrides["model_general"] == "qwen3.5:397b-cloud"
+        assert overrides["model_general"] == "deepseek-v4-pro:cloud"  # §17.632 valve default

@@ -112,7 +112,7 @@ async def test_feasibility_tool_call_immune_to_reasoning_prose():
     """§17.580 regression: the feasibility pass reads structured tool-call args,
     so a reasoning model that emits <think> prose in .text no longer forces the
     fallback (the pre-fix generate() + parse_json_object bug that fired on
-    every job because model_general → qwen3.5:397b-cloud emits prose)."""
+    every job because model_general → a reasoning model emits prose)."""
     _mod.refine_idea = AsyncMock(return_value={
         "status": "awaiting_confirmation",
         "job_id": "job-580",
