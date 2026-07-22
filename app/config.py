@@ -322,13 +322,18 @@ class Settings(BaseSettings):
     # model_verifier (qwen3.5, which never does — see §17.547), so the
     # native-first path in tool_call fires; coaxing still catches prose batches.
     # §17.566 — swapped kimi-k2.7-code:cloud → qwen3-coder-next:cloud after an
-    # objective A/B (scripts/model_ab.py --task extraction, repeat=5 on the
-    # extraction goldens): kimi was FLAKY (5/10, intermittent entries=0) while
-    # qwen3-coder-next was 10/10 AND ~3.5× faster (4.0s vs 14.3s baseline).
-    # It's NOT in tool_call_coax_models, so it uses the native path. (Scoped to
-    # extraction only — qwen3-coder-next failed the cli-entrypoint codegen
-    # golden at runtime, so model_coder stays kimi.)
-    model_research_extract: str = "qwen3-coder-next:cloud"
+    # objective A/B (extraction goldens): kimi was FLAKY (~3/10 entries=0) while
+    # qwen3-coder-next was 10/10 AND faster.
+    # §17.631 — qwen3-coder-next:cloud was RETIRED by Ollama Cloud 2026-07-15
+    # (HTTP 410 Gone); the role had been silently falling back to kimi (~3/10 on
+    # the distill goldens — the flakiness §17.566 fixed had quietly returned). Re-A/B'd
+    # the live Ollama Cloud catalog (scripts/model_ab.py --task extraction,
+    # repeat=5 then repeat=15 tie-breaker across deepseek-v4-pro / glm-5.1 /
+    # glm-5.2 / minimax-m3 / gpt-oss / nemotron / kimi-k2.6): glm-5.1:cloud won
+    # at 30/30 AND fastest of the perfect-reliability models (5.9s; vs
+    # minimax-m3 30/30@9.5s, deepseek-v4-pro 30/30@6.4s, qwen3.5 30/30@52.8s;
+    # glm-5.2 was 28/30). NOT in tool_call_coax_models → native tool-call path.
+    model_research_extract: str = "glm-5.1:cloud"
     model_cloud_heavy: str = "qwen3.5:397b-cloud"
     model_cloud_alt: str = "qwen3.5:397b-cloud"
     model_fallback: str = "qwen3.5:latest"
