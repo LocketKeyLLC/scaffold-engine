@@ -3895,8 +3895,12 @@ class Pipeline:
         # Required-slot gate — never intercept into an empty query/find/action.
         for slot in self._NL_REQUIRED_SLOTS.get(intent, ()):
             if not (data.get(slot) or "").strip():
+                self.logger.info(
+                    "nl_command: intent=%s missing slot=%s → fall through", intent, slot,
+                )
                 return None
 
+        self.logger.info("nl_command: intercept intent=%s", intent)
         return self._dispatch_nl_command(intent, data, msg, chat_id=chat_id)
 
     def _classify_command(self, msg: str) -> dict:
