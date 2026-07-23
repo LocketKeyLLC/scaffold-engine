@@ -397,6 +397,36 @@ class TestConfirmFollowup:
     def test_affirmative_detection(self, pipe, word, ok):
         assert pipe._is_affirmative(word) is ok
 
+    @pytest.mark.parametrize("word,ok", [
+        ("no", True), ("no, cancel that", True), ("never mind", True),
+        ("nevermind", True), ("not now", True), ("cancel", True),
+        ("don't", True), ("stop", True),
+        ("yes", False), ("go", False), ("make it deep instead", False), ("", False),
+    ])
+    def test_negative_detection(self, pipe, word, ok):
+        assert pipe._is_negative(word) is ok
+
+    def test_negative_reply_cancels_cleanly_no_triage(self, pipe):
+        # §17.637 — declining a pending confirm renders a clean cancellation and
+        # STOPS (previously it fell through to the planner: the reported
+        # "reverted to Scope/Options/Gaps" after saying no to a delete).
+        card = pipe._render_nl_confirm(
+            "jobs_delete", {"id": "j-1", "label": "Isolated VM Setup", "noun": "job"}, "⚠️")
+        hist = [
+            {"role": "user", "content": "delete the isolated VM job"},
+            {"role": "assistant", "content": card},
+            {"role": "user", "content": "no, cancel that"},
+        ]
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE") as triage, \
+             patch.object(pipe, "_execute_nl_action") as ex:
+            out = "".join(pipe.pipe("no, cancel that", "m", hist, {}))
+        assert "Cancelled" in out and "not deleted" in out
+        assert "Isolated VM Setup" in out
+        assert "TRIAGE" not in out
+        triage.assert_not_called()
+        ex.assert_not_called()          # nothing executed
+
     def test_execute_research_fires_handle_research(self, pipe):
         pend = {"intent": "research_topic", "slots": {"topic": "zfs", "depth": "deep"}}
         with patch.object(pipe, "_handle_research",

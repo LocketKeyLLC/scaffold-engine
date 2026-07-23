@@ -1529,19 +1529,27 @@ class Pipeline:
                     return
 
         # §17.629 — pending NL-command confirm follow-up. If the previous turn
-        # rendered a confirm card for an expensive write (research / schedule)
-        # and this turn is an affirmative ("go"/"yes"), fire the stashed action.
+        # rendered a confirm card for an expensive/destructive write (research /
+        # schedule / delete) and this turn responds to it, act on the response.
         # Checked BEFORE the noise guard (a bare "go" mustn't be swallowed) and
-        # gated on the valve. A non-affirmative reply discards the pending
-        # action and falls through to normal routing (the operator changed
-        # their mind or is refining).
+        # gated on the valve.
+        # §17.637 — an affirmative fires the action; an explicit NEGATIVE
+        # ("no" / "cancel that" / "never mind") renders a clean cancellation and
+        # STOPS — previously a "no" fell through to the planner (the reported
+        # "reverted to Scope/Options/Gaps" after declining a delete). Anything
+        # else (a refinement / new request) discards the pending action and
+        # routes normally.
         if not msg.startswith("/") and self.valves.nl_command_routing_enabled:
             pend = self._extract_pending_nl_confirm(messages)
-            if pend and self._is_affirmative(msg):
-                yield from self._execute_nl_action(
-                    pend, chat_id=self._chat_id_from_body(body),
-                )
-                return
+            if pend:
+                if self._is_affirmative(msg):
+                    yield from self._execute_nl_action(
+                        pend, chat_id=self._chat_id_from_body(body),
+                    )
+                    return
+                if self._is_negative(msg):
+                    yield self._render_confirm_cancelled(pend)
+                    return
 
         # §17.349 — guard against single-char / noise input (e.g. the
         # bare "a" case from the §17.342 transcript). The triage prompt
@@ -4261,6 +4269,37 @@ class Pipeline:
     def _is_affirmative(self, msg: str) -> bool:
         norm = (msg or "").strip().lower().strip(".!,;: ").strip()
         return norm in self._NL_AFFIRMATIVE
+
+    # §17.637 — explicit decline of a pending confirm. Matched on the first
+    # word (+ a couple of two-word phrases) so "no, cancel that", "never mind",
+    # "not now" all count. Only consulted when a confirm is pending, so the
+    # context is unambiguous.
+    _NEGATIVE_FIRST_WORDS: frozenset = frozenset({
+        "no", "nope", "nah", "cancel", "cancelled", "dont", "don't", "never",
+        "stop", "abort", "forget", "nevermind",
+    })
+
+    def _is_negative(self, msg: str) -> bool:
+        words = re.sub(r"[^\w\s']", " ", (msg or "").lower()).split()
+        if not words:
+            return False
+        if words[0] in self._NEGATIVE_FIRST_WORDS:
+            return True
+        return words[:2] in (["not", "now"], ["not", "yet"], ["leave", "it"])
+
+    def _render_confirm_cancelled(self, pend: dict) -> str:
+        """§17.637 — clean acknowledgement when the operator declines a pending
+        confirm, instead of falling through to the planner."""
+        intent = pend.get("intent", "")
+        label = (pend.get("slots") or {}).get("label")
+        if intent.endswith("_delete"):
+            what = f" **{label}** was not deleted." if label else " Nothing was deleted."
+            return f"👍 Cancelled.{what}"
+        if intent == "research_topic":
+            return "👍 Cancelled — no research started."
+        if intent == "schedule_add":
+            return "👍 Cancelled — no schedule created."
+        return "👍 Okay, cancelled — nothing was changed."
 
     def _execute_nl_action(
         self, pending: dict, *, chat_id: str | None = None,
