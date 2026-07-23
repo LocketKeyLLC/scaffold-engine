@@ -186,6 +186,45 @@ class TestPipeContinuity:
         assert "TRIAGE" in out                 # planner still ran
         triage.assert_called_once()
 
+    @pytest.mark.parametrize("task", [
+        "title_generation", "tags_generation", "follow_up_generation",
+        "query_generation", "autocomplete_generation",
+    ])
+    def test_owui_task_call_short_circuits_no_side_effects(self, pipe, task):
+        # §17.634 — OWUI fires background calls (title/tag/follow-up/…) through
+        # the same pipe with body.metadata.task set. They must bypass ALL
+        # routing (triage/assist/continuity/command) — the continuity path calls
+        # assist_start (a real side effect) and would spuriously start sessions.
+        with patch.object(pipe, "_direct_completion", return_value="TITLE") as dc, \
+             patch.object(pipe, "_reconnect_in_progress") as rec, \
+             patch.object(pipe, "_call_triage") as triage, \
+             patch.object(pipe, "_nl_command_route") as nl:
+            out = "".join(pipe.pipe(
+                "### Task:\nmake a title", "m",
+                [{"role": "user", "content": "### Task:\nmake a title"}],
+                {"metadata": {"task": task}},
+            ))
+        assert out == "TITLE"
+        dc.assert_called_once()
+        rec.assert_not_called()
+        triage.assert_not_called()
+        nl.assert_not_called()
+
+    def test_no_task_marker_routes_normally(self, pipe):
+        # A real user turn (no task marker) must NOT hit _direct_completion.
+        with patch.object(pipe, "_direct_completion") as dc, \
+             patch.object(pipe, "_active_assist_session", return_value=None), \
+             patch.object(pipe, "_active_assist_session_via_history", return_value=None), \
+             patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+             patch.object(pipe, "_in_progress_banner", return_value=""), \
+             patch.object(pipe, "_classify_command",
+                          return_value={"intent": "none", "confidence": "low"}), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE"):
+            out = "".join(pipe.pipe("build a thing", "m",
+                                    [{"role": "user", "content": "build a thing"}], {}))
+        assert "TRIAGE" in out
+        dc.assert_not_called()
+
     def test_valve_off_disables_continuity(self, pipe):
         pipe.valves.assist_continuity_enabled = False
         with patch.object(_mod._assist, "fetch_assist_candidates") as fc, \

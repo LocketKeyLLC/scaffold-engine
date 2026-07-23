@@ -1123,6 +1123,33 @@ class Pipeline:
         text = re.sub(r"<think(?:ing)?>.*", "", text, flags=re.DOTALL)
         return text.strip()
 
+    def _direct_completion(self, messages: List[dict]) -> str:
+        """§17.634 — a raw LLM completion of the given messages with NO triage
+        system prompt and NO routing. For OWUI background/task calls
+        (title/tag/follow-up/…), whose prompt already carries its own
+        instructions; must never touch the side-effectful assist/continuity/
+        command paths. Fail-soft → empty string (OWUI falls back to a default
+        title/tags)."""
+        payload = {
+            "model": self.valves.triage_model,
+            "messages": self._clean_messages(messages),
+            "stream": False,
+        }
+        try:
+            r = _HTTP_SESSION.post(
+                f"{self.valves.ollama_url}/v1/chat/completions",
+                json=payload,
+                timeout=self.valves.triage_timeout,
+            )
+            if r.status_code == 200:
+                return self._strip_think(
+                    r.json()["choices"][0]["message"]["content"]
+                ) or ""
+            self.logger.debug("direct_completion HTTP %s", r.status_code)
+        except Exception as e:  # noqa: BLE001 — never break a task call
+            self.logger.debug("direct_completion failed: %s", e)
+        return ""
+
     def _call_triage(self, messages: List[dict]) -> str:
         clean = self._window_messages(self._clean_messages(messages))
         payload = {
@@ -1360,6 +1387,23 @@ class Pipeline:
                 )
 
         body["stream"] = True
+
+        # §17.634 — OWUI background/task calls (title / tag / follow-up / query /
+        # emoji / autocomplete generation) arrive through THIS same pipe, marked
+        # with `body.metadata.task`. They are NOT user turns: routing them
+        # through triage/assist/continuity/command paths produces garbage titles
+        # AND — since §17.633 — has real side effects (continuity reconnection
+        # calls assist_start, spuriously starting other assist sessions; caught
+        # in a live OWUI browser test). Short-circuit to a raw, routing-free,
+        # side-effect-free completion so OWUI still gets its title/tags/etc.
+        _meta = body.get("metadata") if isinstance(body, dict) else None
+        _task = (_meta or {}).get("task") if isinstance(_meta, dict) else None
+        if _task:
+            self.logger.info(
+                "owui task call task=%s → direct completion (no routing)", _task,
+            )
+            yield self._direct_completion(messages)
+            return
 
         # Normalize input (Tier 1 #1): NFKC + unicode-dash -> `--` + `-flag` -> `--flag`.
         # Surface rewrites so the parser's behavior is visible (Tier 1 #13).
@@ -2179,10 +2223,13 @@ class Pipeline:
         the right job and calling it."""
         cands = _assist.fetch_assist_candidates(self)
         if not cands:
+            self.logger.info("continuity: no in-progress candidates → fall through")
             return None
         # Strong, unique topic match (≥2 distinctive shared tokens) → resume now.
         match, ambiguous = _assist.match_assist_candidate(msg, cands)
         if match and not ambiguous:
+            self.logger.info("continuity: reconnect (strong topic match) job=%s",
+                             match.get("job_id"))
             return _assist.assist_start(self, match["job_id"], chat_id=chat_id)
         if self._looks_like_resume(msg):
             # Resume intent present → a single distinctive topic token is enough
@@ -2190,13 +2237,21 @@ class Pipeline:
             # title). Unique → resume; else offer the in-progress list.
             m2, amb2 = _assist.match_assist_candidate(msg, cands, min_score=1)
             if m2 and not amb2:
+                self.logger.info("continuity: reconnect (resume+topic) job=%s",
+                                 m2.get("job_id"))
                 return _assist.assist_start(self, m2["job_id"], chat_id=chat_id)
             if len(cands) == 1:
+                self.logger.info("continuity: reconnect (resume, single) job=%s",
+                                 cands[0].get("job_id"))
                 return _assist.assist_start(self, cands[0]["job_id"], chat_id=chat_id)
+            self.logger.info("continuity: resume phrasing, %d candidates → pick-list",
+                             len(cands))
             return iter([_assist.render_candidate_list(cands)])
         # Topic matched but ambiguous (tied / weak) → let the operator choose.
         if match and ambiguous:
+            self.logger.info("continuity: ambiguous topic match → pick-list")
             return iter([_assist.render_candidate_list(cands)])
+        self.logger.info("continuity: no reconnect signal → fall through to planner")
         return None
 
     def _in_progress_banner(self) -> str:
