@@ -204,6 +204,26 @@ class TestResultsResolution:
         assert ambiguous is False
         assert {c["job_id"] for c in cands} == {"job-1", "job-2"}
 
+    def test_resolve_job_ref_is_recency_independent(self, pipe):
+        # §17.636 — a job NOT in the recent list is still found via a
+        # server-side ?q=<distinctive-token> title search (the "could not find
+        # the isolated VM job" bug, where test jobs pushed it past the recent
+        # window). Noise words ("job") are dropped from the search token.
+        def fake_fetch(params):
+            if params.get("q") == "isolated":
+                return [{"id": "j-iso", "title": "Isolated VM Setup for Media",
+                         "status": "awaiting_assist"}]
+            return []  # not in the recent/other-token results
+        with patch.object(pipe, "_fetch_jobs", side_effect=fake_fetch):
+            match, ambiguous, cands = pipe._resolve_job_ref("isolated VM job")
+        assert match["job_id"] == "j-iso"   # found despite not being "recent"
+        assert ambiguous is False           # single search hit → unambiguous
+
+    def test_resolve_job_ref_no_match_returns_none(self, pipe):
+        with patch.object(pipe, "_fetch_jobs", return_value=[]):
+            match, ambiguous, cands = pipe._resolve_job_ref("nonexistent zzz")
+        assert match is None and cands == []
+
 
 # ---------------------------------------------------------------------------
 # pipe() end-to-end — intercept vs. triage fall-through

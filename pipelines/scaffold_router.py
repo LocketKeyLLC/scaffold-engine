@@ -4047,32 +4047,66 @@ class Pipeline:
         lines += ["", f"Reply with `{slash} <id>{suffix}` using an id above."]
         return "\n".join(lines)
 
-    def _resolve_job_ref(self, ref: str):
-        """Token-match a job name/topic against recent jobs (GET /jobs).
+    # §17.636 — words dropped when picking a job-title SEARCH token (they are
+    # generic / not in titles: "delete the isolated VM job" → search "isolated",
+    # not "job"). They stay in the ref for token-MATCHING.
+    _JOB_REF_NOISE = frozenset({
+        "job", "jobs", "task", "tasks", "the", "one", "session", "sessions",
+        "run", "runs", "it", "this", "that", "my",
+    })
 
-        Returns ``(match_or_None, ambiguous, candidates)`` where candidates are
-        normalized ``{job_id,title,status}`` dicts — the same shape
-        `_assist.match_assist_candidate` / `render_candidate_list` expect, so
-        the assist pick-list machinery is reused verbatim."""
-        cands: List[dict] = []
+    def _fetch_jobs(self, params: dict) -> list:
+        """GET /jobs → jobs list (fail-soft → [])."""
         try:
             r = _HTTP_SESSION.get(
-                f"{self.valves.orchestrator_url}/jobs",
-                params={"limit": 25},
-                headers=self._auth_headers(),
-                timeout=self.valves.request_timeout,
+                f"{self.valves.orchestrator_url}/jobs", params=params,
+                headers=self._auth_headers(), timeout=self.valves.request_timeout,
             )
             if r.status_code < 400:
-                jobs = (r.json() or {}).get("jobs") or []
-                cands = [
-                    {"job_id": j.get("id"), "title": j.get("title", ""),
-                     "status": j.get("status", "")}
-                    for j in jobs if j.get("id")
-                ]
+                return (r.json() or {}).get("jobs") or []
         except (requests.exceptions.RequestException, ValueError) as e:
-            self.logger.debug("nl _resolve_job_ref failed: %s", e)
+            self.logger.debug("nl _fetch_jobs failed: %s", e)
+        return []
+
+    def _resolve_job_ref(self, ref: str):
+        """Recency-INDEPENDENT job lookup by name/topic.
+
+        §17.636 — was a flat `GET /jobs?limit=25`, which missed the target when
+        many recent jobs (e.g. test jobs) pushed it off the list — the reported
+        "could not find the isolated VM job". Now searches server-side by the
+        ref's distinctive tokens (`?q=<token>` ILIKE title), unions the hits,
+        and token-matches to disambiguate; falls back to the recent list when
+        the ref has no distinctive token. Returns ``(match_or_None, ambiguous,
+        candidates)`` in the normalized ``{job_id,title,status}`` shape."""
+        toks = [
+            w for w in re.findall(r"[a-z0-9]+", (ref or "").lower())
+            if len(w) > 2 and w not in self._JOB_REF_NOISE
+        ]
+        seen: set = set()
+        cands: List[dict] = []
+
+        def _add(jobs):
+            for j in jobs or []:
+                jid = j.get("id")
+                if jid and jid not in seen:
+                    seen.add(jid)
+                    cands.append({"job_id": jid, "title": j.get("title", ""),
+                                  "status": j.get("status", "")})
+
+        for q in (toks[:3] or [None]):
+            params = {"limit": 25}
+            if q:
+                params["q"] = q
+            _add(self._fetch_jobs(params))
+        if not cands:  # ref had no distinctive token → fall back to recent list
+            _add(self._fetch_jobs({"limit": 50}))
         if not cands:
             return None, False, []
+        # A server-side title search that yields exactly ONE job IS the match —
+        # the ILIKE already narrowed it, so don't demand ≥2 tokens (which would
+        # wrongly flag a single 1-token hit as ambiguous).
+        if len(cands) == 1:
+            return cands[0], False, cands
         match, ambiguous = _assist.match_assist_candidate(ref, cands)
         return match, ambiguous, cands
 
