@@ -186,25 +186,39 @@ class TestPipeContinuity:
         assert "TRIAGE" in out                 # planner still ran
         triage.assert_called_once()
 
-    @pytest.mark.parametrize("task", [
-        "title_generation", "tags_generation", "follow_up_generation",
-        "query_generation", "autocomplete_generation",
-    ])
-    def test_owui_task_call_short_circuits_no_side_effects(self, pipe, task):
-        # §17.634 — OWUI fires background calls (title/tag/follow-up/…) through
-        # the same pipe with body.metadata.task set. They must bypass ALL
-        # routing (triage/assist/continuity/command) — the continuity path calls
-        # assist_start (a real side effect) and would spuriously start sessions.
-        with patch.object(pipe, "_direct_completion", return_value="TITLE") as dc, \
+    # The REAL OWUI title-generation prompt shape (open_webui/config.py
+    # DEFAULT_TITLE_GENERATION_PROMPT_TEMPLATE) — starts with "### Task:" and
+    # carries a "### Chat History:" block. OWUI sends THIS as the message and
+    # does NOT forward body.metadata.task to an external pipeline.
+    _REAL_TASK_PROMPT = (
+        "### Task:\nGenerate a concise, 3-5 word title with an emoji "
+        "summarizing the chat history.\n### Guidelines:\n- ...\n### Output:\n"
+        'JSON format: { "title": "..." }\n### Chat History:\n<chat_history>\n'
+        "USER: let's continue setting up proxmox\n</chat_history>"
+    )
+
+    def test_is_owui_task_call_detector(self, pipe):
+        # Content signal (the load-bearing path — metadata.task is NOT forwarded).
+        assert pipe._is_owui_task_call({}, self._REAL_TASK_PROMPT) is True
+        # metadata.task belt-and-suspenders (clients that DO forward it).
+        assert pipe._is_owui_task_call({"metadata": {"task": "title_generation"}}, "hi") is True
+        # Real user turns must NOT be detected as task calls.
+        assert pipe._is_owui_task_call({}, "let's continue setting up proxmox") is False
+        assert pipe._is_owui_task_call({}, "### Task: my own heading, no chat history") is False
+
+    def test_owui_task_call_short_circuits_no_side_effects(self, pipe):
+        # The real content-based path: a "### Task:…### Chat History:" prompt must
+        # bypass ALL routing — the continuity path calls assist_start (a real
+        # side effect) that spuriously started sessions in the live browser test.
+        with patch.object(pipe, "_direct_completion", return_value="📉 Title") as dc, \
              patch.object(pipe, "_reconnect_in_progress") as rec, \
              patch.object(pipe, "_call_triage") as triage, \
              patch.object(pipe, "_nl_command_route") as nl:
             out = "".join(pipe.pipe(
-                "### Task:\nmake a title", "m",
-                [{"role": "user", "content": "### Task:\nmake a title"}],
-                {"metadata": {"task": task}},
+                self._REAL_TASK_PROMPT, "m",
+                [{"role": "user", "content": self._REAL_TASK_PROMPT}], {},
             ))
-        assert out == "TITLE"
+        assert out == "📉 Title"
         dc.assert_called_once()
         rec.assert_not_called()
         triage.assert_not_called()

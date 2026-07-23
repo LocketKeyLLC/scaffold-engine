@@ -1123,6 +1123,23 @@ class Pipeline:
         text = re.sub(r"<think(?:ing)?>.*", "", text, flags=re.DOTALL)
         return text.strip()
 
+    @staticmethod
+    def _is_owui_task_call(body: dict, msg: str) -> bool:
+        """§17.634 — is this an OWUI background/task call (title / tag /
+        follow-up / query / emoji / autocomplete generation), NOT a user turn?
+
+        OWUI does not forward `body.metadata.task` to an external pipeline, so
+        the load-bearing signal is the prompt itself: every task template OWUI
+        sends starts with `### Task:` and carries a `### Chat History:` block
+        (see open_webui/config.py DEFAULT_*_GENERATION_PROMPT_TEMPLATE). Users
+        never type that. The metadata.task check is kept as belt-and-suspenders
+        for OWUI builds / other clients that DO forward it."""
+        meta = body.get("metadata") if isinstance(body, dict) else None
+        if isinstance(meta, dict) and meta.get("task"):
+            return True
+        head = (msg or "").lstrip()
+        return head.startswith("### Task:") and "### Chat History:" in head
+
     def _direct_completion(self, messages: List[dict]) -> str:
         """§17.634 — a raw LLM completion of the given messages with NO triage
         system prompt and NO routing. For OWUI background/task calls
@@ -1389,19 +1406,19 @@ class Pipeline:
         body["stream"] = True
 
         # §17.634 — OWUI background/task calls (title / tag / follow-up / query /
-        # emoji / autocomplete generation) arrive through THIS same pipe, marked
-        # with `body.metadata.task`. They are NOT user turns: routing them
-        # through triage/assist/continuity/command paths produces garbage titles
-        # AND — since §17.633 — has real side effects (continuity reconnection
-        # calls assist_start, spuriously starting other assist sessions; caught
-        # in a live OWUI browser test). Short-circuit to a raw, routing-free,
-        # side-effect-free completion so OWUI still gets its title/tags/etc.
-        _meta = body.get("metadata") if isinstance(body, dict) else None
-        _task = (_meta or {}).get("task") if isinstance(_meta, dict) else None
-        if _task:
-            self.logger.info(
-                "owui task call task=%s → direct completion (no routing)", _task,
-            )
+        # emoji / autocomplete generation) arrive through THIS same pipe. They
+        # are NOT user turns: routing them through triage/assist/continuity/
+        # command paths produces garbage titles AND — since §17.633 — has real
+        # side effects (continuity reconnection calls assist_start, spuriously
+        # starting other assist sessions; caught in a live OWUI browser test).
+        # §17.634a — OWUI does NOT forward `body.metadata.task` to an external
+        # pipeline (the marker is internal — confirmed live: the first fix
+        # no-op'd and the spurious starts recurred). The reliable signal is the
+        # PROMPT: every OWUI task template is sent as a message starting with
+        # `### Task:` + a `### Chat History:` block. Short-circuit those to a
+        # raw, routing-free, side-effect-free completion.
+        if self._is_owui_task_call(body, msg):
+            self.logger.info("owui task call → direct completion (no routing)")
             yield self._direct_completion(messages)
             return
 
