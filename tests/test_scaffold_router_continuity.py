@@ -122,13 +122,28 @@ class TestReconnect:
 
     def test_weak_signal_never_auto_resumes(self, pipe):
         # A weak, non-resume topic touch ("the setup" shares 1 generic token)
-        # must NOT auto-resume a job — either a pick-list or no-reconnect
-        # (None → falls through to the planner) is acceptable.
+        # must NOT auto-resume a job.
         fc, as_ = _mock_assist()
         with fc, as_:
             r = pipe._reconnect_in_progress("the setup", chat_id=None)
         out = "".join(r) if r is not None else ""
         assert "RESUMED:" not in out
+
+    @pytest.mark.parametrize("msg", [
+        "research the latest on proxmox installation",   # command + weak topic touch
+        "delete the proxmox job",
+        "what's the status of the proxmox setup",
+        "schedule weekly research on proxmox news",
+    ])
+    def test_command_mentioning_a_job_topic_does_not_reconnect(self, pipe, msg):
+        # §17.635 — the DeFruscio HomeLab bug: a COMMAND that merely names an
+        # in-progress job's topic (1 weak token, no resume phrasing) must NOT be
+        # hijacked by continuity — it returns None so the command router handles
+        # it. (Candidate titled "Proxmox VE Installation…" → "proxmox" is the
+        # only shared token → weak/ambiguous → no reconnect.)
+        fc, as_ = _mock_assist()
+        with fc, as_:
+            assert pipe._reconnect_in_progress(msg, chat_id=None) is None
 
 
 # ---------------------------------------------------------------------------

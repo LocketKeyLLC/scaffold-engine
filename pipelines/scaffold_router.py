@@ -2264,11 +2264,16 @@ class Pipeline:
             self.logger.info("continuity: resume phrasing, %d candidates → pick-list",
                              len(cands))
             return iter([_assist.render_candidate_list(cands)])
-        # Topic matched but ambiguous (tied / weak) → let the operator choose.
-        if match and ambiguous:
-            self.logger.info("continuity: ambiguous topic match → pick-list")
-            return iter([_assist.render_candidate_list(cands)])
-        self.logger.info("continuity: no reconnect signal → fall through to planner")
+        # §17.635 — a WEAK/ambiguous topic touch with NO resume phrasing is NOT
+        # a reconnect signal. It is usually a COMMAND that merely mentions an
+        # in-progress job's topic ("research the latest on proxmox…", "delete
+        # the isolated VM job") — reconnecting there hijacks the command (the
+        # DeFruscio HomeLab bug: "research … proxmox …" landed in the Proxmox
+        # assist walkthrough). Fall through so `_nl_command_route` (research /
+        # delete / …) or the planner handles it. Reconnection now requires a
+        # STRONG unique topic match (≥2 distinctive tokens) OR an explicit
+        # resume phrasing (handled above).
+        self.logger.info("continuity: no strong/resume signal → fall through")
         return None
 
     def _in_progress_banner(self) -> str:
