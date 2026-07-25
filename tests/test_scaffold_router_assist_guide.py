@@ -429,6 +429,31 @@ class TestSubmitAutoAdvance:
             out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
         assert "All steps terminal" in out
 
+    def test_skip_auto_advances_to_next(self, pipe):
+        # §17.639 — skip has the same dead-end as submit; it auto-advances too.
+        pipe.valves.assist_auto_advance = True
+        pipe.valves.assist_auto_guide = False
+        skip_body = {"status": "skipped", "no_op": False,
+                     "next_node_key": "T3", "mirror_divergence": False}
+        next_body = {"session_id": _SID, "node_key": "T3", "title": "Third step",
+                     "tool": "LLM", "domain": "eng", "depends_on": [],
+                     "base_prompt": "bp"}
+        with patch.object(_vendor, "_ss",
+                          return_value=self._session(skip_body, next_body)):
+            out = "".join(_vendor.assist_skip(pipe, _SID, "T2", chat_id=None))
+        assert "skipped" in out
+        assert "Moving on to `T3`" in out
+        assert "Third step" in out
+
+    def test_skip_no_advance_when_valve_off(self, pipe):
+        pipe.valves.assist_auto_advance = False
+        skip_body = {"status": "skipped", "no_op": False,
+                     "next_node_key": "T3", "mirror_divergence": False}
+        with patch.object(_vendor, "_ss", return_value=self._explode_on_get(
+                skip_body, "valve off — skip must not advance")):
+            out = "".join(_vendor.assist_skip(pipe, _SID, "T2", chat_id=None))
+        assert "Next: `T3`" in out
+
 
 # ── §17.492: destructive-command banner ─────────────────────────────────────
 

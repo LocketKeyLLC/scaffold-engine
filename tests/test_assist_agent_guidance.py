@@ -39,7 +39,9 @@ def _db_with_session(sess_row, extra_rows=None):
 @pytest.mark.asyncio
 async def test_generate_step_guidance_resolves_current_node():
     sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3"}
-    db = _db_with_session(sess)
+    # §17.639 — the anti-echo guard SELECTs the current step's status; a live
+    # (non-terminal) pointer is used as-is with no healing.
+    db = _db_with_session(sess, extra_rows=[{"status": "presented"}])
     node_row = {"description": "desc", "domain": "net"}
     with patch.object(assist_agent, "_assemble_ctx_for_node",
                       new=AsyncMock(return_value=(node_row, _ctx()))), \
@@ -69,9 +71,54 @@ async def test_generate_step_guidance_missing_session_raises():
 @pytest.mark.asyncio
 async def test_generate_step_guidance_no_node_raises():
     sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": None}
-    db = _db_with_session(sess)
-    with pytest.raises(ValueError, match="no node_key"):
+    # No pointer + no pending step → the guard's _next_pending_node_key SELECT
+    # returns nothing → "no live step".
+    db = _db_with_session(sess, extra_rows=[None])
+    with pytest.raises(ValueError, match="no live step"):
         await assist_agent.generate_step_guidance(session_id="s", db=db)
+
+
+@pytest.mark.asyncio
+async def test_generate_step_guidance_heals_past_terminal_pointer():
+    """§17.639 — pointer lingers on a finished step (e.g. handed_off / committed)
+    and no explicit node_key is given → the guard heals forward to the next
+    pending step and generates for THAT, never re-rendering the finished one
+    (the "output is echoing" class)."""
+    for terminal in ("committed", "handed_off", "skipped"):
+        sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3"}
+        # execute order: session, step-status(terminal), next_pending(T5), heal UPDATE
+        db = _db_with_session(
+            sess, extra_rows=[{"status": terminal}, {"node_key": "T5"}, {}],
+        )
+        node_row = {"description": "d", "domain": "net"}
+        with patch.object(assist_agent, "_assemble_ctx_for_node",
+                          new=AsyncMock(return_value=(node_row, _ctx()))), \
+             patch("app.modules.assist_guide.ensure_guidance",
+                   new=AsyncMock(return_value={"guidance": "walk", "status": "ready",
+                                               "cached": False, "guidance_meta": {}})):
+            res = await assist_agent.generate_step_guidance(
+                session_id="s", research=False, force=False, db=db,
+            )
+        assert res["node_key"] == "T5", f"{terminal}: should heal forward, not echo"
+        db.commit.assert_awaited()  # corrected pointer persisted
+
+
+@pytest.mark.asyncio
+async def test_generate_step_guidance_explicit_node_key_honored_on_terminal():
+    """§17.639 — an EXPLICIT node_key is honored even when it names a finished
+    step (intentional re-view via `/assist guide T1`); no status query, no heal."""
+    sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T5"}
+    db = _db_with_session(sess)  # only the session SELECT — guard short-circuits
+    node_row = {"description": "d", "domain": "net"}
+    with patch.object(assist_agent, "_assemble_ctx_for_node",
+                      new=AsyncMock(return_value=(node_row, _ctx()))), \
+         patch("app.modules.assist_guide.ensure_guidance",
+               new=AsyncMock(return_value={"guidance": "walk", "status": "ready",
+                                           "cached": False, "guidance_meta": {}})):
+        res = await assist_agent.generate_step_guidance(
+            session_id="s", node_key="T1", research=False, force=False, db=db,
+        )
+    assert res["node_key"] == "T1"
 
 
 @pytest.mark.asyncio
@@ -280,7 +327,7 @@ async def test_learn_from_submit_nothing_new_skips_write():
 async def test_generate_step_guidance_stream_resolves_and_delegates():
     sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3",
             "metadata": {}}
-    db = _db_with_session(sess)
+    db = _db_with_session(sess, extra_rows=[{"status": "presented"}])  # §17.639 guard
 
     async def _fake_stream(**kwargs):
         yield {"type": "delta", "text": "hi"}
@@ -339,7 +386,7 @@ async def test_set_environment_rejects_bad_verbosity():
 async def test_generate_step_guidance_threads_verbosity():
     sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3",
             "metadata": {"verbosity": "terse"}}
-    db = _db_with_session(sess)
+    db = _db_with_session(sess, extra_rows=[{"status": "presented"}])  # §17.639 guard
     with patch.object(assist_agent, "_assemble_ctx_for_node",
                       new=AsyncMock(return_value=({"description": "d", "domain": None}, _ctx()))), \
          patch("app.modules.assist_guide.ensure_guidance",

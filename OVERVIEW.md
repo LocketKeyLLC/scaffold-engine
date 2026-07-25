@@ -22049,6 +22049,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.639 Hardening — anti-echo guard + skip parity (make the §17.638 class impossible) (2026-07-25)
+
+**Follow-up review of §17.638: "improve so things of this nature will not occur again."** §17.638 advanced `current_node_key` *proactively* in `submit_step`, but that's whack-a-mole — the review found **`handoff_step` marks a node `handed_off` and never advances the pointer**, so a single handoff re-opened the exact same echo (the next conversational turn re-grounds on the handed-off step and re-renders its walkthrough). Any future pointer-mutating path, or a commit/skip race, or a continuity reconnect landing on a finished node, would reintroduce it. **Root-cause guard**: both guidance generators (`generate_step_guidance` + `generate_step_guidance_stream`) now resolve the target node through a single choke point, `_resolve_live_node_key`:
+
+- an **explicit** `node_key` is honored verbatim (intentional re-view of a finished step, `/assist guide T1`);
+- an **auto-resolved** pointer that lands on a **terminal** step (`committed` / `skipped` / `handed_off` / `escalated`, the new `_TERMINAL_STEP_STATUSES` tuple) **self-heals forward** to the next claimable step and persists the corrected pointer (logs `assist_pointer_healed`), rather than re-rendering the finished one.
+
+So the anti-echo invariant — *a walkthrough never re-renders a finished step* — now holds regardless of which upstream path left the pointer stale; the §17.638 proactive advance is an optimization on top, not the guarantee. **Deliberately NOT guarded**: `run_step_fix` (the operator is diagnosing the step they just did, which may be terminal — healing forward would generate a fix for an unrelated future step) and `run_step_research` (a side query, not the walkthrough). The guard is scoped to the path that actually echoes.
+
+**Skip parity**: `assist_skip` now auto-advances after a skip (same `assist_auto_advance` valve as §17.638's submit) — skipping then parking on the skipped step was the same dead-end.
+
+**Tests**: +3 agent (guard heals past `committed`/`handed_off`/`skipped`; explicit node_key honored on a terminal step; no-live-step raises), +2 pipeline (skip auto-advances / holds when valve off), +1 live integration (`test_pointer_heals_past_terminal_step` — simulates a handoff parking the pointer on `handed_off` T1, asserts auto-resolve returns T2, explicit T1 still honored, corrected pointer persisted). Updated 4 existing guidance mocks for the guard's status SELECT. Agent 61, pipeline 907, integration 8 green.
+
 ### §17.638 Fix — assist auto-advances after a commit (kills the "output is echoing" symptom) (2026-07-25)
 
 **Same homelab job (Isolated VM Setup, session `3fe3931c…`), reported as "it worked to where I retrieved the information for it and then its output was echoing."** Traced live: the operator worked step **T1** (gather hardware: `nproc`/`free`/`lspci`), submitted, T1 committed — then every subsequent conversational turn re-rendered **T1's** walkthrough. **Two structural causes, both fixed:**

@@ -933,9 +933,16 @@ def assist_skip(
     assist_remember(
         pipe, chat_id, session_id=session_id, last_node_key=next_nk,
     )
+    # §17.639 — auto-advance on skip too (parity with the §17.638 submit path):
+    # skipping and then parking on the skipped step is the same dead-end, and a
+    # conversational operator won't type `/assist next`.
+    auto_advance = (
+        getattr(pipe.valves, "assist_auto_advance", True) and bool(next_nk)
+    )
     msg = f"⏭ Step `{node_key}` skipped. "
     if next_nk:
-        msg += f"Next: `{next_nk}`."
+        msg += (f"Moving on to `{next_nk}`…" if auto_advance
+                else f"Next: `{next_nk}`.")
     else:
         msg += f"All steps terminal — run `/assist done`."
     # §17.286 — mirror invariant divergence (skip path). assist_steps
@@ -947,6 +954,9 @@ def assist_skip(
             "skipped, but the DAG node was NOT touched."
         )
     yield msg
+    if auto_advance:
+        yield "\n\n---\n\n"
+        yield from assist_next(pipe, session_id, chat_id=chat_id)
 
 
 def assist_handoff(

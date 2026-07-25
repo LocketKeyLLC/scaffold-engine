@@ -524,11 +524,17 @@ async def generate_step_guidance(
     if sess["status"] not in ("active", "paused"):
         raise ValueError(f"session status {sess['status']!r} cannot generate guidance")
     job_id = str(sess["job_id"])
-    nk = node_key or sess["current_node_key"]
+    # §17.639 — resolve through the anti-echo guard: an explicit node_key is
+    # honored, but an auto-resolved pointer never targets a *finished* step (it
+    # self-heals forward instead of re-rendering the committed/handed-off one).
+    nk = await _resolve_live_node_key(
+        session_id=session_id, node_key=node_key,
+        current_node_key=sess["current_node_key"], db=db,
+    )
     if not nk:
         raise ValueError(
-            "no node_key supplied and session has no current step; "
-            "claim one with /assist next first"
+            "no live step to guide; the session's steps are all finished — "
+            "run /assist done to see the result, or /assist next to re-check"
         )
 
     if research is None:
@@ -591,11 +597,17 @@ async def generate_step_guidance_stream(
     if sess["status"] not in ("active", "paused"):
         raise ValueError(f"session status {sess['status']!r} cannot generate guidance")
     job_id = str(sess["job_id"])
-    nk = node_key or sess["current_node_key"]
+    # §17.639 — resolve through the anti-echo guard: an explicit node_key is
+    # honored, but an auto-resolved pointer never targets a *finished* step (it
+    # self-heals forward instead of re-rendering the committed/handed-off one).
+    nk = await _resolve_live_node_key(
+        session_id=session_id, node_key=node_key,
+        current_node_key=sess["current_node_key"], db=db,
+    )
     if not nk:
         raise ValueError(
-            "no node_key supplied and session has no current step; "
-            "claim one with /assist next first"
+            "no live step to guide; the session's steps are all finished — "
+            "run /assist done to see the result, or /assist next to re-check"
         )
     if research is None:
         research = settings.assist_guide_research
@@ -690,6 +702,11 @@ async def run_step_fix(
     if sess["status"] not in ("active", "paused"):
         raise ValueError(f"session status {sess['status']!r} cannot run fix")
     job_id = str(sess["job_id"])
+    # NB: fix does NOT use the §17.639 anti-echo guard — the operator is
+    # diagnosing a problem with the step they just did (which may be terminal),
+    # so we must target the referenced/current step, not heal forward to an
+    # unrelated future one. The guard is scoped to the guidance path (the thing
+    # that re-renders a walkthrough and thus echoes).
     nk = node_key or sess["current_node_key"]
     if not nk:
         raise ValueError(
@@ -1242,6 +1259,61 @@ async def _next_pending_node_key(*, session_id: str, db) -> Optional[str]:
         {"sid": session_id},
     )).mappings().first()
     return row["node_key"] if row else None
+
+
+# §17.639 — a step in one of these statuses is FINISHED; it must never be
+# handed back as the session's "current step" to (re)generate a walkthrough for.
+# Re-rendering a finished step is the "output is echoing" class (§17.638): the
+# pointer lingers on it and every conversational turn replays its walkthrough.
+_TERMINAL_STEP_STATUSES = ("committed", "skipped", "handed_off", "escalated")
+
+
+async def _resolve_live_node_key(
+    *, session_id: str, node_key: Optional[str], current_node_key: Optional[str], db,
+) -> Optional[str]:
+    """Resolve the node a guidance turn should target — never a finished step.
+
+    - An EXPLICIT ``node_key`` is honored verbatim: the operator asked to (re)view
+      that specific step, even a completed one (`/assist guide T1`).
+    - Otherwise fall back to ``current_node_key`` — but only if it still points at
+      LIVE work. If the pointer lingers on a terminal step (handoff marks a node
+      ``handed_off`` without advancing the pointer; a commit/skip race; a
+      continuity reconnect landing on a finished node), self-heal it forward to
+      the next claimable step and persist the corrected pointer, so no path can
+      make a walkthrough echo a finished step (§17.638/§17.639). Returns the
+      resolved key, or ``None`` when the session has no live step left.
+
+    This is the single choke point every auto-resolved guidance/turn passes
+    through, so the anti-echo invariant holds regardless of which upstream path
+    left the pointer stale — proactive per-path advances (submit_step) are an
+    optimization on top, not the guarantee.
+    """
+    if node_key:
+        return node_key
+    nk = current_node_key
+    if nk:
+        row = (await db.execute(
+            text("SELECT status FROM assist_steps "
+                 "WHERE session_id = :sid AND node_key = :nk"),
+            {"sid": session_id, "nk": nk},
+        )).mappings().first()
+        if row and row["status"] not in _TERMINAL_STEP_STATUSES:
+            return nk  # pointer is live — use it as-is
+    # Pointer missing or finished → heal forward to the next claimable step.
+    healed = await _next_pending_node_key(session_id=session_id, db=db)
+    if healed and healed != nk:
+        await db.execute(
+            text("UPDATE assist_sessions SET current_node_key = :nk, "
+                 "updated_at = NOW() "
+                 "WHERE id = :sid AND status IN ('active', 'paused')"),
+            {"sid": session_id, "nk": healed},
+        )
+        await db.commit()
+        logger.info(
+            "assist_pointer_healed session_id=%s from=%s to=%s",
+            session_id, nk, healed,
+        )
+    return healed
 
 
 async def _maybe_finalize_session(*, session_id: str, db) -> None:

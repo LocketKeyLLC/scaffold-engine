@@ -125,6 +125,56 @@ async def test_submit_advances_pointer_before_next(seeded_job):
 
 @pytest.mark.validate
 @pytest.mark.asyncio
+async def test_pointer_heals_past_terminal_step(seeded_job):
+    """§17.639 — the anti-echo guard. handoff (and other paths) can leave
+    current_node_key on a FINISHED step without advancing it; the guard used by
+    the guidance path must never hand that finished step back — it self-heals
+    forward to the next pending step and persists the corrected pointer, so no
+    walkthrough ever re-renders a done step (the "output is echoing" class)."""
+    job_id = seeded_job
+    async with async_session() as db:
+        out = await assist_agent.start_assist_session(
+            job_id=job_id, replan_policy="disabled", db=db,
+        )
+        sid = out["session_id"]
+    # Simulate a single handoff of T1: mark the step handed_off and leave the
+    # pointer parked on it (exactly what handoff_step does — it never advances).
+    async with async_session() as db:
+        await db.execute(
+            text("UPDATE assist_steps SET status='handed_off' "
+                 "WHERE session_id=:sid AND node_key='T1'"),
+            {"sid": sid},
+        )
+        await db.execute(
+            text("UPDATE dag_nodes SET status='done' "
+                 "WHERE job_id=:jid AND node_key='T1'"),
+            {"jid": job_id},
+        )
+        await db.execute(
+            text("UPDATE assist_sessions SET current_node_key='T1' WHERE id=:sid"),
+            {"sid": sid},
+        )
+        await db.commit()
+    # Auto-resolve (no explicit node_key) must NOT return the handed-off T1.
+    async with async_session() as db:
+        resolved = await assist_agent._resolve_live_node_key(
+            session_id=sid, node_key=None, current_node_key="T1", db=db,
+        )
+    assert resolved == "T2"
+    # An EXPLICIT request for the finished step is still honored (intentional re-view).
+    async with async_session() as db:
+        explicit = await assist_agent._resolve_live_node_key(
+            session_id=sid, node_key="T1", current_node_key="T1", db=db,
+        )
+    assert explicit == "T1"
+    # The corrected pointer was persisted, so later turns ground on live work.
+    async with async_session() as db:
+        sess = await assist_agent.get_session(session_id=sid, db=db)
+    assert sess["current_node_key"] == "T2"
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
 async def test_full_walkthrough_from_awaiting_assist(seeded_job):
     """§17.625 regression — a job PARKED by the §17.624 hands-on gate in
     'awaiting_assist' must walk start→submit-all→completed just like a
