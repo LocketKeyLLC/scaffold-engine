@@ -82,6 +82,32 @@ def test_guide_system_for_tool_defaults_to_noncode():
     assert assist_guide.guide_system_for_tool(None) is assist_guide.GUIDE_SYSTEM_NONCODE
 
 
+# ── §17.640: always-on beginner-audience framing ────────────────────────────
+
+
+def test_every_guide_prompt_carries_beginner_framing():
+    """§17.640 — the walkthrough must never assume prior expertise. The
+    beginner-audience floor is baked into EVERY human guide/fix system prompt
+    (shell/codegen/non-code/fix), so it holds regardless of verbosity."""
+    for tool in ("shell", "codegen", "LLM", None):
+        s = assist_guide.guide_system_for_tool(tool)
+        assert "assume the operator is a capable beginner" in s.lower(), tool
+        # the specific failure that prompted this: connecting two machines
+        assert "connecting one machine to another" in s
+    assert "assume the operator is a capable beginner" in assist_guide.GUIDE_SYSTEM_FIX.lower()
+
+
+def test_beginner_framing_survives_every_verbosity():
+    """The floor holds at every verbosity — terse must NOT reintroduce an
+    expert assumption (the pre-§17.640 terse said 'assume an expert operator')."""
+    base = assist_guide.guide_system_for_tool("LLM")
+    for v in (None, "normal", "terse", "detailed"):
+        s = assist_guide.apply_verbosity(base, v)
+        assert "assume the operator is a capable beginner" in s.lower(), v
+    terse = assist_guide.apply_verbosity(base, "terse")
+    assert "assume an expert" not in terse.lower()
+
+
 # ── generation (happy path) ──────────────────────────────────────────────
 
 

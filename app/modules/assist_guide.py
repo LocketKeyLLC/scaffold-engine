@@ -53,13 +53,35 @@ logger = logging.getLogger("scaffold.assist_guide")
 # *LLM* to produce a deliverable; these tell the engine to produce
 # instructions the *human operator* will follow to produce it themselves.
 
+# §17.640 — always-on beginner-audience framing. Injected into every human
+# guide/fix system prompt so the walkthrough NEVER assumes prior expertise or
+# that the operator already knows an unspoken sub-task (the reported failure:
+# a step said "connect the PC to the other PC" with no explanation of HOW).
+# Verbosity is a separate dial (terse = fewer words, detailed = more WHY); this
+# floor holds at every level, so "always assume limited knowledge" is guaranteed
+# regardless of the verbosity setting.
+_AUDIENCE_FRAMING = (
+    "Audience — ALWAYS assume the operator is a capable beginner: they will "
+    "follow precise instructions carefully but are NOT assumed to know this "
+    "domain. Never assume prior expertise, and never assume they already know "
+    "how to do a sub-task the step takes for granted — opening a terminal, "
+    "connecting one machine to another, finding a device's IP address, editing "
+    "a config file, plugging in a cable, logging into a router. When a step "
+    "depends on such a sub-task, spell out HOW to do it (the exact clicks, "
+    "commands, cables, or menu paths), not just 'configure X' or 'connect A to "
+    "B'. Expand every acronym and define jargon in-line the first time it "
+    "appears. When more than one common setup exists (wired vs Wi-Fi, two "
+    "machines on the same network vs across the internet), name the one you are "
+    "assuming and give the reader a quick way to tell which fits their case."
+)
+
 _RUNBOOK_HUMAN_FRAMING = (
     "You are a hands-on co-pilot guiding a human operator through ONE step of "
     "a larger plan. The reader will perform this step themselves on their own "
     "machine. Produce the runbook they will follow — every command copy-paste "
     "ready, every operator-supplied value a <PLACEHOLDER>, and a clear way to "
     "confirm success. You are NOT performing the step; do not narrate it as "
-    "done."
+    "done.\n\n" + _AUDIENCE_FRAMING
 )
 
 _HEADING_META_RULE = (
@@ -72,6 +94,8 @@ _HEADING_META_RULE = (
 )
 
 GUIDE_SYSTEM_CODEGEN = f"""You are a hands-on co-pilot guiding a human operator through ONE code step of a larger plan. The reader will create and run this code themselves.
+
+{_AUDIENCE_FRAMING}
 
 {_HEADING_META_RULE}
 
@@ -103,6 +127,8 @@ Produce the walkthrough for THIS step only. Nothing more."""
 
 GUIDE_SYSTEM_NONCODE = f"""You are a hands-on co-pilot guiding a human operator through ONE non-coding step of a larger plan. The deliverable is a decision, a written artifact, a configuration in a UI, or a manual action — not code or shell commands.
 
+{_AUDIENCE_FRAMING}
+
 {_HEADING_META_RULE}
 
 Use these section headings, in order, and omit any that don't apply:
@@ -131,6 +157,8 @@ Hard rules:
 Produce the walkthrough for THIS step only. Nothing more."""
 
 GUIDE_SYSTEM_FIX = f"""You are a hands-on co-pilot helping a human operator who hit a problem while performing ONE step of a larger plan. They will paste the error / what went wrong; you diagnose it and give them the exact commands to recover and finish the step.
+
+{_AUDIENCE_FRAMING}
 
 {_HEADING_META_RULE}
 
@@ -185,9 +213,11 @@ _RESEARCH_SYNTH_SYSTEM = (
 VERBOSITY_LEVELS = ("terse", "normal", "detailed")
 _VERBOSITY_DIRECTIVE = {
     "terse": (
-        "\n\nVERBOSITY: TERSE — output only the commands/steps and a one-line "
-        "reason each. Omit background, rationale, and prose. Assume an expert "
-        "operator who just wants the actions."
+        "\n\nVERBOSITY: TERSE — the operator asked for brevity: output only the "
+        "commands/steps with a one-line reason each, and omit background and "
+        "rationale. Brevity means FEWER WORDS, not assuming expertise — still "
+        "spell out any non-obvious sub-task and keep every command copy-paste "
+        "ready (the beginner-audience rule above always holds)."
     ),
     "detailed": (
         "\n\nVERBOSITY: DETAILED — assume a less-experienced operator: briefly "
