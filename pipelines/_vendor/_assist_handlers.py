@@ -845,9 +845,25 @@ def assist_submit(
     assist_remember(
         pipe, chat_id, session_id=session_id, last_node_key=next_nk,
     )
+    # §17.487 — the success verdict is needed both for the warning block below
+    # and for the auto-advance gate, so read it up front.
+    verdict = d.get("success_verdict") or {}
+    outcome = verdict.get("outcome")
+    ran = "sandbox" in (verdict.get("grounded_by") or "")
+    # §17.638 — auto-advance: after a clean commit, present the next step in the
+    # same turn instead of parking on the finished one (the "output is echoing"
+    # symptom — every later turn re-rendered the committed step's walkthrough).
+    # Held back on a soft-fail verdict so the operator can redo/fix first.
+    auto_advance = (
+        getattr(pipe.valves, "assist_auto_advance", True)
+        and d.get("status") == "committed"
+        and bool(next_nk)
+        and outcome != "failed"
+    )
     msg = f"✅ Step `{node_key}` committed. "
     if next_nk:
-        msg += f"Next: `{next_nk}`. Run `/assist next` to fetch."
+        msg += (f"Moving on to `{next_nk}`…" if auto_advance
+                else f"Next: `{next_nk}`. Run `/assist next` to fetch.")
     else:
         msg += f"All steps terminal — run `/assist done` to view compiled output."
     # §17.286 — mirror invariant divergence: assist_steps was updated
@@ -863,9 +879,7 @@ def assist_submit(
         )
     # §17.487 — warn mode: surface the success verdict without blocking.
     # §17.491 — when grounded_by includes 'sandbox', the code was actually run.
-    verdict = d.get("success_verdict") or {}
-    outcome = verdict.get("outcome")
-    ran = "sandbox" in (verdict.get("grounded_by") or "")
+    # (verdict/outcome/ran computed above — reused by the auto-advance gate.)
     if outcome == "failed":
         head = ("🛑 **Ran your code in the sandbox — it errored.**" if ran
                 else "⚠️ **This may have failed.**")
@@ -885,6 +899,13 @@ def assist_submit(
         pairs = ", ".join(f"`{k}`=`{v}`" for k, v in learned.items())
         msg += f"\n\n📌 Learned for later steps: {pairs}"
     yield msg
+    # §17.638 — chain straight into the next step (claim + walkthrough) so the
+    # operator keeps moving instead of re-reading the finished one. assist_next
+    # re-remembers the freshly-claimed node_key, superseding the next_nk hint
+    # stashed above.
+    if auto_advance:
+        yield "\n\n---\n\n"
+        yield from assist_next(pipe, session_id, chat_id=chat_id)
 
 
 def assist_skip(

@@ -283,6 +283,7 @@ class TestSubmitVerdictRender:
         assert "/assist fix" in out
 
     def test_submit_quiet_on_success_verdict(self, pipe):
+        pipe.valves.assist_auto_advance = False  # §17.638 — verdict render only
         body = {"status": "committed", "no_op": False, "next_node_key": "T3",
                 "mirror_divergence": False,
                 "success_verdict": {"outcome": "succeeded", "reason": "ok"}}
@@ -303,6 +304,7 @@ class TestSubmitLearnedSubstitutions:
         return sess
 
     def test_submit_surfaces_learned_values(self, pipe):
+        pipe.valves.assist_auto_advance = False  # §17.638 — learned-subs render only
         body = {"status": "committed", "no_op": False, "next_node_key": "T3",
                 "mirror_divergence": False,
                 "learned_substitutions": {"HOST_IP": "10.0.0.5"}}
@@ -312,6 +314,7 @@ class TestSubmitLearnedSubstitutions:
         assert "HOST_IP" in out and "10.0.0.5" in out
 
     def test_submit_no_learned_no_banner(self, pipe):
+        pipe.valves.assist_auto_advance = False  # §17.638 — learned-subs render only
         body = {"status": "committed", "no_op": False, "next_node_key": "T3",
                 "mirror_divergence": False}
         with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
@@ -340,6 +343,7 @@ class TestSubmitSandboxVerdictRender:
         assert "NameError" in out
 
     def test_succeeded_sandbox_shows_verified(self, pipe):
+        pipe.valves.assist_auto_advance = False  # §17.638 — verdict render only
         body = {"status": "committed", "no_op": False, "next_node_key": "T3",
                 "mirror_divergence": False,
                 "success_verdict": {"outcome": "succeeded", "reason": "ok",
@@ -357,6 +361,73 @@ class TestSubmitSandboxVerdictRender:
             out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "code", chat_id=None))
         assert "Ran your code in the sandbox" in out
         assert "not marked done" in out
+
+
+# ── §17.638: auto-advance after a clean commit ──────────────────────────────
+
+
+class TestSubmitAutoAdvance:
+    """After a clean commit the pipeline should claim + present the NEXT step in
+    the same turn — not park on the finished one (the "output is echoing"
+    symptom, where every later conversational turn re-rendered the committed
+    step's walkthrough)."""
+
+    def _session(self, submit_body, next_body):
+        sess = MagicMock()
+        sess.post.return_value = _make_response(200, submit_body)
+        sess.get.return_value = _make_response(200, next_body)
+        return sess
+
+    def _explode_on_get(self, submit_body, why):
+        sess = MagicMock()
+        sess.post.return_value = _make_response(200, submit_body)
+        sess.get.side_effect = AssertionError(why)
+        return sess
+
+    def test_commit_auto_advances_to_next(self, pipe):
+        pipe.valves.assist_auto_advance = True
+        pipe.valves.assist_auto_guide = False  # keep the next-step render simple
+        submit_body = {"status": "committed", "no_op": False,
+                       "next_node_key": "T3", "mirror_divergence": False}
+        next_body = {"session_id": _SID, "node_key": "T3", "title": "Third step",
+                     "tool": "LLM", "domain": "eng", "depends_on": [],
+                     "base_prompt": "bp"}
+        with patch.object(_vendor, "_ss",
+                          return_value=self._session(submit_body, next_body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
+        assert "committed" in out
+        assert "Moving on to `T3`" in out           # forward-looking phrasing
+        assert "Run `/assist next`" not in out      # no manual-advance hint
+        assert "Third step" in out                  # next step rendered inline
+
+    def test_no_advance_on_failed_verdict(self, pipe):
+        pipe.valves.assist_auto_advance = True
+        submit_body = {"status": "committed", "no_op": False,
+                       "next_node_key": "T3", "mirror_divergence": False,
+                       "success_verdict": {"outcome": "failed", "reason": "boom"}}
+        with patch.object(_vendor, "_ss", return_value=self._explode_on_get(
+                submit_body, "must not advance on a soft-fail verdict")):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "boom", chat_id=None))
+        assert "committed" in out
+        assert "Next: `T3`. Run `/assist next`" in out  # falls back to manual hint
+
+    def test_no_advance_when_valve_off(self, pipe):
+        pipe.valves.assist_auto_advance = False
+        submit_body = {"status": "committed", "no_op": False,
+                       "next_node_key": "T3", "mirror_divergence": False}
+        with patch.object(_vendor, "_ss", return_value=self._explode_on_get(
+                submit_body, "valve off — must not advance")):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
+        assert "Next: `T3`. Run `/assist next`" in out
+
+    def test_no_advance_when_no_next(self, pipe):
+        pipe.valves.assist_auto_advance = True
+        submit_body = {"status": "committed", "no_op": False,
+                       "next_node_key": None, "mirror_divergence": False}
+        with patch.object(_vendor, "_ss", return_value=self._explode_on_get(
+                submit_body, "no next step — must not advance")):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
+        assert "All steps terminal" in out
 
 
 # ── §17.492: destructive-command banner ─────────────────────────────────────

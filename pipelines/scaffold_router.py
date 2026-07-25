@@ -628,6 +628,13 @@ class Pipeline:
         assist_auto_guide: bool = True
         assist_guide_research: bool = True
         assist_guide_timeout: int = 180
+        # §17.638 — after a clean commit, immediately claim + present the next
+        # step instead of stopping at "run /assist next". Without this the
+        # operator stayed parked on the finished step and every conversational
+        # turn re-rendered its walkthrough (the "output is echoing" symptom).
+        # Suppressed on a soft-fail verdict (they may want to redo the step).
+        # Flip off to restore the explicit-advance flow.
+        assist_auto_advance: bool = True
         # §17.537 — assist-aware chat routing. When a chat has an ACTIVE
         # assist session, plain (non-command) text is a conversational turn
         # ON that session — route it to the step guidance (refine=<text>)

@@ -75,6 +75,7 @@ class TestMirrorDivergenceResponseShape:
             _result(),                                   # UPDATE assist_sessions activity
             _result(mappings_first=_replan_session_row()),  # SELECT replan policy
             _result(mappings_first={"node_key": "T2"}),  # next_pending — non-None skips finalize
+            _result(),                                   # §17.638 UPDATE current_node_key -> T2
         ]
         out = await assist_agent.submit_step(
             session_id="sess-1", node_key="T1",
@@ -96,6 +97,7 @@ class TestMirrorDivergenceResponseShape:
             _result(),
             _result(mappings_first=_replan_session_row()),
             _result(mappings_first={"node_key": "T2"}),  # next_pending — skip finalize
+            _result(),                                   # §17.638 UPDATE current_node_key -> T2
         ]
         out = await assist_agent.submit_step(
             session_id="sess-1", node_key="T1",
@@ -118,6 +120,7 @@ class TestMirrorDivergenceResponseShape:
             _result(rowcount=0),                        # UPDATE dag_nodes — already done
             _result(),                                   # session activity touch
             _result(mappings_first={"node_key": "T2"}),  # next_pending — skip finalize
+            _result(),                                   # §17.638 UPDATE current_node_key -> T2
         ]
         out = await assist_agent.submit_step(
             session_id="sess-1", node_key="T1",
@@ -134,6 +137,7 @@ class TestMirrorDivergenceResponseShape:
             _result(rowcount=1),                        # UPDATE dag_nodes
             _result(),
             _result(mappings_first={"node_key": "T2"}),  # next_pending
+            _result(),                                   # §17.638 UPDATE current_node_key -> T2
         ]
         out = await assist_agent.submit_step(
             session_id="sess-1", node_key="T1",

@@ -96,6 +96,35 @@ async def test_full_walkthrough(seeded_job):
 
 @pytest.mark.validate
 @pytest.mark.asyncio
+async def test_submit_advances_pointer_before_next(seeded_job):
+    """§17.638 — submit_step advances current_node_key off the committed step,
+    WITHOUT waiting for the next /next claim. Pre-§17.638 the pointer lingered
+    on the just-committed step, so every conversational turn re-grounded on it
+    and re-rendered its finished walkthrough (the "output is echoing" symptom)."""
+    job_id = seeded_job
+    async with async_session() as db:
+        out = await assist_agent.start_assist_session(
+            job_id=job_id, replan_policy="disabled", db=db,
+        )
+        sid = out["session_id"]
+    # Claim + commit T1.
+    async with async_session() as db:
+        step = await assist_agent.get_next_step(session_id=sid, db=db)
+        assert step["node_key"] == "T1"
+    async with async_session() as db:
+        res = await assist_agent.submit_step(
+            session_id=sid, node_key="T1", evidence="did T1",
+            evidence_kind="text", action="submit", db=db,
+        )
+    assert res["next_node_key"] == "T2"
+    # The pointer has already moved to T2 — no get_next_step call in between.
+    async with async_session() as db:
+        sess = await assist_agent.get_session(session_id=sid, db=db)
+    assert sess["current_node_key"] == "T2"
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
 async def test_full_walkthrough_from_awaiting_assist(seeded_job):
     """§17.625 regression — a job PARKED by the §17.624 hands-on gate in
     'awaiting_assist' must walk start→submit-all→completed just like a

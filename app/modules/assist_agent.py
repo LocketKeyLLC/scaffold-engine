@@ -1159,6 +1159,27 @@ async def submit_step(
     next_pending = await _next_pending_node_key(session_id=session_id, db=db)
     if next_pending is None:
         await _maybe_finalize_session(session_id=session_id, db=db)
+    else:
+        # §17.638 — advance the session pointer off the step we just committed.
+        # `current_node_key` was previously moved only by get_next_step (the
+        # `/next` claim), so between a commit and the next explicit `/next` it
+        # lingered on a *terminal* step. Every conversational turn grounds on
+        # `current_node_key` (classify_session_turn / the guide/refine fallback),
+        # so the finished step's walkthrough got re-rendered on each turn — the
+        # "output is echoing" symptom the operator hit on the homelab job. Point
+        # it at the next pending step (computed AFTER _maybe_replan so a
+        # selective/full re-plan's resets are reflected) so downstream turns
+        # ground on live work. get_next_step re-sets this to the same key when it
+        # claims, so the write is idempotent with the claim path.
+        await db.execute(
+            text(
+                "UPDATE assist_sessions SET current_node_key = :nk, "
+                "updated_at = NOW() "
+                "WHERE id = :sid AND status IN ('active', 'paused')"
+            ),
+            {"sid": session_id, "nk": next_pending},
+        )
+        await db.commit()
     return {
         "session_id": session_id,
         "node_key": node_key,
