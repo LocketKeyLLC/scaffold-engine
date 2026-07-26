@@ -41,7 +41,29 @@ Rules:
 - Extract implicit requirements from the idea
 - If the idea is vague, list ambiguities but still produce a best-effort brief
 - Keep goals specific and actionable
-- No filler words, no hedging"""
+- No filler words, no hedging
+
+§17.649 — Non-destructive default (READ CAREFULLY). When the idea refers to an
+EXISTING or already-running system — signalled by words like "existing",
+"already", "current", "my <server/host/cluster/database>", "on my …", or a
+named service that is clearly in use — and asks to CLEAN UP, MODIFY, ADD TO, or
+RECONFIGURE it (e.g. "remove old data", "clean up", "reconfigure", "add X",
+"harden"), you MUST NOT escalate that into destroying the system:
+  * Do NOT turn "remove old data" into "wipe all storage / all disks".
+  * Do NOT turn "set up / configure X on my existing Proxmox" into "reinstall the
+    OS" or "provision the host from scratch".
+  * Do NOT bake a full wipe, OS reinstall, reformat, or delete-everything action
+    into `goals` to resolve an uncertainty about the system's current state.
+Prefer the CONSERVATIVE, in-place interpretation that PRESERVES the existing
+system and touches only what the idea names (the old data, the specific service,
+the specific config). A destructive whole-system action (wipe all disks,
+reinstall the OS, reformat, drop the database, factory-reset) belongs in `goals`
+ONLY when the idea UNAMBIGUOUSLY asks to rebuild/reprovision from scratch (e.g.
+"fresh install", "bare-metal rebuild", "start over", "reformat everything").
+If whether to rebuild-from-scratch vs. modify-in-place is genuinely unclear,
+record it in `ambiguities` AND choose the non-destructive reading for `goals` —
+never the reverse. Removing DATA is not the same as wiping DISKS or reinstalling
+an OS; keep them distinct."""
 
 REFINE_PROMPT = """Analyze this idea and produce a structured brief:
 
@@ -85,7 +107,14 @@ REFINE_BRIEF_TOOL = Tool(
             "goals": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Specific measurable outcomes",
+                "description": (
+                    "Specific measurable outcomes. §17.649 — for an existing/"
+                    "already-running system, keep goals non-destructive and "
+                    "in-place: 'remove old data' ≠ 'wipe all disks'; 'configure X "
+                    "on existing Proxmox' ≠ 'reinstall the OS'. Only include a "
+                    "full wipe / OS reinstall / reformat / delete-all goal when "
+                    "the idea unambiguously asks to rebuild from scratch."
+                ),
             },
             "constraints": {
                 "type": "array",

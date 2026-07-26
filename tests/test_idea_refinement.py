@@ -309,3 +309,28 @@ class TestDomainEnumGuard:
         desc = (REFINE_BRIEF_TOOL.input_schema["properties"]["domain"]
                 .get("description", "")).lower()
         assert "software" in desc and "eng" in desc  # tells the model what eng is
+
+
+class TestNonDestructiveDefault:
+    """§17.649 — refinement must not escalate 'existing system + remove old
+    data' into 'wipe all disks + reinstall'. Live failure: the idea "home lab on
+    existing Proxmox VE hardware … removing old data" produced the goal "Wipe all
+    existing data from target storage devices before Proxmox installation" and a
+    wipe+reinstall host component — which on a running Proxmox destroys it."""
+
+    def test_refine_system_carries_nondestructive_rule(self):
+        from app.modules.idea_refinement import REFINE_SYSTEM
+        low = REFINE_SYSTEM.lower()
+        assert "non-destructive default" in low
+        assert "remove old data" in low and "wipe all" in low
+        assert "reinstall the os" in low or "reinstall" in low
+        assert "in-place" in low
+        assert "unambiguously asks to rebuild" in low
+
+    def test_goals_field_reinforces_nondestructive(self):
+        from app.modules.idea_refinement import REFINE_BRIEF_TOOL
+        desc = (REFINE_BRIEF_TOOL.input_schema["properties"]["goals"]
+                .get("description", "")).lower()
+        assert "non-destructive" in desc
+        assert "wipe all disks" in desc
+        assert "reinstall the os" in desc
