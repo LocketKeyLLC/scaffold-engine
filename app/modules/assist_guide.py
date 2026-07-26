@@ -843,28 +843,45 @@ async def extract_substitutions(
 # High-confidence, command-context-anchored patterns only — a destructive
 # verb in prose ("this removes the file") must NOT trip the gate; only an
 # actual command form does. (compiled regex, human-readable why).
-_DESTRUCTIVE_PATTERNS: list[tuple[re.Pattern, str]] = [
+#
+# §17.644 — two groups. COMMAND patterns anchor to the START of the command
+# (via re.match after the prompt/sudo/env prefix is stripped): a real command
+# leads with its tool name, so `parted /dev/sdb` fires but the prose/heading
+# lines "Create a single partition with parted", "1. Open parted…", "4. Exit
+# parted:" do NOT. The pre-§17.644 patterns used `\b<tool>\b` (word anywhere),
+# so a bare mention of parted/fdisk/mkfs/dd/etc. in a sentence tripped the
+# banner — crying wolf on nearly every shell step, which blunts the real
+# warning (the §17.613 lesson, generalized from `rm` to every command verb).
+# CONTENT patterns are not command-led (redirects, SQL, fork bomb), so they
+# stay search-anywhere.
+_DESTRUCTIVE_CMD_PATTERNS: list[tuple[re.Pattern, str]] = [
     # §17.613 (audit #7) — require an actual dash-flag bearing r/f/R. The old
     # pattern needed no leading dash, so `rm file.conf` and even the safe
     # `rm -i file` tripped the gate — crying wolf trains operators to ignore it.
-    (re.compile(r"\brm\s+(-\S*\s+)*-\S*[rfR]"), "recursive/forced file deletion (rm -rf)"),
-    (re.compile(r"--no-preserve-root"), "rm targeting / (--no-preserve-root)"),
-    (re.compile(r"\bdd\b\s+(if|of)="), "raw disk write (dd)"),
-    (re.compile(r"\bmkfs(\.\w+)?\b"), "format filesystem (mkfs)"),
-    (re.compile(r"\bwipefs\b"), "wipe filesystem signatures (wipefs)"),
-    (re.compile(r"\bshred\b"), "secure file wipe (shred)"),
-    (re.compile(r"\b(fdisk|parted|sgdisk)\b"), "partition-table edit"),
-    (re.compile(r">\s*/dev/(sd|nvme|vd|hd|mmcblk)"), "overwrite a block device"),
-    (re.compile(r"\bchmod\s+-R\s+0?777\b"), "world-writable recursive chmod"),
-    (re.compile(r"\bgit\s+(reset\s+--hard|clean\s+-[a-zA-Z]*f|push\s+(-f|--force))"),
+    (re.compile(r"rm\s+(-\S*\s+)*-\S*[rfR]"), "recursive/forced file deletion (rm -rf)"),
+    (re.compile(r"dd\s+(if|of)="), "raw disk write (dd)"),
+    (re.compile(r"mkfs(\.\w+)?\b"), "format filesystem (mkfs)"),
+    (re.compile(r"wipefs\b"), "wipe filesystem signatures (wipefs)"),
+    (re.compile(r"shred\b"), "secure file wipe (shred)"),
+    (re.compile(r"(fdisk|parted|sgdisk)\b"), "partition-table edit"),
+    (re.compile(r"chmod\s+-R\s+0?777\b"), "world-writable recursive chmod"),
+    (re.compile(r"git\s+(reset\s+--hard|clean\s+-[a-zA-Z]*f|push\s+(-f|--force))"),
      "destructive git (hard reset / force push / clean -f)"),
-    (re.compile(r"\bdocker\s+(system\s+prune|volume\s+(rm|prune)|rm\s+-f)"), "docker resource removal"),
-    (re.compile(r"\bkubectl\s+delete\b"), "kubectl delete"),
+    (re.compile(r"docker\s+(system\s+prune|volume\s+(rm|prune)|rm\s+-f)"), "docker resource removal"),
+    (re.compile(r"kubectl\s+delete\b"), "kubectl delete"),
+]
+_DESTRUCTIVE_CONTENT_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"--no-preserve-root"), "rm targeting / (--no-preserve-root)"),
+    (re.compile(r">\s*/dev/(sd|nvme|vd|hd|mmcblk)"), "overwrite a block device"),
     (re.compile(r"\b(DROP\s+(TABLE|DATABASE|SCHEMA)|TRUNCATE(\s+TABLE)?)\b", re.IGNORECASE),
      "destructive SQL (DROP/TRUNCATE)"),
     (re.compile(r"\bDELETE\s+FROM\b(?!.*\bWHERE\b)", re.IGNORECASE), "unfiltered SQL DELETE (no WHERE)"),
     (re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"), "fork bomb"),
 ]
+
+# Leading prefixes that precede the actual command verb (so `sudo parted …` and
+# `FOO=bar dd …` still anchor on parted/dd). Stripped before the CMD match.
+_CMD_PREFIX_RE = re.compile(r"^(sudo\s+|doas\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+")
 
 
 def scan_destructive(text: str) -> list[dict]:
@@ -873,6 +890,10 @@ def scan_destructive(text: str) -> list[dict]:
     Returns ``[{line, why}]`` (deduped by line; line truncated). Strips leading
     prompt/fence chars so ``$ rm -rf x`` matches. No LLM. Best-effort — this
     informs the operator, it does not block.
+
+    §17.644 — command patterns anchor to the start of the command (after any
+    prompt/`sudo`/env-var prefix) so a destructive verb appearing mid-sentence
+    in prose or a numbered heading does not trip the banner.
     """
     if not text:
         return []
@@ -882,11 +903,23 @@ def scan_destructive(text: str) -> list[dict]:
         line = raw.strip().lstrip("$#>` ").strip()
         if not line or line in seen:
             continue
-        for rx, why in _DESTRUCTIVE_PATTERNS:
-            if rx.search(line):
-                out.append({"line": line[:200], "why": why})
-                seen.add(line)
+        matched: Optional[str] = None
+        # Command-led: strip sudo/doas/env prefixes, then require the tool at
+        # the start (re.match anchors at position 0).
+        cmd_line = _CMD_PREFIX_RE.sub("", line)
+        for rx, why in _DESTRUCTIVE_CMD_PATTERNS:
+            if rx.match(cmd_line):
+                matched = why
                 break
+        # Content-led: high-confidence tokens that aren't command-first.
+        if matched is None:
+            for rx, why in _DESTRUCTIVE_CONTENT_PATTERNS:
+                if rx.search(line):
+                    matched = why
+                    break
+        if matched is not None:
+            out.append({"line": line[:200], "why": matched})
+            seen.add(line)
     return out
 
 

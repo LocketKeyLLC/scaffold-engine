@@ -705,6 +705,33 @@ def test_scan_destructive_dedups_by_line():
     assert len(assist_guide.scan_destructive(text)) == 1
 
 
+def test_scan_destructive_command_verbs_anchor_to_command_start():
+    """§17.644 — a destructive tool named in PROSE or a numbered heading must NOT
+    fire; only an actual command (tool at the start, after any sudo/env prefix)
+    does. The live browser test flagged 7 lines on one T1 step, most of them
+    prose containing the word 'parted'."""
+    # Prose / headings that merely MENTION the tool — must NOT fire.
+    for prose in (
+        "### Phase 2 – Create a single partition with parted",
+        "1. Open parted on the disk:",
+        "4. Exit parted:",
+        "Use fdisk or parted to inspect the layout.",
+        "This will format the drive with mkfs later.",
+        "Be careful with dd — it writes raw bytes.",
+    ):
+        assert assist_guide.scan_destructive(prose) == [], f"false positive on: {prose!r}"
+    # Real commands (optionally sudo/env-prefixed) — must fire.
+    for danger in (
+        "sudo parted /dev/sdb",
+        "parted /dev/<DISK_DEVICE>",
+        "mkfs.ext4 /dev/sdb1",
+        "sudo dd if=/dev/zero of=/dev/sda",
+        "FOO=bar dd if=/dev/zero of=/dev/sdb",
+        "kubectl delete pod x",
+    ):
+        assert assist_guide.scan_destructive(danger), f"missed: {danger!r}"
+
+
 @pytest.mark.asyncio
 async def test_generate_guidance_attaches_destructive(monkeypatch):
     monkeypatch.setattr(assist_guide.settings, "assist_destructive_scan", True)

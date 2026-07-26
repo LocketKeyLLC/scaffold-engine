@@ -1130,7 +1130,12 @@ def assist_guide_stream_cmd(
                 continue
             if event_type == sse_const.ASSIST_GUIDE_DELTA:
                 if not started:
-                    yield "## 🧭 How to do this step\n\n"
+                    # §17.644 — lead with a newline so the H2 starts at column 0
+                    # of a fresh line. Keepalive ZWSPs (yielded while the research
+                    # pre-pass runs, before the first delta) would otherwise sit
+                    # on the same line as `##`, so the `#` is no longer the first
+                    # char and OWUI renders it as literal text, not a heading.
+                    yield "\n## 🧭 How to do this step\n\n"
                     started = True
                 txt = payload.get("text", "")
                 if txt:

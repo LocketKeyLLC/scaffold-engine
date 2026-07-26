@@ -22049,6 +22049,22 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.644 Fix — end-to-end OWUI assist verification + 3 UX bugs it surfaced (2026-07-26)
+
+**Drove a full assist session through the real OWUI path** (pipeline `:9099` → orchestrator `:8000`: explicit `metadata.chat_id`, streamed SSE, multi-turn history) on a throwaway homelab job (created, verified, deleted — real jobs untouched). **§17.643 confirmed working through the browser**, not just via `docker exec`: the concise beginner walkthrough renders (T1 partition, T4 LXC — phased, checkpoints, `<PLACEHOLDER>`s), research is cited-for-correctness but not reproduced as depth, and the **verbosity trap is fixed live** — "walk me through this like a beginner" produced 456 words at `normal`, not the old bloated `detailed`. NL routing (next / plain sentence / "show me the plan" / "where am i" / "done, …"), explain_plan, status, streaming, and the success-verifier all worked. See [[project_orchestrator_no_hot_reload]] — the fix only reached the browser after `docker restart`.
+
+The optimal-UX pass surfaced **3 pre-existing bugs** (not §17.643 regressions):
+
+1. **Destructive-command banner false positives** (`scan_destructive`, `assist_guide.py`). On one T1 step the banner flagged **7 lines, only ~2 real** — the rest were prose/headings containing a tool name ("Phase 2 – Create a single partition with parted", "1. Open parted…", "4. Exit parted:"). The command patterns used `\b<tool>\b` (word anywhere), so any mention of parted/fdisk/mkfs/dd/wipefs/shred in a sentence tripped it — crying wolf on nearly every shell step, blunting the real warning (the §17.613 `rm` lesson, ungeneralized). **Fix**: split into `_DESTRUCTIVE_CMD_PATTERNS` (anchored to the command START via `re.match` after a prompt/`sudo`/`doas`/env-var prefix strip — so `sudo parted /dev/sdb` fires but the prose lines don't) and `_DESTRUCTIVE_CONTENT_PATTERNS` (redirect-to-block-device, SQL DROP/TRUNCATE/unfiltered-DELETE, fork bomb — not command-led, still search-anywhere). Bare command lines (`rm -rf /tmp/x` with no fence) still fire, preserving the existing tests.
+
+2. **Substitution learner false positives** (`assist.py` submit path). A submit with evidence the verifier judged **`failed`/unrelated** still ran `learn_from_submit`, scraping garbage subs (e.g. `STORAGE=4TB` from "the 4TB drive is partitioned") that then propagate into later steps' `<STORAGE>` placeholder. **Fix**: gate learning on `verdict.outcome != 'failed'` — `succeeded`/`unclear`/None still learn (no over-block), only a definite failure suppresses it. The step still commits (block valve off by default), just without learning from mismatched evidence.
+
+3. **ZWSP breaks the walkthrough heading** (`_assist_handlers.py` stream path). While the research pre-pass runs (before the first content delta), the guide stream yields keepalive zero-width spaces to hold the SSE connection open; the first delta then yielded `"## 🧭 How to do this step\n\n"` — so the ZWSPs sat on the SAME line as `##`, making `#` no longer the first char, so OWUI can render it as literal text instead of an H2. **Fix**: lead the header with `\n` so the H2 always starts at column 0 of a fresh line (keepalives kept — removing them would let the connection time out during the slow research pass).
+
++7 regression tests (command-anchoring: prose-mention no-fire vs. real/`sudo`/env-prefixed commands fire; failed-verdict suppresses learning vs. succeeded/unclear still learn). Assist suite green (223).
+
+---
+
 ### §17.643 Fix — assist walkthroughs are concise; research is correctness-only, not reproduced (2026-07-26)
 
 **Fresh homelab attempt, still "responses too long, still not assuming a limited user" — after §17.640/641/642.** Those three commits kept editing the walkthrough *prompt* and the DAG *granularity*, both of which measurement showed were already fine. Reproduced against the live orchestrator (`docker exec … generate_guidance`, real `model_general`/deepseek-v4-pro): the DAG for a homelab brief yields **11 genuinely single-outcome nodes** (Create LXC — "only container creation" → Pass through iGPU — "only GPU passthrough" → Install Jellyfin — "only installation" → …), and a single-outcome walkthrough with `research=False` is a clean **471 words**, beginner-level (spells out clicks, defines jargon inline, checkpoints). So neither §17.642 nor the beginner/pacing floors were the leak. The real driver, isolated by a test matrix:

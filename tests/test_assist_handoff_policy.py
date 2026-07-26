@@ -71,6 +71,8 @@ async def test_submit_action_never_auto_handoffs():
                       new=AsyncMock(return_value={"status": "active", "handoff_policy": "auto_on_skip"})), \
          patch.object(assist_router.assist_agent, "spawn_handoff_background") as spawn, \
          patch.object(assist_router.settings, "assist_verify_on_submit", False), \
+         patch.object(assist_router.assist_agent, "learn_from_submit",
+                      new=AsyncMock(return_value=None)), \
          patch.object(assist_router.assist_agent, "submit_step",
                       new=AsyncMock(return_value={"status": "committed"})) as submit:
         result = await assist_router.assist_submit(
@@ -79,3 +81,51 @@ async def test_submit_action_never_auto_handoffs():
     spawn.assert_not_called()
     submit.assert_called_once()
     assert result["status"] == "committed"
+
+
+# ── §17.644 — don't learn substitutions from failed/unrelated evidence ──────
+
+
+def _submit_body(node_key="T1"):
+    return AssistSubmitInput(node_key=node_key, action="submit",
+                             output="the 4TB drive is partitioned")
+
+
+def _patch_submit(outcome):
+    """Active session, a verdict with the given outcome, a clean commit, and a
+    learn stub — so a test can assert whether learn_from_submit ran."""
+    return (
+        patch.object(assist_router.assist_agent, "get_session",
+                     new=AsyncMock(return_value={"status": "active", "handoff_policy": "manual"})),
+        patch.object(assist_router.assist_agent, "verify_submit_outcome",
+                     new=AsyncMock(return_value={"outcome": outcome, "reason": "r"})),
+        patch.object(assist_router.assist_agent, "submit_step",
+                     new=AsyncMock(return_value={"status": "committed"})),
+        patch.object(assist_router.assist_agent, "learn_from_submit",
+                     new=AsyncMock(return_value={"STORAGE": "4TB"})),
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_verdict_suppresses_substitution_learning():
+    """A `failed` verdict means the evidence is unrelated to this step; learning
+    from it produces garbage subs (STORAGE=4TB from '4TB drive'). Skip it — the
+    step still commits (block valve off by default), just without learning."""
+    gs, ver, ss, learn = _patch_submit("failed")
+    with gs, ver, ss, learn as learn_mock:
+        result = await assist_router.assist_submit("sid-1", _submit_body(), AsyncMock())
+    assert result["status"] == "committed"
+    learn_mock.assert_not_called()
+    assert "learned_substitutions" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["succeeded", "unclear"])
+async def test_nonfailed_verdict_still_learns(outcome):
+    """`succeeded`/`unclear` (and None) still learn — only a definite `failed`
+    verdict suppresses it, so the §17.644 guard doesn't over-block."""
+    gs, ver, ss, learn = _patch_submit(outcome)
+    with gs, ver, ss, learn as learn_mock:
+        result = await assist_router.assist_submit("sid-1", _submit_body(), AsyncMock())
+    learn_mock.assert_called_once()
+    assert result["learned_substitutions"] == {"STORAGE": "4TB"}

@@ -458,7 +458,15 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         # §17.490 — learn the concrete values the operator used for this step's
         # placeholders so later walkthroughs are concrete. Best-effort; only
         # fires on a real commit and when the step's guidance had placeholders.
+        # §17.644 — but NOT when the verifier judged the evidence a failure /
+        # unrelated to the step: that evidence is about a different step (or is
+        # noise), so learning from it produces garbage substitutions (e.g.
+        # STORAGE=4TB scraped from "the 4TB drive is partitioned") that then
+        # propagate into later steps' placeholders. `unclear`/`succeeded`/None
+        # still learn — only a definite `failed` verdict suppresses it.
+        _verdict_failed = bool(verdict) and verdict.get("outcome") == "failed"
         if (settings.assist_learn_substitutions and body.action == "submit"
+                and not _verdict_failed
                 and isinstance(result, dict) and result.get("status") == "committed"):
             try:
                 learned = await assist_agent.learn_from_submit(
