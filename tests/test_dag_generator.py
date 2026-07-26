@@ -400,6 +400,20 @@ class TestToolSelectionGuide:
         assert "is NOT one node; it is SIX" in DAG_SYSTEM
         assert "Verify a hardware transcode" in DAG_SYSTEM
 
+    def test_split_acquire_create_configure(self):
+        """§17.646 — a 900+-word "Create unprivileged LXC" walkthrough (bundled
+        download-template + create + set-static-IP) motivated splitting acquire /
+        create / network-config into separate outcomes."""
+        from app.modules.dag_generator import DAG_SYSTEM
+        # Prerequisite acquisition and post-create configuration are their own nodes.
+        assert "ACQUIRES A PREREQUISITE" in DAG_SYSTEM
+        assert "CREATES a resource and then CONFIGURES that resource" in DAG_SYSTEM
+        assert "acquire-prerequisite ≠ create ≠ network-config" in DAG_SYSTEM
+        # The "more than one Phase → more than one outcome" tell.
+        assert "more than one \"Phase\"" in DAG_SYSTEM
+        # The concrete LXC split example.
+        assert '"Create unprivileged LXC" is NOT one node' in DAG_SYSTEM
+
     def test_step_count_allows_finer_grain(self):
         from app.modules.dag_generator import DAG_SYSTEM
         # The old hard cap of 10 is gone; multi-part briefs go finer.

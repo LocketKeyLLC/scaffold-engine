@@ -1083,6 +1083,31 @@ class Pipeline:
         before this is ever consulted)."""
         return bool(msg) and bool(cls._ASSIST_INTENT_RE.search(msg))
 
+    # §17.646 — a message that reads as CONTINUING an in-progress assist step
+    # (reporting completion / advancing / reporting an error / pasting output),
+    # as opposed to a brand-new idea. Used to gate the /work sole-session
+    # fallback so it resumes on "done"/"next" but leaves new ideas for the
+    # planner. Deterministic — an unambiguous fast verb OR a leading
+    # continuation phrase.
+    _ASSIST_CONT_RE = re.compile(
+        r"^\s*("
+        r"done|next|skip|pause|resume|continue|status|finished?|complete[d]?|"
+        r"submit|proceed|go on|keep going|move on|"
+        r"i['’]?\s*(did|ran|created|installed|configured|finished|set up|added)|"
+        r"i['’]?ve\b|it\s+(worked|failed|errored|says|shows)|"
+        r"that\s+(worked|failed)|"
+        r"what['’]?s\s+next|where\s+(am\s+i|were\s+we)|show\s+(me\s+)?the\s+plan"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    def _looks_like_assist_continuation(self, msg: str) -> bool:
+        if not msg:
+            return False
+        if _assist.fast_classify_turn(msg):   # next/skip/pause/status/… verbs
+            return True
+        return bool(self._ASSIST_CONT_RE.search(msg.strip()))
+
     @staticmethod
     def _is_first_turn(messages: list[dict]) -> bool:
         """True when the user has sent exactly one user-message in this chat.
@@ -1594,6 +1619,17 @@ class Pipeline:
             self._active_assist_session(cid)
             or self._active_assist_session_via_history(messages)
         )
+        # §17.646 — DB-derived fallback. Both paths above can fail even mid-
+        # session: OWUI delivers no chat_id AND, on a long transcript, truncates
+        # the "Assist session started — <id>" marker out of the history window it
+        # sends — so a plain "done" / "next" / pasted output could no longer find
+        # the session and fell through to the planner (completion lost, the step
+        # never advanced). If this message reads as an assist continuation AND
+        # exactly one assist session is active, resume it via /work (no chat_id,
+        # no history needed). Gated on the continuation signal so a genuinely new
+        # idea still reaches the planner untouched.
+        if not active and self._looks_like_assist_continuation(msg):
+            active = self._sole_active_session_via_work()
         if active:
             # §17.626 — plain text in an active session is an intent, not just a
             # refine hint: classify it and route (submit/skip/next/fix/…).
@@ -2437,6 +2473,32 @@ class Pipeline:
             return r.json()
         except (requests.exceptions.RequestException, ValueError):
             return None
+
+    def _sole_active_session_via_work(self) -> dict | None:
+        """§17.646 — the single active assist session from /work (DB-derived, no
+        chat_id / no history marker), or None when there are zero or more than
+        one. Returns the same `{session_id, last_node_key, status}` shape as the
+        other resolvers so the routing fork stays signal-agnostic."""
+        work = self._fetch_work()
+        if not work:
+            return None
+        # /work returns the list under `assist_sessions` (WorkResponse field name).
+        active = [
+            s for s in (work.get("assist_sessions") or [])
+            if isinstance(s, dict) and s.get("status") == "active" and s.get("session_id")
+        ]
+        if len(active) != 1:
+            return None
+        s = active[0]
+        self.logger.info(
+            "assist_routing work-fallback session=%s node=%s",
+            s.get("session_id"), s.get("current_node_key"),
+        )
+        return {
+            "session_id": s["session_id"],
+            "last_node_key": s.get("current_node_key"),
+            "status": "active",
+        }
 
     def _active_job_recall(self, chat_id: str | None) -> dict | None:
         # §17.539 — chat_id is NOT delivered to the pipe in this OWUI setup

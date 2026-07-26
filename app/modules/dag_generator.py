@@ -196,10 +196,19 @@ only that result. A node is TOO BIG (split it) if ANY of these hold:
   install Jellyfin, map GPU");
 - its `outputs` list holds more than one distinct artifact;
 - finishing it has more than one natural "stop and check it worked" moment;
-- it bundles create + configure + integrate + verify of the same thing.
+- it bundles create + configure + integrate + verify of the same thing;
+- it ACQUIRES A PREREQUISITE and then uses it (download an ISO/template/image,
+  add a package repo) — the acquisition is its own node;
+- it CREATES a resource and then CONFIGURES that resource (set its network/IP,
+  add users, install software, edit its config) — creation and configuration
+  are separate outcomes.
+A good rule of thumb: if the human-facing walkthrough for the node would need
+more than one "Phase", it is more than one outcome — split it so each node's
+walkthrough is a single short phase.
 
-Splitting heuristic: install ≠ configure ≠ integrate ≠ verify — each is its
-own node. So "Deploy Jellyfin with transcoding" is NOT one node; it is SIX:
+Splitting heuristic (each distinct verb is its own node):
+acquire-prerequisite ≠ create ≠ network-config, and install ≠ configure ≠ integrate ≠ verify.
+So "Deploy Jellyfin with transcoding" is NOT one node; it is SIX:
   T_a Create the Jellyfin LXC        → outputs: empty Jellyfin LXC running
   T_b Install Jellyfin               → starts from T_a; the server package only
   T_c Map the GPU into the LXC       → starts from T_b; device passthrough only
@@ -210,6 +219,15 @@ Each is one result with one checkpoint. Apply the same split to any
 "set up / deploy / configure X with Y" phrasing and to any node that would
 otherwise create several sibling resources at once (e.g. "Create the 4 LXCs"
 → one create node per LXC). Prefer more small steps over few big ones.
+
+Concretely, "Create unprivileged LXC" is NOT one node either — a real DAG that
+made it one node produced a 900+-word walkthrough covering three phases at once.
+Split it:
+  T_a Download the OS template (if not present)  → outputs: template on host
+  T_b Create the unprivileged container          → starts from T_a; the CT only
+  T_c Set the container's static IP              → starts from T_b; network only
+Creating the container and giving it a network identity are separate outcomes,
+each with its own checkpoint.
 
 Anti-example 1 (Shell — drawn from a real DAG that violated this rule —
 homelab brief, 6-node Shell decomposition). T1, T2, T3, T5 EACH produced

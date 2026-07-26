@@ -311,3 +311,91 @@ class TestPipeRoutesViaHistoryWithoutChatId:
             out = "".join(pipe.pipe("what about networking", "model-id", msgs, NO_CID_BODY))
         assert "TRIAGE_OUTPUT" in out
         guide.assert_not_called()
+
+
+@pytest.mark.smoke
+class TestWorkFallbackResume:
+    """§17.646 — when OWUI sends no chat_id AND truncates the assist-start marker
+    out of a long transcript, a plain "done"/"next" must still resume the sole
+    active session (DB-derived via /work), so completion is recorded and the step
+    advances instead of bouncing to the planner."""
+
+    @pytest.mark.parametrize("msg", [
+        "done", "done, I created the LXC container", "next", "what's next",
+        "I installed pi-hole", "it failed with an error", "skip this",
+        "I've finished the step", "status",
+    ])
+    def test_continuation_phrases_detected(self, pipe, msg):
+        assert pipe._looks_like_assist_continuation(msg) is True
+
+    @pytest.mark.parametrize("msg", [
+        "build me a web scraper in python",
+        "set up a hardened homelab on a Supermicro server",
+        "what about networking best practices",
+        "create a budget tracker app",
+    ])
+    def test_new_ideas_not_treated_as_continuation(self, pipe, msg):
+        assert pipe._looks_like_assist_continuation(msg) is False
+
+    def _work(self, sessions):
+        return {"jobs": [], "assist_sessions": sessions}
+
+    def test_sole_active_session_returned(self, pipe):
+        sessions = [{"session_id": "s-1", "status": "active", "current_node_key": "T3"}]
+        with patch.object(pipe, "_fetch_work", return_value=self._work(sessions)):
+            got = pipe._sole_active_session_via_work()
+        assert got == {"session_id": "s-1", "last_node_key": "T3", "status": "active"}
+
+    def test_zero_active_returns_none(self, pipe):
+        with patch.object(pipe, "_fetch_work", return_value=self._work([])):
+            assert pipe._sole_active_session_via_work() is None
+
+    def test_multiple_active_returns_none(self, pipe):
+        sessions = [
+            {"session_id": "s-1", "status": "active", "current_node_key": "T1"},
+            {"session_id": "s-2", "status": "active", "current_node_key": "T2"},
+        ]
+        with patch.object(pipe, "_fetch_work", return_value=self._work(sessions)):
+            assert pipe._sole_active_session_via_work() is None
+
+    def test_continuation_no_marker_resumes_sole_session(self, pipe):
+        """The fix: no chat_id, no marker in history, a "done" turn — resume the
+        one active session via /work and route it through _assist_nl_turn."""
+        msgs = [
+            {"role": "user", "content": "earlier stuff"},
+            {"role": "assistant", "content": "some walkthrough with no session marker"},
+            {"role": "user", "content": "done, I created the LXC"},
+        ]
+        sessions = [{"session_id": "s-9", "status": "active", "current_node_key": "T2"}]
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_fetch_work", return_value=self._work(sessions)), \
+             patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+             patch.object(pipe, "_in_progress_banner", return_value=""), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
+             patch.object(pipe, "_assist_nl_turn",
+                          side_effect=lambda *a, **k: iter(["GUIDE_OUTPUT"])) as guide:
+            out = "".join(pipe.pipe("done, I created the LXC", "model-id", msgs, NO_CID_BODY))
+        assert "GUIDE_OUTPUT" in out
+        assert "TRIAGE_OUTPUT" not in out
+        triage.assert_not_called()
+        args, kwargs = guide.call_args
+        assert args[0] == "s-9"
+        assert kwargs["node_key"] == "T2"
+
+    def test_new_idea_no_marker_does_not_hijack_sole_session(self, pipe):
+        """A genuinely new idea (not a continuation) must NOT be swallowed by the
+        active session — it goes to the planner, and /work is never consulted."""
+        msgs = [
+            {"role": "user", "content": "build a hardened homelab on a Supermicro server"},
+        ]
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_fetch_work") as work, \
+             patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+             patch.object(pipe, "_in_progress_banner", return_value=""), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
+             patch.object(pipe, "_assist_nl_turn") as guide:
+            out = "".join(pipe.pipe(
+                "build a hardened homelab on a Supermicro server", "model-id", msgs, NO_CID_BODY))
+        assert "TRIAGE_OUTPUT" in out
+        guide.assert_not_called()
+        work.assert_not_called()  # gated out before the /work call
