@@ -115,6 +115,25 @@ def test_every_guide_prompt_carries_pacing_floor():
         assert "do not cut it" not in low, tool
 
 
+def test_every_guide_prompt_carries_target_safety():
+    """§17.648 — every human guide/fix prompt must carry the target-machine
+    safety rule: a wipe/install step acts ON the target (in place, booted from
+    media), never by attaching the target's drives to the operator's own laptop,
+    and never runs a destructive command against the machine the operator is at.
+    The live failure: a Proxmox-host 'Wipe storage devices' step told the user to
+    pull the server's drives, plug them into their laptop, and dd them there."""
+    for tool in ("shell", "codegen", "LLM", None):
+        s = assist_guide.guide_system_for_tool(tool).lower()
+        assert "target-machine safety" in s, tool
+        assert "attach them to their own" in s or "relocate its hardware" in s, tool
+        assert "never run a destructive command" in s, tool
+    fix = assist_guide.GUIDE_SYSTEM_FIX.lower()
+    assert "target-machine safety" in fix
+    # The pre-§17.648 misleading absolute is gone from the shell/runbook framing.
+    assert "perform this step themselves on their own machine." not in \
+        assist_guide.guide_system_for_tool("shell").lower()
+
+
 def test_beginner_framing_survives_every_verbosity():
     """The floor holds at every verbosity — terse must NOT reintroduce an
     expert assumption (the pre-§17.640 terse said 'assume an expert operator')."""
