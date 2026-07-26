@@ -75,13 +75,34 @@ _AUDIENCE_FRAMING = (
     "assuming and give the reader a quick way to tell which fits their case."
 )
 
+# §17.641 — pacing floor. §17.640 made walkthroughs thorough ("spell out HOW"),
+# which for a large step turns into one long flat list that overwhelms a
+# first-timer doing it by hand. This keeps the SAME completeness but chunks and
+# paces it — group into phases, checkpoint each, one action per item. Chunk the
+# work, never cut it.
+_PACING_FRAMING = (
+    "Pacing — the reader is ONE person doing this by hand, possibly for the "
+    "first time, so the walkthrough must stay digestible and never read as an "
+    "overwhelming wall of actions. (1) Cover ONLY what THIS step needs — never "
+    "fold in work that belongs to a later step. (2) If the step needs more than "
+    "a handful of actions, GROUP them into a few short, clearly labeled phases "
+    "(roughly 3-6 actions each) and end each phase with a one-line "
+    "'Checkpoint:' the reader confirms before moving on — chunk the work, do "
+    "NOT cut it (every necessary action still appears). (3) One concrete action "
+    "per numbered item; no compound 'do A, then B, then C' items. (4) Put "
+    "anything nice-to-have or advanced behind an explicit '(Optional)' label so "
+    "it is clearly skippable, never inline as if required. (5) Open with a "
+    "single short sentence naming how many phases there are, so the reader sees "
+    "a short, finite path instead of an endless list."
+)
+
 _RUNBOOK_HUMAN_FRAMING = (
     "You are a hands-on co-pilot guiding a human operator through ONE step of "
     "a larger plan. The reader will perform this step themselves on their own "
     "machine. Produce the runbook they will follow — every command copy-paste "
     "ready, every operator-supplied value a <PLACEHOLDER>, and a clear way to "
     "confirm success. You are NOT performing the step; do not narrate it as "
-    "done.\n\n" + _AUDIENCE_FRAMING
+    "done.\n\n" + _AUDIENCE_FRAMING + "\n\n" + _PACING_FRAMING
 )
 
 _HEADING_META_RULE = (
@@ -96,6 +117,8 @@ _HEADING_META_RULE = (
 GUIDE_SYSTEM_CODEGEN = f"""You are a hands-on co-pilot guiding a human operator through ONE code step of a larger plan. The reader will create and run this code themselves.
 
 {_AUDIENCE_FRAMING}
+
+{_PACING_FRAMING}
 
 {_HEADING_META_RULE}
 
@@ -128,6 +151,8 @@ Produce the walkthrough for THIS step only. Nothing more."""
 GUIDE_SYSTEM_NONCODE = f"""You are a hands-on co-pilot guiding a human operator through ONE non-coding step of a larger plan. The deliverable is a decision, a written artifact, a configuration in a UI, or a manual action — not code or shell commands.
 
 {_AUDIENCE_FRAMING}
+
+{_PACING_FRAMING}
 
 {_HEADING_META_RULE}
 

@@ -97,6 +97,18 @@ def test_every_guide_prompt_carries_beginner_framing():
     assert "assume the operator is a capable beginner" in assist_guide.GUIDE_SYSTEM_FIX.lower()
 
 
+def test_every_guide_prompt_carries_pacing_floor():
+    """§17.641 — a step's walkthrough must be paced (phased + checkpoints), not
+    an overwhelming flat list. The pacing floor is in every generation prompt."""
+    for tool in ("shell", "codegen", "LLM", None):
+        s = assist_guide.guide_system_for_tool(tool)
+        low = s.lower()
+        assert "pacing" in low, tool
+        assert "checkpoint" in low, tool
+        assert "phases" in low, tool
+        assert "chunk the work, do not cut it" in low, tool  # complete, not truncated
+
+
 def test_beginner_framing_survives_every_verbosity():
     """The floor holds at every verbosity — terse must NOT reintroduce an
     expert assumption (the pre-§17.640 terse said 'assume an expert operator')."""
