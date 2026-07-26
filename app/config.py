@@ -703,6 +703,17 @@ class Settings(BaseSettings):
     # stays snippet-fast (not deep) so walkthroughs don't slow down. 0 = snippet-
     # only everywhere.
     assist_research_fetch_top_n: int = Field(default=2, ge=0, le=5)
+    # §17.650 — project-aware assist Q&A. Both the /assist research ("ask")
+    # path and the step-guidance turn were job-BLIND: they answered an operator
+    # question with a raw KB/web lookup that carried none of the project's own
+    # state (refined brief, the research/plan the DAG already produced, the
+    # captured environment). So "how do I connect the two computers" got a
+    # generic answer that knew nothing about *these* machines. When enabled, a
+    # compact project-wide digest of completed DAG-node outputs is threaded into
+    # both paths so the engine relays what the project already established before
+    # reaching for the open web. max_chars caps the digest (0 = disabled too).
+    assist_job_context_enabled: bool = True
+    assist_job_context_max_chars: int = Field(default=6000, ge=0, le=20000)
     # §17.492 — deterministic scan of generated walkthroughs / fixes for
     # high-confidence destructive commands (rm -rf, dd, mkfs, DROP TABLE, force
     # push, …); matches are surfaced as a prominent "review before running"

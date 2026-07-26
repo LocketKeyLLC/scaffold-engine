@@ -28,7 +28,11 @@ from typing import Any, AsyncGenerator, Optional
 from sqlalchemy import text
 
 from app.database import async_session
-from app.modules.prompt_assembly import StepContext, assemble_step_context
+from app.modules.prompt_assembly import (
+    StepContext,
+    assemble_job_digest,
+    assemble_step_context,
+)
 
 logger = logging.getLogger("scaffold.assist")
 
@@ -563,6 +567,13 @@ async def generate_step_guidance(
     environment = _environment_from_metadata(sess.get("metadata"))
     verbosity = _verbosity_from_metadata(sess.get("metadata"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
+    # §17.650 — the whole-project digest (minus this step's direct parents,
+    # already in ctx.assembled_prompt) so the walkthrough is consistent with
+    # research/plan done in other DAG branches, not just the immediate upstream.
+    job_digest = await _job_digest_for(
+        db=db, job_id=job_id,
+        exclude_node_keys={nk, *ctx.upstream_outputs.keys()},
+    )
 
     res = await assist_guide.ensure_guidance(
         session_id=session_id,
@@ -575,6 +586,7 @@ async def generate_step_guidance(
         domain=node_row.get("domain"),
         environment=environment,
         verbosity=verbosity,
+        job_digest=job_digest,
         db=db,
     )
     return {
@@ -635,6 +647,10 @@ async def generate_step_guidance_stream(
     environment = _environment_from_metadata(sess.get("metadata"))
     verbosity = _verbosity_from_metadata(sess.get("metadata"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
+    job_digest = await _job_digest_for(  # §17.650 — whole-project digest
+        db=db, job_id=job_id,
+        exclude_node_keys={nk, *ctx.upstream_outputs.keys()},
+    )
 
     async for ev in assist_guide.generate_guidance_stream(
         session_id=session_id,
@@ -647,6 +663,7 @@ async def generate_step_guidance_stream(
         domain=node_row.get("domain"),
         environment=environment,
         verbosity=verbosity,
+        job_digest=job_digest,
         db=db,
     ):
         yield ev
@@ -662,31 +679,57 @@ async def run_step_research(
     """Confirm an operator-supplied question via the research helpers.
 
     A side query — not persisted to the step's guidance. Resolves the node's
-    domain (when a node is in scope) to bias Milvus retrieval.
+    domain (when a node is in scope) to bias Milvus retrieval, and (§17.650)
+    threads the project's own state — brief, environment, and a digest of the
+    work already completed on the job — so the answer relays what THIS project
+    established rather than a project-blind web lookup.
     """
     from app.modules import assist_guide
+    from app.modules.assist_guide import render_environment_block
 
     if not (question or "").strip():
         raise ValueError("research question is empty")
     sess = (await db.execute(
         text("""
-            SELECT id, job_id, status, current_node_key
+            SELECT id, job_id, status, current_node_key, metadata
               FROM assist_sessions WHERE id = :sid
         """),
         {"sid": session_id},
     )).mappings().first()
     if not sess:
         raise ValueError(f"assist session not found: {session_id}")
+    job_id = str(sess["job_id"])
     nk = node_key or sess["current_node_key"]
     domain = None
     if nk:
         drow = (await db.execute(
             text("SELECT domain FROM dag_nodes WHERE job_id = :jid AND node_key = :nk"),
-            {"jid": str(sess["job_id"]), "nk": nk},
+            {"jid": job_id, "nk": nk},
         )).mappings().first()
         domain = (drow or {}).get("domain")
+
+    # §17.650 — assemble project context the ask/research path was blind to.
+    job_row = (await db.execute(
+        text("SELECT refined_brief FROM jobs WHERE id = :id"),
+        {"id": job_id},
+    )).mappings().first()
+    brief = (job_row or {}).get("refined_brief") or {}
+    environment = _environment_from_metadata(sess.get("metadata"))
+    digest = await _job_digest_for(db=db, job_id=job_id)
+    context_parts: list[str] = []
+    goal = (brief or {}).get("description") or (brief or {}).get("title") or ""
+    if isinstance(goal, str) and goal.strip():
+        context_parts.append(f"## Project goal\n{goal.strip()}")
+    env_block = render_environment_block(environment)
+    if env_block:
+        context_parts.append(env_block)
+    if digest:
+        context_parts.append(digest)
+    job_context = "\n\n".join(context_parts) or None
+
     res = await assist_guide.research_one(
         question=question, node_key=nk or "?", domain=domain,
+        job_context=job_context, context_hint=_kb_hint_from(brief, environment),
     )
     return {"session_id": session_id, "node_key": nk, **res}
 
@@ -856,6 +899,50 @@ async def list_assist_candidates(*, db, limit: int = 25) -> list[dict]:
 
 
 # ── Environment capture (§17.487 — concrete commands, not placeholders) ────
+
+
+async def _job_digest_for(
+    *, db, job_id: str, exclude_node_keys: set[str] | None = None,
+) -> str:
+    """§17.650 — the project-wide completed-work digest, gated by settings.
+
+    Returns "" when disabled (``assist_job_context_enabled`` /
+    ``assist_job_context_max_chars=0``) or when the job has produced nothing
+    yet, so callers can unconditionally thread the result. Fail-soft: a digest
+    fetch must never break the guidance/research turn.
+    """
+    from app.config import settings
+
+    if not settings.assist_job_context_enabled or settings.assist_job_context_max_chars <= 0:
+        return ""
+    try:
+        return await assemble_job_digest(
+            db=db,
+            job_id=job_id,
+            exclude_node_keys=exclude_node_keys,
+            max_total_chars=settings.assist_job_context_max_chars,
+        )
+    except Exception as exc:  # noqa: BLE001 — never block the turn on a digest fetch
+        logger.warning("assist_job_digest_failed job_id=%s: %s", job_id, exc)
+        return ""
+
+
+def _kb_hint_from(brief: dict, environment: dict) -> str:
+    """A short project-entity string to bias local-KB retrieval (§17.650).
+
+    Pulls the brief goal/title and the environment substitution KEYS (not
+    values — the keys name the entities, e.g. HOST_A/HOST_B, without leaking
+    concrete secrets into the query). Capped so it augments, not dominates,
+    the operator's actual question.
+    """
+    bits: list[str] = []
+    goal = (brief or {}).get("description") or (brief or {}).get("title") or ""
+    if isinstance(goal, str) and goal.strip():
+        bits.append(goal.strip())
+    subs = (environment or {}).get("substitutions") or {}
+    if isinstance(subs, dict) and subs:
+        bits.append(" ".join(str(k) for k in subs.keys()))
+    return " ".join(bits)[:300].strip()
 
 
 def _environment_from_metadata(metadata: Any) -> dict:

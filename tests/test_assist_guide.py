@@ -383,6 +383,49 @@ async def test_research_one_no_sources_no_synthesis():
     chat.assert_not_called()  # nothing to synthesize from
 
 
+@pytest.mark.asyncio
+async def test_research_one_synthesizes_from_job_context_without_web_sources():
+    # §17.650 — a question answerable purely from the project's own prior work
+    # must still synthesize an answer even when the open web returns nothing,
+    # and the project context must be folded into the synthesis prompt.
+    with patch("app.modules.execution_agent._milvus_search",
+               new=AsyncMock(return_value="No knowledge base results found.")), \
+         patch.object(assist_guide, "_deep_web_sources", new=AsyncMock(return_value=[])), \
+         patch("app.modules.execution_agent._searxng_search",
+               new=AsyncMock(return_value="No search results found.")), \
+         patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp("Use HOST_A=10.0.0.1"))) as chat:
+        res = await assist_guide.research_one(
+            question="how do I connect the two computers?",
+            job_context="## Project context — done work\nHOST_A=10.0.0.1, HOST_B=10.0.0.2 via crossover",
+        )
+    assert res["sources"] == []           # web/KB were dry
+    assert res["answer"] == "Use HOST_A=10.0.0.1"  # but the project context carried it
+    chat.assert_called_once()
+    # chat_until_nonempty forwards messages= as a kwarg to model_router.chat.
+    messages = chat.call_args.kwargs["messages"]
+    user_msg = next(m["content"] for m in messages if m["role"] == "user")
+    assert "HOST_A=10.0.0.1" in user_msg   # project state reached the model
+
+
+@pytest.mark.asyncio
+async def test_research_one_context_hint_biases_kb_only():
+    # §17.650 — context_hint augments the LOCAL-KB embedding query but NOT the
+    # web query (open-web results must not be polluted with project entities).
+    milvus = AsyncMock(return_value="No knowledge base results found.")
+    with patch("app.modules.execution_agent._milvus_search", new=milvus), \
+         patch.object(assist_guide, "_deep_web_sources", new=AsyncMock(return_value=[])), \
+         patch("app.modules.execution_agent._searxng_search",
+               new=AsyncMock(return_value="No search results found.")), \
+         patch.object(assist_guide.model_router, "chat", new=AsyncMock(return_value=_resp("x"))):
+        await assist_guide.research_one(
+            question="what subnet?", context_hint="HomeLab HOST_A HOST_B",
+        )
+    kb_query = milvus.call_args[0][0]
+    assert "what subnet?" in kb_query
+    assert "HOST_A" in kb_query  # entity hint folded into the KB query
+
+
 # ── §17.487: environment block ─────────────────────────────────────────────
 
 

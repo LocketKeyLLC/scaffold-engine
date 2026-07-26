@@ -132,9 +132,16 @@ async def test_generate_step_guidance_inactive_session_raises():
 @pytest.mark.asyncio
 async def test_run_step_research_resolves_domain():
     sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3"}
-    db = _db_with_session(sess, extra_rows=[{"domain": "net"}])
+    # execute order: session SELECT, domain SELECT, refined_brief SELECT.
+    # (§17.650) — the project-digest fetch is patched out below.
+    db = _db_with_session(
+        sess,
+        extra_rows=[{"domain": "net"}, {"refined_brief": {"description": "connect two PCs"}}],
+    )
     with patch("app.modules.assist_guide.research_one",
-               new=AsyncMock(return_value={"question": "q", "sources": [], "answer": None})) as research:
+               new=AsyncMock(return_value={"question": "q", "sources": [], "answer": None})) as research, \
+         patch("app.modules.assist_agent._job_digest_for",
+               new=AsyncMock(return_value="## Project context — done work")):
         res = await assist_agent.run_step_research(
             session_id="s", question="what flag?", db=db,
         )
@@ -142,6 +149,9 @@ async def test_run_step_research_resolves_domain():
     _, kwargs = research.call_args
     assert kwargs["domain"] == "net"
     assert kwargs["node_key"] == "T3"
+    # §17.650 — project state is threaded into the research call, not dropped.
+    assert "Project context" in (kwargs["job_context"] or "")
+    assert "connect two PCs" in kwargs["job_context"]
 
 
 @pytest.mark.asyncio

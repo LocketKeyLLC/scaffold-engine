@@ -765,3 +765,58 @@ async def assemble_step_context(
         grounding_kind=grounding_kind,
         assembled_prompt=assembled,
     )
+
+
+async def assemble_job_digest(
+    *,
+    db,
+    job_id: str,
+    exclude_node_keys: set[str] | None = None,
+    max_total_chars: int | None = None,
+) -> str:
+    """A compact, project-WIDE digest of everything the job has produced so far.
+
+    §17.650 — Assist Mode's Q&A/research and guidance paths historically only
+    ever saw a step's *direct* ``depends_on`` parents (``assemble_step_context``)
+    or, for ``/assist research``, nothing at all. So an operator question was
+    answered without the research/plan the DAG had already generated in other
+    branches — the engine "misplaced" its own project knowledge. This gathers
+    every completed node's output (ordered by execution order, minus the caller's
+    current-step keys, which are already threaded separately) into one truncated
+    block the assist paths can hand to the model as project context.
+
+    Returns "" when the job has no usable completed output (fail-soft: callers
+    just skip the section).
+    """
+    exclude = exclude_node_keys or set()
+    rows = (await db.execute(
+        text(
+            "SELECT node_key, title, output_text, execution_order FROM dag_nodes "
+            "WHERE job_id = :jid AND status = 'done' "
+            "AND output_text IS NOT NULL AND output_text <> '' "
+            "ORDER BY execution_order NULLS LAST, node_key"
+        ),
+        {"jid": job_id},
+    )).mappings().all()
+    outputs: dict[str, str] = {}
+    titles: dict[str, str] = {}
+    for r in rows:
+        nk = r["node_key"]
+        if nk in exclude:
+            continue
+        outputs[nk] = r["output_text"] or ""
+        titles[nk] = r["title"] or nk
+    if not outputs:
+        return ""
+
+    cap = max_total_chars if max_total_chars is not None else settings.max_upstream_chars
+    outputs, _ = truncate_upstream_outputs(outputs, max_total_chars=cap)
+
+    parts = [
+        "## Project context — work already completed on THIS job (relay and stay "
+        "consistent with it; the operator expects you to know what the project "
+        "already established)"
+    ]
+    for nk, body in outputs.items():
+        parts.append(f"### {titles.get(nk, nk)} ({nk})\n{body}")
+    return "\n\n".join(parts)

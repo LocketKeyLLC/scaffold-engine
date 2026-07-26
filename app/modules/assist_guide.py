@@ -268,10 +268,16 @@ _GUIDE_USER_TRAILER = (
 )
 
 _RESEARCH_SYNTH_SYSTEM = (
-    "You answer a single operator question using only the provided search "
-    "results. Be concise and concrete. Cite the source index like [1] for "
-    "each fact. If the results do not answer the question, say so plainly "
-    "rather than guessing. No preamble, no filler."
+    "You answer a single operator question about an in-progress project. Use the "
+    "PROJECT CONTEXT block (what this project has already established — its brief, "
+    "environment, and completed work) together with the provided search results. "
+    "When the project context already answers the question — e.g. concrete host "
+    "names, addresses, or decisions the project settled — relay THOSE specifics "
+    "rather than generic advice; the operator is asking about THIS project, not "
+    "the topic in general. Be concise and concrete. Cite search-result indices "
+    "like [1] for facts drawn from them. If neither the project context nor the "
+    "results answer the question, say so plainly rather than guessing. No "
+    "preamble, no filler."
 )
 
 
@@ -434,18 +440,24 @@ async def _deep_web_sources(query: str, *, top_n: int) -> list[dict]:
 
 async def _confirm_query(
     query: str, *, node_key: str, domain: Optional[str], deep: bool = False,
+    kb_query_extra: Optional[str] = None,
 ) -> list[dict]:
     """Confirm one query via Milvus (local KB) + web.
 
     ``deep`` (used by /assist research + /assist fix) fetches & extracts the top
     SearXNG result PAGES (real doc content); otherwise (the auto-guide pre-pass)
-    it uses fast search snippets. Returns ``{query, kind, text[, url]}`` source
-    dicts, only non-empty/non-failure. Never raises (helpers are fail-soft).
+    it uses fast search snippets. ``kb_query_extra`` (§17.650) biases ONLY the
+    local-KB embedding query with project entities (brief/environment) so a
+    generic operator question still retrieves this project's ingested research;
+    the web query stays the raw question so open-web results aren't polluted.
+    Returns ``{query, kind, text[, url]}`` source dicts, only non-empty/
+    non-failure. Never raises (helpers are fail-soft).
     """
     from app.modules.execution_agent import _milvus_search, _searxng_search
 
     sources: list[dict] = []
-    milvus = await _milvus_search(query, node_key=node_key, domain=domain)
+    kb_query = f"{query}\n{kb_query_extra.strip()}" if (kb_query_extra or "").strip() else query
+    milvus = await _milvus_search(kb_query, node_key=node_key, domain=domain)
     if _is_useful_grounding(milvus):
         sources.append({"query": query, "kind": "milvus", "text": milvus.strip()})
 
@@ -969,14 +981,18 @@ def _build_guide_user_prompt(
     ctx: StepContext, node_description: Optional[str],
     sources: list[dict], refine_hint: Optional[str],
     environment: Optional[dict] = None,
+    job_digest: Optional[str] = None,
 ) -> str:
     """Compose the user message: the same upstream-last task the executor
-    would see, plus the operator environment, a confirmed-research block, and
-    a human-walkthrough trailer.
+    would see, plus the operator environment, a project-wide digest of work
+    already completed on the job (§17.650), a confirmed-research block, and a
+    human-walkthrough trailer.
     """
     parts: list[str] = [ctx.assembled_prompt]
     if node_description and node_description.strip() and node_description.strip() not in ctx.assembled_prompt:
         parts.append(f"Task description: {node_description.strip()}")
+    if job_digest and job_digest.strip():
+        parts.append(job_digest.strip())
     env_block = render_environment_block(environment)
     if env_block:
         parts.append(env_block)
@@ -1001,6 +1017,7 @@ async def generate_guidance(
     domain: Optional[str] = None,
     environment: Optional[dict] = None,
     verbosity: str = "normal",
+    job_digest: Optional[str] = None,
 ) -> dict:
     """Generate (do not persist) the human walkthrough for one step.
 
@@ -1025,6 +1042,7 @@ async def generate_guidance(
     system = apply_verbosity(guide_system_for_tool(ctx.tool), verbosity)
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
+        job_digest=job_digest,
     )
 
     resp = await chat_until_nonempty(
@@ -1203,6 +1221,7 @@ async def ensure_guidance(
     domain: Optional[str] = None,
     environment: Optional[dict] = None,
     verbosity: str = "normal",
+    job_digest: Optional[str] = None,
     db,
 ) -> dict:
     """Return guidance, generating + persisting only when needed.
@@ -1226,6 +1245,7 @@ async def ensure_guidance(
         domain=domain,
         environment=environment,
         verbosity=verbosity,
+        job_digest=job_digest,
     )
     await persist_guidance(
         session_id=session_id,
@@ -1254,6 +1274,7 @@ async def generate_guidance_stream(
     domain: Optional[str] = None,
     environment: Optional[dict] = None,
     verbosity: str = "normal",
+    job_digest: Optional[str] = None,
     db,
 ):
     """Stream a walkthrough as it generates. Yields event dicts:
@@ -1293,6 +1314,7 @@ async def generate_guidance_stream(
     system = apply_verbosity(guide_system_for_tool(ctx.tool), verbosity)
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
+        job_digest=job_digest,
     )
     messages = [
         {"role": "system", "content": system},
@@ -1351,20 +1373,37 @@ async def generate_guidance_stream(
 
 async def research_one(
     *, question: str, node_key: str = "?", domain: Optional[str] = None,
-    synthesize: bool = True,
+    synthesize: bool = True, job_context: Optional[str] = None,
+    context_hint: Optional[str] = None,
 ) -> dict:
     """Confirm a single operator-supplied question and optionally synthesize
     a short cited answer. Does not persist — this is a side query.
+
+    §17.650 — ``job_context`` (the project's brief + environment + a digest of
+    completed DAG-node work) is folded into the synthesis prompt so the answer
+    relays what THIS project already established instead of a project-blind web
+    lookup. ``context_hint`` biases only the local-KB retrieval (see
+    ``_confirm_query``).
     """
     role = settings.assist_guide_model_role
-    sources = await _confirm_query(question, node_key=node_key, domain=domain, deep=True)
+    sources = await _confirm_query(
+        question, node_key=node_key, domain=domain, deep=True,
+        kb_query_extra=context_hint,
+    )
     answer: Optional[str] = None
-    if synthesize and sources:
+    # Synthesize when we have web/KB sources OR project context to relay — a
+    # question answerable purely from the project's own prior work must not be
+    # dropped just because the open web returned nothing.
+    if synthesize and (sources or (job_context or "").strip()):
+        ctx_block = (
+            f"{job_context.strip()}\n\n" if (job_context or "").strip() else ""
+        )
         resp = await chat_until_nonempty(
             model_router.chat,
             [
                 {"role": "system", "content": _RESEARCH_SYNTH_SYSTEM},
                 {"role": "user", "content": (
+                    f"{ctx_block}"
                     f"Question: {question}\n\n"
                     f"{_render_research_block(sources)}"
                 )},

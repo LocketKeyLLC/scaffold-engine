@@ -527,3 +527,43 @@ class TestAssembleStepContext:
         )
         with pytest.raises((AttributeError, Exception)):
             ctx.node_key = "different"  # type: ignore[misc]
+
+
+def _fake_digest_db(rows: list[dict]) -> AsyncMock:
+    """A db whose execute(...).mappings().all() yields the given dict rows —
+    the shape assemble_job_digest reads (§17.650)."""
+    db = AsyncMock()
+    result = MagicMock()
+    result.mappings.return_value.all.return_value = rows
+    db.execute = AsyncMock(return_value=result)
+    return db
+
+
+@pytest.mark.asyncio
+class TestAssembleJobDigest:
+    """§17.650 — the project-wide completed-work digest that makes Assist Mode's
+    Q&A/research + guidance paths aware of work done in OTHER DAG branches."""
+
+    async def test_gathers_completed_nodes(self):
+        db = _fake_digest_db([
+            {"node_key": "R1", "title": "Research links", "output_text": "use a crossover cable", "execution_order": 1},
+            {"node_key": "P1", "title": "Plan", "output_text": "static IPs 10.0.0.1/2", "execution_order": 2},
+        ])
+        digest = await pa.assemble_job_digest(db=db, job_id="j1")
+        assert "Project context" in digest
+        assert "Research links (R1)" in digest
+        assert "crossover cable" in digest
+        assert "static IPs 10.0.0.1/2" in digest
+
+    async def test_excludes_requested_keys(self):
+        db = _fake_digest_db([
+            {"node_key": "R1", "title": "Research", "output_text": "alpha", "execution_order": 1},
+            {"node_key": "P1", "title": "Plan", "output_text": "beta", "execution_order": 2},
+        ])
+        digest = await pa.assemble_job_digest(db=db, job_id="j1", exclude_node_keys={"P1"})
+        assert "alpha" in digest
+        assert "beta" not in digest  # the current step's own context is threaded separately
+
+    async def test_empty_when_no_completed_work(self):
+        db = _fake_digest_db([])
+        assert await pa.assemble_job_digest(db=db, job_id="j1") == ""
