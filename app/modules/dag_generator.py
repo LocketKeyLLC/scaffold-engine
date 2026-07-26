@@ -74,7 +74,7 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
 }
 
 Rules:
-- Decompose the idea into exactly 3 to 10 execution steps. Do not create more than 10 steps. If the task is simple, use 3 steps. If it requires research, retrieval, and synthesis, use 4-10 steps.
+- Decompose the idea into SINGLE-OUTCOME execution steps (see "Single outcome per node" below): each step produces ONE discrete, independently verifiable result the operator can finish and check before moving on. Match the number of steps to the brief's actual distinct outcomes — never pad, and never inflate a step to swallow adjacent work. A simple brief is 3-6 steps; a multi-part host-action / infra / deployment brief is typically 8-20, because each install / configure / integrate / verify becomes its own step. Do not exceed 25. When unsure whether something is one step or several, SPLIT — smaller steps are easier to execute, verify, and recover than big ones.
 - Every task must have a unique id (T1, T2, ...)
 - depends_on references other task ids — only use ids you have defined
 - No circular dependencies
@@ -173,10 +173,37 @@ Hard rules (CodeGen verbs — §17.367 + §17.370):
 
 Hard rules (universal):
 - Each node's `outputs` field must be a tight description of the
-  incremental artifact (e.g., "Jellyfin LXC + container running",
+  incremental artifact (e.g., "Jellyfin LXC created and running",
   "parser module exporting extract_blocks(text) → list[Block]") — NOT a
   catch-all like "fully deployed homelab" or "complete CLI tool" that
   overlaps every other node's outputs.
+
+Single outcome per node (§17.642 — read every time):
+
+Each node produces EXACTLY ONE outcome — one thing installed, one thing
+configured, one file written, one decision made — with ONE way to verify it.
+This is a DIFFERENT rule from scope discipline above: scope discipline says a
+node must not repeat a sibling's work; single-outcome says a node must not
+BUNDLE several results of its own. A node must satisfy both — one result, and
+only that result. A node is TOO BIG (split it) if ANY of these hold:
+- its `name` needs "and", a comma, or a slash to describe it ("Create LXC,
+  install Jellyfin, map GPU");
+- its `outputs` list holds more than one distinct artifact;
+- finishing it has more than one natural "stop and check it worked" moment;
+- it bundles create + configure + integrate + verify of the same thing.
+
+Splitting heuristic: install ≠ configure ≠ integrate ≠ verify — each is its
+own node. So "Deploy Jellyfin with transcoding" is NOT one node; it is SIX:
+  T_a Create the Jellyfin LXC        → outputs: empty Jellyfin LXC running
+  T_b Install Jellyfin               → starts from T_a; the server package only
+  T_c Map the GPU into the LXC       → starts from T_b; device passthrough only
+  T_d Configure VA-API transcoding   → starts from T_c; the transcode config only
+  T_e Bind-mount the media library   → starts from T_d; the mount only
+  T_f Verify a hardware transcode    → starts from T_e; the one confirming test
+Each is one result with one checkpoint. Apply the same split to any
+"set up / deploy / configure X with Y" phrasing and to any node that would
+otherwise create several sibling resources at once (e.g. "Create the 4 LXCs"
+→ one create node per LXC). Prefer more small steps over few big ones.
 
 Anti-example 1 (Shell — drawn from a real DAG that violated this rule —
 homelab brief, 6-node Shell decomposition). T1, T2, T3, T5 EACH produced
@@ -272,6 +299,12 @@ EXAMPLE (8-node DAG for "Install Proxmox VE, set up Jellyfin + Ollama in contain
     {"id": "T8", "name": "Document the setup", "type": "output", "inputs": ["all upstream runbooks"], "outputs": ["README.md"], "depends_on": ["T7"], "tool": "LLM", "domain": null, "assigned_model": null, "notes": "Documentation about the setup is text — LLM, not Shell.", "is_deliverable": true}
   ]
 }
+NOTE on the example above: it is drawn COARSE for brevity, to show scope
+boundaries, tool selection, and deliverable marking. Under the single-outcome
+rule, each multi-part node splits further into single-outcome nodes — "T3 Create
+LXC containers" → one create node per LXC, and "T4 Deploy Jellyfin service" →
+the six-node create→install→map-GPU→configure→mount→verify split shown above.
+Real output should use that finer grain, not this compressed illustration.
 
 EXAMPLE (5-node DAG for "Build a CLI tool that converts screenshots to a searchable PDF"):
 {

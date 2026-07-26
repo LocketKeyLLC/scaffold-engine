@@ -381,6 +381,33 @@ class TestToolSelectionGuide:
         assert 'A node named "Configure Y"' in DAG_SYSTEM
         assert 'A node named "Deploy Z service"' in DAG_SYSTEM
 
+    # ----- §17.642 — single-outcome granularity -----
+
+    def test_single_outcome_rule_present(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The dedicated labeled block + the load-bearing definition.
+        assert "Single outcome per node" in DAG_SYSTEM
+        assert "EXACTLY ONE outcome" in DAG_SYSTEM
+        # The split heuristic the model keys on.
+        assert "install ≠ configure ≠ integrate ≠ verify" in DAG_SYSTEM
+        # It must be distinguished from (not conflated with) scope discipline.
+        assert "DIFFERENT rule from scope discipline" in DAG_SYSTEM
+        assert "BUNDLE several results" in DAG_SYSTEM
+
+    def test_single_outcome_jellyfin_split_example(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The exact overwhelming case (§17.641 report) → six single-outcome nodes.
+        assert "is NOT one node; it is SIX" in DAG_SYSTEM
+        assert "Verify a hardware transcode" in DAG_SYSTEM
+
+    def test_step_count_allows_finer_grain(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        # The old hard cap of 10 is gone; multi-part briefs go finer.
+        assert "3 to 10 execution steps" not in DAG_SYSTEM
+        assert "Do not create more than 10 steps" not in DAG_SYSTEM
+        assert "SINGLE-OUTCOME execution steps" in DAG_SYSTEM
+        assert "typically 8-20" in DAG_SYSTEM
+
     # ----- §17.367 — CodeGen-verb scope discipline -----
 
     def test_scope_rules_cover_codegen_verbs(self):
