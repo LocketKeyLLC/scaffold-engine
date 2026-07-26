@@ -1097,6 +1097,7 @@ async def generate_fix(
     node_key: str,
     domain: Optional[str] = None,
     verbosity: str = "normal",
+    job_digest: Optional[str] = None,
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -1120,6 +1121,8 @@ async def generate_fix(
         )
 
     parts = [ctx.assembled_prompt]
+    if job_digest and job_digest.strip():   # §17.653 — project-wide context
+        parts.append(job_digest.strip())
     env_block = render_environment_block(environment)
     if env_block:
         parts.append(env_block)

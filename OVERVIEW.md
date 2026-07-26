@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.653 Fix + audit — assist `fix`/troubleshooting made project-aware; full component sweep (2026-07-26)
+
+**Answering "do ALL components relay the project, not just Q&A?"** Swept every context-producing path. Found one interactive assist component still job-blind after §17.650: the **`fix`/troubleshooting** path (`run_step_fix` → `generate_fix`) threaded only `ctx` (direct-upstream + brief) + environment, NOT the whole-project digest. So diagnosing an error mid-assist couldn't relay the plan/research from other branches. **Fix**: threaded `job_digest` through `generate_fix` + `run_step_fix` (same `_job_digest_for` gate/exclusion as guidance). **Live-verified via the pipeline** (new chat → `/assist` → "it failed, which disks are boot vs ZFS data"): the fix now reasons about the project ("proceed to the next step (secure wipe)" — it knows the DAG plan). +1 test.
+
+**Sweep result — the two regimes and how each stays project-aware:**
+- **Interactive assist (browser-driven)** — all now thread brief + environment + whole-project digest: step **guidance** for every tool type (Shell/LLM/CodeGen; §17.650), **research/`ask`** (§17.650), **`fix`** (this entry). Live-checked: T1 Shell guidance and T5 VLAN-config guidance both relay project specifics (T5 references the management/AI VLAN scheme AND points to its logical upstream "the network design (T8)"); the WireGuard `ask` names the single Supermicro host; the `fix` knows the wipe is next.
+- **Autonomous execution (server-side, triggered from browser)** — project-aware by a *different, appropriate* mechanism, NOT the digest: `execution_agent.execute_next_node` builds each node prompt from the **brief goal** + **RAG grounding queried with the project goal** (`rag_query = "{project_goal}: {title}"`, surfacing ingested `/research` findings) + **explicit DAG upstream** (`depends_on` outputs, `_format_upstream_block`) + **retry/reviewer feedback** (W.1). The planner wires dependencies, so a node sees exactly its declared inputs plus the corpus — the whole-job digest would be noise there. Verified in `execution_agent.py:1290-1319`. No change needed; documented so the asymmetry is intentional, not an oversight.
+
+---
+
 ### §17.652 Fix — a bound assist session now beats a stale pick-list (routing precedence) (2026-07-26)
 
 **The live-test aside from §17.651, promoted to a fix.** When a natural-language reconnect is ambiguous (multiple in-progress jobs), the pipeline renders a `<!--ASSIST_PICK-->` candidate list; the operator picks one and a session starts. But that marker **stays in the chat history forever**, and `pipe()` checked pick-resolution (`scaffold_router.py:1553`) BEFORE the active-session history check (`:1618`). So a later substantive message that merely contained a candidate job's distinctive token — e.g. asking *"which computer should host the **WireGuard** endpoint"* while the WireGuard job was a candidate — re-resolved the stale pick via `resolve_candidate_pick` and **re-presented the step** instead of answering. Only bit after an NL pick-list entry (an explicit `/assist <id>` emits no pick-list). Confirmed live: the 3-turn NL flow (resume → pick → question) re-presented the disk-inventory step on turn 3.

@@ -563,6 +563,25 @@ async def test_generate_fix_includes_error_and_env_in_prompt():
 
 
 @pytest.mark.asyncio
+async def test_generate_fix_threads_job_digest_into_prompt():
+    # §17.653 — troubleshooting is project-aware: the whole-project digest is
+    # folded into the fix prompt just like the guidance path.
+    captured = {}
+
+    async def _capture_chat(messages, **kw):
+        captured["user"] = messages[1]["content"]
+        return _resp("fixed steps")
+
+    with patch.object(assist_guide.model_router, "chat", new=_capture_chat):
+        await assist_guide.generate_fix(
+            ctx=_ctx("shell"), error_text="permission denied",
+            research=False, node_key="T3",
+            job_digest="## Project context — done work\nZFS pool tank on the Supermicro host",
+        )
+    assert "ZFS pool tank on the Supermicro host" in captured["user"]
+
+
+@pytest.mark.asyncio
 async def test_generate_fix_failsoft_empty():
     with patch.object(assist_guide.model_router, "chat",
                       new=AsyncMock(return_value=_resp(""))):

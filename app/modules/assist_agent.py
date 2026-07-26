@@ -782,6 +782,10 @@ async def run_step_fix(
     environment = _environment_from_metadata(sess.get("metadata"))
     verbosity = _verbosity_from_metadata(sess.get("metadata"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
+    job_digest = await _job_digest_for(  # §17.653 — troubleshooting is project-aware too
+        db=db, job_id=job_id,
+        exclude_node_keys={nk, *ctx.upstream_outputs.keys()},
+    )
 
     res = await assist_guide.generate_fix(
         ctx=ctx,
@@ -791,6 +795,7 @@ async def run_step_fix(
         node_key=nk,
         domain=node_row.get("domain"),
         verbosity=verbosity,
+        job_digest=job_digest,
     )
     # Capture the blocker on the friction trail (best-effort).
     try:
