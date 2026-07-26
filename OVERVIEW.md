@@ -22053,6 +22053,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 **Follow-up to the §17.646 end-to-end pass:** the per-turn total stayed at ~470-720 words partly because `render_step_footer` re-printed the full 89-word "how to report back" block (done/skip/fix/handoff/research/where-am-I + slash aliases) after EVERY step. Useful once to orient a first-timer; noise by step 3. **Fix**: the full footer now shows only on the FIRST walkthrough of a session; once any step is completed it trims to a one-liner (`_FOOTER_TRIMMED`, ~22 words: "Done? Tell me what happened — or skip, or paste an error to fix. …"). First-vs-later is read from the session `step_counts` roll-up: the `/next` endpoint (`routers/assist.py`) now attaches `step_counts` to the claimed-step response (committed/skipped/handed_off don't change during a claim, so the pre-claim `get_session` counts are accurate), and `render_step_footer` (`_assist_handlers.py`) returns full when zero steps are complete, trimmed otherwise. Missing `step_counts` (older orchestrator) → full, so the guidance is never silently dropped. Live-verified through the pipeline: START → FULL footer, DONE #1/#2 → trimmed. +3 regression tests (full-first/trimmed-after; trims on any of committed/skipped/handed_off/done). assist NL suite green (66).
 
+**End-to-end verification (2026-07-26, fresh "AdGuard Home on Proxmox LXC" job, real OWUI path — no chat_id, full history threaded, throwaway job created→driven→deleted).** DAG = 7 single-outcome nodes (Download template → Create LXC → Set static IP → Install → Configure DNS → Verify → Document, with Document wired to T6). Drove START + 6 "done" turns:
+
+| Turn | Step reached | Footer |
+|---|---|---|
+| START | Download LXC template | **FULL** |
+| done #1 | Create unprivileged LXC | trimmed |
+| done #2 | Set static IP | trimmed |
+| done #3 | Install AdGuard Home | trimmed |
+| done #4 | Configure LAN DNS serving | trimmed |
+| done #5 | Verify ad blocking | trimmed |
+| done #6 | Document the setup | trimmed |
+
+The full footer fired exactly once (first walkthrough); every later step trimmed — confirming §17.647 across a whole run, not just the first two steps. Alongside it the other assist fixes held: completion retained on every "done" with NO chat_id (DB: T1–T6 `committed`, T7 `presented`; §17.646), strictly linear ordering with no jumps/bounces (§17.645), walkthrough-only length 252–567 words / avg ~370 vs. the 922 that prompted the work (§17.646), and zero destructive-banner false positives (§17.643/613).
+
 ---
 
 ### §17.646 Fix — assist completion-retention (no-chat_id) + finer DAG splits for length (2026-07-26)
