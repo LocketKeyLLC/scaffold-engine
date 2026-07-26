@@ -612,3 +612,38 @@ async def test_handoff_single_restore_survives_cancellation(monkeypatch):
     restore = [c for c in rec if c[0] == "execute" and "assisted_executing" in c[1]]
     assert restore, "shielded restore did not run under cancellation (E1 regression)"
     assert any(c[0] == "commit" for c in rec)
+
+
+# ── §17.645 — one step in flight at a time (get_next_step) ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_next_step_represents_inflight_before_claiming(monkeypatch):
+    """When a step is already presented-but-unsubmitted, `next` re-presents THAT
+    instead of claiming a new (possibly far) node — no claim UPDATE runs."""
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _result(mappings_first={"id": "s1", "job_id": "j1", "status": "active"}),
+    ]
+    inflight = {"node_key": "T1", "re_presented": True}
+    monkeypatch.setattr(assist_agent, "_load_presented_step",
+                        AsyncMock(return_value=inflight))
+    res = await assist_agent.get_next_step(session_id="s1", db=db)
+    assert res is inflight
+    assert db.execute.await_count == 1  # session SELECT only — no claim
+
+
+@pytest.mark.asyncio
+async def test_get_next_step_claims_when_nothing_inflight(monkeypatch):
+    """With nothing in flight, it proceeds to the claim path (here nothing is
+    claimable → falls through to the None fallback)."""
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _result(mappings_first={"id": "s1", "job_id": "j1", "status": "active"}),
+        _result(mappings_first=None),  # claim UPDATE → nothing claimable
+    ]
+    monkeypatch.setattr(assist_agent, "_load_presented_step",
+                        AsyncMock(return_value=None))
+    res = await assist_agent.get_next_step(session_id="s1", db=db)
+    assert res is None
+    assert db.execute.await_count == 2  # session SELECT + claim attempt

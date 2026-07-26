@@ -78,7 +78,13 @@ Rules:
 - Every task must have a unique id (T1, T2, ...)
 - depends_on references other task ids — only use ids you have defined
 - No circular dependencies
-- First task(s) must have empty depends_on
+- First task(s) must have empty depends_on — ONLY genuine starting work (nothing
+  must happen before it) qualifies
+- A node that documents, summarizes, verifies, validates, reviews, or reports on
+  the OVERALL build is a terminal CONSUMER: it MUST depend on the nodes it covers
+  (typically the build's leaf nodes) and MUST NOT have empty depends_on. Never
+  leave a "Document the setup" / "Verify the build" node dependency-free — that
+  makes it runnable before the work it describes exists.
 - Last task(s) must be type "output" or "validation"
 - Deliverable marker (§17.475): set "is_deliverable": true on EXACTLY the
   node(s) that produce the user-facing final artifact the brief asked for.
@@ -472,6 +478,60 @@ def auto_link_dead_ends(tasks: list[dict], orphans: list[str]) -> str | None:
             deps.append(o)
     ptask["depends_on"] = deps
     return primary
+
+
+# §17.645 — terminal reporting verbs. A node whose name says it documents /
+# verifies / summarizes / reviews the build is a downstream CONSUMER of the
+# build, not a starting step. If the generator leaves it with empty depends_on
+# it becomes dependency-ready from t=0, so the assist "next" claim can hand it
+# to the operator out of order ("Document the setup" as step 2). detect_dead_ends
+# misses it because a depless leaf counts as a deliverable (it is trivially
+# "covered"), so this is a separate, narrow backstop.
+_TERMINAL_REPORT_RE = re.compile(
+    r"\b(document|documentation|summar|verif|validat|review|write[- ]?up|"
+    r"final report)\b",
+    re.IGNORECASE,
+)
+
+
+def wire_orphan_terminal_nodes(tasks: list[dict]) -> list[str]:
+    """Wire a depless terminal-reporting node into the build leaves it should
+    follow. Returns the list of node ids that were rewired (for logging).
+
+    Only touches a node that (a) has empty depends_on, (b) has a
+    terminal-reporting name, and (c) is not the graph's only real work — it is
+    wired to depend on every current leaf (node nothing depends on) that is not
+    itself a depless terminal-reporting node. Cycle-safe: the node was depless,
+    and leaves do not reference it, so no back-edge can exist.
+    """
+    ids = [t["id"] for t in tasks if t.get("id")]
+    if len(ids) < 2:
+        return []
+    id_set = set(ids)
+    referenced = {
+        d for t in tasks for d in (t.get("depends_on") or []) if d in id_set
+    }
+    leaves = [i for i in ids if i not in referenced]
+
+    def _is_depless_terminal(t: dict) -> bool:
+        return (not (t.get("depends_on") or [])
+                and bool(_TERMINAL_REPORT_RE.search(t.get("name") or "")))
+
+    depless_terminal = {t["id"] for t in tasks if t.get("id") and _is_depless_terminal(t)}
+    if not depless_terminal:
+        return []
+    rewired: list[str] = []
+    for t in tasks:
+        if t.get("id") not in depless_terminal:
+            continue
+        # Predecessors = leaves other than this node and other depless terminal
+        # nodes (so two orphan reporting nodes don't wire to each other only).
+        preds = [l for l in leaves if l != t["id"] and l not in depless_terminal]
+        if not preds:
+            continue
+        t["depends_on"] = sorted(preds)
+        rewired.append(t["id"])
+    return rewired
 
 
 def render_dead_end_corrections(
@@ -874,6 +934,24 @@ async def generate_dag(
     if len(tasks) < 2:
         await _fail_job(db, uid, "DAG must have at least 2 tasks")
         return {"job_id": job_id, "status": "failed", "error": "Less than 2 tasks generated"}
+
+    # §17.645 — wire depless terminal-reporting nodes (document / verify /
+    # summarize the build) into the build leaves they should follow, BEFORE the
+    # dead-end pass. Without deps such a node is claimable from t=0, so the
+    # assist "next" claim hands it to the operator out of order (live browser
+    # test: "Document setup for beginner" surfaced as step 2, before anything
+    # was built). detect_dead_ends can't catch it — a depless leaf counts as a
+    # deliverable — so this narrow deterministic fix runs first.
+    rewired_terminals = wire_orphan_terminal_nodes(tasks)
+    if rewired_terminals:
+        validator_warnings.append(
+            f"terminal_nodes_wired: {', '.join(rewired_terminals)} had no "
+            f"dependencies but document/verify the build — wired to the build "
+            f"leaves so they run last, not first"
+        )
+        logger.warning(
+            "dag_terminal_nodes_wired: job=%s nodes=%s", job_id, rewired_terminals,
+        )
 
     # §17.476 (Phase 2) — dead-end auto-link, last resort. The validator loop
     # already flagged orphans and retried; any survivor is wired into the

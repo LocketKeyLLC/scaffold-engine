@@ -903,6 +903,46 @@ class TestAutoLinkDeadEnds:
         assert _dag_gen.auto_link_dead_ends(tasks, []) is None
 
 
+class TestWireOrphanTerminalNodes:
+    """§17.645 — a depless document/verify/summarize node is wired into the build
+    leaves so the assist claim can't hand it out before the build exists."""
+
+    def test_depless_document_node_is_wired_to_leaves(self):
+        tasks = [
+            {"id": "T1", "name": "Install Proxmox host", "type": "action", "depends_on": []},
+            {"id": "T2", "name": "Create Pi-hole LXC", "type": "action", "depends_on": ["T1"]},
+            {"id": "T3", "name": "Verify Pi-hole DNS", "type": "validation", "depends_on": ["T2"]},
+            {"id": "T12", "name": "Document setup for beginner", "type": "output",
+             "depends_on": []},
+        ]
+        rewired = _dag_gen.wire_orphan_terminal_nodes(tasks)
+        assert rewired == ["T12"]
+        t12 = next(t for t in tasks if t["id"] == "T12")
+        assert t12["depends_on"] == ["T3"]   # the sole build leaf
+
+    def test_real_first_step_is_not_wired(self):
+        """A genuine starting step with empty deps must stay a root — only
+        terminal-reporting names are touched."""
+        tasks = [
+            {"id": "T1", "name": "Install Proxmox host", "type": "action", "depends_on": []},
+            {"id": "T2", "name": "Create LXC", "type": "action", "depends_on": ["T1"]},
+        ]
+        assert _dag_gen.wire_orphan_terminal_nodes(tasks) == []
+        assert next(t for t in tasks if t["id"] == "T1")["depends_on"] == []
+
+    def test_document_node_that_already_has_deps_untouched(self):
+        tasks = [
+            {"id": "T1", "name": "Build it", "type": "action", "depends_on": []},
+            {"id": "T2", "name": "Document the build", "type": "output", "depends_on": ["T1"]},
+        ]
+        assert _dag_gen.wire_orphan_terminal_nodes(tasks) == []
+
+    def test_prompt_forbids_depless_terminal_nodes(self):
+        from app.modules.dag_generator import DAG_SYSTEM
+        assert "terminal CONSUMER" in DAG_SYSTEM
+        assert "MUST NOT have empty depends_on" in DAG_SYSTEM
+
+
 def _dag_json_with_dead_end():
     """A DAG whose deliverable is T1 (code) with downstream docs T2, plus an
     orphan sibling TS that nothing consumes and is not the deliverable."""

@@ -310,14 +310,60 @@ async def get_session(*, session_id: str, db) -> Optional[dict]:
 # ── Step retrieval ───────────────────────────────────────────────────────
 
 
+async def _load_presented_step(*, session_id: str, job_id: str, db) -> Optional[dict]:
+    """Assemble the (earliest) in-flight presented-but-unsubmitted step for this
+    session, or None. Shared by the §17.645 one-in-flight guard and the §17.512
+    nothing-else-claimable fallback."""
+    presented = (await db.execute(
+        text("""
+            SELECT s.node_key, s.guidance_status
+              FROM assist_steps s
+              JOIN dag_nodes d
+                ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid AND s.status = 'presented'
+             ORDER BY d.execution_order NULLS LAST, s.node_key
+             LIMIT 1
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not presented:
+        return None
+    node_row, ctx = await _assemble_ctx_for_node(
+        db=db, job_id=job_id, node_key=presented["node_key"],
+    )
+    return {
+        "session_id": session_id,
+        "job_id": job_id,
+        "node_key": ctx.node_key,
+        "title": ctx.title,
+        "description": node_row.get("description"),
+        "tool": ctx.tool,
+        "domain": ctx.domain,
+        "depends_on": list(node_row.get("depends_on") or []),
+        "system_prompt": ctx.system_prompt,
+        "base_prompt": ctx.base_prompt,
+        "upstream_outputs": ctx.upstream_outputs,
+        "upstream_truncated_keys": ctx.upstream_truncated_keys,
+        "assembled_prompt": ctx.assembled_prompt,
+        "guidance_status": presented.get("guidance_status") or "none",
+        "re_presented": True,
+    }
+
+
 async def get_next_step(*, session_id: str, db) -> Optional[dict]:
-    """Atomically claim the next pending step whose deps are satisfied.
+    """Claim the next step for the human to work.
+
+    §17.645 — ONE step in flight at a time. If a step is already presented but
+    not yet submitted/skipped, re-present THAT rather than claiming a new one.
+    This keeps the human walkthrough linear — finish or skip the current step
+    before the next is handed out — so `next` can't jump to an unrelated
+    dependency-ready branch (e.g. a standalone doc/summary node) and then bounce
+    back to the unfinished step. Only when nothing is in flight does it claim the
+    next pending step whose deps are satisfied.
 
     Returns the step + assembled context, or None when the session is
-    complete (no pending steps with satisfied deps remain). The caller
-    should treat None as "session complete" only when also no
-    presented steps are in flight — otherwise it just means the user
-    has work to submit.
+    complete (no pending steps with satisfied deps remain and nothing is in
+    flight).
 
     Concurrency: an atomic UPDATE with FOR UPDATE SKIP LOCKED prevents
     two readers from claiming the same step.
@@ -334,6 +380,13 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
     if sess["status"] != "active":
         return None
     job_id = str(sess["job_id"])
+
+    # §17.645 — one step in flight at a time. Re-present an already-presented,
+    # not-yet-submitted step instead of claiming a new (possibly far) node.
+    in_flight = await _load_presented_step(session_id=session_id, job_id=job_id, db=db)
+    if in_flight is not None:
+        await db.commit()
+        return in_flight
 
     # Claim atomically. Dep gating: every node listed in dag_nodes.depends_on
     # must be 'done' or 'skipped' on dag_nodes.
@@ -370,43 +423,10 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
         # §17.512 — no pending step is claimable. Before reporting "nothing to
         # do", re-surface a step already PRESENTED to this user but not yet
         # submitted, so a lost / scrolled-away / reconnect walkthrough is
-        # recoverable via `/assist next` instead of being a dead-end. Only
-        # fires when nothing new is claimable, so it never blocks forward
-        # progress on parallel/ready steps.
-        presented = (await db.execute(
-            text("""
-                SELECT s.node_key, s.guidance_status
-                  FROM assist_steps s
-                  JOIN dag_nodes d
-                    ON d.job_id = s.job_id AND d.node_key = s.node_key
-                 WHERE s.session_id = :sid AND s.status = 'presented'
-                 ORDER BY d.execution_order NULLS LAST, s.node_key
-                 LIMIT 1
-            """),
-            {"sid": session_id},
-        )).mappings().first()
-        if not presented:
-            return None
-        node_row, ctx = await _assemble_ctx_for_node(
-            db=db, job_id=job_id, node_key=presented["node_key"],
-        )
-        return {
-            "session_id": session_id,
-            "job_id": job_id,
-            "node_key": ctx.node_key,
-            "title": ctx.title,
-            "description": node_row.get("description"),
-            "tool": ctx.tool,
-            "domain": ctx.domain,
-            "depends_on": list(node_row.get("depends_on") or []),
-            "system_prompt": ctx.system_prompt,
-            "base_prompt": ctx.base_prompt,
-            "upstream_outputs": ctx.upstream_outputs,
-            "upstream_truncated_keys": ctx.upstream_truncated_keys,
-            "assembled_prompt": ctx.assembled_prompt,
-            "guidance_status": presented.get("guidance_status") or "none",
-            "re_presented": True,
-        }
+        # recoverable via `/assist next`. (Post-§17.645 this is normally caught
+        # by the in-flight guard above; kept as a belt-and-suspenders fallback
+        # for legacy sessions with a presented step but a race on the claim.)
+        return await _load_presented_step(session_id=session_id, job_id=job_id, db=db)
 
     node_key = claimed["node_key"]
     await db.execute(
