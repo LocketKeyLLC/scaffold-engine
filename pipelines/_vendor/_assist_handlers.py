@@ -1288,10 +1288,16 @@ _TERSE_HINTS = (
     "less detail", "too verbose", "too long", "shorter", "brief", "concise",
     "less wordy", "cut the",
 )
+# §17.643 — the beginner-language phrases ("beginner", "walk me through", "step
+# by step", "eli5") were removed from this list: they signal a reader who wants
+# a CLEAR, concise how-to, not more rationale. Mapping them to `detailed` made
+# the walkthrough LONGER (more WHY, expanded verification) — the opposite of
+# what a beginner asking for simple help wants. They now fall through to the
+# beginner-clear `normal` default (which already assumes limited knowledge).
+# Only phrases that genuinely ask for MORE depth remain here.
 _DETAILED_HINTS = (
     "more detail", "detailed", "explain more", "more thorough", "verbose",
-    "step by step", "walk me through", "more context", "explain why",
-    "beginner", "eli5", "in depth", "in-depth",
+    "more context", "explain why", "in depth", "in-depth",
 )
 
 

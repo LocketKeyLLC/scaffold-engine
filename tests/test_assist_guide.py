@@ -98,15 +98,21 @@ def test_every_guide_prompt_carries_beginner_framing():
 
 
 def test_every_guide_prompt_carries_pacing_floor():
-    """§17.641 — a step's walkthrough must be paced (phased + checkpoints), not
-    an overwhelming flat list. The pacing floor is in every generation prompt."""
+    """§17.641/§17.643 — a step's walkthrough must be paced (phased +
+    checkpoints) AND brief. The pacing/brevity floor is in every generation
+    prompt: chunk the necessary actions, but favor the fewest words a beginner
+    needs to act. The pre-§17.643 anti-brevity phrasing ('do NOT cut it') is
+    gone — it produced ~870-word single-step walkthroughs."""
     for tool in ("shell", "codegen", "LLM", None):
         s = assist_guide.guide_system_for_tool(tool)
         low = s.lower()
         assert "pacing" in low, tool
         assert "checkpoint" in low, tool
         assert "phases" in low, tool
-        assert "chunk the work, do not cut it" in low, tool  # complete, not truncated
+        # §17.643 — brevity is now part of the floor; the old anti-brevity
+        # instruction must NOT reappear (it fought the "too long" fix).
+        assert "fewest words" in low, tool
+        assert "do not cut it" not in low, tool
 
 
 def test_beginner_framing_survives_every_verbosity():
@@ -191,6 +197,22 @@ async def test_generate_guidance_hard_failure_marks_failed():
 
 
 # ── research pre-pass ────────────────────────────────────────────────────
+
+
+def test_render_research_block_is_correctness_only():
+    """§17.643 — the research block must instruct the model to use the facts for
+    ACCURACY only, not to reproduce their depth. The pre-§17.643 header
+    ('authoritative facts; use them') led the model to transcribe the research
+    into the walkthrough, ~doubling its length (471→871 words for one step)."""
+    block = assist_guide._render_research_block(
+        [{"query": "q", "kind": "searxng", "text": "apt install nginx"}]
+    )
+    low = block.lower()
+    assert "for your accuracy only" in low
+    assert "not to reproduce" in low
+    assert "the reader needs the steps, not the research" in low
+    # empty sources still no-op
+    assert assist_guide._render_research_block([]) == ""
 
 
 @pytest.mark.asyncio

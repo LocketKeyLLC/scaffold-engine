@@ -330,6 +330,20 @@ def test_verbosity_helper():
 
 
 @pytest.mark.smoke
+@pytest.mark.parametrize("msg", [
+    "walk me through this",
+    "explain it step by step",
+    "I'm a beginner, help me",
+    "eli5 please",
+])
+def test_beginner_language_does_not_force_detailed(msg):
+    """§17.643 — asking for help in beginner language must NOT bump verbosity to
+    `detailed` (which adds WHY-rationale and length). A beginner wants a clear,
+    concise how-to; these fall through to the beginner-clear `normal` default."""
+    assert _ah._verbosity_from_message(msg) == "normal"
+
+
+@pytest.mark.smoke
 def test_handoff_mode_helper():
     assert _ah._handoff_mode_from_message("do the rest for me") == "all_remaining"
     assert _ah._handoff_mode_from_message("you do this one") == "single"

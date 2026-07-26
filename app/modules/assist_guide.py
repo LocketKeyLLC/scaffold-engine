@@ -78,22 +78,28 @@ _AUDIENCE_FRAMING = (
 # §17.641 — pacing floor. §17.640 made walkthroughs thorough ("spell out HOW"),
 # which for a large step turns into one long flat list that overwhelms a
 # first-timer doing it by hand. This keeps the SAME completeness but chunks and
-# paces it — group into phases, checkpoint each, one action per item. Chunk the
-# work, never cut it.
+# paces it — group into phases, checkpoint each, one action per item.
+# §17.643 — brevity is now part of the floor. The prior wording ("chunk the
+# work, do NOT cut it — every necessary action still appears") was an explicit
+# anti-brevity instruction; combined with the research block it produced ~870-
+# word walkthroughs for a single step. Completeness now means every necessary
+# ACTION, not every possible word: lead with the actions, cut padding.
 _PACING_FRAMING = (
-    "Pacing — the reader is ONE person doing this by hand, possibly for the "
-    "first time, so the walkthrough must stay digestible and never read as an "
-    "overwhelming wall of actions. (1) Cover ONLY what THIS step needs — never "
-    "fold in work that belongs to a later step. (2) If the step needs more than "
-    "a handful of actions, GROUP them into a few short, clearly labeled phases "
-    "(roughly 3-6 actions each) and end each phase with a one-line "
-    "'Checkpoint:' the reader confirms before moving on — chunk the work, do "
-    "NOT cut it (every necessary action still appears). (3) One concrete action "
-    "per numbered item; no compound 'do A, then B, then C' items. (4) Put "
-    "anything nice-to-have or advanced behind an explicit '(Optional)' label so "
-    "it is clearly skippable, never inline as if required. (5) Open with a "
-    "single short sentence naming how many phases there are, so the reader sees "
-    "a short, finite path instead of an endless list."
+    "Pacing & length — the reader is ONE person doing this by hand, possibly "
+    "for the first time. Keep it SHORT and scannable: give the fewest words a "
+    "beginner needs to ACT, lead with the actions, and cut background, "
+    "rationale, and reference material they did not ask for. Completeness means "
+    "every necessary action is present — NOT that every action carries an "
+    "explanation. (1) Cover ONLY what THIS step needs — never fold in work that "
+    "belongs to a later step. (2) If the step needs more than a handful of "
+    "actions, GROUP them into a few short, clearly labeled phases (roughly 3-6 "
+    "actions each) and end each phase with a one-line 'Checkpoint:' the reader "
+    "confirms before moving on — chunk the necessary actions, do not pad them. "
+    "(3) One concrete action per numbered item; no compound 'do A, then B, then "
+    "C' items. (4) Put anything nice-to-have or advanced behind an explicit "
+    "'(Optional)' label so it is clearly skippable, never inline as if "
+    "required. (5) Open with a single short sentence naming how many phases "
+    "there are, so the reader sees a short, finite path."
 )
 
 _RUNBOOK_HUMAN_FRAMING = (
@@ -143,7 +149,7 @@ Hard rules:
 - Never write past-tense narration ("Created the file", "Ran it and got…", "Output confirmed…"). The human runs it, not you.
 - Never invent concrete values (IPs, hostnames, ports, keys, versions) absent from the task or research block — use placeholders.
 - If the task enumerates specifics (a full language list, default values, every flag), implement them COMPLETELY; do not silently truncate to a subset.
-- If a confirmed-research block is provided, treat those facts as authoritative and use them (correct package name, current flag, exact version).
+- If a confirmed-research block is provided, use it SILENTLY for accuracy only (correct package name, current flag, exact version) — do NOT reproduce its depth, background, or explanations; the reader needs the steps, not the research.
 - No emoji, no "let me know if…", no completion checkmarks — the operator marks completion.
 
 Produce the walkthrough for THIS step only. Nothing more."""
@@ -176,7 +182,7 @@ Use these section headings, in order, and omit any that don't apply:
 Hard rules:
 - Never write past-tense narration as if you performed the step ("Configured…", "Decided…", "Wrote…"). The human does it.
 - Never invent concrete values (names, URLs, account IDs, versions) absent from the task or research block — use placeholders.
-- If a confirmed-research block is provided, treat those facts as authoritative.
+- If a confirmed-research block is provided, use it SILENTLY for accuracy only — do NOT reproduce its depth, background, or explanations; the reader needs the steps, not the research.
 - No emoji, no filler closers, no completion checkmarks.
 
 Produce the walkthrough for THIS step only. Nothing more."""
@@ -205,7 +211,7 @@ Hard rules:
 - Address THIS error and THIS task. Don't restate the whole step from scratch unless the fix requires it.
 - Never write past-tense narration ("Fixed it", "Ran it and it worked"). The operator runs your commands.
 - Never invent concrete values (versions, paths, package names, ports) absent from the task, the error, the environment, or the research block — use a <PLACEHOLDER>.
-- If a confirmed-research block is provided, treat those facts as authoritative (correct package name, current flag, known-bug workaround).
+- If a confirmed-research block is provided, use it SILENTLY for accuracy only (correct package name, current flag, known-bug workaround) — do NOT reproduce its depth or background; give the fix, not the research.
 - If the error text is too vague to diagnose, say exactly what additional output you need (e.g. "paste the full traceback" / "run `<cmd>` and share the output") instead of guessing.
 - No emoji, no filler closers, no completion checkmarks.
 
@@ -449,7 +455,14 @@ def _render_research_block(sources: list[dict]) -> str:
     if not sources:
         return ""
     parts = [
-        "## Research (confirmed — authoritative facts; use them, do not contradict them)"
+        # §17.643 — research is for the model's ACCURACY, not for the reader.
+        # The old header ("authoritative facts; use them") led the model to
+        # transcribe the research depth into the walkthrough, ~doubling its
+        # length and burying the steps in expert detail. Use it silently.
+        "## Research (confirmed facts — for YOUR accuracy only, NOT to reproduce)\n"
+        "Use these to get package names, versions, flags, and exact commands "
+        "right. Do NOT copy this material, its background, or its depth into the "
+        "walkthrough — the reader needs the steps, not the research."
     ]
     for i, s in enumerate(sources, 1):
         src = f"{s['kind']}: {s['url']}" if s.get("url") else s["kind"]
