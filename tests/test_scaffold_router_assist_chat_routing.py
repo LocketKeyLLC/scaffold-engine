@@ -145,6 +145,60 @@ class TestPipeRouting:
         assert "TRIAGE_OUTPUT" in out
         guide.assert_not_called()
 
+    def test_active_session_beats_stale_pick_list(self, pipe):
+        # §17.652 — a spent `<!--ASSIST_PICK-->` stays in history forever. Once a
+        # session is active, a later substantive message that merely contains a
+        # candidate job's distinctive token ("…host the WireGuard endpoint…") must
+        # route to the SESSION, not re-resolve the pick and re-present the step.
+        rec = {"session_id": "s1", "last_node_key": "T1", "status": "active"}
+        msgs = [
+            {"role": "user", "content": "continue the proxmox setup"},
+            {"role": "assistant",
+             "content": "which job? <!--ASSIST_PICK:aaaa1111,bbbb2222-->"},
+            {"role": "user", "content": "the first one"},
+            {"role": "assistant", "content": "🤝 Assist session started — step T1"},
+            {"role": "user",
+             "content": "which computer should host the WireGuard endpoint?"},
+        ]
+        with patch.object(pipe, "_assist_recall", return_value=rec), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT"), \
+             patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+             patch.object(pipe, "_in_progress_banner", return_value=""), \
+             patch.object(_mod._assist, "resolve_candidate_pick") as pick, \
+             patch.object(_mod._assist, "assist_start") as start, \
+             patch.object(
+                 pipe, "_assist_nl_turn",
+                 side_effect=lambda *a, **k: iter(["GUIDE_OUTPUT"]),
+             ) as guide:
+            out = "".join(pipe.pipe(msgs[-1]["content"], "model-id", msgs, CHAT_BODY))
+        assert "GUIDE_OUTPUT" in out
+        guide.assert_called_once()
+        pick.assert_not_called()   # pick block skipped entirely
+        start.assert_not_called()  # session NOT re-started
+
+    def test_pick_resolves_when_no_active_session(self, pipe):
+        # Guard the normal flow: with NO active session, a selector reply against
+        # a pending pick-list still starts the chosen job (§17.652 didn't break it).
+        msgs = [
+            {"role": "user", "content": "continue the proxmox setup"},
+            {"role": "assistant",
+             "content": "which job? <!--ASSIST_PICK:aaaa1111,bbbb2222-->"},
+            {"role": "user", "content": "the first one"},
+        ]
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_active_assist_session_via_history", return_value=None), \
+             patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+             patch.object(pipe, "_in_progress_banner", return_value=""), \
+             patch.object(_mod._assist, "resolve_candidate_pick", return_value="aaaa1111") as pick, \
+             patch.object(
+                 _mod._assist, "assist_start",
+                 side_effect=lambda *a, **k: iter(["STARTED aaaa1111"]),
+             ) as start:
+            out = "".join(pipe.pipe(msgs[-1]["content"], "model-id", msgs, CHAT_BODY))
+        assert "STARTED aaaa1111" in out
+        pick.assert_called_once()
+        start.assert_called_once()
+
     def test_slash_command_dispatches_despite_active_session(self, pipe):
         # An active session must NOT swallow `/jobs` etc. — slash dispatch
         # happens before the plain-text routing block. §17.562: /jobs is an

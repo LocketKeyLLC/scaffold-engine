@@ -1545,18 +1545,34 @@ class Pipeline:
         # work or drives a command. Prevents the "👋 Welcome, describe what you
         # want to build" preamble from prefacing a resume.
 
+        # §17.539 / §17.626 — resolve the active assist session ONCE here (from
+        # chat_id when OWUI delivers one — it usually doesn't — else from the
+        # conversation-history marker). Hoisted above the pick-list follow-up so a
+        # bound session takes precedence over a STALE pick-list (§17.652): once a
+        # session is started, the `<!--ASSIST_PICK-->` marker stays in history
+        # forever, and a later substantive message that merely contains a
+        # candidate job's distinctive token ("…host the WireGuard endpoint…")
+        # would otherwise re-resolve the pick and re-present the step instead of
+        # answering. For a brand-new chat (no marker) this is cheap — no HTTP.
+        cid = self._chat_id_from_body(body)
+        active = (
+            self._active_assist_session(cid)
+            or self._active_assist_session_via_history(messages)
+        )
+
         # §17.627 — natural-start disambiguation follow-up. If the previous turn
         # offered an assist candidate pick-list, a short selector reply ("1",
         # "the proxmox one", "second") starts that job. Checked BEFORE the noise
         # guard so a bare "1" isn't swallowed. A non-matching reply falls through
-        # to normal routing (maybe it's a new idea after all).
-        if not msg.startswith("/"):
+        # to normal routing (maybe it's a new idea after all). Skipped when a
+        # session is already active (§17.652) — the pick-list is already spent.
+        if not msg.startswith("/") and not active:
             pending = self._extract_pending_candidates(messages)
             if pending:
                 picked = _assist.resolve_candidate_pick(self, msg, pending)
                 if picked:
                     yield from _assist.assist_start(
-                        self, picked, chat_id=self._chat_id_from_body(body),
+                        self, picked, chat_id=cid,
                     )
                     return
 
@@ -1614,11 +1630,7 @@ class Pipeline:
         # the confirmed reality is OWUI does NOT deliver chat_id to an external
         # pipe, so the history marker is the load-bearing signal). Either way
         # the routing decision no longer depends on OWUI's metadata/header quirks.
-        cid = self._chat_id_from_body(body)
-        active = (
-            self._active_assist_session(cid)
-            or self._active_assist_session_via_history(messages)
-        )
+        # (`cid` + `active` were resolved once, above the pick-list follow-up.)
         # §17.646 — DB-derived fallback. Both paths above can fail even mid-
         # session: OWUI delivers no chat_id AND, on a long transcript, truncates
         # the "Assist session started — <id>" marker out of the history window it
