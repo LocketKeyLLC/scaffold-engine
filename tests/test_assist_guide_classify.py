@@ -132,6 +132,26 @@ async def test_classify_turn_ask_returns_query():
     assert out["query"] == "is ZFS safe without ECC RAM"
 
 
+# ── §17.651 — ask vs question boundary (project/off-step → ask) ────────────
+
+
+@pytest.mark.smoke
+def test_classify_prompt_routes_project_questions_to_ask():
+    """A design/planning question about the project or a DIFFERENT step must
+    classify as ask (→ project-aware research, §17.650), not question (which
+    only re-renders the CURRENT step). Guards the prompt wording since the
+    boundary itself is model-driven and can't be unit-asserted hermetically."""
+    sys_prompt = assist_guide._CLASSIFY_SYSTEM
+    tool_desc = assist_guide._CLASSIFY_TURN_TOOL.input_schema[
+        "properties"]["intent"]["description"]
+    for blob in (sys_prompt, tool_desc):
+        low = blob.lower()
+        # ask must explicitly cover project/design/planning + other-step questions
+        assert "project" in low and "ask" in low
+        # question must be scoped to the CURRENT step only
+        assert "current step" in low or "this step" in low
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("intent", ["handoff", "status", "explain_plan", "set_env"])
 async def test_classify_turn_passes_through_new_intents(intent):

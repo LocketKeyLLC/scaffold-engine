@@ -700,8 +700,8 @@ _CLASSIFY_TURN_TOOL = model_router.Tool(
                     "explain_plan = they want the whole plan / all the steps / the big picture ('what's the overall plan', 'show me all the steps'). "
                     "set_env = they're telling you about their machine/environment ('I'm on Ubuntu 24.04 with apt', 'my host IP is 10.0.0.5', 'I use bash'). "
                     "set_verbosity = they want more or less detail in the instructions ('explain more', 'be more detailed', 'just give me the commands', 'too verbose'). "
-                    "ask = a factual lookup that benefits from web/knowledge-base search — versions, current commands, comparisons, 'what is X', 'what's the latest', 'is X safe' — where a researched, cited answer helps more than re-showing the step. "
-                    "question = they want help understanding or ADJUSTING this step's instructions (clarify, redo for a different OS, more detail on one part) — the safe default when unsure."
+                    "ask = they want a real ANSWER to a question, not a re-rendering of the current step. Covers a factual lookup (versions, current commands, comparisons, 'what is X', 'is X safe') AND a project/design/planning question about the operator's own setup or a part of the plan OTHER than the current step ('which of my two machines should host the WireGuard endpoint', 'how should the VLANs be laid out', 'do I need X for Y'). A researched, project-aware answer helps more than re-showing the step. "
+                    "question = they want to clarify or ADJUST the CURRENT step's own instructions specifically (clarify THIS step, redo THIS step for a different OS, more detail on one part of it). Use this ONLY when the message is about the step in front of them — a question about the wider project or a different step is ask. Safe default when unsure AND the message clearly concerns the current step."
                 ),
             },
             "evidence": {
@@ -739,8 +739,17 @@ _CLASSIFY_SYSTEM = (
     "- STATES a result/decision ('I picked ZFS', 'done, 0 errors', pasted output) → submit\n"
     "- reports a FAILURE ('it errored with…', 'not working', 'command not found') → fix\n"
     "- wants the ENGINE to do the work ('you do this', 'run it for me', 'handle the rest') → handoff\n"
-    "- a FACTUAL lookup ('what's the difference between ZFS and LVM', 'latest Proxmox version', 'is ZFS safe on non-ECC') → ask\n"
-    "- wants to CLARIFY/ADJUST this step's instructions ('how do I do this', 'redo for macOS', 'more detail on part 2') → question\n"
+    "- wants an ANSWER to a question → ask. This covers BOTH a factual lookup "
+    "('difference between ZFS and LVM', 'latest Proxmox version', 'is ZFS safe on "
+    "non-ECC') AND a project/design/planning question about THEIR setup or a part "
+    "of the plan OTHER than the step in front of them ('which of my two machines "
+    "should host the WireGuard endpoint', 'how should I lay out the VLANs', 'do I "
+    "need a separate NIC for that'). If they want an answer — not a re-rendering of "
+    "the current step — it is ask.\n"
+    "- wants to CLARIFY/ADJUST the CURRENT step's own instructions ('how do I do "
+    "THIS step', 'redo this one for macOS', 'more detail on part 2') → question. "
+    "Only when the message is about the step in front of them; a question about the "
+    "wider project or a different step is ask, not question.\n"
     "- tells you about their MACHINE ('I'm on Ubuntu 24.04', 'IP is 10.0.0.5') → set_env\n"
     "Call classify_turn exactly once."
 )
