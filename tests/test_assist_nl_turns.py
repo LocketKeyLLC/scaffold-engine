@@ -229,10 +229,33 @@ def test_try_natural_start_no_match_returns_none(pipe):
 
 @pytest.mark.smoke
 def test_render_step_footer_natural_language():
+    # No step_counts (or all-zero) → first walkthrough → full footer.
     out = _ah.render_step_footer({"node_key": "T1"})
     assert "just tell me what happened" in out.lower()
     assert "skip" in out.lower()
     assert "/assist submit" in out  # muted alias still present
+
+
+@pytest.mark.smoke
+def test_footer_full_on_first_step_trimmed_after():
+    """§17.647 — the full 89-word footer shows once (first walkthrough); once any
+    step is completed it trims to a one-liner so later steps aren't padded."""
+    full = _ah.render_step_footer({"node_key": "T1", "step_counts": {"pending": 5}})
+    trimmed = _ah.render_step_footer(
+        {"node_key": "T3", "step_counts": {"committed": 2, "pending": 3}})
+    assert len(full.split()) > len(trimmed.split()) * 2  # materially shorter
+    assert "/assist handoff" in full          # full lists every control
+    assert "/assist handoff" not in trimmed   # trimmed drops the exhaustive list
+    # trimmed still keeps the essentials in reach
+    assert "skip" in trimmed.lower()
+    assert "where am i" in trimmed.lower()
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("done_status", ["committed", "skipped", "handed_off", "done"])
+def test_footer_trims_on_any_completed_status(done_status):
+    out = _ah.render_step_footer({"node_key": "T2", "step_counts": {done_status: 1}})
+    assert "/assist handoff" not in out  # trimmed
 
 
 @pytest.mark.smoke

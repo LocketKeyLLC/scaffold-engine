@@ -238,6 +238,13 @@ async def assist_next(session_id: str, db=Depends(get_db)):
             "node_key": None,
             "step_counts": (sess2 or {}).get("step_counts", {}),
         }
+    # §17.647 — carry the session step roll-up on the claimed step too, so the
+    # pipeline can tell a first walkthrough from a later one and trim the
+    # repetitive "how to report back" footer after the operator has done a step.
+    # (committed/skipped/handed_off don't change during a claim, so the pre-claim
+    # sess counts are accurate for that decision.)
+    if isinstance(step, dict):
+        step["step_counts"] = sess.get("step_counts", {})
     return step
 
 

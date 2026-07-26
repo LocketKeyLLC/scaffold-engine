@@ -234,27 +234,45 @@ def render_step(step: dict) -> str:
     )
 
 
-def render_step_footer(step: dict) -> str:
-    """§17.626 — the natural-language 'what to do when you're done' block, shown
-    AFTER the walkthrough. This is what replaces the old `/assist submit` code
-    fence: the operator just talks back to the engine.
+# §17.626 — full "how to report back" footer. Teaches the whole plain-language
+# control surface; shown once, on the FIRST walkthrough of a session.
+_FOOTER_FULL = (
+    "\n\n---\n\n"
+    "**When you're done, just tell me what happened** — paste any command "
+    "output, or say what you did or decided. I'll check it and move you to "
+    "the next step.\n\n"
+    "- Nothing to paste? A short _\"done\"_ works.  ·  Pass on it? _\"skip\"_.\n"
+    "- Hit a problem? Tell me the error (_\"it failed with …\"_) and I'll fix it.\n"
+    "- Want me to just do it? _\"you handle this one\"_ (or _\"you do the rest\"_).\n"
+    "- Need a fact? Ask (_\"is ZFS safe on non-ECC?\"_) — I'll research it.\n"
+    "- Lost? _\"where am I\"_ or _\"show me the plan\"_.\n\n"
+    "_Prefer commands? `/assist submit`, `/assist skip`, `/assist fix`, "
+    "`/assist handoff`, `/assist research` still work._\n"
+)
 
-    Slash commands stay as power-user aliases (mentioned once, muted); the
-    primary path is plain conversation, which the router classifies into
-    submit / skip / fix / next (§17.626)."""
-    return (
-        "\n\n---\n\n"
-        "**When you're done, just tell me what happened** — paste any command "
-        "output, or say what you did or decided. I'll check it and move you to "
-        "the next step.\n\n"
-        "- Nothing to paste? A short _\"done\"_ works.  ·  Pass on it? _\"skip\"_.\n"
-        "- Hit a problem? Tell me the error (_\"it failed with …\"_) and I'll fix it.\n"
-        "- Want me to just do it? _\"you handle this one\"_ (or _\"you do the rest\"_).\n"
-        "- Need a fact? Ask (_\"is ZFS safe on non-ECC?\"_) — I'll research it.\n"
-        "- Lost? _\"where am I\"_ or _\"show me the plan\"_.\n\n"
-        "_Prefer commands? `/assist submit`, `/assist skip`, `/assist fix`, "
-        "`/assist handoff`, `/assist research` still work._\n"
-    )
+# §17.647 — trimmed footer for LATER steps. Once the operator has completed a
+# step they know the drill; the full 89-word block on every step is noise that
+# inflates each response. A one-liner keeps the essentials in reach.
+_FOOTER_TRIMMED = (
+    "\n\n---\n_Done? Tell me what happened — or _\"skip\"_, or paste an error "
+    "to fix. Say _\"where am I\"_ / _\"show me the plan\"_ anytime._\n"
+)
+
+# assist_steps statuses that mean a step is finished (so this is not the
+# operator's first walkthrough of the session).
+_DONE_STEP_STATUSES = ("committed", "skipped", "handed_off", "done")
+
+
+def render_step_footer(step: dict) -> str:
+    """§17.626/§17.647 — the natural-language 'what to do when you're done' block,
+    shown AFTER the walkthrough. Full on the first walkthrough (orient the user);
+    trimmed once any step has been completed (they already know how to report
+    back). First-vs-later is read from the session `step_counts` the /next
+    endpoint attaches; absent (older orchestrator) → full, so we never silently
+    drop the guidance."""
+    counts = step.get("step_counts") or {}
+    completed = sum(counts.get(s, 0) for s in _DONE_STEP_STATUSES)
+    return _FOOTER_TRIMMED if completed > 0 else _FOOTER_FULL
 
 
 def render_destructive_banner(meta: dict | None) -> str:
