@@ -1016,3 +1016,125 @@ class TestPipeWorkflowFlow:
         triage.assert_not_called()
         clf2.assert_not_called()
         hc2.assert_called_once_with("/cancel job-3", chat_id=None)
+
+
+# ===========================================================================
+# §17.658 — Phase 7: ground-truth KB + prompt inspection
+# ===========================================================================
+
+
+@pytest.mark.smoke
+class TestPhase7Fast:
+    @pytest.mark.parametrize("msg,intent", [
+        ("list ground truths", "gt_list"),
+        ("show my ground truths", "gt_list"),
+        ("ground truth stats", "gt_stats"),
+        ("gt stats", "gt_stats"),
+    ])
+    def test_fast_phrases(self, msg, intent):
+        assert _mod._fast_classify_command(msg) == intent
+
+
+@pytest.mark.smoke
+class TestPhase7RequiredSlots:
+    @pytest.mark.parametrize("intent", ["gt_search", "gt_extract", "prompts_view"])
+    def test_missing_slot_falls_through(self, pipe, intent):
+        clf = {"intent": intent, "confidence": "high"}   # no query/topic/job_ref
+        with patch.object(pipe, "_classify_command", return_value=clf):
+            assert pipe._nl_command_route("do a thing", _hist("x")) is None
+
+
+@pytest.mark.smoke
+class TestGtReads:
+    def test_gt_list_renders(self, pipe):
+        body = {"total": 2, "entries": [
+            {"entry_id": "e1", "title": "ZFS ARC", "tags": "zfs", "snippet": "arc cache"},
+            {"entry_id": "e2", "title": "K8s DNS", "tags": "k8s", "snippet": "coredns"}]}
+        with patch.object(pipe, "_gt_json", return_value=(body, None)):
+            out = pipe._nl_gt_list()
+        assert "Ground-truth KB" in out and "`e1`" in out and "ZFS ARC" in out
+
+    def test_gt_list_empty_state(self, pipe):
+        with patch.object(pipe, "_gt_json", return_value=({"total": 0, "entries": []}, None)):
+            out = pipe._nl_gt_list()
+        assert "no entries" in out.lower()
+
+    def test_gt_search_renders_and_calls_endpoint(self, pipe):
+        body = {"results": [{"entry_id": "e9", "title": "ZFS", "score": 0.87, "snippet": "x"}]}
+        with patch.object(pipe, "_gt_json", return_value=(body, None)) as gj:
+            out = pipe._nl_gt_search("zfs arc")
+        assert "`e9`" in out and "0.87" in out
+        # posts the query to /gt/search
+        args, kwargs = gj.call_args
+        assert args[0] == "POST" and args[1] == "/gt/search"
+        assert kwargs["json_body"]["query"] == "zfs arc"
+
+    def test_gt_stats_renders(self, pipe):
+        body = {"total_entries": 42, "domains": {"eng": 30, "ops": 12}, "tags": {"zfs": 5}}
+        with patch.object(pipe, "_gt_json", return_value=(body, None)):
+            out = pipe._nl_gt_stats()
+        assert "42 entries" in out and "eng: 30" in out
+
+    def test_gt_read_surfaces_error(self, pipe):
+        with patch.object(pipe, "_gt_json", return_value=(None, "⚠️ boom")):
+            assert "boom" in pipe._nl_gt_list()
+
+
+@pytest.mark.smoke
+class TestGtExtractConfirm:
+    def test_confirm_card_not_launch(self, pipe):
+        with patch.object(pipe, "_gt_json") as gj:
+            out = "".join(pipe._dispatch_nl_command(
+                "gt_extract", {"topic": "zfs tuning"}, "raw"))
+        assert "NL_CONFIRM:" in out and "zfs tuning" in out
+        gj.assert_not_called()                 # nothing extracted until confirmed
+
+    def test_execute_extracted_summary(self, pipe):
+        result = {"status": "extracted", "entry_count": 7, "search_results_used": 12}
+        with patch.object(pipe, "_gt_json", return_value=(result, None)) as gj:
+            out = "".join(pipe._execute_nl_action(
+                {"intent": "gt_extract", "slots": {"topic": "zfs"}}))
+        assert "Extracted **7**" in out
+        args, kwargs = gj.call_args
+        assert args[0] == "POST" and args[1] == "/gt"
+        assert kwargs["json_body"]["topic"] == "zfs"
+
+    def test_execute_non_extracted_status(self, pipe):
+        with patch.object(pipe, "_gt_json",
+                          return_value=({"status": "empty", "error": "no entries"}, None)):
+            out = "".join(pipe._execute_nl_action(
+                {"intent": "gt_extract", "slots": {"topic": "zfs"}}))
+        assert "empty" in out and "no entries" in out
+
+    def test_cancel_message(self, pipe):
+        msg = pipe._render_confirm_cancelled({"intent": "gt_extract", "slots": {}})
+        assert "no ground truths" in msg.lower()
+
+
+@pytest.mark.smoke
+class TestPromptsView:
+    def test_unique_match_renders_prompts(self, pipe):
+        resolved = ({"job_id": "job-5", "title": "proxmox"}, False,
+                    [{"job_id": "job-5", "title": "proxmox"}])
+        pbody = {"node_count": 2, "nodes": [
+            {"execution_order": 1, "node_key": "T1", "has_template": True,
+             "has_optimized": False, "status": "done"},
+            {"execution_order": 2, "node_key": "T2", "has_template": True,
+             "has_optimized": True, "status": "pending"}]}
+        with patch.object(pipe, "_resolve_job_ref", return_value=resolved), \
+             patch.object(pipe, "_gt_json", return_value=(pbody, None)) as gj:
+            out = "".join(pipe._nl_prompts_view({"job_ref": "proxmox"}))
+        assert "Prompts — proxmox" in out and "`T1`" in out and "`T2`" in out
+        assert gj.call_args[0][1] == "/prompts/job-5"
+
+    def test_ambiguous_lists(self, pipe):
+        cands = [{"job_id": "a", "title": "p one", "status": "done"},
+                 {"job_id": "b", "title": "p two", "status": "done"}]
+        with patch.object(pipe, "_resolve_job_ref", return_value=(cands[0], True, cands)):
+            out = "".join(pipe._nl_prompts_view({"job_ref": "p"}))
+        assert "ASSIST_PICK" not in out and "/prompts <id>" in out
+
+    def test_no_match_clarifies(self, pipe):
+        with patch.object(pipe, "_resolve_job_ref", return_value=(None, False, [])):
+            out = "".join(pipe._nl_prompts_view({"job_ref": "nope"}))
+        assert "couldn't find a job" in out.lower()

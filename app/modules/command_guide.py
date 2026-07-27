@@ -64,6 +64,12 @@ _READ_INTENTS = (
     "config",          # engine/pipeline configuration   → /config
     "work_here",       # what am I working on now         → /here
     "work_next",       # my single next actionable step   → /next
+    # §17.658 (Phase 7) — knowledge-base (ground-truth) + prompt inspection,
+    # surfaced from the main chat (their own OWUI pipelines aside).
+    "gt_list",         # list ground-truth KB entries     → GET /gt/list
+    "gt_search",       # semantic search the GT KB        → POST /gt/search
+    "gt_stats",        # GT collection summary            → GET /gt/stats
+    "prompts_view",    # a job's per-node prompts         → GET /prompts/<id>
 )
 # Mutating / expensive intents (§17.629, Phase 2). research_topic + schedule_add
 # commit real cost and are confirmed in the pipeline before firing.
@@ -82,6 +88,8 @@ _WRITE_INTENTS = (
     "research_github", # ingest a repo's docs              → /research github:<repo>
     "research_openapi",# ingest an OpenAPI spec            → /research openapi:<url>
     "research_rename", # rename a research session         → /research/rename <id> <n>
+    # §17.658 (Phase 7) — ground-truth extraction (SearXNG + LLM; confirmed).
+    "gt_extract",      # extract ground truths on a topic  → POST /gt
 )
 # Workflow-control intents (§17.657, Phase 6). State-altering job/DAG control;
 # each is confirmed in the pipeline (confirm/execute kick expensive multi-step
@@ -174,6 +182,17 @@ _ROUTE_TOOL = model_router.Tool(
                     "system-wide job census (status). "
                     "work_next = my single NEXT actionable step in my current work ('what should I do "
                     "next', 'what now', 'what's next'). "
+                    # --- knowledge-base + prompt inspection (Phase 7, §17.658) ---
+                    "gt_list = list GROUND-TRUTH knowledge-base entries ('list ground truths', 'show the "
+                    "GT entries', 'what ground truths do I have') — the curated ground-truth KB, distinct "
+                    "from rag_query's research notes. "
+                    "gt_search = semantically SEARCH the GROUND-TRUTH KB ('search ground truths for X', "
+                    "'find the GT about X'); put the text in query. Prefer rag_query when the user says "
+                    "'my notes' rather than 'ground truths'. "
+                    "gt_stats = GROUND-TRUTH KB summary/counts ('ground truth stats', 'how many ground "
+                    "truths', 'GT breakdown'). "
+                    "prompts_view = show a job's per-node PROMPTS ('show the prompts for the proxmox job', "
+                    "'what prompts is job abc using', 'inspect the prompts'); put the job in job_ref. "
                     # --- writes (Phase 2) ---
                     "research_topic = run autonomous WEB RESEARCH on a topic and ingest findings "
                     "('research the latest on postgres tuning', 'look up what's new in Proxmox 8', "
@@ -203,6 +222,9 @@ _ROUTE_TOOL = model_router.Tool(
                     "spec URL in url. "
                     "research_rename = rename a past RESEARCH session ('rename the zfs research to ZFS "
                     "Tuning Notes'); put the session reference in job_ref and the new topic in new_name. "
+                    "gt_extract = EXTRACT ground truths on a topic via web search + LLM ('extract ground "
+                    "truths about kubernetes networking', 'build ground truths on ZFS'); put the topic in "
+                    "topic. Distinct from research_topic (research notes) — this curates the GT KB. "
                     # --- destructive (Phase 3) ---
                     "jobs_delete = DELETE/remove a job ('delete the kubernetes job', 'remove that old CLI "
                     "job'); put the job name/id in target_ref. "
@@ -246,17 +268,17 @@ _ROUTE_TOOL = model_router.Tool(
             "query": {
                 "type": "string",
                 "description": (
-                    "For intent=rag_query, jobs_find, or research_find: the search "
-                    "text as a clean standalone query (strip filler). Omit otherwise."
+                    "For intent=rag_query, jobs_find, research_find, or gt_search: the "
+                    "search text as a clean standalone query (strip filler). Omit otherwise."
                 ),
             },
             "job_ref": {
                 "type": "string",
                 "description": (
-                    "For intent=results, logs, cost, jobs_rename, or research_rename: "
-                    "how the operator referred to the job/session — a name/topic fragment "
-                    "or an id. Omit if none given (logs/cost then fall back to the active "
-                    "job)."
+                    "For intent=results, logs, cost, jobs_rename, research_rename, or "
+                    "prompts_view: how the operator referred to the job/session — a "
+                    "name/topic fragment or an id. Omit if none given (logs/cost then fall "
+                    "back to the active job)."
                 ),
             },
             "url": {
@@ -284,8 +306,8 @@ _ROUTE_TOOL = model_router.Tool(
             "topic": {
                 "type": "string",
                 "description": (
-                    "For intent=research_topic or schedule_add: the research topic as "
-                    "a clean standalone phrase. Omit otherwise."
+                    "For intent=research_topic, schedule_add, or gt_extract: the topic "
+                    "as a clean standalone phrase. Omit otherwise."
                 ),
             },
             "depth": {
@@ -361,10 +383,12 @@ _ROUTE_SYSTEM = (
     "confident you are.\n\n"
     "Families of action exist: READS (status, results, searching the "
     "knowledge base, listing jobs/models/schedules/research sessions, a job's "
-    "logs or cost, a health check, your config, and 'what am I working on / "
+    "logs or cost, a health check, your config, listing/searching the "
+    "ground-truth KB, viewing a job's prompts, and 'what am I working on / "
     "what's next', help), WRITES (run web research on a "
     "topic, ingest a specific page / GitHub repo / OpenAPI spec into the "
-    "knowledge base, schedule recurring research, set/reset a model role, "
+    "knowledge base, extract ground truths on a topic, schedule recurring "
+    "research, set/reset a model role, "
     "optimize a prompt, rename a job or research session), WORKFLOW CONTROL "
     "(approve/confirm a job, execute its DAG, retry or skip a node, cancel a "
     "job, clean up stale jobs — each confirmed before it runs), and DELETES "

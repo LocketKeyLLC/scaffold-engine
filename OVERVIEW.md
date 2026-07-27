@@ -22049,6 +22049,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.658 Feature — NL command router, Phase 7: ground-truth KB + prompt inspection (closes the arc) (2026-07-27)
+
+**Last of the four §17.655 phases** — brings the two components that live in their OWN OWUI pipelines (`gt_browser`, `prompt_inspector`) within reach of the **main** chat by plain language. Five intents: `gt_list`, `gt_search`, `gt_stats`, `prompts_view` (reads), and `gt_extract` (write → confirmed, since it runs SearXNG + LLM distillation). No new slots — reuses `query` (gt_search), `topic` (gt_extract), `job_ref` (prompts_view).
+
+- **Classifier.** The load-bearing distinction is `gt_*` (the curated **ground-truth** KB) vs `rag_query` (research **notes**) — descriptions lean on the "ground truth(s)" framing and tell the model to prefer rag_query for "my notes". `gt_extract` is separated from `research_topic` the same way. Slot descriptions + READS/WRITES families updated.
+- **Pipeline.** The dedicated pipelines are separate OWUI models the main chat can't reach, so scaffold_router gets **compact renderers** (not full replicas — each points at the dedicated pipeline / a slash path for deep work) over a shared `_gt_json` helper: `_nl_gt_list` (`GET /gt/list`), `_nl_gt_search` (`POST /gt/search`), `_nl_gt_stats` (`GET /gt/stats`), and `_nl_prompts_view` (resolves the job via `_resolve_job_ref`, then `GET /prompts/<id>`). `gt_extract` renders a confirm card (`_confirm_gt_extract`) and, on the affirmative, `_execute_gt_extract` posts `/gt` and summarizes the `entry_count`. No-slot fast phrases added for gt_list/gt_stats.
+
+**Verification.** Unit — classifier **47 passed** (+5: surface, gt_search/gt_extract/prompts_view slot carries, gt_list/gt_stats no-slot), pipeline NL **189 passed** (+19: fast phrases, required-slot gates, gt list/search/stats renderers incl. empty-state + error surfacing + endpoint assertions, gt_extract confirm + extracted/empty execute + cancel msg, prompts_view unique/ambiguous/no-match). **Live `/route` smoke vs kimi: 8/8** — all five intents high-confidence with clean slots, AND `gt_search` ("search ground truths") vs `rag_query` ("search my notes") held, `research_topic`/`status` unregressed. **Live end-to-end `pipe()` smoke** (:9099, no chat_id): `list my ground truths` → the real KB (**20 of 2654** entries), `how many ground truths` → stats (2654), `extract ground truths about zfs tuning` → confirm card (**nothing extracted**, turn-1), `show the prompts for the proxmox job` → job disambiguation — all live, no mutation. Pipeline reloads clean (0 quarantine); orchestrator restarted (no hot-reload). No schema change.
+
+**This closes the §17.655 "wire every remaining component to natural language" arc** (Phases 4–7 = §17.655–658): reads, research ingest, workflow control, and the GT/prompt components are all now driveable by plain sentence from the main chat, on the §17.628 posture (high-confidence intercept, triage default, confirm on anything expensive/destructive). Small deferrals logged in-phase: retry/skip still need the node key named (§17.657); prompt *editing* by NL and gt_detail-by-id were left out (awkward / niche).
+
+---
+
 ### §17.657 Feature — NL command router, Phase 6: workflow control (confirmed) (2026-07-27)
 
 **Third of the four §17.655 phases.** Wires the state-altering job/DAG verbs to natural language: `confirm_job` (approve → auto-chain build), `execute_job`, `retry_node`, `skip_node`, `cancel_job`, `cleanup`. New `_WORKFLOW_INTENTS` family in `command_guide.py` — kept distinct from DELETES because these are **reversible operational verbs**, not data removal. Every one is **confirm-carded** (confirm/execute kick a long run; cancel/skip/retry/cleanup flip state) — nothing fires until the affirmative follow-up.

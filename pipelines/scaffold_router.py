@@ -204,6 +204,15 @@ _FAST_COMMAND_PHRASES: dict = {
         "what's next", "whats next", "what should i do next",
         "what do i do next", "next step", "what now", "what next",
     },
+    # §17.658 (Phase 7) — ground-truth KB (no-slot reads only).
+    "gt_list": {
+        "list ground truths", "show ground truths", "show my ground truths",
+        "list gt", "ground truth entries", "list ground truth entries",
+    },
+    "gt_stats": {
+        "ground truth stats", "gt stats", "ground truth breakdown",
+        "ground truth summary", "how many ground truths",
+    },
 }
 _FAST_COMMAND_LOOKUP: dict = {
     phrase: intent
@@ -3990,6 +3999,10 @@ class Pipeline:
         "cancel_job": ("job_ref",),
         "skip_node": ("job_ref", "node_key"),
         "retry_node": ("job_ref", "node_key"),
+        # §17.658 (Phase 7) — GT KB search/extract + prompt view.
+        "gt_search": ("query",),
+        "gt_extract": ("topic",),
+        "prompts_view": ("job_ref",),
         "jobs_delete": ("target_ref",),
         "schedule_delete": ("target_ref",),
         "research_delete": ("target_ref",),
@@ -4144,6 +4157,23 @@ class Pipeline:
             return
         if intent == "cleanup":
             yield self._confirm_cleanup()
+            return
+        # §17.658 (Phase 7) — ground-truth KB + prompt inspection, surfaced from
+        # the main chat. Reads run directly; gt_extract (SearXNG + LLM) confirms.
+        if intent == "gt_list":
+            yield self._nl_gt_list()
+            return
+        if intent == "gt_search":
+            yield self._nl_gt_search(query)
+            return
+        if intent == "gt_stats":
+            yield self._nl_gt_stats()
+            return
+        if intent == "prompts_view":
+            yield from self._nl_prompts_view(data, chat_id=chat_id)
+            return
+        if intent == "gt_extract":
+            yield self._confirm_gt_extract(data)
             return
         if intent in ("jobs_delete", "schedule_delete", "research_delete"):
             yield from self._nl_delete(intent, data, chat_id=chat_id)
@@ -4539,6 +4569,151 @@ class Pipeline:
         )
         return self._render_nl_confirm("cleanup", {}, summary)
 
+    # ---- §17.658 (Phase 7) ground-truth KB + prompt inspection -----------
+    # Compact renderers so the MAIN chat can reach these by plain language; the
+    # dedicated `gt_browser` / `prompt_inspector` pipelines remain for deep work.
+
+    def _gt_json(self, method: str, path: str, *, params=None, json_body=None):
+        """Call a /gt or /prompts endpoint, return (data_or_None, error_str)."""
+        try:
+            url = f"{self.valves.orchestrator_url}{path}"
+            if method == "GET":
+                r = _HTTP_SESSION.get(url, params=params or {},
+                                      headers=self._auth_headers(),
+                                      timeout=self.valves.request_timeout)
+            else:
+                r = _HTTP_SESSION.post(url, json=json_body or {},
+                                       headers=self._auth_headers(),
+                                       timeout=self.valves.stream_timeout)
+        except requests.exceptions.RequestException as e:
+            return None, f"⚠️ {e}"
+        if r.status_code >= 400:
+            return None, self._fmt(r)
+        try:
+            data = r.json()
+        except ValueError:
+            return None, f"⚠️ Non-JSON reply: {r.text[:200]}"
+        return (data if isinstance(data, dict) else {}), None
+
+    def _nl_gt_list(self) -> str:
+        data, err = self._gt_json("GET", "/gt/list",
+                                  params={"page": 1, "per_page": 20})
+        if err:
+            return err
+        entries = data.get("entries") or []
+        total = data.get("total", len(entries))
+        if not entries:
+            return ("📚 **Ground-truth KB** — no entries yet.\n\n"
+                    "💡 `extract ground truths about <topic>` to build some.")
+        lines = [f"📚 **Ground-truth KB** — {len(entries)} of {total}", "",
+                 "| ID | Topic | Tags | Snippet |", "|---|---|---|---|"]
+        for e in entries:
+            eid = str(e.get("entry_id", "—"))[:12]
+            topic = str(e.get("title", "—"))[:40]
+            tags = str(e.get("tags", "—"))[:24]
+            snip = (e.get("snippet") or "—").replace("\n", " ").replace("|", "\\|")[:50]
+            lines.append(f"| `{eid}` | {topic} | {tags} | {snip} |")
+        lines.append("\n_Deep browse: the `gt_browser` pipeline, or `/gt/detail <id>`._")
+        return "\n".join(lines)
+
+    def _nl_gt_search(self, query: str) -> str:
+        data, err = self._gt_json("POST", "/gt/search",
+                                  json_body={"query": query, "top_k": 10})
+        if err:
+            return err
+        results = data.get("results") or []
+        header = f"🔎 **Ground-truth search** — “{query}” · {len(results)} hit(s)"
+        if not results:
+            return header + "\n\n_No matching ground truths._"
+        lines = [header, "", "| ID | Topic | Score | Snippet |", "|---|---|---:|---|"]
+        for r in results:
+            eid = str(r.get("entry_id", "—"))[:12]
+            topic = str(r.get("title", "—"))[:40]
+            score = r.get("score", 0) or 0
+            snip = (r.get("snippet") or "—").replace("\n", " ").replace("|", "\\|")[:50]
+            lines.append(f"| `{eid}` | {topic} | {score:.2f} | {snip} |")
+        return "\n".join(lines)
+
+    def _nl_gt_stats(self) -> str:
+        data, err = self._gt_json("GET", "/gt/stats")
+        if err:
+            return err
+        total = data.get("total_entries", 0)
+        domains = data.get("domains", {}) or {}
+        tags = data.get("tags", {}) or {}
+        lines = [f"📊 **Ground-truth KB stats** — {total} entries"]
+        if domains:
+            lines.append("\n**By topic:**")
+            lines += [f"- {t}: {c}" for t, c in list(domains.items())[:12]]
+        if tags:
+            lines.append("\n**Top tags:**")
+            lines += [f"- {t}: {c}" for t, c in list(tags.items())[:12]]
+        return "\n".join(lines)
+
+    def _confirm_gt_extract(self, data: dict) -> str:
+        topic = (data.get("topic") or "").strip()
+        summary = (
+            f"🧪 **Extract ground truths on “{topic}”?**\n\n"
+            f"- Runs a SearXNG web search + LLM distillation (a minute or two on CPU).\n"
+            f"- Curates entries into the ground-truth KB (searchable via ground-truth search)."
+        )
+        return self._render_nl_confirm("gt_extract", {"topic": topic}, summary)
+
+    def _execute_gt_extract(self, topic: str):
+        yield (f"🧪 Extracting ground truths on **{topic}** — SearXNG + LLM "
+               f"distillation, this can take a minute…\n\n")
+        data, err = self._gt_json("POST", "/gt", json_body={"topic": topic})
+        if err:
+            yield err
+            return
+        status = data.get("status")
+        if status == "extracted":
+            n = data.get("entry_count", 0)
+            used = data.get("search_results_used", 0)
+            yield (f"✅ Extracted **{n}** ground truth(s) on **{topic}** "
+                   f"(from {used} search results). "
+                   f"Search them with `search ground truths for {topic}`.")
+        else:
+            yield (f"⚠️ Extraction returned `{status or 'unknown'}`: "
+                   f"{data.get('error', 'no entries produced')}")
+
+    def _nl_prompts_view(self, data: dict, *, chat_id: str | None = None):
+        """Resolve a job and render its per-node prompts (§17.658)."""
+        ref = (data.get("job_ref") or "").strip()
+        match, ambiguous, cands = self._resolve_job_ref(ref)
+        if match and ambiguous and cands:
+            yield self._render_job_disambiguation(
+                cands, "see prompts for", "/prompts")
+            return
+        if not match:
+            yield (f"I couldn't find a job matching “{ref}”. Try `/jobs list` "
+                   f"to see recent jobs.")
+            return
+        jid = match["job_id"]
+        pdata, err = self._gt_json("GET", f"/prompts/{jid}")
+        if err:
+            yield err
+            return
+        nodes = pdata.get("nodes") or []
+        label = match.get("title") or jid
+        header = (f"## 📝 Prompts — {label} (`{jid[:8]}`) · "
+                  f"{pdata.get('node_count', len(nodes))} nodes")
+        if not nodes:
+            yield header + "\n\n_(no DAG nodes — job may not be planned yet)_"
+            return
+        lines = [header, "", "| # | Node | Template | Optimized | Status |",
+                 "|---:|---|:---:|:---:|---|"]
+        for n in nodes:
+            order = n.get("execution_order", "?")
+            key = str(n.get("node_key", "?"))[:14]
+            tmpl = "✅" if n.get("has_template") else "—"
+            opt = "✅" if n.get("has_optimized") else "—"
+            st = str(n.get("status", "?"))[:12]
+            lines.append(f"| {order} | `{key}` | {tmpl} | {opt} | {st} |")
+        lines.append(f"\n_Full text: the `prompt_inspector` pipeline, or "
+                     f"`/prompts/{jid[:8]}/<node_key>`._")
+        yield "\n".join(lines)
+
     def _extract_pending_nl_confirm(self, messages: List[dict]) -> dict | None:
         """Recover the pending NL action from the most recent assistant turn's
         confirm marker, or None. Only the immediately-preceding assistant turn
@@ -4604,6 +4779,8 @@ class Pipeline:
             return "👍 Cancelled — the node was left as-is."
         if intent == "cleanup":
             return "👍 Cancelled — the reaper did not run."
+        if intent == "gt_extract":
+            return "👍 Cancelled — no ground truths were extracted."
         return "👍 Okay, cancelled — nothing was changed."
 
     def _execute_nl_action(
@@ -4657,6 +4834,10 @@ class Pipeline:
             return
         if intent == "cleanup":
             yield self._handle_command("/cleanup", chat_id=chat_id)
+            return
+        # §17.658 — ground-truth extraction (SearXNG + LLM), gated by its card.
+        if intent == "gt_extract":
+            yield from self._execute_gt_extract((slots.get("topic") or "").strip())
             return
         # §17.630 — destructive: fire the underlying delete WITH its confirm
         # token (the NL confirm card was the human gate).

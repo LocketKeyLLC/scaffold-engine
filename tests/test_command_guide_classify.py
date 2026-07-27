@@ -52,11 +52,15 @@ def test_intent_surface_is_complete():
         # Phase 4 (§17.655) — remaining safe reads
         "schedule_list", "research_list", "research_find", "logs", "cost",
         "health", "config", "work_here", "work_next",
+        # Phase 7 (§17.658) — ground-truth KB reads + prompt view
+        "gt_list", "gt_search", "gt_stats", "prompts_view",
         # Phase 2 — mutating/expensive
         "research_topic", "schedule_add", "model_set", "model_reset",
         "optimize", "jobs_rename",
         # Phase 5 (§17.656) — research ingest variants + session rename
         "research_url", "research_github", "research_openapi", "research_rename",
+        # Phase 7 (§17.658) — ground-truth extraction (write)
+        "gt_extract",
         # Phase 6 (§17.657) — workflow control (all confirmed in the pipeline)
         "confirm_job", "execute_job", "retry_node", "skip_node", "cancel_job",
         "cleanup",
@@ -263,6 +267,41 @@ async def test_node_workflow_intents_carry_job_ref_and_node_key(intent):
 async def test_cleanup_intent_classifies_no_slot():
     out = await _classify({"intent": "cleanup", "confidence": "high"})
     assert out["intent"] == "cleanup"
+    assert out["confidence"] == "high"
+
+
+# ── Phase 7 (§17.658) ground-truth KB + prompt view ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_gt_search_carries_query():
+    out = await _classify({"intent": "gt_search", "confidence": "high",
+                           "query": "kubernetes networking"})
+    assert out["intent"] == "gt_search"
+    assert out["query"] == "kubernetes networking"
+
+
+@pytest.mark.asyncio
+async def test_gt_extract_carries_topic():
+    out = await _classify({"intent": "gt_extract", "confidence": "high",
+                           "topic": "zfs tuning"})
+    assert out["intent"] == "gt_extract"
+    assert out["topic"] == "zfs tuning"
+
+
+@pytest.mark.asyncio
+async def test_prompts_view_carries_job_ref():
+    out = await _classify({"intent": "prompts_view", "confidence": "high",
+                           "job_ref": "proxmox"})
+    assert out["intent"] == "prompts_view"
+    assert out["job_ref"] == "proxmox"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["gt_list", "gt_stats"])
+async def test_gt_no_slot_reads_classify(intent):
+    out = await _classify({"intent": intent, "confidence": "high"})
+    assert out["intent"] == intent
     assert out["confidence"] == "high"
 
 
