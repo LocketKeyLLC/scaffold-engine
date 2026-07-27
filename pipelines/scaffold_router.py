@@ -13,6 +13,7 @@ is migrated into stream_timeout on pipeline init.
 """
 
 from typing import Generator, List
+import base64
 import json
 import os
 import logging
@@ -1103,7 +1104,11 @@ class Pipeline:
     # (`render_candidate_list`), recovered on the next turn to resolve a short
     # selector reply ("1" / "the proxmox one") back to a job. Mirrors the
     # §17.444 pending-brief marker recovery pattern.
-    _ASSIST_PICK_RE = re.compile(r"<!--ASSIST_PICK:([0-9a-fA-F,\-]+)-->")
+    # §17.660 — reference-link definition (invisible in OWUI) + legacy HTML-
+    # comment form (pre-§17.660, still recovered so a pending pick-list resolves
+    # across the upgrade). See _render_nl_confirm for why the comment form leaked.
+    _ASSIST_PICK_RE = re.compile(r"\[apick\]:\s*ASSIST_PICK:([A-Za-z0-9_-]+)")
+    _ASSIST_PICK_LEGACY_RE = re.compile(r"<!--ASSIST_PICK:([0-9a-fA-F,\-]+)-->")
 
     _ASSIST_NUDGE = (
         "💡 **Looking for Assist Mode?** Typing \"assist\" / \"help me "
@@ -2428,7 +2433,16 @@ class Pipeline:
                 continue
             match = self._ASSIST_PICK_RE.search(content)
             if match:
-                return [x for x in match.group(1).split(",") if x]
+                try:
+                    enc = match.group(1)
+                    enc += "=" * (-len(enc) % 4)  # restore base64 padding
+                    ids = base64.urlsafe_b64decode(enc.encode()).decode()
+                    return [x for x in ids.split(",") if x]
+                except (ValueError, UnicodeDecodeError):
+                    pass
+            legacy = self._ASSIST_PICK_LEGACY_RE.search(content)  # pre-§17.660
+            if legacy:
+                return [x for x in legacy.group(1).split(",") if x]
         return []
 
     def _get_assist_session(self, session_id: str) -> dict | None:
@@ -4015,7 +4029,16 @@ class Pipeline:
     # affirmative reply ("go"/"yes") recovers + fires it. HTML comment → hidden
     # in the rendered chat but preserved in the raw history OWUI replays (same
     # mechanism as the §17.627 `<!--ASSIST_PICK-->` pick-list marker).
-    _NL_CONFIRM_MARKER_RE = re.compile(r"<!--NL_CONFIRM:(\{.*?\})-->", re.DOTALL)
+    # §17.660 — the marker is a markdown REFERENCE-LINK DEFINITION, not an HTML
+    # comment: OWUI's markdown renderer (v0.11) shows `<!--…-->` as visible
+    # literal text but renders an unused `[label]: dest` definition as NOTHING —
+    # while both survive verbatim in the assistant content OWUI replays to the
+    # pipeline. The `NL_CONFIRM:` token is kept inside the destination (payload
+    # is base64url, no `{`/quotes/spaces) so it stays greppable. The legacy HTML-
+    # comment form is still recognized so a confirm pending across the upgrade
+    # still fires.
+    _NL_CONFIRM_MARKER_RE = re.compile(r"\[nlc\]:\s*NL_CONFIRM:([A-Za-z0-9_-]+)")
+    _NL_CONFIRM_LEGACY_RE = re.compile(r"<!--NL_CONFIRM:(\{.*?\})-->", re.DOTALL)
     _NL_AFFIRMATIVE: frozenset = frozenset({
         "go", "yes", "y", "yep", "yeah", "yup", "ok", "okay", "sure",
         "do it", "run it", "run", "confirm", "confirmed", "proceed",
@@ -4436,10 +4459,14 @@ class Pipeline:
         """A confirm card: human summary + a hidden action marker recovered on
         the affirmative follow-up. `slots` must be JSON-serializable + minimal
         (only what `_execute_nl_action` needs)."""
-        marker = f"<!--NL_CONFIRM:{json.dumps({'intent': intent, 'slots': slots})}-->"
+        payload = json.dumps({"intent": intent, "slots": slots})
+        enc = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+        # Reference-link definition on its own block → invisible in OWUI; the
+        # `NL_CONFIRM:<base64>` destination is recovered by `_NL_CONFIRM_MARKER_RE`.
+        marker = f"[nlc]: NL_CONFIRM:{enc}"
         return (
             f"{summary}\n\n"
-            "_Reply **go** (or **yes**) to run it, or tell me what to change._\n"
+            "_Reply **go** (or **yes**) to run it, or tell me what to change._\n\n"
             f"{marker}"
         )
 
@@ -4782,7 +4809,17 @@ class Pipeline:
                 mt = self._NL_CONFIRM_MARKER_RE.search(content)
                 if mt:
                     try:
-                        d = json.loads(mt.group(1))
+                        enc = mt.group(1)
+                        enc += "=" * (-len(enc) % 4)  # restore base64 padding
+                        d = json.loads(base64.urlsafe_b64decode(enc.encode()).decode())
+                        if isinstance(d, dict) and d.get("intent"):
+                            return d
+                    except (ValueError, UnicodeDecodeError):
+                        return None
+                lm = self._NL_CONFIRM_LEGACY_RE.search(content)  # pre-§17.660
+                if lm:
+                    try:
+                        d = json.loads(lm.group(1))
                         if isinstance(d, dict) and d.get("intent"):
                             return d
                     except ValueError:

@@ -30,6 +30,7 @@ Module contract:
 """
 from __future__ import annotations
 
+import base64
 import json
 import queue as _q
 import re
@@ -1639,10 +1640,15 @@ def render_candidate_list(candidates: list) -> str:
         "describe it._",
     ]
     # §17.627 — hidden ordered-id marker so a short selector reply on the next
-    # turn ("1", "the proxmox one") maps back to a job. HTML comment → invisible
-    # in the rendered chat but preserved in the raw history OWUI replays.
+    # turn ("1", "the proxmox one") maps back to a job. §17.660 — a markdown
+    # REFERENCE-LINK DEFINITION, not an HTML comment: OWUI's markdown renderer
+    # shows `<!--…-->` as visible literal text (verified in-browser) but renders
+    # an unused `[label]: dest` definition as NOTHING, while both survive in the
+    # raw history OWUI replays. Payload base64url so the ids stay in the
+    # (invisible) destination; `ASSIST_PICK:` token kept for grep/recovery.
     ids = ",".join(c.get("job_id", "") for c in candidates[:8])
-    lines.append(f"\n<!--ASSIST_PICK:{ids}-->")
+    enc = base64.urlsafe_b64encode(ids.encode()).decode().rstrip("=")
+    lines.append(f"\n\n[apick]: ASSIST_PICK:{enc}")
     return "\n".join(lines)
 
 

@@ -22049,6 +22049,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.660 Fix — confirm / pick-list markers were VISIBLE in the OWUI browser (HTML comment → reference-link definition) (2026-07-27)
+
+**Caught by driving the real OWUI browser** (Playwright, minted a session JWT from `WEBUI_SECRET_KEY`, model `scaffold-engine`). The affirmative confirm round-trip works end-to-end — "schedule a weekly research run…" → confirm card → "yes" → `✅ Scheduled #N` — but the screenshot exposed a bug that pipe()-level tests and DB inspection had hidden: the hidden action marker was an **HTML comment** (`<!--NL_CONFIRM:{…}-->`), and **OWUI's markdown renderer (v0.11) displays HTML comments as visible literal text**. So every confirm card showed a line of raw `<!--NL_CONFIRM:{"intent":…}-->` to the user. The prior "hidden by markdown" claim (and the identical §17.627 comment in `render_candidate_list`) was simply wrong — never visually verified.
+
+- **Fix:** the marker is now a markdown **reference-link definition** (`[nlc]: NL_CONFIRM:<base64url>`), which OWUI renders as **nothing** (an unused link definition) while still surviving verbatim in the assistant content OWUI replays to the pipeline. Payload is base64url (no `{`/quotes/spaces to escape); the `NL_CONFIRM:` token is kept inside the invisible destination so it stays greppable and the existing `"NL_CONFIRM:" in out` unit assertions still hold. Recovery regex anchored on the `[nlc]:` label; a **legacy** `<!--NL_CONFIRM:{json}-->` regex is retained so a confirm pending across the upgrade still fires.
+- **Same fix applied to the sibling `ASSIST_PICK` marker** (assist pick-lists, `_vendor/_assist_handlers.py`) — identical HTML-comment bug, identical rendered shape, so it inherits the verified-invisible form: `[apick]: ASSIST_PICK:<base64url>` + legacy fallback. The misleading "HTML comment → invisible" code comment was corrected.
+
+**Verification.** **Real-browser (Playwright) before→after:** turn-1 screenshot went from showing the raw `<!--NL_CONFIRM:…-->` line to a **clean card** (Topic / Cron / Depth / "Reply go…"), `MARKER_LEAK_IN_VISIBLE` False, and the affirmative still fired (`✅ Scheduled #9`); test schedules created during the drive were deleted (0 remain). Unit — NL suite **198 passed** (assertions unchanged — token preserved), assist pick-list + chat-routing + continuity **342 passed** combined (legacy-format pick-list tests still green via the fallback regex, now doubling as back-compat coverage); the one exact-format render assertion updated to the reference-def form + a base64 round-trip check. Pipeline reloads clean (0 quarantine). **This is the fix that makes the §17.655–659 NL router actually clean in the OWUI browser** — the flows worked, but the confirm cards looked broken until now.
+
+---
+
 ### §17.659 Fix — close the §17.655 arc flags: hermetic continuity test + retry/skip node auto-resolution (2026-07-27)
 
 Clears the two items flagged at the end of the §17.655–658 arc.

@@ -12,6 +12,8 @@ Pins:
   * match_assist_candidate: strong-unique match, ambiguous match, no-match;
   * render_step_footer teaches the natural report-back path.
 """
+import base64
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -410,7 +412,14 @@ def test_candidate_list_embeds_hidden_marker():
         {"job_id": "j1", "title": "A", "status": "planning"},
         {"job_id": "j2", "title": "B", "status": "planning"},
     ])
-    assert "<!--ASSIST_PICK:j1,j2-->" in out
+    # §17.660 — reference-link definition (invisible in OWUI), NOT an HTML
+    # comment (which OWUI renders as visible literal text). Payload base64url,
+    # recoverable back to the ordered ids.
+    assert "[apick]: ASSIST_PICK:" in out
+    assert "<!--" not in out                      # no visible comment marker
+    enc = re.search(r"ASSIST_PICK:([A-Za-z0-9_-]+)", out).group(1)
+    enc += "=" * (-len(enc) % 4)
+    assert base64.urlsafe_b64decode(enc.encode()).decode() == "j1,j2"
 
 
 # ── §17.627 — assist_plan renders the DAG ─────────────────────────────────
