@@ -220,6 +220,46 @@ Hard rules:
 
 Produce the walkthrough for THIS step only. Nothing more."""
 
+# §17.654 — decision nodes get their own system prompt. The reported failure:
+# the non-code guide RESOLVED decisions for the operator ("state the recommended
+# choice, do not leave the decision hanging") and BUNDLED every sub-decision of a
+# coarse node into one shot (a "define VLAN IDs" node presented all four segments
+# + IDs + subnets at once, pre-assuming a four-segment architecture the operator
+# never chose). This prompt inverts both: surface ONE decision, lay out real
+# options with honest trade-offs, SUGGEST a lean but explicitly leave the choice
+# to the operator, and invite them to talk it through. It never auto-resolves and
+# never bundles.
+GUIDE_SYSTEM_DECISION = f"""You are a hands-on co-pilot helping a human operator make ONE decision, as part of a larger plan they are working through with you one step at a time. This step is a DECISION: the deliverable is a choice the operator makes — not code, not commands, not a manual action to perform.
+
+{_AUDIENCE_FRAMING}
+
+{_HEADING_META_RULE}
+
+Your job is to help them DECIDE — not to decide for them. Present exactly ONE decision at a time. If the step's task bundles several sub-choices (e.g. "define the VLAN IDs and subnets for the network segments" implies: how many segments? then which IDs? then which subnets?), surface only the FIRST, most foundational choice now, and tell the reader the follow-on choices you will help with next once this one is settled. Never pre-assume a count, a topology, or a specific set the operator has not agreed to.
+
+Use these section headings, in order, and omit any that don't apply:
+
+## The decision
+(One or two sentences: the single thing to decide right now, and why it matters to what follows. If the wider step implies further choices, name them in one line as "then, next: …" so the reader sees the path without being asked to decide them yet.)
+
+## Options
+(The real, distinct options — usually 2-4 — as a short list. For each: a one-line description and the honest trade-off (what you gain / what it costs). Do NOT invent options that don't fit the operator's context; if the task or context narrows it, say so. Never fold two choices into one option.)
+
+## My suggestion
+(State which option you'd lean toward and the ONE main reason — framed explicitly as a suggestion the operator is free to reject: "I'd lean <X> because <reason> — but it's your call." NEVER present the suggestion as settled, and NEVER omit the fact that it's their decision.)
+
+## Your move
+(Invite the operator to act conversationally: pick an option, ask about any of them, or state a constraint / preference that should shape the choice. Make clear they can just talk to you — they do not need a command. One or two sentences.)
+
+Hard rules:
+- Present ONE decision. Do not resolve it, and do not bundle sub-decisions into this turn.
+- Never write past-tense narration ("Decided…", "Picked…"). The operator decides.
+- Never invent concrete values (IPs, IDs, subnets, hostnames, versions) the operator has not given — use placeholders or clearly-labeled examples, and say the operator sets the real ones.
+- If a confirmed-research block is provided, use it SILENTLY for accuracy only (real current options, correct names/versions) — do NOT reproduce its depth or background; the reader needs the choice framed, not a research dump.
+- No emoji, no filler closers, no completion checkmarks.
+
+Frame THIS one decision only. Nothing more."""
+
 GUIDE_SYSTEM_FIX = f"""You are a hands-on co-pilot helping a human operator who hit a problem while performing ONE step of a larger plan. They will paste the error / what went wrong; you diagnose it and give them the exact commands to recover and finish the step.
 
 {_AUDIENCE_FRAMING}
@@ -267,6 +307,18 @@ _GUIDE_USER_TRAILER = (
     "instructions exactly."
 )
 
+# §17.654 — decision nodes get a different ask: frame ONE choice, don't resolve
+# it, don't bundle sub-decisions.
+_GUIDE_DECISION_TRAILER = (
+    "---\n\n"
+    "Using the task and any upstream/research context above, help the operator "
+    "make THIS decision. Frame exactly ONE choice, lay out the real options with "
+    "honest trade-offs, offer a suggestion they are free to reject, and invite "
+    "them to pick or talk it through. Do NOT resolve the decision for them and "
+    "do NOT bundle sub-decisions. Follow the output structure and hard rules in "
+    "your system instructions exactly."
+)
+
 _RESEARCH_SYNTH_SYSTEM = (
     "You answer a single operator question about an in-progress project. Use the "
     "PROJECT CONTEXT block (what this project has already established — its brief, "
@@ -306,14 +358,20 @@ def apply_verbosity(system: str, verbosity: str | None) -> str:
     return system + _VERBOSITY_DIRECTIVE.get(verbosity or "normal", "")
 
 
-def guide_system_for_tool(tool: str) -> str:
+def guide_system_for_tool(tool: str, *, is_decision: bool = False) -> str:
     """Pick the human-facing system prompt for a node's tool type.
 
     Mirrors ``prompt_assembly.system_for_tool`` (shell/codegen/else) but
     targets the human operator rather than the LLM executor. The ``shell``
     variant reuses ``EXECUTION_SYSTEM_RUNBOOK`` verbatim (it already targets a
     human performing host commands) with a one-line operator framing prepended.
+
+    §17.654 — a decision node ALWAYS uses the decision prompt (one choice at a
+    time, suggest-don't-decide), regardless of its tool, so the operator is
+    never railroaded by a resolved-for-them runbook.
     """
+    if is_decision:
+        return GUIDE_SYSTEM_DECISION
     t = (tool or "").lower()
     if t == "shell":
         return f"{_RUNBOOK_HUMAN_FRAMING}\n\n{EXECUTION_SYSTEM_RUNBOOK}"
@@ -540,6 +598,30 @@ def render_environment_block(environment: dict | None) -> str:
     return "\n\n".join(parts)
 
 
+def render_operator_notes_block(notes: list[dict] | None) -> str:
+    """§17.654 — the operator's captured notes & additions, threaded into every
+    later step's guidance so the engine respects what they raised and stops
+    re-assuming. ``notes`` = list of ``{ts, kind, node_key, text}``. Returns ""
+    when empty so callers can thread it unconditionally.
+    """
+    if not notes:
+        return ""
+    lines: list[str] = []
+    for n in notes:
+        text_ = (n.get("text") or "").strip() if isinstance(n, dict) else ""
+        if not text_:
+            continue
+        kind = (n.get("kind") or "note").strip() if isinstance(n, dict) else "note"
+        lines.append(f"- ({kind}) {text_}")
+    if not lines:
+        return ""
+    return (
+        "## Operator notes & additions (things the operator has raised for THIS "
+        "project — honor them; do not contradict or re-assume around them)\n"
+        + "\n".join(lines)
+    )
+
+
 # ── Success verification (§17.487 — did the submitted step actually work?) ─
 
 _JUDGE_OUTCOME_TOOL = model_router.Tool(
@@ -670,7 +752,7 @@ async def verify_step_success(
 ASSIST_INTENTS = (
     "advance", "skip", "submit", "fix", "finalize", "pause",
     "handoff", "status", "explain_plan", "set_env", "set_verbosity",
-    "ask", "question",
+    "ask", "question", "note",
 )
 
 _CLASSIFY_TURN_TOOL = model_router.Tool(
@@ -701,7 +783,8 @@ _CLASSIFY_TURN_TOOL = model_router.Tool(
                     "set_env = they're telling you about their machine/environment ('I'm on Ubuntu 24.04 with apt', 'my host IP is 10.0.0.5', 'I use bash'). "
                     "set_verbosity = they want more or less detail in the instructions ('explain more', 'be more detailed', 'just give me the commands', 'too verbose'). "
                     "ask = they want a real ANSWER to a question, not a re-rendering of the current step. Covers a factual lookup (versions, current commands, comparisons, 'what is X', 'is X safe') AND a project/design/planning question about the operator's own setup or a part of the plan OTHER than the current step ('which of my two machines should host the WireGuard endpoint', 'how should the VLANs be laid out', 'do I need X for Y'). A researched, project-aware answer helps more than re-showing the step. "
-                    "question = they want to clarify or ADJUST the CURRENT step's own instructions specifically (clarify THIS step, redo THIS step for a different OS, more detail on one part of it). Use this ONLY when the message is about the step in front of them — a question about the wider project or a different step is ask. Safe default when unsure AND the message clearly concerns the current step."
+                    "question = they want to clarify or ADJUST the CURRENT step's own instructions specifically (clarify THIS step, redo THIS step for a different OS, more detail on one part of it). Use this ONLY when the message is about the step in front of them — a question about the wider project or a different step is ask. Safe default when unsure AND the message clearly concerns the current step. "
+                    "note = they are RECORDING a new requirement, constraint, preference, or decision to remember for the rest of the project — not asking a question and not reporting they did the current step ('also, I want a DMZ', 'remember I only have 2 NICs', 'note: everything must survive a reboot', 'from now on use 10.x addresses', 'add a backup step later'). These are additions to keep, not the current step's evidence. When in doubt between note and submit: if it states a fact/wish to carry FORWARD rather than the OUTCOME of the current step, it is note."
                 ),
             },
             "evidence": {
@@ -724,6 +807,25 @@ _CLASSIFY_TURN_TOOL = model_router.Tool(
                 "description": (
                     "When intent=ask: the factual question to research, phrased "
                     "as a clear standalone query. Omit otherwise."
+                ),
+            },
+            "note_text": {
+                "type": "string",
+                "description": (
+                    "When intent=note: the requirement / constraint / preference "
+                    "/ decision to remember, as a short standalone statement "
+                    "(e.g. 'wants a DMZ segment', 'only 2 physical NICs "
+                    "available', 'all VMs must survive a host reboot'). Omit otherwise."
+                ),
+            },
+            "note_kind": {
+                "type": "string",
+                "enum": ["addition", "constraint", "preference", "decision", "note"],
+                "description": (
+                    "When intent=note: how to tag it — addition (a new thing to "
+                    "include), constraint (a hard limit), preference (a soft "
+                    "want), decision (a choice already made), or note (generic). "
+                    "Omit otherwise."
                 ),
             },
         },
@@ -751,6 +853,11 @@ _CLASSIFY_SYSTEM = (
     "Only when the message is about the step in front of them; a question about the "
     "wider project or a different step is ask, not question.\n"
     "- tells you about their MACHINE ('I'm on Ubuntu 24.04', 'IP is 10.0.0.5') → set_env\n"
+    "- RECORDS a new requirement/constraint/preference/decision to carry forward "
+    "for the rest of the project, not tied to finishing the current step ('also I "
+    "want a DMZ', 'remember I only have 2 NICs', 'from now on use 10.x') → note. "
+    "Distinguish from submit: note carries a fact/wish FORWARD; submit reports the "
+    "current step's OUTCOME.\n"
     "Call classify_turn exactly once."
 )
 
@@ -766,7 +873,8 @@ async def classify_turn(
     returns ``intent='question'`` so a flaky classifier degrades to the guide/
     refine behavior rather than misfiring a submit/skip/handoff."""
     role = role or settings.assist_classify_model_role
-    fallback = {"intent": "question", "evidence": "", "error_text": "", "query": ""}
+    fallback = {"intent": "question", "evidence": "", "error_text": "", "query": "",
+                "note_text": "", "note_kind": "note"}
     user = (
         f"Current step: {title}\n\n"
         f"What the step asks:\n{(task_prompt or '')[:1500]}\n\n"
@@ -795,11 +903,15 @@ async def classify_turn(
     intent = args.get("intent")
     if intent not in ASSIST_INTENTS:
         return fallback
+    note_kind = (args.get("note_kind") or "note").strip()
     return {
         "intent": intent,
         "evidence": (args.get("evidence") or "").strip(),
         "error_text": (args.get("error_text") or "").strip(),
         "query": (args.get("query") or "").strip(),
+        "note_text": (args.get("note_text") or "").strip(),
+        "note_kind": note_kind if note_kind in
+        ("addition", "constraint", "preference", "decision", "note") else "note",
     }
 
 
@@ -991,11 +1103,14 @@ def _build_guide_user_prompt(
     sources: list[dict], refine_hint: Optional[str],
     environment: Optional[dict] = None,
     job_digest: Optional[str] = None,
+    operator_notes: Optional[list[dict]] = None,
+    is_decision: bool = False,
 ) -> str:
     """Compose the user message: the same upstream-last task the executor
     would see, plus the operator environment, a project-wide digest of work
-    already completed on the job (§17.650), a confirmed-research block, and a
-    human-walkthrough trailer.
+    already completed on the job (§17.650), the operator's captured notes &
+    additions (§17.654), a confirmed-research block, and a human-walkthrough
+    trailer (a decision-framing trailer when the node is a decision).
     """
     parts: list[str] = [ctx.assembled_prompt]
     if node_description and node_description.strip() and node_description.strip() not in ctx.assembled_prompt:
@@ -1005,10 +1120,13 @@ def _build_guide_user_prompt(
     env_block = render_environment_block(environment)
     if env_block:
         parts.append(env_block)
+    notes_block = render_operator_notes_block(operator_notes)
+    if notes_block:
+        parts.append(notes_block)
     research_block = _render_research_block(sources)
     if research_block:
         parts.append(research_block)
-    parts.append(_GUIDE_USER_TRAILER)
+    parts.append(_GUIDE_DECISION_TRAILER if is_decision else _GUIDE_USER_TRAILER)
     if refine_hint and refine_hint.strip():
         parts.append(
             f"Operator refinement — apply this to the walkthrough: {refine_hint.strip()}"
@@ -1027,6 +1145,8 @@ async def generate_guidance(
     environment: Optional[dict] = None,
     verbosity: str = "normal",
     job_digest: Optional[str] = None,
+    operator_notes: Optional[list[dict]] = None,
+    is_decision: bool = False,
 ) -> dict:
     """Generate (do not persist) the human walkthrough for one step.
 
@@ -1048,10 +1168,12 @@ async def generate_guidance(
             domain=domain,
         )
 
-    system = apply_verbosity(guide_system_for_tool(ctx.tool), verbosity)
+    system = apply_verbosity(
+        guide_system_for_tool(ctx.tool, is_decision=is_decision), verbosity
+    )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
-        job_digest=job_digest,
+        job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
     )
 
     resp = await chat_until_nonempty(
@@ -1234,6 +1356,8 @@ async def ensure_guidance(
     environment: Optional[dict] = None,
     verbosity: str = "normal",
     job_digest: Optional[str] = None,
+    operator_notes: Optional[list[dict]] = None,
+    is_decision: bool = False,
     db,
 ) -> dict:
     """Return guidance, generating + persisting only when needed.
@@ -1258,6 +1382,8 @@ async def ensure_guidance(
         environment=environment,
         verbosity=verbosity,
         job_digest=job_digest,
+        operator_notes=operator_notes,
+        is_decision=is_decision,
     )
     await persist_guidance(
         session_id=session_id,
@@ -1287,6 +1413,8 @@ async def generate_guidance_stream(
     environment: Optional[dict] = None,
     verbosity: str = "normal",
     job_digest: Optional[str] = None,
+    operator_notes: Optional[list[dict]] = None,
+    is_decision: bool = False,
     db,
 ):
     """Stream a walkthrough as it generates. Yields event dicts:
@@ -1323,10 +1451,12 @@ async def generate_guidance_stream(
             node_key=node_key, domain=domain,
         )
 
-    system = apply_verbosity(guide_system_for_tool(ctx.tool), verbosity)
+    system = apply_verbosity(
+        guide_system_for_tool(ctx.tool, is_decision=is_decision), verbosity
+    )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
-        job_digest=job_digest,
+        job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
     )
     messages = [
         {"role": "system", "content": system},

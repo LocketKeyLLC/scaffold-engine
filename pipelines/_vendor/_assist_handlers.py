@@ -460,6 +460,33 @@ def assist_status(pipe, session_id: str) -> Generator[str, None, None]:
         f"- Current step: `{d.get('current_node_key') or '(none)'}`\n"
         f"- Steps: {counts_str}\n"
     )
+    # §17.654 — surface captured notes & additions so the operator sees
+    # everything the engine is carrying forward, at a glance.
+    yield _render_notes_block(d.get("notes"))
+
+
+def _render_notes_block(notes) -> str:
+    """A '📌 Notes & additions' block for the status/results roll-up. Tolerates a
+    JSONB list or a JSON string; returns '' when there is nothing to show."""
+    if isinstance(notes, str):
+        try:
+            notes = json.loads(notes)
+        except (ValueError, TypeError):
+            notes = []
+    if not isinstance(notes, list) or not notes:
+        return ""
+    lines = ["\n📌 **Notes & additions** (carried into every remaining step):\n"]
+    for n in notes:
+        if not isinstance(n, dict):
+            continue
+        txt = (n.get("text") or "").strip()
+        if not txt:
+            continue
+        kind = (n.get("kind") or "note").strip()
+        nk = n.get("node_key")
+        where = f" _(from `{nk}`)_" if nk else ""
+        lines.append(f"- **{kind}:** {txt}{where}")
+    return "\n".join(lines) + "\n" if len(lines) > 1 else ""
 
 
 def dispatch_assist_sub(
@@ -1415,13 +1442,15 @@ def assist_nl_turn(
     capture). Falls back to the step-guidance turn for questions/refinements.
     Slash commands bypass this entirely (dispatched earlier)."""
     intent = fast_classify_turn(msg)
-    evidence, error_text, query = "", "", ""
+    evidence, error_text, query, note_text, note_kind = "", "", "", "", "note"
     if intent is None:
         d = assist_interpret(pipe, session_id, msg, node_key=node_key)
         intent = d.get("intent") or "question"
         evidence = d.get("evidence") or ""
         error_text = d.get("error_text") or ""
         query = d.get("query") or ""
+        note_text = d.get("note_text") or ""
+        note_kind = d.get("note_kind") or "note"
         node_key = d.get("node_key") or node_key
 
     if intent == "advance":
@@ -1465,6 +1494,13 @@ def assist_nl_turn(
         nk = _recall_node_key(pipe, chat_id, node_key)
         yield from assist_research_cmd(
             pipe, session_id, (query or msg).strip(), node_key=nk, chat_id=chat_id,
+        ); return
+    if intent == "note":
+        # §17.654 — capture a new requirement/constraint/decision and confirm it
+        # back. It feeds forward into every later step's guidance context.
+        nk = _recall_node_key(pipe, chat_id, node_key)
+        yield from assist_note_cmd(
+            pipe, session_id, (note_text or msg).strip(), kind=note_kind, node_key=nk,
         ); return
     if intent == "set_env":
         subs = dict(re.findall(r"([A-Za-z_]\w*)=(\S+)", msg))
@@ -1836,3 +1872,30 @@ def assist_friction(
     if r.status_code >= 400:
         yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
     yield f"📝 Friction note recorded for `{node_key}` in session `{session_id}`."
+
+
+def assist_note_cmd(
+    pipe, session_id: str, note_text: str, *,
+    kind: str = "note", node_key: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.654 — record a session-level note/addition and confirm it back so the
+    operator knows it landed. The note feeds forward into later steps' guidance."""
+    if not (note_text or "").strip():
+        yield "What should I note? Tell me the requirement, constraint, or decision to remember."
+        return
+    try:
+        r = _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/note",
+            json={"text": note_text, "kind": kind, "node_key": node_key},
+            headers=pipe._auth_headers(),
+            timeout=pipe.valves.request_timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    label = kind if kind and kind != "note" else "note"
+    yield (
+        f"📌 Noted ({label}): {note_text.strip()}\n\n"
+        "_I'll carry this forward into the remaining steps. Say _\"next\"_ to continue._"
+    )

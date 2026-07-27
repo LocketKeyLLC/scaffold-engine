@@ -320,6 +320,44 @@
         "title": "AssistInterpretInput",
         "type": "object"
       },
+      "AssistNoteInput": {
+        "properties": {
+          "kind": {
+            "default": "note",
+            "enum": [
+              "note",
+              "addition",
+              "decision",
+              "constraint",
+              "preference"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The step it was raised on, if any (context only).",
+            "title": "Node Key"
+          },
+          "text": {
+            "description": "The requirement / constraint / preference / decision to remember.",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "AssistNoteInput",
+        "type": "object"
+      },
       "AssistResearchInput": {
         "properties": {
           "node_key": {
@@ -4384,6 +4422,106 @@
           }
         ],
         "summary": "Assist Next",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/note": {
+      "post": {
+        "operationId": "assist_note_assist__session_id__note_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistNoteInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Note",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/notes": {
+      "get": {
+        "operationId": "assist_notes_list_assist__session_id__notes_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Notes List",
         "tags": [
           "Assist"
         ]

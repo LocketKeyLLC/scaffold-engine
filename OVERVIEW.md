@@ -22049,6 +22049,23 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.654 Feature — assist decisions are one-at-a-time (suggest-don't-decide) + session "notes & additions" that feed forward (2026-07-26)
+
+**The reported failure (homelab-in-OWUI, "another attempt… still not working; it assumes too much, be far simpler with the user").** Two structural problems, both verified at the source against the live OpnSense assist session (job `0d3d71a2`, session `4c977111`):
+
+1. **Decisions were resolved FOR the operator and BUNDLED.** `assist_guide.GUIDE_SYSTEM_NONCODE`'s `## What to decide` block told the model to "state the recommended choice, do not leave the decision hanging." A coarse decision node (T2 "Define VLAN IDs and subnets") therefore pre-assumed a **four-segment architecture the operator never chose** (trusted/IoT/guest/management) and dumped all four VLAN IDs + subnets in one shot. That is the "assumes too much."
+2. **Nothing captured what the operator raised mid-flow.** A new requirement ("also I want a DMZ") or constraint ("only 2 NICs") had nowhere to live and never fed forward — so the engine kept re-assuming around it.
+
+**Fix (scoped exactly to the confirmed direction: one decision at a time, flexible conversation, note new/important additions):**
+- **New `GUIDE_SYSTEM_DECISION` prompt** (`assist_guide.py`), routed for any `node_type='decision'` **regardless of tool** via `guide_system_for_tool(tool, is_decision=)`. It frames **ONE** choice with `## The decision / ## Options / ## My suggestion / ## Your move`, surfaces the FIRST foundational sub-choice (with a "then, next:" preview) instead of bundling, offers a lean explicitly marked **"but it's your call"** (never auto-resolves), and ends open to invite conversation. `_GUIDE_DECISION_TRAILER` in the user prompt reinforces it. `is_decision` threaded through `generate_guidance`/`generate_guidance_stream`/`ensure_guidance` from a new `node_type` SELECT in `_assemble_ctx_for_node`.
+- **Session-level notes & additions.** Migration `056_assist_session_notes.sql` adds `assist_sessions.notes JSONB` (single ALTER). `record_note`/`list_notes` + `_coerce_notes` (agent), `POST /assist/{sid}/note` + `GET /assist/{sid}/notes` (router), a **`note` classifier intent** (`classify_turn` returns `note_text`/`note_kind`; distinguishes *carry-forward* from `submit`'s *this-step outcome*), pipeline `assist_note_cmd` (confirm-back "📌 Noted (kind): …"), and a "📌 Notes & additions" block in the status roll-up. Notes are injected into **every later step's guidance** via `render_operator_notes_block` (read from the session row already fetched in the guidance path — no extra round-trip), so what the operator raises is honored, not re-assumed.
+
+**Live-verified** against the real session: T2 regenerated as a single address-block decision with a suggestion marked "your call" (vs the old bundled 4-segment runbook); the plain-language turn *"also, I want a DMZ segment"* routed through the pipeline (:9099, no chat_id) → `note/addition` → confirmed back; and the DMZ note then **appeared in T3's firewall decision** ("trusted, IoT, guest, management, **DMZ**") — feed-forward confirmed. Session reset to clean state afterward. +19 tests (12 agent/guide, 7 pipeline); full assist suite 398 green; ci-tier-0 green (056 lints single-statement); OpenAPI snapshot regenerated (+2 routes).
+
+**Deferred (logged, not built this pass):** the umbrella job still has **no DAG of its own** — the project overview is a flat component rollup, so "the DAG as a living whole-project overview" and "created code as a reusable base" (RAG-ingest of committed artifacts) from the original request are NOT addressed here. The `note` capture is the lightweight stand-in for "adding/changing the DAG as you go"; a true growing-DAG assist mode is a larger follow-up.
+
+---
+
 ### §17.653 Fix + audit — assist `fix`/troubleshooting made project-aware; full component sweep (2026-07-26)
 
 **Answering "do ALL components relay the project, not just Q&A?"** Swept every context-producing path. Found one interactive assist component still job-blind after §17.650: the **`fix`/troubleshooting** path (`run_step_fix` → `generate_fix`) threaded only `ctx` (direct-upstream + brief) + environment, NOT the whole-project digest. So diagnosing an error mid-assist couldn't relay the plan/research from other branches. **Fix**: threaded `job_digest` through `generate_fix` + `run_step_fix` (same `_job_digest_for` gate/exclusion as guidance). **Live-verified via the pipeline** (new chat → `/assist` → "it failed, which disks are boot vs ZFS data"): the fix now reasons about the project ("proceed to the next step (secure wipe)" — it knows the DAG plan). +1 test.

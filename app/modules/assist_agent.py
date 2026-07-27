@@ -278,7 +278,7 @@ async def get_session(*, session_id: str, db) -> Optional[dict]:
     sess = (await db.execute(
         text("""
             SELECT id, job_id, status, current_node_key, handoff_policy,
-                   replan_policy, started_at, last_activity_at, completed_at
+                   replan_policy, started_at, last_activity_at, completed_at, notes
               FROM assist_sessions WHERE id = :sid
         """),
         {"sid": session_id},
@@ -489,7 +489,7 @@ async def _assemble_ctx_for_node(
     node_row = (await db.execute(
         text("""
             SELECT node_key, title, description, prompt_template, depends_on,
-                   tool, domain, execution_order
+                   tool, domain, execution_order, node_type
               FROM dag_nodes
              WHERE job_id = :jid AND node_key = :nk
         """),
@@ -538,7 +538,7 @@ async def generate_step_guidance(
 
     sess = (await db.execute(
         text("""
-            SELECT id, job_id, status, current_node_key, metadata
+            SELECT id, job_id, status, current_node_key, metadata, notes
               FROM assist_sessions WHERE id = :sid
         """),
         {"sid": session_id},
@@ -574,6 +574,11 @@ async def generate_step_guidance(
         db=db, job_id=job_id,
         exclude_node_keys={nk, *ctx.upstream_outputs.keys()},
     )
+    # §17.654 — decision nodes get the one-choice-at-a-time, suggest-don't-decide
+    # prompt; every step also carries the operator's captured notes & additions
+    # (read from the session row already fetched — no extra round-trip).
+    is_decision = (node_row.get("node_type") or "").lower() == "decision"
+    operator_notes = _coerce_notes(sess.get("notes"))
 
     res = await assist_guide.ensure_guidance(
         session_id=session_id,
@@ -587,6 +592,8 @@ async def generate_step_guidance(
         environment=environment,
         verbosity=verbosity,
         job_digest=job_digest,
+        operator_notes=operator_notes,
+        is_decision=is_decision,
         db=db,
     )
     return {
@@ -619,7 +626,7 @@ async def generate_step_guidance_stream(
 
     sess = (await db.execute(
         text("""
-            SELECT id, job_id, status, current_node_key, metadata
+            SELECT id, job_id, status, current_node_key, metadata, notes
               FROM assist_sessions WHERE id = :sid
         """),
         {"sid": session_id},
@@ -651,6 +658,8 @@ async def generate_step_guidance_stream(
         db=db, job_id=job_id,
         exclude_node_keys={nk, *ctx.upstream_outputs.keys()},
     )
+    is_decision = (node_row.get("node_type") or "").lower() == "decision"  # §17.654
+    operator_notes = _coerce_notes(sess.get("notes"))
 
     async for ev in assist_guide.generate_guidance_stream(
         session_id=session_id,
@@ -664,6 +673,8 @@ async def generate_step_guidance_stream(
         environment=environment,
         verbosity=verbosity,
         job_digest=job_digest,
+        operator_notes=operator_notes,
+        is_decision=is_decision,
         db=db,
     ):
         yield ev
@@ -820,6 +831,7 @@ async def classify_session_turn(
 
     fallback = {
         "intent": "question", "evidence": "", "error_text": "", "query": "",
+        "note_text": "", "note_kind": "note",
         "node_key": node_key, "title": None,
     }
     if not (message or "").strip():
@@ -1607,6 +1619,78 @@ async def list_friction(*, session_id: str, db) -> list[dict]:
         {"sid": session_id},
     )).mappings().all()
     return [dict(r) for r in rows]
+
+
+# ── Notes & additions (§17.654 — capture what the operator raises mid-flow) ─
+
+# Kinds an operator-raised note can be tagged as. Free-form is coerced to
+# 'note'; the classifier/pipeline pick a more specific kind when they can.
+_NOTE_KINDS = ("note", "addition", "decision", "constraint", "preference")
+
+
+async def record_note(
+    *, session_id: str, text_: str, kind: str = "note",
+    node_key: str | None = None, db,
+) -> dict | None:
+    """§17.654 — append a session-level note/addition. Project-scoped (not tied
+    to a step's lifecycle like friction): a new requirement or constraint the
+    operator raises should outlive the step it came up on and feed forward into
+    every later step's guidance. Appends to ``assist_sessions.notes`` (JSONB
+    array). Returns the stored note dict, or None on empty text / missing
+    session. Single-statement append; the whole array is re-read cheaply."""
+    note_text = (text_ or "").strip()
+    if not note_text:
+        return None
+    k = kind if kind in _NOTE_KINDS else "note"
+    # Build the note server-side so the timestamp comes from the DB clock (no
+    # datetime import here) and the append stays a single statement.
+    res = (await db.execute(
+        text("""
+            UPDATE assist_sessions
+               SET notes = COALESCE(notes, '[]'::jsonb) || jsonb_build_array(
+                     jsonb_build_object(
+                       'ts', to_char(NOW() AT TIME ZONE 'UTC',
+                                     'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                       'kind', CAST(:kind AS text),
+                       'node_key', CAST(:nk AS text),
+                       'text', CAST(:txt AS text)
+                     )),
+                   last_activity_at = NOW(),
+                   updated_at = NOW()
+             WHERE id = :sid
+         RETURNING id
+        """),
+        {"sid": session_id, "kind": k, "nk": node_key, "txt": note_text},
+    )).first()
+    if res is None:
+        await db.rollback()
+        return None
+    await db.commit()
+    return {"kind": k, "node_key": node_key, "text": note_text}
+
+
+def _coerce_notes(value: Any) -> list[dict]:
+    """Normalize an ``assist_sessions.notes`` JSONB value to a list of dicts.
+    Tolerates None / a JSON string (defensive decode, mirroring
+    _environment_from_metadata) / a already-decoded list."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            value = []
+    return [n for n in (value or []) if isinstance(n, dict)]
+
+
+async def list_notes(*, session_id: str, db) -> list[dict]:
+    """§17.654 — the session's captured notes & additions, oldest first.
+    Returns [] for an unknown session or empty list."""
+    row = (await db.execute(
+        text("SELECT notes FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not row:
+        return []
+    return _coerce_notes(row.get("notes"))
 
 
 # ── Handoff (assist -> autonomous executor for one node or all remaining) ─

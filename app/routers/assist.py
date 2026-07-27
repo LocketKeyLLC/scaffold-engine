@@ -58,6 +58,14 @@ class AssistChatMapInput(BaseModel):
     last_node_key: Optional[str] = None
 
 
+class AssistNoteInput(BaseModel):
+    text: str = Field(description="The requirement / constraint / preference / decision to remember.")
+    kind: Literal["note", "addition", "decision", "constraint", "preference"] = "note"
+    node_key: Optional[str] = Field(
+        default=None, description="The step it was raised on, if any (context only)."
+    )
+
+
 class AssistGuideInput(BaseModel):
     node_key: Optional[str] = Field(
         default=None, description="Defaults to the session's current step."
@@ -564,3 +572,27 @@ async def assist_friction_list(session_id: str, db=Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
     notes = await assist_agent.list_friction(session_id=session_id, db=db)
     return {"session_id": session_id, "friction": notes}
+
+
+# §17.654 — session notes & additions (project-scoped, feed-forward into guidance)
+@router.post("/assist/{session_id}/note")
+async def assist_note(session_id: str, body: AssistNoteInput, db=Depends(get_db)):
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    note = await assist_agent.record_note(
+        session_id=session_id, text_=body.text, kind=body.kind,
+        node_key=body.node_key, db=db,
+    )
+    if note is None:
+        raise HTTPException(status_code=409, detail="empty note text")
+    return {"recorded": True, "session_id": session_id, "note": note}
+
+
+@router.get("/assist/{session_id}/notes")
+async def assist_notes_list(session_id: str, db=Depends(get_db)):
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    notes = await assist_agent.list_notes(session_id=session_id, db=db)
+    return {"session_id": session_id, "notes": notes}
