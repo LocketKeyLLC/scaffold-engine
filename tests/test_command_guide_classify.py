@@ -57,6 +57,9 @@ def test_intent_surface_is_complete():
         "optimize", "jobs_rename",
         # Phase 5 (§17.656) — research ingest variants + session rename
         "research_url", "research_github", "research_openapi", "research_rename",
+        # Phase 6 (§17.657) — workflow control (all confirmed in the pipeline)
+        "confirm_job", "execute_job", "retry_node", "skip_node", "cancel_job",
+        "cleanup",
         # Phase 3 — destructive (always confirmed in the pipeline)
         "jobs_delete", "schedule_delete", "research_delete",
         # safe default
@@ -66,11 +69,12 @@ def test_intent_surface_is_complete():
 
 @pytest.mark.smoke
 def test_destructive_intents_are_the_only_delete_verbs():
-    # Exactly three delete intents exist; the pipeline gates all behind a
-    # confirm. No cancel/purge intent leaked in.
+    # Exactly three DELETE (permanent data-removal) intents exist; the pipeline
+    # gates all behind a confirm. cancel_job is a distinct reversible workflow
+    # verb (§17.657), NOT a delete. Truly destructive words still must not leak.
     deletes = [i for i in command_guide.COMMAND_INTENTS if "delete" in i]
     assert set(deletes) == {"jobs_delete", "schedule_delete", "research_delete"}
-    for banned in ("cancel", "purge", "wipe", "drop"):
+    for banned in ("purge", "wipe", "drop"):
         assert not any(banned in i for i in command_guide.COMMAND_INTENTS), banned
 
 
@@ -233,6 +237,35 @@ async def test_research_rename_carries_ref_and_new_name():
     assert out["new_name"] == "ZFS Tuning Notes"
 
 
+# ── Phase 6 (§17.657) workflow control ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["confirm_job", "execute_job", "cancel_job"])
+async def test_job_workflow_intents_carry_job_ref(intent):
+    out = await _classify({"intent": intent, "confidence": "high",
+                           "job_ref": "proxmox"})
+    assert out["intent"] == intent
+    assert out["job_ref"] == "proxmox"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["retry_node", "skip_node"])
+async def test_node_workflow_intents_carry_job_ref_and_node_key(intent):
+    out = await _classify({"intent": intent, "confidence": "high",
+                           "job_ref": "kube", "node_key": "T3"})
+    assert out["intent"] == intent
+    assert out["job_ref"] == "kube"
+    assert out["node_key"] == "T3"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_intent_classifies_no_slot():
+    out = await _classify({"intent": "cleanup", "confidence": "high"})
+    assert out["intent"] == "cleanup"
+    assert out["confidence"] == "high"
+
+
 @pytest.mark.asyncio
 async def test_fallback_carries_all_slots_empty():
     # Fail-soft dict must contain every slot key so callers can .get safely.
@@ -241,7 +274,7 @@ async def test_fallback_carries_all_slots_empty():
         out = await command_guide.classify_command(message="research something")
     for k in ("topic", "depth", "cron", "tz", "model_role", "model_name",
               "prompt", "new_name", "query", "job_ref", "target_ref",
-              "url", "repo"):
+              "url", "repo", "node_key"):
         assert out[k] == ""
 
 

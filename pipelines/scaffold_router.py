@@ -3983,6 +3983,13 @@ class Pipeline:
         "research_github": ("repo",),
         "research_openapi": ("url",),
         "research_rename": ("job_ref", "new_name"),
+        # §17.657 (Phase 6) — workflow control. job_ref required so a state-
+        # altering verb never fires on an unnamed "it"; cleanup takes no target.
+        "confirm_job": ("job_ref",),
+        "execute_job": ("job_ref",),
+        "cancel_job": ("job_ref",),
+        "skip_node": ("job_ref", "node_key"),
+        "retry_node": ("job_ref", "node_key"),
         "jobs_delete": ("target_ref",),
         "schedule_delete": ("target_ref",),
         "research_delete": ("target_ref",),
@@ -4128,6 +4135,15 @@ class Pipeline:
             return
         if intent == "research_rename":
             yield from self._nl_research_rename(data)
+            return
+        # §17.657 (Phase 6) — workflow control. All render a confirm card (state-
+        # altering; confirm/execute also kick a long run); nothing fires until the
+        # affirmative follow-up handled by `_execute_nl_action`.
+        if intent in self._WORKFLOW_SPEC:
+            yield from self._nl_workflow(intent, data, chat_id=chat_id)
+            return
+        if intent == "cleanup":
+            yield self._confirm_cleanup()
             return
         if intent in ("jobs_delete", "schedule_delete", "research_delete"):
             yield from self._nl_delete(intent, data, chat_id=chat_id)
@@ -4460,6 +4476,69 @@ class Pipeline:
         )
         return self._render_nl_confirm(intent, {"source": source}, summary)
 
+    # ---- §17.657 (Phase 6) workflow control (all confirmed) --------------
+
+    # (intent → icon, human verb, what-happens line, base slash for the
+    # disambiguation-list hint). cleanup is targetless → handled separately.
+    _WORKFLOW_SPEC = {
+        "confirm_job": ("▶️", "Approve & build",
+                        "Runs Phase 2 research → DAG → execute (a long 10-40 min run on CPU).",
+                        "/confirm"),
+        "execute_job": ("⚙️", "Execute all pending nodes",
+                        "Runs every pending DAG node — state-altering.", "/execute"),
+        "cancel_job":  ("🚫", "Cancel",
+                        "Flips the job to `cancelled` (reversible via `/jobs/<id>/resume`).",
+                        "/cancel"),
+        "skip_node":   ("⏭️", "Skip node",
+                        "Marks the node done without running it — for a mis-rejecting verifier.",
+                        "/skip"),
+        "retry_node":  ("🔁", "Retry node",
+                        "Resets the failed/blocked node to pending and re-runs it.",
+                        "/exec retry"),
+    }
+
+    def _nl_workflow(self, intent: str, data: dict, *, chat_id: str | None = None):
+        """Resolve the named job and render a confirm card for a state-altering
+        workflow verb (§17.657). skip/retry also carry a node_key (already gated
+        required). Unique match → confirm; ambiguous → marker-less list; no match
+        → clarify. Nothing fires here — only `_execute_nl_action` acts."""
+        icon, verb, effect, slash = self._WORKFLOW_SPEC[intent]
+        ref = (data.get("job_ref") or "").strip()
+        node_key = (data.get("node_key") or "").strip()
+        match, ambiguous, cands = self._resolve_job_ref(ref)
+        if match and not ambiguous:
+            label = match.get("title") or match["job_id"]
+            status = match.get("status") or "?"
+            node_line = f"- **Node:** `{node_key}`\n" if node_key else ""
+            summary = (
+                f"{icon} **{verb}?**\n\n"
+                f"- **Job:** {label} (`{match['job_id']}`, `{status}`)\n"
+                f"{node_line}"
+                f"- {effect}"
+            )
+            slots = {"id": match["job_id"], "label": label}
+            if node_key:
+                slots["node_key"] = node_key
+            yield self._render_nl_confirm(intent, slots, summary)
+            return
+        if match and ambiguous and cands:
+            suffix = f" {node_key}" if node_key else ""
+            yield self._render_job_disambiguation(
+                cands, verb.lower(), slash, suffix=suffix)
+            return
+        yield (
+            f"I couldn't find a job matching “{ref}”. Try `/jobs list` to see "
+            f"recent jobs, or `/jobs find {ref}` to search."
+        )
+
+    def _confirm_cleanup(self) -> str:
+        summary = (
+            "🧹 **Run the stale-job reaper?**\n\n"
+            "Sweeps abandoned/stuck jobs (cancels timed-out runs, clears orphaned "
+            "executors). Safe anytime — healthy active jobs are untouched."
+        )
+        return self._render_nl_confirm("cleanup", {}, summary)
+
     def _extract_pending_nl_confirm(self, messages: List[dict]) -> dict | None:
         """Recover the pending NL action from the most recent assistant turn's
         confirm marker, or None. Only the immediately-preceding assistant turn
@@ -4515,6 +4594,16 @@ class Pipeline:
             return "👍 Cancelled — no schedule created."
         if intent in ("research_url", "research_github", "research_openapi"):
             return "👍 Cancelled — nothing was ingested."
+        if intent == "confirm_job":
+            return "👍 Cancelled — the job was not started."
+        if intent == "execute_job":
+            return "👍 Cancelled — nothing was executed."
+        if intent == "cancel_job":
+            return "👍 Okay — the job was left running."
+        if intent in ("skip_node", "retry_node"):
+            return "👍 Cancelled — the node was left as-is."
+        if intent == "cleanup":
+            return "👍 Cancelled — the reaper did not run."
         return "👍 Okay, cancelled — nothing was changed."
 
     def _execute_nl_action(
@@ -4542,6 +4631,32 @@ class Pipeline:
         if intent in ("research_url", "research_github", "research_openapi"):
             source = (slots.get("source") or "").strip()
             yield from self._handle_research(f"/research {source} --confirm")
+            return
+        # §17.657 — workflow control. The NL confirm card was the human gate;
+        # fire the underlying command now (confirm/execute stream a long run).
+        if intent == "confirm_job":
+            yield from self._handle_confirm(f"/confirm {slots.get('id', '')}")
+            return
+        if intent == "execute_job":
+            yield from self._handle_execute(
+                f"/execute {slots.get('id', '')}", chat_id=chat_id)
+            return
+        if intent == "cancel_job":
+            yield self._handle_command(
+                f"/cancel {slots.get('id', '')}", chat_id=chat_id)
+            return
+        if intent == "skip_node":
+            yield self._handle_command(
+                f"/skip {slots.get('id', '')} {slots.get('node_key', '')}",
+                chat_id=chat_id)
+            return
+        if intent == "retry_node":
+            yield self._handle_command(
+                f"/exec retry {slots.get('id', '')} {slots.get('node_key', '')}",
+                chat_id=chat_id)
+            return
+        if intent == "cleanup":
+            yield self._handle_command("/cleanup", chat_id=chat_id)
             return
         # §17.630 — destructive: fire the underlying delete WITH its confirm
         # token (the NL confirm card was the human gate).

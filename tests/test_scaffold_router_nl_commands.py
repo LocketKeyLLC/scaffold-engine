@@ -849,3 +849,170 @@ class TestResearchRename:
                 "research_rename", {"job_ref": "zfs", "new_name": "X"}, "raw"))
         assert "RENAMED" in out
         nr.assert_called_once()
+
+
+# ===========================================================================
+# §17.657 — Phase 6: workflow control (all confirmed)
+# ===========================================================================
+
+
+@pytest.mark.smoke
+class TestPhase6RequiredSlots:
+    @pytest.mark.parametrize("intent,data", [
+        ("confirm_job", {"confidence": "high"}),                          # no job_ref
+        ("execute_job", {"confidence": "high"}),                          # no job_ref
+        ("cancel_job", {"confidence": "high"}),                           # no job_ref
+        ("skip_node", {"confidence": "high", "job_ref": "x"}),            # no node_key
+        ("skip_node", {"confidence": "high", "node_key": "T3"}),          # no job_ref
+        ("retry_node", {"confidence": "high", "job_ref": "x"}),           # no node_key
+    ])
+    def test_missing_slot_falls_through(self, pipe, intent, data):
+        clf = {"intent": intent, **data}
+        with patch.object(pipe, "_classify_command", return_value=clf):
+            assert pipe._nl_command_route("do a thing", _hist("x")) is None
+
+    def test_cleanup_needs_no_slot(self, pipe):
+        clf = {"intent": "cleanup", "confidence": "high"}
+        with patch.object(pipe, "_classify_command", return_value=clf):
+            assert pipe._nl_command_route("clean up stale jobs", _hist("x")) is not None
+
+
+@pytest.mark.smoke
+class TestWorkflowConfirmCards:
+    """Every workflow verb renders a confirm card and fires NOTHING until an
+    affirmative follow-up."""
+    @pytest.mark.parametrize("intent,data", [
+        ("confirm_job", {"job_ref": "proxmox"}),
+        ("execute_job", {"job_ref": "proxmox"}),
+        ("cancel_job", {"job_ref": "proxmox"}),
+        ("skip_node", {"job_ref": "proxmox", "node_key": "T3"}),
+        ("retry_node", {"job_ref": "proxmox", "node_key": "T3"}),
+    ])
+    def test_unique_match_renders_confirm_not_fire(self, pipe, intent, data):
+        resolved = ({"job_id": "job-7", "title": "proxmox cluster",
+                     "status": "awaiting_confirmation"}, False,
+                    [{"job_id": "job-7", "title": "proxmox cluster"}])
+        with patch.object(pipe, "_resolve_job_ref", return_value=resolved), \
+             patch.object(pipe, "_handle_command") as hc, \
+             patch.object(pipe, "_handle_confirm") as hcf, \
+             patch.object(pipe, "_handle_execute") as hex_:
+            out = "".join(pipe._dispatch_nl_command(intent, data, "raw", chat_id="c1"))
+        assert "NL_CONFIRM:" in out
+        assert "job-7" in out
+        hc.assert_not_called(); hcf.assert_not_called(); hex_.assert_not_called()
+
+    def test_node_key_shown_in_card(self, pipe):
+        resolved = ({"job_id": "job-7", "title": "kube", "status": "failed"}, False,
+                    [{"job_id": "job-7", "title": "kube"}])
+        with patch.object(pipe, "_resolve_job_ref", return_value=resolved):
+            out = "".join(pipe._dispatch_nl_command(
+                "skip_node", {"job_ref": "kube", "node_key": "T3"}, "raw"))
+        assert "`T3`" in out
+
+    def test_ambiguous_lists_without_marker(self, pipe):
+        cands = [{"job_id": "a", "title": "prox one", "status": "planning"},
+                 {"job_id": "b", "title": "prox two", "status": "planning"}]
+        with patch.object(pipe, "_resolve_job_ref", return_value=(cands[0], True, cands)):
+            out = "".join(pipe._dispatch_nl_command(
+                "execute_job", {"job_ref": "prox"}, "raw"))
+        assert "ASSIST_PICK" not in out and "NL_CONFIRM" not in out
+        assert "/execute <id>" in out
+
+    def test_no_match_clarifies(self, pipe):
+        with patch.object(pipe, "_resolve_job_ref", return_value=(None, False, [])):
+            out = "".join(pipe._dispatch_nl_command(
+                "cancel_job", {"job_ref": "nope"}, "raw"))
+        assert "couldn't find a job" in out.lower()
+        assert "NL_CONFIRM" not in out
+
+    def test_cleanup_confirm_card(self, pipe):
+        out = "".join(pipe._dispatch_nl_command("cleanup", {}, "raw"))
+        assert "NL_CONFIRM:" in out
+        assert "reaper" in out.lower()
+
+
+@pytest.mark.smoke
+class TestWorkflowExecute:
+    """After an affirmative, _execute_nl_action fires the underlying command."""
+    def test_confirm_streams_via_handle_confirm(self, pipe):
+        pend = {"intent": "confirm_job", "slots": {"id": "job-7", "label": "prox"}}
+        with patch.object(pipe, "_handle_confirm",
+                          side_effect=lambda cmd: iter([f"C::{cmd}"])) as h:
+            out = "".join(pipe._execute_nl_action(pend, chat_id="c1"))
+        assert "C::/confirm job-7" in out
+        h.assert_called_once()
+
+    def test_execute_streams_via_handle_execute(self, pipe):
+        pend = {"intent": "execute_job", "slots": {"id": "job-7"}}
+        with patch.object(pipe, "_handle_execute",
+                          side_effect=lambda cmd, **k: iter([f"E::{cmd}"])) as h:
+            out = "".join(pipe._execute_nl_action(pend, chat_id="c1"))
+        assert "E::/execute job-7" in out
+        h.assert_called_once_with("/execute job-7", chat_id="c1")
+
+    def test_cancel_dispatches_command(self, pipe):
+        pend = {"intent": "cancel_job", "slots": {"id": "job-7"}}
+        with patch.object(pipe, "_handle_command", return_value="CANCELLED") as hc:
+            out = "".join(pipe._execute_nl_action(pend, chat_id="c1"))
+        assert out == "CANCELLED"
+        hc.assert_called_once_with("/cancel job-7", chat_id="c1")
+
+    def test_skip_dispatches_command(self, pipe):
+        pend = {"intent": "skip_node", "slots": {"id": "job-7", "node_key": "T3"}}
+        with patch.object(pipe, "_handle_command", return_value="SKIPPED") as hc:
+            out = "".join(pipe._execute_nl_action(pend, chat_id="c1"))
+        hc.assert_called_once_with("/skip job-7 T3", chat_id="c1")
+
+    def test_retry_dispatches_command(self, pipe):
+        pend = {"intent": "retry_node", "slots": {"id": "job-7", "node_key": "T3"}}
+        with patch.object(pipe, "_handle_command", return_value="RETRIED") as hc:
+            out = "".join(pipe._execute_nl_action(pend, chat_id="c1"))
+        hc.assert_called_once_with("/exec retry job-7 T3", chat_id="c1")
+
+    def test_cleanup_dispatches_command(self, pipe):
+        pend = {"intent": "cleanup", "slots": {}}
+        with patch.object(pipe, "_handle_command", return_value="REAPED") as hc:
+            out = "".join(pipe._execute_nl_action(pend, chat_id="c1"))
+        assert out == "REAPED"
+        hc.assert_called_once_with("/cleanup", chat_id="c1")
+
+    @pytest.mark.parametrize("intent,needle", [
+        ("confirm_job", "not started"), ("execute_job", "nothing was executed"),
+        ("cancel_job", "left running"), ("skip_node", "left as-is"),
+        ("retry_node", "left as-is"), ("cleanup", "reaper did not run"),
+    ])
+    def test_cancel_messages(self, pipe, intent, needle):
+        msg = pipe._render_confirm_cancelled({"intent": intent, "slots": {}})
+        assert needle in msg.lower()
+
+
+@pytest.mark.smoke
+class TestPipeWorkflowFlow:
+    def test_cancel_confirm_then_affirmative_fires(self, pipe):
+        clf = {"intent": "cancel_job", "confidence": "high", "job_ref": "kube"}
+        resolved = ({"job_id": "job-3", "title": "kube", "status": "running"}, False,
+                    [{"job_id": "job-3", "title": "kube"}])
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE"), \
+             patch.object(pipe, "_classify_command", return_value=clf), \
+             patch.object(pipe, "_resolve_job_ref", return_value=resolved), \
+             patch.object(pipe, "_handle_command") as hc:
+            card = "".join(pipe.pipe("cancel the kube job", "m",
+                                     _hist("cancel the kube job"), {}))
+        assert "NL_CONFIRM:" in card and "job-3" in card
+        hc.assert_not_called()                       # nothing cancelled yet
+
+        history = [
+            {"role": "user", "content": "cancel the kube job"},
+            {"role": "assistant", "content": card},
+            {"role": "user", "content": "yes"},
+        ]
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE") as triage, \
+             patch.object(pipe, "_classify_command") as clf2, \
+             patch.object(pipe, "_handle_command", return_value="CANCELLED") as hc2:
+            out = "".join(pipe.pipe("yes", "m", history, {}))
+        assert "CANCELLED" in out
+        triage.assert_not_called()
+        clf2.assert_not_called()
+        hc2.assert_called_once_with("/cancel job-3", chat_id=None)

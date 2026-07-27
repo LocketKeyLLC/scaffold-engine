@@ -83,6 +83,18 @@ _WRITE_INTENTS = (
     "research_openapi",# ingest an OpenAPI spec            → /research openapi:<url>
     "research_rename", # rename a research session         → /research/rename <id> <n>
 )
+# Workflow-control intents (§17.657, Phase 6). State-altering job/DAG control;
+# each is confirmed in the pipeline (confirm/execute kick expensive multi-step
+# runs; cancel/skip/retry/cleanup flip state). Kept distinct from DELETES —
+# these are reversible operational verbs, not data removal.
+_WORKFLOW_INTENTS = (
+    "confirm_job",     # approve → auto-chain build     → /confirm <id>
+    "execute_job",     # run all pending DAG nodes      → /execute <id>
+    "retry_node",      # retry a failed/blocked node    → /exec retry <id> <node>
+    "skip_node",       # skip a DAG node                → /skip <id> <node>
+    "cancel_job",      # cancel a job (reversible)      → /cancel <id>
+    "cleanup",         # reap stale jobs                → /cleanup
+)
 # Destructive intents (§17.630, Phase 3). ALWAYS confirmed in the pipeline —
 # the named target is resolved and echoed, and nothing deletes without an
 # explicit affirmative follow-up.
@@ -91,7 +103,10 @@ _DESTRUCTIVE_INTENTS = (
     "schedule_delete", # delete a research schedule    → /schedule delete <id>
     "research_delete", # delete a research session     → /research/delete <id> confirm
 )
-COMMAND_INTENTS = _READ_INTENTS + _WRITE_INTENTS + _DESTRUCTIVE_INTENTS + ("none",)
+COMMAND_INTENTS = (
+    _READ_INTENTS + _WRITE_INTENTS + _WORKFLOW_INTENTS + _DESTRUCTIVE_INTENTS
+    + ("none",)
+)
 
 _CONFIDENCE = ("high", "medium", "low")
 _DEPTHS = ("shallow", "medium", "deep")
@@ -196,6 +211,22 @@ _ROUTE_TOOL = model_router.Tool(
                     "research_delete = DELETE/remove a past RESEARCH SESSION ('delete the proxmox research', "
                     "'remove that research on zfs'); put the session topic/id in target_ref. "
                     "(All deletes are confirmed with the operator before anything is removed.) "
+                    # --- workflow control (Phase 6, §17.657) ---
+                    "confirm_job = APPROVE a job that is waiting for confirmation and kick off the full "
+                    "build ('approve the proxmox job', 'go ahead and build the kubernetes one', 'confirm "
+                    "and run job abc'); put the job in job_ref. This starts a long (10-40 min) run. "
+                    "execute_job = RUN/execute a job's already-planned DAG nodes ('execute the homelab "
+                    "job', 'run all the steps for abc'); put the job in job_ref. "
+                    "retry_node = RE-RUN a specific failed/blocked DAG node ('retry node T3 on the kube "
+                    "job', 'rerun the failed step T2'); put the job in job_ref and the node key (e.g. "
+                    "'T3') in node_key. "
+                    "skip_node = SKIP a specific DAG node ('skip node T3 on the proxmox job', 'skip step "
+                    "T2'); put the job in job_ref and the node key in node_key. "
+                    "cancel_job = CANCEL/stop a job ('cancel the proxmox job', 'stop that run') — flips it "
+                    "to cancelled (reversible via resume), NOT a permanent delete (jobs_delete); put the "
+                    "job in job_ref. "
+                    "cleanup = reap/clean up STALE or abandoned jobs ('clean up stale jobs', 'run the "
+                    "reaper', 'tidy up old stuck jobs') — no specific target. "
                     # --- the safe default ---
                     "none = ANYTHING else — describing/building a multi-step deliverable ('build a CLI that "
                     "…', 'set up proxmox on my box', 'make me an app'), a general question, or chit-chat. "
@@ -241,6 +272,13 @@ _ROUTE_TOOL = model_router.Tool(
                 "description": (
                     "For intent=research_github: the repository as 'owner/repo' (strip "
                     "any 'https://github.com/' prefix and trailing path). Omit otherwise."
+                ),
+            },
+            "node_key": {
+                "type": "string",
+                "description": (
+                    "For intent=retry_node or skip_node: the DAG node key the operator "
+                    "named (e.g. 'T3', 'T2'), verbatim. Omit if they did not name one."
                 ),
             },
             "topic": {
@@ -321,16 +359,18 @@ _ROUTE_SYSTEM = (
     "The operator typed a plain message (no slash command). Decide if it is a "
     "request to run one of the engine's actions (see the tool), and how "
     "confident you are.\n\n"
-    "Three families of action exist: READS (status, results, searching the "
+    "Families of action exist: READS (status, results, searching the "
     "knowledge base, listing jobs/models/schedules/research sessions, a job's "
     "logs or cost, a health check, your config, and 'what am I working on / "
     "what's next', help), WRITES (run web research on a "
     "topic, ingest a specific page / GitHub repo / OpenAPI spec into the "
     "knowledge base, schedule recurring research, set/reset a model role, "
-    "optimize a prompt, rename a job or research session), and DELETES (remove a "
-    "job, a research schedule, or a "
+    "optimize a prompt, rename a job or research session), WORKFLOW CONTROL "
+    "(approve/confirm a job, execute its DAG, retry or skip a node, cancel a "
+    "job, clean up stale jobs — each confirmed before it runs), and DELETES "
+    "(remove a job, a research schedule, or a "
     "past research session — always confirmed before anything is removed).\n\n"
-    "Critical distinction — a WRITE action here is a SINGLE engine operation. A "
+    "Critical distinction — a command here is a SINGLE engine operation. A "
     "request to BUILD, CREATE, or SET UP a multi-step software/infrastructure "
     "deliverable ('build a CLI that converts screenshots to PDF', 'set up "
     "proxmox on my dual-xeon box', 'make me a dashboard') is NOT a command — it "
@@ -357,7 +397,7 @@ async def classify_command(*, message: str, role: str | None = None) -> dict:
         "intent": "none", "confidence": "low", "query": "", "job_ref": "",
         "topic": "", "depth": "", "cron": "", "tz": "", "model_role": "",
         "model_name": "", "prompt": "", "new_name": "", "target_ref": "",
-        "url": "", "repo": "",
+        "url": "", "repo": "", "node_key": "",
     }
     text = (message or "").strip()
     if not text:
@@ -414,4 +454,5 @@ async def classify_command(*, message: str, role: str | None = None) -> dict:
         "target_ref": _s("target_ref"),
         "url": _s("url"),
         "repo": _s("repo"),
+        "node_key": _s("node_key"),
     }
