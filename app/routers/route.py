@@ -30,9 +30,11 @@ class RouteInput(BaseModel):
 
 @router.post("/route")
 async def route_command(body: RouteInput):
-    """Classify a plain-language top-level message into a read-only engine
-    intent (status / results / rag_query / jobs_list / jobs_find / model_* /
-    help), so the OWUI pipeline can drive the right component by talking.
+    """Classify a plain-language top-level message into an engine intent
+    (reads: status / results / rag_query / jobs_* / model_* / schedule_list /
+    research_list / research_find / logs / cost / health / config / work_* /
+    help; plus the §17.629/§17.630 write & delete verbs), so the OWUI pipeline
+    can drive the right component by talking.
 
     Fail-soft: a classifier hiccup or a non-command message returns
     ``intent='none'`` (confidence ``low``); the pipeline then falls through to

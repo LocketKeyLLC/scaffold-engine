@@ -173,6 +173,37 @@ _FAST_COMMAND_PHRASES: dict = {
         "help", "what can you do", "what can i do", "how do i use this",
         "commands", "show commands", "what commands", "how does this work",
     },
+    # §17.655 (Phase 4) — remaining safe reads. Only no-slot, whole-message
+    # phrasings belong here; research_find/logs/cost need an argument and go to
+    # the /route classifier.
+    "schedule_list": {
+        "list schedules", "list my schedules", "show schedules",
+        "show my schedules", "my schedules", "what's scheduled",
+        "whats scheduled", "scheduled research", "recurring research",
+    },
+    "research_list": {
+        "list research", "show research", "my research", "research sessions",
+        "list research sessions", "recent research", "past research",
+        "show my research",
+    },
+    "health": {
+        "health check", "system health", "is everything ok", "is everything up",
+        "is everything healthy", "are things healthy", "are the services up",
+        "check the system",
+    },
+    "config": {
+        "show config", "show my config", "my config", "show configuration",
+        "current config", "show settings", "my settings",
+    },
+    "work_here": {
+        "what am i working on", "where am i", "what am i doing",
+        "my active work", "what's in progress", "whats in progress",
+        "where was i",
+    },
+    "work_next": {
+        "what's next", "whats next", "what should i do next",
+        "what do i do next", "next step", "what now", "what next",
+    },
 }
 _FAST_COMMAND_LOOKUP: dict = {
     phrase: intent
@@ -3940,6 +3971,8 @@ class Pipeline:
     _NL_REQUIRED_SLOTS: dict = {
         "rag_query": ("query",),
         "jobs_find": ("query",),
+        "research_find": ("query",),   # §17.655 — logs/cost job_ref is optional
+                                       # (they fall back to active-job recall)
         "research_topic": ("topic",),
         "schedule_add": ("cron", "topic"),
         "model_set": ("model_role", "model_name"),
@@ -4038,6 +4071,12 @@ class Pipeline:
             "model_available": "/model available",
             "model_probe": "/model probe",
             "model_reset": "/model reset",
+            # §17.655 (Phase 4) — no-slot reads that route through _handle_command.
+            "schedule_list": "/schedule list",
+            "health": "/health",
+            "config": "/config",
+            "work_here": "/here",
+            "work_next": "/next",
             "rag_query": f"/rag {query}",
             "jobs_find": f"/jobs find {query}",
             "optimize": f"/optimize {(data.get('prompt') or '').strip()}",
@@ -4052,6 +4091,21 @@ class Pipeline:
 
         if intent == "results":
             yield from self._nl_results(data, chat_id=chat_id)
+            return
+        # §17.655 (Phase 4) — reads that route through non-_handle_command paths.
+        if intent == "research_list":
+            yield from self._handle_research_mgmt("/research/list")
+            return
+        if intent == "research_find":
+            yield from self._handle_research_mgmt(f"/research/find {query}")
+            return
+        if intent == "logs":
+            yield from self._nl_job_scoped(
+                data, slash="/logs", verb="see logs for", chat_id=chat_id)
+            return
+        if intent == "cost":
+            yield from self._nl_job_scoped(
+                data, slash="/cost", verb="see the cost of", chat_id=chat_id)
             return
         if intent == "jobs_rename":
             yield from self._nl_rename(data, chat_id=chat_id)
@@ -4069,30 +4123,39 @@ class Pipeline:
         # Unknown/unsupported intent slipped through — degrade gracefully.
         yield self._call_triage_from_msg(msg)
 
-    def _nl_results(self, data: dict, *, chat_id: str | None = None):
-        """Resolve a job reference for `results` and dispatch `/results`.
+    def _nl_job_scoped(
+        self, data: dict, *, slash: str, verb: str, chat_id: str | None = None,
+    ):
+        """Resolve a job reference and dispatch `<slash> <id>` through the
+        existing handler. Shared by results/logs/cost (§17.655):
 
-        - explicit/uniquely-matched job → `/results <id>`
-        - ambiguous name → a plain disambiguation list (ids + `/results <id>`);
+        - no ref → `<slash>` (falls back to active-job recall)
+        - explicit/uniquely-matched job → `<slash> <id>`
+        - ambiguous name → a plain disambiguation list (ids + `<slash> <id>`);
           NOT the assist pick-list, whose "1" follow-up starts a session
-        - no ref → `/results` (falls back to active-job recall)
-        - named but no match → clarify, don't silently show the wrong job."""
+        - named but no match → clarify, don't silently act on the wrong job."""
         ref = (data.get("job_ref") or "").strip()
         if not ref:
-            yield self._handle_command("/results", chat_id=chat_id)
+            yield self._handle_command(slash, chat_id=chat_id)
             return
         match, ambiguous, cands = self._resolve_job_ref(ref)
         if match and not ambiguous:
             yield self._handle_command(
-                f"/results {match['job_id']}", chat_id=chat_id,
+                f"{slash} {match['job_id']}", chat_id=chat_id,
             )
             return
         if match and ambiguous and cands:
-            yield self._render_job_disambiguation(cands, "see results for", "/results")
+            yield self._render_job_disambiguation(cands, verb, slash)
             return
         yield (
             f"I couldn't find a job matching “{ref}”. Try `/jobs list` to see "
             f"recent jobs, or `/jobs find {ref}` to search."
+        )
+
+    def _nl_results(self, data: dict, *, chat_id: str | None = None):
+        """results = `/results [job_ref]`. See `_nl_job_scoped`."""
+        yield from self._nl_job_scoped(
+            data, slash="/results", verb="see results for", chat_id=chat_id,
         )
 
     def _nl_rename(self, data: dict, *, chat_id: str | None = None):

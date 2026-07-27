@@ -42,7 +42,7 @@ from app.config import settings
 
 logger = logging.getLogger("scaffold.command_guide")
 
-# Read-only intents (§17.628, Phase 1).
+# Read-only intents (§17.628, Phase 1; extended §17.655, Phase 4).
 _READ_INTENTS = (
     "status",          # active jobs overview           → /status
     "results",         # compiled output of a job       → /results [job_ref]
@@ -53,6 +53,17 @@ _READ_INTENTS = (
     "model_available", # models present in `ollama list`→ /model available
     "model_probe",     # live per-role availability ping → /model probe
     "help",            # the command surface            → /help
+    # §17.655 (Phase 4) — the remaining safe reads. A misfire is at worst a
+    # wrong read, never a write; all degrade to triage below 'high' confidence.
+    "schedule_list",   # recurring research schedules    → /schedule list
+    "research_list",   # recent research sessions        → /research/list
+    "research_find",   # search research by topic        → /research/find <query>
+    "logs",            # per-node execution log for a job→ /logs [job_ref]
+    "cost",            # token/cost rollup for a job      → /cost [job_ref]
+    "health",          # subsystem health check          → /health
+    "config",          # engine/pipeline configuration   → /config
+    "work_here",       # what am I working on now         → /here
+    "work_next",       # my single next actionable step   → /next
 )
 # Mutating / expensive intents (§17.629, Phase 2). research_topic + schedule_add
 # commit real cost and are confirmed in the pipeline before firing.
@@ -97,17 +108,49 @@ _ROUTE_TOOL = model_router.Tool(
                 "enum": list(COMMAND_INTENTS),
                 "description": (
                     # --- reads (Phase 1) ---
-                    "status = overview of what jobs are running ('what's running', 'any jobs going'). "
-                    "results = the OUTCOME/compiled output of a job, often named ('how did the proxmox "
-                    "job turn out'); put the job name in job_ref. "
+                    "status = overview of what JOBS are running ('what's running', 'any jobs going') — "
+                    "a job census, NOT a backend-service health check (that's health) and NOT your own "
+                    "current task (that's work_here). "
+                    "results = the final OUTCOME/compiled answer of a job, often named ('how did the "
+                    "proxmox job turn out', 'show the result of X') — NOT its step-by-step logs (that's "
+                    "logs) and NOT its cost (that's cost); put the job name in job_ref. "
                     "rag_query = search the knowledge base / ingested notes ('search my notes for X', "
                     "'what do we know about X'); put the search text in query. "
-                    "jobs_list = see recent jobs ('list my jobs'). "
-                    "jobs_find = FIND a job by topic ('find my kubernetes job'); put the text in query. "
-                    "model_list = which model each role uses now. "
+                    "jobs_list = see recent build/deliverable jobs ('list my jobs') — NOT web-research "
+                    "runs (that's research_list). "
+                    "jobs_find = FIND a build job by topic ('find my kubernetes job') — NOT a research "
+                    "session (that's research_find); put the text in query. "
+                    "model_list = which MODEL each role uses now — the model roles ONLY, NOT the full "
+                    "engine settings (that's config). "
                     "model_available = which models are installed. "
                     "model_probe = are the models reachable. "
                     "help = what can I do / the commands. "
+                    # --- more reads (Phase 4, §17.655) ---
+                    "schedule_list = show recurring research SCHEDULES / cron jobs ('what's "
+                    "scheduled', 'list my schedules', 'show recurring research'). "
+                    "research_list = list past web-RESEARCH SESSIONS ('show my research', 'recent "
+                    "research runs', 'past research sessions') — these are /research web-lookup runs, "
+                    "distinct from build jobs; do NOT use jobs_list for these. "
+                    "research_find = FIND a past web-RESEARCH session by topic ('find my research on "
+                    "zfs', 'search my research for proxmox') — a research run, NOT a build job "
+                    "(jobs_find); put the topic in query. "
+                    "logs = a job's per-node execution LOG/trace — which DAG steps ran, their status, "
+                    "why one failed ('show the logs for the proxmox job', 'what happened on that run', "
+                    "'why did it fail') — the execution trace, NOT the final answer (results) or the "
+                    "cost; put any job name in job_ref, or omit it for the active job. "
+                    "cost = a job's token/COST/spend rollup — money and tokens used ('how much did the "
+                    "proxmox job cost', 'what did that run cost', 'token spend for X') — NOT the output "
+                    "(results); put any job name in job_ref, or omit for the active job. "
+                    "health = are the backend SERVICES up — an infrastructure health check of "
+                    "Postgres/Ollama/Milvus/Redis ('health check', 'is everything up', 'are the "
+                    "services ok', 'is the engine healthy') — NOT a job census (status). "
+                    "config = show ALL engine/pipeline CONFIGURATION / settings ('show my config', "
+                    "'what are my settings') — every setting, NOT just the model roles (model_list). "
+                    "work_here = what am I personally WORKING ON right now / where I left off ('what "
+                    "am I working on', 'where was I', 'my active work') — my current task, NOT the "
+                    "system-wide job census (status). "
+                    "work_next = my single NEXT actionable step in my current work ('what should I do "
+                    "next', 'what now', 'what's next'). "
                     # --- writes (Phase 2) ---
                     "research_topic = run autonomous WEB RESEARCH on a topic and ingest findings "
                     "('research the latest on postgres tuning', 'look up what's new in Proxmox 8', "
@@ -151,15 +194,16 @@ _ROUTE_TOOL = model_router.Tool(
             "query": {
                 "type": "string",
                 "description": (
-                    "For intent=rag_query or jobs_find: the search text as a clean "
-                    "standalone query (strip filler). Omit otherwise."
+                    "For intent=rag_query, jobs_find, or research_find: the search "
+                    "text as a clean standalone query (strip filler). Omit otherwise."
                 ),
             },
             "job_ref": {
                 "type": "string",
                 "description": (
-                    "For intent=results or jobs_rename: how the operator referred to "
-                    "the job — a name/topic fragment or an id. Omit if none given."
+                    "For intent=results, logs, cost, or jobs_rename: how the operator "
+                    "referred to the job — a name/topic fragment or an id. Omit if none "
+                    "given (logs/cost then fall back to the active job)."
                 ),
             },
             "topic": {
@@ -239,7 +283,9 @@ _ROUTE_SYSTEM = (
     "request to run one of the engine's actions (see the tool), and how "
     "confident you are.\n\n"
     "Three families of action exist: READS (status, results, searching the "
-    "knowledge base, listing jobs/models, help), WRITES (run web research on a "
+    "knowledge base, listing jobs/models/schedules/research sessions, a job's "
+    "logs or cost, a health check, your config, and 'what am I working on / "
+    "what's next', help), WRITES (run web research on a "
     "topic, schedule recurring research, set/reset a model role, optimize a "
     "prompt, rename a job), and DELETES (remove a job, a research schedule, or a "
     "past research session — always confirmed before anything is removed).\n\n"

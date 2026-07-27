@@ -49,6 +49,9 @@ def test_intent_surface_is_complete():
         # Phase 1 — reads
         "status", "results", "rag_query", "jobs_list", "jobs_find",
         "model_list", "model_available", "model_probe", "help",
+        # Phase 4 (§17.655) — remaining safe reads
+        "schedule_list", "research_list", "research_find", "logs", "cost",
+        "health", "config", "work_here", "work_next",
         # Phase 2 — mutating/expensive
         "research_topic", "schedule_add", "model_set", "model_reset",
         "optimize", "jobs_rename",
@@ -107,6 +110,38 @@ async def test_slots_are_stripped():
     out = await _classify({"intent": "jobs_find", "confidence": "high",
                            "query": "  kubernetes  "})
     assert out["query"] == "kubernetes"
+
+
+# ── Phase 4 (§17.655) reads — new slot carries + no-slot intents ───────────
+
+
+@pytest.mark.asyncio
+async def test_research_find_carries_query():
+    out = await _classify({"intent": "research_find", "confidence": "high",
+                           "query": "zfs on non-ecc ram"})
+    assert out["intent"] == "research_find"
+    assert out["query"] == "zfs on non-ecc ram"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["logs", "cost"])
+async def test_logs_cost_carry_job_ref(intent):
+    out = await _classify({"intent": intent, "confidence": "high",
+                           "job_ref": "proxmox"})
+    assert out["intent"] == intent
+    assert out["job_ref"] == "proxmox"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", [
+    "schedule_list", "research_list", "health", "config",
+    "work_here", "work_next",
+])
+async def test_no_slot_reads_classify(intent):
+    # These carry no slot — classification alone is enough to route them.
+    out = await _classify({"intent": intent, "confidence": "high"})
+    assert out["intent"] == intent
+    assert out["confidence"] == "high"
 
 
 # ── write intents (Phase 2) carry their slots ─────────────────────────────

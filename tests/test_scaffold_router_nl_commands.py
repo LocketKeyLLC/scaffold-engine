@@ -57,6 +57,17 @@ class TestFastClassify:
         ("probe models", "model_probe"),
         ("help", "help"),
         ("what can you do", "help"),
+        # §17.655 (Phase 4) — remaining safe reads.
+        ("what's scheduled", "schedule_list"),
+        ("list my schedules", "schedule_list"),
+        ("show my research", "research_list"),
+        ("recent research", "research_list"),
+        ("health check", "health"),
+        ("is everything healthy", "health"),
+        ("show my config", "config"),
+        ("what am i working on", "work_here"),
+        ("what's next", "work_next"),
+        ("what should i do next", "work_next"),
     ])
     def test_known_phrases(self, msg, intent):
         assert _mod._fast_classify_command(msg) == intent
@@ -140,6 +151,12 @@ class TestDispatchMapping:
         ("model_set", {"model_role": "coder", "model_name": "kimi:cloud"},
          "/model set coder kimi:cloud"),
         ("optimize", {"prompt": "write a haiku"}, "/optimize write a haiku"),
+        # Phase 4 (§17.655) no-slot reads:
+        ("schedule_list", {}, "/schedule list"),
+        ("health", {}, "/health"),
+        ("config", {}, "/config"),
+        ("work_here", {}, "/here"),
+        ("work_next", {}, "/next"),
     ])
     def test_slash_translation(self, pipe, intent, data, expected):
         with patch.object(pipe, "_handle_command", return_value="OK") as hc:
@@ -648,3 +665,82 @@ class TestPipeDeleteFlow:
         # The delete must NOT fire on a non-affirmative reply.
         assert not any("delete" in str(c).lower() for c in
                        [call.args[0] for call in hc.call_args_list])
+
+
+# ===========================================================================
+# §17.655 — Phase 4: remaining safe reads
+# ===========================================================================
+
+
+@pytest.mark.smoke
+class TestPhase4Reads:
+    def test_research_find_missing_query_falls_through(self, pipe):
+        # High confidence but empty query → don't intercept into an empty search.
+        clf = {"intent": "research_find", "confidence": "high", "query": ""}
+        with patch.object(pipe, "_classify_command", return_value=clf):
+            assert pipe._nl_command_route("find my research", _hist("x")) is None
+
+    def test_research_list_dispatches_to_mgmt(self, pipe):
+        with patch.object(pipe, "_handle_research_mgmt",
+                          side_effect=lambda cmd: iter([f"R::{cmd}"])) as hr:
+            out = "".join(pipe._dispatch_nl_command("research_list", {}, "raw"))
+        assert "R::/research/list" in out
+        hr.assert_called_once()
+
+    def test_research_find_dispatches_query_to_mgmt(self, pipe):
+        with patch.object(pipe, "_handle_research_mgmt",
+                          side_effect=lambda cmd: iter([f"R::{cmd}"])) as hr:
+            out = "".join(pipe._dispatch_nl_command(
+                "research_find", {"query": "proxmox"}, "raw"))
+        assert "R::/research/find proxmox" in out
+        hr.assert_called_once()
+
+    @pytest.mark.parametrize("intent,slash,verb", [
+        ("logs", "/logs", "see logs for"),
+        ("cost", "/cost", "see the cost of"),
+    ])
+    def test_logs_cost_no_ref_uses_recall(self, pipe, intent, slash, verb):
+        with patch.object(pipe, "_handle_command", return_value="OUT") as hc:
+            out = "".join(pipe._dispatch_nl_command(intent, {"job_ref": ""},
+                                                    "raw", chat_id="c1"))
+        assert out == "OUT"
+        hc.assert_called_once_with(slash, chat_id="c1")
+
+    @pytest.mark.parametrize("intent,slash", [("logs", "/logs"), ("cost", "/cost")])
+    def test_logs_cost_unique_match_dispatches_with_id(self, pipe, intent, slash):
+        resolved = ({"job_id": "job-42", "title": "proxmox"}, False,
+                    [{"job_id": "job-42", "title": "proxmox"}])
+        with patch.object(pipe, "_resolve_job_ref", return_value=resolved), \
+             patch.object(pipe, "_handle_command", return_value="OUT") as hc:
+            out = "".join(pipe._dispatch_nl_command(intent, {"job_ref": "proxmox"},
+                                                    "raw", chat_id="c1"))
+        assert out == "OUT"
+        hc.assert_called_once_with(f"{slash} job-42", chat_id="c1")
+
+    def test_logs_ambiguous_lists_without_assist_marker(self, pipe):
+        cands = [{"job_id": "a", "title": "prox one", "status": "completed"},
+                 {"job_id": "b", "title": "prox two", "status": "running"}]
+        with patch.object(pipe, "_resolve_job_ref", return_value=(cands[0], True, cands)), \
+             patch.object(pipe, "_handle_command") as hc:
+            out = "".join(pipe._dispatch_nl_command("logs", {"job_ref": "prox"}, "raw"))
+        assert "ASSIST_PICK" not in out
+        assert "/logs <id>" in out
+        hc.assert_not_called()
+
+    def test_cost_no_match_clarifies(self, pipe):
+        with patch.object(pipe, "_resolve_job_ref", return_value=(None, False, [])), \
+             patch.object(pipe, "_handle_command") as hc:
+            out = "".join(pipe._dispatch_nl_command("cost", {"job_ref": "nope"}, "raw"))
+        assert "couldn't find a job" in out.lower()
+        hc.assert_not_called()
+
+    def test_fast_phrase_read_intercepts_end_to_end(self, pipe):
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE") as triage, \
+             patch.object(pipe, "_classify_command") as clf, \
+             patch.object(pipe, "_handle_command", return_value="SCHED"):
+            out = "".join(pipe.pipe("list my schedules", "m",
+                                    _hist("list my schedules"), {}))
+        assert "SCHED" in out
+        triage.assert_not_called()
+        clf.assert_not_called()          # deterministic tier handled it
