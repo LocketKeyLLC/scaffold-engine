@@ -74,6 +74,14 @@ _WRITE_INTENTS = (
     "model_reset",     # reset ALL model roles to defaults  → /model reset
     "optimize",        # optimize a prompt                  → /optimize <prompt>
     "jobs_rename",     # rename a job                       → /jobs rename <id> <n>
+    # §17.656 (Phase 5) — research INGEST variants + session rename. The three
+    # ingest verbs fetch an external source and write it to the knowledge base,
+    # so they are confirmed in the pipeline (like research_topic); rename is
+    # cheap/reversible and runs directly (like jobs_rename).
+    "research_url",    # ingest a single web page          → /research <url>
+    "research_github", # ingest a repo's docs              → /research github:<repo>
+    "research_openapi",# ingest an OpenAPI spec            → /research openapi:<url>
+    "research_rename", # rename a research session         → /research/rename <id> <n>
 )
 # Destructive intents (§17.630, Phase 3). ALWAYS confirmed in the pipeline —
 # the named target is resolved and echoed, and nothing deletes without an
@@ -167,6 +175,19 @@ _ROUTE_TOOL = model_router.Tool(
                     "this prompt better: ...'); put the prompt text in prompt. "
                     "jobs_rename = rename an existing job ('rename job abc to Home Lab Setup'); put the job "
                     "reference in job_ref and the new title in new_name. "
+                    # --- research ingest variants + rename (Phase 5, §17.656) ---
+                    "research_url = ingest ONE specific web PAGE verbatim into the knowledge base — the "
+                    "user gives an explicit http(s) URL ('ingest this page https://x/article', 'read and "
+                    "save https://x/post', 'add https://x to my notes'); put the bare URL in url. NOT "
+                    "open-ended topic research (research_topic). "
+                    "research_github = ingest a GitHub REPO's docs (README + docstrings) — the user names "
+                    "a repo ('read the docs at github.com/owner/repo', 'ingest the owner/repo repo'); put "
+                    "just 'owner/repo' in repo (strip any github.com/ prefix). "
+                    "research_openapi = ingest an OpenAPI/Swagger SPEC (one entry per endpoint) — the user "
+                    "points at a spec ('ingest the openapi spec at https://api.x/openapi.json'); put the "
+                    "spec URL in url. "
+                    "research_rename = rename a past RESEARCH session ('rename the zfs research to ZFS "
+                    "Tuning Notes'); put the session reference in job_ref and the new topic in new_name. "
                     # --- destructive (Phase 3) ---
                     "jobs_delete = DELETE/remove a job ('delete the kubernetes job', 'remove that old CLI "
                     "job'); put the job name/id in target_ref. "
@@ -201,9 +222,25 @@ _ROUTE_TOOL = model_router.Tool(
             "job_ref": {
                 "type": "string",
                 "description": (
-                    "For intent=results, logs, cost, or jobs_rename: how the operator "
-                    "referred to the job — a name/topic fragment or an id. Omit if none "
-                    "given (logs/cost then fall back to the active job)."
+                    "For intent=results, logs, cost, jobs_rename, or research_rename: "
+                    "how the operator referred to the job/session — a name/topic fragment "
+                    "or an id. Omit if none given (logs/cost then fall back to the active "
+                    "job)."
+                ),
+            },
+            "url": {
+                "type": "string",
+                "description": (
+                    "For intent=research_url: the bare web page URL to ingest. For "
+                    "research_openapi: the OpenAPI/Swagger spec URL. Include the "
+                    "http(s):// scheme; omit otherwise."
+                ),
+            },
+            "repo": {
+                "type": "string",
+                "description": (
+                    "For intent=research_github: the repository as 'owner/repo' (strip "
+                    "any 'https://github.com/' prefix and trailing path). Omit otherwise."
                 ),
             },
             "topic": {
@@ -261,7 +298,9 @@ _ROUTE_TOOL = model_router.Tool(
             "new_name": {
                 "type": "string",
                 "description": (
-                    "For intent=jobs_rename: the new title for the job. Omit otherwise."
+                    "For intent=jobs_rename: the new title for the job. For "
+                    "research_rename: the new topic for the research session. Omit "
+                    "otherwise."
                 ),
             },
             "target_ref": {
@@ -286,8 +325,10 @@ _ROUTE_SYSTEM = (
     "knowledge base, listing jobs/models/schedules/research sessions, a job's "
     "logs or cost, a health check, your config, and 'what am I working on / "
     "what's next', help), WRITES (run web research on a "
-    "topic, schedule recurring research, set/reset a model role, optimize a "
-    "prompt, rename a job), and DELETES (remove a job, a research schedule, or a "
+    "topic, ingest a specific page / GitHub repo / OpenAPI spec into the "
+    "knowledge base, schedule recurring research, set/reset a model role, "
+    "optimize a prompt, rename a job or research session), and DELETES (remove a "
+    "job, a research schedule, or a "
     "past research session — always confirmed before anything is removed).\n\n"
     "Critical distinction — a WRITE action here is a SINGLE engine operation. A "
     "request to BUILD, CREATE, or SET UP a multi-step software/infrastructure "
@@ -316,6 +357,7 @@ async def classify_command(*, message: str, role: str | None = None) -> dict:
         "intent": "none", "confidence": "low", "query": "", "job_ref": "",
         "topic": "", "depth": "", "cron": "", "tz": "", "model_role": "",
         "model_name": "", "prompt": "", "new_name": "", "target_ref": "",
+        "url": "", "repo": "",
     }
     text = (message or "").strip()
     if not text:
@@ -370,4 +412,6 @@ async def classify_command(*, message: str, role: str | None = None) -> dict:
         "prompt": _s("prompt"),
         "new_name": _s("new_name"),
         "target_ref": _s("target_ref"),
+        "url": _s("url"),
+        "repo": _s("repo"),
     }

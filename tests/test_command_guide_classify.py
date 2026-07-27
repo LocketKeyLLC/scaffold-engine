@@ -55,6 +55,8 @@ def test_intent_surface_is_complete():
         # Phase 2 — mutating/expensive
         "research_topic", "schedule_add", "model_set", "model_reset",
         "optimize", "jobs_rename",
+        # Phase 5 (§17.656) — research ingest variants + session rename
+        "research_url", "research_github", "research_openapi", "research_rename",
         # Phase 3 — destructive (always confirmed in the pipeline)
         "jobs_delete", "schedule_delete", "research_delete",
         # safe default
@@ -196,6 +198,41 @@ async def test_jobs_rename_carries_ref_and_new_name():
     assert out["new_name"] == "Home Lab Setup"
 
 
+# ── Phase 5 (§17.656) research ingest variants + rename ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_research_url_carries_url():
+    out = await _classify({"intent": "research_url", "confidence": "high",
+                           "url": "https://example.com/post"})
+    assert out["intent"] == "research_url"
+    assert out["url"] == "https://example.com/post"
+
+
+@pytest.mark.asyncio
+async def test_research_github_carries_repo():
+    out = await _classify({"intent": "research_github", "confidence": "high",
+                           "repo": "owner/repo"})
+    assert out["intent"] == "research_github"
+    assert out["repo"] == "owner/repo"
+
+
+@pytest.mark.asyncio
+async def test_research_openapi_carries_url():
+    out = await _classify({"intent": "research_openapi", "confidence": "high",
+                           "url": "https://api.x/openapi.json"})
+    assert out["intent"] == "research_openapi"
+    assert out["url"] == "https://api.x/openapi.json"
+
+
+@pytest.mark.asyncio
+async def test_research_rename_carries_ref_and_new_name():
+    out = await _classify({"intent": "research_rename", "confidence": "high",
+                           "job_ref": "zfs", "new_name": "ZFS Tuning Notes"})
+    assert out["job_ref"] == "zfs"
+    assert out["new_name"] == "ZFS Tuning Notes"
+
+
 @pytest.mark.asyncio
 async def test_fallback_carries_all_slots_empty():
     # Fail-soft dict must contain every slot key so callers can .get safely.
@@ -203,7 +240,8 @@ async def test_fallback_carries_all_slots_empty():
                       new=AsyncMock(side_effect=RuntimeError("x"))):
         out = await command_guide.classify_command(message="research something")
     for k in ("topic", "depth", "cron", "tz", "model_role", "model_name",
-              "prompt", "new_name", "query", "job_ref", "target_ref"):
+              "prompt", "new_name", "query", "job_ref", "target_ref",
+              "url", "repo"):
         assert out[k] == ""
 
 

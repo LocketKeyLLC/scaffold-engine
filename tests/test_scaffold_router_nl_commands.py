@@ -744,3 +744,108 @@ class TestPhase4Reads:
         assert "SCHED" in out
         triage.assert_not_called()
         clf.assert_not_called()          # deterministic tier handled it
+
+
+# ===========================================================================
+# §17.656 — Phase 5: research ingest variants + session rename
+# ===========================================================================
+
+
+@pytest.mark.smoke
+class TestPhase5RequiredSlots:
+    @pytest.mark.parametrize("intent,data", [
+        ("research_url", {"confidence": "high"}),                      # no url
+        ("research_github", {"confidence": "high"}),                   # no repo
+        ("research_openapi", {"confidence": "high"}),                  # no url
+        ("research_rename", {"confidence": "high", "job_ref": "x"}),   # no new_name
+        ("research_rename", {"confidence": "high", "new_name": "Y"}),  # no ref
+    ])
+    def test_missing_slot_falls_through(self, pipe, intent, data):
+        clf = {"intent": intent, **data}
+        with patch.object(pipe, "_classify_command", return_value=clf):
+            assert pipe._nl_command_route("ingest a thing", _hist("x")) is None
+
+
+@pytest.mark.smoke
+class TestIngestConfirmCards:
+    """Ingest fetches an external source + writes to the KB → confirm card,
+    nothing fetched until an affirmative follow-up."""
+    def test_url_renders_confirm_not_launch(self, pipe):
+        with patch.object(pipe, "_handle_research") as launch:
+            out = "".join(pipe._dispatch_nl_command(
+                "research_url", {"url": "https://example.com/post"}, "raw"))
+        assert "NL_CONFIRM:" in out
+        assert "https://example.com/post" in out
+        launch.assert_not_called()
+
+    def test_github_strips_prefix_in_source(self, pipe):
+        with patch.object(pipe, "_handle_research"):
+            out = "".join(pipe._dispatch_nl_command(
+                "research_github", {"repo": "https://github.com/owner/repo"}, "raw"))
+        assert "NL_CONFIRM:" in out
+        assert "github:owner/repo" in out          # prefix stripped + normalized
+
+    def test_openapi_prefixes_source(self, pipe):
+        with patch.object(pipe, "_handle_research"):
+            out = "".join(pipe._dispatch_nl_command(
+                "research_openapi", {"url": "https://api.x/openapi.json"}, "raw"))
+        assert "openapi:https://api.x/openapi.json" in out
+
+
+@pytest.mark.smoke
+class TestIngestExecute:
+    @pytest.mark.parametrize("intent,slots,expected", [
+        ("research_url", {"source": "https://x/p"}, "/research https://x/p --confirm"),
+        ("research_github", {"source": "github:o/r"}, "/research github:o/r --confirm"),
+        ("research_openapi", {"source": "openapi:https://x/o.json"},
+         "/research openapi:https://x/o.json --confirm"),
+    ])
+    def test_execute_fires_handle_research(self, pipe, intent, slots, expected):
+        pend = {"intent": intent, "slots": slots}
+        with patch.object(pipe, "_handle_research",
+                          side_effect=lambda cmd: iter([f"RUN::{cmd}"])) as hr:
+            out = "".join(pipe._execute_nl_action(pend))
+        assert f"RUN::{expected}" in out
+        hr.assert_called_once()
+
+    def test_ingest_cancel_message(self, pipe):
+        msg = pipe._render_confirm_cancelled(
+            {"intent": "research_url", "slots": {"source": "https://x"}})
+        assert "ingested" in msg.lower()
+
+
+@pytest.mark.smoke
+class TestResearchRename:
+    def test_unique_match_renames_directly(self, pipe):
+        resolved = ({"job_id": "sess-2", "title": "zfs"}, False,
+                    [{"job_id": "sess-2", "title": "zfs"}])
+        with patch.object(pipe, "_resolve_research_ref", return_value=resolved), \
+             patch.object(pipe, "_handle_research_mgmt",
+                          side_effect=lambda cmd: iter([f"R::{cmd}"])) as hr:
+            out = "".join(pipe._nl_research_rename(
+                {"job_ref": "zfs", "new_name": "ZFS Tuning Notes"}))
+        assert "R::/research/rename sess-2 ZFS Tuning Notes" in out
+        hr.assert_called_once()
+
+    def test_ambiguous_lists_without_marker(self, pipe):
+        cands = [{"job_id": "a", "title": "zfs one", "status": "completed"},
+                 {"job_id": "b", "title": "zfs two", "status": "completed"}]
+        with patch.object(pipe, "_resolve_research_ref", return_value=(cands[0], True, cands)), \
+             patch.object(pipe, "_handle_research_mgmt") as hr:
+            out = "".join(pipe._nl_research_rename({"job_ref": "zfs", "new_name": "X"}))
+        assert "ASSIST_PICK" not in out
+        assert "/research/rename <id> X" in out
+        hr.assert_not_called()
+
+    def test_no_match_clarifies(self, pipe):
+        with patch.object(pipe, "_resolve_research_ref", return_value=(None, False, [])):
+            out = "".join(pipe._nl_research_rename({"job_ref": "nope", "new_name": "X"}))
+        assert "couldn't find a research session" in out.lower()
+
+    def test_dispatch_routes_rename(self, pipe):
+        with patch.object(pipe, "_nl_research_rename",
+                          side_effect=lambda data: iter(["RENAMED"])) as nr:
+            out = "".join(pipe._dispatch_nl_command(
+                "research_rename", {"job_ref": "zfs", "new_name": "X"}, "raw"))
+        assert "RENAMED" in out
+        nr.assert_called_once()

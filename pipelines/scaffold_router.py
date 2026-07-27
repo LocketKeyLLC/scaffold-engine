@@ -3978,6 +3978,11 @@ class Pipeline:
         "model_set": ("model_role", "model_name"),
         "optimize": ("prompt",),
         "jobs_rename": ("job_ref", "new_name"),
+        # §17.656 (Phase 5) — research ingest variants + session rename.
+        "research_url": ("url",),
+        "research_github": ("repo",),
+        "research_openapi": ("url",),
+        "research_rename": ("job_ref", "new_name"),
         "jobs_delete": ("target_ref",),
         "schedule_delete": ("target_ref",),
         "research_delete": ("target_ref",),
@@ -4116,6 +4121,14 @@ class Pipeline:
         if intent == "schedule_add":
             yield self._confirm_schedule(data)
             return
+        # §17.656 (Phase 5) — research ingest variants (confirm: outbound fetch
+        # + knowledge-base write) and session rename (direct: cheap/reversible).
+        if intent in ("research_url", "research_github", "research_openapi"):
+            yield self._confirm_research_ingest(intent, data)
+            return
+        if intent == "research_rename":
+            yield from self._nl_research_rename(data)
+            return
         if intent in ("jobs_delete", "schedule_delete", "research_delete"):
             yield from self._nl_delete(intent, data, chat_id=chat_id)
             return
@@ -4178,6 +4191,28 @@ class Pipeline:
         yield (
             f"I couldn't find a job matching “{ref}” to rename. Try `/jobs list` "
             f"to see recent jobs."
+        )
+
+    def _nl_research_rename(self, data: dict):
+        """§17.656 — resolve a research-session reference and dispatch
+        `/research/rename`. Reversible, so a unique match runs directly;
+        ambiguity lists the candidates (new topic preserved in the hint)."""
+        ref = (data.get("job_ref") or "").strip()
+        new_name = (data.get("new_name") or "").strip()
+        match, ambiguous, cands = self._resolve_research_ref(ref)
+        if match and not ambiguous:
+            yield from self._handle_research_mgmt(
+                f"/research/rename {match['job_id']} {new_name}",
+            )
+            return
+        if match and ambiguous and cands:
+            yield self._render_job_disambiguation(
+                cands, "rename", "/research/rename", suffix=f" {new_name}",
+            )
+            return
+        yield (
+            f"I couldn't find a research session matching “{ref}” to rename. "
+            f"Try `/research/list` to see recent sessions."
         )
 
     def _render_job_disambiguation(
@@ -4390,6 +4425,41 @@ class Pipeline:
             summary,
         )
 
+    # §17.656 (Phase 5) — research ingest variants. The classifier extracts a
+    # bare value (a URL, or owner/repo); the pipeline adds the canonical
+    # /research mode prefix so `_handle_research` routes to the right ingest
+    # mode. Confirmed because each fetches an external source AND writes it to
+    # the knowledge base (and a URL the user merely mentioned mustn't auto-ingest).
+    # (intent → human noun, icon, slot to read, prefix template)
+    _INGEST_SPEC = {
+        "research_url":     ("page", "🌐", "url",  "{v}"),
+        "research_github":  ("GitHub repo", "🐙", "repo", "github:{v}"),
+        "research_openapi": ("OpenAPI spec", "📖", "url", "openapi:{v}"),
+    }
+
+    def _ingest_source(self, intent: str, data: dict) -> str:
+        """Canonical `/research` argument for an ingest intent (prefixed), or ''
+        if the slot is empty. github: tolerates a github.com/ URL the model may
+        have left un-normalized."""
+        _, _, slot, tmpl = self._INGEST_SPEC[intent]
+        v = (data.get(slot) or "").strip()
+        if not v:
+            return ""
+        if intent == "research_github":
+            v = re.sub(r"^(?:https?://)?(?:www\.)?github\.com/", "", v,
+                       flags=re.IGNORECASE).strip("/")
+        return tmpl.format(v=v)
+
+    def _confirm_research_ingest(self, intent: str, data: dict) -> str:
+        noun, icon, _, _ = self._INGEST_SPEC[intent]
+        source = self._ingest_source(intent, data)
+        summary = (
+            f"{icon} **Ingest this {noun} into your knowledge base?**\n\n"
+            f"- **Source:** `{source}`\n"
+            f"- Fetches it and adds it to your searchable notes (queryable via `/rag`)."
+        )
+        return self._render_nl_confirm(intent, {"source": source}, summary)
+
     def _extract_pending_nl_confirm(self, messages: List[dict]) -> dict | None:
         """Recover the pending NL action from the most recent assistant turn's
         confirm marker, or None. Only the immediately-preceding assistant turn
@@ -4443,6 +4513,8 @@ class Pipeline:
             return "👍 Cancelled — no research started."
         if intent == "schedule_add":
             return "👍 Cancelled — no schedule created."
+        if intent in ("research_url", "research_github", "research_openapi"):
+            return "👍 Cancelled — nothing was ingested."
         return "👍 Okay, cancelled — nothing was changed."
 
     def _execute_nl_action(
@@ -4463,6 +4535,13 @@ class Pipeline:
             tz = (slots.get("tz") or "UTC").strip()
             cmd = f'/schedule add "{cron}" --depth={depth} --tz={tz} {topic}'
             yield self._handle_schedule(cmd)
+            return
+        # §17.656 — research ingest variants. `source` is already mode-prefixed
+        # (url / github:<repo> / openapi:<url>); --confirm skips the short-query
+        # disambiguation (prefixed sources never trigger it, but explicit is safe).
+        if intent in ("research_url", "research_github", "research_openapi"):
+            source = (slots.get("source") or "").strip()
+            yield from self._handle_research(f"/research {source} --confirm")
             return
         # §17.630 — destructive: fire the underlying delete WITH its confirm
         # token (the NL confirm card was the human gate).
