@@ -3997,8 +3997,10 @@ class Pipeline:
         "confirm_job": ("job_ref",),
         "execute_job": ("job_ref",),
         "cancel_job": ("job_ref",),
-        "skip_node": ("job_ref", "node_key"),
-        "retry_node": ("job_ref", "node_key"),
+        # §17.659 — node_key is OPTIONAL: when the operator doesn't name a node
+        # ("retry the failed step"), _nl_workflow auto-resolves the failed one.
+        "skip_node": ("job_ref",),
+        "retry_node": ("job_ref",),
         # §17.658 (Phase 7) — GT KB search/extract + prompt view.
         "gt_search": ("query",),
         "gt_extract": ("topic",),
@@ -4537,16 +4539,35 @@ class Pipeline:
         node_key = (data.get("node_key") or "").strip()
         match, ambiguous, cands = self._resolve_job_ref(ref)
         if match and not ambiguous:
-            label = match.get("title") or match["job_id"]
+            jid = match["job_id"]
+            label = match.get("title") or jid
+            # §17.659 — auto-resolve the failed/blocked node for skip/retry when
+            # the operator didn't name one ("retry the failed step"). Exactly one
+            # → use it; several → list them (name one); none → say so.
+            if intent in ("skip_node", "retry_node") and not node_key:
+                failing = self._resolve_failing_nodes(jid)
+                if len(failing) == 1:
+                    node_key = str(failing[0].get("node_key") or "").strip()
+                elif len(failing) > 1:
+                    yield self._render_failing_nodes(intent, match, failing)
+                    return
+                else:
+                    word = "retry" if intent == "retry_node" else "skip"
+                    yield (
+                        f"No failed or blocked nodes on **{label}** to {word}. "
+                        f"Name the node explicitly (e.g. add `T3`), or check "
+                        f"`/results {jid[:8]}`."
+                    )
+                    return
             status = match.get("status") or "?"
             node_line = f"- **Node:** `{node_key}`\n" if node_key else ""
             summary = (
                 f"{icon} **{verb}?**\n\n"
-                f"- **Job:** {label} (`{match['job_id']}`, `{status}`)\n"
+                f"- **Job:** {label} (`{jid}`, `{status}`)\n"
                 f"{node_line}"
                 f"- {effect}"
             )
-            slots = {"id": match["job_id"], "label": label}
+            slots = {"id": jid, "label": label}
             if node_key:
                 slots["node_key"] = node_key
             yield self._render_nl_confirm(intent, slots, summary)
@@ -4568,6 +4589,41 @@ class Pipeline:
             "executors). Safe anytime — healthy active jobs are untouched."
         )
         return self._render_nl_confirm("cleanup", {}, summary)
+
+    def _resolve_failing_nodes(self, job_id: str) -> list:
+        """§17.659 — the job's failed/blocked DAG nodes (for skip/retry node
+        auto-resolution when the operator didn't name one). Fail-soft → []."""
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/logs/{job_id}",
+                params={"limit": 100, "offset": 0},
+                headers=self._auth_headers(), timeout=self.valves.request_timeout,
+            )
+            if r.status_code < 400:
+                nodes = (r.json() or {}).get("nodes") or []
+                return [n for n in nodes
+                        if n.get("status") in ("failed", "blocked")]
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self.logger.debug("nl _resolve_failing_nodes failed: %s", e)
+        return []
+
+    def _render_failing_nodes(self, intent: str, match: dict, failing: list) -> str:
+        """§17.659 — list a job's failed/blocked nodes and ask the operator to
+        name one (plain text, no stateful marker) when auto-resolution finds >1."""
+        word = "retry" if intent == "retry_node" else "skip"
+        label = match.get("title") or match["job_id"]
+        lines = [
+            f"**{label}** has {len(failing)} failed/blocked nodes — which one "
+            f"do you want to {word}?", "",
+        ]
+        for n in failing[:8]:
+            key = n.get("node_key", "?")
+            reason = (n.get("failure_reason") or "").replace("\n", " ").strip()[:70]
+            rp = f" — {reason}" if reason else ""
+            lines.append(f"- `{key}`{rp}")
+        first = failing[0].get("node_key", "T1")
+        lines += ["", f"Tell me which — e.g. “{word} {first} on {label}”."]
+        return "\n".join(lines)
 
     # ---- §17.658 (Phase 7) ground-truth KB + prompt inspection -----------
     # Compact renderers so the MAIN chat can reach these by plain language; the

@@ -239,11 +239,13 @@ _ROUTE_TOOL = model_router.Tool(
                     "and run job abc'); put the job in job_ref. This starts a long (10-40 min) run. "
                     "execute_job = RUN/execute a job's already-planned DAG nodes ('execute the homelab "
                     "job', 'run all the steps for abc'); put the job in job_ref. "
-                    "retry_node = RE-RUN a specific failed/blocked DAG node ('retry node T3 on the kube "
-                    "job', 'rerun the failed step T2'); put the job in job_ref and the node key (e.g. "
-                    "'T3') in node_key. "
-                    "skip_node = SKIP a specific DAG node ('skip node T3 on the proxmox job', 'skip step "
-                    "T2'); put the job in job_ref and the node key in node_key. "
+                    "retry_node = RE-RUN a failed/blocked DAG node ('retry node T3 on the kube job', "
+                    "'rerun the failed step', 'retry the kube job'); put the job in job_ref and, IF the "
+                    "operator named a node key (e.g. 'T3'), put it in node_key — otherwise omit node_key "
+                    "and the failed node is found automatically. "
+                    "skip_node = SKIP a failed/blocked DAG node ('skip node T3 on the proxmox job', 'skip "
+                    "the failing step'); put the job in job_ref and, if a node key was named, node_key — "
+                    "otherwise omit it and the failed node is found automatically. "
                     "cancel_job = CANCEL/stop a job ('cancel the proxmox job', 'stop that run') — flips it "
                     "to cancelled (reversible via resume), NOT a permanent delete (jobs_delete); put the "
                     "job in job_ref. "
@@ -300,7 +302,8 @@ _ROUTE_TOOL = model_router.Tool(
                 "type": "string",
                 "description": (
                     "For intent=retry_node or skip_node: the DAG node key the operator "
-                    "named (e.g. 'T3', 'T2'), verbatim. Omit if they did not name one."
+                    "named (e.g. 'T3', 'T2'), verbatim. Omit if they did not name one — "
+                    "the pipeline then auto-resolves the job's failed/blocked node."
                 ),
             },
             "topic": {

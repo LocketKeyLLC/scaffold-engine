@@ -180,6 +180,7 @@ class TestPipeContinuity:
         with fc, as_, \
              patch.object(pipe, "_active_assist_session", return_value=None), \
              patch.object(pipe, "_active_assist_session_via_history", return_value=None), \
+             patch.object(pipe, "_sole_active_session_via_work", return_value=None), \
              patch.object(pipe, "_call_triage", return_value="TRIAGE") as triage:
             out = "".join(pipe.pipe("let's continue proxmox", "m",
                                     self._fresh("let's continue proxmox"), {}))
@@ -259,6 +260,7 @@ class TestPipeContinuity:
         with patch.object(_mod._assist, "fetch_assist_candidates") as fc, \
              patch.object(pipe, "_active_assist_session", return_value=None), \
              patch.object(pipe, "_active_assist_session_via_history", return_value=None), \
+             patch.object(pipe, "_sole_active_session_via_work", return_value=None), \
              patch.object(pipe, "_classify_command",
                           return_value={"intent": "none", "confidence": "low"}), \
              patch.object(pipe, "_call_triage", return_value="TRIAGE"):

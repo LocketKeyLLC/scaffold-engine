@@ -862,14 +862,22 @@ class TestPhase6RequiredSlots:
         ("confirm_job", {"confidence": "high"}),                          # no job_ref
         ("execute_job", {"confidence": "high"}),                          # no job_ref
         ("cancel_job", {"confidence": "high"}),                           # no job_ref
-        ("skip_node", {"confidence": "high", "job_ref": "x"}),            # no node_key
+        # §17.659 — skip/retry need only job_ref now (node auto-resolves); a
+        # bare node with no job still falls through.
         ("skip_node", {"confidence": "high", "node_key": "T3"}),          # no job_ref
-        ("retry_node", {"confidence": "high", "job_ref": "x"}),           # no node_key
+        ("retry_node", {"confidence": "high", "node_key": "T3"}),         # no job_ref
     ])
     def test_missing_slot_falls_through(self, pipe, intent, data):
         clf = {"intent": intent, **data}
         with patch.object(pipe, "_classify_command", return_value=clf):
             assert pipe._nl_command_route("do a thing", _hist("x")) is None
+
+    @pytest.mark.parametrize("intent", ["skip_node", "retry_node"])
+    def test_node_verb_intercepts_on_job_ref_alone(self, pipe, intent):
+        # §17.659 — node_key optional: job_ref alone is enough to intercept.
+        clf = {"intent": intent, "confidence": "high", "job_ref": "kube"}
+        with patch.object(pipe, "_classify_command", return_value=clf):
+            assert pipe._nl_command_route("retry the failed step", _hist("x")) is not None
 
     def test_cleanup_needs_no_slot(self, pipe):
         clf = {"intent": "cleanup", "confidence": "high"}
@@ -908,6 +916,60 @@ class TestWorkflowConfirmCards:
             out = "".join(pipe._dispatch_nl_command(
                 "skip_node", {"job_ref": "kube", "node_key": "T3"}, "raw"))
         assert "`T3`" in out
+
+
+@pytest.mark.smoke
+class TestNodeAutoResolve:
+    """§17.659 — skip/retry with no named node_key auto-resolve the failed one."""
+    def _job(self):
+        return ({"job_id": "job-7", "title": "kube", "status": "failed"}, False,
+                [{"job_id": "job-7", "title": "kube"}])
+
+    @pytest.mark.parametrize("intent", ["skip_node", "retry_node"])
+    def test_single_failing_node_auto_used(self, pipe, intent):
+        with patch.object(pipe, "_resolve_job_ref", return_value=self._job()), \
+             patch.object(pipe, "_resolve_failing_nodes",
+                          return_value=[{"node_key": "T4", "status": "failed"}]):
+            out = "".join(pipe._dispatch_nl_command(intent, {"job_ref": "kube"}, "raw"))
+        assert "NL_CONFIRM:" in out and "`T4`" in out       # auto-picked node in card
+
+    @pytest.mark.parametrize("intent", ["skip_node", "retry_node"])
+    def test_multiple_failing_nodes_lists(self, pipe, intent):
+        with patch.object(pipe, "_resolve_job_ref", return_value=self._job()), \
+             patch.object(pipe, "_resolve_failing_nodes",
+                          return_value=[{"node_key": "T2", "failure_reason": "bad"},
+                                        {"node_key": "T5", "failure_reason": "worse"}]):
+            out = "".join(pipe._dispatch_nl_command(intent, {"job_ref": "kube"}, "raw"))
+        assert "NL_CONFIRM" not in out                       # not auto-fired
+        assert "`T2`" in out and "`T5`" in out
+        assert "which one" in out.lower()
+
+    @pytest.mark.parametrize("intent,word", [("skip_node", "skip"), ("retry_node", "retry")])
+    def test_no_failing_nodes_says_so(self, pipe, intent, word):
+        with patch.object(pipe, "_resolve_job_ref", return_value=self._job()), \
+             patch.object(pipe, "_resolve_failing_nodes", return_value=[]):
+            out = "".join(pipe._dispatch_nl_command(intent, {"job_ref": "kube"}, "raw"))
+        assert "NL_CONFIRM" not in out
+        assert word in out.lower() and "no failed" in out.lower()
+
+    def test_named_node_key_skips_autoresolve(self, pipe):
+        with patch.object(pipe, "_resolve_job_ref", return_value=self._job()), \
+             patch.object(pipe, "_resolve_failing_nodes") as rf:
+            out = "".join(pipe._dispatch_nl_command(
+                "retry_node", {"job_ref": "kube", "node_key": "T9"}, "raw"))
+        assert "NL_CONFIRM:" in out and "`T9`" in out
+        rf.assert_not_called()                              # no lookup when named
+
+    def test_resolve_failing_nodes_filters(self, pipe):
+        body = {"nodes": [
+            {"node_key": "T1", "status": "done"},
+            {"node_key": "T2", "status": "failed"},
+            {"node_key": "T3", "status": "blocked"},
+            {"node_key": "T4", "status": "running"}]}
+        with patch.object(_mod._HTTP_SESSION, "get",
+                          return_value=_make_response(200, body)):
+            out = pipe._resolve_failing_nodes("job-7")
+        assert {n["node_key"] for n in out} == {"T2", "T3"}
 
     def test_ambiguous_lists_without_marker(self, pipe):
         cands = [{"job_id": "a", "title": "prox one", "status": "planning"},
