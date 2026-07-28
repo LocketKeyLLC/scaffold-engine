@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.661 Fix — job-scoped workflow commands were swallowed by assist mode (skip-precedence collision) (2026-07-27)
+
+**Caught by the full in-browser NL sweep.** With an assist session active in the chat, "skip the failing step **on the Build hardened home job**" routed to the assist NL turn (which owns the verb "skip") and skipped the *current assist step* — instead of the top-level `skip_node` for the named job. Root cause: in `pipe()`, once a session is `active`, ALL plain text goes to `_assist_nl_turn` (§17.626) before `_nl_command_route` (§17.628), so the assist "skip"/"cancel" verbs shadow the top-level workflow verbs. `retry_node` didn't collide only because assist has no "retry" verb; `cancel_job` was latently shadowed the same way.
+
+- **Fix (`scaffold_router.py`):** a deterministic pre-gate `_looks_like_scoped_command(msg)` — true only when the message names a workflow/delete verb (`skip|cancel|stop|execute|retry|delete|remove|approve|confirm|…`) **AND** an explicit job/node reference (`on the … / the <name> job / job <id> / node T3 / step T3`). Inside the `if active:` block, when it matches, consult `_nl_command_route` FIRST; if it intercepts (high-confidence intent with a resolved job), route top-level — otherwise fall through to the assist turn unchanged. The heuristic keeps ordinary in-session turns ("skip", "next", pasted output) on the cheap assist path with **no extra classifier call**. The affirmative confirm follow-up ("yes") was already safe — the §17.629 pending-confirm check precedes the assist block.
+
+**Verification.** Unit — **+11** (the `_looks_like_scoped_command` matrix: 7 scoped, 6 bare/non-scoped; three pipe() interaction tests: scoped→router, scoped-no-intercept→assist, bare-skip→assist-without-router-call); assist-chat-routing + NL + continuity + assist-nl suites **359 passed**. **Deterministic routing proof against the deployed pipeline** (mocking an active session): "skip the failing step on the proxmox job" → top-level (nl_route called, assist NOT), "skip"/"next" → assist (router never consulted), "cancel the kube job" → top-level. **Live pipe() smoke** (no chat_id, sole active session): the previously-colliding message now renders the top-level `skip_node` response ("No failed or blocked nodes on Build a hardened home lab…") — no assist-step mutation. Pipeline reloads clean.
+
+---
+
 ### §17.660 Fix — confirm / pick-list markers were VISIBLE in the OWUI browser (HTML comment → reference-link definition) (2026-07-27)
 
 **Caught by driving the real OWUI browser** (Playwright, minted a session JWT from `WEBUI_SECRET_KEY`, model `scaffold-engine`). The affirmative confirm round-trip works end-to-end — "schedule a weekly research run…" → confirm card → "yes" → `✅ Scheduled #N` — but the screenshot exposed a bug that pipe()-level tests and DB inspection had hidden: the hidden action marker was an **HTML comment** (`<!--NL_CONFIRM:{…}-->`), and **OWUI's markdown renderer (v0.11) displays HTML comments as visible literal text**. So every confirm card showed a line of raw `<!--NL_CONFIRM:{"intent":…}-->` to the user. The prior "hidden by markdown" claim (and the identical §17.627 comment in `render_candidate_list`) was simply wrong — never visually verified.

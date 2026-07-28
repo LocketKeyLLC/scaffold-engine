@@ -453,3 +453,71 @@ class TestWorkFallbackResume:
         assert "TRIAGE_OUTPUT" in out
         guide.assert_not_called()
         work.assert_not_called()  # gated out before the /work call
+
+
+# ---------------------------------------------------------------------------
+# §17.661 — job-scoped top-level command carve-out (assist-precedence collision)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+class TestScopedCommandCarveout:
+    """A job-scoped workflow/delete command ("skip the failing step on the
+    proxmox job") reaches the top-level router even while an assist session is
+    active — instead of the assist "skip" verb swallowing it. Bare current-step
+    verbs ("skip", "next") still go straight to assist with no extra classify."""
+
+    @pytest.mark.parametrize("msg,scoped", [
+        ("skip the failing step on the proxmox job", True),
+        ("cancel the kubernetes job", True),
+        ("retry node T3 on the homelab job", True),
+        ("delete the old CLI job", True),
+        ("execute the proxmox job", True),
+        ("approve the firewall job and build it", True),
+        ("skip node T2 on job a1b2c3d4", True),
+        # bare current-step verbs / non-scoped → stay assist
+        ("skip", False),
+        ("skip this step", False),
+        ("next", False),
+        ("submit the output", False),
+        ("done, I created the container", False),
+        ("cancel", False),
+        ("what about networking", False),
+    ])
+    def test_scoped_detector(self, pipe, msg, scoped):
+        assert pipe._looks_like_scoped_command(msg) is scoped
+
+    def _drive(self, pipe, msg, *, nl_result):
+        rec = {"session_id": "s1", "last_node_key": "T1", "status": "active"}
+        nl_ret = iter(["CMD_OUTPUT"]) if nl_result else None
+        with patch.object(pipe, "_assist_recall", return_value=rec), \
+             patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+             patch.object(pipe, "_in_progress_banner", return_value=""), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE"), \
+             patch.object(pipe, "_nl_command_route", return_value=nl_ret) as nlr, \
+             patch.object(pipe, "_assist_nl_turn",
+                          side_effect=lambda *a, **k: iter(["GUIDE_OUTPUT"])) as guide:
+            out = "".join(pipe.pipe(msg, "model-id", _multiturn(msg), CHAT_BODY))
+        return out, nlr, guide
+
+    def test_scoped_command_reaches_top_level_router(self, pipe):
+        out, nlr, guide = self._drive(
+            pipe, "skip the failing step on the proxmox job", nl_result=True)
+        assert "CMD_OUTPUT" in out and "GUIDE_OUTPUT" not in out
+        nlr.assert_called_once()
+        guide.assert_not_called()             # assist did NOT swallow it
+
+    def test_scoped_command_no_intercept_falls_to_assist(self, pipe):
+        # scoped phrasing, but the router didn't intercept (no such job / low
+        # confidence) → assist still owns the turn (no behaviour lost).
+        out, nlr, guide = self._drive(
+            pipe, "skip the failing step on the proxmox job", nl_result=False)
+        assert "GUIDE_OUTPUT" in out
+        nlr.assert_called_once()
+        guide.assert_called_once()
+
+    def test_bare_skip_stays_assist_without_router_call(self, pipe):
+        out, nlr, guide = self._drive(pipe, "skip this step", nl_result=True)
+        assert "GUIDE_OUTPUT" in out and "CMD_OUTPUT" not in out
+        nlr.assert_not_called()               # heuristic False → no extra classify
+        guide.assert_called_once()

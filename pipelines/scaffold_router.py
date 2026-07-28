@@ -1153,6 +1153,34 @@ class Pipeline:
             return True
         return bool(self._ASSIST_CONT_RE.search(msg.strip()))
 
+    # §17.661 — a job-SCOPED top-level command: a workflow/delete verb PLUS an
+    # explicit reference to a specific job or DAG node ("skip the failing step
+    # ON THE PROXMOX JOB", "cancel the kube job", "retry node T3 on job abc123").
+    # When an assist session is active, such a message is about the NAMED job —
+    # not the current assist step — so it must reach the top-level router instead
+    # of being swallowed by the assist "skip"/"cancel" verb (the reported
+    # collision). Deterministic pre-gate: only when it matches do we consult the
+    # LLM top-level classifier, so ordinary in-session turns ("skip", "next",
+    # pasted output) stay on the cheap assist path with no extra round-trip.
+    _SCOPED_CMD_VERB_RE = re.compile(
+        r"\b(skip|cancel|stop|execute|re-?run|retry|delete|remove|approve|"
+        r"confirm|kick\s*off)\b",
+        re.IGNORECASE,
+    )
+    _SCOPED_CMD_SCOPE_RE = re.compile(
+        r"\bon\s+(the|job)\b|\bthe\s+\S.*\bjob\b|\bjob\s+[0-9a-f]{6,}\b|"
+        r"\bnode\s+[A-Za-z]?\d+\b|\bstep\s+[A-Za-z]?\d+\b",
+        re.IGNORECASE,
+    )
+
+    def _looks_like_scoped_command(self, msg: str) -> bool:
+        """True when `msg` names a workflow/delete verb AND an explicit job/node
+        reference — the signal that it targets a specific job, not the current
+        assist step. Both halves required so a bare 'skip'/'cancel' stays assist."""
+        m = (msg or "").strip()
+        return bool(m and self._SCOPED_CMD_VERB_RE.search(m)
+                    and self._SCOPED_CMD_SCOPE_RE.search(m))
+
     @staticmethod
     def _is_first_turn(messages: list[dict]) -> bool:
         """True when the user has sent exactly one user-message in this chat.
@@ -1688,6 +1716,19 @@ class Pipeline:
         if not active and self._looks_like_assist_continuation(msg):
             active = self._sole_active_session_via_work()
         if active:
+            # §17.661 — job-scoped top-level command carve-out. A message that
+            # names a workflow/delete verb AND a specific job/node ("skip the
+            # failing step on the proxmox job", "cancel the kube job") is about
+            # THAT job, not the current assist step — so consult the top-level
+            # router first; otherwise the assist "skip"/"cancel" verb swallows it.
+            # The heuristic gate keeps ordinary in-session turns off this path,
+            # and the router still only intercepts on a high-confidence intent
+            # with a resolved job — anything else falls through to assist.
+            if self._looks_like_scoped_command(msg):
+                handled = self._nl_command_route(msg, messages, chat_id=cid)
+                if handled is not None:
+                    yield from handled
+                    return
             # §17.626 — plain text in an active session is an intent, not just a
             # refine hint: classify it and route (submit/skip/next/fix/…).
             yield from self._assist_nl_turn(
