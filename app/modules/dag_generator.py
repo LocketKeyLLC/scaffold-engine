@@ -554,6 +554,41 @@ def connect_isolated_nodes(tasks: list[dict]) -> list[str]:
     return wired
 
 
+def _enforce_deliverable_marking(tasks: list[dict]) -> list[str]:
+    """§17.669 — §17.475 says a MID-GRAPH setup step is NEVER the deliverable, but
+    the generator over-marks (homelab test: 8/10, incl. 'Download Proxmox ISO',
+    'Configure GPU passthrough'). A DAG should mark the node(s) that produce the
+    FINAL artifact, not every step. Enforce it deterministically: ``is_deliverable``
+    survives only on a TERMINAL node (nothing depends on it) OR a CodeGen node
+    (per §17.475 the code IS the deliverable even with downstream validation).
+    Mid-graph non-CodeGen marks are cleared. Only removes over-marks — it does not
+    add new ones, except the safety fallback to terminal leaves if every mark was
+    mid-graph (so we never drop to zero deliverables). Returns the unmarked ids."""
+    real = [t for t in tasks if t.get("id")]
+    ids = {t["id"] for t in real}
+    depended_on: set[str] = set()
+    for t in real:
+        depended_on |= {d for d in (t.get("depends_on") or []) if d in ids}
+    marked = [t for t in real if t.get("is_deliverable")]
+    if not marked:
+        return []  # zero-marked is handled by the leaf fallback in generate_dag
+    def keeps(t: dict) -> bool:
+        terminal = t["id"] not in depended_on
+        return terminal or str(t.get("tool", "")).lower() == "codegen"
+    keep = {t["id"] for t in marked if keeps(t)}
+    if not keep:  # every mark was mid-graph non-CodeGen → fall back to leaves
+        keep = {t["id"] for t in real if t["id"] not in depended_on}
+    unmarked: list[str] = []
+    for t in marked:
+        if t["id"] not in keep:
+            t["is_deliverable"] = False
+            unmarked.append(t["id"])
+    for t in real:  # only relevant in the leaf-fallback branch
+        if t["id"] in keep and not t.get("is_deliverable"):
+            t["is_deliverable"] = True
+    return unmarked
+
+
 # §17.645 — terminal reporting verbs. A node whose name says it documents /
 # verifies / summarizes / reviews the build is a downstream CONSUMER of the
 # build, not a starting step. If the generator leaves it with empty depends_on
@@ -1109,6 +1144,19 @@ async def generate_dag(
     if not any(t.get("is_deliverable") for t in normalized):
         for t in normalized:
             t["is_deliverable"] = t["id"] in leaf_keys
+
+    # §17.669 — clear MID-GRAPH deliverable over-marks (§17.475: a setup step is
+    # never the deliverable). Runs after the graph is fully connected (§17.668),
+    # so "terminal" is computed on the final edges.
+    _demarked = _enforce_deliverable_marking(normalized)
+    if _demarked:
+        validator_warnings.append(
+            f"deliverable_overmark_cleared: {', '.join(_demarked)} were marked "
+            f"is_deliverable but are mid-graph setup steps — cleared (§17.475)"
+        )
+        logger.warning(
+            "dag_deliverable_overmark_cleared: job=%s nodes=%s", job_id, _demarked,
+        )
 
     try:
         for i, task in enumerate(normalized):

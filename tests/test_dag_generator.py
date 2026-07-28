@@ -1128,3 +1128,61 @@ class TestConnectIsolatedNodes:
         tasks = [{"id": "A", "execution_order": 1, "depends_on": []},
                  {"id": "B", "execution_order": 2, "depends_on": ["A"]}]
         assert _dag_gen.connect_isolated_nodes(tasks) == []
+
+
+@pytest.mark.smoke
+class TestDeliverableMarking:
+    """§17.669 — is_deliverable survives only on TERMINAL or CodeGen nodes;
+    mid-graph setup over-marks are cleared (§17.475)."""
+
+    def _homelab(self):
+        # 8/10 marked incl. mid-graph setup steps (the real over-marking).
+        return [
+            {"id": "T1", "depends_on": []},
+            {"id": "T2", "depends_on": ["T1"], "is_deliverable": True},
+            {"id": "T3", "depends_on": ["T1"]},
+            {"id": "T4", "depends_on": ["T1"], "is_deliverable": True},
+            {"id": "T5", "depends_on": ["T1"], "is_deliverable": True, "tool": "Shell"},
+            {"id": "T15", "depends_on": ["T5"], "is_deliverable": True, "tool": "Shell"},
+            {"id": "T17", "depends_on": ["T15"], "is_deliverable": True, "tool": "Shell"},
+            {"id": "T18", "depends_on": ["T17"], "is_deliverable": True, "tool": "Shell"},
+            {"id": "T19", "depends_on": ["T3"], "is_deliverable": True, "tool": "Shell"},
+            {"id": "T22", "depends_on": ["T19"], "is_deliverable": True, "tool": "checkpoint"},
+        ]
+
+    def test_midgraph_cleared_terminals_kept(self):
+        tasks = self._homelab()
+        unmarked = _dag_gen._enforce_deliverable_marking(tasks)
+        assert set(unmarked) == {"T5", "T15", "T17", "T19"}
+        by = {t["id"]: t for t in tasks}
+        for k in ("T5", "T15", "T17", "T19"):
+            assert not by[k].get("is_deliverable"), k
+        for k in ("T2", "T4", "T18", "T22"):
+            assert by[k]["is_deliverable"], k
+        assert sum(1 for t in tasks if t.get("is_deliverable")) == 4  # was 8
+
+    def test_codegen_kept_even_mid_graph(self):
+        # code brief: the CodeGen node emits the deliverable even though a
+        # downstream validation node depends on it (§17.475).
+        tasks = [
+            {"id": "T1", "depends_on": [], "is_deliverable": True, "tool": "CodeGen"},
+            {"id": "T2", "depends_on": ["T1"], "tool": "LLM"},
+        ]
+        unmarked = _dag_gen._enforce_deliverable_marking(tasks)
+        assert unmarked == []
+        assert {t["id"]: t for t in tasks}["T1"]["is_deliverable"]
+
+    def test_zero_marked_is_noop(self):
+        tasks = [{"id": "A", "depends_on": []}, {"id": "B", "depends_on": ["A"]}]
+        assert _dag_gen._enforce_deliverable_marking(tasks) == []
+
+    def test_all_midgraph_falls_back_to_leaf(self):
+        tasks = [
+            {"id": "A", "depends_on": [], "is_deliverable": True, "tool": "Shell"},
+            {"id": "B", "depends_on": ["A"], "is_deliverable": True, "tool": "Shell"},
+            {"id": "C", "depends_on": ["B"], "tool": "LLM"},
+        ]
+        _dag_gen._enforce_deliverable_marking(tasks)
+        by = {t["id"]: t for t in tasks}
+        assert by["C"]["is_deliverable"]           # leaf marked (fallback)
+        assert not by["A"].get("is_deliverable") and not by["B"].get("is_deliverable")

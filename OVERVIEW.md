@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.669 Fix — DAG deliverable over-marking (§17.475 rule enforced deterministically) (2026-07-27)
+
+**The §17.668 related finding, now fixed.** The generator marked **8 of 10** homelab nodes `is_deliverable=true` — including mid-graph SETUP steps ("Download Proxmox ISO", "Configure GPU passthrough") — despite the DAG_PROMPT (§17.475) saying "set it on EXACTLY the node(s) that produce the final artifact; a mid-graph setup step is NEVER the deliverable." The LLM ignored the prompt, and nothing enforced it: over-marking muddies the compiled-output synthesis (every marked node treated as a final output) and was what let the §17.668 orphans hide (a self-covering deliverable).
+
+- **Fix (`dag_generator.py`):** new `_enforce_deliverable_marking(tasks)` — deterministic §17.475 enforcement. `is_deliverable` survives only on a **terminal** node (nothing depends on it) OR a **CodeGen** node (per §17.475, code is the deliverable even with downstream validation); mid-graph non-CodeGen marks are cleared. Only removes over-marks (never adds), except a safety fallback to terminal leaves if every mark was mid-graph so it never drops to zero. Runs in `generate_dag` after the graph is fully connected (§17.668), so "terminal" is computed on final edges; emits a `deliverable_overmark_cleared` warning.
+
+**Verification.** Unit — **+4** (`test_dag_generator.py`: homelab 8→4 with mid-graph T5/T15/T17/T19 cleared & terminals T2/T4/T18/T22 kept; CodeGen kept even mid-graph; zero-marked no-op; all-mid-graph falls back to a leaf); dag_generator suite **79 passed**. **Repaired the existing homelab job** on real data: **8 → 4** deliverables (unmarked T5/T15/T17/T19; T2/T4/T18/T22 remain). Orchestrator restarted. **Remaining structural nuance (not deliverable-marking):** the 4 survivors are all terminal leaves incl. two *decision* leaves (T2/T4) — the generator didn't wire the config steps to CONSUME the decisions, so they dangle; converging the plan to a single final-validation node is a separate DAG-structure improvement, not this fix.
+
+---
+
 ### §17.668 Fix — disconnected DAG nodes: `is_deliverable` orphans escaped dead-end detection (2026-07-27)
 
 **From the fresh homelab test:** 4 of 10 tasks (GPU passthrough, Jellyfin config, AdGuard config, verify-SSH) shipped **disconnected from the graph** — empty `depends_on` and nothing depending on them (claimable from t=0, floating). Root cause: those nodes were marked `is_deliverable=true`, and `detect_dead_ends` (§17.476) treats a deliverable as self-covered (`_reachable` from itself), so it never flagged them and `auto_link_dead_ends` never fired — `_validate_graph` only *warned*. (The generator also over-marked 8/10 nodes `is_deliverable`, which is what let the orphans hide.)
