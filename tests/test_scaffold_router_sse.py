@@ -20,17 +20,32 @@ def pipe():
 
 @pytest.mark.smoke
 class TestSSEErrorEventRendering:
-    """#8.2: error SSE events render with error prefix and optional traceback fence."""
+    """#8.2 / §17.675: error SSE events render a clear cause + recovery hint,
+    and NEVER dump a raw Python traceback into the chat bubble."""
 
-    def test_error_with_traceback(self, pipe):
+    def test_error_with_traceback_is_not_dumped(self, pipe):
         failed = []
         data = json.dumps({"message": "boom", "traceback": "Traceback: line 42"})
         out = "".join(pipe._handle_sse_event("error", data, failed))
         assert "Execution error" in out
         assert "boom" in out
-        assert "Traceback: line 42" in out
-        assert "```traceback" in out
+        # §17.675 — the raw traceback must NOT reach the chat.
+        assert "Traceback: line 42" not in out
+        assert "```traceback" not in out
+        assert "/results" in out  # actionable recovery hint
         assert len(failed) == 1
+
+    def test_generic_message_falls_back_to_traceback_last_line(self, pipe):
+        # §17.675 — when the message is generic, derive a cause from the final
+        # traceback line (still no fence, still no full dump).
+        failed = []
+        data = json.dumps({
+            "error": "unknown error",
+            "traceback": "Traceback (most recent call last):\n  ...\nValueError: bad port",
+        })
+        out = "".join(pipe._handle_sse_event("error", data, failed))
+        assert "ValueError: bad port" in out
+        assert "```traceback" not in out
 
     def test_error_without_traceback(self, pipe):
         failed = []

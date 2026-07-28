@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.675 UX — five verified chat-experience improvements (plan preview, assist progress, orientation, heartbeat, no-traceback) (2026-07-28)
+
+**Research method.** Fanned out 4 read-only Explore agents across the user-facing surfaces (assist journey, OWUI chat/discoverability, research→options→plan transparency, failure/status/recovery) → ~50 raw findings, then **verified each high-value candidate against the code** before implementing (subagent findings run ~31% true-positive per [[feedback_verify_before_claim]]). Verification disproved several agent claims: the streaming guidance footer IS present (`_assist_handlers.py:819`); the welcome correctly labels `/research`/`/jobs` as advanced (not a trap); submit already signals completion ("All steps terminal — run `/assist done`"). Five items survived and shipped:
+
+- **(a) Plan preview before commit (#1, high).** `_execution_choice` (shared by `/confirm` + `/go`) previewed only "Execution plan ready — N steps" — the user picked autonomous-vs-assist **blind**. New `_render_plan_steps(tasks)` renders a beginner-readable numbered step list (names only; node ids/tools/deps hidden), flagging 🔀 decision steps and 🛠 hands-on/Shell steps with a legend, shown before the choice.
+- **(b) Assist "Step X of Y" (#2, high).** `render_step` showed the title but no position. Now prepends "**Step {done+1} of {total}** · {N} to go / last step" from the `step_counts` the `/next` endpoint already attaches (omitted gracefully when absent).
+- **(c) Command-first orientation (#3, med).** The first-touch welcome only fires on the new-idea path at the end of `pipe()`, so a first-turn slash command (`/idea …`, `/here`) got zero orientation. New `_WELCOME_ONELINE` rides one compact line above the command output on a first-turn slash command (suppressed for `/help`/`/advanced`; honors `show_welcome_on_first_turn`).
+- **(d) Earlier long-wait heartbeat (#4, med).** `_post_with_keepalive`'s first visible progress marker fired only at `progress_marker_interval` (120s) — up to 2 min of silent (zero-width) keepalives that read as a crash on CPU. New valve `progress_first_marker_seconds` (25s, clamped ≤ steady interval) fires an early "still working" heartbeat, then settles to the steady cadence; Phase 2/3 ETA lines updated to match.
+- **(e) No raw tracebacks in chat (#5, latent guard).** `_render_error_event` would dump a ```traceback fence if the payload carried one (nothing currently populates `stack_trace`, but the render path existed). Now shows a single clear cause line (derived from the traceback's last line only when the message is generic) + a `/results` recovery hint; the raw traceback never reaches the chat bubble.
+
+**Verification.** Unit — pipeline suites **314 passed** (`--noconftest`): new `TestPlanPreview` (3), `render_step` progress (2), one-liner orientation (2), rewrote the SSE error-render tests for the no-dump behavior; updated the pre-existing traceback-fence assertion. **Live** — pipelines server reloaded clean (`scaffold_router` registered); first-turn `/here` through `:9099` shows the one-liner above the output with no full preamble. Pipeline-side only (no orchestrator change); `open-webui-pipelines` restarted.
+
+---
+
 ### §17.674 Fix — pivot answers ACHIEVE the goal (not a forum recap) + a length ceiling on long walkthroughs (2026-07-28)
 
 **Two issues from a fresh homelab test.** (1) When the operator pivoted mid-step to ask how to do something, the `ask`/research path pulled a forum thread and just **relayed it** ("the thread suggests…") instead of telling them how to achieve the task on their own setup. (2) Step walkthroughs were **a little too long** (the Proxmox-install step ran ~994 words), sprawling into inline "if your setup is X…" branches.

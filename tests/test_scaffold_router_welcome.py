@@ -110,6 +110,30 @@ class TestWelcomeSkipsWhenNotApplicable:
         assert "Welcome to Scaffold Engine" not in out
         assert "HELP_OUTPUT" in out
 
+    def test_nonhelp_slash_first_turn_gets_compact_oneliner(self, pipe):
+        """§17.675 — a command-first newcomer (a slash command other than
+        /help or /advanced) gets a ONE-LINE orientation above their command
+        output, not the full preamble and not nothing."""
+        with patch.object(pipe, "_handle_command", return_value="STATUS_OUTPUT"):
+            out = "".join(pipe.pipe(
+                "/status", "model-id",
+                [{"role": "user", "content": "/status"}], {},
+            ))
+        assert "New to Scaffold Engine" in out          # compact one-liner
+        assert "Welcome to Scaffold Engine" not in out  # NOT the full preamble
+        assert "STATUS_OUTPUT" in out
+
+    def test_slash_first_turn_oneliner_respects_valve(self, pipe):
+        """§17.675 — the one-liner honors show_welcome_on_first_turn."""
+        pipe.valves.show_welcome_on_first_turn = False
+        with patch.object(pipe, "_handle_command", return_value="STATUS_OUTPUT"):
+            out = "".join(pipe.pipe(
+                "/status", "model-id",
+                [{"role": "user", "content": "/status"}], {},
+            ))
+        assert "New to Scaffold Engine" not in out
+        assert "STATUS_OUTPUT" in out
+
     def test_second_turn_skips_welcome(self, pipe):
         """The welcome is one-time per chat. Second turn = already past
         the first-touch moment."""

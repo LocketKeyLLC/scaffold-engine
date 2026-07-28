@@ -271,6 +271,40 @@ def test_render_step_leads_with_title_not_jargon():
     assert "Domain:" not in out
 
 
+@pytest.mark.smoke
+def test_render_step_shows_progress_position():
+    """§17.675 — a forward-looking 'Step X of Y' so a first-timer knows where
+    they are. done statuses count as completed → position is done+1."""
+    step_counts = {"committed": 2, "skipped": 1, "presented": 1, "pending": 6}
+    out = _ah.render_step({
+        "node_key": "T4", "title": "Configure VLANs", "tool": "Shell",
+        "depends_on": [], "base_prompt": "do it", "upstream_outputs": {},
+        "step_counts": step_counts,
+    })
+    # total = 10, done = 3 → "Step 4 of 10", and the position leads the title
+    assert "Step 4 of 10" in out
+    assert "6 to go" in out
+    assert out.index("Step 4 of 10") < out.index("Configure VLANs")
+
+
+@pytest.mark.smoke
+def test_render_step_last_step_and_no_counts():
+    # last step: remaining == 0 → "last step"
+    last = _ah.render_step({
+        "node_key": "T9", "title": "Document it", "tool": "LLM", "depends_on": [],
+        "base_prompt": "x", "upstream_outputs": {},
+        "step_counts": {"committed": 4, "presented": 1},  # total 5, done 4 → step 5 of 5
+    })
+    assert "Step 5 of 5" in last
+    assert "last step" in last
+    # no step_counts (older orchestrator) → no progress line, no crash
+    none = _ah.render_step({
+        "node_key": "T1", "title": "First", "tool": "LLM", "depends_on": [],
+        "base_prompt": "x", "upstream_outputs": {},
+    })
+    assert "Step " not in none.split("###")[0]
+
+
 # ── §17.627 — new intents route to engine components ──────────────────────
 
 

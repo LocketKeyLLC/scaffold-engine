@@ -619,6 +619,13 @@ class Pipeline:
         # 25-min job, which surfaces progress without filling the chat with
         # redundant ticks. Set to 0 to disable visible markers.
         progress_marker_interval: int = 120
+        # §17.675 — the FIRST visible marker fires this many seconds in, then the
+        # cadence settles to progress_marker_interval. Without this the chat can
+        # look frozen for a full 2 min before the first sign of life (only
+        # invisible zero-width keepalives go out in between); a beginner reads
+        # that silence as a crash. 25 s gives an early "still working" heartbeat.
+        # Ignored when progress_marker_interval is 0 (markers disabled).
+        progress_first_marker_seconds: int = 25
 
         # Triage
         triage_model: str = "qwen3:4b"
@@ -1061,6 +1068,17 @@ class Pipeline:
         "_Power user? `/advanced on` unlocks the full surface — `/research`, "
         "`/jobs`, and ~45 more._\n\n"
         "---\n\n"
+    )
+
+    # §17.675 — compact orientation for users whose FIRST message is a slash
+    # command. The full welcome preamble only fires on the new-idea path at the
+    # end of pipe(), so a command-first user (e.g. `/idea …`, `/go`) got zero
+    # orientation. This one line rides above their command output so they still
+    # learn the two paths + `/help`, without the full preamble prefacing a
+    # command. Suppressed for `/help` and `/advanced` (already orientation/config).
+    _WELCOME_ONELINE = (
+        "👋 _New to Scaffold Engine? Describe an idea and type `/go`, or "
+        "`/help` for the command list._\n\n---\n\n"
     )
 
     # §17.504 — assist-intent nudge. A free-text message that *asks the engine
@@ -1561,6 +1579,14 @@ class Pipeline:
         # core commands are blocked with a one-line hint when advanced mode is
         # off. Then the streaming /resume verb dispatches. Plain text and core
         # verbs fall through to the normal chain untouched.
+        # §17.675 — orient a command-first newcomer: the full welcome only fires
+        # on the new-idea path at the end of pipe(), so a first-turn slash command
+        # otherwise gets no orientation at all. One compact line, above the output.
+        if (msg.startswith("/") and self._is_first_turn(messages)
+                and self.valves.show_welcome_on_first_turn
+                and not self._is_cmd(msg, "/help", "/advanced")):
+            yield self._WELCOME_ONELINE
+
         if msg.startswith("/"):
             if self._is_cmd(msg, "/advanced"):
                 yield self._handle_advanced(msg); return
@@ -2106,7 +2132,7 @@ class Pipeline:
                 return
             payload["feedback"] = feedback
 
-        yield "🔬 Starting research and knowledge ingestion — this may take 10-25 minutes on CPU. Progress markers will appear roughly every 2 minutes.\n\n"
+        yield "🔬 Starting research and knowledge ingestion — this may take 10-25 minutes on CPU. You'll see a first progress marker within a few seconds, then updates every couple of minutes. It's fine to leave this and check back.\n\n"
 
         ok, res = yield from self._post_with_keepalive(
             f"{self.valves.orchestrator_url}/ideate/confirm",
@@ -2137,7 +2163,7 @@ class Pipeline:
             )
             return
 
-        yield "\n✅ Research complete — generating execution plan...\n\n"
+        yield "\n✅ Research complete — generating execution plan (usually 30–90s on CPU)...\n\n"
 
         ok, res = yield from self._post_with_keepalive(
             f"{self.valves.orchestrator_url}/dag",
@@ -3003,21 +3029,32 @@ class Pipeline:
         start = time.monotonic()
         marker_interval = self.valves.progress_marker_interval
         last_marker = start
+        # \u00a717.675 \u2014 first marker fires sooner than the steady cadence so the chat
+        # shows a "still working" heartbeat within ~25 s instead of a silent 2-min
+        # gap that reads as a crash. After the first, the cadence is the steady
+        # interval. Clamp to the steady interval so a mis-set value can't exceed it.
+        first_after = min(
+            max(int(getattr(self.valves, "progress_first_marker_seconds", 25)), 1),
+            marker_interval or 1,
+        )
+        markers_shown = 0
 
         while not future.done():
             time.sleep(self.valves.keepalive_interval)
             if future.done():
                 break
             now = time.monotonic()
+            threshold = first_after if markers_shown == 0 else marker_interval
             if (
                 progress_label
                 and marker_interval > 0
-                and (now - last_marker) >= marker_interval
+                and (now - last_marker) >= threshold
             ):
                 elapsed = int(now - start)
                 mm, ss = elapsed // 60, elapsed % 60
                 yield f"\n\u23f3 {progress_label}\u2026 ({mm}m {ss:02d}s elapsed)\n"
                 last_marker = now
+                markers_shown += 1
             else:
                 yield "\u200b"
         # The loop exited because future.done() is True; result() returns
@@ -3193,12 +3230,43 @@ class Pipeline:
         yield self._execution_choice(job_id, dag_data, num_nodes)
         return
 
+    @staticmethod
+    def _render_plan_steps(tasks: list) -> str:
+        """§17.675 — a beginner-readable list of the plan's steps, shown before
+        the execute-vs-assist choice so the user sees WHAT they are committing to
+        (was: only a step count — they picked a mode blind). Engine internals
+        (node ids, dependency keys, raw prompts) stay hidden; a decision step is
+        flagged 🔀 and a hands-on/Shell step 🛠 so the user knows what's coming."""
+        lines: list[str] = []
+        has_decision = has_hands_on = False
+        for i, t in enumerate(tasks, 1):
+            if not isinstance(t, dict):
+                continue
+            name = (t.get("name") or t.get("title") or "").strip() or "(unnamed step)"
+            ttype = str(t.get("type") or "").lower()
+            tool = str(t.get("tool") or "").lower()
+            tag = ""
+            if ttype == "decision":
+                tag = " 🔀"; has_decision = True
+            elif tool == "shell":
+                tag = " 🛠"; has_hands_on = True
+            lines.append(f"{i}. {name}{tag}")
+        if not lines:
+            return ""
+        legend = [x for x in (
+            "🔀 a choice you'll make" if has_decision else "",
+            "🛠 a hands-on step you run" if has_hands_on else "",
+        ) if x]
+        tail = ("\n\n_" + " · ".join(legend) + "_") if legend else ""
+        return "**Here's the plan:**\n\n" + "\n".join(lines) + tail
+
     def _execution_choice(
         self, job_id: str, dag_data: dict, num_nodes: int,
     ) -> str:
         """§17.562 — the always-ask autonomous-vs-assist prompt after planning.
         Shared by /confirm and the /go auto-chain so the choice is identical.
-        Shell/hands-on steps drive the *recommendation*, not the visibility."""
+        Shell/hands-on steps drive the *recommendation*, not the visibility.
+        §17.675 — now also previews the actual steps so the choice is informed."""
         tasks = dag_data.get("tasks", []) if isinstance(dag_data, dict) else []
         shell_steps = sum(
             1 for t in tasks
@@ -3215,8 +3283,11 @@ class Pipeline:
                 "This is a text/code/research plan the engine can run on its "
                 "own — **Autonomous is recommended**."
             )
+        plan = self._render_plan_steps(tasks)
+        plan_block = f"{plan}\n\n" if plan else ""
         return (
             f"📋 **Execution plan ready — {num_nodes} steps.**\n\n"
+            f"{plan_block}"
             f"{rec} How do you want to proceed?\n\n"
             f"- `/execute {job_id}` — **autonomous**: the engine runs every "
             f"step itself.\n"
@@ -3698,14 +3769,30 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _render_error_event(self, payload: dict) -> Generator[str, None, None]:
-        """Render an SSE `error` event (#8.2)."""
+        """Render an SSE `error` event (#8.2).
+
+        §17.675 — a beginner must never be shown a raw Python traceback in the
+        chat bubble (scary + unactionable). We surface a single clear cause line
+        (deriving it from the final traceback line only when the message itself
+        is generic) and point to `/results` for the full detail, which lives in
+        the operator logs. The raw traceback is never dumped into chat."""
         message = (payload.get("error") or payload.get("message")
                    or payload.get("detail") or "unknown error")
         tb = payload.get("traceback") or payload.get("stack_trace")
+        if tb and message in ("", "unknown error"):
+            last = next((ln.strip() for ln in reversed(str(tb).splitlines())
+                         if ln.strip()), "")
+            if last:
+                message = last
+        job_id = payload.get("job_id") or payload.get("id")
         yield "\n❌ **Execution error:** "
         yield f"{message}\n\n"
-        if tb:
-            yield f"```traceback\n{tb}\n```\n"
+        if job_id:
+            yield (f"_This is usually recoverable — check `/results {job_id}` for "
+                   f"the full details, then retry the step._\n")
+        else:
+            yield ("_This is usually recoverable — check `/results` for the full "
+                   "details, then retry._\n")
 
     def _handle_sse_event(
         self, event_type: str, data: str, failed_nodes: list,

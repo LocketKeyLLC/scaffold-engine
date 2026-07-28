@@ -18,6 +18,39 @@ def pipe():
 
 
 @pytest.mark.smoke
+class TestPlanPreview:
+    """§17.675 — the execute-vs-assist prompt previews the actual steps so the
+    user sees WHAT they're committing to (was: only a step count)."""
+
+    _TASKS = [
+        {"id": "T0", "name": "Decide storage filesystem", "type": "decision", "tool": "LLM"},
+        {"id": "T1", "name": "Install Proxmox VE", "type": "action", "tool": "Shell"},
+        {"id": "T2", "name": "Document the setup", "type": "output", "tool": "LLM"},
+    ]
+
+    def test_render_plan_steps_lists_names_and_flags(self, pipe):
+        out = pipe._render_plan_steps(self._TASKS)
+        assert "1. Decide storage filesystem 🔀" in out
+        assert "2. Install Proxmox VE 🛠" in out
+        assert "3. Document the setup" in out
+        # engine internals stay hidden
+        assert "T0" not in out and "LLM" not in out
+        # legend explains the icons that appear
+        assert "a choice you'll make" in out
+        assert "a hands-on step you run" in out
+
+    def test_render_plan_steps_empty(self, pipe):
+        assert pipe._render_plan_steps([]) == ""
+
+    def test_execution_choice_embeds_the_plan(self, pipe):
+        out = pipe._execution_choice("job-1", {"tasks": self._TASKS}, 3)
+        assert "Execution plan ready — 3 steps" in out
+        assert "Here's the plan:" in out
+        assert "Install Proxmox VE" in out          # steps shown before the choice
+        assert out.index("Here's the plan:") < out.index("/execute job-1")
+
+
+@pytest.mark.smoke
 class TestExtractText:
     """_extract_text: pulls plain text from message content."""
 

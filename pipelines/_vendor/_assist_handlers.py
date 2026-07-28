@@ -226,8 +226,22 @@ def render_step(step: dict) -> str:
         f"<details>\n<summary>Show the exact task (for reference)</summary>\n\n"
         f"```\n{step.get('base_prompt', '')}\n```\n\n</details>\n\n"
     )
+    # §17.675 — a forward-looking position so a first-timer always knows where
+    # they are and how much remains (was: title only, no sense of progress).
+    # step_counts is attached by the /next endpoint; absent on an older
+    # orchestrator → we simply omit the line rather than guess.
+    counts = step.get("step_counts") or {}
+    total = sum(v for v in counts.values() if isinstance(v, int))
+    done = sum(counts.get(s, 0) for s in _DONE_STEP_STATUSES)
+    if total:
+        remaining = total - done - 1
+        tail = f"{remaining} to go" if remaining > 0 else "last step"
+        progress = f"**Step {done + 1} of {total}** · {tail}\n\n"
+    else:
+        progress = ""
     return (
         f"{re_shown}"
+        f"{progress}"
         f"### 📋 {title}\n\n"
         f"_{subtitle}_\n\n"
         f"{upstream_block}"
