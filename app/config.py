@@ -840,6 +840,11 @@ class Settings(BaseSettings):
     # model re-decomposes; any survivors are auto-linked to the primary
     # deliverable as a deterministic last resort. Disable to skip the check.
     dag_dead_end_check_enabled: bool = True
+    # §17.671 — wire a DECISION node ("Decide X") to the step that APPLIES it
+    # ("Configure X"), matched on distinctive shared subject tokens, when the
+    # generator made the decision but never consumed it. Best-effort/cycle-safe;
+    # a miss just leaves it for convergence (§17.670). Runs BEFORE convergence.
+    dag_wire_decisions_enabled: bool = True
     # §17.670 — converge multiple terminal leaves (dangling decisions + parallel
     # config steps that never join) into a SINGLE final sink, so the plan flows to
     # one deliverable instead of several loose ends. Deterministic, cycle-safe.

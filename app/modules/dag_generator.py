@@ -589,6 +589,103 @@ def _enforce_deliverable_marking(tasks: list[dict]) -> list[str]:
     return unmarked
 
 
+_DECISION_VERBS = frozenset({
+    "decide", "deciding", "decision", "choose", "choosing", "choice",
+    "determine", "select", "selecting", "pick", "plan", "planning",
+})
+_IMPLEMENT_HINTS = frozenset({
+    "configure", "config", "setup", "install", "deploy", "create", "apply",
+    "provision", "enable", "build", "write", "implement", "mount", "assign",
+    "set", "run", "add",
+})
+_SUBJECT_STOP = frozenset({
+    "the", "a", "an", "and", "or", "for", "of", "to", "with", "on", "in",
+    "at", "by", "your", "my", "our", "its", "this", "that", "how", "do",
+    "does", "into", "from", "final", "step", "node", "task",
+})
+
+
+def _subject_tokens(name: str) -> set[str]:
+    """Distinctive subject tokens of a node name (len>=3, minus decision verbs +
+    generic stopwords) for decision→implementer matching."""
+    toks = re.findall(r"[a-z0-9]+", (name or "").lower())
+    return {
+        w for w in toks
+        if len(w) >= 3 and w not in _SUBJECT_STOP and w not in _DECISION_VERBS
+    }
+
+
+def wire_decisions_to_implementers(tasks: list[dict]) -> list[tuple[str, str]]:
+    """§17.671 — a decision node ("Decide/Choose X") should be CONSUMED by the
+    step that applies it ("Configure/Install/Deploy X"). The generator often makes
+    the decision but never wires it, so it dangles. For each DANGLING decision
+    (nothing depends on it), find the best later non-decision step that shares a
+    DISTINCTIVE subject token (a token that appears in few node names — so we match
+    on 'jellyfin'/'vlan'/'backup', not generic 'configure'/'storage') and make that
+    step depend on the decision (additively). Best-effort heuristic: a miss just
+    leaves the decision for convergence (§17.670); a wrong match only adds a benign
+    ordering edge. Cycle-safe — never wire an implementer the decision already
+    (transitively) depends on. Returns [(decision_id, implementer_id)] wired."""
+    real = [t for t in tasks if t.get("id")]
+    ids = {t["id"] for t in real}
+    fwd = {
+        t["id"]: [d for d in (t.get("depends_on") or []) if d in ids] for t in real
+    }
+    order = {
+        t["id"]: (t["execution_order"] if t.get("execution_order") is not None else i)
+        for i, t in enumerate(real)
+    }
+    depended_on: set[str] = set()
+    for deps in fwd.values():
+        depended_on |= set(deps)
+    subjects = {t["id"]: _subject_tokens(t.get("name") or "") for t in real}
+    freq: dict[str, int] = {}
+    for s in subjects.values():
+        for w in s:
+            freq[w] = freq.get(w, 0) + 1
+    distinct_max = max(2, len(real) // 3)   # a token in <=this many names is distinctive
+    by_id = {t["id"]: t for t in real}
+    wired: list[tuple[str, str]] = []
+    for d in real:
+        if str(d.get("type", "")).lower() != "decision":
+            continue
+        did = d["id"]
+        if did in depended_on:              # already consumed — leave it
+            continue
+        dsub = subjects[did]
+        dclosure = _reachable(did, fwd)      # what the decision depends on (cycle guard)
+        scored = []
+        for c in real:
+            cid = c["id"]
+            if cid == did or str(c.get("type", "")).lower() == "decision":
+                continue
+            if order.get(cid, 0) <= order.get(did, 0):   # implementer comes after
+                continue
+            if cid in dclosure:              # decision already depends on it → cycle
+                continue
+            distinct_shared = [
+                w for w in (dsub & subjects[cid]) if freq.get(w, 99) <= distinct_max
+            ]
+            if not distinct_shared:
+                continue
+            name = (c.get("name") or "").lower()
+            is_impl = bool(subjects[cid] & _IMPLEMENT_HINTS) or any(
+                h in name for h in _IMPLEMENT_HINTS
+            )
+            scored.append(((len(distinct_shared), int(is_impl), -order.get(cid, 0)), cid))
+        if not scored:
+            continue
+        _, best = max(scored, key=lambda x: x[0])
+        bt = by_id[best]
+        deps = list(bt.get("depends_on") or [])
+        if did not in deps:
+            deps.append(did)
+            bt["depends_on"] = deps
+            depended_on.add(did)
+            wired.append((did, best))
+    return wired
+
+
 def converge_terminal_leaves(tasks: list[dict]) -> tuple[str | None, list[str]]:
     """§17.670 — a well-formed DAG flows to ONE final sink. The generator often
     leaves several terminal leaves (nodes nothing depends on): dangling DECISION
@@ -1192,6 +1289,23 @@ async def generate_dag(
     if not any(t.get("is_deliverable") for t in normalized):
         for t in normalized:
             t["is_deliverable"] = t["id"] in leaf_keys
+
+    # §17.671 — wire dangling DECISION nodes to the step that applies them
+    # ("Decide Jellyfin media storage" → "Configure Jellyfin media library"), when
+    # such an implementer exists. Runs BEFORE convergence so genuinely-consumed
+    # decisions no longer count as loose ends; a decision with no implementer in
+    # the plan still falls through to convergence.
+    if settings.dag_wire_decisions_enabled:
+        _dec_wired = wire_decisions_to_implementers(normalized)
+        if _dec_wired:
+            _pairs = ", ".join(f"{d}->{c}" for d, c in _dec_wired)
+            validator_warnings.append(
+                f"decisions_wired_to_implementers: {_pairs} — decision nodes "
+                f"connected to the steps that apply them"
+            )
+            logger.warning(
+                "dag_decisions_wired: job=%s pairs=%s", job_id, _dec_wired,
+            )
 
     # §17.670 — converge multiple terminal leaves into a single final sink so the
     # plan flows to one deliverable (dangling decisions/config steps get joined).

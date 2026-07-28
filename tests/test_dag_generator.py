@@ -1239,3 +1239,51 @@ class TestConvergeTerminalLeaves:
     def test_single_terminal_is_noop(self):
         tasks = [{"id": "A", "depends_on": []}, {"id": "B", "depends_on": ["A"]}]
         assert _dag_gen.converge_terminal_leaves(tasks) == (None, [])
+
+
+@pytest.mark.smoke
+class TestWireDecisionsToImplementers:
+    """§17.671 — a dangling decision is wired to the step that applies it,
+    matched on a distinctive shared subject token."""
+
+    def _tasks(self):
+        return [
+            {"id": "T1", "name": "Determine server state", "type": "decision", "execution_order": 1, "depends_on": []},
+            {"id": "T2", "name": "Decide VLAN scheme", "type": "decision", "execution_order": 2, "depends_on": ["T1"]},
+            {"id": "T3", "name": "Decide backup destination", "type": "decision", "execution_order": 3, "depends_on": ["T1"]},
+            {"id": "T4", "name": "Decide Jellyfin media storage", "type": "decision", "execution_order": 4, "depends_on": ["T1"]},
+            {"id": "T5", "name": "Download Proxmox ISO", "type": "task", "execution_order": 5, "depends_on": ["T1"]},
+            {"id": "T17", "name": "Configure Jellyfin media library", "type": "task", "execution_order": 7, "depends_on": ["T5"]},
+            {"id": "T19", "name": "Configure backup jobs", "type": "task", "execution_order": 9, "depends_on": ["T3"]},
+        ]
+
+    def test_decision_wired_to_matching_implementer(self):
+        tasks = self._tasks()
+        wired = _dag_gen.wire_decisions_to_implementers(tasks)
+        assert ("T4", "T17") in wired              # Jellyfin/media match
+        assert "T4" in {t["id"]: t for t in tasks}["T17"]["depends_on"]
+
+    def test_decision_without_implementer_not_wired(self):
+        # nothing else mentions VLAN → T2 has no implementer to wire to
+        wired = _dag_gen.wire_decisions_to_implementers(self._tasks())
+        assert not any(d == "T2" for d, _ in wired)
+
+    def test_already_consumed_decision_untouched(self):
+        tasks = self._tasks()                       # T19 already depends on T3
+        wired = _dag_gen.wire_decisions_to_implementers(tasks)
+        assert not any(d == "T3" for d, _ in wired)
+        assert {t["id"]: t for t in tasks}["T19"]["depends_on"] == ["T3"]
+
+    def test_cycle_safe_no_wire_to_upstream(self):
+        tasks = [
+            {"id": "A", "name": "Configure jellyfin media", "type": "task", "execution_order": 1, "depends_on": []},
+            {"id": "B", "name": "Decide jellyfin media storage", "type": "decision", "execution_order": 2, "depends_on": ["A"]},
+        ]
+        assert _dag_gen.wire_decisions_to_implementers(tasks) == []
+
+    def test_generic_only_no_match(self):
+        tasks = [
+            {"id": "D", "name": "Decide the approach", "type": "decision", "execution_order": 1, "depends_on": []},
+            {"id": "I", "name": "Configure the system", "type": "task", "execution_order": 2, "depends_on": []},
+        ]
+        assert _dag_gen.wire_decisions_to_implementers(tasks) == []

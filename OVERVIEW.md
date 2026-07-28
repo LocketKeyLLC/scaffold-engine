@@ -22049,6 +22049,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.671 Feature — wire DECISION nodes to the step that applies them (semantic) (2026-07-28)
+
+**The deeper generator-semantics gap the §17.668–670 passes left open.** A decision node ("Decide Jellyfin media storage") should be CONSUMED by the step that applies it ("Configure Jellyfin media library"), but the generator often makes the decision and never wires it — so it dangles and only convergence (§17.670) catches it, feeding it into the final sink rather than its real implementer.
+
+- **Fix (`dag_generator.py`):** new `wire_decisions_to_implementers(tasks)` — for each DANGLING decision (nothing depends on it), find the best later non-decision step that shares a **distinctive** subject token (a token appearing in few node names — so it matches on 'jellyfin'/'vlan'/'backup', not generic 'configure'/'storage'; frequency-thresholded, prefers implement-verb nodes, nearest order) and make that step depend on the decision (additively). Best-effort/cycle-safe (never wires an implementer the decision already depends on). A decision whose implementer doesn't exist in the plan (homelab: "Decide VLAN scheme" — the generator never created a VLAN-config step) still falls through to convergence. Runs BEFORE §17.670 convergence so genuinely-consumed decisions aren't treated as loose ends. Gated on `dag_wire_decisions_enabled` (default on).
+
+**Verification.** Unit — **+5** (`test_dag_generator.py`: decision→matching implementer wired on the shared Jellyfin/media token; decision with no implementer not wired; already-consumed decision untouched; cycle-safe no-wire-to-upstream; generic-token-only → no match); dag_generator suite **89 passed**. **Confirmed on the real homelab node names**: "Decide Jellyfin media storage" (T4) → "Configure Jellyfin media library" (T17); "Decide VLAN scheme" correctly got no implementer. **Repaired the existing homelab job**: `T17 depends_on = {T15, T4}` (config now waits on its decision), redundant convergence edge T22→T4 dropped (T4 still reached via T22→T18→T17→T4). Orchestrator restarted.
+
+**DAG-quality passes now (§17.668–671), in order:** connect isolated nodes → **wire decisions to implementers** → converge remaining loose ends → enforce single deliverable. The homelab job is now fully well-formed: 0 isolated, 1 sink, 1 deliverable, and its decisions feed the steps that apply them.
+
+---
+
 ### §17.670 Feature — DAG terminal convergence: many loose ends → one final sink (2026-07-27)
 
 **Closes the §17.668/§17.669 DAG-quality trilogy** (all three surfaced by the fresh homelab test). The generator left the plan with **multiple terminal leaves** (nodes nothing depends on) — dangling DECISION nodes never consumed by the step that should apply them (T2 "Decide VLAN scheme", T4 "Decide media storage") plus parallel config/verify steps that never joined (T18 AdGuard, T22 verify-SSH). A well-formed plan should flow to ONE final deliverable, not scatter into loose ends.
