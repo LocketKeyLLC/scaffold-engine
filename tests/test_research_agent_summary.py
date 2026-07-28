@@ -620,3 +620,22 @@ class TestOptionsTailoringV664:
              patch.object(ra, "read_tool_args", return_value=args):
             await ra._generate_options(self._state(), "summary")   # no context
         assert "goal / needs" not in captured["messages"][-1]["content"].lower()
+
+
+class TestOptionsGoalInherentGuardV667:
+    """§17.667 — the options prompt surfaces decisions INHERENT in a build/set-up
+    goal (not just explicit comparisons in the research), while excluding trivial
+    interchangeable 'choices'. Guards the prompt wording; behaviour is model-driven
+    and verified by a live smoke."""
+
+    def test_prompt_covers_goal_inherent_and_material_consequence(self):
+        from app.modules.research_agent import OPTIONS_SYSTEM_V1
+        low = OPTIONS_SYSTEM_V1.lower()
+        # goal-inherent case (build/set up something)
+        assert "build" in low and "set up" in low
+        # the material-consequence test that keeps it from over-triggering
+        assert "materially different" in low or "consequential" in low
+        # the interchangeable exclusion (the over-trigger this guards against)
+        assert "interchangeable" in low
+        # still explicitly false for factual/single-answer
+        assert "false" in low and "factual" in low

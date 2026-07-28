@@ -283,27 +283,44 @@ flowing text with topic transitions."""
 # "how does TLS work") has NO options — return has_options=false rather than
 # manufacturing false choices. Tone mirrors the §17.654 assist decision nodes:
 # suggest a default, framed explicitly as the user's call.
-OPTIONS_SYSTEM_V1 = """You help a user turn research into a DECISION. Given a topic and the \
-research collected on it, decide whether the user genuinely faces a choice between \
-DISTINCT, viable approaches that would materially change what they do next.
+OPTIONS_SYSTEM_V1 = """You help a user turn research into a DECISION. Given a topic (and often a \
+"User's goal / needs"), decide whether the user genuinely faces a meaningful CHOICE \
+— one where reasonable people would pick differently and it materially changes what \
+they do next.
 
-Set has_options=true ONLY when there really are 2+ meaningfully different paths a \
-reasonable person would weigh (different tools, architectures, strategies, or \
-trade-offs). Examples: "firewall for a homelab" → OPNsense vs pfSense vs a Linux \
-box; "store time-series data" → Postgres+Timescale vs InfluxDB vs Prometheus.
+THE TEST for a real decision: the options must lead to MATERIALLY DIFFERENT \
+outcomes the operator would actually weigh — different data safety, cost, \
+performance, complexity, hardware needs, or what becomes possible later. Different \
+ways to do the SAME thing with no real consequence are NOT a decision.
 
-Set has_options=FALSE for a straightforward factual or single-answer topic where \
-there is no real branch — do NOT invent choices to fill the field. When in doubt, \
-false.
+Set has_options=true when there IS such a branch. This covers TWO cases:
+1. An explicit comparison the research raises ("firewall" → OPNsense vs pfSense vs \
+a Linux box; "store time-series data" → Postgres+Timescale vs InfluxDB vs \
+Prometheus).
+2. A consequential decision the GOAL forces even if the research reads as \
+step-by-step how-to. When the goal is to BUILD or SET UP something, the operator \
+often faces key choices the plan should not silently pick — e.g. a home lab: how to \
+lay out storage (ZFS vs LVM-thin vs a single disk — differ on redundancy, RAM, \
+snapshots), where backups go (on-host vzdump vs a NAS vs offsite/cloud — differ on \
+disaster recovery), how media transcoding is handled (CPU vs GPU passthrough). \
+Surface the SINGLE most consequential such decision, using the concrete approaches \
+the research actually describes as the options.
 
-When true: name the ONE core decision, then 2-4 options. For each option give a \
-short label, who/what it best FITS, and its main TRADE-OFF. If a "User's goal / \
-needs" line is provided, tailor the FIT lines and your suggestion to THAT goal \
-(not just the bare topic); otherwise tie fit to the needs the topic implies. Then \
-suggest which you'd lean toward — it MUST be one of the options you listed — and \
-the ONE main reason, framed as a suggestion the user is free to reject ("I'd lean \
-X because Y — but it's your call"). Base everything on the research provided; \
-don't add outside facts. Call surface_options exactly once."""
+Set has_options=FALSE when there is no consequential choice: a purely \
+factual/single-answer topic ("what port does postgres use", "how does TLS work"); \
+a task with one obvious path; OR when the 'alternatives' are interchangeable ways \
+to do the same thing with no real consequence — which library function to call \
+(os.rename vs pathlib.rename), trivial style choices, or steps that simply all have \
+to be done. A decision CHANGES the outcome, not just the syntax. Do NOT invent \
+choices to fill the field. When torn, choose false.
+
+When true: name the ONE core decision, then 2-4 options grounded in the research \
+(real tools/approaches it mentions). For each: a short label, who/what it best FITS \
+(tailored to the "User's goal / needs" when given, else to what the topic implies), \
+and its main TRADE-OFF. Then suggest which you'd lean toward — it MUST be one of the \
+options you listed — and the ONE main reason, framed as a suggestion the user is \
+free to reject ("I'd lean X because Y — but it's your call"). Base the options on \
+the research provided; don't add outside facts. Call surface_options exactly once."""
 
 SURFACE_OPTIONS_TOOL = Tool(
     name="surface_options",
