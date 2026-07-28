@@ -115,7 +115,8 @@ async def validate_tool_picks(
     *,
     model_role: str = "model_general",
     model_overrides: dict | None = None,
-    max_tokens: int = 1024,
+    max_tokens: int = 3072,
+    empty_redraws: int = 2,
 ) -> ValidatorOutcome:
     """Run the validator LLM and return findings.
 
@@ -155,26 +156,46 @@ async def validate_tool_picks(
     if model_overrides:
         route_kwargs["overrides"] = model_overrides
 
-    try:
-        resp = await model_router.generate(
-            prompt,
-            system=VALIDATOR_SYSTEM,
-            temperature=0.1,
-            max_tokens=max_tokens,
-            **route_kwargs,
+    # §17.665 — retry-on-empty. The validator role (model_general →
+    # qwen3.5:397b-cloud) is a *thinking* model that can return success=True with
+    # EMPTY content (budget spent on the <think> block); parse_json_object then
+    # yields None and the validator silently fails open (skips the audit). Mirror
+    # the §17.463 generator fix: re-draw up to `empty_redraws`+1 times on an
+    # empty/unparseable SUCCESSFUL response. A hard failure (success=False) or a
+    # call exception is surfaced immediately — no wasted draws on a down model.
+    draws = max(1, int(empty_redraws) + 1)
+    parsed = None
+    resp = None
+    for d in range(draws):
+        try:
+            resp = await model_router.generate(
+                prompt,
+                system=VALIDATOR_SYSTEM,
+                temperature=0.1,
+                max_tokens=max_tokens,
+                **route_kwargs,
+            )
+        except Exception as exc:
+            logger.warning("dag_validator_call_failed: %s", exc)
+            return ValidatorOutcome(error=f"call_failed: {exc}")
+
+        if not resp.success:
+            logger.warning("dag_validator_response_unsuccessful: %s", resp.error)
+            return ValidatorOutcome(error=f"response_unsuccessful: {resp.error}")
+
+        parsed = parse_json_object(resp.text)
+        if parsed is not None:
+            break
+        logger.warning(
+            "dag_validator_redraw_on_empty: draw=%d/%d text_len=%d "
+            "(thinking-model empty content, §17.665)",
+            d + 1, draws, len(resp.text or ""),
         )
-    except Exception as exc:
-        logger.warning("dag_validator_call_failed: %s", exc)
-        return ValidatorOutcome(error=f"call_failed: {exc}")
 
-    if not resp.success:
-        logger.warning("dag_validator_response_unsuccessful: %s", resp.error)
-        return ValidatorOutcome(error=f"response_unsuccessful: {resp.error}")
-
-    parsed = parse_json_object(resp.text)
     if parsed is None:
         logger.warning(
-            "dag_validator_json_parse_failed: raw=%r", resp.text[:200],
+            "dag_validator_json_parse_failed: raw=%r",
+            (resp.text[:200] if resp and resp.text else ""),
         )
         return ValidatorOutcome(error="json_parse_failed")
 

@@ -689,6 +689,7 @@ async def _generate_dag_with_validator(
             dag_data.get("tasks", []),
             model_overrides=route_kwargs.get("overrides"),
             max_tokens=settings.dag_validator_max_tokens,
+            empty_redraws=settings.dag_validator_empty_redraws,
         )
 
         if outcome.error:

@@ -823,7 +823,16 @@ class Settings(BaseSettings):
     # the legacy single-shot DAG generation).
     dag_validator_enabled: bool = True
     dag_validator_max_retries: int = Field(default=2, ge=0, le=5)
-    dag_validator_max_tokens: int = Field(default=1024, ge=256, le=8192)
+    # §17.665 — bumped 1024 → 3072: the validator role (model_general →
+    # qwen3.5:397b-cloud) is a *thinking* model that spends tokens on a <think>
+    # block BEFORE the JSON; 1024 let it burn the whole budget reasoning and
+    # emit EMPTY content (the §17.463 lesson, for the validator this time), which
+    # showed up as dag_validator_json_parse_failed raw='' → silent fail-open.
+    dag_validator_max_tokens: int = Field(default=3072, ge=256, le=8192)
+    # §17.665 — retry-on-empty for the validator: re-draw up to N times when a
+    # SUCCESSFUL response is empty/unparseable (thinking-model empty content). A
+    # hard failure (success=False) is not retried. 0 disables the extra draws.
+    dag_validator_empty_redraws: int = Field(default=2, ge=0, le=5)
     # §17.476 (Phase 2) — dependency-completeness / dead-end detection. A
     # substantive node whose output neither feeds nor is fed by any
     # is_deliverable node is an orphan branch (the §17.471-474 defect). When

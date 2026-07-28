@@ -333,3 +333,50 @@ class TestRenderCorrectionsBlock:
         assert "Documentation is not code." in block
         # Must steer the model to apply corrections, not start fresh
         assert "applying the corrections" in block.lower()
+
+
+@pytest.mark.smoke
+class TestValidatorRetryOnEmpty:
+    """§17.665 — retry-on-empty: a thinking-model success+empty response is
+    re-drawn instead of silently failing open."""
+
+    _TASKS = [{"id": "T1", "name": "A", "tool": "LLM"}]
+
+    async def test_empty_then_valid_retries_and_succeeds(self):
+        gen = AsyncMock(side_effect=[
+            _llm_response(""),                 # thinking-model empty content
+            _llm_response('{"issues": []}'),   # re-draw lands a real result
+        ])
+        with patch("app.modules.dag_validator.model_router.generate", new=gen):
+            outcome = await validate_tool_picks(self._TASKS, empty_redraws=2)
+        assert outcome.error is None and outcome.issues == []
+        assert gen.await_count == 2             # re-drew once
+
+    async def test_all_empty_exhausts_then_parse_failed(self):
+        gen = AsyncMock(side_effect=[_llm_response(""), _llm_response(""), _llm_response("")])
+        with patch("app.modules.dag_validator.model_router.generate", new=gen):
+            outcome = await validate_tool_picks(self._TASKS, empty_redraws=2)
+        assert outcome.error == "json_parse_failed"
+        assert gen.await_count == 3             # 1 initial + 2 redraws
+
+    async def test_hard_failure_not_retried(self):
+        gen = AsyncMock(side_effect=[
+            _llm_response("", success=False, error="model down"),
+            _llm_response('{"issues": []}'),
+        ])
+        with patch("app.modules.dag_validator.model_router.generate", new=gen):
+            outcome = await validate_tool_picks(self._TASKS, empty_redraws=2)
+        assert outcome.error.startswith("response_unsuccessful")
+        assert gen.await_count == 1             # success=False is not retried
+
+    async def test_valid_first_draw_no_retry(self):
+        gen = AsyncMock(side_effect=[_llm_response('{"issues": []}')])
+        with patch("app.modules.dag_validator.model_router.generate", new=gen):
+            outcome = await validate_tool_picks(self._TASKS, empty_redraws=2)
+        assert outcome.error is None and gen.await_count == 1
+
+    async def test_redraws_zero_is_single_draw(self):
+        gen = AsyncMock(side_effect=[_llm_response("")])
+        with patch("app.modules.dag_validator.model_router.generate", new=gen):
+            outcome = await validate_tool_picks(self._TASKS, empty_redraws=0)
+        assert outcome.error == "json_parse_failed" and gen.await_count == 1

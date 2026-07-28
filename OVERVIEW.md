@@ -22049,6 +22049,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.665 Fix — DAG validator hardened against thinking-model empty content (retry-on-empty + headroom) (2026-07-27)
+
+**Surfaced by the §17.664 stress test** (`dag_validator_json_parse_failed: raw=''` on 2/4 DAG generations). The second-pass tool-pick validator (`validate_tool_picks`, `model_general` → qwen3.5:397b-cloud, a *thinking* model) called `generate` once with `max_tokens=1024` — too tight for the model's `<think>` block, so it burned the whole budget reasoning and returned `success=True` with **empty content**. `parse_json_object` → None → the validator **silently failed open** (skipped the audit entirely). This is the §17.463 thinking-model-empty-content lesson, never applied to the *validator* path.
+
+- **Fix (`dag_validator.py`):** wrapped the generate+parse in a **retry-on-empty** loop (mirrors §17.463's `_generate_dag_json`) — re-draw up to `empty_redraws`+1 times when a *successful* response is empty/unparseable; a hard failure (`success=False`) or a call exception still returns immediately (no wasted draws on a down model). New `empty_redraws` param.
+- **Config:** `dag_validator_max_tokens` default **1024 → 3072** (reasoning headroom so it rarely runs empty in the first place); new `dag_validator_empty_redraws` valve (default **2**). The `generate_dag` caller passes it through.
+
+**Verification.** Unit — **+5** (`test_dag_validator.py`: empty→valid retries & succeeds, all-empty exhausts→`json_parse_failed`, hard-failure-not-retried, valid-first-draw-no-retry, `empty_redraws=0`→single-draw); dag_generator + dag_validator suites **93 passed**. **Live smoke** (3 real DAG generations): **`validator_parse_fails=0`** (was 2/4) — and the validator now does real work (on the firewall DAG it flagged `T8:LLM→Shell`, drove a correction retry, then `validator_clean_after_retry`), instead of failing open. Orchestrator restarted. No API-schema change.
+
+---
+
 ### §17.664 Hardening — stress-test the research→decision feature + tailor options to the user's goal (2026-07-27)
 
 **Stress-tested §17.662/§17.663 (user: "stress test and confirm its abilities, fix and improve").** Paced live harness (16-topic gate matrix + 4-brief DAG-structure probe, spaced to dodge the cloud-model rate limit).
