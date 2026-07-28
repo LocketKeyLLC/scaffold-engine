@@ -39,7 +39,7 @@ def test_decision_prompt_is_suggest_not_decide():
     assert "your call" in low
     assert "never auto-resolve" in low or "do not resolve" in low or "not to decide for them" in low
     # keeps the always-on beginner floor
-    assert "assume the operator is a capable beginner" in low
+    assert "assume no prior knowledge" in low
 
 
 def _ctx(tool="LLM"):

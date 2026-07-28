@@ -91,10 +91,26 @@ def test_every_guide_prompt_carries_beginner_framing():
     (shell/codegen/non-code/fix), so it holds regardless of verbosity."""
     for tool in ("shell", "codegen", "LLM", None):
         s = assist_guide.guide_system_for_tool(tool)
-        assert "assume the operator is a capable beginner" in s.lower(), tool
+        assert "assume no prior knowledge" in s.lower(), tool
         # the specific failure that prompted this: connecting two machines
         assert "connecting one machine to another" in s
-    assert "assume the operator is a capable beginner" in assist_guide.GUIDE_SYSTEM_FIX.lower()
+    assert "assume no prior knowledge" in assist_guide.GUIDE_SYSTEM_FIX.lower()
+
+
+def test_every_guide_prompt_carries_simplicity_floor():
+    """§17.673 — the walkthrough must serve the MOST unknowledgeable person: the
+    plain-language + confirm-as-you-go floor is baked into every guide/fix prompt
+    (via _AUDIENCE_FRAMING). Simple words, exact button text, and a short 'what
+    you should see' check after actions that show feedback — without re-bloating
+    (§17.643): the confirmations are explicitly flagged as checks, not padding."""
+    for tool in ("shell", "codegen", "LLM", None):
+        s = assist_guide.guide_system_for_tool(tool).lower()
+        assert "plain language" in s, tool
+        assert "simplest everyday words" in s, tool
+        assert "should see" in s, tool
+        # the confirmations must NOT reopen the verbosity hole §17.643 closed
+        assert "not background" in s or "never excuse padding" in s, tool
+    assert "plain language" in assist_guide.GUIDE_SYSTEM_FIX.lower()
 
 
 def test_every_guide_prompt_carries_pacing_floor():
@@ -140,7 +156,7 @@ def test_beginner_framing_survives_every_verbosity():
     base = assist_guide.guide_system_for_tool("LLM")
     for v in (None, "normal", "terse", "detailed"):
         s = assist_guide.apply_verbosity(base, v)
-        assert "assume the operator is a capable beginner" in s.lower(), v
+        assert "assume no prior knowledge" in s.lower(), v
     terse = assist_guide.apply_verbosity(base, "terse")
     assert "assume an expert" not in terse.lower()
 

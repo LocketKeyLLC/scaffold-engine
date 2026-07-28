@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.673 Feature — guidance floor tuned for the MOST unknowledgeable operator (plain language + confirm-as-you-go) (2026-07-28)
+
+**The ask.** "Walk through the most unknowledgeable person from beginning to end with simple instructions." The beginner floor from §17.640 ("assume a capable beginner… spell out HOW… define jargon") already existed, but it targeted a *capable* beginner and said nothing about *how simply* to write or how the reader confirms a step actually worked — a true novice needs plainer words and a way to tell they're on track.
+
+- **Fix (`assist_guide.py`, one shared constant → all guidance):** rewrote `_AUDIENCE_FRAMING` (included by `GUIDE_SYSTEM_CODEGEN`, `_NONCODE`, `_DECISION`, `_FIX` — so every guidance/fix/decision prompt inherits it in one edit). Three additions on top of the existing HOW-completeness: (1) **audience level dropped** from "capable beginner" to "the LEAST experienced person who could plausibly attempt this — assume NO prior knowledge of the domain, the tools, or the jargon"; (2) **plain-language mandate** — simplest everyday words, short sentences, a 3-5 word plain-English gloss the first time any term appears, exact button/menu text ("click the blue Install button") over vague verbs ("proceed"); (3) **confirm-as-you-go** — after any action with visible feedback, ONE short "you should see …" line so the reader knows it worked, plus a few-word reassurance when something normal looks alarming (a warning, a long pause, a certificate prompt). **Anti-bloat guard (protects §17.643):** the confirmations are explicitly flagged as short checks, "not background — they never excuse padding the rest with explanation," so they don't reopen the verbosity hole §17.643 closed.
+
+**Verification.** Unit — anchor phrase updated across 3 tests ("assume the operator is a capable beginner" → "assume no prior knowledge") + new `test_every_guide_prompt_carries_simplicity_floor` (asserts plain-language + "should see" + the anti-padding clause in all four guide prompts and FIX); `test_assist_guide.py` + `test_assist_notes_and_decisions.py` **78 passed**. **Live guidance smoke** (real model, "Install Proxmox VE on the server" step) produced exactly the intended shape: exact boot-menu keys, "You should soon see the Proxmox VE welcome screen with a blue background" confirmations at each phase, "the installation will take a few minutes… This is normal," and the self-signed-cert browser warning explicitly called out as "expected — click Advanced." Pivot (§17.666, practical how-to → `ask`) already covers the "at any point" half of the directive; this covers the "simple instructions, beginning to end" half.
+
+---
+
 ### §17.672 Feature — flag (and retry to fill) decisions with no implementer step (2026-07-28)
 
 **The decomposition-completeness gap §17.671 exposed.** A decision whose implementer the generator NEVER created (homelab: "Decide VLAN scheme" — no VLAN-config step exists) can't be wired to anything (§17.671) and just gets swept into the final sink by convergence (§17.670) — the choice is made but never carried out. The deterministic passes can connect an *existing* node; they cannot invent a *missing* one. So this needs the generator.
