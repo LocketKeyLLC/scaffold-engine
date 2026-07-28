@@ -506,6 +506,54 @@ def auto_link_dead_ends(tasks: list[dict], orphans: list[str]) -> str | None:
     return primary
 
 
+def connect_isolated_nodes(tasks: list[dict]) -> list[str]:
+    """§17.668 — wire any ISOLATED node (empty depends_on AND nothing depends on
+    it → zero edges) into the graph. ``detect_dead_ends`` MISSES these when the
+    generator marks them ``is_deliverable`` (a deliverable trivially "reaches
+    itself"), so `auto_link_dead_ends` never fires — the homelab test left
+    config/verify steps (Configure Jellyfin, Verify SSH, …) floating with no
+    deps, claimable from t=0 and flagged "disconnected from the graph". This is a
+    deterministic connectivity guarantee independent of is_deliverable: each
+    isolated node is chained onto the nearest preceding step (highest
+    execution_order below its own), including previously-wired isolated nodes, so
+    config/verify run AFTER the build and in a sensible order. Cycle-safe — an
+    isolated node has no path to/from anything, and it only ever gains a
+    dependency on a LOWER-order node. Returns the wired node ids."""
+    real = [t for t in tasks if t.get("id")]
+    ids = {t["id"] for t in real}
+    depended_on: set[str] = set()
+    has_dep: dict[str, bool] = {}
+    for t in real:
+        deps = [d for d in (t.get("depends_on") or []) if d in ids]
+        has_dep[t["id"]] = bool(deps)
+        depended_on.update(deps)
+    iso_ids = {t["id"] for t in real
+               if not has_dep[t["id"]] and t["id"] not in depended_on}
+    if not iso_ids:
+        return []
+    order = {
+        t["id"]: (t["execution_order"] if t.get("execution_order") is not None else i)
+        for i, t in enumerate(real)
+    }
+    by_id = {t["id"]: t for t in real}
+    # anchor pool = the connected nodes; grows as we wire isolated ones so they
+    # chain instead of all hanging off a single node.
+    anchor_pool = [t["id"] for t in real if t["id"] not in iso_ids]
+    wired: list[str] = []
+    for iid in sorted(iso_ids, key=lambda x: order.get(x, 0)):
+        to = order.get(iid, 0)
+        preds = [a for a in anchor_pool if a != iid and order.get(a, 0) < to]
+        if not preds:  # nothing earlier — fall back to any connected node
+            preds = [a for a in anchor_pool if a != iid]
+        if not preds:  # degenerate: every node was isolated
+            continue
+        anchor = max(preds, key=lambda a: order.get(a, 0))
+        by_id[iid]["depends_on"] = [anchor]
+        anchor_pool.append(iid)
+        wired.append(iid)
+    return wired
+
+
 # §17.645 — terminal reporting verbs. A node whose name says it documents /
 # verifies / summarizes / reviews the build is a downstream CONSUMER of the
 # build, not a starting step. If the generator leaves it with empty depends_on
@@ -1011,6 +1059,21 @@ async def generate_dag(
         if errors:
             await _fail_job(db, uid, f"Task validation errors: {'; '.join(errors)}")
             return {"job_id": job_id, "status": "failed", "errors": errors}
+        # §17.668 — connectivity guarantee: wire any isolated node (zero edges)
+        # into the graph. Catches the is_deliverable-marked orphans that
+        # detect_dead_ends/auto_link_dead_ends miss (see connect_isolated_nodes).
+        if settings.dag_dead_end_check_enabled:
+            _iso_wired = connect_isolated_nodes(normalized)
+            if _iso_wired:
+                validator_warnings.append(
+                    f"isolated_nodes_connected: {', '.join(_iso_wired)} had no "
+                    f"dependencies and nothing depended on them (floating from "
+                    f"t=0) — chained onto the preceding step"
+                )
+                logger.warning(
+                    "dag_isolated_nodes_connected: job=%s nodes=%s",
+                    job_id, _iso_wired,
+                )
         normalized, dag_warnings = validate_dag(normalized)
     except ValueError as exc:
         await _fail_job(db, uid, str(exc))

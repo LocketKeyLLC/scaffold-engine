@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.668 Fix — disconnected DAG nodes: `is_deliverable` orphans escaped dead-end detection (2026-07-27)
+
+**From the fresh homelab test:** 4 of 10 tasks (GPU passthrough, Jellyfin config, AdGuard config, verify-SSH) shipped **disconnected from the graph** — empty `depends_on` and nothing depending on them (claimable from t=0, floating). Root cause: those nodes were marked `is_deliverable=true`, and `detect_dead_ends` (§17.476) treats a deliverable as self-covered (`_reachable` from itself), so it never flagged them and `auto_link_dead_ends` never fired — `_validate_graph` only *warned*. (The generator also over-marked 8/10 nodes `is_deliverable`, which is what let the orphans hide.)
+
+- **Fix (`dag_generator.py`):** new deterministic `connect_isolated_nodes(tasks)` pass — independent of `is_deliverable`, it finds any node with **zero edges** (no deps AND nothing depends on it) and chains each onto the nearest preceding step (highest `execution_order` below its own, *including previously-wired isolated nodes* so config/verify steps chain sequentially and run AFTER the build, not at t=0). Cycle-safe by construction (an isolated node has no path to/from anything and only ever gains a dependency on a lower-order node). Wired into `generate_dag` right after `_normalize_tasks`, before `validate_dag`'s connectivity check, gated on `dag_dead_end_check_enabled`. Emits an `isolated_nodes_connected` warning for observability.
+
+**Verification.** Unit — **+6** (`test_dag_generator.py`: the homelab shape chains T15→T5→T17→T18 & T22→T19, no-isolated-left, connected-nodes-untouched, root-with-dependents-not-wired, deps-point-backward-acyclic, no-isolated no-op); dag_generator suite **75 passed**. **Repaired the existing homelab job** (aaafa3f8, in an active assist session) with the same function on its real persisted nodes → wired T15/T17/T18/T22, **0 isolated nodes remain** (SQL connectivity check). Orchestrator restarted. **Related finding (not fixed here):** the generator over-marks `is_deliverable` (8/10 on this job) — a separate plan-quality issue for the compiled-output synthesis; connectivity is now guaranteed regardless.
+
+---
+
 ### §17.667 Fix — research options now surface a "set up X" brief's INHERENT decisions (§17.663 under-triggered on how-to research) (2026-07-27)
 
 **Surfaced by a fresh end-to-end homelab test.** A "Proxmox home lab" job ran the full pipeline (Phase 1 → research+compile → DAG → assist → a live `ask` pivot that gave concrete, cited, environment-aware steps ✅) — but `research_data.options` came back `null`: `_generate_options` returned `has_options=false`. Root cause: Phase 2's research queries are installation **how-to** ("Proxmox install guide", "Jellyfin transcoding", "VLAN bridge config") — not head-to-head comparisons — so `OPTIONS_SYSTEM_V1`, which only surfaced options when the research *content* showed an explicit "X vs Y", saw none. The homelab's real decisions (storage layout, backup destination, VLAN scheme, transcoding) never surfaced. (The DAG generator independently made its own decision nodes, so the plan still branched — but without the researched, tailored options §17.662/663 exist to provide.)

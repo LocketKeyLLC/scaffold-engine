@@ -1066,3 +1066,65 @@ class TestOperatorDecisionMerge:
         rendered = _dag_gen.DAG_PROMPT.format(brief=json.dumps(merged))
         assert "Which firewall?" in rendered
         assert '"type": "decision"' in _dag_gen.DAG_PROMPT or "type: \"decision\"" in _dag_gen.DAG_PROMPT
+
+
+@pytest.mark.smoke
+class TestConnectIsolatedNodes:
+    """§17.668 — isolated nodes (zero edges, incl. is_deliverable-marked orphans
+    that detect_dead_ends misses) are chained onto the preceding step so nothing
+    floats from t=0 / shows 'disconnected from the graph'."""
+
+    def _homelab(self):
+        # mirrors the real failure: T15/T17/T22 have empty deps + is_deliverable.
+        return [
+            {"id": "T1", "type": "decision", "execution_order": 1, "depends_on": []},
+            {"id": "T5", "type": "task", "execution_order": 5, "depends_on": ["T1"]},
+            {"id": "T15", "type": "task", "execution_order": 6, "depends_on": [], "is_deliverable": True},
+            {"id": "T17", "type": "task", "execution_order": 7, "depends_on": [], "is_deliverable": True},
+            {"id": "T19", "type": "task", "execution_order": 9, "depends_on": ["T5"]},
+            {"id": "T22", "type": "checkpoint", "execution_order": 10, "depends_on": [], "is_deliverable": True},
+        ]
+
+    def test_isolated_deliverable_nodes_chained_in_order(self):
+        tasks = self._homelab()
+        wired = _dag_gen.connect_isolated_nodes(tasks)
+        assert wired == ["T15", "T17", "T22"]
+        by = {t["id"]: t for t in tasks}
+        assert by["T15"]["depends_on"] == ["T5"]    # nearest earlier connected
+        assert by["T17"]["depends_on"] == ["T15"]   # chains onto the prior isolated
+        assert by["T22"]["depends_on"] == ["T19"]
+
+    def test_no_isolated_left_after(self):
+        tasks = self._homelab()
+        _dag_gen.connect_isolated_nodes(tasks)
+        ids = {t["id"] for t in tasks}
+        depended = set()
+        for t in tasks:
+            depended |= {d for d in (t.get("depends_on") or []) if d in ids}
+        for t in tasks:
+            has_dep = bool([d for d in (t.get("depends_on") or []) if d in ids])
+            assert has_dep or t["id"] in depended, f"{t['id']} still isolated"
+
+    def test_connected_nodes_untouched(self):
+        tasks = self._homelab()
+        _dag_gen.connect_isolated_nodes(tasks)
+        by = {t["id"]: t for t in tasks}
+        assert by["T5"]["depends_on"] == ["T1"]
+        assert by["T19"]["depends_on"] == ["T5"]
+
+    def test_root_with_dependents_not_wired(self):
+        # T1 has no deps but T5 depends on it → NOT isolated.
+        assert "T1" not in _dag_gen.connect_isolated_nodes(self._homelab())
+
+    def test_deps_point_backward_acyclic(self):
+        tasks = self._homelab()
+        _dag_gen.connect_isolated_nodes(tasks)
+        order = {t["id"]: t["execution_order"] for t in tasks}
+        for t in tasks:
+            for d in (t.get("depends_on") or []):
+                assert order[d] < order[t["id"]], f"{t['id']} -> higher-order {d}"
+
+    def test_no_isolated_is_noop(self):
+        tasks = [{"id": "A", "execution_order": 1, "depends_on": []},
+                 {"id": "B", "execution_order": 2, "depends_on": ["A"]}]
+        assert _dag_gen.connect_isolated_nodes(tasks) == []
