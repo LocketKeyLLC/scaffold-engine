@@ -276,6 +276,75 @@ DRAWN FROM THE ENTRIES. Keep it under 500 words. No markdown headers — just
 flowing text with topic transitions."""
 
 
+# §17.662 — after summarizing, decide whether the topic presents the user with a
+# real DECISION between distinct viable approaches, and if so lay out the
+# options tailored to their needs. The hard rule is ONLY-WHEN-APPLICABLE: a
+# straightforward factual / single-answer topic ("what port does postgres use",
+# "how does TLS work") has NO options — return has_options=false rather than
+# manufacturing false choices. Tone mirrors the §17.654 assist decision nodes:
+# suggest a default, framed explicitly as the user's call.
+OPTIONS_SYSTEM_V1 = """You help a user turn research into a DECISION. Given a topic and the \
+research collected on it, decide whether the user genuinely faces a choice between \
+DISTINCT, viable approaches that would materially change what they do next.
+
+Set has_options=true ONLY when there really are 2+ meaningfully different paths a \
+reasonable person would weigh (different tools, architectures, strategies, or \
+trade-offs). Examples: "firewall for a homelab" → OPNsense vs pfSense vs a Linux \
+box; "store time-series data" → Postgres+Timescale vs InfluxDB vs Prometheus.
+
+Set has_options=FALSE for a straightforward factual or single-answer topic where \
+there is no real branch — do NOT invent choices to fill the field. When in doubt, \
+false.
+
+When true: name the ONE core decision, then 2-4 options. For each option give a \
+short label, who/what it best FITS (tie it to likely needs implied by the topic), \
+and its main TRADE-OFF. Then suggest which you'd lean toward and the ONE main \
+reason — framed as a suggestion the user is free to reject ("I'd lean X because Y \
+— but it's your call"). Base everything on the research provided; don't add \
+outside facts. Call surface_options exactly once."""
+
+SURFACE_OPTIONS_TOOL = Tool(
+    name="surface_options",
+    description=(
+        "Report whether the researched topic presents the user with a real "
+        "decision between distinct viable approaches, and if so lay out the "
+        "options tailored to their needs. has_options=false for a straightforward "
+        "factual/single-answer topic — do not fabricate choices."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "has_options": {
+                "type": "boolean",
+                "description": "true ONLY if 2+ meaningfully-distinct viable paths exist.",
+            },
+            "decision": {
+                "type": "string",
+                "description": "The ONE core choice the user faces (empty if has_options=false).",
+            },
+            "options": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "Short name for the approach"},
+                        "fit": {"type": "string", "description": "Who/what it best suits"},
+                        "tradeoff": {"type": "string", "description": "Its main downside/cost"},
+                    },
+                    "required": ["label", "fit", "tradeoff"],
+                },
+            },
+            "suggested": {
+                "type": "string",
+                "description": "The label of the option you'd lean toward (must match one above).",
+            },
+            "why": {"type": "string", "description": "One-line reason for the suggestion."},
+        },
+        "required": ["has_options"],
+    },
+)
+
+
 # Sprint W.6 — native tool-call schemas. The wrapper falls back to
 # JSON-coaxing on providers without native tool support, so callers
 # always read structured output via resp.tool_calls[0].arguments
@@ -997,6 +1066,80 @@ def _build_summary_prompt_body(state: "ResearchState") -> str:
     return "\n".join(out)
 
 
+async def _generate_options(
+    state: ResearchState,
+    summary_text: str,
+    *,
+    overrides: dict | None = None,
+) -> dict | None:
+    """§17.662 — surface user-tailored decision options from the research, but
+    ONLY when the topic is decision-shaped. Returns a normalized dict
+    ``{decision, options:[{label,fit,tradeoff}], suggested, why}`` or ``None``
+    (not applicable / disabled / error). Fail-soft: never raises, never blocks
+    finalize. Requires ≥2 distinct options — a single 'choice' is not a branch."""
+    if not settings.research_options_enabled:
+        return None
+    role = settings.research_options_model_role or "model_general"
+    facets = ", ".join(
+        sorted({str(e.get("facet", "")) for e in state.all_entries if e.get("facet")})[:12]
+    )
+    prompt = (
+        f"Topic: {state.topic}\n"
+        f"Facets covered: {facets}\n\n"
+        f"Research summary:\n{summary_text[:4000]}\n\n"
+        "Call surface_options."
+    )
+    try:
+        resp = await _bounded_tool_call(
+            messages=[
+                {"role": "system", "content": _sys(OPTIONS_SYSTEM_V1)},
+                {"role": "user", "content": prompt},
+            ],
+            tools=[SURFACE_OPTIONS_TOOL],
+            role=role, overrides=overrides, temperature=0.3, max_tokens=1536,
+        )
+    except Exception as exc:  # never block finalize on the options step
+        logger.warning("research_options_failed: topic=%s err=%s", state.topic, exc)
+        return None
+    parsed = read_tool_args(resp)
+    if not parsed or not parsed.get("has_options"):
+        return None
+    opts = [
+        {
+            "label": str(o.get("label", "")).strip(),
+            "fit": str(o.get("fit", "")).strip(),
+            "tradeoff": str(o.get("tradeoff", "")).strip(),
+        }
+        for o in (parsed.get("options") or [])
+        if isinstance(o, dict) and str(o.get("label", "")).strip()
+    ][: max(2, int(settings.research_options_max))]
+    if len(opts) < 2:  # a real branch needs at least two distinct paths
+        return None
+    return {
+        "decision": str(parsed.get("decision", "")).strip(),
+        "options": opts,
+        "suggested": str(parsed.get("suggested", "")).strip(),
+        "why": str(parsed.get("why", "")).strip(),
+    }
+
+
+def _render_options_block(data: dict) -> str:
+    """§17.662 — the '🔀 Your options' section appended to a research summary."""
+    decision = (data.get("decision") or "").strip() or "Which approach fits you best?"
+    lines = ["", "---", "", f"### 🔀 Your options — {decision}", ""]
+    for o in data.get("options") or []:
+        lines.append(
+            f"- **{o.get('label', '')}** — fits: {o.get('fit', '')} "
+            f"_Trade-off:_ {o.get('tradeoff', '')}"
+        )
+    suggested = (data.get("suggested") or "").strip()
+    if suggested:
+        why = (data.get("why") or "").strip()
+        tail = f" because {why}" if why else ""
+        lines += ["", f"_I'd lean **{suggested}**{tail} — but it's your call._"]
+    return "\n".join(lines)
+
+
 async def _generate_summary(
     state: ResearchState,
     *,
@@ -1067,7 +1210,14 @@ async def _generate_summary(
     state.faithfulness = await _maybe_score_faithfulness(
         summary_text, state, overrides,
     )
-    return _finalize_summary_text(summary_text, state)
+    finalized = _finalize_summary_text(summary_text, state)
+    # §17.662 — branch out into user-tailored options when the topic is
+    # decision-shaped (only-when-applicable → None for factual topics). Appended
+    # AFTER the sources/notes so the factual summary stays clean above the choices.
+    state.options = await _generate_options(state, summary_text, overrides=overrides)
+    if state.options:
+        finalized += "\n" + _render_options_block(state.options)
+    return finalized
 
 
 # =============================================================================
@@ -1108,6 +1258,10 @@ def _build_research_complete_payload(
         "faithfulness": getattr(state, "faithfulness", None),
         # §17.452 (CoVe) — whether the summary was revised by Chain-of-Verification.
         "cove": getattr(state, "cove", None),
+        # §17.662 — user-tailored decision options (None when the topic isn't
+        # decision-shaped). Structured for programmatic readers; also rendered
+        # into the summary text as a "🔀 Your options" block.
+        "options": getattr(state, "options", None),
     }
     if summary is not None:
         payload["summary"] = summary

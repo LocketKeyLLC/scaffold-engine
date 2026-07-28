@@ -73,6 +73,12 @@ class ResearchState:
     # §17.452 (Phase C) — CoVe revision metadata ({changed, questions}) stamped
     # by _generate_summary when the check is enabled. None = not run.
     cove: dict | None = None
+    # §17.662 — user-tailored decision options ("branches") surfaced from the
+    # research, stamped by _generate_summary when the topic is decision-shaped.
+    # None = not run / not applicable (a straightforward factual topic gets NO
+    # fabricated choices). Shape: {decision, options:[{label,fit,tradeoff}],
+    # suggested, why}. Surfaced on the research_complete payload + summary block.
+    options: dict | None = None
 
     @property
     def max_iterations(self) -> int:

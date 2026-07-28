@@ -423,3 +423,136 @@ class TestBoundedToolCallTouch:
 
         assert out.success is False
         assert touched == []
+
+
+# ===========================================================================
+# §17.662 — research surfaces user-tailored options (only when applicable)
+# ===========================================================================
+
+
+class TestGenerateOptions:
+    def _state(self, topic="firewall for a homelab"):
+        from app.modules.research_state import ResearchState
+        st = ResearchState(topic=topic, depth="shallow", domain="eng")
+        st.all_entries = [{"facet": "tools", "content": "x"}]
+        return st
+
+    @pytest.mark.asyncio
+    async def test_disabled_returns_none_without_call(self):
+        from app.modules import research_agent as ra
+        with patch.object(ra.settings, "research_options_enabled", False), \
+             patch.object(ra, "_bounded_tool_call", new=AsyncMock()) as call:
+            out = await ra._generate_options(self._state(), "summary")
+        assert out is None
+        call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_factual_topic_no_options(self):
+        # only-when-applicable: has_options=false → no fabricated choices.
+        from app.modules import research_agent as ra
+        with patch.object(ra.settings, "research_options_enabled", True), \
+             patch.object(ra, "_bounded_tool_call", new=AsyncMock(return_value=MagicMock())), \
+             patch.object(ra, "read_tool_args", return_value={"has_options": False}):
+            out = await ra._generate_options(self._state("what port does postgres use"), "5432")
+        assert out is None
+
+    @pytest.mark.asyncio
+    async def test_decision_topic_surfaces_options(self):
+        from app.modules import research_agent as ra
+        args = {
+            "has_options": True, "decision": "Which firewall?",
+            "options": [
+                {"label": "OPNsense", "fit": "GUI homelabbers", "tradeoff": "heavier"},
+                {"label": "pfSense", "fit": "stability", "tradeoff": "CE lags"},
+            ],
+            "suggested": "OPNsense", "why": "friendlier UI",
+        }
+        with patch.object(ra.settings, "research_options_enabled", True), \
+             patch.object(ra, "_bounded_tool_call", new=AsyncMock(return_value=MagicMock())), \
+             patch.object(ra, "read_tool_args", return_value=args):
+            out = await ra._generate_options(self._state(), "summary")
+        assert out["decision"] == "Which firewall?"
+        assert [o["label"] for o in out["options"]] == ["OPNsense", "pfSense"]
+        assert out["suggested"] == "OPNsense" and out["why"] == "friendlier UI"
+
+    @pytest.mark.asyncio
+    async def test_single_option_is_not_a_branch(self):
+        from app.modules import research_agent as ra
+        args = {"has_options": True, "decision": "d",
+                "options": [{"label": "only", "fit": "f", "tradeoff": "t"}]}
+        with patch.object(ra.settings, "research_options_enabled", True), \
+             patch.object(ra, "_bounded_tool_call", new=AsyncMock(return_value=MagicMock())), \
+             patch.object(ra, "read_tool_args", return_value=args):
+            out = await ra._generate_options(self._state(), "s")
+        assert out is None                     # <2 options → not a real branch
+
+    @pytest.mark.asyncio
+    async def test_options_capped_at_max(self):
+        from app.modules import research_agent as ra
+        many = [{"label": f"L{i}", "fit": "f", "tradeoff": "t"} for i in range(8)]
+        args = {"has_options": True, "decision": "d", "options": many, "suggested": "L0"}
+        with patch.object(ra.settings, "research_options_enabled", True), \
+             patch.object(ra.settings, "research_options_max", 4), \
+             patch.object(ra, "_bounded_tool_call", new=AsyncMock(return_value=MagicMock())), \
+             patch.object(ra, "read_tool_args", return_value=args):
+            out = await ra._generate_options(self._state(), "s")
+        assert len(out["options"]) == 4
+
+    @pytest.mark.asyncio
+    async def test_failsoft_on_error_never_raises(self):
+        from app.modules import research_agent as ra
+        with patch.object(ra.settings, "research_options_enabled", True), \
+             patch.object(ra, "_bounded_tool_call",
+                          new=AsyncMock(side_effect=RuntimeError("boom"))):
+            out = await ra._generate_options(self._state(), "s")
+        assert out is None
+
+    def test_render_block_shape(self):
+        from app.modules.research_agent import _render_options_block
+        blk = _render_options_block({
+            "decision": "Which DB?",
+            "options": [{"label": "Postgres", "fit": "general", "tradeoff": "scale"},
+                        {"label": "Influx", "fit": "metrics", "tradeoff": "niche"}],
+            "suggested": "Postgres", "why": "one system to run"})
+        assert "🔀 Your options — Which DB?" in blk
+        assert "**Postgres**" in blk and "**Influx**" in blk
+        assert "I'd lean **Postgres**" in blk and "your call" in blk
+
+
+class TestSummaryAppendsOptions:
+    @pytest.mark.asyncio
+    async def test_summary_appends_options_block_when_present(self):
+        from app.modules import research_agent as ra
+        from app.modules.research_state import ResearchState
+        st = ResearchState(topic="firewall", depth="shallow", domain="eng")
+        st.all_entries = [{"facet": "f", "content": "some fact"}]
+        opts = {"decision": "Which firewall?",
+                "options": [{"label": "A", "fit": "x", "tradeoff": "y"},
+                            {"label": "B", "fit": "x", "tradeoff": "y"}],
+                "suggested": "A", "why": "z"}
+        with patch.object(ra.model_router, "generate",
+                          new=AsyncMock(return_value=_make_generate_response("A clean prose summary."))), \
+             patch.object(ra, "_maybe_cove_revise",
+                          new=AsyncMock(side_effect=lambda t, *a, **k: t)), \
+             patch.object(ra, "_maybe_score_faithfulness", new=AsyncMock(return_value=None)), \
+             patch.object(ra, "_generate_options", new=AsyncMock(return_value=opts)):
+            out = await ra._generate_summary(st)
+        assert "A clean prose summary." in out
+        assert "🔀 Your options" in out and "**A**" in out
+        assert st.options == opts               # stamped on state for the payload
+
+    @pytest.mark.asyncio
+    async def test_summary_clean_when_no_options(self):
+        from app.modules import research_agent as ra
+        from app.modules.research_state import ResearchState
+        st = ResearchState(topic="what port does postgres use", depth="shallow", domain="eng")
+        st.all_entries = [{"facet": "f", "content": "5432"}]
+        with patch.object(ra.model_router, "generate",
+                          new=AsyncMock(return_value=_make_generate_response("Postgres uses 5432."))), \
+             patch.object(ra, "_maybe_cove_revise",
+                          new=AsyncMock(side_effect=lambda t, *a, **k: t)), \
+             patch.object(ra, "_maybe_score_faithfulness", new=AsyncMock(return_value=None)), \
+             patch.object(ra, "_generate_options", new=AsyncMock(return_value=None)):
+            out = await ra._generate_summary(st)
+        assert "🔀 Your options" not in out     # no fabricated choices
+        assert st.options is None

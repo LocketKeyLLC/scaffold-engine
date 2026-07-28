@@ -520,6 +520,15 @@ class Settings(BaseSettings):
     # behaviour. faithfulness_model_role picks which role scores it.
     faithfulness_check_enabled: bool = False
     faithfulness_model_role: str = "model_verifier"
+    # §17.662 — after a research run, surface a small set of user-tailored
+    # decision OPTIONS ("branch out into choices that suit the user's needs")
+    # when the topic is decision-shaped. ONLY-WHEN-APPLICABLE: the model returns
+    # has_options=false for a straightforward factual/single-answer topic, so no
+    # choices are fabricated. One LLM tool-call per run; fail-soft (an error or a
+    # disabled flag → no options block, unchanged summary). Default ON.
+    research_options_enabled: bool = True
+    research_options_model_role: str = "model_general"
+    research_options_max: int = 4
     # §17.569 — grounding gate: faithfulness-score the SYNTHESIZED job
     # deliverable against the source node-work (the W.7 synthesis can introduce
     # claims not in the work — the §17.522 drift). Default ON, FLAG-ONLY: when
