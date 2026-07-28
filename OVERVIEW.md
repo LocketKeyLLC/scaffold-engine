@@ -22049,6 +22049,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.670 Feature — DAG terminal convergence: many loose ends → one final sink (2026-07-27)
+
+**Closes the §17.668/§17.669 DAG-quality trilogy** (all three surfaced by the fresh homelab test). The generator left the plan with **multiple terminal leaves** (nodes nothing depends on) — dangling DECISION nodes never consumed by the step that should apply them (T2 "Decide VLAN scheme", T4 "Decide media storage") plus parallel config/verify steps that never joined (T18 AdGuard, T22 verify-SSH). A well-formed plan should flow to ONE final deliverable, not scatter into loose ends.
+
+- **Fix (`dag_generator.py`):** new `converge_terminal_leaves(tasks)` — when there are ≥2 terminal leaves, pick a single PRIMARY sink (a final-type node — output/validation/checkpoint — if present, else the node with the most work behind it; tie → latest step) and make every OTHER terminal feed into it. The plan then converges to one sink, dangling decisions get consumed, and — since it runs BEFORE the §17.669 deliverable-marking — that single terminal becomes the single deliverable. Cycle-safe by construction (a terminal has no dependents, so nothing can already reach it; the primary only gains dependencies on the others). Gated on new valve `dag_converge_terminals_enabled` (default on); emits a `terminals_converged` warning.
+
+**Verification.** Unit — **+5** (`test_dag_generator.py`: homelab's 4 terminals converge into the checkpoint T22 with T2/T4/T18 wired in; exactly-one-terminal-after; convergence→marking yields the single deliverable T22; new deps point backward/acyclic; single-terminal no-op); dag_generator suite **84 passed**. **Repaired the existing homelab job** on real data: 4 terminal leaves → **1 sink (T22)**, deliverables 4 → **1 (T22)**. Orchestrator restarted.
+
+**The trilogy together (§17.668–670)** makes every persisted DAG well-formed: **connected** (no isolated nodes floating from t=0, §17.668) → **converged** (a single final sink, §17.670) → with **one clear deliverable** (mid-graph over-marks cleared, §17.669). The homelab job that started with 4 disconnected nodes + 8 deliverables now has 0 disconnected, 1 sink, 1 deliverable.
+
+---
+
 ### §17.669 Fix — DAG deliverable over-marking (§17.475 rule enforced deterministically) (2026-07-27)
 
 **The §17.668 related finding, now fixed.** The generator marked **8 of 10** homelab nodes `is_deliverable=true` — including mid-graph SETUP steps ("Download Proxmox ISO", "Configure GPU passthrough") — despite the DAG_PROMPT (§17.475) saying "set it on EXACTLY the node(s) that produce the final artifact; a mid-graph setup step is NEVER the deliverable." The LLM ignored the prompt, and nothing enforced it: over-marking muddies the compiled-output synthesis (every marked node treated as a final output) and was what let the §17.668 orphans hide (a self-covering deliverable).

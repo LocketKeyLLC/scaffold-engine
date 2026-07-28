@@ -840,6 +840,10 @@ class Settings(BaseSettings):
     # model re-decomposes; any survivors are auto-linked to the primary
     # deliverable as a deterministic last resort. Disable to skip the check.
     dag_dead_end_check_enabled: bool = True
+    # §17.670 — converge multiple terminal leaves (dangling decisions + parallel
+    # config steps that never join) into a SINGLE final sink, so the plan flows to
+    # one deliverable instead of several loose ends. Deterministic, cycle-safe.
+    dag_converge_terminals_enabled: bool = True
     execution_global_retry_cap: int = Field(default=20, ge=0, le=1000)
     # Sprint X.24 — process-wide cap on concurrent execute_all_nodes runs.
     # Each run drives its own inference loop and holds short-lived DB

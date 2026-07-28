@@ -1186,3 +1186,56 @@ class TestDeliverableMarking:
         by = {t["id"]: t for t in tasks}
         assert by["C"]["is_deliverable"]           # leaf marked (fallback)
         assert not by["A"].get("is_deliverable") and not by["B"].get("is_deliverable")
+
+
+@pytest.mark.smoke
+class TestConvergeTerminalLeaves:
+    """§17.670 — multiple terminal leaves converge into a single final sink."""
+
+    def _homelab(self):
+        # 4 terminals (T2/T4 decisions, T18 config, T22 verify) — none converge.
+        return [
+            {"id": "T1", "depends_on": [], "execution_order": 1, "type": "decision"},
+            {"id": "T2", "depends_on": ["T1"], "execution_order": 2, "type": "decision", "is_deliverable": True},
+            {"id": "T3", "depends_on": ["T1"], "execution_order": 3, "type": "decision"},
+            {"id": "T4", "depends_on": ["T1"], "execution_order": 4, "type": "decision", "is_deliverable": True},
+            {"id": "T5", "depends_on": ["T1"], "execution_order": 5, "type": "task"},
+            {"id": "T15", "depends_on": ["T5"], "execution_order": 6, "type": "task"},
+            {"id": "T17", "depends_on": ["T15"], "execution_order": 7, "type": "task"},
+            {"id": "T18", "depends_on": ["T17"], "execution_order": 8, "type": "task", "is_deliverable": True},
+            {"id": "T19", "depends_on": ["T3"], "execution_order": 9, "type": "task"},
+            {"id": "T22", "depends_on": ["T19"], "execution_order": 10, "type": "checkpoint", "is_deliverable": True},
+        ]
+
+    def test_converges_into_final_type_sink(self):
+        tasks = self._homelab()
+        primary, wired = _dag_gen.converge_terminal_leaves(tasks)
+        assert primary == "T22"                       # checkpoint = final-type
+        assert set(wired) == {"T2", "T4", "T18"}
+        assert set({t["id"]: t for t in tasks}["T22"]["depends_on"]) == {"T19", "T2", "T4", "T18"}
+
+    def test_exactly_one_terminal_after(self):
+        tasks = self._homelab()
+        _dag_gen.converge_terminal_leaves(tasks)
+        ids = {t["id"] for t in tasks}
+        depended = set()
+        for t in tasks:
+            depended |= {d for d in (t.get("depends_on") or []) if d in ids}
+        assert [t["id"] for t in tasks if t["id"] not in depended] == ["T22"]
+
+    def test_converge_then_marking_gives_single_deliverable(self):
+        tasks = self._homelab()
+        _dag_gen.converge_terminal_leaves(tasks)
+        _dag_gen._enforce_deliverable_marking(tasks)
+        assert [t["id"] for t in tasks if t.get("is_deliverable")] == ["T22"]
+
+    def test_new_deps_point_backward_acyclic(self):
+        tasks = self._homelab()
+        _dag_gen.converge_terminal_leaves(tasks)
+        order = {t["id"]: t["execution_order"] for t in tasks}
+        for d in {t["id"]: t for t in tasks}["T22"]["depends_on"]:
+            assert order[d] < order["T22"]
+
+    def test_single_terminal_is_noop(self):
+        tasks = [{"id": "A", "depends_on": []}, {"id": "B", "depends_on": ["A"]}]
+        assert _dag_gen.converge_terminal_leaves(tasks) == (None, [])

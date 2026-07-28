@@ -589,6 +589,54 @@ def _enforce_deliverable_marking(tasks: list[dict]) -> list[str]:
     return unmarked
 
 
+def converge_terminal_leaves(tasks: list[dict]) -> tuple[str | None, list[str]]:
+    """§17.670 — a well-formed DAG flows to ONE final sink. The generator often
+    leaves several terminal leaves (nodes nothing depends on): dangling DECISION
+    nodes never consumed by the step that should apply them, plus parallel config
+    steps that never join (homelab: T2 VLAN-decision, T4 media-decision, T18
+    AdGuard, T22 verify-SSH were all terminal). Pick a single PRIMARY sink and
+    make every OTHER terminal feed into it, so the plan converges to one
+    deliverable and nothing dangles. Primary = a final-type node
+    (output/validation/checkpoint) if present, else the node with the most work
+    behind it (largest upstream closure); tie → latest execution_order. Cycle-safe
+    by construction: a terminal has NO dependents, so nothing can already reach it,
+    and we only make the primary depend on the others. Returns (primary, wired)."""
+    real = [t for t in tasks if t.get("id")]
+    ids = {t["id"] for t in real}
+    depended_on: set[str] = set()
+    for t in real:
+        depended_on |= {d for d in (t.get("depends_on") or []) if d in ids}
+    terminals = [t for t in real if t["id"] not in depended_on]
+    if len(terminals) <= 1:
+        return None, []
+    fwd = {
+        t["id"]: [d for d in (t.get("depends_on") or []) if d in ids] for t in real
+    }
+    order = {
+        t["id"]: (t["execution_order"] if t.get("execution_order") is not None else i)
+        for i, t in enumerate(real)
+    }
+    _FINAL = {"output", "validation", "checkpoint"}
+
+    def _score(t: dict):
+        return (
+            str(t.get("type", "")).lower() in _FINAL,   # prefer a final-type node
+            len(_reachable(t["id"], fwd)),               # then the most work behind it
+            order.get(t["id"], 0),                       # then the latest step
+        )
+
+    primary = max(terminals, key=_score)
+    pid = primary["id"]
+    deps = list(primary.get("depends_on") or [])
+    wired: list[str] = []
+    for t in terminals:
+        if t["id"] != pid and t["id"] not in deps:
+            deps.append(t["id"])
+            wired.append(t["id"])
+    primary["depends_on"] = deps
+    return pid, wired
+
+
 # §17.645 — terminal reporting verbs. A node whose name says it documents /
 # verifies / summarizes / reviews the build is a downstream CONSUMER of the
 # build, not a starting step. If the generator leaves it with empty depends_on
@@ -1145,9 +1193,25 @@ async def generate_dag(
         for t in normalized:
             t["is_deliverable"] = t["id"] in leaf_keys
 
+    # §17.670 — converge multiple terminal leaves into a single final sink so the
+    # plan flows to one deliverable (dangling decisions/config steps get joined).
+    # Runs after connectivity (§17.668) and BEFORE deliverable marking, so the
+    # single sink is what gets marked.
+    if settings.dag_converge_terminals_enabled:
+        _primary, _converged = converge_terminal_leaves(normalized)
+        if _converged:
+            validator_warnings.append(
+                f"terminals_converged: {', '.join(_converged)} were loose ends — "
+                f"wired into the final sink {_primary} so the plan converges"
+            )
+            logger.warning(
+                "dag_terminals_converged: job=%s primary=%s wired=%s",
+                job_id, _primary, _converged,
+            )
+
     # §17.669 — clear MID-GRAPH deliverable over-marks (§17.475: a setup step is
-    # never the deliverable). Runs after the graph is fully connected (§17.668),
-    # so "terminal" is computed on the final edges.
+    # never the deliverable). Runs after the graph is fully connected (§17.668)
+    # and converged (§17.670), so "terminal" is computed on the final edges.
     _demarked = _enforce_deliverable_marking(normalized)
     if _demarked:
         validator_warnings.append(
