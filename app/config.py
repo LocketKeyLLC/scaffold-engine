@@ -845,6 +845,11 @@ class Settings(BaseSettings):
     # generator made the decision but never consumed it. Best-effort/cycle-safe;
     # a miss just leaves it for convergence (§17.670). Runs BEFORE convergence.
     dag_wire_decisions_enabled: bool = True
+    # §17.672 — decomposition-completeness: flag a DECISION with NO implementer
+    # step in the plan (decided something, never added the step that carries it
+    # out). Feeds the validator retry loop so the generator ADDS the missing step;
+    # any survivor is surfaced as an `unimplemented_decisions` warning.
+    dag_decision_impl_check_enabled: bool = True
     # §17.670 — converge multiple terminal leaves (dangling decisions + parallel
     # config steps that never join) into a SINGLE final sink, so the plan flows to
     # one deliverable instead of several loose ends. Deterministic, cycle-safe.

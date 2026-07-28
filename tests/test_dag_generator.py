@@ -1287,3 +1287,42 @@ class TestWireDecisionsToImplementers:
             {"id": "I", "name": "Configure the system", "type": "task", "execution_order": 2, "depends_on": []},
         ]
         assert _dag_gen.wire_decisions_to_implementers(tasks) == []
+
+
+@pytest.mark.smoke
+class TestDetectUnimplementedDecisions:
+    """§17.672 — flag a decision with no step that carries it out."""
+
+    def _tasks(self):
+        return [
+            {"id": "T1", "name": "Determine server state", "type": "decision", "depends_on": []},
+            {"id": "T2", "name": "Decide VLAN scheme", "type": "decision", "depends_on": ["T1"]},
+            {"id": "T3", "name": "Decide backup destination", "type": "decision", "depends_on": ["T1"]},
+            {"id": "T4", "name": "Decide Jellyfin media storage", "type": "decision", "depends_on": ["T1"]},
+            {"id": "T5", "name": "Download Proxmox ISO", "type": "task", "depends_on": ["T1"]},
+            {"id": "T17", "name": "Configure Jellyfin media library", "type": "task", "depends_on": ["T5"]},
+            {"id": "T19", "name": "Configure backup jobs", "type": "task", "depends_on": ["T3"]},
+        ]
+
+    def test_flags_only_the_decision_without_implementer(self):
+        # T2 VLAN → no VLAN-config step → flagged; T4 has Jellyfin config → not;
+        # T3 consumed by T19 → not; T1 consumed by all → not.
+        assert _dag_gen.detect_unimplemented_decisions(self._tasks()) == ["T2"]
+
+    def test_no_decisions_is_empty(self):
+        tasks = [{"id": "A", "type": "task", "depends_on": []},
+                 {"id": "B", "type": "task", "depends_on": ["A"]}]
+        assert _dag_gen.detect_unimplemented_decisions(tasks) == []
+
+    def test_all_decisions_implemented_is_empty(self):
+        tasks = [
+            {"id": "D", "name": "Decide jellyfin storage", "type": "decision", "depends_on": []},
+            {"id": "I", "name": "Configure jellyfin storage", "type": "task", "depends_on": []},
+        ]
+        assert _dag_gen.detect_unimplemented_decisions(tasks) == []
+
+    def test_render_names_the_missing_step(self):
+        block = _dag_gen.render_unimplemented_decision_corrections(
+            self._tasks(), ["T2"], 2)
+        assert "Decide VLAN scheme" in block
+        assert "implement" in block.lower() and "depends_on" in block.lower()

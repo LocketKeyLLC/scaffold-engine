@@ -686,6 +686,68 @@ def wire_decisions_to_implementers(tasks: list[dict]) -> list[tuple[str, str]]:
     return wired
 
 
+def detect_unimplemented_decisions(tasks: list[dict]) -> list[str]:
+    """§17.672 — DECISION nodes with NO step that carries them out. A decision is
+    unimplemented when NOTHING depends on it AND no non-decision node shares a
+    DISTINCTIVE subject token with it (so §17.671 has no implementer to wire to —
+    the generator decided something but never added the step). This is a
+    decomposition-completeness gap the deterministic passes cannot fix (they can
+    connect an EXISTING node, not invent a missing one), so it is fed to the
+    validator retry loop (add the step) and, on survival, surfaced as a warning.
+    A decision already consumed by some step is treated as implemented. Returns the
+    unimplemented decision ids, in task order."""
+    real = [t for t in tasks if t.get("id")]
+    ids = {t["id"] for t in real}
+    depended_on: set[str] = set()
+    for t in real:
+        depended_on |= {d for d in (t.get("depends_on") or []) if d in ids}
+    subjects = {t["id"]: _subject_tokens(t.get("name") or "") for t in real}
+    freq: dict[str, int] = {}
+    for s in subjects.values():
+        for w in s:
+            freq[w] = freq.get(w, 0) + 1
+    distinct_max = max(2, len(real) // 3)
+    out: list[str] = []
+    for d in real:
+        if str(d.get("type", "")).lower() != "decision":
+            continue
+        if d["id"] in depended_on:          # something applies it → implemented
+            continue
+        dsub = {w for w in subjects[d["id"]] if freq.get(w, 99) <= distinct_max}
+        has_impl = any(
+            (dsub & subjects[c["id"]])
+            for c in real
+            if c["id"] != d["id"] and str(c.get("type", "")).lower() != "decision"
+        )
+        if not has_impl:
+            out.append(d["id"])
+    return out
+
+
+def render_unimplemented_decision_corrections(
+    tasks: list[dict], unimplemented: list[str], next_attempt: int,
+) -> str:
+    """§17.672 — correction block: tell the generator to ADD the missing
+    implementation step for each decision that has no follow-through."""
+    by_id = {t["id"]: t for t in tasks if t.get("id")}
+    lines = [
+        f"## Unimplemented decisions (attempt {next_attempt})",
+        "",
+        "These DECISION nodes choose something but the plan has NO later step that "
+        "APPLIES the choice — a decision with no follow-through. For EACH, ADD the "
+        "missing implementation step (e.g. a 'Decide VLAN scheme' decision needs a "
+        "'Configure VLAN bridges' action that depends_on it and carries it out):",
+        "",
+    ]
+    for did in unimplemented:
+        nm = (by_id.get(did) or {}).get("name", did)
+        lines.append(
+            f"- {did} \"{nm}\" — add the action/config step that implements this "
+            f"decision, with depends_on including {did}."
+        )
+    return "\n".join(lines)
+
+
 def converge_terminal_leaves(tasks: list[dict]) -> tuple[str | None, list[str]]:
     """§17.670 — a well-formed DAG flows to ONE final sink. The generator often
     leaves several terminal leaves (nodes nothing depends on): dangling DECISION
@@ -937,8 +999,15 @@ async def _generate_dag_with_validator(
             detect_dead_ends(dag_data.get("tasks", []))
             if settings.dag_dead_end_check_enabled else []
         )
+        # §17.672 — decisions with no implementer step (decomposition gap the
+        # deterministic passes can't fix — no node to wire to). Retry so the model
+        # ADDS the missing step.
+        unimplemented = (
+            detect_unimplemented_decisions(dag_data.get("tasks", []))
+            if settings.dag_decision_impl_check_enabled else []
+        )
 
-        if not outcome.issues and not dead_ends:
+        if not outcome.issues and not dead_ends and not unimplemented:
             if attempt > 1:
                 warnings.append(f"validator_clean_after_retry_attempt_{attempt}")
             return {
@@ -963,13 +1032,24 @@ async def _generate_dag_with_validator(
                     f"remain after {attempt} attempts: " + ", ".join(dead_ends)
                     + " (auto-link fallback will connect them)"
                 )
+            if unimplemented:
+                warnings.append(
+                    f"unimplemented_decisions: {len(unimplemented)} decision(s) with "
+                    f"no implementer step after {attempt} attempts: "
+                    + ", ".join(unimplemented)
+                    + " (decided but never carried out — plan may be incomplete)"
+                )
             return {
                 "dag_data": dag_data, "raw_text": last_text, "model": last_model,
                 "duration_ms": total_duration_ms, "warnings": warnings,
                 "error": None, "attempts": attempt, "validator_calls": attempt,
             }
 
-        sig = (issue_set_signature(outcome.issues), tuple(sorted(dead_ends)))
+        sig = (
+            issue_set_signature(outcome.issues),
+            tuple(sorted(dead_ends)),
+            tuple(sorted(unimplemented)),
+        )
         if sig == last_issue_signature:
             warnings.append(
                 f"validator_circuit_break_attempt_{attempt}: identical issue "
@@ -1003,6 +1083,16 @@ async def _generate_dag_with_validator(
             correction_parts.append(
                 render_dead_end_corrections(
                     dag_data.get("tasks", []), dead_ends, attempt + 1,
+                )
+            )
+        if unimplemented:
+            warnings.append(
+                f"unimplemented_decision_found_{len(unimplemented)}_attempt_{attempt}: "
+                + ", ".join(unimplemented)
+            )
+            correction_parts.append(
+                render_unimplemented_decision_corrections(
+                    dag_data.get("tasks", []), unimplemented, attempt + 1,
                 )
             )
         corrections_block = "\n\n".join(correction_parts)

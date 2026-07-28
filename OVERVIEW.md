@@ -22049,6 +22049,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.672 Feature — flag (and retry to fill) decisions with no implementer step (2026-07-28)
+
+**The decomposition-completeness gap §17.671 exposed.** A decision whose implementer the generator NEVER created (homelab: "Decide VLAN scheme" — no VLAN-config step exists) can't be wired to anything (§17.671) and just gets swept into the final sink by convergence (§17.670) — the choice is made but never carried out. The deterministic passes can connect an *existing* node; they cannot invent a *missing* one. So this needs the generator.
+
+- **Fix (`dag_generator.py`):** `detect_unimplemented_decisions(tasks)` — a decision is unimplemented when NOTHING depends on it AND no non-decision node shares a **distinctive** subject token with it (so §17.671 has no implementer to wire to). Two responses: (1) **drive the generator to fill the gap** — fed into the validator retry loop alongside the §17.476 dead-end check (same budget/circuit-breaker): `render_unimplemented_decision_corrections` tells the model to ADD the missing implementation step (e.g. "Decide VLAN scheme" → add "Configure VLAN bridges" depending on it), so it re-decomposes; (2) **flag survivors** — after retries, an `unimplemented_decisions` warning surfaces on the DAG result. Gated on `dag_decision_impl_check_enabled` (default on).
+
+**Verification.** Unit — **+4** (`test_dag_generator.py`: on the homelab shape only "Decide VLAN scheme" is flagged — the Jellyfin decision has a config step, the backup decision is consumed, the server-state decision is depended-on by all; no-decisions empty; all-implemented empty; the correction block names the missing step + says depends_on). dag_generator suite **93 passed**; module imports clean, valve live. **Live generation smoke** confirmed the retry-loop change doesn't break generation (15-task homelab DAG, 2 decisions both implemented → correctly no flag). The retry integration mirrors the proven §17.476 dead-end retry (detect → condition → correction block → circuit-break signature → exhaustion warning).
+
+**Completes the DAG-quality suite (§17.668–672):** connect isolated → wire decisions to implementers → **flag/fill unimplemented decisions** → converge loose ends → enforce single deliverable. A generated plan is now connected, its decisions wired to (or flagged as missing) their implementers, converged to one deliverable.
+
+---
+
 ### §17.671 Feature — wire DECISION nodes to the step that applies them (semantic) (2026-07-28)
 
 **The deeper generator-semantics gap the §17.668–670 passes left open.** A decision node ("Decide Jellyfin media storage") should be CONSUMED by the step that applies it ("Configure Jellyfin media library"), but the generator often makes the decision and never wires it — so it dangles and only convergence (§17.670) catches it, feeding it into the final sink rather than its real implementer.
