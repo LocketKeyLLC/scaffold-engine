@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.676 UX — verified the §17.675 backlog; 4 already-handled, shipped friendly rate-limit surfacing (2026-07-28)
+
+**Verified each of the 5 deferred backlog items against the code before implementing** (the discipline from [[feedback_verify_before_claim]] — most turned out already-done, a good reminder that a plausible audit finding ≠ a real gap):
+
+- **Feasibility risks in `/ideate` — ALREADY DONE.** `_render_ideate_response` (scaffold_router.py:3153–3165) already renders `feasibility.risks` ("Risks to consider") + `clarifications_needed` ("A few things that could be more specific"). The audit finding misread the code.
+- **Note-recorded confirmation — ALREADY DONE.** The `note` intent handler (`_assist_handlers.py:1919`) already replies "📌 Noted (…): … I'll carry this forward into the remaining steps."
+- **`next_actions` on failed/blocked — ALREADY DONE.** `/results` failed/blocked/cancelled branch (scaffold_router.py:6425–6457) renders status + `error_summary` + a failed-nodes table + `_render_next_actions(data)` (server-supplied recovery commands from `recovery.py`).
+- **Blocked-step explanation — VALID but LOW-value, deferred.** `get_next_step` returns `None` when nothing is claimable and the "nothing to do… waiting on earlier steps" render (render_step) doesn't name which deps are pending. But under the §17.645 one-step-in-flight, deps-gated model (where `skipped` also satisfies a dep), this state is a rare edge the linear walkthrough almost never reaches, and closing it needs a new orchestrator query/endpoint — not worth it now.
+- **Rate-limit (429) surfacing — VALID, SHIPPED.** Cloud-model 429s are common on this CPU-only host and are TRANSIENT; on retry-exhaustion the raw `HTTP 429` reached the chat, reading as a broken engine. New `_RATE_LIMIT_RE` + `_rate_limit_note(reason)` translate any rate-limit signature (429 / "rate limit" / "too many requests" / "quota exceeded") into a calm, actionable note ("momentarily rate-limited… wait a minute, then retry — usually clears on the next attempt"). Wired into all four failure-render points: the `node_failed` and `error` SSE events, the streamed job-`failed` render, and the `/results` failed/blocked branch (each yields the note only when non-empty).
+
+**Verification.** Unit — `test_scaffold_router_sse.py` + commands + helpers + welcome **210 passed** (`--noconftest`): new `TestRateLimitNote` (detects 5 rate-limit variants, empty for 5 non-rate-limit reasons incl. None, friendly note rides along on node_failed + error events); fixed a pre-existing `test_node_failed` chunk-count by guarding the note yield to non-empty. Live — `open-webui-pipelines` reloaded clean. Pipeline-side only.
+
+---
+
 ### §17.675 UX — five verified chat-experience improvements (plan preview, assist progress, orientation, heartbeat, no-traceback) (2026-07-28)
 
 **Research method.** Fanned out 4 read-only Explore agents across the user-facing surfaces (assist journey, OWUI chat/discoverability, research→options→plan transparency, failure/status/recovery) → ~50 raw findings, then **verified each high-value candidate against the code** before implementing (subagent findings run ~31% true-positive per [[feedback_verify_before_claim]]). Verification disproved several agent claims: the streaming guidance footer IS present (`_assist_handlers.py:819`); the welcome correctly labels `/research`/`/jobs` as advanced (not a trap); submit already signals completion ("All steps terminal — run `/assist done`"). Five items survived and shipped:

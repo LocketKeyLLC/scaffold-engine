@@ -56,6 +56,42 @@ class TestSSEErrorEventRendering:
 
 
 @pytest.mark.smoke
+class TestRateLimitNote:
+    """§17.676 — a raw rate-limit failure becomes a calm, actionable note."""
+
+    @pytest.mark.parametrize("reason", [
+        "HTTP 429: Too Many Requests",
+        "openai HTTP 429: rate limit reached",
+        "the model is rate-limited, try again",
+        "quota exceeded for this key",
+        "Too Many Requests",
+    ])
+    def test_detects_rate_limit_variants(self, pipe, reason):
+        note = pipe._rate_limit_note(reason)
+        assert "rate-limited" in note.lower()
+        assert "wait a minute" in note.lower()
+
+    @pytest.mark.parametrize("reason", [
+        "ValueError: bad port", "connection refused", "", None, "timeout after 30s",
+    ])
+    def test_non_rate_limit_returns_empty(self, pipe, reason):
+        assert pipe._rate_limit_note(reason) == ""
+
+    def test_node_failed_429_shows_friendly_note(self, pipe):
+        failed = []
+        data = json.dumps({"node_key": "T3", "error": "provider HTTP 429: slow down"})
+        out = "".join(pipe._handle_sse_event("node_failed", data, failed))
+        assert "T3 failed" in out
+        assert "rate-limited" in out.lower()  # the friendly translation rides along
+
+    def test_error_event_429_shows_friendly_note(self, pipe):
+        failed = []
+        data = json.dumps({"message": "429 too many requests"})
+        out = "".join(pipe._handle_sse_event("error", data, failed))
+        assert "rate-limited" in out.lower()
+
+
+@pytest.mark.smoke
 class TestSSEStreamStalled:
     """#8.12: Stream stall detected; reader emits stream_stalled event."""
 

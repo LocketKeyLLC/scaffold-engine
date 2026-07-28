@@ -124,6 +124,15 @@ _CORE_COMMANDS: frozenset = frozenset({
     "/help", "/advanced",
 })
 
+# §17.676 — a raw "429 / rate limit" from a cloud model is common on this
+# CPU-only host (several roles use rate-limited cloud models) and is TRANSIENT,
+# not a bug. Detect it in a failure reason so the render layer can translate it
+# into a calm, actionable note instead of showing a beginner a raw "HTTP 429".
+_RATE_LIMIT_RE = re.compile(
+    r"\b(?:429|rate[\s_-]?limit(?:ed|s)?|too\s+many\s+requests|quota\s+exceeded)\b",
+    re.IGNORECASE,
+)
+
 # §17.562 — lookup-class commands that get the "what's next" footer appended
 # (non-streaming path only). Deliberately excludes commands that already
 # render next steps (/idea, /confirm, /status, /here, /jobs) or are pure
@@ -3768,6 +3777,20 @@ class Pipeline:
     # SSE event renderers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _rate_limit_note(reason: object) -> str:
+        """§17.676 — translate a raw rate-limit failure into a calm, actionable
+        note so a beginner waits + retries instead of reading '429' as a broken
+        engine. Returns '' when the reason is not a rate-limit signature."""
+        if reason and _RATE_LIMIT_RE.search(str(reason)):
+            return (
+                "\n> ⏳ The AI model provider is momentarily **rate-limited** "
+                "(too many requests in a short window). This is temporary and "
+                "not a problem with your setup — wait a minute, then retry the "
+                "step. It usually clears on the next attempt.\n"
+            )
+        return ""
+
     def _render_error_event(self, payload: dict) -> Generator[str, None, None]:
         """Render an SSE `error` event (#8.2).
 
@@ -3787,6 +3810,9 @@ class Pipeline:
         job_id = payload.get("job_id") or payload.get("id")
         yield "\n❌ **Execution error:** "
         yield f"{message}\n\n"
+        rl = self._rate_limit_note(message) or self._rate_limit_note(tb)
+        if rl:
+            yield rl
         if job_id:
             yield (f"_This is usually recoverable — check `/results {job_id}` for "
                    f"the full details, then retry the step._\n")
@@ -3820,6 +3846,9 @@ class Pipeline:
         elif event_type == "node_failed":
             reason = payload.get("error") or payload.get("verification_reason") or "unknown"
             yield f"❌ Step {payload.get('node_key','?')} failed: {reason}\n"
+            rl = self._rate_limit_note(reason)  # §17.676 — '' unless rate-limited
+            if rl:
+                yield rl
             failed_nodes.append(payload)
         elif event_type == "node_retry":
             title = payload.get("title", "")
@@ -3899,6 +3928,9 @@ class Pipeline:
                 if status == "failed":
                     reason = data.get("error") or data.get("reason") or "see server logs"
                     yield f"❌ Job `{job_id}` failed: {reason}\n"
+                    rl = self._rate_limit_note(reason)
+                    if rl:
+                        yield rl
                     yield f"Run `/results {job_id}` for full diagnostic output."
                     return
                 if status in ("cancelled", "canceled"):
@@ -6436,6 +6468,9 @@ class Pipeline:
             lines = [f"⚠️ Status: **{status}** — {done}/{total} nodes complete, {failed_n} failed"]
             if err:
                 lines.append(f"_{err}_")
+            rl = self._rate_limit_note(err)  # §17.676
+            if rl:
+                lines.append(rl)
             if failed_nodes:
                 lines.append("")
                 lines.append("**Failed nodes:**")
