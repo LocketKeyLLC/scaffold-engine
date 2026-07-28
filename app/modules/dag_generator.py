@@ -350,10 +350,11 @@ DAG_PROMPT = """Decompose this refined brief into a DAG of executable tasks:
 
 §17.663 — If (and ONLY if) the brief contains an `operator_decision` object (a key
 choice the research surfaced, with an `options` list), you MUST include an early
-node of `type: "decision"` named after that decision, list its options (each
-label + trade-off) in that node's `notes`, and make the downstream implementation
-tasks `depends_on` it — so the operator chooses the path before the plan commits
-to one. If there is no `operator_decision`, do not add a decision node for this.
+node of `type: "decision"` named after that decision, put its options (each label
++ trade-off) AND the `suggested` default into that node's `notes`, and make the
+downstream implementation tasks `depends_on` it — so the operator chooses the path
+before the plan commits to one. This is separate from any decisions the plan
+itself needs; add it in addition to those.
 
 Return ONLY the JSON object. No preamble, no markdown."""
 

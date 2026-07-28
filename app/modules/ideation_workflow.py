@@ -505,8 +505,13 @@ async def research_and_compile(
                 _osummary = " ".join(
                     e.get("content", "") for e in entries[:12]
                 )[:4000]
+                # §17.664 — thread the user's goal (brief description) so the
+                # options are tailored to THEIR needs, not just the title.
+                _ctx = " ".join(
+                    str(brief.get(k, "")) for k in ("title", "description", "goal")
+                ).strip()
                 research_options = await _generate_options(
-                    _ostate, _osummary, overrides=model_overrides,
+                    _ostate, _osummary, overrides=model_overrides, context=_ctx,
                 )
                 if research_options:
                     logger.info(

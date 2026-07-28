@@ -22049,6 +22049,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.664 Hardening — stress-test the research→decision feature + tailor options to the user's goal (2026-07-27)
+
+**Stress-tested §17.662/§17.663 (user: "stress test and confirm its abilities, fix and improve").** Paced live harness (16-topic gate matrix + 4-brief DAG-structure probe, spaced to dodge the cloud-model rate limit).
+
+**Confirmed abilities.** Gate ("only-when-applicable") — **14/14** on clear cases: all 8 decision-shaped topics (firewall / time-series DB / web framework / VPN / reverse-proxy / backup / orchestration / language) → options; all 6 factual topics (postgres port / TLS / HTTP 429 / IPv6 bits / list-comp / SSH port) → none; 2 borderline (query-tuning, project-structure) → options, reasonable. DAG structure — all 3 `operator_decision` briefs produced a valid T1 `decision` node (deps=[], options in `notes`, downstream `depends_on` it), including one with markdown/pipe chars in labels. Two non-issues confirmed: a no-`operator_decision` brief still got the generator's *own* "Decide library stack" node (pre-existing, correct — the directive doesn't over-suppress), and `dag_validator_json_parse_failed: raw=''` is the pre-existing thinking-model-empty validator hiccup (fails open).
+
+**Improvements made (§17.664).** (1) **Goal-tailored options** — `_generate_options` gained a `context` param threaded into the prompt (+ `OPTIONS_SYSTEM_V1` now tailors `fit`/suggestion to it); the DAG-job path passes the brief's title+description+goal, so options suit *the user's* needs, not just the topic. (2) **Suggested-must-be-listed** — the returned `suggested` is dropped (with its `why`) unless it names one of the emitted options, so the "I'd lean X" render never points at an unlisted choice. (3) DAG directive tightened to carry the `suggested` default into the decision node's notes and to clarify it's additive to the plan's own decisions.
+
+**Verification.** Unit — **+4** (suggested-not-listed dropped, valid-suggested preserved, context threaded into prompt, no-context omits the goal line); research-summary + dag_generator + ideation Phase 1/2 suites **116 passed**, no regressions. **Live tailoring smoke:** same topic ("reverse proxy") + same research, different goals → "minimal Raspberry Pi, auto-HTTPS" suggested **Caddy** ("one-line config"), "large multi-team Docker deployment" suggested **Traefik** ("Docker-native, checks all three boxes"). Orchestrator restarted. No API-schema change.
+
+---
+
 ### §17.663 Feature — research → decision-node: a surfaced option set becomes an explicit DAG branch (2026-07-27)
 
 **Follow-on to §17.662** (user: "wire research→decision-node next"). §17.662 surfaced user-tailored options in the research *output*; this threads them into the *plan* so the DAG itself branches on the choice and §17.654 assist mode presents it one-at-a-time. The `decision` node type already existed — this connects research's surfaced options to it.

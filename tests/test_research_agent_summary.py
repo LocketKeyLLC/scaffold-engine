@@ -556,3 +556,67 @@ class TestSummaryAppendsOptions:
             out = await ra._generate_summary(st)
         assert "🔀 Your options" not in out     # no fabricated choices
         assert st.options is None
+
+
+class TestOptionsTailoringV664:
+    """§17.664 — context tailoring + suggested-must-be-listed validation."""
+    def _state(self, topic="db choice"):
+        from app.modules.research_state import ResearchState
+        st = ResearchState(topic=topic, depth="shallow", domain="eng")
+        st.all_entries = [{"facet": "x", "content": "c"}]
+        return st
+
+    _OPTS = [{"label": "A", "fit": "f", "tradeoff": "t"},
+             {"label": "B", "fit": "f", "tradeoff": "t"}]
+
+    @pytest.mark.asyncio
+    async def test_suggested_not_listed_is_dropped(self):
+        from app.modules import research_agent as ra
+        args = {"has_options": True, "decision": "d", "options": self._OPTS,
+                "suggested": "Z-not-listed", "why": "because"}
+        with patch.object(ra.settings, "research_options_enabled", True), \
+             patch.object(ra, "_bounded_tool_call", new=AsyncMock(return_value=MagicMock())), \
+             patch.object(ra, "read_tool_args", return_value=args):
+            out = await ra._generate_options(self._state(), "s")
+        assert out["suggested"] == "" and out["why"] == ""   # both cleared
+
+    @pytest.mark.asyncio
+    async def test_valid_suggested_preserved(self):
+        from app.modules import research_agent as ra
+        args = {"has_options": True, "decision": "d", "options": self._OPTS,
+                "suggested": "B", "why": "because"}
+        with patch.object(ra.settings, "research_options_enabled", True), \
+             patch.object(ra, "_bounded_tool_call", new=AsyncMock(return_value=MagicMock())), \
+             patch.object(ra, "read_tool_args", return_value=args):
+            out = await ra._generate_options(self._state(), "s")
+        assert out["suggested"] == "B" and out["why"] == "because"
+
+    @pytest.mark.asyncio
+    async def test_context_threaded_into_prompt(self):
+        from app.modules import research_agent as ra
+        captured = {}
+        async def _fake_call(**kwargs):
+            captured["messages"] = kwargs.get("messages")
+            return MagicMock()
+        args = {"has_options": True, "decision": "d", "options": self._OPTS, "suggested": "A"}
+        with patch.object(ra.settings, "research_options_enabled", True), \
+             patch.object(ra, "_bounded_tool_call", new=_fake_call), \
+             patch.object(ra, "read_tool_args", return_value=args):
+            await ra._generate_options(self._state(), "summary",
+                                       context="run it on a Raspberry Pi with 2GB RAM")
+        user_msg = captured["messages"][-1]["content"]
+        assert "Raspberry Pi" in user_msg and "goal" in user_msg.lower()
+
+    @pytest.mark.asyncio
+    async def test_no_context_omits_goal_line(self):
+        from app.modules import research_agent as ra
+        captured = {}
+        async def _fake_call(**kwargs):
+            captured["messages"] = kwargs.get("messages")
+            return MagicMock()
+        args = {"has_options": True, "decision": "d", "options": self._OPTS, "suggested": "A"}
+        with patch.object(ra.settings, "research_options_enabled", True), \
+             patch.object(ra, "_bounded_tool_call", new=_fake_call), \
+             patch.object(ra, "read_tool_args", return_value=args):
+            await ra._generate_options(self._state(), "summary")   # no context
+        assert "goal / needs" not in captured["messages"][-1]["content"].lower()

@@ -297,11 +297,13 @@ there is no real branch — do NOT invent choices to fill the field. When in dou
 false.
 
 When true: name the ONE core decision, then 2-4 options. For each option give a \
-short label, who/what it best FITS (tie it to likely needs implied by the topic), \
-and its main TRADE-OFF. Then suggest which you'd lean toward and the ONE main \
-reason — framed as a suggestion the user is free to reject ("I'd lean X because Y \
-— but it's your call"). Base everything on the research provided; don't add \
-outside facts. Call surface_options exactly once."""
+short label, who/what it best FITS, and its main TRADE-OFF. If a "User's goal / \
+needs" line is provided, tailor the FIT lines and your suggestion to THAT goal \
+(not just the bare topic); otherwise tie fit to the needs the topic implies. Then \
+suggest which you'd lean toward — it MUST be one of the options you listed — and \
+the ONE main reason, framed as a suggestion the user is free to reject ("I'd lean \
+X because Y — but it's your call"). Base everything on the research provided; \
+don't add outside facts. Call surface_options exactly once."""
 
 SURFACE_OPTIONS_TOOL = Tool(
     name="surface_options",
@@ -1071,20 +1073,30 @@ async def _generate_options(
     summary_text: str,
     *,
     overrides: dict | None = None,
+    context: str | None = None,
 ) -> dict | None:
     """§17.662 — surface user-tailored decision options from the research, but
     ONLY when the topic is decision-shaped. Returns a normalized dict
     ``{decision, options:[{label,fit,tradeoff}], suggested, why}`` or ``None``
     (not applicable / disabled / error). Fail-soft: never raises, never blocks
-    finalize. Requires ≥2 distinct options — a single 'choice' is not a branch."""
+    finalize. Requires ≥2 distinct options — a single 'choice' is not a branch.
+
+    §17.664 — ``context`` (the user's goal/brief, when known) is threaded into
+    the prompt so the ``fit`` lines and the suggestion are tailored to *their*
+    needs, not just the bare topic. The DAG-job path (§17.663) passes the brief
+    description here."""
     if not settings.research_options_enabled:
         return None
     role = settings.research_options_model_role or "model_general"
     facets = ", ".join(
         sorted({str(e.get("facet", "")) for e in state.all_entries if e.get("facet")})[:12]
     )
+    ctx_line = ""
+    if context and context.strip():
+        ctx_line = f"User's goal / needs: {context.strip()[:600]}\n"
     prompt = (
         f"Topic: {state.topic}\n"
+        f"{ctx_line}"
         f"Facets covered: {facets}\n\n"
         f"Research summary:\n{summary_text[:4000]}\n\n"
         "Call surface_options."
@@ -1115,11 +1127,17 @@ async def _generate_options(
     ][: max(2, int(settings.research_options_max))]
     if len(opts) < 2:  # a real branch needs at least two distinct paths
         return None
+    # §17.664 — a suggestion must name one of the listed options; otherwise the
+    # "I'd lean X" render would point at an option that isn't shown. Drop it.
+    labels = {o["label"] for o in opts}
+    suggested = str(parsed.get("suggested", "")).strip()
+    if suggested not in labels:
+        suggested = ""
     return {
         "decision": str(parsed.get("decision", "")).strip(),
         "options": opts,
-        "suggested": str(parsed.get("suggested", "")).strip(),
-        "why": str(parsed.get("why", "")).strip(),
+        "suggested": suggested,
+        "why": str(parsed.get("why", "")).strip() if suggested else "",
     }
 
 
