@@ -348,6 +348,13 @@ DAG_PROMPT = """Decompose this refined brief into a DAG of executable tasks:
 {brief}
 ---
 
+§17.663 — If (and ONLY if) the brief contains an `operator_decision` object (a key
+choice the research surfaced, with an `options` list), you MUST include an early
+node of `type: "decision"` named after that decision, list its options (each
+label + trade-off) in that node's `notes`, and make the downstream implementation
+tasks `depends_on` it — so the operator chooses the path before the plan commits
+to one. If there is no `operator_decision`, do not add a decision node for this.
+
 Return ONLY the JSON object. No preamble, no markdown."""
 
 
@@ -830,7 +837,7 @@ async def generate_dag(
     # re-entry guard can tell idempotent retry from a brief-edit drift.
     result = await db.execute(
         text("""
-            SELECT j.status, j.refined_brief, j.dag_input_hash,
+            SELECT j.status, j.refined_brief, j.dag_input_hash, j.research_data,
                    (SELECT COUNT(*) FROM dag_nodes WHERE job_id = j.id) AS node_count
             FROM jobs j
             WHERE j.id = :id
@@ -843,7 +850,7 @@ async def generate_dag(
         await db.rollback()
         return {"error": f"Job {job_id} not found"}
 
-    status, brief, stored_hash, node_count = row
+    status, brief, stored_hash, research_data, node_count = row
     # H6: accept 'planning' OR 'running' — execute_all_nodes flips to 'running'
     # before calling generate_dag on auto-gen path.
     if status not in ("planning", "running"):
@@ -859,6 +866,10 @@ async def generate_dag(
         return {"error": "Job has no refined_brief — run idea refinement first"}
 
     brief_data = brief if isinstance(brief, dict) else json.loads(brief)
+    # §17.663 — thread the research-surfaced operator decision (§17.662) into the
+    # brief so the DAG builds an explicit `decision` node for it. Merged BEFORE
+    # the input hash so a different surfaced decision correctly re-plans.
+    brief_data = _brief_with_operator_decision(brief_data, research_data)
     current_hash = _compute_dag_input_hash(brief_data, model, model_overrides)
 
     # §17.181: re-entry guard. Three cases when nodes already exist:
@@ -1468,6 +1479,28 @@ def _safe_label(value: str) -> str:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _brief_with_operator_decision(brief_data: dict, research_data) -> dict:
+    """§17.663 — merge the research-surfaced operator decision (§17.662's
+    ``research_data['options']``) into the brief as ``operator_decision``, so
+    generate_dag's prompt directs an explicit ``decision`` node.
+
+    No-op (returns ``brief_data`` unchanged) when: it isn't a dict, it already
+    carries an ``operator_decision``, ``research_data`` is missing/malformed, or
+    the options payload has no non-empty ``options`` list. Never raises."""
+    if not isinstance(brief_data, dict) or "operator_decision" in brief_data:
+        return brief_data
+    try:
+        rd = research_data if isinstance(research_data, dict) else (
+            json.loads(research_data) if research_data else None
+        )
+    except (ValueError, TypeError):
+        return brief_data
+    options = (rd or {}).get("options") if isinstance(rd, dict) else None
+    if isinstance(options, dict) and options.get("options"):
+        return {**brief_data, "operator_decision": options}
+    return brief_data
+
 
 def _map_node_type(task_type: str) -> str:
     """Map WA task types to dag_nodes.node_type enum."""

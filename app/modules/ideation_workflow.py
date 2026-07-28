@@ -489,6 +489,35 @@ async def research_and_compile(
                 "phase2_distill: job_id=%s entry_count=%d", job_id, len(entries),
             )
 
+        # §17.663 — surface the key operator DECISION from the researched facts
+        # so the DAG can build an explicit `decision` node for it (reuses the
+        # §17.662 machinery). Only-when-applicable: None for a straightforward
+        # brief with no genuine branch. Fail-soft — never blocks Phase 2.
+        research_options = None
+        if entries and settings.research_options_enabled:
+            try:
+                from app.modules.research_agent import _generate_options
+                from app.modules.research_state import ResearchState
+                _ostate = ResearchState(
+                    topic=brief.get("title", ""), domain=brief.get("domain", "eng"),
+                )
+                _ostate.all_entries = entries
+                _osummary = " ".join(
+                    e.get("content", "") for e in entries[:12]
+                )[:4000]
+                research_options = await _generate_options(
+                    _ostate, _osummary, overrides=model_overrides,
+                )
+                if research_options:
+                    logger.info(
+                        "phase2_options: job_id=%s decision=%r n_options=%d",
+                        job_id, research_options.get("decision", "")[:60],
+                        len(research_options.get("options", [])),
+                    )
+            except Exception as exc:  # pragma: no cover — fail-soft
+                logger.warning("phase2_options_failed: job_id=%s err=%s", job_id, exc)
+                research_options = None
+
         # Step 3: TOON + Milvus ingest
         toon_rows = format_toon_rows(entries) if entries else []
         ingest_count = 0
@@ -606,6 +635,10 @@ async def research_and_compile(
                         "brief": brief,
                         "research_entries": len(entries),
                         "milvus_ingested": ingest_count,
+                        # §17.663 — the operator decision the research surfaced
+                        # (None when not applicable); generate_dag reads this to
+                        # build a `decision` node.
+                        "options": research_options,
                     }
                 ),
                 "workflow": json.dumps(workflow),
@@ -630,6 +663,9 @@ async def research_and_compile(
             "milvus_ingested": ingest_count,
             "toon_rows": len(toon_rows),
             "github": gh_result,
+            # §17.663 — the operator decision surfaced from research (None when
+            # not applicable); becomes an early `decision` node in the DAG.
+            "options": research_options,
         },
         "workflow": workflow,
         "message": (

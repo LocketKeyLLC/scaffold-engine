@@ -1010,3 +1010,59 @@ class TestDeadEndRetryLoop:
             )
         assert result["attempts"] == 1
         assert not any("dead_end" in w for w in result["warnings"])
+
+
+# ===========================================================================
+# §17.663 — research options → operator_decision → DAG decision node
+# ===========================================================================
+
+
+@pytest.mark.smoke
+class TestOperatorDecisionMerge:
+    """The research-surfaced options (§17.662) thread into the brief as
+    `operator_decision`, so generate_dag's prompt directs a `decision` node."""
+
+    _OPTS = {"decision": "Which firewall?",
+             "options": [{"label": "OPNsense", "fit": "x", "tradeoff": "y"},
+                         {"label": "pfSense", "fit": "x", "tradeoff": "y"}],
+             "suggested": "OPNsense", "why": "z"}
+
+    def test_options_merged_from_json_research_data(self):
+        brief = {"title": "homelab firewall"}
+        out = _dag_gen._brief_with_operator_decision(brief, json.dumps({"options": self._OPTS}))
+        assert out["operator_decision"] == self._OPTS
+        assert out["title"] == "homelab firewall"      # original preserved
+
+    def test_options_merged_from_dict_research_data(self):
+        out = _dag_gen._brief_with_operator_decision({"title": "x"}, {"options": self._OPTS})
+        assert out["operator_decision"] == self._OPTS
+
+    def test_no_options_is_noop(self):
+        brief = {"title": "x"}
+        assert _dag_gen._brief_with_operator_decision(brief, json.dumps({"options": None})) is brief
+        assert _dag_gen._brief_with_operator_decision(brief, None) is brief
+        assert _dag_gen._brief_with_operator_decision(brief, json.dumps({})) is brief
+
+    def test_empty_options_list_is_noop(self):
+        brief = {"title": "x"}
+        rd = json.dumps({"options": {"decision": "d", "options": []}})
+        assert _dag_gen._brief_with_operator_decision(brief, rd) is brief
+
+    def test_existing_operator_decision_not_overwritten(self):
+        brief = {"title": "x", "operator_decision": {"kept": True}}
+        out = _dag_gen._brief_with_operator_decision(brief, json.dumps({"options": self._OPTS}))
+        assert out["operator_decision"] == {"kept": True}
+
+    def test_malformed_research_data_is_safe(self):
+        brief = {"title": "x"}
+        assert _dag_gen._brief_with_operator_decision(brief, "not json{{") is brief
+
+    def test_prompt_directs_decision_node_only_when_present(self):
+        # directive text present + conditional wording
+        assert "operator_decision" in _dag_gen.DAG_PROMPT
+        # merged brief surfaces the decision in the rendered prompt
+        merged = _dag_gen._brief_with_operator_decision(
+            {"title": "x"}, json.dumps({"options": self._OPTS}))
+        rendered = _dag_gen.DAG_PROMPT.format(brief=json.dumps(merged))
+        assert "Which firewall?" in rendered
+        assert '"type": "decision"' in _dag_gen.DAG_PROMPT or "type: \"decision\"" in _dag_gen.DAG_PROMPT

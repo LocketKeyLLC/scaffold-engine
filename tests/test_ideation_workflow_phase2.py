@@ -222,3 +222,66 @@ async def test_compile_tool_call_immune_to_reasoning_prose():
     tools_arg = _mod.model_router.tool_call.call_args.kwargs["tools"]
     assert tools_arg[0].name == "emit_execution_plan"
     assert result["workflow"]["compiled_prompt"] == "Build it"
+
+
+@pytest.mark.smoke
+async def test_research_surfaces_operator_options():
+    """§17.663 — a decision-shaped brief surfaces operator options, which land in
+    research_summary (and research_data) so generate_dag can build a decision node."""
+    claimed = {
+        "research_data": {
+            "feasibility": {"recommended_research_queries": ["firewall"]},
+            "brief": {"title": "homelab firewall", "domain": "eng"},
+        },
+        "refined_brief": None,
+    }
+    db = _mock_db_for_claim(claimed)
+    _mod.search_searxng = AsyncMock(return_value=[
+        {"title": "FW", "url": "https://e.com/a", "content": "opnsense vs pfsense"},
+    ])
+    _mod.model_router = MagicMock()
+    _mod.model_router.tool_call = AsyncMock(return_value=_tool_response({
+        "compiled_prompt": "x", "workflow_steps": [], "configuration": {"domain": "eng"}}))
+    _mod.distill_entries = AsyncMock(return_value=[{"content": "opnsense vs pfsense"}])
+    _mod.ingest_entries = AsyncMock(return_value={"new": 1, "versioned": 0})
+    _mod.format_toon_rows = MagicMock(return_value=["r"])
+
+    opts = {"decision": "Which firewall?",
+            "options": [{"label": "OPNsense", "fit": "x", "tradeoff": "y"},
+                        {"label": "pfSense", "fit": "x", "tradeoff": "y"}],
+            "suggested": "OPNsense", "why": "z"}
+    import app.modules.research_agent as ra
+    with patch.object(ra, "_generate_options", AsyncMock(return_value=opts)):
+        result = await _mod.research_and_compile(job_id="job-opt", db=db)
+
+    assert result["status"] == "planning"
+    assert result["research_summary"]["options"] == opts
+
+
+@pytest.mark.smoke
+async def test_research_no_options_for_factual_brief():
+    """Only-when-applicable: a factual brief surfaces no options (None)."""
+    claimed = {
+        "research_data": {
+            "feasibility": {"recommended_research_queries": ["postgres port"]},
+            "brief": {"title": "default postgres port", "domain": "eng"},
+        },
+        "refined_brief": None,
+    }
+    db = _mock_db_for_claim(claimed)
+    _mod.search_searxng = AsyncMock(return_value=[
+        {"title": "PG", "url": "https://e.com/a", "content": "5432"},
+    ])
+    _mod.model_router = MagicMock()
+    _mod.model_router.tool_call = AsyncMock(return_value=_tool_response({
+        "compiled_prompt": "x", "workflow_steps": [], "configuration": {"domain": "eng"}}))
+    _mod.distill_entries = AsyncMock(return_value=[{"content": "5432"}])
+    _mod.ingest_entries = AsyncMock(return_value={"new": 1, "versioned": 0})
+    _mod.format_toon_rows = MagicMock(return_value=["r"])
+
+    import app.modules.research_agent as ra
+    with patch.object(ra, "_generate_options", AsyncMock(return_value=None)):
+        result = await _mod.research_and_compile(job_id="job-fact", db=db)
+
+    assert result["status"] == "planning"
+    assert result["research_summary"]["options"] is None

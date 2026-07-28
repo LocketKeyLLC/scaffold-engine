@@ -22049,6 +22049,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.663 Feature — research → decision-node: a surfaced option set becomes an explicit DAG branch (2026-07-27)
+
+**Follow-on to §17.662** (user: "wire research→decision-node next"). §17.662 surfaced user-tailored options in the research *output*; this threads them into the *plan* so the DAG itself branches on the choice and §17.654 assist mode presents it one-at-a-time. The `decision` node type already existed — this connects research's surfaced options to it.
+
+- **Phase 2 (`ideation_workflow.research_and_compile`):** after distilling the researched facts, it reuses the §17.662 `_generate_options` (constructing a lightweight `ResearchState` from the entries) to surface the key operator decision — only-when-applicable, fail-soft, non-blocking. The result is stored on the job's `research_data['options']` and echoed in the `research_summary` response. (Phase 2 has its own research path — SearXNG → distill → ingest → compile — distinct from standalone `/research`, so it never produced options before.)
+- **`generate_dag`:** now also `SELECT`s `j.research_data`; a new `_brief_with_operator_decision(brief_data, research_data)` helper merges `research_data['options']` into the brief as `operator_decision` **before** the DAG input hash (so a different surfaced decision correctly re-plans). No-op when there are no options / the brief already carries one / the payload is malformed. The `DAG_PROMPT` gained a **conditional** directive: *if (and only if) the brief has an `operator_decision`, include an early `type:"decision"` node named for it, list its options in `notes`, and make implementation tasks depend on it.* Absent options → no decision node (only-when-applicable at the DAG level too).
+
+**Verification.** Unit — **+9** (`_brief_with_operator_decision` matrix: json/dict research_data, no-options/empty-list/malformed no-ops, existing-decision-not-overwritten, prompt directive renders the decision) + **+2** Phase 2 (surfaces options into `research_summary` when decision-shaped; None for a factual brief); dag_generator **69**, ideation Phase 1/2 + research-summary suites **112 passed** total, no regressions. **End-to-end live smoke** (real `model_general`, `_generate_dag_with_validator` on a brief carrying `operator_decision`): produced a 6-node DAG whose **T1 is a `decision` node** ("Choose firewall platform") with the three options + suggestion in its `notes`, downstream install/config nodes depending on it — the plan branches on the operator's choice. Orchestrator restarted (no hot-reload). No API-schema change. **The §17.662→§17.663 arc closes the loop: research surfaces the choice, the DAG branches on it, and assist mode (§17.654) walks the operator through it one decision at a time.**
+
+---
+
 ### §17.662 Feature — research branches out into user-tailored options (only when applicable) (2026-07-27)
 
 **User directive: "the engine gives the user options, only when applicable" → when researching a topic (standalone `/research` OR the research phase of a DAG job), branch out into a number of choices that best suit the user's needs.** Research previously produced only a flat factual summary; it never surfaced the *decision* a user faces. This adds that — while holding hard to "only when applicable": a straightforward factual topic gets **no** options (no fabricated choices).
