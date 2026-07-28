@@ -152,6 +152,24 @@ def test_classify_prompt_routes_project_questions_to_ask():
         assert "current step" in low or "this step" in low
 
 
+@pytest.mark.smoke
+def test_classify_prompt_routes_practical_howto_to_ask():
+    """§17.666 — a practical HOW-TO / 'help me do X' (e.g. 'how do I connect the
+    Proxmox server to my laptop') must classify as ask (→ pivot + give concrete,
+    project-aware steps), NOT question (which just re-renders the current step).
+    The reported failure was exactly this mis-route. Guards the prompt wording."""
+    sys_prompt = assist_guide._CLASSIFY_SYSTEM
+    tool_desc = assist_guide._CLASSIFY_TURN_TOOL.input_schema[
+        "properties"]["intent"]["description"]
+    for blob in (sys_prompt, tool_desc):
+        low = blob.lower()
+        # ask covers practical how-to / help-with-a-task, and says to PIVOT
+        assert "how-to" in low or "how do i" in low
+        assert "help" in low and "pivot" in low
+        # question is scoped to the step's WORDING and must NOT default for how-to
+        assert "wording" in low
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("intent", ["handoff", "status", "explain_plan", "set_env"])
 async def test_classify_turn_passes_through_new_intents(intent):

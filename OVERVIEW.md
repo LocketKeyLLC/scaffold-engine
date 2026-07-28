@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.666 Fix — assist mis-routed practical how-to / task-help to `question` (re-render) instead of `ask` (pivot + assist) (2026-07-27)
+
+**Reported from a live homelab run:** mid-assist, the operator asked "how to help connect the Proxmox VE server to the current laptop" and the engine "did not properly assist — it should pivot and help with tasks." Diagnosis: `classify_turn` routed the message to **`question`** (which just re-renders/clarifies the *current* step via `assist_chat_turn`) instead of **`ask`** (which runs the §17.650 project-aware answer path, `run_step_research` → `research_one`). Confirmed live: "how do I connect X to my laptop" → `question` across every current-step context. The `ask` examples were all *design/decision* questions ("which machine should host WireGuard"); the model never recognized a **practical HOW-TO / "help me do X"** as `ask`, and `question`'s "safe default when unsure" absorbed it — so the operator's task-help request re-showed the step instead of answering it.
+
+- **Fix (`assist_guide.py`, prompt-only):** `ask` now explicitly covers a third category — a practical how-to the operator needs help accomplishing ("how do I connect the Proxmox server to my laptop", "how do I set up X", "help me get Y talking to Z") — and says to **PIVOT and help even when it's a sub-task or a task other than the current step**. `question` is tightened to ONLY clarifying/adjusting the *wording* of the current step, with an explicit "do NOT default here for how-to/help." Changed the tool enum description AND `_CLASSIFY_SYSTEM` (the culprit was the "'how do I do THIS step' → question" example). The `ask` answer path itself was already good (§17.650 threads goal + environment + completed-work digest) — this just lets it run.
+
+**Verification.** Unit — **+1** prompt-content guard (`ask` must cover how-to + "pivot"; `question` scoped to "wording"); classify suite **18 passed**, no regressions. **Live classify smoke: 14/14** — the reported phrasing + 3 how-to variants → `ask`; step-clarifications ("what does the vmbr0 part mean", "redo for older Proxmox", "more detail on bullet 3") → `question`; design/factual → `ask`; advance/submit/fix/handoff/note all unchanged. **Live answer smoke** (`research_one` with a homelab goal + Windows-laptop environment): "how do I connect the Proxmox VE server to my laptop" → concrete, environment-tailored steps ("browse to `https://<management-IP>:8006`, accept the self-signed cert, log in as root…"). Orchestrator restarted. No API-schema change.
+
+---
+
 ### §17.665 Fix — DAG validator hardened against thinking-model empty content (retry-on-empty + headroom) (2026-07-27)
 
 **Surfaced by the §17.664 stress test** (`dag_validator_json_parse_failed: raw=''` on 2/4 DAG generations). The second-pass tool-pick validator (`validate_tool_picks`, `model_general` → qwen3.5:397b-cloud, a *thinking* model) called `generate` once with `max_tokens=1024` — too tight for the model's `<think>` block, so it burned the whole budget reasoning and returned `success=True` with **empty content**. `parse_json_object` → None → the validator **silently failed open** (skipped the audit entirely). This is the §17.463 thinking-model-empty-content lesson, never applied to the *validator* path.
