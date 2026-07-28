@@ -129,6 +129,28 @@ def test_every_guide_prompt_carries_pacing_floor():
         # instruction must NOT reappear (it fought the "too long" fix).
         assert "fewest words" in low, tool
         assert "do not cut it" not in low, tool
+        # §17.674 — a length ceiling + single-golden-path (no inline decision
+        # trees) so a "little too long" step trims instead of sprawling.
+        assert "150-300 words" in low, tool
+        assert "one common path" in low, tool
+        assert "decision tree" in low, tool
+
+
+def test_research_synth_prompt_is_actionable_not_a_source_recap():
+    """§17.674 — the pivot `ask`/research answer must synthesize how to ACHIEVE
+    the goal from the sources (forum/doc/search) adapted to the project, NOT recap
+    what a page says. The live failure: it relayed a forum thread instead of the
+    steps the operator takes."""
+    low = assist_guide._RESEARCH_SYNTH_SYSTEM.lower()
+    # sources are raw material, not the answer
+    assert "raw material" in low
+    assert "mine" in low
+    # explicit ban on the forum-recap failure mode
+    assert "the forum suggests" in low or "according to the thread" in low
+    assert "recap" in low
+    # actionable + beginner-simple
+    assert "steps the operator should take" in low or "what the operator actually does" in low
+    assert "copy-paste" in low
 
 
 def test_every_guide_prompt_carries_target_safety():

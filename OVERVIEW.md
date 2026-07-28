@@ -22049,6 +22049,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.674 Fix — pivot answers ACHIEVE the goal (not a forum recap) + a length ceiling on long walkthroughs (2026-07-28)
+
+**Two issues from a fresh homelab test.** (1) When the operator pivoted mid-step to ask how to do something, the `ask`/research path pulled a forum thread and just **relayed it** ("the thread suggests…") instead of telling them how to achieve the task on their own setup. (2) Step walkthroughs were **a little too long** (the Proxmox-install step ran ~994 words), sprawling into inline "if your setup is X…" branches.
+
+- **Fix 1 — actionable synthesis (`assist_guide._RESEARCH_SYNTH_SYSTEM`, used by `research_one` ← the pivot `ask` path).** Rewrote the synthesis prompt from source-relay ("cite indices [1] for facts") to **goal-achievement**: sources (forum/doc/search) are **raw material to MINE a working procedure from**, then adapt to the project (PROJECT CONTEXT: hosts, IPs, decisions) and hand back the exact steps the operator takes. Explicit ban on the failure mode: NEVER answer with "the forum suggests…", "according to the thread…", or a page recap — "turn it into what the operator actually DOES." Carries the §17.673 beginner floor (plain words, jargon glossed, exact button/command text, one action per step) and stays brief. Version/conflicting sources → pick what fits the project + one-line why.
+- **Fix 2 — length ceiling + single golden path (`_PACING_FRAMING`, all guidance prompts).** Added rules (6) keep a typical step to a short scannable page (~150-300 words; a genuine multi-phase step like an OS install may run longer, but past that it's padding or a folded-in later step — trim); (7) give the ONE common path, NOT an inline decision tree — cover the typical case and invite the reader to just ask if their setup differs (leans on the §17.666 pivot instead of branching inline).
+
+**Verification.** Unit — `test_assist_guide` + `_notes_and_decisions` + `_agent_guidance` **104 passed** (extended the pacing-floor test for the ceiling/golden-path anchors; new `test_research_synth_prompt_is_actionable_not_a_source_recap`). **Live smoke, Fix 1** (`research_one`, "How do I create the bootable Proxmox USB from my Windows laptop?" + Windows-laptop PROJECT CONTEXT, 3 forum/doc sources): returned a **259-word numbered procedure** (Download ISO → Rufus → configure DD mode → write → safely eject), adapted to Windows 11, exact button text, sources cited as facts only — **zero forum-recap tells**. **Live smoke, Fix 2** (same Proxmox-install step as §17.673): **994 → 626 words** (~37% shorter) with the "you should see" confirmations intact.
+
+---
+
 ### §17.673 Feature — guidance floor tuned for the MOST unknowledgeable operator (plain language + confirm-as-you-go) (2026-07-28)
 
 **The ask.** "Walk through the most unknowledgeable person from beginning to end with simple instructions." The beginner floor from §17.640 ("assume a capable beginner… spell out HOW… define jargon") already existed, but it targeted a *capable* beginner and said nothing about *how simply* to write or how the reader confirms a step actually worked — a true novice needs plainer words and a way to tell they're on track.
