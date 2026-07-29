@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.680 Fix — "pick up the \<job\>" resume phrasing (found by extreme NL stress test) (2026-07-29)
+
+**Stress-test finding.** A full natural-language routing sweep (all assist intents + continuity + confirm-gate, driven through the pipeline against the live homelab candidates) passed **38/41 critical checks**; the 3 misses were: two acceptable LLM handler-choices (a "no longer need X step" → `skip`, a "give an example" → `ask`/research — **neither a stale re-render**), and one real gap: **"pick up the palworld job" fell to the planner** instead of reconnecting. `_RESUME_PHRASES` had "pick up where/from/back" but not "pick up **the/my** \<job\>". Fix: added "pick up the/my/that/on", "resume the/my", "back to my" to `_RESUME_PHRASES` (`scaffold_router.py`). Re-verified: 12/12 continuity (new-builds still → planner, all resume phrasings → reconnect/pick-list). +4 unit assertions in `test_scaffold_router_continuity.py`; 236 routing regressions green.
+
+**Stress-test verdict (the recurring "it repeats something irrelevant" class):** across the pivot battery (10 phrasings) **no pivot produced a stale re-render** — every one routed to the note→re-plan path or a reasonable action (skip). Genuine questions re-render; fast verbs, confirm-gate (yes/no ± pending), env, status, plan, submit, fix, handoff all routed correctly. The deterministic pivot + new-build + resume gates (§17.678/679/680) are the durable layer; the LLM classifier is the fuzzy first pass they backstop.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.679 Fix — a PIVOT mid-assist reshapes the plan instead of repeating a now-stale step (2026-07-29)
 
 **The recurring bug (3rd report, reproduced live).** Operator pivots mid-assist ("actually forget SaaS — make this a 5-part e-commerce sequence **instead**") and the engine **re-renders the current step** as if nothing changed — "it repeated something now irrelevant." Root cause traced end-to-end: `classify_turn` is inconsistent on pivots — it routes some to `note` (→ §17.677 re-plan, correct) but drops others to the default `question` intent, which falls through to `assist_chat_turn` (`_assist_handlers.py`) → a `force=True` re-render of the **current** step. Verified live via `/assist/{sid}/interpret`: the "forget SaaS…instead" pivot classified as `question`, and driving the turn re-rendered T1 (the SaaS framing step) while all 6 plan nodes stayed SaaS. Prior point-fixes (§17.638/639/651/666/674) each patched a specific repeat; the classifier prompt kept leaking new pivots through.

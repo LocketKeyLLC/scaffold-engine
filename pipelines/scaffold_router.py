@@ -2406,6 +2406,10 @@ class Pipeline:
         "next step", "back to work", "back to the", "get back to",
         "let's finish", "lets finish", "finish setting up", "finish up",
         "let's keep", "lets keep", "pick back up",
+        # §17.680 — "pick up the/my/that/on <job>" is a resume, not a new idea
+        # (stress test caught "pick up the palworld job" falling to the planner).
+        "pick up the", "pick up my", "pick up that", "pick up on",
+        "resume the", "resume my", "back to my",
     )
 
     def _looks_like_resume(self, msg: str) -> bool:

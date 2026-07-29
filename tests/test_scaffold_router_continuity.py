@@ -59,6 +59,9 @@ class TestLooksLikeResume:
         "let's continue setting up proxmox", "what's next", "whats next",
         "where were we", "keep going", "pick up where we left off",
         "resume", "carry on", "let's finish the firewall", "back to the homelab",
+        # §17.680 — "pick up the/my <job>" resume phrasings (stress-test caught)
+        "pick up the palworld job", "pick up my proxmox work",
+        "resume the firewall", "back to my opnsense job",
     ])
     def test_positive(self, pipe, msg):
         assert pipe._looks_like_resume(msg) is True
