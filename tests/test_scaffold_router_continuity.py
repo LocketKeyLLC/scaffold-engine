@@ -72,6 +72,35 @@ class TestLooksLikeResume:
 
 
 # ---------------------------------------------------------------------------
+# _looks_like_new_build_request (§17.678)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+class TestLooksLikeNewBuild:
+    @pytest.mark.parametrize("msg", [
+        "set up a homelab with proxmox and a palworld server",
+        "build a home lab on my supermicro",
+        "create a new VM for a game server",
+        "deploy a firewall and VPN gateway",
+        "I want to build a media server",
+        "help me set up VLAN isolation",
+        "let's build a kubernetes cluster",
+        "spin up a new container",
+    ])
+    def test_positive(self, pipe, msg):
+        assert pipe._looks_like_new_build_request(msg) is True
+
+    @pytest.mark.parametrize("msg", [
+        "continue the proxmox setup", "what's next", "where were we",
+        "finish setting up the firewall", "the homelab job",
+        "how are you", "",
+    ])
+    def test_negative(self, pipe, msg):
+        assert pipe._looks_like_new_build_request(msg) is False
+
+
+# ---------------------------------------------------------------------------
 # _reconnect_in_progress
 # ---------------------------------------------------------------------------
 
@@ -114,6 +143,28 @@ class TestReconnect:
             r = pipe._reconnect_in_progress("build me a screenshot to PDF tool",
                                             chat_id=None)
         assert r is None
+
+    def test_new_build_with_topic_overlap_does_not_reopen(self, pipe):
+        # §17.678 — the reported bug. A NEW build request that happens to share
+        # ≥2 distinctive tokens with an in-progress job ("proxmox", "installation",
+        # "dual", "xeon" all match CANDS[0]) must NOT reopen it — it goes to the
+        # planner. Pre-§17.678 this strong-matched and reopened the old job.
+        fc, as_ = _mock_assist()
+        with fc, as_:
+            r = pipe._reconnect_in_progress(
+                "set up a new proxmox installation on my dual xeon and add a firewall",
+                chat_id=None)
+        assert r is None  # fell through to the planner, no RESUMED sentinel
+
+    def test_new_build_yields_to_explicit_resume(self, pipe):
+        # A build verb PLUS an explicit resume phrasing is still a resume — the
+        # gate only fires when there is NO resume/continuation signal.
+        fc, as_ = _mock_assist()
+        with fc, as_:
+            out = "".join(pipe._reconnect_in_progress(
+                "let's build out and continue the proxmox installation",
+                chat_id=None))
+        assert out == "RESUMED:11111111-1111-1111-1111-111111111111"
 
     def test_no_candidates_returns_none(self, pipe):
         fc, as_ = _mock_assist(candidates=[])

@@ -2412,6 +2412,32 @@ class Pipeline:
         low = (msg or "").lower()
         return any(p in low for p in self._RESUME_PHRASES)
 
+    # §17.678 — a message that describes NEW work to build/create (a fresh
+    # deliverable), as opposed to referencing or resuming existing work. Used to
+    # stop a topic-rich new idea from strong-matching (and reopening) an old
+    # in-progress job that merely shares vocabulary. Creation verbs only —
+    # "finish"/"continue" are deliberately absent (those are resume, above).
+    _NEW_BUILD_RE = re.compile(
+        # (a) message OPENS with a creation verb ("set up a homelab…", "build…",
+        #     "deploy…"); a trailing noun like "the proxmox setup" does NOT match.
+        r"(?:^\s*(?:please\s+)?(?:build|set\s*up|setup|create|deploy|provision|"
+        r"spin\s*up|stand\s*up|make|design|configure|install)\b)"
+        # (b) OR a request frame anywhere ("i want to build", "help me set up",
+        #     "let's build", "can you create").
+        r"|\b(?:i\s*want\s*(?:to|a|an)|i['’]?d\s*like|i\s*need\s*(?:a|an|to)|"
+        r"help\s*me\s*(?:build|set\s*up|create|deploy|make|configure|design|"
+        r"stand\s*up|spin\s*up|put\s*together|install)|"
+        r"let['’]?s\s*(?:build|create|set\s*up|make|design)|"
+        r"can\s*you\s*(?:build|create|set\s*up|make|design)|"
+        r"make\s*(?:me\s*)?(?:a|an)\b)",
+        re.IGNORECASE,
+    )
+
+    def _looks_like_new_build_request(self, msg: str) -> bool:
+        """§17.678 — True when `msg` frames NEW work to build/create rather than
+        continuing existing work. Deterministic (no LLM)."""
+        return bool(msg) and bool(self._NEW_BUILD_RE.search(msg))
+
     def _reconnect_in_progress(self, msg: str, chat_id: str | None):
         """§17.633 — reconnect a chat with no bound session to IN-PROGRESS assist
         work started elsewhere. Returns a generator (resume stream / pick-list)
@@ -2425,6 +2451,19 @@ class Pipeline:
         cands = _assist.fetch_assist_candidates(self)
         if not cands:
             self.logger.info("continuity: no in-progress candidates → fall through")
+            return None
+        # §17.678 — a fresh natural-language message that describes NEW work to
+        # build ("set up a homelab with Proxmox, a Palworld server, VLANs…")
+        # must NOT be reconnected to an old job just because it shares topic
+        # vocabulary. That message strong-matches the leftover homelab
+        # components (≥2 shared tokens) and reopened one instead of planning a
+        # new build — the reported bug. A new-build request with NO explicit
+        # resume/continuation signal falls through to the planner. Bare topic
+        # references without a build verb still reach the match logic below.
+        if (self._looks_like_new_build_request(msg)
+                and not self._looks_like_resume(msg)
+                and not self._looks_like_assist_continuation(msg)):
+            self.logger.info("continuity: new-build request → planner (no reconnect)")
             return None
         # Strong, unique topic match (≥2 distinctive shared tokens) → resume now.
         match, ambiguous = _assist.match_assist_candidate(msg, cands)

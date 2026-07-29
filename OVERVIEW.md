@@ -22049,6 +22049,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.678 Fix — a fresh new-build request no longer reopens an old job that shares vocabulary (2026-07-29)
+
+**The bug (reproduced live).** Operator opened a fresh OWUI chat and described a NEW homelab build in natural language — and the engine **reopened an old completed component job** (`assist_session_started … reopened=True prev_status=completed`) instead of planning a new build. Root cause: cross-chat continuity (§17.633) treats a **strong topic-token match (≥2 shared distinctive tokens)** as a reconnect signal in `_reconnect_in_progress` (`scaffold_router.py`). A topic-rich new-idea description ("set up a homelab with Proxmox, a Palworld server, VLANs…") shares ≥2 tokens with the leftover homelab component jobs from an earlier umbrella decomposition, so it strong-matched one and `assist_start`-reopened it. The §17.635 guard only downgrades *weak* matches; a rich new idea produces a *strong* match and slipped through.
+
+**The fix.** New deterministic gate `_looks_like_new_build_request` (`_NEW_BUILD_RE`): the message OPENS with a creation verb (build / set up / create / deploy / provision / spin up / stand up / make / design / configure / install) **or** carries a request frame ("i want to build", "help me set up", "let's build", "can you create"). In `_reconnect_in_progress`, a message that reads as a new build **and** has NO explicit resume/continuation signal now falls through to the planner instead of reconnecting. Creation verbs are start-anchored so a trailing noun ("the proxmox **setup**") does NOT trip it; "finish"/"continue" are deliberately absent (those are resume). Bare topic references with no build verb still reach the match logic, and explicit resume ("continue proxmox", "what's next") is unchanged.
+
+**Verification.** Unit — `test_scaffold_router_continuity.py` +14 (new-build detector positives/negatives incl. the "the proxmox setup" noun trap; a new-build-with-topic-overlap message returns None; a new-build-plus-resume message still resumes) → **50 passed**; routing regressions (`assist_chat_routing` / `welcome` / `nl_turns`) **196 passed** total, `--noconftest`. **Live** — drove `_reconnect_in_progress` inside the `open-webui-pipelines` container against the REAL candidates (Palworld / VLAN / Proxmox): the homelab new-build message → `None → planner`; "build a new proxmox server…" → `None → planner`; "continue the proxmox setup" / "what's next" → reconnect/pick-list. Pipelines container restarted (no hot-reload). Builds on [[project_assist_crosschat_continuity]].
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.677 Feature — plan-affecting notes trigger a surface-and-ask re-plan (constraints actually fix the plan) (2026-07-29)
 
 **The gap (reproduced live).** In an active Assist session (Proxmox VE + ZFS build, job `91a94870`, on node `T1`) the operator raised a real constraint — *"No TPM available."* The engine filed it into `assist_sessions.notes` (§17.654) and did **nothing structural**: it never checked whether the constraint invalidates a downstream step, never fixed the plan, never asked. The operator's read: *"the engine isn't implementing what I tell it."* Root cause traced: the whole divergence→replan machinery fires **only** on `action='submit'` (`assist_agent.py:1294`); `record_note` was purely append-only and its text only fed forward into later guidance renders. A note that broke the plan left the plan untouched.
