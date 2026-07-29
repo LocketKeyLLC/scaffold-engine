@@ -66,6 +66,11 @@ class AssistNoteInput(BaseModel):
     )
 
 
+class AssistReplanDecisionInput(BaseModel):
+    # §17.677 — resolve a pending note-triggered plan-fix proposal.
+    decision: Literal["apply", "discard"] = "apply"
+
+
 class AssistGuideInput(BaseModel):
     node_key: Optional[str] = Field(
         default=None, description="Defaults to the session's current step."
@@ -586,7 +591,41 @@ async def assist_note(session_id: str, body: AssistNoteInput, db=Depends(get_db)
     )
     if note is None:
         raise HTTPException(status_code=409, detail="empty note text")
-    return {"recorded": True, "session_id": session_id, "note": note}
+    # §17.677 — a plan-affecting note (constraint/decision/addition/preference)
+    # gets an impact pass over the pending nodes; a non-empty proposal is
+    # surfaced for the operator to confirm via POST /assist/{sid}/replan/apply.
+    proposal = await assist_agent.assess_note_impact(
+        session_id=session_id, note_kind=note["kind"], note_text=note["text"], db=db,
+    )
+    out = {"recorded": True, "session_id": session_id, "note": note}
+    if proposal:
+        out["replan_proposal"] = proposal
+    return out
+
+
+@router.get("/assist/{session_id}/replan")
+async def assist_replan_get(session_id: str, db=Depends(get_db)):
+    """§17.677 — the session's un-resolved note-triggered plan-fix proposal.
+    Returns ``{pending: <proposal>|null}`` (used by the pipeline confirm-gate)."""
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    pending = await assist_agent.get_pending_replan(session_id=session_id, db=db)
+    return {"session_id": session_id, "pending": pending}
+
+
+@router.post("/assist/{session_id}/replan/apply")
+async def assist_replan_apply(
+    session_id: str, body: AssistReplanDecisionInput, db=Depends(get_db),
+):
+    """§17.677 — apply or discard the session's pending note-triggered plan fix."""
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    result = await assist_agent.apply_pending_replan(
+        session_id=session_id, decision=body.decision, db=db,
+    )
+    return {"session_id": session_id, **result}
 
 
 @router.get("/assist/{session_id}/notes")

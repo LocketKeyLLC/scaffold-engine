@@ -647,6 +647,12 @@ class Settings(BaseSettings):
     # known to be sufficient).
     assist_replan_regen_enabled: bool = True
     assist_replan_regen_max_tokens: int = Field(default=2048, ge=512, le=8192)
+    # §17.677 — when the operator raises a plan-affecting note mid-session
+    # (constraint/decision/addition/preference), run an LLM impact analysis over
+    # the still-pending nodes and surface a proposed plan fix for confirmation
+    # ("surface-and-ask", not silent auto-rewrite). Disable to keep notes purely
+    # feed-forward-as-text (§17.654 behavior) with no impact analysis.
+    assist_note_replan_enabled: bool = True
     # §17.486 — Assist Mode guidance layer. When a human claims a step, the
     # engine generates a human-executable walkthrough (copy-paste terminal
     # commands for shell/codegen work, step-by-step instructions for

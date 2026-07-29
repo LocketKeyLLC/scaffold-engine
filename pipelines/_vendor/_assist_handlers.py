@@ -1443,6 +1443,86 @@ def assist_plan(
     yield "\n".join(lines)
 
 
+# §17.677 — a pending note-replan proposal is resolved by a plain yes/no. Kept
+# deterministic (no LLM) so the confirm turn is cheap and unambiguous.
+_REPLAN_YES = {
+    "yes", "y", "yeah", "yep", "yup", "apply", "apply it", "apply them",
+    "do it", "go ahead", "sure", "ok", "okay", "confirm", "confirmed",
+    "make the changes", "update the plan", "fix the plan", "sounds good",
+}
+_REPLAN_NO = {
+    "no", "n", "nope", "nah", "cancel", "discard", "skip it", "leave it",
+    "leave it alone", "keep it", "keep as is", "don't", "dont", "no thanks",
+    "never mind", "nevermind", "don't change it", "dont change it",
+}
+
+
+def _replan_decision(msg: str) -> str | None:
+    """'apply' / 'discard' for a bare yes/no, else None."""
+    norm = (msg or "").strip().lower().strip(".!?,;: ").strip()
+    if norm in _REPLAN_YES:
+        return "apply"
+    if norm in _REPLAN_NO:
+        return "discard"
+    return None
+
+
+def fetch_pending_replan(pipe, session_id: str) -> dict | None:
+    """GET /assist/{sid}/replan → the pending proposal, or None. Fail-soft."""
+    try:
+        r = _ss(pipe).get(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/replan",
+            headers=pipe._auth_headers(),
+            timeout=pipe.valves.request_timeout,
+        )
+        if r.status_code < 400:
+            d = r.json()
+            if isinstance(d, dict):
+                return d.get("pending")
+    except (requests.exceptions.RequestException, ValueError):
+        return None
+    return None
+
+
+def assist_replan_confirm(
+    pipe, session_id: str, decision: str,
+) -> Generator[str, None, None]:
+    """POST /assist/{sid}/replan/apply and render the outcome."""
+    try:
+        r = _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/replan/apply",
+            json={"decision": decision},
+            headers=pipe._auth_headers(),
+            timeout=pipe.valves.request_timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError:
+        d = {}
+    if decision == "discard" or not (isinstance(d, dict) and d.get("applied")):
+        yield ("👍 Left the plan unchanged — the note is still recorded and "
+               "carried forward. Say _\"next\"_ to continue.")
+        return
+    revised = d.get("revised") or []
+    dropped = d.get("dropped") or []
+    parts = ["✅ Plan updated."]
+    if revised:
+        parts.append(
+            f"Revised {', '.join(revised)} (re-rendered when you next view "
+            f"{'them' if len(revised) != 1 else 'it'})."
+        )
+    if dropped:
+        parts.append(f"Dropped {', '.join(dropped)}.")
+    if not revised and not dropped:
+        parts.append("No pending steps needed changing after all.")
+    parts.append("Say _\"next\"_ to continue.")
+    yield " ".join(parts)
+
+
 def assist_nl_turn(
     pipe, session_id: str, msg: str, *,
     node_key: str | None = None, chat_id: str | None = None,
@@ -1456,6 +1536,13 @@ def assist_nl_turn(
     research), status/explain_plan (the DAG), set_env/set_verbosity (environment
     capture). Falls back to the step-guidance turn for questions/refinements.
     Slash commands bypass this entirely (dispatched earlier)."""
+    # §17.677 — a bare yes/no resolves a pending note-triggered plan fix before
+    # any other classification. Only pays the GET when the message *looks* like a
+    # confirm (deterministic phrase match), so normal turns are unaffected.
+    decision = _replan_decision(msg)
+    if decision and fetch_pending_replan(pipe, session_id):
+        yield from assist_replan_confirm(pipe, session_id, decision)
+        return
     intent = fast_classify_turn(msg)
     evidence, error_text, query, note_text, note_kind = "", "", "", "", "note"
     if intent is None:
@@ -1915,7 +2002,37 @@ def assist_note_cmd(
     if r.status_code >= 400:
         yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
     label = kind if kind and kind != "note" else "note"
-    yield (
-        f"📌 Noted ({label}): {note_text.strip()}\n\n"
-        "_I'll carry this forward into the remaining steps. Say _\"next\"_ to continue._"
-    )
+    # §17.677 — a plan-affecting note may come back with a proposed plan fix.
+    proposal = None
+    try:
+        d = r.json()
+        if isinstance(d, dict):
+            proposal = d.get("replan_proposal")
+    except ValueError:
+        proposal = None
+    yield f"📌 Noted ({label}): {note_text.strip()}\n\n"
+    affected = (proposal or {}).get("proposals") if isinstance(proposal, dict) else None
+    if not affected:
+        yield "_I'll carry this forward into the remaining steps. Say _\"next\"_ to continue._"
+        return
+    # Surface-and-ask: show the impact, wait for a yes/no before rewriting.
+    lines = [
+        f"This affects **{len(affected)}** pending "
+        f"step{'s' if len(affected) != 1 else ''}:",
+        "",
+    ]
+    for p in affected:
+        if not isinstance(p, dict):
+            continue
+        nk = p.get("node_key", "?")
+        act = "drop" if p.get("action") == "drop" else "revise"
+        assumption = (p.get("current_assumption") or "").strip()
+        change = (p.get("proposed_change") or "").strip()
+        head = f"- **{nk}** ({act})"
+        if assumption:
+            head += f" — {assumption}"
+        lines.append(head)
+        if change:
+            lines.append(f"    → {change}")
+    lines += ["", "**Apply these plan changes?** (yes / no / edit)"]
+    yield "\n".join(lines)

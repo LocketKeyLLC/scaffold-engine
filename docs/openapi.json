@@ -358,6 +358,21 @@
         "title": "AssistNoteInput",
         "type": "object"
       },
+      "AssistReplanDecisionInput": {
+        "properties": {
+          "decision": {
+            "default": "apply",
+            "enum": [
+              "apply",
+              "discard"
+            ],
+            "title": "Decision",
+            "type": "string"
+          }
+        },
+        "title": "AssistReplanDecisionInput",
+        "type": "object"
+      },
       "AssistResearchInput": {
         "properties": {
           "node_key": {
@@ -4572,6 +4587,108 @@
         ]
       }
     },
+    "/assist/{session_id}/replan": {
+      "get": {
+        "description": "§17.677 — the session's un-resolved note-triggered plan-fix proposal.\nReturns ``{pending: <proposal>|null}`` (used by the pipeline confirm-gate).",
+        "operationId": "assist_replan_get_assist__session_id__replan_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Replan Get",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/replan/apply": {
+      "post": {
+        "description": "§17.677 — apply or discard the session's pending note-triggered plan fix.",
+        "operationId": "assist_replan_apply_assist__session_id__replan_apply_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistReplanDecisionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Replan Apply",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/{session_id}/research": {
       "post": {
         "description": "Confirm an operator-supplied question via SearXNG/Milvus + a short\ncited synthesis. A side query — not persisted to the step's guidance.",
@@ -8043,7 +8160,7 @@
     },
     "/route": {
       "post": {
-        "description": "Classify a plain-language top-level message into a read-only engine\nintent (status / results / rag_query / jobs_list / jobs_find / model_* /\nhelp), so the OWUI pipeline can drive the right component by talking.\n\nFail-soft: a classifier hiccup or a non-command message returns\n``intent='none'`` (confidence ``low``); the pipeline then falls through to\ntriage untouched.",
+        "description": "Classify a plain-language top-level message into an engine intent\n(reads: status / results / rag_query / jobs_* / model_* / schedule_list /\nresearch_list / research_find / logs / cost / health / config / work_* /\nhelp; plus the §17.629/§17.630 write & delete verbs), so the OWUI pipeline\ncan drive the right component by talking.\n\nFail-soft: a classifier hiccup or a non-command message returns\n``intent='none'`` (confidence ``low``); the pipeline then falls through to\ntriage untouched.",
         "operationId": "route_command_route_post",
         "requestBody": {
           "content": {

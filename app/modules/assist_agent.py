@@ -1669,6 +1669,143 @@ async def record_note(
     return {"kind": k, "node_key": node_key, "text": note_text}
 
 
+async def assess_note_impact(
+    *, session_id: str, note_kind: str, note_text: str, db,
+) -> dict | None:
+    """§17.677 — after a plan-affecting note is recorded, ask whether it
+    invalidates any pending node and, if so, stash a proposal on the session for
+    the operator to confirm.
+
+    Gated by ``assist_note_replan_enabled`` and by kind: a generic ``note`` is
+    pure feed-forward text (§17.654) and skips analysis. Returns the proposal
+    dict (``{note_text, note_kind, proposals, ts}``) when there's something to
+    confirm, else ``None``. Fail-soft: any error leaves the note recorded and
+    returns ``None`` — the impact pass must never break note-taking.
+    """
+    from datetime import datetime, timezone
+
+    from app.config import settings
+    from app.modules import assist_replan
+
+    if not settings.assist_note_replan_enabled:
+        return None
+    # A generic 'note' is a reminder, not a plan-shaping requirement.
+    if (note_kind or "note") == "note":
+        return None
+    sess = (await db.execute(
+        text("SELECT job_id, status FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess or sess["status"] not in ("active", "paused"):
+        return None
+    job_id = str(sess["job_id"])
+    try:
+        impact = await assist_replan.analyze_note_impact(
+            db=db, job_id=job_id, note_text=note_text, note_kind=note_kind,
+        )
+    except Exception as e:  # noqa: BLE001 — never break the note on analysis
+        logger.warning("assess_note_impact_failed session_id=%s err=%r", session_id, e)
+        return None
+    affected = impact.get("affected") or []
+    if not affected:
+        return None
+    proposal = {
+        "note_text": note_text,
+        "note_kind": note_kind,
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "proposals": affected,
+    }
+    # Read-modify-write merge — never clobber other metadata keys (mirrors
+    # set_environment). One pending proposal at a time; a fresh note overwrites
+    # any unresolved prior one.
+    await db.execute(
+        text("""
+            UPDATE assist_sessions
+               SET metadata = COALESCE(metadata, '{}'::jsonb)
+                     || CAST(:patch AS jsonb),
+                   updated_at = NOW()
+             WHERE id = :sid
+        """),
+        {"sid": session_id, "patch": json.dumps({"pending_replan": proposal})},
+    )
+    await db.commit()
+    logger.info(
+        "assist_note_replan_proposed session_id=%s kind=%s affected=%d",
+        session_id, note_kind, len(affected),
+    )
+    return proposal
+
+
+def _pending_replan_from_metadata(metadata: Any) -> dict | None:
+    """§17.677 — pull ``metadata.pending_replan`` out of a session's metadata
+    JSONB, tolerating None / a JSON-string body. Returns None when absent."""
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (ValueError, TypeError):
+            metadata = {}
+    pr = (metadata or {}).get("pending_replan") if isinstance(metadata, dict) else None
+    return pr if isinstance(pr, dict) else None
+
+
+async def get_pending_replan(*, session_id: str, db) -> dict | None:
+    """§17.677 — the session's un-resolved note-replan proposal, or None."""
+    row = (await db.execute(
+        text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not row:
+        return None
+    return _pending_replan_from_metadata(row.get("metadata"))
+
+
+async def apply_pending_replan(
+    *, session_id: str, decision: str, db,
+) -> dict:
+    """§17.677 — resolve the session's pending note-replan proposal.
+
+    ``decision='apply'`` mutates the pending plan (drop/revise affected nodes)
+    then clears the proposal; ``decision='discard'`` clears it and keeps the
+    note as-is. Idempotent when nothing is pending. Returns a summary the
+    pipeline renders back to the operator.
+    """
+    from app.modules import assist_replan
+
+    sess = (await db.execute(
+        text("SELECT job_id, metadata FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    pending = _pending_replan_from_metadata(sess.get("metadata"))
+    if not pending:
+        return {"applied": False, "reason": "no_pending"}
+
+    summary: dict
+    if decision == "apply":
+        result = await assist_replan.apply_note_replan(
+            db=db, session_id=session_id, job_id=str(sess["job_id"]),
+            proposals=pending.get("proposals") or [],
+        )
+        summary = {"applied": True, **result}
+    else:
+        summary = {"applied": False, "discarded": True}
+
+    # Clear the pending proposal regardless of outcome (apply commits inside
+    # apply_note_replan; the key-removal is a separate committed statement).
+    await db.execute(
+        text("""
+            UPDATE assist_sessions
+               SET metadata = COALESCE(metadata, '{}'::jsonb) - 'pending_replan',
+                   updated_at = NOW()
+             WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )
+    await db.commit()
+    return summary
+
+
 def _coerce_notes(value: Any) -> list[dict]:
     """Normalize an ``assist_sessions.notes`` JSONB value to a list of dicts.
     Tolerates None / a JSON string (defensive decode, mirroring
