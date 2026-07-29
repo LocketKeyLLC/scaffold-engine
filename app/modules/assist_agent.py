@@ -239,6 +239,20 @@ async def start_assist_session(
             """),
             {"sid": session_id},
         )
+        # §17.681 — the ON CONFLICT above only bumps last_activity_at; it does
+        # NOT touch status. A prior session that finished (completed) or was
+        # reaped (abandoned/cancelled) therefore stayed terminal, so the reopened
+        # session yielded NO steps: get_next_step bails on status != 'active' and
+        # _maybe_finalize_session only finalizes active|paused. Force it live so
+        # the deliberate hands-on redo actually works.
+        await db.execute(
+            text("""
+                UPDATE assist_sessions
+                   SET status = 'active', completed_at = NULL, updated_at = NOW()
+                 WHERE id = :sid AND status <> 'active'
+            """),
+            {"sid": session_id},
+        )
 
     total = (await db.execute(
         text("SELECT COUNT(*) FROM assist_steps WHERE session_id = :sid"),
@@ -261,7 +275,10 @@ async def start_assist_session(
     return {
         "session_id": session_id,
         "job_id": job_id,
-        "status": sess_row["status"],
+        # §17.681 — on reopen we forced the (possibly-terminal) session back to
+        # 'active' above; sess_row was RETURNED from the pre-reset ON CONFLICT, so
+        # report the live status, not the stale one.
+        "status": "active" if reopening else sess_row["status"],
         "handoff_policy": sess_row["handoff_policy"],
         "replan_policy": sess_row["replan_policy"],
         "total_steps": total,
@@ -880,14 +897,36 @@ ASSIST_ELIGIBLE_STATUSES = (
     "completed", "cancelled",
 )
 
+# §17.681 — the subset that counts as GENUINELY IN-PROGRESS (not terminal).
+# The AUTOMATIC cross-chat continuity surfaces (_reconnect_in_progress,
+# _in_progress_banner) must draw from THIS set, not the full eligible list:
+# a bare "continue" / topic-matching message must never silently re-open a
+# job the user already finished OR that the reaper cancelled after abandonment
+# (cleanup turns an abandoned assist session into job='cancelled', which — being
+# in ASSIST_ELIGIBLE_STATUSES — otherwise lingered as a reconnect candidate
+# forever: the reported "reopens something it never finished" bug). Terminal
+# re-open for a deliberate hands-on redo stays available via the EXPLICIT
+# `/assist <job_id>` path, which never consults this list.
+ASSIST_INPROGRESS_STATUSES = tuple(
+    s for s in ASSIST_ELIGIBLE_STATUSES if s not in ("completed", "cancelled")
+)
 
-async def list_assist_candidates(*, db, limit: int = 25) -> list[dict]:
+
+async def list_assist_candidates(
+    *, db, limit: int = 25, in_progress: bool = False,
+) -> list[dict]:
     """§17.626 — jobs a user could step through in Assist Mode, newest first.
 
     Returns ``[{job_id, title, status, node_count}]``. Excludes umbrella jobs
     with no DAG of their own (they run autonomously through component children)
     and 0-node jobs (nothing to assist). Used by the natural-language 'start'
-    path to map a phrase like 'set up proxmox' to an existing job."""
+    path to map a phrase like 'set up proxmox' to an existing job.
+
+    §17.681 — ``in_progress=True`` restricts to non-terminal jobs
+    (``ASSIST_INPROGRESS_STATUSES``). The automatic continuity/banner paths pass
+    it so a topic match or "continue" can't resurface a completed/cancelled job;
+    the explicit-redo default (``False``) keeps the full re-openable list."""
+    statuses = ASSIST_INPROGRESS_STATUSES if in_progress else ASSIST_ELIGIBLE_STATUSES
     rows = (await db.execute(
         text("""
             SELECT j.id, j.title, j.status, j.job_type,
@@ -897,7 +936,7 @@ async def list_assist_candidates(*, db, limit: int = 25) -> list[dict]:
              ORDER BY j.created_at DESC
              LIMIT :lim
         """),
-        {"statuses": list(ASSIST_ELIGIBLE_STATUSES), "lim": limit},
+        {"statuses": list(statuses), "lim": limit},
     )).mappings().all()
     out: list[dict] = []
     for r in rows:

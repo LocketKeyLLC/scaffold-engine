@@ -82,6 +82,7 @@ async def test_start_session_reopens_completed_job():
         _result(),                          # UPDATE jobs status
         _result(),                          # INSERT seed assist_steps
         _result(),                          # UPDATE assist_steps reset (re-open)
+        _result(),                          # §17.681 UPDATE assist_sessions → active
         _result(scalar=7),                  # SELECT total
         _result(scalar=7),                  # SELECT pending
     ]
@@ -89,7 +90,18 @@ async def test_start_session_reopens_completed_job():
         job_id="99999999-9999-9999-9999-999999999999", db=db,
     )
     assert out["reopened"] is True
+    # §17.681 — reopened sessions always report 'active' (the ON CONFLICT return
+    # carried the stale terminal status before the forced reset).
+    assert out["status"] == "active"
     assert out["pending_steps"] == 7
+    # §17.681 — the session status reset must have run (else a reopened session
+    # keeps a terminal status and get_next_step yields nothing).
+    sess_reset = [
+        str(c.args[0]) for c in db.execute.await_args_list
+        if c.args and "assist_sessions" in str(c.args[0])
+        and "status = 'active'" in str(c.args[0])
+    ]
+    assert sess_reset, "re-open did not reset the assist session to active"
     assert db.commit.await_count == 1
     # The dag_nodes reset must have run — assert one UPDATE targeted dag_nodes
     # back to pending.

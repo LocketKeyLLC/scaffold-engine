@@ -219,9 +219,18 @@ async def assist_start(body: AssistStartInput, db=Depends(get_db)):
 # route match (FastAPI matches in declaration order; otherwise `candidates`
 # binds to `{session_id}`).
 @router.get("/assist/candidates")
-async def assist_candidates(db=Depends(get_db)):
-    """Jobs a user could step through in Assist Mode (natural-language start)."""
-    return {"candidates": await assist_agent.list_assist_candidates(db=db)}
+async def assist_candidates(in_progress: bool = False, db=Depends(get_db)):
+    """Jobs a user could step through in Assist Mode (natural-language start).
+
+    §17.681 — ``in_progress=true`` excludes terminal (completed/cancelled) jobs.
+    The automatic cross-chat continuity paths pass it so a "continue"/topic
+    match can't silently re-open a finished or reaper-cancelled job; the
+    explicit-redo default keeps the full re-openable list."""
+    return {
+        "candidates": await assist_agent.list_assist_candidates(
+            db=db, in_progress=in_progress,
+        )
+    }
 
 
 @router.get("/assist/{session_id}")

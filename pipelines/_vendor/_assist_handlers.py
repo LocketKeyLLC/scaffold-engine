@@ -1763,10 +1763,17 @@ def resolve_candidate_pick(pipe, msg: str, pending_ids: list) -> str | None:
 
 
 def fetch_assist_candidates(pipe) -> list:
-    """GET /assist/candidates → list (fail-soft → [])."""
+    """GET /assist/candidates → list (fail-soft → []).
+
+    §17.681 — always requests ``in_progress=true``: every live caller here is an
+    AUTOMATIC continuity surface (reconnect / banner / pick-list follow-up), and
+    those must never resurface a terminal (completed/cancelled) job on a bare
+    "continue" or topic match. Deliberate terminal re-opens go through the
+    explicit `/assist <job_id>` path, which doesn't touch this helper."""
     try:
         r = _ss(pipe).get(
             f"{pipe.valves.orchestrator_url}/assist/candidates",
+            params={"in_progress": "true"},
             headers=pipe._auth_headers(),
             timeout=pipe.valves.request_timeout,
         )

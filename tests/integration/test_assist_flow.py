@@ -299,3 +299,92 @@ async def test_friction_log(seeded_job):
     assert len(notes) == 1
     assert "docs were wrong" in notes[0]["friction_note"]
     assert "took 3 attempts" in notes[0]["friction_note"]
+
+
+async def _add_one_node(job_id: str) -> None:
+    """A single dag_node so list_assist_candidates counts the job (node_count>0)."""
+    async with async_session() as db:
+        await db.execute(
+            text("""
+                INSERT INTO dag_nodes (job_id, node_key, title, depends_on,
+                                       execution_order, prompt_template, tool, domain)
+                VALUES (:jid, 'T1', 'only step', '{}', 1, 'p', 'LLM', 'eng')
+            """),
+            {"jid": job_id},
+        )
+        await db.commit()
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
+async def test_candidates_in_progress_excludes_terminal(insert_job):
+    """§17.681 — the AUTOMATIC continuity pool (in_progress=True) must exclude
+    terminal (completed/cancelled) jobs, so a "continue"/topic-match message can
+    never silently re-open a finished or reaper-cancelled job. The explicit-redo
+    default (in_progress=False) still lists them."""
+    live_id = await insert_job(status="assisted_executing", title="live proxmox build")
+    cancelled_id = await insert_job(status="cancelled", title="dead palworld build")
+    completed_id = await insert_job(status="completed", title="done vlan build")
+    for jid in (live_id, cancelled_id, completed_id):
+        await _add_one_node(jid)
+
+    async with async_session() as db:
+        in_prog = await assist_agent.list_assist_candidates(db=db, in_progress=True)
+        full = await assist_agent.list_assist_candidates(db=db, in_progress=False)
+
+    in_prog_ids = {c["job_id"] for c in in_prog}
+    full_ids = {c["job_id"] for c in full}
+    # In-progress pool: the live job only.
+    assert live_id in in_prog_ids
+    assert cancelled_id not in in_prog_ids
+    assert completed_id not in in_prog_ids
+    # Explicit-redo default: all three re-openable.
+    assert {live_id, cancelled_id, completed_id} <= full_ids
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
+async def test_reopen_terminal_session_resets_to_active(seeded_job):
+    """§17.681 — re-opening a job whose PRIOR assist session finished must force
+    the session back to 'active'. Before the fix, ON CONFLICT only bumped
+    last_activity_at, so the reused session kept status='completed' and
+    get_next_step returned None — the redo yielded no steps."""
+    job_id = seeded_job
+    # Run a full walkthrough so session + job reach 'completed'.
+    async with async_session() as db:
+        out = await assist_agent.start_assist_session(
+            job_id=job_id, replan_policy="disabled", db=db,
+        )
+        sid = out["session_id"]
+    for nk in ("T1", "T2", "T3"):
+        async with async_session() as db:
+            step = await assist_agent.get_next_step(session_id=sid, db=db)
+            assert step is not None and step["node_key"] == nk
+            await assist_agent.submit_step(
+                session_id=sid, node_key=nk, evidence=f"did {nk}",
+                evidence_kind="text", action="submit", db=db,
+            )
+    async with async_session() as db:
+        sess = await assist_agent.get_session(session_id=sid, db=db)
+    assert sess["status"] == "completed"  # precondition for the reopen test
+
+    # Re-open the now-completed job.
+    async with async_session() as db:
+        reopened = await assist_agent.start_assist_session(
+            job_id=job_id, replan_policy="disabled", db=db,
+        )
+    # Same session row reused, but forced live.
+    assert reopened["session_id"] == sid
+    assert reopened["reopened"] is True
+    assert reopened["status"] == "active"
+
+    async with async_session() as db:
+        sess2 = await assist_agent.get_session(session_id=sid, db=db)
+    assert sess2["status"] == "active", "reopened session stuck in terminal status"
+
+    # The redo must actually yield a step (the core symptom of the bug).
+    async with async_session() as db:
+        step = await assist_agent.get_next_step(session_id=sid, db=db)
+    assert step is not None and step["node_key"] == "T1", (
+        "reopened session yielded no steps — get_next_step bailed on stale status"
+    )

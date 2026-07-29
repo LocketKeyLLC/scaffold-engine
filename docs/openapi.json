@@ -3766,8 +3766,20 @@
     },
     "/assist/candidates": {
       "get": {
-        "description": "Jobs a user could step through in Assist Mode (natural-language start).",
+        "description": "Jobs a user could step through in Assist Mode (natural-language start).\n\n§17.681 — ``in_progress=true`` excludes terminal (completed/cancelled) jobs.\nThe automatic cross-chat continuity paths pass it so a \"continue\"/topic\nmatch can't silently re-open a finished or reaper-cancelled job; the\nexplicit-redo default keeps the full re-openable list.",
         "operationId": "assist_candidates_assist_candidates_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "in_progress",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "In Progress",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -3776,6 +3788,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [
