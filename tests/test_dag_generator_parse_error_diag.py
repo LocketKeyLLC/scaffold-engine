@@ -132,12 +132,13 @@ class TestGenerateDagParseErrorField:
             }
 
         # Mock the DB-dependent pieces: job lookup + _fail_job.
-        # The lookup returns a 4-tuple (status, brief, stored_hash, node_count)
-        # via `result.first()`. We use planning status + a brief + no
-        # existing nodes so we land at the LLM call cleanly.
+        # The lookup returns a 5-tuple (status, brief, stored_hash, research_data,
+        # node_count) via `result.first()` — research_data was added to the SELECT
+        # and unpack; this mock had a stale 4-tuple. We use planning status + a
+        # brief + no existing nodes so we land at the LLM call cleanly.
         job_result = MagicMock()
         job_result.first.return_value = (
-            "planning", {"title": "test"}, None, 0,
+            "planning", {"title": "test"}, None, None, 0,
         )
         db = AsyncMock()
         db.execute = AsyncMock(return_value=job_result)
