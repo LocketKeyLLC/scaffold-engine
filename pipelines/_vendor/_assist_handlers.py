@@ -1523,6 +1523,53 @@ def assist_replan_confirm(
     yield " ".join(parts)
 
 
+# §17.679 — a PIVOT / redirection message: the operator is changing direction
+# or reshaping the plan, not asking about the current step. The LLM classifier
+# routes some pivots to `note` (→ §17.677 re-plan, correct) but drops others to
+# `question` (→ a bare re-render of the current step — the recurring "it repeated
+# something now irrelevant" bug). This deterministic detector is the reliable
+# backstop: a clear pivot is ALWAYS routed through the note→re-plan path so the
+# engine surfaces which pending steps the pivot changes and offers to fix them,
+# instead of repeating a now-stale step. Markers are specific to genuine
+# direction/scope changes (not format nitpicks like "make the subject shorter").
+_PIVOT_RE = re.compile(
+    r"(^\s*actually\b)"                                        # opens with "actually"
+    r"|\b(on second thought|scratch that|never ?mind|"
+    r"changed? my mind|change of plan|different (direction|approach)|"
+    r"start over|do it differently)\b"
+    r"|\b(forget|drop|ditch|ignore|scrap) (the|that|this|all|everything|about|my)\b"
+    r"|\b(switch|change|pivot|redo)\s+(it|this|them|the\s+\w+|everything|to|over to)\b"
+    r"|\bmake (it|this|them|the whole \w+)\b.{0,60}\binstead\b"
+    r"|\b(rather than|instead of)\s+\w+"
+    r"|\b\w+\s+instead\b"                                      # "... do X instead"
+    r"|\bno longer\b",
+    re.IGNORECASE,
+)
+# A change phrased as applying to the WHOLE deliverable (not one step) is also a
+# plan-reshaping pivot — it must fan out to every affected step, not re-render one.
+_GLOBAL_CHANGE_RE = re.compile(
+    r"\b(throughout|everywhere|across (all|the board)|"
+    r"all (the )?(steps|emails|sections|parts|pages)|"
+    r"every (step|email|section|part|page)|globally|"
+    r"the (whole|entire) (thing|sequence|plan|project|document)|overall)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_pivot(msg: str) -> bool:
+    """§17.679 — True when `msg` changes direction / reshapes the plan (as opposed
+    to asking about, or refining, the current step). Deterministic (no LLM)."""
+    if not msg:
+        return False
+    return bool(_PIVOT_RE.search(msg)) or bool(_GLOBAL_CHANGE_RE.search(msg))
+
+
+def _pivot_kind(msg: str) -> str:
+    """A whole-deliverable change is a `preference` (fan out to all steps); a
+    directional change is a `decision`. Both are plan-affecting → §17.677 runs."""
+    return "preference" if _GLOBAL_CHANGE_RE.search(msg or "") else "decision"
+
+
 def assist_nl_turn(
     pipe, session_id: str, msg: str, *,
     node_key: str | None = None, chat_id: str | None = None,
@@ -1615,6 +1662,17 @@ def assist_nl_turn(
         yield from assist_env_cmd(
             pipe, session_id, verbosity=_verbosity_from_message(msg), chat_id=chat_id,
         ); return
+    # §17.679 — before falling through to a re-render of the current step, catch
+    # a PIVOT the classifier missed. A pivot ("actually… / …instead / change it
+    # to… / <global change> throughout") reshapes the plan, so route it through
+    # the note→re-plan path (§17.677): the engine surfaces which pending steps
+    # the pivot affects and offers to fix them — instead of repeating a now-stale
+    # step (the recurring "it repeated something now irrelevant" bug).
+    if _looks_like_pivot(msg):
+        yield from assist_note_cmd(
+            pipe, session_id, msg.strip(), kind=_pivot_kind(msg), node_key=node_key,
+        )
+        return
     # question (default) — the existing guide/refine turn.
     yield from assist_chat_turn(pipe, session_id, msg, node_key=node_key, chat_id=chat_id)
 

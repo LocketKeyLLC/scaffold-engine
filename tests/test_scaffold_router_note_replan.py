@@ -106,6 +106,73 @@ class TestConfirmGate:
         nxt.assert_called_once()
 
 
+class TestPivotDetector:
+    # §17.679 — a pivot/redirection must route to the note→re-plan path, never a
+    # bare re-render of the current step ("it repeated something now irrelevant").
+    @pytest.mark.parametrize("msg,kind", [
+        ("actually forget SaaS - make this a 5-part e-commerce sequence instead", "decision"),
+        ("wait, I changed my mind, the product is a mobile fitness app", "decision"),
+        ("on second thought, let's target enterprise buyers", "decision"),
+        ("switch it to a 2-week drip instead of 3 emails", "decision"),
+        ("scrap all that, different approach: focus on retention", "decision"),
+        ("rather than email, do it as in-app messages", "decision"),
+        ("no longer targeting free users", "decision"),
+        ("make the tone much more casual and funny throughout", "preference"),
+        ("rewrite every step to be shorter", "preference"),
+    ])
+    def test_pivots_detected_with_kind(self, msg, kind):
+        assert _vendor._looks_like_pivot(msg) is True
+        assert _vendor._pivot_kind(msg) == kind
+
+    @pytest.mark.parametrize("msg", [
+        "what does this step mean?", "can you add a call to action?",
+        "make the subject line shorter", "how long should the welcome email be?",
+        "explain the activation email", "give me an example",
+        "which platform do you recommend?", "",
+    ])
+    def test_non_pivots_not_detected(self, msg):
+        assert _vendor._looks_like_pivot(msg) is False
+
+
+class TestPivotGateRouting:
+    def test_pivot_classified_as_question_routes_to_note_not_rerender(self, pipe):
+        """The core §17.679 fix: a pivot the LLM drops to 'question' must go to
+        the note→re-plan path, NOT assist_chat_turn (the re-render)."""
+        interp = {"intent": "question", "note_text": "", "note_kind": "note",
+                  "evidence": "", "error_text": "", "query": "", "node_key": "T1"}
+        with patch.object(_vendor, "fast_classify_turn", return_value=None), \
+             patch.object(_vendor, "assist_interpret", return_value=interp), \
+             patch.object(_vendor, "fetch_pending_replan", return_value=None), \
+             patch.object(_vendor, "assist_note_cmd",
+                          return_value=iter(["📌 Noted (decision): ..."])) as note_cmd, \
+             patch.object(_vendor, "assist_chat_turn",
+                          return_value=iter(["RE-RENDER"])) as chat_turn:
+            out = "".join(_vendor.assist_nl_turn(
+                pipe, _SID, "actually forget SaaS, make it e-commerce instead",
+                node_key="T1"))
+        assert "📌 Noted" in out
+        note_cmd.assert_called_once()
+        assert note_cmd.call_args.kwargs["kind"] == "decision"
+        chat_turn.assert_not_called()   # the re-render path was NOT taken
+
+    def test_genuine_question_still_re_renders(self, pipe):
+        """A non-pivot question must still get the current step's guidance."""
+        interp = {"intent": "question", "note_text": "", "note_kind": "note",
+                  "evidence": "", "error_text": "", "query": "", "node_key": "T1"}
+        with patch.object(_vendor, "fast_classify_turn", return_value=None), \
+             patch.object(_vendor, "assist_interpret", return_value=interp), \
+             patch.object(_vendor, "fetch_pending_replan", return_value=None), \
+             patch.object(_vendor, "assist_note_cmd",
+                          return_value=iter(["NOTE"])) as note_cmd, \
+             patch.object(_vendor, "assist_chat_turn",
+                          return_value=iter(["step guidance"])) as chat_turn:
+            out = "".join(_vendor.assist_nl_turn(
+                pipe, _SID, "what does this step mean?", node_key="T1"))
+        assert "step guidance" in out
+        chat_turn.assert_called_once()
+        note_cmd.assert_not_called()
+
+
 class TestConfirmRender:
     def test_apply_summary_lists_revised_and_dropped(self, pipe):
         sess = MagicMock()
