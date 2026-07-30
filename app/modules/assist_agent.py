@@ -156,6 +156,9 @@ async def start_assist_session(
         }
 
     reopening = row["status"] in _TERMINAL_REOPEN_STATUSES
+    # §17.682 — reconnecting to a PAUSED job (job='assisted_paused', session
+    # 'paused') is a RESUME, not a redo: reactivate in place, never reset work.
+    resuming_paused = row["status"] == "assisted_paused"
     if not reopening and row["status"] not in _VALID_START_STATUSES:
         raise ValueError(
             f"job {job_id} is in status {row['status']!r}; "
@@ -198,8 +201,9 @@ async def start_assist_session(
     # gate) so the job moves into assisted_executing; without awaiting_assist
     # here the job stays parked through the whole walkthrough and
     # _maybe_finalize_session (WHERE status IN assisted_*) can never mark it
-    # 'completed'. completed_at is cleared (harmless no-op for the non-terminal
-    # start paths).
+    # 'completed'. §17.682 — assisted_paused too, so reconnecting a paused job
+    # resumes it (mirrors resume_session's job flip). completed_at is cleared
+    # (harmless no-op for the non-terminal start paths).
     await db.execute(
         text("""
             UPDATE jobs
@@ -207,7 +211,8 @@ async def start_assist_session(
                    updated_at = NOW()
              WHERE id = :id
                AND status IN ('planning', 'executing', 'blocked', 'failed',
-                              'completed', 'cancelled', 'awaiting_assist')
+                              'completed', 'cancelled', 'awaiting_assist',
+                              'assisted_paused')
         """),
         {"id": job_id},
     )
@@ -254,6 +259,22 @@ async def start_assist_session(
             {"sid": session_id},
         )
 
+    # §17.682 — reconnecting to a PAUSED job resumes it. The ON CONFLICT above
+    # left the reused session 'paused' and the job flip above moved the job back
+    # to assisted_executing; mirror resume_session on the session row so
+    # get_next_step (which requires status='active') hands out the next step.
+    # Unlike the reopen path this must NOT reset nodes/steps — paused work
+    # continues exactly where the operator left off.
+    if resuming_paused:
+        await db.execute(
+            text("""
+                UPDATE assist_sessions
+                   SET status = 'active', last_activity_at = NOW(), updated_at = NOW()
+                 WHERE id = :sid AND status = 'paused'
+            """),
+            {"sid": session_id},
+        )
+
     total = (await db.execute(
         text("SELECT COUNT(*) FROM assist_steps WHERE session_id = :sid"),
         {"sid": session_id},
@@ -275,10 +296,10 @@ async def start_assist_session(
     return {
         "session_id": session_id,
         "job_id": job_id,
-        # §17.681 — on reopen we forced the (possibly-terminal) session back to
-        # 'active' above; sess_row was RETURNED from the pre-reset ON CONFLICT, so
-        # report the live status, not the stale one.
-        "status": "active" if reopening else sess_row["status"],
+        # §17.681/682 — on reopen (terminal) or resume (paused) we forced the
+        # session back to 'active' above; sess_row was RETURNED from the pre-reset
+        # ON CONFLICT, so report the live status, not the stale one.
+        "status": "active" if (reopening or resuming_paused) else sess_row["status"],
         "handoff_policy": sess_row["handoff_policy"],
         "replan_policy": sess_row["replan_policy"],
         "total_steps": total,
@@ -890,11 +911,14 @@ async def classify_session_turn(
 # §17.626 — statuses from which a job can be stepped through in Assist Mode.
 # Mirrors the guard in assist_agent.start_session / the umbrella handling in
 # the router; awaiting_assist is a component parked for hands-on work (§17.624),
-# and terminal jobs are re-openable for a hands-on redo (§17.623).
+# and terminal jobs are re-openable for a hands-on redo (§17.623). §17.682 —
+# assisted_paused is included so a PAUSED job stays discoverable by cross-chat
+# continuity (start_assist_session resumes it in place); it is non-terminal, so
+# it also flows into ASSIST_INPROGRESS_STATUSES below.
 ASSIST_ELIGIBLE_STATUSES = (
     "planning", "executing", "running", "blocked", "failed",
-    "assisted_executing", "assisted_running", "awaiting_assist",
-    "completed", "cancelled",
+    "assisted_executing", "assisted_running", "assisted_paused",
+    "awaiting_assist", "completed", "cancelled",
 )
 
 # §17.681 — the subset that counts as GENUINELY IN-PROGRESS (not terminal).

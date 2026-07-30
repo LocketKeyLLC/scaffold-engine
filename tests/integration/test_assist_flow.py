@@ -388,3 +388,67 @@ async def test_reopen_terminal_session_resets_to_active(seeded_job):
     assert step is not None and step["node_key"] == "T1", (
         "reopened session yielded no steps — get_next_step bailed on stale status"
     )
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
+async def test_candidates_in_progress_includes_paused(insert_job):
+    """§17.682 — a PAUSED job (assisted_paused) must stay discoverable by
+    cross-chat continuity, i.e. appear in the in_progress candidate pool."""
+    paused_id = await insert_job(status="assisted_paused", title="paused proxmox build")
+    await _add_one_node(paused_id)
+    async with async_session() as db:
+        in_prog = await assist_agent.list_assist_candidates(db=db, in_progress=True)
+    assert paused_id in {c["job_id"] for c in in_prog}
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
+async def test_reconnect_paused_job_resumes_without_reset(seeded_job):
+    """§17.682 — reconnecting to a paused job via start_assist_session (the
+    continuity path, NOT resume_session) reactivates it AND preserves prior
+    work: get_next_step returns the NEXT step, not the already-committed one."""
+    job_id = seeded_job
+    async with async_session() as db:
+        out = await assist_agent.start_assist_session(
+            job_id=job_id, replan_policy="disabled", db=db,
+        )
+        sid = out["session_id"]
+    # Commit T1, then pause mid-walkthrough.
+    async with async_session() as db:
+        step = await assist_agent.get_next_step(session_id=sid, db=db)
+        assert step["node_key"] == "T1"
+        await assist_agent.submit_step(
+            session_id=sid, node_key="T1", evidence="did T1",
+            evidence_kind="text", action="submit", db=db,
+        )
+    async with async_session() as db:
+        await assist_agent.pause_session(session_id=sid, db=db)
+        sess = await assist_agent.get_session(session_id=sid, db=db)
+    assert sess["status"] == "paused"
+
+    # Reconnect via the START path (what cross-chat continuity calls).
+    async with async_session() as db:
+        reconn = await assist_agent.start_assist_session(
+            job_id=job_id, replan_policy="disabled", db=db,
+        )
+    assert reconn["session_id"] == sid
+    assert reconn["reopened"] is False      # a resume, not a terminal redo
+    assert reconn["status"] == "active"
+
+    async with async_session() as db:
+        sess2 = await assist_agent.get_session(session_id=sid, db=db)
+    assert sess2["status"] == "active", "paused session was not reactivated"
+
+    # Work is preserved: T1 stays committed, the next step is T2 (NOT a reset T1).
+    async with async_session() as db:
+        step = await assist_agent.get_next_step(session_id=sid, db=db)
+    assert step is not None and step["node_key"] == "T2", (
+        "resume reset the walkthrough — should continue at T2, not redo T1"
+    )
+    async with async_session() as db:
+        t1 = (await db.execute(
+            text("SELECT status FROM dag_nodes WHERE job_id=:j AND node_key='T1'"),
+            {"j": job_id},
+        )).scalar()
+    assert t1 == "done", "prior committed node T1 was wrongly reset on resume"

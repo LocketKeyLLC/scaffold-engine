@@ -22049,6 +22049,22 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.682 Fix — a PAUSED assist job is now reconnectable from a fresh chat (closes the §17.681 deferral) (2026-07-29)
+
+**The gap (opposite of §17.681 — too shy, not too eager).** Pausing an assist session sets `job='assisted_paused'` + `session='paused'`, but `assisted_paused` was in **neither** `ASSIST_ELIGIBLE_STATUSES` nor (therefore) the new §17.681 `ASSIST_INPROGRESS_STATUSES`. So a paused job was **invisible** to `/assist/candidates` → cross-chat continuity (`_reconnect_in_progress`, `_in_progress_banner`) could never surface it from a fresh chat; the only way back was an explicit `/assist resume` in the *same* chat (where the history marker still lived). Reported alongside §17.681 as the paused-work-can't-be-picked-up case.
+
+**Why adding it to the list isn't enough.** Continuity reconnect calls `assist_start`, not `resume_session`. For a paused job that path would have left the reused session `paused` (the `ON CONFLICT` only bumps `last_activity_at`) and the job at `assisted_paused` (its status wasn't in the job-flip `WHERE IN`), so `get_next_step` — which requires `status='active'` — would return None: the exact broken-reconnect shape §17.681 fixed for terminal jobs.
+
+**The fix.** (`assist_agent.py`)
+1. Add `assisted_paused` to `ASSIST_ELIGIBLE_STATUSES` (non-terminal → auto-flows into `ASSIST_INPROGRESS_STATUSES`), so a paused job is a continuity candidate again.
+2. New `resuming_paused` branch in `start_assist_session` mirrors `resume_session` **through the start path**: session `paused→active`, and `assisted_paused` added to the job-status flip `WHERE IN` so the job returns to `assisted_executing`. Crucially it does **NOT** reset nodes/steps (unlike the §17.623 terminal-reopen) — paused work continues exactly where the operator left off. Return status reports `active`.
+
+**Verification.** **Live** (orchestrator restarted): seeded an `assisted_paused` job → `/assist/candidates?in_progress=true` includes it; `POST /assist/start` → `status=active, reopened=False`; `/assist/{sid}/next` → yields the step. **Integration** (`test_assist_flow.py`, +2) — `test_candidates_in_progress_includes_paused` and `test_reconnect_paused_job_resumes_without_reset` (pause mid-walkthrough after committing T1, reconnect via `start_assist_session`, assert session active + next step is **T2 not a reset T1** + T1 stays `done`) → **12 passed**. Reaper interaction unchanged and consistent: an idle paused job still reaps to `cancelled` (`cleanup.py`) → then correctly excluded from in-progress by §17.681. Regressions: assist unit/pipeline **211 passed** `--noconftest`; OpenAPI in sync (no endpoint change); ci-tier-0 green. Closes the [[project_assist_crosschat_continuity]] §17.681 deferral.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.681 Fix — automatic continuity no longer re-opens a job it never finished (root cause, not another phrase) (2026-07-29)
 
 **The recurring bug, finally at the root.** The whole §17.633/678/679/680 series tuned *phrase heuristics* (`_looks_like_new_build_request`, `_looks_like_pivot`, `_RESUME_PHRASES`) to keep new-build/pivot messages away from the reconnect path. But the reported symptom — *"it reopens something it never finished"* — has an upstream cause the heuristics can't cover: **the automatic-continuity candidate pool includes terminal jobs.** `ASSIST_ELIGIBLE_STATUSES` (`assist_agent.py`) deliberately lists `completed` + `cancelled` for the *explicit* hands-on-redo feature (§17.623) — but the **automatic** surfaces (`_reconnect_in_progress`, `_in_progress_banner`, `_sole_active_session_via_work`, all via `fetch_assist_candidates` → `/assist/candidates`) drew from that same broad list. So a bare "continue" or a topic match could silently re-open a **finished** job, and — worse — the reaper (`cleanup.py`) turns an abandoned assist session into `job='cancelled'`, which being "eligible" lingered as a reconnect candidate **forever**. The `_in_progress_banner` even listed completed jobs as *"in progress."* Verified against source (two subagents disagreed on the status filter; the code settled it — the broad list is real).
