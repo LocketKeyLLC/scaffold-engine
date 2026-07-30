@@ -2050,6 +2050,11 @@ async def regenerate_subgraph(
             system=REGEN_SYSTEM,
             temperature=0.2,
             max_tokens=settings.assist_replan_regen_max_tokens,
+            # §17.684 — same as DAG generation (§17.683): model_general is a
+            # reasoning model whose discarded thinking shares the num_predict
+            # budget; on a large subgraph it starves this structured regen
+            # output. Disable thinking so the whole budget goes to the answer.
+            think=False,
             **route_kwargs,
         )
     except Exception as exc:
