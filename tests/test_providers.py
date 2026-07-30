@@ -224,6 +224,42 @@ async def test_ollama_provider_generate_delegates_to_call_ollama():
     payload = args[1]
     assert payload["system"] == "sys"
     assert payload["prompt"] == "prompt-text"
+    # §17.683 — no think key by default (leaves the model's own default).
+    assert "think" not in payload
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_generate_think_false_threads_into_payload():
+    """§17.683 — think=False must reach the /api/generate payload so a reasoning
+    model sends its whole num_predict budget to the answer (DAG-gen fix)."""
+    p = OllamaProvider()
+    fake = AsyncMock(return_value=ModelResponse(
+        text="{}", model="m", success=True, provider="ollama",
+    ))
+    from app import model_router
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        await p.generate("m", "prompt-text", think=False)
+    payload = fake.call_args[0][1]
+    assert payload["think"] is False
+
+
+@pytest.mark.asyncio
+async def test_model_router_generate_think_threads_through_role_path():
+    """§17.683 — model_router.generate(role=..., think=False) forwards think to
+    the provider (the DAG generator relies on this end-to-end)."""
+    from app import model_router
+    captured = {}
+
+    async def _fake_generate(model, prompt, **kwargs):
+        captured.update(kwargs)
+        return ModelResponse(text="{}", model=model, success=True, provider="ollama")
+
+    fake_provider = MagicMock()
+    fake_provider.generate = AsyncMock(side_effect=_fake_generate)
+    with patch.object(model_router, "_resolve_role",
+                      return_value=("some-model", fake_provider)):
+        await model_router.generate("p", role="model_general", think=False)
+    assert captured.get("think") is False
 
 
 @pytest.mark.asyncio

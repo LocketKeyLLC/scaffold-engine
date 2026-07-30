@@ -94,6 +94,14 @@ class OllamaProvider(LLMProvider):
         }
         if system:
             payload["system"] = system
+        # §17.683 — optional thinking toggle. On a reasoning model num_predict is
+        # a SHARED thinking+content budget and model_router reads ONLY `response`
+        # (the `thinking` field is discarded), so a long chain-of-thought starves
+        # (or empties) the answer. `think=False` sends all tokens to `response`.
+        # Absent/None → unchanged model default.
+        think = opts.get("think")
+        if think is not None:
+            payload["think"] = think
         return await model_router._dispatch_with_retry(
             "/api/generate", payload, model, fallback,
         )

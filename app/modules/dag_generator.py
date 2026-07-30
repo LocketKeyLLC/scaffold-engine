@@ -389,6 +389,14 @@ async def _generate_dag_json(
             system=DAG_SYSTEM,
             temperature=0.3,
             max_tokens=8192,
+            # §17.683 — disable chain-of-thought. model_general is a reasoning
+            # model whose thinking shares the num_predict budget and is discarded
+            # here (only `response` is read); on a large brief it consumed all
+            # 8192 tokens (done=length) and returned empty/truncated output, so
+            # all 3 redraws failed to parse ("Failed to parse DAG JSON"). With
+            # thinking off the model emits the JSON directly (verified: eval
+            # ~3.5k, valid DAG) — the structure is fully specified by DAG_SYSTEM.
+            think=False,
             **route_kwargs,
         )
         total_ms += getattr(resp, "total_duration_ms", 0) or 0

@@ -497,12 +497,18 @@ async def generate(
     temperature: float = 0.7,
     max_tokens: int = 4096,
     fallback: str | None = None,
+    think: bool | None = None,
 ) -> ModelResponse:
     """Generate text. ``role=`` routes via the provider abstraction.
 
     Pass ``role="model_general"`` (etc.) to dispatch through whichever
     provider is bound to that role in settings/overrides. Pass ``model=``
     for the legacy direct-Ollama path. The two are mutually exclusive.
+
+    §17.683 — ``think=False`` disables a reasoning model's chain-of-thought so
+    the whole num_predict budget goes to the answer (the ``thinking`` field is
+    discarded on this path anyway). ``None`` leaves the model default untouched.
+    Only the Ollama provider honors it; other providers ignore it via ``**opts``.
     """
     _reject_role_model_collision(role, model)
     if role:
@@ -511,7 +517,7 @@ async def generate(
             lambda: provider.generate(
                 resolved_model, prompt,
                 system=system, temperature=temperature, max_tokens=max_tokens,
-                fallback=fallback,
+                fallback=fallback, think=think,
             ),
             model=resolved_model,
         )
@@ -528,6 +534,8 @@ async def generate(
     }
     if system:
         payload["system"] = system
+    if think is not None:
+        payload["think"] = think
     resp = await _dispatch_with_retry("/api/generate", payload, model, fallback)
     return await _record_call(resp)
 

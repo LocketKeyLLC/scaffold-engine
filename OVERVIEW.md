@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.683 Fix — DAG generation no longer fails on a thinking model that starves its own output (2026-07-30)
+
+**The failure (reported: "the job completely failed", reproduced exactly).** A fresh single-job homelab build (`d41b904d`, `job_type=legacy`) died at DAG generation with **"Failed to parse DAG JSON from LLM output."** Logs showed the §17.463 empty-redraw guard firing all three draws: `dag_generate_redraw_on_empty: draw=1/3 text_len=0 … draw=3/3 text_len=0`. Root cause: DAG generation routes to `role="model_general"` = **`deepseek-v4-pro:cloud`, a *thinking* model** (§17.632 swapped model_general to it; same class as the qwen3.5 issue). On Ollama's `/api/generate`, `num_predict` is a **shared thinking+content budget** and `model_router` reads **only** the `response` field — the `thinking` field is discarded. The full `DAG_SYSTEM` (~22 KB) + a 3.4 KB refined_brief drove a huge chain-of-thought that consumed the entire 8192-token budget (`done_reason=length`) leaving `response` empty or truncated — every draw. The §17.463 mitigation (8192 tokens + 3 redraws) was already in place and still lost, because thinking *reliably* overran the budget on this complex prompt.
+
+**Reproduced at the endpoint** (real brief, `num_predict=8192`): thinking-on → draws of `response_len=0 / thinking_len=29574 / done=length` (json_ok=False) ×3; `think:false` → `response_len=12483 / thinking_len=0 / eval=3530 / done=stop`, **valid JSON**.
+
+**The fix — a `think` toggle, off for DAG generation.** Since the reasoning is discarded on this path anyway, disabling it is strictly correct here. Threaded `think: bool | None = None` through `model_router.generate` (both role + legacy paths) → `OllamaProvider.generate` (adds `payload["think"]` only when not None; other providers absorb it via `**opts` and ignore it) → `dag_generator._generate_dag_json` passes `think=False`. `None` everywhere else preserves the model default. This is the core-provider change the [[thinking_model_empty_content]] note had flagged as the real fix but that didn't exist until now.
+
+**Verification.** **Live end-to-end** (orchestrator restarted, real client): `model_router.generate(role='model_general', think=False)` on the failing brief → `success=True, json_ok=True, 36 tasks`; the REAL `generate_dag` on job `d41b904d` → `status=executing, task_count=10, error=None`, `dag_nodes=10` persisted (was `failed`/0). (Test-revived job then deleted — clean slate restored.) **Unit** — `test_providers.py` +2 (`think=False` reaches the `/api/generate` payload; absent by default) and a model_router role-path passthrough test; `test_providers/model_router/dag_generator*` **230 passed**. **Deferred (same pattern, not yet hit):** `assist_replan` regen and phase-1 feasibility also call `model_general` for structured output and could starve on a large prompt — apply `think=False` there if it recurs (phase-1 already logged `llm_success=False` on this run, but fell back cleanly).
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.682 Fix — a PAUSED assist job is now reconnectable from a fresh chat (closes the §17.681 deferral) (2026-07-29)
 
 **The gap (opposite of §17.681 — too shy, not too eager).** Pausing an assist session sets `job='assisted_paused'` + `session='paused'`, but `assisted_paused` was in **neither** `ASSIST_ELIGIBLE_STATUSES` nor (therefore) the new §17.681 `ASSIST_INPROGRESS_STATUSES`. So a paused job was **invisible** to `/assist/candidates` → cross-chat continuity (`_reconnect_in_progress`, `_in_progress_banner`) could never surface it from a fresh chat; the only way back was an explicit `/assist resume` in the *same* chat (where the history marker still lived). Reported alongside §17.681 as the paused-work-can't-be-picked-up case.
