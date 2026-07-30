@@ -74,7 +74,7 @@ OUTPUT FORMAT (strict JSON, no markdown fences):
 }
 
 Rules:
-- Decompose the idea into SINGLE-OUTCOME execution steps (see "Single outcome per node" below): each step produces ONE discrete, independently verifiable result the operator can finish and check before moving on. Match the number of steps to the brief's actual distinct outcomes — never pad, and never inflate a step to swallow adjacent work. A simple brief is 3-6 steps; a multi-part host-action / infra / deployment brief is typically 8-10. **HARD LIMIT: emit AT MOST 10 tasks — never more.** §17.685: a plan exceeding 10 granular steps is downstream-truncated to 10 (lossy) and, past ~10, risks overrunning the output budget or emitting a malformed task. So when a brief lists many components (a dozen+ services/deliverables), do NOT emit one task per component — CONSOLIDATE related components into a single phase-level task (e.g. "Deploy media stack: Jellyfin + Sonarr + Prowlarr" is ONE task, not three; "Harden network: VLANs + firewall + VPN" is ONE task) so the entire plan stays within 10 higher-level phases that each still produce a verifiable outcome. When unsure whether something is one step or several, prefer the CONSOLIDATED phase — a plan of ≤10 solid phases beats 40 granular steps that get truncated.
+- Decompose the idea into SINGLE-OUTCOME execution steps (see "Single outcome per node" below): each step produces ONE discrete, independently verifiable result the operator can finish and check before moving on. §17.686 — COVER THE ENTIRE GOAL: emit one node for EACH distinct outcome the goal actually requires, so that completing every node completes the whole goal. Do NOT drop, skip, or merge away real work to save space, and do NOT pad with filler. A simple brief is 3-6 steps; a multi-part host-action / infra / deployment brief needs a node for EACH install / configure / integrate / verify outcome and is typically 12-30 (a large multi-service build legitimately reaches the cap). HARD LIMIT: never emit more than the "maximum tasks" count stated in the request below. Only if the goal genuinely needs MORE nodes than that cap should you fold the lowest-value adjacent work into consolidated phase-level tasks to fit — otherwise prefer full granular per-outcome coverage. When unsure whether something is one step or several, SPLIT — smaller steps are easier to execute, verify, and recover than big ones.
 - Every task must have a unique id (T1, T2, ...)
 - depends_on references other task ids — only use ids you have defined
 - No circular dependencies
@@ -342,7 +342,9 @@ EXAMPLE (5-node DAG for "Build a CLI tool that converts screenshots to a searcha
   ]
 }"""
 
-DAG_PROMPT = """Decompose this refined brief into a DAG of executable tasks:
+DAG_PROMPT = """Decompose this refined brief into a DAG of executable tasks — one node per distinct outcome, covering the ENTIRE goal so that finishing every node finishes the goal.
+
+Maximum tasks: {max_nodes}. Use as many nodes as the goal genuinely needs (up to that limit) — do NOT truncate real work, do NOT pad. Only fold work into consolidated phases if the goal would otherwise exceed {max_nodes}.
 
 ---
 {brief}
@@ -388,14 +390,16 @@ async def _generate_dag_json(
             prompt,
             system=DAG_SYSTEM,
             temperature=0.3,
-            max_tokens=8192,
+            # §17.686 — scaled from 8192 so a full goal-completion DAG (up to
+            # dag_max_nodes) fits without truncating mid-JSON (done=length).
+            max_tokens=settings.dag_generation_max_tokens,
             # §17.683 — disable chain-of-thought. model_general is a reasoning
             # model whose thinking shares the num_predict budget and is discarded
-            # here (only `response` is read); on a large brief it consumed all
-            # 8192 tokens (done=length) and returned empty/truncated output, so
-            # all 3 redraws failed to parse ("Failed to parse DAG JSON"). With
-            # thinking off the model emits the JSON directly (verified: eval
-            # ~3.5k, valid DAG) — the structure is fully specified by DAG_SYSTEM.
+            # here (only `response` is read); on a large brief it consumed the
+            # whole budget (done=length) and returned empty/truncated output, so
+            # all redraws failed to parse ("Failed to parse DAG JSON"). With
+            # thinking off the model emits the JSON directly — the structure is
+            # fully specified by DAG_SYSTEM.
             think=False,
             **route_kwargs,
         )
@@ -940,7 +944,10 @@ async def _generate_dag_with_validator(
         _exemplar_block = ""
 
     for attempt in range(1, max_attempts + 1):
-        prompt_body = DAG_PROMPT.format(brief=json.dumps(brief_data, indent=2))
+        prompt_body = DAG_PROMPT.format(
+            brief=json.dumps(brief_data, indent=2),
+            max_nodes=settings.dag_max_nodes,
+        )
         prompt = (corrections_block + "\n\n" + prompt_body) if corrections_block else prompt_body
         if _exemplar_block:
             prompt = _exemplar_block + prompt
@@ -1332,7 +1339,7 @@ async def generate_dag(
     # 3b-4b. Node-count enforcement + normalize + semantic validation
     # (single try/except so any ValueError from these steps fails the job cleanly)
     try:
-        tasks = _enforce_node_count(tasks)
+        tasks = _enforce_node_count(tasks, max_count=settings.dag_max_nodes)
         normalized, errors, normalize_warnings = _normalize_tasks(tasks)
         if errors:
             await _fail_job(db, uid, f"Task validation errors: {'; '.join(errors)}")

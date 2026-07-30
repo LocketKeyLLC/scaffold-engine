@@ -459,11 +459,15 @@ class Settings(BaseSettings):
     formal_verify_depth: int = Field(default=20, ge=1, le=200)
 
     # Research agent
-    research_max_iterations: int = Field(default=3, ge=1, le=20)
-    research_max_queries: int = Field(default=12, ge=1, le=50)
-    ideation_max_queries: int = Field(default=5, ge=1, le=50)
+    # §17.686 — drastically raised for goal-completion depth: research runs until
+    # gap-analysis reports full coverage OR the iteration ceiling, so higher caps
+    # let a complex goal research to completion while a simple one still stops
+    # early. iters 3→10, queries 12→40, urls/iter 30→100, ideation 5→15.
+    research_max_iterations: int = Field(default=10, ge=1, le=20)
+    research_max_queries: int = Field(default=40, ge=1, le=50)
+    ideation_max_queries: int = Field(default=15, ge=1, le=50)
     ideation_max_distill_results: int = Field(default=15, ge=1, le=200)
-    research_max_urls_per_iteration: int = Field(default=30, ge=1, le=200)
+    research_max_urls_per_iteration: int = Field(default=100, ge=1, le=200)
     research_searxng_delay: float = Field(default=1.5, ge=0.0, le=60.0)
     # §17.549 — soft recency: append the current year to search queries that
     # don't already name one, biasing SearXNG toward fresh results without a
@@ -834,11 +838,22 @@ class Settings(BaseSettings):
     # block BEFORE the JSON; 1024 let it burn the whole budget reasoning and
     # emit EMPTY content (the §17.463 lesson, for the validator this time), which
     # showed up as dag_validator_json_parse_failed raw='' → silent fail-open.
-    dag_validator_max_tokens: int = Field(default=3072, ge=256, le=8192)
+    # §17.686 — bumped 3072 → 6144 (bound 8192 → 16384): validating a much larger
+    # DAG (up to dag_max_nodes=40) produces more per-task feedback, and the
+    # thinking-model <think> block eats budget first.
+    dag_validator_max_tokens: int = Field(default=6144, ge=256, le=16384)
     # §17.665 — retry-on-empty for the validator: re-draw up to N times when a
     # SUCCESSFUL response is empty/unparseable (thinking-model empty content). A
     # hard failure (success=False) is not retried. 0 disables the extra draws.
     dag_validator_empty_redraws: int = Field(default=2, ge=0, le=5)
+    # §17.686 — goal-completion DAG sizing. Raised the per-job node ceiling from
+    # the old hard-coded 10 (§17.685) so a complex build is planned as ALL the
+    # nodes the goal needs rather than truncated/consolidated. dag_generation_max_
+    # tokens MUST scale with it: with think=False the whole budget is the JSON
+    # answer, so a 40-node DAG (~15-20k tokens) needs generous headroom or it
+    # truncates mid-JSON (done=length). min_count stays 3.
+    dag_max_nodes: int = Field(default=40, ge=3, le=120)
+    dag_generation_max_tokens: int = Field(default=32768, ge=2048, le=65536)
     # §17.476 (Phase 2) — dependency-completeness / dead-end detection. A
     # substantive node whose output neither feeds nor is fed by any
     # is_deliverable node is an orphan branch (the §17.471-474 defect). When

@@ -22049,6 +22049,22 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.686 Change — drastically raise DAG node + research ceilings for goal-completion depth (2026-07-30)
+
+**Operator directive:** plan/research to full goal completion — create all the nodes a goal needs and run research until coverage is complete — rather than the conservative caps. This partially reverses the §17.685 posture (which capped DAGs at 10 and told the model to consolidate) in favor of coverage. Values chosen with the operator: **DAG 40 nodes / 32k-token budget; research 10 iters / 40 queries / 100 URLs-per-iter.**
+
+**DAG (now settings, was hard-coded).** `dag_max_nodes=40` (`_enforce_node_count(max_count=…)`, was 10) and `dag_generation_max_tokens=32768` (the `generate` call, was 8192) — the two MUST move together: with §17.683 `think=False` the whole budget is the JSON answer, so a 40-node DAG needs headroom or it truncates mid-JSON (`done=length`). `dag_validator_max_tokens` 3072→6144 (bound→16384) for validating a bigger DAG. **Prompt:** `DAG_SYSTEM` now says "COVER THE ENTIRE GOAL — one node per distinct outcome … typically 12-30 … never exceed the maximum stated in the request", and the numeric cap is injected DYNAMICALLY into `DAG_PROMPT` from `settings.dag_max_nodes` (`Maximum tasks: {max_nodes}`) — so the prompt guidance stays aligned to the enforcement cap at ANY configured value, preventing the §17.685 prompt↔cap mismatch from recurring.
+
+**Research (config defaults).** `research_max_iterations` 3→10, `research_max_queries` 12→40, `research_max_urls_per_iteration` 30→100, `ideation_max_queries` 5→15. Research early-stops when gap-analysis reports full coverage, so these are CEILINGS: a complex goal researches to completion; a simple one still stops fast (not a fixed cost).
+
+**Verification (escalating stress harness, 4 tiers 10→55 components, 2 draws each, since removed).** **8/8 `generate_dag` draws OK**, every DAG persisted **40 nodes** (was capped at 10), every raw response `done=stop` — no truncation even at L3's 106-task / 47 KB raw output (the 32k budget ≈ 130k chars has ample headroom). The §17.685 `Task missing 'id'` / sink-overflow crashes did NOT recur — the generous budget lets the model finish each task object, and the §17.668-672 well-formedness passes (truncate→connect→converge→mark) handle 40-node graphs cleanly. `test_dag_generator` 93 passed; ci-tier-0 green; orchestrator restarted (live).
+
+**Honest ceiling / when to decompose.** The model over-generates past the cap for very large briefs (L3/38-comp raw = 106 tasks; L4/55-comp = 72) and truncation reduces to 40 — so a SINGLE DAG covers ≤40 nodes. A goal that genuinely needs more than 40 nodes for completion should go through **umbrella decomposition** (each component → its own ≤40-node DAG), not one mega-DAG. 40/32k is the drastically-raised single-DAG ceiling; both `dag_max_nodes` (le=120) and `dag_generation_max_tokens` (le=65536) are settings if the operator wants to push further.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.685 Fix — DAG over-generation (prompt↔cap mismatch) that broke complex briefs (2026-07-30)
 
 **Found by an escalating stress test** (after §17.683 fixed the thinking-empty failure): ran the real `generate_dag` on 4 tiers of increasing brief complexity (10 → 55 components), multiple draws each. §17.683 held at L1/L2, but two NEW failure modes surfaced at high complexity: **L4** (55 comps) — the DAG JSON response itself exceeded the 8192-token budget (`done=length`, unparseable); **L3** (38 comps, intermittent) — the model emitted a 64-task DAG with 27 sink nodes and a malformed entry, tripping `dag_truncate_sink_overflow` and `job_failed: Task 0: missing 'id'`.

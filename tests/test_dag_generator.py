@@ -414,22 +414,21 @@ class TestToolSelectionGuide:
         # The concrete LXC split example.
         assert '"Create unprivileged LXC" is NOT one node' in DAG_SYSTEM
 
-    def test_step_count_capped_at_ten_with_consolidation(self):
-        """§17.685 — the prompt count guidance is aligned to the
-        `_enforce_node_count` cap of 10. The prior 'typically 8-20, do not
-        exceed 25' loosening was never matched by an enforcement change, so
-        excess tasks were truncated anyway — and on complex briefs the
-        over-generation overran the output token budget (done=length →
-        unparseable) or emitted malformed/too-many-sink DAGs. The prompt now
-        sets a hard limit of 10 and requires consolidation."""
-        from app.modules.dag_generator import DAG_SYSTEM
+    def test_step_count_full_goal_coverage_up_to_dynamic_cap(self):
+        """§17.686 — the prompt no longer caps at 10 / consolidate-everything
+        (§17.685); it instructs FULL per-outcome coverage of the whole goal up
+        to a DYNAMIC node limit injected from settings.dag_max_nodes via
+        DAG_PROMPT. Keeping the prompt's cap aligned to the enforcement setting
+        (rather than a hard-coded number) is what prevents the §17.685
+        prompt↔cap mismatch from recurring at any configured cap."""
+        from app.modules.dag_generator import DAG_SYSTEM, DAG_PROMPT
         assert "SINGLE-OUTCOME execution steps" in DAG_SYSTEM
-        # Hard cap aligned to _enforce_node_count(max_count=10).
-        assert "AT MOST 10 tasks" in DAG_SYSTEM
-        assert "CONSOLIDATE" in DAG_SYSTEM
-        # The old over-generation guidance is gone.
-        assert "typically 8-20" not in DAG_SYSTEM
-        assert "do not exceed 25" not in DAG_SYSTEM.lower()
+        assert "COVER THE ENTIRE GOAL" in DAG_SYSTEM
+        # The §17.685 hard-10 / consolidate-everything guidance is gone.
+        assert "AT MOST 10 tasks" not in DAG_SYSTEM
+        # The numeric cap is dynamic (settings.dag_max_nodes), injected via DAG_PROMPT.
+        assert "{max_nodes}" in DAG_PROMPT
+        assert "Maximum tasks" in DAG_PROMPT
 
     # ----- §17.367 — CodeGen-verb scope discipline -----
 
@@ -1072,7 +1071,7 @@ class TestOperatorDecisionMerge:
         # merged brief surfaces the decision in the rendered prompt
         merged = _dag_gen._brief_with_operator_decision(
             {"title": "x"}, json.dumps({"options": self._OPTS}))
-        rendered = _dag_gen.DAG_PROMPT.format(brief=json.dumps(merged))
+        rendered = _dag_gen.DAG_PROMPT.format(brief=json.dumps(merged), max_nodes=40)
         assert "Which firewall?" in rendered
         assert '"type": "decision"' in _dag_gen.DAG_PROMPT or "type: \"decision\"" in _dag_gen.DAG_PROMPT
 
