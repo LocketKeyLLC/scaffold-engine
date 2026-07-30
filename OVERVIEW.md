@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.685 Fix — DAG over-generation (prompt↔cap mismatch) that broke complex briefs (2026-07-30)
+
+**Found by an escalating stress test** (after §17.683 fixed the thinking-empty failure): ran the real `generate_dag` on 4 tiers of increasing brief complexity (10 → 55 components), multiple draws each. §17.683 held at L1/L2, but two NEW failure modes surfaced at high complexity: **L4** (55 comps) — the DAG JSON response itself exceeded the 8192-token budget (`done=length`, unparseable); **L3** (38 comps, intermittent) — the model emitted a 64-task DAG with 27 sink nodes and a malformed entry, tripping `dag_truncate_sink_overflow` and `job_failed: Task 0: missing 'id'`.
+
+**Root cause — the prompt tells the model to over-generate.** `DAG_SYSTEM` said an infra brief is *"typically 8-20 … do not exceed 25"* steps and *"each install/configure/integrate/verify becomes its own step"*, but `_enforce_node_count` hard-caps at **10** (`max_count=10`). So for a many-component brief the model dutifully produced 25-64 tasks — all excess is pure risk (response-budget overflow, malformed tasks, lossy truncation, sink overflow) for zero benefit, since everything past 10 is discarded anyway.
+
+**The fix.** Aligned the prompt to the enforcement cap: `DAG_SYSTEM` now sets a **HARD LIMIT of 10 tasks** and instructs the model to **CONSOLIDATE** many components into phase-level tasks ("Deploy media stack: Jellyfin + Sonarr + Prowlarr" is ONE task; "Harden network: VLANs + firewall + VPN" is ONE task) rather than one-per-component, so a large build becomes ≤10 solid phases instead of 40 granular steps that get truncated. (Prompt-only change; the 10-node enforcement + truncation stay as the backstop.)
+
+**Verification (escalating stress harness, 3 draws/tier × 4 tiers).** **12/12 full `generate_dag` draws OK** across L1→L4 (baseline → 55-component pathological), all `done=stop`, all valid, all persisted 10 nodes — vs pre-fix L3 1/2 and L4 0/2. Raw DAG-JSON response sizes collapsed ~4-5× (L3 27,588→5,697 chars; L4 28,683 `length`→6,453 `stop`), clearing the token budget. Builds on §17.683/684. **Noted (non-blocking):** the DAG validator (§17.665) still does one thinking-empty redraw on occasion and recovers — a future `think=False` candidate, but it never fails.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.684 Fix — extend think=False to assist re-plan regen; feasibility deliberately left on thinking (2026-07-30)
 
 **Follow-on to §17.683.** Applied the same `think=False` to the assist re-plan subgraph regeneration (`dag_generator.py` `regen_subgraph`, `role="model_general"`, `max_tokens=settings.assist_replan_regen_max_tokens`): it's the identical shape — a `generate()` call producing structured output whose format is fully specified by `REGEN_SYSTEM`, so the discarded chain-of-thought is pure budget waste that can starve the regen on a large subgraph.

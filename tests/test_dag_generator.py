@@ -414,13 +414,22 @@ class TestToolSelectionGuide:
         # The concrete LXC split example.
         assert '"Create unprivileged LXC" is NOT one node' in DAG_SYSTEM
 
-    def test_step_count_allows_finer_grain(self):
+    def test_step_count_capped_at_ten_with_consolidation(self):
+        """§17.685 — the prompt count guidance is aligned to the
+        `_enforce_node_count` cap of 10. The prior 'typically 8-20, do not
+        exceed 25' loosening was never matched by an enforcement change, so
+        excess tasks were truncated anyway — and on complex briefs the
+        over-generation overran the output token budget (done=length →
+        unparseable) or emitted malformed/too-many-sink DAGs. The prompt now
+        sets a hard limit of 10 and requires consolidation."""
         from app.modules.dag_generator import DAG_SYSTEM
-        # The old hard cap of 10 is gone; multi-part briefs go finer.
-        assert "3 to 10 execution steps" not in DAG_SYSTEM
-        assert "Do not create more than 10 steps" not in DAG_SYSTEM
         assert "SINGLE-OUTCOME execution steps" in DAG_SYSTEM
-        assert "typically 8-20" in DAG_SYSTEM
+        # Hard cap aligned to _enforce_node_count(max_count=10).
+        assert "AT MOST 10 tasks" in DAG_SYSTEM
+        assert "CONSOLIDATE" in DAG_SYSTEM
+        # The old over-generation guidance is gone.
+        assert "typically 8-20" not in DAG_SYSTEM
+        assert "do not exceed 25" not in DAG_SYSTEM.lower()
 
     # ----- §17.367 — CodeGen-verb scope discipline -----
 
