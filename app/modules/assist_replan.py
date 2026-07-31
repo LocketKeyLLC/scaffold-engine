@@ -62,6 +62,35 @@ Decide: does the human output meet the task's intent?
 Call the record_divergence tool exactly once with your verdict."""
 
 
+# §17.688 — a DECISION node's deliverable is a CHOICE, not a finished artifact.
+# The default prompt treats "missing required content" (a decision node's task
+# text names a full table/config the operator legitimately did not reproduce) as
+# divergence, so a valid decision ("3 vlans") was flagged major → assist_steps
+# .divergence=TRUE (and, under selective/full, a spurious downstream replan). A
+# decision only diverges when it CONTRADICTS the framed choice or a hard
+# constraint — not when it is merely terse or omits concrete implementation
+# detail (that is applied by later steps).
+_DIVERGENCE_PROMPT_DECISION = """You are checking whether a human operator's \
+DECISION on a planning step diverges from what that step asked them to decide.
+
+DECISION STEP TITLE: {title}
+WHAT THE STEP ASKS THEM TO DECIDE (context — the concrete artifact it names is \
+produced by LATER steps, NOT required in this answer): {prompt}
+
+HUMAN DECISION (just submitted):
+{evidence}
+
+Decide: does the human's decision fit what this step asked them to choose?
+- A clear, on-topic choice among the framed options (a count, an approach, a
+  named option) is NOT divergence — even if it is terse and omits concrete
+  values (IDs, subnets, commands, config); those are applied by later steps.
+- Divergence is ONLY: contradicting a hard constraint the step set, choosing
+  something outside the framed decision, or refusing/answering a different
+  question entirely.
+
+Call the record_divergence tool exactly once with your verdict."""
+
+
 # Audit B4 — native tool-call schema for the divergence verifier. Replaces
 # the W.6-era "Respond with a single JSON object…" coaxing prose. Mirrors
 # the X.10 RECORD_VERIFICATION_TOOL pattern: schema lives in code, not in
@@ -107,6 +136,7 @@ RECORD_DIVERGENCE_TOOL = Tool(
 
 async def detect_divergence(
     *, title: str, prompt: str, evidence: str, model_overrides: dict | None = None,
+    is_decision: bool = False,
 ) -> dict:
     """Run the divergence verifier. Returns the parsed dict.
 
@@ -122,7 +152,8 @@ async def detect_divergence(
     """
     # Defer the model_router import; it pulls heavy http client state.
     from app import model_router
-    msg = _DIVERGENCE_PROMPT.format(
+    template = _DIVERGENCE_PROMPT_DECISION if is_decision else _DIVERGENCE_PROMPT
+    msg = template.format(
         title=title or "(untitled)",
         prompt=(prompt or "")[:4000],
         evidence=(evidence or "")[:4000],
@@ -622,6 +653,7 @@ async def _detect_and_mark_in_background(
     prompt: str,
     evidence: str,
     model_overrides: dict | None,
+    is_decision: bool = False,
 ) -> None:
     """Background worker for context_only: run divergence detection and
     write the `divergence=TRUE` flag on assist_steps if applicable.
@@ -634,7 +666,7 @@ async def _detect_and_mark_in_background(
     try:
         div = await detect_divergence(
             title=title, prompt=prompt, evidence=evidence,
-            model_overrides=model_overrides,
+            model_overrides=model_overrides, is_decision=is_decision,
         )
         if not div["diverges"] or div["severity"] != "major":
             return
@@ -686,6 +718,7 @@ async def maybe_replan(
     evidence: str,
     policy: str,
     model_overrides: dict | None = None,
+    is_decision: bool = False,
 ) -> dict | None:
     """Run divergence detection + apply policy.
 
@@ -709,7 +742,7 @@ async def maybe_replan(
             _detect_and_mark_in_background(
                 session_id=session_id, node_key=node_key,
                 title=title, prompt=prompt, evidence=evidence,
-                model_overrides=model_overrides,
+                model_overrides=model_overrides, is_decision=is_decision,
             )
         )
         _BACKGROUND_TASKS.add(task)
@@ -719,7 +752,7 @@ async def maybe_replan(
     # the BFS reset that the next /assist next call reads.
     div = await detect_divergence(
         title=title, prompt=prompt, evidence=evidence,
-        model_overrides=model_overrides,
+        model_overrides=model_overrides, is_decision=is_decision,
     )
     if not div["diverges"] or div["severity"] != "major":
         return None

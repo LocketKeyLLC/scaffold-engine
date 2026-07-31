@@ -750,9 +750,33 @@ async def _sandbox_codegen_check(evidence: str) -> Optional[dict]:
         return None
 
 
+# §17.688 — a DECISION node's deliverable is a CHOICE, not a finished artifact.
+# The default verifier judged an operator's decision ("3 vlans", "option a")
+# against the node's concrete-artifact task text ("Produce a table: VLAN ID,
+# subnet/CIDR, DHCP scope, isolation rules") and returned 'failed' → the user
+# who correctly answered the framed question got "⚠️ This may have failed." A
+# decision step is judged on whether a clear, on-topic choice was made; the
+# concrete artifact is applied by later implementer steps (e.g. T2 "Define VLAN
+# plan" decides → T12 "Create VLAN interfaces" / T17 "Configure switch" apply).
+_VERIFY_DECISION_SYSTEM = (
+    "You verify whether a human operator MADE THE DECISION a planning step asked "
+    "of them, from what they wrote. This step's deliverable is a CHOICE or a "
+    "stated direction — NOT a finished artifact, command output, or a fully "
+    "specified table/config. The concrete implementation (exact IDs, subnets, "
+    "commands, config values) is produced by LATER steps that apply this "
+    "decision. Return 'succeeded' when the operator expressed a clear, on-topic "
+    "choice or direction for THIS decision (picked an option, stated a "
+    "count/approach, or gave a constraint that settles it). Return 'failed' ONLY "
+    "if the message is empty, off-topic, or explicitly refuses to decide. Return "
+    "'unclear' only if you genuinely cannot tell. NEVER return 'failed' merely "
+    "because the operator did not reproduce the full concrete artifact named in "
+    "the task — for a decision step that is expected and correct."
+)
+
+
 async def verify_step_success(
     *, title: str, task_prompt: str, tool: str, evidence: str,
-    environment: Optional[dict] = None,
+    environment: Optional[dict] = None, is_decision: bool = False,
 ) -> dict:
     """Judge whether pasted evidence indicates the step worked. Fail-soft.
 
@@ -768,8 +792,10 @@ async def verify_step_success(
     role = settings.assist_guide_model_role
 
     # Sandbox pre-check (codegen only, sandbox on). Deterministic ground truth.
+    # A decision step produces no code, so the sandbox path never applies.
     sandbox: Optional[dict] = None
-    if (tool or "").lower() == "codegen" and settings.codegen_execution_check_enabled \
+    if (not is_decision) and (tool or "").lower() == "codegen" \
+            and settings.codegen_execution_check_enabled \
             and (settings.coderunner_url or "").strip():
         sandbox = await _sandbox_codegen_check(evidence)
         if sandbox and sandbox["verdict"] == "fail":
@@ -781,20 +807,33 @@ async def verify_step_success(
             }
 
     env_block = render_environment_block(environment)
-    user = (
-        f"Task: {title}\n\n{task_prompt}\n\n"
-        + (f"{env_block}\n\n" if env_block else "")
-        + f"Operator's pasted evidence / output for this step:\n{evidence[:6000]}\n\n"
-        "Call judge_step_outcome."
-    )
+    if is_decision:  # §17.688 — judge the CHOICE, not the downstream artifact
+        system = _VERIFY_DECISION_SYSTEM
+        user = (
+            f"Decision step: {title}\n\n"
+            "What this decision is ultimately about (context — NOT a checklist the "
+            "operator's answer must fully satisfy; later steps apply the concrete "
+            f"details):\n{task_prompt}\n\n"
+            + (f"{env_block}\n\n" if env_block else "")
+            + f"Operator's decision / message for this step:\n{evidence[:6000]}\n\n"
+            "Judge whether they made a clear, on-topic decision. Call judge_step_outcome."
+        )
+    else:
+        system = (
+            "You verify whether a human operator's step succeeded, from the "
+            "output they pasted. Conservative: 'failed' only on a clear "
+            "failure signal, 'unclear' when you can't tell."
+        )
+        user = (
+            f"Task: {title}\n\n{task_prompt}\n\n"
+            + (f"{env_block}\n\n" if env_block else "")
+            + f"Operator's pasted evidence / output for this step:\n{evidence[:6000]}\n\n"
+            "Call judge_step_outcome."
+        )
     try:
         resp = await model_router.tool_call(
             [
-                {"role": "system", "content": (
-                    "You verify whether a human operator's step succeeded, from the "
-                    "output they pasted. Conservative: 'failed' only on a clear "
-                    "failure signal, 'unclear' when you can't tell."
-                )},
+                {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             [_JUDGE_OUTCOME_TOOL],

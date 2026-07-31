@@ -1216,7 +1216,7 @@ async def verify_submit_outcome(
     row = (await db.execute(
         text("""
             SELECT s.status, ss.metadata,
-                   d.title, d.prompt_template, d.tool
+                   d.title, d.prompt_template, d.tool, d.node_type
               FROM assist_steps s
               JOIN assist_sessions ss ON ss.id = s.session_id
               JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
@@ -1233,6 +1233,9 @@ async def verify_submit_outcome(
         tool=row["tool"] or "LLM",
         evidence=evidence,
         environment=_environment_from_metadata(row["metadata"]),
+        # §17.688 — a decision node is judged on the CHOICE, not the downstream
+        # concrete artifact (its task text names a table/config later steps apply).
+        is_decision=(row["node_type"] or "").lower() == "decision",
     )
 
 
@@ -1454,7 +1457,7 @@ async def _maybe_replan(
         return None
     node = (await db.execute(
         text("""
-            SELECT title, prompt_template
+            SELECT title, prompt_template, node_type
               FROM dag_nodes WHERE job_id = :jid AND node_key = :nk
         """),
         {"jid": job_id, "nk": node_key},
@@ -1471,6 +1474,9 @@ async def _maybe_replan(
         prompt=node["prompt_template"] or "",
         evidence=evidence,
         policy=policy,
+        # §17.688 — a decision node's concise choice is not divergence from its
+        # concrete-artifact task text (that artifact is applied by later steps).
+        is_decision=(node["node_type"] or "").lower() == "decision",
     )
 
 

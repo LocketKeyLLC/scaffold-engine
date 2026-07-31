@@ -22049,6 +22049,28 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.688 Fix — a DECISION step is judged on the choice, not against its downstream artifact (the "3 VLANs → may have failed" error) (2026-07-31)
+
+**Report (OWUI run).** "It ran into an error when I made a selection of 3 VLANs." Reproduced from the OWUI chat store + logs: step **T2 "Define VLAN plan"** is a `decision` node whose task text says *"Produce a concrete table: VLAN ID, name, subnet/CIDR, purpose, DHCP scope, isolation rules."* Its §17.654 walkthrough correctly framed **one** foundational choice ("How many VLANs?" — options 3/4/5/6+, promising "then we'll decide purposes, IDs, subnets"). The operator answered **"3 vlans"** — exactly the framed question — and got: **"⚠️ This may have failed."** plus an async `assist_divergence_marked_async` on T2.
+
+**Root cause.** Two independent judges were blind to `node_type` and measured a **decision** against its **downstream concrete-artifact** task text:
+- `verify_step_success` (submit-time success verifier, `model_general`): judged "3 vlans" against "Produce a concrete table …" → **`failed`** → the pipeline's soft-fail banner (`_assist_handlers.py:945`).
+- `detect_divergence` (`model_verifier`): same comparison → **`diverges=major`** → `assist_steps.divergence=TRUE` (and, under `selective`/`full`, a spurious downstream replan).
+
+The DAG confirms the design intent: T2 (`decision`, `depends_on={}`) **decides**; the concrete artifact is applied by later implementer steps **T12 "Create VLAN interfaces"** and **T17 "Configure switch VLAN database"** (both `depends_on={T2}`). So a decision node's deliverable IS the choice — reproducing the full table at decision time is neither expected nor required.
+
+**Fix — make both judges decision-aware** (`is_decision` derived from `dag_nodes.node_type`):
+- `verify_step_success(..., is_decision=False)`: a new `_VERIFY_DECISION_SYSTEM` + user framing — the task text is *context, not a checklist*; `succeeded` = a clear on-topic choice/direction; `failed` only if empty/off-topic/refuses; NEVER fail for omitting the concrete artifact (later steps apply it). Also skips the codegen sandbox for decisions. Wired via `verify_submit_outcome` (now selects `d.node_type`).
+- `detect_divergence(..., is_decision=False)`: a new `_DIVERGENCE_PROMPT_DECISION` — a concise choice among the framed options is NOT divergence; only contradicting a hard constraint / answering a different question is. Threaded through `maybe_replan` + `_detect_and_mark_in_background`; `assist_agent._maybe_replan` now selects `node_type` and passes `is_decision`.
+
+**Verification.** New `tests/test_assist_decision_verify.py` (5) + existing assist suites green (133 passed across guide/replan/mirror/note-replan/agent). **Live models (the real proof, not mocks)** on the exact T2 scenario: success verifier `is_decision=True → succeeded` ("clear, on-topic decision: they want 3 VLANs") vs `False → failed` ("no concrete table …" — the old banner); divergence `is_decision=True → diverges=False` vs `False → diverges=major`. Both false positives eliminated only when the node is treated as a decision. No request-schema change (internal params only). Orchestrator restarted (live).
+
+**Deferred (design, needs operator input).** The committed evidence for T2 is still just "3 vlans", so T12/T17 decide the concrete IDs/subnets at *implementation* time rather than the operator fixing them at decision time. A fuller flow would keep a concrete-artifact decision node OPEN across turns (count → purposes → IDs/subnets, accumulating the table, commit on confirm) instead of committing on the first sub-answer — a classifier + step-lifecycle change (a partial decision answer is currently classified as a terminal `submit`). Tracked separately; §17.688 fixes the reported error and yields a clean, working decision flow.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.687 Fix — Assist Mode recalls the recent conversation (a suggestion it made a turn ago) (2026-07-31)
 
 **Report (OWUI natural-language trial run).** Two symptoms: (1) mid-assist the engine "does not seem to be properly recalling previous portions of the project/job"; (2) it "was unable to properly define a program it suggested so the user could confirm their interest."
