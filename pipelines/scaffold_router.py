@@ -705,6 +705,16 @@ class Pipeline:
         # blocking POST + full result. Off → the §17.486 non-streamed path.
         assist_stream: bool = True
 
+        # §17.687 — recent-conversation recall. The assist generation endpoints
+        # historically saw only committed-node output + captured notes, never
+        # the live dialogue — so a program the engine SUGGESTED a turn ago (or
+        # any not-yet-committed back-and-forth) was forgotten on the next turn,
+        # and a follow-up ("define that one", "yes, do it") had no antecedent.
+        # When on, the last N conversation turns (current message excluded) ride
+        # along with the guide/fix/research/interpret calls so those references
+        # resolve. 0 → send no history (the orchestrator also caps the block).
+        assist_history_turns: int = 6
+
         # §17.633 — cross-chat assist continuity. OWUI sends no chat_id and a
         # NEW chat has no session marker in history, so neither the chatmap nor
         # the history-recovery path can find in-progress assist work started in
@@ -1046,6 +1056,35 @@ class Pipeline:
             if text:
                 cleaned.append({"role": m["role"], "content": text})
         return cleaned
+
+    # \u00a717.687 \u2014 per-message char cap on forwarded assist history. Bounds the
+    # HTTP payload (an assistant walkthrough can be long); the orchestrator
+    # applies the real char budget (assist_conversation_context_max_chars).
+    _ASSIST_HISTORY_PER_MSG_CHARS = 2000
+
+    def _assist_history(self, messages: List[dict]) -> List[dict]:
+        """\u00a717.687 \u2014 the recent conversation to forward with an assist turn.
+
+        Cleans OWUI messages to ``[{role, content}]``, DROPS the last one (the
+        current operator utterance \u2014 it's sent separately as the message /
+        refine / error), keeps the last ``assist_history_turns`` and caps each
+        message so a long pasted walkthrough can't bloat the request. Returns
+        ``[]`` when the valve is 0 or there's nothing prior."""
+        turns = int(getattr(self.valves, "assist_history_turns", 6) or 0)
+        if turns <= 0:
+            return []
+        cleaned = self._clean_messages(messages or [])
+        prior = cleaned[:-1]  # exclude the current turn
+        if not prior:
+            return []
+        cap = self._ASSIST_HISTORY_PER_MSG_CHARS
+        out: List[dict] = []
+        for m in prior[-turns:]:
+            content = m.get("content") or ""
+            if len(content) > cap:
+                content = content[:cap].rstrip() + " \u2026[truncated]"
+            out.append({"role": m.get("role") or "user", "content": content})
+        return out
 
     @staticmethod
     def _first_token(msg: str) -> str:
@@ -1769,6 +1808,7 @@ class Pipeline:
             yield from self._assist_nl_turn(
                 active["session_id"], msg,
                 node_key=active.get("last_node_key"), chat_id=cid,
+                history=self._assist_history(messages),  # §17.687
             )
             return
 
@@ -2382,12 +2422,16 @@ class Pipeline:
     def _assist_nl_turn(
         self, session_id: str, msg: str, *,
         node_key: str | None = None, chat_id: str | None = None,
+        history: list[dict] | None = None,
     ) -> Generator[str, None, None]:
         """§17.626 — route a plain-language assist-session turn to the right
         action (advance/skip/submit/fix/finalize/pause/question). Supersedes the
-        §17.537 always-guide behavior so the operator drives the flow by talking."""
+        §17.537 always-guide behavior so the operator drives the flow by talking.
+        §17.687 — ``history`` (recent conversation) rides along to the guide/fix/
+        research/interpret calls so references back resolve."""
         yield from _assist.assist_nl_turn(
             self, session_id, msg, node_key=node_key, chat_id=chat_id,
+            history=history,
         )
 
     def _assist_try_natural_start(self, msg: str, chat_id: str | None):

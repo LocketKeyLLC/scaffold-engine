@@ -84,22 +84,42 @@ class AssistGuideInput(BaseModel):
     force: bool = Field(
         default=True, description="Regenerate even if a cached walkthrough exists."
     )
+    history: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "§17.687 — recent conversation turns [{role, content}] (oldest "
+            "first, current message excluded) so the walkthrough resolves "
+            "references back to what was just discussed."
+        ),
+    )
 
 
 class AssistResearchInput(BaseModel):
     question: str
     node_key: Optional[str] = None
+    history: list[dict] = Field(
+        default_factory=list,
+        description="§17.687 — recent conversation turns [{role, content}].",
+    )
 
 
 class AssistFixInput(BaseModel):
     error: str = Field(description="The error / what went wrong while doing the step.")
     node_key: Optional[str] = None
+    history: list[dict] = Field(
+        default_factory=list,
+        description="§17.687 — recent conversation turns [{role, content}].",
+    )
 
 
 class AssistInterpretInput(BaseModel):
     message: str = Field(description="The operator's plain-language message.")
     node_key: Optional[str] = Field(
         default=None, description="Defaults to the session's current step."
+    )
+    history: list[dict] = Field(
+        default_factory=list,
+        description="§17.687 — recent conversation turns [{role, content}].",
     )
 
 
@@ -286,6 +306,7 @@ async def assist_guide(session_id: str, body: AssistGuideInput, db=Depends(get_d
             refine=body.refine,
             research=body.research,
             force=body.force,
+            history=body.history,
             db=db,
         )
     except ValueError as exc:
@@ -320,7 +341,7 @@ async def assist_guide_stream(
         try:
             async for ev in assist_agent.generate_step_guidance_stream(
                 session_id=session_id, node_key=body.node_key, refine=body.refine,
-                research=body.research, force=body.force, db=db,
+                research=body.research, force=body.force, history=body.history, db=db,
             ):
                 if ev.get("type") == "delta":
                     yield assist_agent._sse(ASSIST_GUIDE_DELTA, {"text": ev["text"]})
@@ -350,6 +371,7 @@ async def assist_research(session_id: str, body: AssistResearchInput, db=Depends
             session_id=session_id,
             node_key=body.node_key,
             question=body.question,
+            history=body.history,
             db=db,
         )
     except ValueError as exc:
@@ -367,6 +389,7 @@ async def assist_fix(session_id: str, body: AssistFixInput, db=Depends(get_db)):
             session_id=session_id,
             node_key=body.node_key,
             error=body.error,
+            history=body.history,
             db=db,
         )
     except ValueError as exc:
@@ -383,7 +406,8 @@ async def assist_interpret(session_id: str, body: AssistInterpretInput, db=Depen
     question) without the operator typing a /assist subcommand. Fail-soft: an
     unresolvable step or classifier hiccup returns intent='question'."""
     return await assist_agent.classify_session_turn(
-        session_id=session_id, message=body.message, node_key=body.node_key, db=db,
+        session_id=session_id, message=body.message, node_key=body.node_key,
+        history=body.history, db=db,
     )
 
 

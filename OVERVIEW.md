@@ -22049,6 +22049,27 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.687 Fix — Assist Mode recalls the recent conversation (a suggestion it made a turn ago) (2026-07-31)
+
+**Report (OWUI natural-language trial run).** Two symptoms: (1) mid-assist the engine "does not seem to be properly recalling previous portions of the project/job"; (2) it "was unable to properly define a program it suggested so the user could confirm their interest."
+
+**Root cause (shared, verified at the contract level).** Assist Mode conversational turns were **stateless across turns**. Per turn the generation paths (`guide`/`fix`/`research`/`interpret`) saw only: the current node's assembled context, the §17.650 committed-node **digest** (`dag_nodes.status='done'` output only), the §17.487 environment, the §17.654/677 operator notes, and the single current utterance. There was **no conversation-history field anywhere** — `AssistGuideInput`/`AssistResearchInput`/`AssistFixInput`/`AssistInterpretInput` never carried one, and the pipeline forwarded only `{message|refine|error, node_key}`. So a program the engine surfaced in a prior turn's decision `## My suggestion` (which is neither a committed node nor an operator note) had **no antecedent** on the follow-up turn — "define that one" / "yes, I'm interested" resolved against nothing. The §17.650 digest recovers only *finished* nodes; notes recover only what the *operator* captured; the live back-and-forth (including the engine's own prior replies) was invisible.
+
+**Fix — thread a windowed, truncated slice of the conversation into every assist generation turn** (mirrors how §17.650 added the digest and §17.487 the environment; additive, gated, fail-soft):
+- **Settings** (`app/config.py`): `assist_conversation_context_enabled=True`, `assist_conversation_context_turns=6`, `assist_conversation_context_max_chars=4000` (0 on either disables).
+- **Render** (`assist_guide.render_conversation_block`): `[{role, content}]` → a "## Recent conversation (you ⇄ the operator, most recent last)" block; keeps the MOST RECENT turns within the char budget (drops oldest first), truncates a single runaway turn, fail-soft on malformed items. Threaded into `_build_guide_user_prompt` (guide + stream), `generate_fix`, and `classify_turn` (so anaphora like "that one" resolves the intent), and folded into `run_step_research`'s `job_context`.
+- **Gate** (`assist_agent._conversation_block_for`): applies the settings, windows to `…_turns`, renders to `…_max_chars`; wired through `generate_step_guidance(_stream)`, `run_step_research`, `run_step_fix`, `classify_session_turn`.
+- **API**: `history: list[dict]` added to the four assist request models; passed to the agent calls (openapi snapshot regenerated).
+- **Pipeline** (`scaffold_router` + `_vendor/_assist_handlers`): new `Pipeline._assist_history(messages)` cleans + **excludes the current turn**, windows to the `assist_history_turns` valve (default 6), caps each message at 2000 chars (bounds the HTTP payload; the orchestrator applies the real char budget). Threaded through `_assist_nl_turn → assist_nl_turn → {assist_interpret, assist_research_cmd, assist_fix_cmd, assist_chat_turn → assist_guide(_stream)_cmd}`. The `question` path already regenerates with `force=True`, so history takes effect (not served from the guidance cache) — no cache-key change needed.
+
+**Verification.** New `tests/test_assist_conversation_context.py` (12) + `tests/test_scaffold_router_assist_history.py` (5) all pass — render ordering/budget/truncation, injection into guide/fix/classify prompts, the settings gate, and the pipeline windowing/exclude-current/per-msg-cap. Existing assist suites green: orchestrator-side 212 passed; pipeline-side 172 passed. **Also repaired one pre-existing (not from this change) stale test:** `test_scaffold_router_assist_chat_routing::test_paused_session_falls_to_triage` used the message "what next for the firewall", which a later NL next-step router now intercepts (→ `_render_next` resume nudge via a live `/work` call) rather than falling through the paused-vs-active gate the test targets; swapped to a neutral substantive message so it exercises the intended paused→triage fall-through (62 passed). openapi snapshot updated; orchestrator + pipelines restarted (live).
+
+**Deferred.** (1) Explicit slash paths (`/assist guide|research|fix`) still send no history (the param defaults to `[]`) — only the NL turn populates it; wire the slash dispatch if the operator wants recall there too. (2) The engine's suggestions still aren't persisted — recall is window-bounded, so a suggestion older than `assist_history_turns` is forgotten; a durable "decisions/suggestions" capture would be the fuller fix. (3) Issue #2's decision-node grounding (can it *define* a freshly-named program even with recall?) awaits the operator's transcript to confirm it isn't a separate options-generation quality bug.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.686 Change — drastically raise DAG node + research ceilings for goal-completion depth (2026-07-30)
 
 **Operator directive:** plan/research to full goal completion — create all the nodes a goal needs and run research until coverage is complete — rather than the conservative caps. This partially reverses the §17.685 posture (which capped DAGs at 10 and told the model to consolidate) in favor of coverage. Values chosen with the operator: **DAG 40 nodes / 32k-token budget; research 10 iters / 40 queries / 100 URLs-per-iter.**

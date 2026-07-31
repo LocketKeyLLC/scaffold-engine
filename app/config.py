@@ -733,6 +733,19 @@ class Settings(BaseSettings):
     # reaching for the open web. max_chars caps the digest (0 = disabled too).
     assist_job_context_enabled: bool = True
     assist_job_context_max_chars: int = Field(default=6000, ge=0, le=20000)
+    # §17.687 — recent-conversation recall. The §17.650 digest recovers only
+    # COMMITTED node output; notes recover only what the OPERATOR captured. So a
+    # program the engine SUGGESTED a turn ago (a decision node's "## My
+    # suggestion"), or any not-yet-committed back-and-forth, was forgotten on the
+    # next turn — the guide/fix/research/classify paths never saw the live
+    # dialogue. A follow-up like "define that one" / "yes, I'm interested" then
+    # had no antecedent. When enabled, a windowed, truncated slice of the OWUI
+    # conversation is threaded into those paths so references back resolve.
+    # `turns` caps how many prior messages the pipeline forwards; `max_chars`
+    # caps the rendered block on the orchestrator (0 on either = disabled).
+    assist_conversation_context_enabled: bool = True
+    assist_conversation_context_turns: int = Field(default=6, ge=0, le=30)
+    assist_conversation_context_max_chars: int = Field(default=4000, ge=0, le=20000)
     # §17.492 — deterministic scan of generated walkthroughs / fixes for
     # high-confidence destructive commands (rm -rf, dd, mkfs, DROP TABLE, force
     # push, …); matches are surfaced as a prominent "review before running"

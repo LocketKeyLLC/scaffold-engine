@@ -1109,6 +1109,7 @@ def assist_guide_cmd(
     pipe, session_id: str, *, node_key: str | None = None,
     refine: str | None = None, research: bool | None = None,
     force: bool = True, chat_id: str | None = None,
+    history: list[dict] | None = None,
 ) -> Generator[str, None, None]:
     """§17.486 — POST /assist/{sid}/guide and render the walkthrough.
 
@@ -1123,6 +1124,7 @@ def assist_guide_cmd(
                 "refine": refine,
                 "research": research,
                 "force": force,
+                "history": history or [],  # §17.687
             },
             headers=pipe._auth_headers(),
             timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
@@ -1144,6 +1146,7 @@ def assist_guide_stream_cmd(
     pipe, session_id: str, *, node_key: str | None = None,
     refine: str | None = None, research: bool | None = None,
     force: bool = True, chat_id: str | None = None,
+    history: list[dict] | None = None,
 ) -> Generator[str, None, None]:
     """§17.493 — stream the walkthrough from /assist/{sid}/guide/stream.
 
@@ -1153,7 +1156,8 @@ def assist_guide_stream_cmd(
     `done` (trailing — we don't know them until generation completes). A cache
     hit arrives as one delta + done(cached) and renders instantly."""
     url = f"{pipe.valves.orchestrator_url}/assist/{session_id}/guide/stream"
-    body = {"node_key": node_key, "refine": refine, "research": research, "force": force}
+    body = {"node_key": node_key, "refine": refine, "research": research,
+            "force": force, "history": history or []}  # §17.687
     q: _q.Queue = _q.Queue()
     stop_event = _th.Event()
     r_holder: list = []
@@ -1235,6 +1239,7 @@ def assist_guide_stream_cmd(
 def assist_chat_turn(
     pipe, session_id: str, refine: str, *,
     node_key: str | None = None, chat_id: str | None = None,
+    history: list[dict] | None = None,
 ) -> Generator[str, None, None]:
     """§17.537 — a plain-language chat turn inside an ACTIVE assist session.
 
@@ -1256,7 +1261,7 @@ def assist_chat_turn(
     yield from _cmd(
         pipe, session_id, node_key=node_key, refine=refine,
         research=pipe.valves.assist_guide_research, force=True,
-        chat_id=chat_id,
+        chat_id=chat_id, history=history,
     )
 
 
@@ -1319,6 +1324,7 @@ def fast_classify_turn(msg: str) -> str | None:
 
 def assist_interpret(
     pipe, session_id: str, message: str, *, node_key: str | None = None,
+    history: list[dict] | None = None,
 ) -> dict:
     """POST /assist/{sid}/interpret → intent dict. Fail-soft → question so a
     classifier/endpoint hiccup degrades to the guide/refine turn."""
@@ -1327,7 +1333,8 @@ def assist_interpret(
     try:
         r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/interpret",
-            json={"message": message, "node_key": node_key},
+            json={"message": message, "node_key": node_key,
+                  "history": history or []},
             headers=pipe._auth_headers(),
             timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
         )
@@ -1573,6 +1580,7 @@ def _pivot_kind(msg: str) -> str:
 def assist_nl_turn(
     pipe, session_id: str, msg: str, *,
     node_key: str | None = None, chat_id: str | None = None,
+    history: list[dict] | None = None,
 ) -> Generator[str, None, None]:
     """§17.626/§17.627 — route a plain-language message in an ACTIVE assist
     session to the right engine component.
@@ -1593,7 +1601,7 @@ def assist_nl_turn(
     intent = fast_classify_turn(msg)
     evidence, error_text, query, note_text, note_kind = "", "", "", "", "note"
     if intent is None:
-        d = assist_interpret(pipe, session_id, msg, node_key=node_key)
+        d = assist_interpret(pipe, session_id, msg, node_key=node_key, history=history)
         intent = d.get("intent") or "question"
         evidence = d.get("evidence") or ""
         error_text = d.get("error_text") or ""
@@ -1631,6 +1639,7 @@ def assist_nl_turn(
         yield "_🔧 Sounds like something went wrong — let me help…_\n\n"
         yield from assist_fix_cmd(
             pipe, session_id, (error_text or msg), node_key=nk, chat_id=chat_id,
+            history=history,
         ); return
     if intent == "handoff":
         nk = _recall_node_key(pipe, chat_id, node_key)
@@ -1643,6 +1652,7 @@ def assist_nl_turn(
         nk = _recall_node_key(pipe, chat_id, node_key)
         yield from assist_research_cmd(
             pipe, session_id, (query or msg).strip(), node_key=nk, chat_id=chat_id,
+            history=history,
         ); return
     if intent == "note":
         # §17.654 — capture a new requirement/constraint/decision and confirm it
@@ -1674,7 +1684,9 @@ def assist_nl_turn(
         )
         return
     # question (default) — the existing guide/refine turn.
-    yield from assist_chat_turn(pipe, session_id, msg, node_key=node_key, chat_id=chat_id)
+    yield from assist_chat_turn(
+        pipe, session_id, msg, node_key=node_key, chat_id=chat_id, history=history,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1839,12 +1851,14 @@ def try_natural_start(pipe, msg: str, chat_id: str | None):
 def assist_research_cmd(
     pipe, session_id: str, question: str, *,
     node_key: str | None = None, chat_id: str | None = None,
+    history: list[dict] | None = None,
 ) -> Generator[str, None, None]:
     """§17.486 — POST /assist/{sid}/research and render cited results."""
     try:
         r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/research",
-            json={"question": question, "node_key": node_key},
+            json={"question": question, "node_key": node_key,
+                  "history": history or []},
             headers=pipe._auth_headers(),
             timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
         )
@@ -1902,12 +1916,14 @@ def assist_env_cmd(
 def assist_fix_cmd(
     pipe, session_id: str, error_text: str, *,
     node_key: str | None = None, chat_id: str | None = None,
+    history: list[dict] | None = None,
 ) -> Generator[str, None, None]:
     """§17.487 — POST /assist/{sid}/fix and render the diagnosis + fix."""
     try:
         r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/fix",
-            json={"error": error_text, "node_key": node_key},
+            json={"error": error_text, "node_key": node_key,
+                  "history": history or []},
             headers=pipe._auth_headers(),
             timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
         )

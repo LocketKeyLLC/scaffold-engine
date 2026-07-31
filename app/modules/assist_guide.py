@@ -662,6 +662,55 @@ def render_operator_notes_block(notes: list[dict] | None) -> str:
     )
 
 
+def render_conversation_block(
+    history: list[dict] | None, *, max_chars: int = 4000,
+) -> str:
+    """§17.687 — the recent OWUI back-and-forth (you ⇄ operator) so a follow-up
+    that refers back to something either of you just said resolves.
+
+    ``history`` = list of ``{role, content}`` (oldest first). The CURRENT
+    operator message is NOT included here — it's threaded separately as the
+    refine / question / error. Keeps the MOST RECENT turns within ``max_chars``
+    (drops oldest first) and returns "" when empty so callers thread it
+    unconditionally. Fail-soft on malformed items.
+    """
+    if not history or max_chars <= 0:
+        return ""
+    rendered: list[str] = []
+    for m in history:
+        if not isinstance(m, dict):
+            continue
+        role = (m.get("role") or "").strip().lower()
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        # Guard a single runaway turn (a huge pasted walkthrough) so one message
+        # can't blow the whole budget; keep the head (the suggestion/decision
+        # framing lives up top per the brevity floor §17.643).
+        if len(content) > max_chars:
+            content = content[:max_chars].rstrip() + " …[truncated]"
+        who = "Operator" if role == "user" else "You (assistant)"
+        rendered.append(f"{who}: {content}")
+    if not rendered:
+        return ""
+    kept: list[str] = []
+    total = 0
+    for line in reversed(rendered):
+        cost = len(line) + 2  # +2 for the blank-line join
+        if kept and total + cost > max_chars:
+            break
+        kept.append(line)
+        total += cost
+    kept.reverse()
+    return (
+        "## Recent conversation (you ⇄ the operator, most recent last) — the "
+        "operator may refer back to something either of you just said (\"that "
+        "one\", \"the program you suggested\", \"yes, do it\"); honor it and stay "
+        "consistent with what you already told them\n"
+        + "\n\n".join(kept)
+    )
+
+
 # ── Success verification (§17.487 — did the submitted step actually work?) ─
 
 _JUDGE_OUTCOME_TOOL = model_router.Tool(
@@ -907,21 +956,30 @@ _CLASSIFY_SYSTEM = (
 
 async def classify_turn(
     *, message: str, title: str, task_prompt: str, tool: str,
-    role: str | None = None,
+    role: str | None = None, conversation: str | None = None,
 ) -> dict:
     """Classify an operator's plain-language turn into an assist intent.
 
     Returns ``{"intent": <one of ASSIST_INTENTS>, "evidence": str,
     "error_text": str, "query": str}``. Fail-soft: on any model/parse error
     returns ``intent='question'`` so a flaky classifier degrades to the guide/
-    refine behavior rather than misfiring a submit/skip/handoff."""
+    refine behavior rather than misfiring a submit/skip/handoff.
+
+    §17.687 — ``conversation`` (the recent back-and-forth) lets the classifier
+    resolve a message whose intent depends on what was JUST said ("yes, that
+    one", "tell me more about the program you suggested") — anaphora it cannot
+    read from the current step alone."""
     role = role or settings.assist_classify_model_role
     fallback = {"intent": "question", "evidence": "", "error_text": "", "query": "",
                 "note_text": "", "note_kind": "note"}
+    convo_block = (
+        f"{conversation.strip()}\n\n" if (conversation or "").strip() else ""
+    )
     user = (
         f"Current step: {title}\n\n"
         f"What the step asks:\n{(task_prompt or '')[:1500]}\n\n"
         f"Tool for this step: {tool or 'LLM'}\n\n"
+        f"{convo_block}"
         f"Operator's message:\n{message[:2000]}\n\n"
         "Call classify_turn."
     )
@@ -1148,12 +1206,14 @@ def _build_guide_user_prompt(
     job_digest: Optional[str] = None,
     operator_notes: Optional[list[dict]] = None,
     is_decision: bool = False,
+    conversation: Optional[str] = None,
 ) -> str:
     """Compose the user message: the same upstream-last task the executor
     would see, plus the operator environment, a project-wide digest of work
     already completed on the job (§17.650), the operator's captured notes &
-    additions (§17.654), a confirmed-research block, and a human-walkthrough
-    trailer (a decision-framing trailer when the node is a decision).
+    additions (§17.654), the recent conversation (§17.687), a confirmed-research
+    block, and a human-walkthrough trailer (a decision-framing trailer when the
+    node is a decision).
     """
     parts: list[str] = [ctx.assembled_prompt]
     if node_description and node_description.strip() and node_description.strip() not in ctx.assembled_prompt:
@@ -1166,6 +1226,8 @@ def _build_guide_user_prompt(
     notes_block = render_operator_notes_block(operator_notes)
     if notes_block:
         parts.append(notes_block)
+    if conversation and conversation.strip():  # §17.687 — recent back-and-forth
+        parts.append(conversation.strip())
     research_block = _render_research_block(sources)
     if research_block:
         parts.append(research_block)
@@ -1190,6 +1252,7 @@ async def generate_guidance(
     job_digest: Optional[str] = None,
     operator_notes: Optional[list[dict]] = None,
     is_decision: bool = False,
+    conversation: Optional[str] = None,
 ) -> dict:
     """Generate (do not persist) the human walkthrough for one step.
 
@@ -1217,6 +1280,7 @@ async def generate_guidance(
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
+        conversation=conversation,
     )
 
     resp = await chat_until_nonempty(
@@ -1263,6 +1327,7 @@ async def generate_fix(
     domain: Optional[str] = None,
     verbosity: str = "normal",
     job_digest: Optional[str] = None,
+    conversation: Optional[str] = None,
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -1291,6 +1356,8 @@ async def generate_fix(
     env_block = render_environment_block(environment)
     if env_block:
         parts.append(env_block)
+    if conversation and conversation.strip():  # §17.687 — recent back-and-forth
+        parts.append(conversation.strip())
     parts.append(f"## Error the operator hit\n{error_text.strip()}")
     research_block = _render_research_block(sources)
     if research_block:
@@ -1401,6 +1468,7 @@ async def ensure_guidance(
     job_digest: Optional[str] = None,
     operator_notes: Optional[list[dict]] = None,
     is_decision: bool = False,
+    conversation: Optional[str] = None,
     db,
 ) -> dict:
     """Return guidance, generating + persisting only when needed.
@@ -1427,6 +1495,7 @@ async def ensure_guidance(
         job_digest=job_digest,
         operator_notes=operator_notes,
         is_decision=is_decision,
+        conversation=conversation,
     )
     await persist_guidance(
         session_id=session_id,
@@ -1458,6 +1527,7 @@ async def generate_guidance_stream(
     job_digest: Optional[str] = None,
     operator_notes: Optional[list[dict]] = None,
     is_decision: bool = False,
+    conversation: Optional[str] = None,
     db,
 ):
     """Stream a walkthrough as it generates. Yields event dicts:
@@ -1500,6 +1570,7 @@ async def generate_guidance_stream(
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
+        conversation=conversation,
     )
     messages = [
         {"role": "system", "content": system},

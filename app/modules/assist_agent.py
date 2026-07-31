@@ -561,6 +561,7 @@ async def generate_step_guidance(
     refine: str | None = None,
     research: bool | None = None,
     force: bool = False,
+    history: list[dict] | None = None,
     db,
 ) -> dict:
     """Generate (or return cached) the human walkthrough for a step.
@@ -617,6 +618,7 @@ async def generate_step_guidance(
     # (read from the session row already fetched — no extra round-trip).
     is_decision = (node_row.get("node_type") or "").lower() == "decision"
     operator_notes = _coerce_notes(sess.get("notes"))
+    conversation = _conversation_block_for(history)  # §17.687
 
     res = await assist_guide.ensure_guidance(
         session_id=session_id,
@@ -632,6 +634,7 @@ async def generate_step_guidance(
         job_digest=job_digest,
         operator_notes=operator_notes,
         is_decision=is_decision,
+        conversation=conversation,
         db=db,
     )
     return {
@@ -651,6 +654,7 @@ async def generate_step_guidance_stream(
     refine: str | None = None,
     research: bool | None = None,
     force: bool = False,
+    history: list[dict] | None = None,
     db,
 ):
     """Streaming sibling of ``generate_step_guidance`` (§17.493).
@@ -698,6 +702,7 @@ async def generate_step_guidance_stream(
     )
     is_decision = (node_row.get("node_type") or "").lower() == "decision"  # §17.654
     operator_notes = _coerce_notes(sess.get("notes"))
+    conversation = _conversation_block_for(history)  # §17.687
 
     async for ev in assist_guide.generate_guidance_stream(
         session_id=session_id,
@@ -713,6 +718,7 @@ async def generate_step_guidance_stream(
         job_digest=job_digest,
         operator_notes=operator_notes,
         is_decision=is_decision,
+        conversation=conversation,
         db=db,
     ):
         yield ev
@@ -723,6 +729,7 @@ async def run_step_research(
     session_id: str,
     node_key: str | None = None,
     question: str,
+    history: list[dict] | None = None,
     db,
 ) -> dict:
     """Confirm an operator-supplied question via the research helpers.
@@ -774,6 +781,9 @@ async def run_step_research(
         context_parts.append(env_block)
     if digest:
         context_parts.append(digest)
+    conversation = _conversation_block_for(history)  # §17.687
+    if conversation:
+        context_parts.append(conversation)
     job_context = "\n\n".join(context_parts) or None
 
     res = await assist_guide.research_one(
@@ -789,6 +799,7 @@ async def run_step_fix(
     node_key: str | None = None,
     error: str,
     research: bool | None = None,
+    history: list[dict] | None = None,
     db,
 ) -> dict:
     """Diagnose an operator-reported error on a step and return corrected steps.
@@ -845,6 +856,7 @@ async def run_step_fix(
         domain=node_row.get("domain"),
         verbosity=verbosity,
         job_digest=job_digest,
+        conversation=_conversation_block_for(history),  # §17.687
     )
     # Capture the blocker on the friction trail (best-effort).
     try:
@@ -858,7 +870,8 @@ async def run_step_fix(
 
 
 async def classify_session_turn(
-    *, session_id: str, message: str, node_key: str | None = None, db,
+    *, session_id: str, message: str, node_key: str | None = None,
+    history: list[dict] | None = None, db,
 ) -> dict:
     """§17.626 — classify an operator's plain-language message against the
     session's current step. Returns ``{intent, evidence, error_text, node_key,
@@ -901,7 +914,7 @@ async def classify_session_turn(
         return fallback
     res = await assist_guide.classify_turn(
         message=message, title=ctx.title, task_prompt=ctx.base_prompt,
-        tool=ctx.tool,
+        tool=ctx.tool, conversation=_conversation_block_for(history),  # §17.687
     )
     res["node_key"] = nk
     res["title"] = ctx.title
@@ -979,6 +992,32 @@ async def list_assist_candidates(
 
 
 # ── Environment capture (§17.487 — concrete commands, not placeholders) ────
+
+
+def _conversation_block_for(history: list[dict] | None) -> str:
+    """§17.687 — render the recent OWUI back-and-forth into a recall block,
+    gated by settings. Returns "" when disabled, empty, or on any render error
+    so callers can thread the result unconditionally (fail-soft: a history
+    render must never break the guidance/fix/research/classify turn)."""
+    from app.config import settings
+    from app.modules import assist_guide
+
+    if (
+        not settings.assist_conversation_context_enabled
+        or settings.assist_conversation_context_max_chars <= 0
+        or settings.assist_conversation_context_turns <= 0
+        or not history
+    ):
+        return ""
+    try:
+        turns = settings.assist_conversation_context_turns
+        recent = history[-turns:]
+        return assist_guide.render_conversation_block(
+            recent, max_chars=settings.assist_conversation_context_max_chars,
+        )
+    except Exception as exc:  # noqa: BLE001 — never block the turn on a render
+        logger.warning("assist_conversation_block_failed job_id_unknown: %s", exc)
+        return ""
 
 
 async def _job_digest_for(

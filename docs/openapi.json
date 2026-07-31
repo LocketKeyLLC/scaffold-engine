@@ -188,6 +188,15 @@
             "title": "Error",
             "type": "string"
           },
+          "history": {
+            "description": "§17.687 — recent conversation turns [{role, content}].",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "History",
+            "type": "array"
+          },
           "node_key": {
             "anyOf": [
               {
@@ -231,6 +240,15 @@
             "description": "Regenerate even if a cached walkthrough exists.",
             "title": "Force",
             "type": "boolean"
+          },
+          "history": {
+            "description": "§17.687 — recent conversation turns [{role, content}] (oldest first, current message excluded) so the walkthrough resolves references back to what was just discussed.",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "History",
+            "type": "array"
           },
           "node_key": {
             "anyOf": [
@@ -296,6 +314,15 @@
       },
       "AssistInterpretInput": {
         "properties": {
+          "history": {
+            "description": "§17.687 — recent conversation turns [{role, content}].",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "History",
+            "type": "array"
+          },
           "message": {
             "description": "The operator's plain-language message.",
             "title": "Message",
@@ -375,6 +402,15 @@
       },
       "AssistResearchInput": {
         "properties": {
+          "history": {
+            "description": "§17.687 — recent conversation turns [{role, content}].",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "History",
+            "type": "array"
+          },
           "node_key": {
             "anyOf": [
               {

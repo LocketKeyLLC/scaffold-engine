@@ -138,9 +138,15 @@ class TestPipeRouting:
         guide.assert_not_called()
 
     def test_paused_session_falls_to_triage(self, pipe):
+        # A paused session is not "active" (`_active_assist_session` returns None),
+        # so plain, non-command text falls through to the triage planner — it is
+        # NOT routed to the in-session guidance turn. Use a neutral substantive
+        # message: a next-step phrasing ("what next …") would instead be caught by
+        # the NL next-step router (→ `_render_next`, a resume nudge), which is a
+        # different code path than the paused-vs-active gate under test here.
         rec = {"session_id": "s1", "status": "paused"}
         out, triage, guide = self._drive(
-            pipe, "what next for the firewall", recall=rec,
+            pipe, "no link up detected on the firewall", recall=rec,
         )
         assert "TRIAGE_OUTPUT" in out
         guide.assert_not_called()
