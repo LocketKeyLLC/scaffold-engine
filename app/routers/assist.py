@@ -41,6 +41,13 @@ class AssistSubmitInput(BaseModel):
     evidence_meta: dict = Field(default_factory=dict)
     action: Literal["submit", "skip"] = "submit"
     friction_note: Optional[str] = None
+    history: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "§17.689 — recent conversation turns [{role, content}] so a DECISION "
+            "step's concrete artifact can be assembled across turns before commit."
+        ),
+    )
 
 
 class AssistHandoffInput(BaseModel):
@@ -472,8 +479,40 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
                     "mirror_divergence": False,
                 }
 
+    # §17.689 — decision deliberation. A decision node's concrete artifact is
+    # assembled ACROSS turns: a partial answer must NOT terminally commit. Runs
+    # before verify/submit; returns None (→ plain single-turn commit) unless this
+    # is a claimable decision step and the model produced a usable result.
+    deliberation = None
+    if body.action == "submit" and settings.assist_decision_deliberation_enabled:
+        deliberation = await assist_agent.run_step_decision(
+            session_id=session_id, node_key=body.node_key,
+            message=body.output, history=body.history, db=db,
+        )
+    if deliberation is not None and deliberation["status"] == "needs_input":
+        # Do NOT commit — keep the step open and hand back the proposal so the
+        # operator can confirm or adjust on the next turn.
+        return {
+            "session_id": session_id,
+            "node_key": body.node_key,
+            "status": "deliberating",
+            "committed": False,
+            "no_op": False,
+            "next_node_key": None,
+            "decision_message": deliberation["message"],
+            "mirror_divergence": False,
+        }
+
     verdict = None
-    if body.action == "submit" and settings.assist_verify_on_submit:
+    # §17.689 — a resolved decision commits the concrete artifact the engine
+    # assembled (not the operator's "looks good"); deliberation replaces the
+    # generic success verify for that path.
+    commit_evidence = body.output
+    decision_message = None
+    if deliberation is not None and deliberation["status"] == "resolved":
+        commit_evidence = deliberation["decision_record"]
+        decision_message = deliberation.get("message") or None
+    elif body.action == "submit" and settings.assist_verify_on_submit:
         verdict = await assist_agent.verify_submit_outcome(
             session_id=session_id, node_key=body.node_key, evidence=body.output, db=db,
         )
@@ -499,7 +538,7 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         result = await assist_agent.submit_step(
             session_id=session_id,
             node_key=body.node_key,
-            evidence=body.output,
+            evidence=commit_evidence,
             evidence_kind=body.evidence_kind,
             evidence_meta=body.evidence_meta,
             action=body.action,
@@ -508,6 +547,10 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         )
         if verdict is not None and isinstance(result, dict):
             result["success_verdict"] = verdict
+        # §17.689 — surface the deliberation confirmation so the pipeline can
+        # show what was recorded alongside the commit.
+        if decision_message and isinstance(result, dict):
+            result["decision_message"] = decision_message
         # §17.490 — learn the concrete values the operator used for this step's
         # placeholders so later walkthroughs are concrete. Best-effort; only
         # fires on a real commit and when the step's guidance had placeholders.

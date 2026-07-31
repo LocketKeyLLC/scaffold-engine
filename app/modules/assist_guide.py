@@ -869,6 +869,132 @@ async def verify_step_success(
     }
 
 
+# ── Multi-turn decision deliberation (§17.689) ─────────────────────────────
+# A decision node whose deliverable is a CONCRETE artifact (a VLAN table, a
+# partition layout, a config set) is assembled ACROSS turns rather than
+# committed on the operator's first partial answer. Each decision turn either
+# proposes a specific artifact to confirm/adjust (needs_input) or, once the
+# operator has confirmed / the choices fully determine it, emits the complete
+# artifact to record (resolved). A simple binary decision resolves in one turn.
+
+_DELIBERATE_TOOL = model_router.Tool(
+    name="resolve_or_continue",
+    description=(
+        "Report whether the operator's decision is now fully settled (resolved) "
+        "or needs another round (needs_input), with the operator-facing message "
+        "and, when resolved, the concrete decision to record for later steps."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["needs_input", "resolved"]},
+            "message": {
+                "type": "string",
+                "description": (
+                    "Markdown shown to the operator. For needs_input: a SPECIFIC "
+                    "concrete proposal they can accept or adjust, then one short "
+                    "line inviting them to confirm or say what to change. For "
+                    "resolved: a brief confirmation of what was decided."
+                ),
+            },
+            "decision_record": {
+                "type": "string",
+                "description": (
+                    "REQUIRED when resolved: the COMPLETE, self-contained concrete "
+                    "artifact to persist as this step's output (e.g. the full table "
+                    "with every field). Later steps build directly from this. Leave "
+                    "empty for needs_input."
+                ),
+            },
+        },
+        "required": ["status", "message"],
+    },
+)
+
+_DELIBERATE_SYSTEM = """You help a human operator finalize ONE decision step whose deliverable is a CONCRETE artifact (a table / list / plan / config with specific values). You are given the step's task, the project context, and the conversation so far (including any proposal you already made). Call resolve_or_continue exactly once.
+
+Choose the outcome:
+
+- status="resolved" when the operator's choices now fully determine the concrete deliverable, OR the operator has CONFIRMED a proposal you made (e.g. "looks good", "yes", "go with that", "that works"). Emit `decision_record` = the COMPLETE concrete artifact, assembled from what the operator chose — every row/field the task asks for, self-contained, ready for later steps to build from.
+
+- status="needs_input" when more is needed to make the deliverable concrete. In `message`, PROPOSE a specific, ready-to-use default that reflects the operator's choices so far (real, usable values — take concrete values from the operator environment when given; use a clearly-labeled <PLACEHOLDER> ONLY for something only the operator can supply, e.g. their exact ISP-facing IP). End with one short line inviting them to confirm or say what to change. If a FOUNDATIONAL choice is still open, ask THAT (offer the real options) — do NOT fabricate past a choice the operator has not made.
+
+Rules:
+- Resolve as soon as the operator confirms — never force an extra round once they've said yes.
+- Do NOT pre-assume a count, topology, or set the operator has not agreed to.
+- Never invent values the operator must own (real public IPs, ISP specifics) — use sensible, clearly-labeled defaults they can change.
+- Keep `message` tight and skimmable. No preamble, no emoji, no completion checkmarks."""
+
+
+async def deliberate_decision(
+    *,
+    title: str,
+    task_prompt: str,
+    environment: Optional[dict] = None,
+    job_digest: Optional[str] = None,
+    operator_notes: Optional[list[dict]] = None,
+    conversation: Optional[str] = None,
+    latest_message: str,
+) -> dict:
+    """§17.689 — one turn of decision deliberation.
+
+    Returns ``{status: 'needs_input'|'resolved'|'error', message, decision_record}``.
+    Fail-soft: any model/parse failure returns ``status='error'`` so the caller
+    can fall back to the plain single-turn commit rather than trapping the
+    operator in a broken decision loop.
+    """
+    role = settings.assist_guide_model_role
+    parts = [
+        f"Decision step: {title}\n\n"
+        f"What this step must ultimately produce (the concrete deliverable):\n{task_prompt}"
+    ]
+    if job_digest and job_digest.strip():
+        parts.append(job_digest.strip())
+    env_block = render_environment_block(environment)
+    if env_block:
+        parts.append(env_block)
+    notes_block = render_operator_notes_block(operator_notes)
+    if notes_block:
+        parts.append(notes_block)
+    if conversation and conversation.strip():
+        parts.append(conversation.strip())
+    parts.append(f"## Operator's latest message\n{(latest_message or '').strip()}")
+    parts.append(
+        "Decide whether this decision is now resolved or needs another round, "
+        "and call resolve_or_continue."
+    )
+    user = "\n\n".join(parts)
+    try:
+        resp = await model_router.tool_call(
+            [
+                {"role": "system", "content": _DELIBERATE_SYSTEM},
+                {"role": "user", "content": user},
+            ],
+            [_DELIBERATE_TOOL],
+            role=role,
+            temperature=0.2,
+            max_tokens=settings.assist_guide_max_tokens,
+            tool_choice="auto",
+        )
+    except Exception as exc:  # network / provider error — fall back to plain commit
+        logger.warning("assist_deliberate_decision_failed: %s", exc)
+        return {"status": "error", "message": "", "decision_record": ""}
+    args = None
+    if resp and resp.success and resp.tool_calls:
+        args = resp.tool_calls[0].arguments or {}
+    if not args:
+        logger.warning("assist_deliberate_decision_unparsed title=%r", title)
+        return {"status": "error", "message": "", "decision_record": ""}
+    status = args.get("status")
+    if status not in ("needs_input", "resolved"):
+        return {"status": "error", "message": "", "decision_record": ""}
+    return {
+        "status": status,
+        "message": (args.get("message") or "").strip(),
+        "decision_record": (args.get("decision_record") or "").strip(),
+    }
+
+
 # ── Natural-language turn classification (§17.626) ─────────────────────────
 # When a chat has an ACTIVE assist session, plain text is an intent, not a new
 # idea. This classifier maps the message to one of the assist verbs so the
@@ -993,9 +1119,21 @@ _CLASSIFY_SYSTEM = (
 )
 
 
+_CLASSIFY_DECISION_HINT = (
+    "\n\nTHIS STEP IS A DECISION (its deliverable is a CHOICE the operator "
+    "makes). Treat the operator MAKING or CONFIRMING that choice as submit: "
+    "picking an option, stating a count / approach / value ('3 vlans', 'go with "
+    "ZFS'), OR confirming a proposal you offered ('looks good', 'yes', 'that "
+    "works', 'go with that', 'perfect') → submit. Only route to ask when they "
+    "want a real answer to a QUESTION (e.g. 'what's the difference between the "
+    "options', 'what do you recommend and why') rather than stating their pick."
+)
+
+
 async def classify_turn(
     *, message: str, title: str, task_prompt: str, tool: str,
     role: str | None = None, conversation: str | None = None,
+    is_decision: bool = False,
 ) -> dict:
     """Classify an operator's plain-language turn into an assist intent.
 
@@ -1003,6 +1141,10 @@ async def classify_turn(
     "error_text": str, "query": str}``. Fail-soft: on any model/parse error
     returns ``intent='question'`` so a flaky classifier degrades to the guide/
     refine behavior rather than misfiring a submit/skip/handoff.
+
+    §17.689 — ``is_decision`` biases a made/confirmed CHOICE toward ``submit`` so
+    it reaches the server-side decision-deliberation path (which assembles the
+    concrete artifact across turns) instead of being read as a bare question.
 
     §17.687 — ``conversation`` (the recent back-and-forth) lets the classifier
     resolve a message whose intent depends on what was JUST said ("yes, that
@@ -1022,10 +1164,11 @@ async def classify_turn(
         f"Operator's message:\n{message[:2000]}\n\n"
         "Call classify_turn."
     )
+    system = _CLASSIFY_SYSTEM + (_CLASSIFY_DECISION_HINT if is_decision else "")
     try:
         resp = await model_router.tool_call(
             [
-                {"role": "system", "content": _CLASSIFY_SYSTEM},
+                {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             [_CLASSIFY_TURN_TOOL],

@@ -2997,10 +2997,10 @@ class Pipeline:
 
     def _assist_submit(
         self, session_id: str, node_key: str, evidence: str,
-        *, chat_id: str | None = None,
+        *, chat_id: str | None = None, history: list[dict] | None = None,
     ) -> Generator[str, None, None]:
         yield from _assist.assist_submit(
-            self, session_id, node_key, evidence, chat_id=chat_id,
+            self, session_id, node_key, evidence, chat_id=chat_id, history=history,
         )
 
     def _assist_skip(

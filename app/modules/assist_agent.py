@@ -883,7 +883,7 @@ async def classify_session_turn(
     fallback = {
         "intent": "question", "evidence": "", "error_text": "", "query": "",
         "note_text": "", "note_kind": "note",
-        "node_key": node_key, "title": None,
+        "node_key": node_key, "title": None, "is_decision": False,
     }
     if not (message or "").strip():
         return fallback
@@ -912,12 +912,18 @@ async def classify_session_turn(
         )
     except ValueError:
         return fallback
+    # §17.689 — on a decision node, a made/confirmed choice routes to `submit`
+    # (→ server-side deliberation), and the flag rides back so the pipeline can
+    # apply a deterministic confirm backstop.
+    is_decision = (node_row.get("node_type") or "").lower() == "decision"
     res = await assist_guide.classify_turn(
         message=message, title=ctx.title, task_prompt=ctx.base_prompt,
         tool=ctx.tool, conversation=_conversation_block_for(history),  # §17.687
+        is_decision=is_decision,
     )
     res["node_key"] = nk
     res["title"] = ctx.title
+    res["is_decision"] = is_decision
     return res
 
 
@@ -1235,8 +1241,74 @@ async def verify_submit_outcome(
         environment=_environment_from_metadata(row["metadata"]),
         # §17.688 — a decision node is judged on the CHOICE, not the downstream
         # concrete artifact (its task text names a table/config later steps apply).
-        is_decision=(row["node_type"] or "").lower() == "decision",
+        is_decision=(row.get("node_type") or "").lower() == "decision",
     )
+
+
+async def run_step_decision(
+    *, session_id: str, node_key: str, message: str,
+    history: list[dict] | None = None, db,
+) -> Optional[dict]:
+    """§17.689 — one turn of decision deliberation for a DECISION node.
+
+    Called by the submit endpoint BEFORE committing. Returns:
+      - ``None`` when deliberation does not apply — the step isn't claimable
+        ('presented'), the node isn't a ``decision``, or the deliberation model
+        failed/gave an unusable answer — so the caller falls back to the plain
+        single-turn commit (a decision is still judged correctly by §17.688).
+      - ``{status: 'needs_input', message}`` — do NOT commit; show the message
+        and keep the step open for the operator's next turn.
+      - ``{status: 'resolved', decision_record, message}`` — commit the
+        ``decision_record`` (the complete concrete artifact) as the step output.
+
+    Fail-soft throughout: a deliberation hiccup must never trap the operator.
+    """
+    from app.config import settings
+    if not settings.assist_decision_deliberation_enabled:
+        return None
+    row = (await db.execute(
+        text("""
+            SELECT s.status, s.job_id, ss.metadata, ss.notes,
+                   d.title, d.prompt_template, d.node_type
+              FROM assist_steps s
+              JOIN assist_sessions ss ON ss.id = s.session_id
+              JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid AND s.node_key = :nk
+        """),
+        {"sid": session_id, "nk": node_key},
+    )).mappings().first()
+    if not row or row.get("status") != "presented":
+        return None
+    if (row.get("node_type") or "").lower() != "decision":
+        return None
+    job_id = str(row["job_id"])
+    environment = _environment_from_metadata(row["metadata"])
+    operator_notes = _coerce_notes(row["notes"])
+    job_digest = await _job_digest_for(
+        db=db, job_id=job_id, exclude_node_keys={node_key},
+    )
+    conversation = _conversation_block_for(history)
+    from app.modules import assist_guide
+    res = await assist_guide.deliberate_decision(
+        title=row["title"] or node_key,
+        task_prompt=row["prompt_template"] or "",
+        environment=environment,
+        job_digest=job_digest,
+        operator_notes=operator_notes,
+        conversation=conversation,
+        latest_message=message,
+    )
+    status = res.get("status")
+    if status == "needs_input" and (res.get("message") or "").strip():
+        return {"status": "needs_input", "message": res["message"].strip()}
+    if status == "resolved" and (res.get("decision_record") or "").strip():
+        return {
+            "status": "resolved",
+            "decision_record": res["decision_record"].strip(),
+            "message": (res.get("message") or "").strip(),
+        }
+    # error / unusable (e.g. resolved with no record) → plain single-turn commit.
+    return None
 
 
 async def submit_step(

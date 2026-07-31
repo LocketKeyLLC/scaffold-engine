@@ -746,6 +746,17 @@ class Settings(BaseSettings):
     assist_conversation_context_enabled: bool = True
     assist_conversation_context_turns: int = Field(default=6, ge=0, le=30)
     assist_conversation_context_max_chars: int = Field(default=4000, ge=0, le=20000)
+    # §17.689 — multi-turn decision deliberation. A decision node whose
+    # deliverable is a CONCRETE artifact (a VLAN table, a partition layout, a
+    # config set) used to commit on the operator's FIRST partial answer ("3
+    # vlans"), leaving downstream steps to invent the concrete values. When on,
+    # a decision step's submit is intercepted: the engine assembles the concrete
+    # artifact ACROSS turns (propose → the operator confirms/adjusts) and only
+    # commits the full, confirmed artifact — so T2 "Define VLAN plan" actually
+    # yields the table T12/T17 build from. A simple binary decision still
+    # resolves in one turn (the LLM marks it resolved immediately). Fail-soft:
+    # any deliberation error falls back to the plain single-turn commit.
+    assist_decision_deliberation_enabled: bool = True
     # §17.492 — deterministic scan of generated walkthroughs / fixes for
     # high-confidence destructive commands (rm -rf, dd, mkfs, DROP TABLE, force
     # push, …); matches are surfaced as a prominent "review before running"

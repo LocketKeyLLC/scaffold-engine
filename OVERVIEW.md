@@ -22049,6 +22049,23 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.689 Feature — multi-turn decision deliberation: a concrete-artifact decision is assembled across turns, committed on confirm (2026-07-31)
+
+**Closes the §17.688 deferral.** §17.688 stopped the "3 VLANs → may have failed" *error*, but the committed evidence was still just "3 vlans" — the concrete VLAN table (IDs/subnets/DHCP/isolation) that T12/T17 build from was left to be invented at implementation time. This makes a decision node whose deliverable is a concrete artifact stay OPEN across turns: **propose → the operator confirms/adjusts → commit the full, confirmed artifact.**
+
+**Mechanism (server-side interception; the pipeline stays thin).**
+- `assist_guide.deliberate_decision` (new LLM, `resolve_or_continue` tool) — one deliberation turn over `{task, project digest, environment, notes, conversation (§17.687), latest_message}`. Returns `needs_input` (a specific concrete proposal to confirm/adjust) or `resolved` (`decision_record` = the complete artifact). Fail-soft → `status='error'`.
+- `assist_agent.run_step_decision` — gates on a *presented* `decision` node; returns `None` (→ plain single-turn commit) when not applicable or on any deliberation error, so a hiccup never traps the operator.
+- `POST /assist/{sid}/submit` interception: on a decision node it runs deliberation FIRST. `needs_input` → returns `status='deliberating'` (NOT committed, step stays open). `resolved` → commits the `decision_record` as evidence (mirror invariant → `dag_nodes.output_text` = the table, so T12/T17 read the real plan) and skips the generic verify. Non-decision / disabled → unchanged path. `AssistSubmitInput` gains `history` (§17.687-style; openapi regenerated).
+- Routing to submit: `classify_turn` gains an `is_decision` bias (a made/confirmed choice → `submit`), threaded via `classify_session_turn` (which now returns `is_decision`); the pipeline adds a **deterministic** confirm backstop `_looks_like_decision_confirm` (a "looks good"/"yes" reply the classifier read as `question` still routes to submit). `assist_submit` forwards `history` and renders the new `deliberating` reply (proposal + "confirm or tell me what to change", no commit); a resolved commit leads with "📌 Decision recorded."
+- Simple binary decisions (T1 Double-NAT vs Bridge) still resolve in ONE turn — the LLM marks them `resolved` immediately, so no extra friction. Gated by `assist_decision_deliberation_enabled` (default true).
+
+**Verification.** `tests/test_assist_decision_deliberation.py` (10) + `tests/test_scaffold_router_decision_deliberation.py` (19) + existing assist suites green (orchestrator 246, pipeline 135); fixed a latent §17.688 mock gap (`verify_submit_outcome` now `.get("node_type")`). **Live model, the real proof** — the exact two-turn T2 flow: turn 1 "3 vlans" → `needs_input` returning a concrete 3-VLAN table (Management/Trusted/Guest with IDs, subnets, DHCP scopes, isolation rules); turn 2 "looks good" (proposal in the §17.687 conversation) → `resolved` with the full table as `decision_record`. openapi-check + ci-tier-0 green; orchestrator + pipelines restarted (live).
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.688 Fix — a DECISION step is judged on the choice, not against its downstream artifact (the "3 VLANs → may have failed" error) (2026-07-31)
 
 **Report (OWUI run).** "It ran into an error when I made a selection of 3 VLANs." Reproduced from the OWUI chat store + logs: step **T2 "Define VLAN plan"** is a `decision` node whose task text says *"Produce a concrete table: VLAN ID, name, subnet/CIDR, purpose, DHCP scope, isolation rules."* Its §17.654 walkthrough correctly framed **one** foundational choice ("How many VLANs?" — options 3/4/5/6+, promising "then we'll decide purposes, IDs, subnets"). The operator answered **"3 vlans"** — exactly the framed question — and got: **"⚠️ This may have failed."** plus an async `assist_divergence_marked_async` on T2.

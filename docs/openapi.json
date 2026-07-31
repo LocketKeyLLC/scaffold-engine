@@ -507,6 +507,15 @@
             ],
             "title": "Friction Note"
           },
+          "history": {
+            "description": "§17.689 — recent conversation turns [{role, content}] so a DECISION step's concrete artifact can be assembled across turns before commit.",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "History",
+            "type": "array"
+          },
           "node_key": {
             "title": "Node Key",
             "type": "string"
