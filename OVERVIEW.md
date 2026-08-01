@@ -22049,6 +22049,23 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.695 Fix — an ACCESSIBLE existing system is preserved (clean in-place, not reinstall) — end to end, and recorded in the brief (2026-08-01)
+
+**Report.** "It still didn't honor my correction… the whole memory retention and additions. There should be a project note that records this." Confirmed from the chat store: msg [0] *"Resituate the Proxmox VE Server, **i can log in** but the IP address does not appear to be working… I'd like to wipe the former user and all data and **start over fresh**."* There was NO later correction this run, so §17.694's timeline rule didn't fire — yet the brief at [5] still read *"Perform a fresh installation of Proxmox VE to wipe existing data,"* and by assist step T9 the plan reached *"Ready to wipe all three disks"* — even though the operator had said the OS is on the 600GB SSD (already installed) and could log in.
+
+**Root cause.** The escalation isn't only a timeline problem; the *initial* statement itself carries the fix — **"i can log in" means the system is installed and reachable.** Nothing weighted that signal, so "wipe the former user data and start over fresh" on a box the operator is logged into was read as a from-scratch OS reinstall / disk wipe. And nothing DURABLY recorded "this system exists, preserve it" for later phases — the operator's "memory retention" complaint.
+
+**Fix — three layers, so the preserve intent is honored AND recorded end to end.**
+1. **Synthesis** (`SYNTHESIS_SYSTEM_PROMPT`, pipeline): if the user can ACCESS / log into / reach the system, it is INSTALLED + REACHABLE → PRESERVE it; read "wipe former user / start over fresh / remove old data" as IN-PLACE cleanup (remove old user/VMs/containers/data, reset services), NOT an OS reinstall or disk wipe; a from-scratch rebuild only if the OS is explicitly broken/unbootable.
+2. **Refine** (`REFINE_SYSTEM` §17.649, server): the accessible signal is now a non-destructive trigger, AND the step must RECORD the existing-system facts as `inputs_available` + an explicit PRESERVE `constraints` entry — the durable project record that persists into planning (the "project note" the operator asked for).
+3. **DAG** (`DAG_PROMPT`): honor PRESERVE/in-place brief constraints — do NOT emit wipe/reinstall/reformat/re-provision nodes for an accessible system.
+
+**Verification (all live, real models).** Synthesis A/B on the exact transcript: OLD → *"fresh Proxmox VE server installation by wiping existing user data"*; NEW → *"the existing accessible Proxmox VE server by removing former user accounts and data… without reinstalling the operating system."* Live `refine_idea` → description "cleaned… without reinstalling the OS", `constraints` = *"PRESERVE the existing Proxmox VE installation and OS on the 600GB SSD — no OS reinstall, no disk wipe"*, `inputs_available` = *"Existing Proxmox VE server — installed, reachable, operator can log in."* **Live `generate_dag` from that brief → 36 nodes, ZERO destructive/reinstall nodes** ("Audit existing users and data → Remove former user accounts/VMs/containers/data → Verify cleanup" then deploy services in-place; no ISO/USB/wipe/reinstall). Tests: `test_scaffold_router_commands.py` +1, `test_idea_refinement.py` +1, `test_dag_generator.py` +1 (prompt-content); command/refine suites green (134). Orchestrator + pipelines restarted (live).
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.694 Fix — pre-/go synthesis reconciles the conversation as a timeline (a later correction wins) (2026-08-01)
 
 **Report.** "When establishing the base plan (before /go) the system doesn't recognize changes from the initial statement. I said I'd figured out the IP address issue, but it didn't remember and again planned a fresh download/reinstall instead of just removing the old data." Confirmed from the chat store: msg [0] *"…the IP address does not appear to be working… I'd like to wipe the former user and all data and start over fresh"*; msg [2] **corrected** it *"I have access now and can log in via web browser, it was plugged into the wrong ethernet port."* The proposed launch brief at [5] still read *"Perform a fresh installation of Proxmox VE."*

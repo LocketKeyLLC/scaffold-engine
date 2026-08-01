@@ -1334,3 +1334,13 @@ class TestDetectUnimplementedDecisions:
             self._tasks(), ["T2"], 2)
         assert "Decide VLAN scheme" in block
         assert "implement" in block.lower() and "depends_on" in block.lower()
+
+
+def test_dag_prompt_has_preserve_guidance():
+    # §17.695 — the DAG prompt must tell the model to honor PRESERVE/in-place
+    # brief constraints and not emit wipe/reinstall nodes for an accessible box.
+    from app.modules.dag_generator import DAG_PROMPT
+    p = DAG_PROMPT.lower()
+    assert "preserve" in p
+    assert "in place" in p or "in-place" in p
+    assert "reinstall" in p and "wipe" in p

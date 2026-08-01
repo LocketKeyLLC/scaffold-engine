@@ -350,6 +350,14 @@ Maximum tasks: {max_nodes}. Use as many nodes as the goal genuinely needs (up to
 {brief}
 ---
 
+§17.695 — Honor the brief's constraints, especially PRESERVE / in-place ones. If
+the brief says the target system is already installed and reachable, or names an
+OS disk / data to preserve, do NOT emit nodes that wipe disks, reinstall the OS,
+reformat, or re-provision the host from scratch. Plan the requested work IN PLACE
+on the existing system (remove the old user / old VMs / containers / data, then
+deploy the wanted services). Only include a from-scratch reinstall / disk wipe
+when the brief's goals UNAMBIGUOUSLY call for a bare-metal rebuild.
+
 §17.663 — If (and ONLY if) the brief contains an `operator_decision` object (a key
 choice the research surfaced, with an `options` list), you MUST include an early
 node of `type: "decision"` named after that decision, put its options (each label

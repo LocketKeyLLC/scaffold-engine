@@ -45,25 +45,42 @@ Rules:
 
 §17.649 — Non-destructive default (READ CAREFULLY). When the idea refers to an
 EXISTING or already-running system — signalled by words like "existing",
-"already", "current", "my <server/host/cluster/database>", "on my …", or a
-named service that is clearly in use — and asks to CLEAN UP, MODIFY, ADD TO, or
-RECONFIGURE it (e.g. "remove old data", "clean up", "reconfigure", "add X",
-"harden"), you MUST NOT escalate that into destroying the system:
+"already", "current", "my <server/host/cluster/database>", "on my …", a named
+service that is clearly in use, OR — §17.695 — the user saying they can ACCESS /
+log into / reach it ("i can log in", "i have access", "i can reach it": the
+system is INSTALLED and REACHABLE) — and asks to CLEAN UP, MODIFY, ADD TO, or
+RECONFIGURE it (e.g. "remove old data", "clean up", "start over fresh",
+"reconfigure", "add X", "harden"), you MUST NOT escalate that into destroying
+the system:
   * Do NOT turn "remove old data" into "wipe all storage / all disks".
   * Do NOT turn "set up / configure X on my existing Proxmox" into "reinstall the
     OS" or "provision the host from scratch".
+  * §17.695 — "start over fresh" / "start new" on a system the user can log into
+    means fresh SERVICES / CONFIG (remove the old user, old VMs/containers, and
+    data; redeploy services), NOT a fresh OS install or a disk wipe.
   * Do NOT bake a full wipe, OS reinstall, reformat, or delete-everything action
     into `goals` to resolve an uncertainty about the system's current state.
 Prefer the CONSERVATIVE, in-place interpretation that PRESERVES the existing
 system and touches only what the idea names (the old data, the specific service,
 the specific config). A destructive whole-system action (wipe all disks,
 reinstall the OS, reformat, drop the database, factory-reset) belongs in `goals`
-ONLY when the idea UNAMBIGUOUSLY asks to rebuild/reprovision from scratch (e.g.
-"fresh install", "bare-metal rebuild", "start over", "reformat everything").
-If whether to rebuild-from-scratch vs. modify-in-place is genuinely unclear,
-record it in `ambiguities` AND choose the non-destructive reading for `goals` —
-never the reverse. Removing DATA is not the same as wiping DISKS or reinstalling
-an OS; keep them distinct."""
+ONLY when the idea UNAMBIGUOUSLY asks to rebuild/reprovision from scratch AND
+gives no sign the system is already reachable (e.g. "bare-metal rebuild", the OS
+"won't boot / needs reinstalling", "reformat everything"). If whether to
+rebuild-from-scratch vs. modify-in-place is genuinely unclear, record it in
+`ambiguities` AND choose the non-destructive reading for `goals` — never the
+reverse. Removing DATA is not the same as wiping DISKS or reinstalling an OS;
+keep them distinct.
+
+§17.695 — RECORD what you understood about the operator's existing environment
+so it persists into planning (this is the project's durable record). When the
+idea states facts about an already-present system — it is installed, reachable,
+what host / OS / hardware / storage it runs on, what must be PRESERVED — capture
+those as `inputs_available` entries (e.g. "Proxmox VE already installed and
+reachable (operator can log in)", "OS on the 600GB SSD") AND add an explicit
+`constraints` entry naming what to preserve and the in-place intent (e.g.
+"PRESERVE the existing accessible Proxmox install and its OS disk — clean in
+place; do NOT reinstall the OS or wipe the OS drive"). Do not drop these facts."""
 
 REFINE_PROMPT = """Analyze this idea and produce a structured brief:
 

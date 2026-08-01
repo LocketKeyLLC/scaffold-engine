@@ -274,6 +274,15 @@ class TestSynthesisTimelineReconciliation:
         assert "reinstall" in p.lower()
         assert "remove old data" in p.lower() or "clean up the existing" in p.lower()
 
+    def test_prompt_has_accessible_preserve_guidance(self):
+        # §17.695 — even WITHOUT a later correction, "i can log in" means the
+        # system is accessible/installed → clean in-place, not reinstall.
+        p = _mod.SYNTHESIS_SYSTEM_PROMPT.lower()
+        assert "log into" in p or "log in" in p
+        assert "reachable" in p or "accessible" in p or "access" in p
+        assert "preserve" in p
+        assert "not an os reinstall" in p or "not a fresh os" in p or "fresh services" in p
+
     def test_synthesize_forwards_the_correction_to_the_model(self, pipe):
         # The correction ("I have access now") MUST reach the model, alongside
         # the initial statement — the model can only reconcile what it sees.

@@ -598,6 +598,21 @@ SYNTHESIS_SYSTEM_PROMPT = (
     "fixed, I can log in now'), treat that problem as RESOLVED: do NOT carry it "
     "— or the workarounds it motivated — into the plan, and do NOT escalate a "
     "now-resolved access/connectivity problem into a from-scratch reinstall. "
+    # §17.695 — the ACCESSIBLE-system signal. "i can log in", "i have access",
+    # "i can reach it" means the system is already INSTALLED and REACHABLE — even
+    # WITHOUT any later correction. Without this, "wipe the former user and all
+    # data and start over fresh" on a box the user can log into was escalated
+    # into a from-scratch OS reinstall / disk wipe (the reported bug — no explicit
+    # correction to trigger the §17.694 timeline rule).
+    "If the user says they can ACCESS / log into / reach the existing system, "
+    "that system is INSTALLED and REACHABLE: PRESERVE it. Read cleanup requests "
+    "('wipe the former user and all data', 'start over fresh', 'remove old "
+    "data') as IN-PLACE cleanup on that running system (remove the old user, old "
+    "VMs / containers, and data; reset services) — NOT an OS reinstall or a disk "
+    "wipe. Describe a from-scratch OS reinstall / bare-metal rebuild ONLY if the "
+    "user explicitly says the OS itself is broken, unbootable, or must be "
+    "reinstalled. 'start over fresh' on a system the user can log into means "
+    "fresh SERVICES / CONFIG, not a fresh OS. "
     "Distinguish 'remove old data / clean up the existing system' from 'wipe "
     "disks / reinstall the OS': only describe a from-scratch rebuild when the "
     "user's LATEST intent clearly asks for it. "

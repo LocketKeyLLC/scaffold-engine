@@ -334,3 +334,18 @@ class TestNonDestructiveDefault:
         assert "non-destructive" in desc
         assert "wipe all disks" in desc
         assert "reinstall the os" in desc
+
+
+# §17.695 — non-destructive / preserve guidance for an ACCESSIBLE existing system
+def test_refine_system_has_accessible_preserve_guidance():
+    from app.modules.idea_refinement import REFINE_SYSTEM
+    p = REFINE_SYSTEM.lower()
+    # the accessible signal is now a non-destructive trigger
+    assert "log into" in p or "log in" in p
+    assert "reachable" in p or "accessible" in p
+    # "start over fresh" on an accessible box = fresh services, not a fresh OS
+    assert "start over fresh" in p
+    assert "not a fresh os" in p or "fresh services" in p or "not an os reinstall" in p
+    # and it must RECORD the preserve intent so it persists into planning
+    assert "inputs_available" in p and "constraints" in p
+    assert "preserve" in p
