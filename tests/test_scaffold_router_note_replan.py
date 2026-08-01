@@ -119,6 +119,14 @@ class TestPivotDetector:
         ("no longer targeting free users", "decision"),
         ("make the tone much more casual and funny throughout", "preference"),
         ("rewrite every step to be shorter", "preference"),
+        # §17.691 — QUESTION-framed pivots (the reported regression).
+        ("can't i just erase the old containers and start fresh? i have access and can log in.", "decision"),
+        ("why not just do it all over the network?", "decision"),
+        ("isn't it easier to clean the existing install?", "decision"),
+        ("do I even need the USB step?", "decision"),
+        ("couldn't we just reuse the current setup?", "decision"),
+        ("why don't we just use the running server?", "decision"),
+        ("is there any need to reinstall at all?", "decision"),
     ])
     def test_pivots_detected_with_kind(self, msg, kind):
         assert _vendor._looks_like_pivot(msg) is True
@@ -129,6 +137,11 @@ class TestPivotDetector:
         "make the subject line shorter", "how long should the welcome email be?",
         "explain the activation email", "give me an example",
         "which platform do you recommend?", "",
+        # §17.691 — near-misses that must NOT trip the question-pivot patterns.
+        "can I add a call to action?",      # "can I" without "just"
+        "do I need this for production?",    # "do I need" without "to"
+        "why is this step listed here?",     # "why is" is not "why not/don't … just"
+        "is there a recommended disk size?", # "is there a …" without need/reason/point to
     ])
     def test_non_pivots_not_detected(self, msg):
         assert _vendor._looks_like_pivot(msg) is False
@@ -154,6 +167,29 @@ class TestPivotGateRouting:
         note_cmd.assert_called_once()
         assert note_cmd.call_args.kwargs["kind"] == "decision"
         chat_turn.assert_not_called()   # the re-render path was NOT taken
+
+    def test_question_framed_pivot_routes_to_note_not_rerender(self, pipe):
+        """§17.691 — the reported regression: a question-framed pivot the LLM
+        classified as 'question' must reach the note→re-plan path, not re-render
+        the (now-stale) current step."""
+        interp = {"intent": "question", "note_text": "", "note_kind": "note",
+                  "evidence": "", "error_text": "", "query": "", "node_key": "T10",
+                  "is_collect": False, "is_decision": False}
+        with patch.object(_vendor, "fast_classify_turn", return_value=None), \
+             patch.object(_vendor, "assist_interpret", return_value=interp), \
+             patch.object(_vendor, "fetch_pending_replan", return_value=None), \
+             patch.object(_vendor, "assist_note_cmd",
+                          return_value=iter(["📌 Noted (decision): ..."])) as note_cmd, \
+             patch.object(_vendor, "assist_chat_turn",
+                          return_value=iter(["RE-RENDER"])) as chat_turn:
+            out = "".join(_vendor.assist_nl_turn(
+                pipe, _SID,
+                "can't i just erase the old containers and start fresh? i have access and can log in.",
+                node_key="T10"))
+        assert "📌 Noted" in out
+        note_cmd.assert_called_once()
+        assert note_cmd.call_args.kwargs["kind"] == "decision"
+        chat_turn.assert_not_called()
 
     def test_genuine_question_still_re_renders(self, pipe):
         """A non-pivot question must still get the current step's guidance."""

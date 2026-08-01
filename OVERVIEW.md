@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.691 Fix — QUESTION-framed pivots reshape the plan (was: re-rendered the stale step) (2026-08-01)
+
+**Report (OWUI run).** "It had issues pivoting from the user's references and instructions mid-assist." Reproduced from the chat store: the plan was a **bare-metal Proxmox reinstall via USB**, but the operator already had a **working, reachable** Proxmox (msg [26] "I got into the browser… by fixing it!"). At [28] they asked *"can't i just erase the old containers and start fresh? i have access and can log in."* — a clear pivot to a simpler approach. The engine classified it `question` and **re-rendered a stale disk-wipe step** instead of reshaping the plan.
+
+**Root cause.** The §17.679 deterministic pivot gate (`_looks_like_pivot`) only caught **declarative** pivots ("do X instead", "switch to Y", "scrap that"). A **question-framed** pivot ("can't I just…?", "why not just…?", "isn't it easier to…?", "do I even need…?") matched nothing, so it fell to the `question` fallback → `assist_chat_turn` re-render. This is the exact class §17.679 was built to route through the note→re-plan path; the phrasing just wasn't covered. (The LLM classifier caught a nearby pivot at [16] but not [28] — the §17.679 lesson stands: the classifier is unreliable here; widen the deterministic gate.)
+
+**Fix.** New `_QUESTION_PIVOT_RE` OR'd into `_looks_like_pivot` (`pipelines/_vendor/_assist_handlers.py`): "can't/couldn't I/we just", "why not/don't … just", "isn't/wouldn't it (be) easier/simpler/…", "do I even/really need <X>" / "do I need to", "is there any need/reason/point to". Anchored on *just* / a comparative / *need* so a plain clarifying question ("what does step 2 mean?", "can I add a CTA?", "do I need this for production?") is NOT swept in. Blast radius is narrow: the pivot gate is only reached AFTER the classifier already deemed the turn a `question` (all explicit intents — ask/skip/submit/fix/… — are handled first), and a misroute degrades gracefully (the note→re-plan path already falls back to "noted, carry forward" when impact analysis finds nothing).
+
+**Verification.** `tests/test_scaffold_router_note_replan.py` +8 detector cases (incl. the exact [28] message) +4 non-pivot near-miss guards +1 routing test; pivot/routing suites green (124). **Live end-to-end** with a throwaway job mirroring the reinstall plan: `analyze_note_impact` on the [28] note flagged **all 5 pending steps** — drop T1/T2/T3 (no ISO/USB/boot-from-USB needed), revise T10 (log into the existing running system instead of wiping the disk) and T11 (networking already exists). Pipeline-only change (no orchestrator/schema change); pipelines container restarted (live).
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.690 Fix — GATHER steps accumulate info across turns too (partial answer no longer commits) (2026-08-01)
 
 **Report (OWUI run).** On the Proxmox build, step **T2 "Gather host hardware details"** (task: *"Operator provides: exact Supermicro model, disk inventory, GPU(s), NIC models"*) — the operator pasted **only** the disk inventory (`lsblk`). It committed immediately and advanced. The verifier even flagged it: *"Disk inventory is provided… but server model, GPU(s), and NIC models are… not yet provided. The step is incomplete"* — yet it still committed. The operator was supplying the requested info **one portion at a time**; the engine took the first portion as the whole answer.

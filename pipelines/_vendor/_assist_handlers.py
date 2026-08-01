@@ -1587,14 +1587,41 @@ _GLOBAL_CHANGE_RE = re.compile(
     r"the (whole|entire) (thing|sequence|plan|project|document)|overall)\b",
     re.IGNORECASE,
 )
+# §17.691 — QUESTION-FRAMED pivots. The operator proposes a simpler / different
+# approach as a QUESTION rather than a declaration ("can't I just erase the old
+# containers and start fresh?", "why not just do it over the network?", "isn't
+# it easier to clean the existing install?", "do I even need the USB step?").
+# _PIVOT_RE only caught declarative pivots ("do X instead", "switch to Y"), so
+# these fell to the `question` fallback and re-rendered the now-stale step (the
+# reported "it wouldn't pivot from my references / instructions mid-assist"
+# bug — the plan assumed a bare-metal reinstall, but the operator already had a
+# working, reachable Proxmox and wanted to just clean it). Anchored on "just" /
+# comparative / "need to" so a plain clarifying question ("what does step 2
+# mean?") is NOT swept in. Only reached when the classifier already deemed the
+# turn a `question`, so the blast radius is narrow.
+_QUESTION_PIVOT_RE = re.compile(
+    r"\b(?:can'?t|cant|could'?nt|couldn'?t|couldnt)\s+(?:i|we|you)\s+just\b"          # "can't I just <X>"
+    r"|\bwhy\s+(?:not|don'?t|dont|do\s+not|can'?t|cant|wouldn'?t|shouldn'?t)\s+"
+    r"(?:i\s+|we\s+|you\s+)?just\b"                                                    # "why not/don't we just"
+    r"|\bwhy\s+not\s+just\b"
+    r"|\b(?:isn'?t|wouldn'?t|won'?t)\s+it\s+(?:be\s+)?"
+    r"(?:easier|simpler|better|faster|quicker|cleaner|nicer|safer|more\s+\w+)\b"       # "isn't it easier to"
+    r"|\bdo\s+(?:i|we)\s+(?:(?:really|even|actually)\s+need\b|need\s+to\b)"            # "do I even need <X>" / "do I need to"
+    r"|\bis\s+there\s+(?:any\s+)?(?:need|reason|point)\s+(?:to|in)\b",                 # "is there any need to"
+    re.IGNORECASE,
+)
 
 
 def _looks_like_pivot(msg: str) -> bool:
-    """§17.679 — True when `msg` changes direction / reshapes the plan (as opposed
-    to asking about, or refining, the current step). Deterministic (no LLM)."""
+    """§17.679/§17.691 — True when `msg` changes direction / reshapes the plan
+    (as opposed to asking about, or refining, the current step). Deterministic
+    (no LLM). Covers declarative pivots (_PIVOT_RE), whole-deliverable changes
+    (_GLOBAL_CHANGE_RE), and question-framed alternatives (_QUESTION_PIVOT_RE)."""
     if not msg:
         return False
-    return bool(_PIVOT_RE.search(msg)) or bool(_GLOBAL_CHANGE_RE.search(msg))
+    return (bool(_PIVOT_RE.search(msg))
+            or bool(_GLOBAL_CHANGE_RE.search(msg))
+            or bool(_QUESTION_PIVOT_RE.search(msg)))
 
 
 def _pivot_kind(msg: str) -> str:
