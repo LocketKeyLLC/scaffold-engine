@@ -85,6 +85,31 @@ DECOMPOSE_SYSTEM = (
     "single focused build, return a single component. Each component is "
     "self-contained: its description must stand alone without the others. "
     "Do not invent scope the user did not state or imply."
+    # §17.698 — the preserve-existing-system guard that §17.649/§17.694/§17.695
+    # added to refine (idea_refinement), synthesis, and DAG generation never
+    # reached THIS path. A component's `description` becomes a child's
+    # `input_text`, which is the FIRST thing the child's synthesis sees — so if
+    # decomposition inverts "clean the reachable Proxmox in place" into "fresh
+    # bare-metal reinstall", the child's (now §17.695-aware) synthesis has
+    # nothing left to preserve; the destructive premise is already baked in.
+    # Production repro: umbrella idea "Configure the reachable Proxmox
+    # environment by wiping former user data and resetting services" decomposed
+    # into a component titled "Proxmox VE Bare-Metal Rebuild / install a fresh
+    # Proxmox VE hypervisor / wipe all disks", and the operator had to fight it
+    # step-by-step in assist mode. Removing DATA is not wiping DISKS or
+    # reinstalling an OS — keep them distinct here too.
+    "\n\nPRESERVE an already-present system. If the idea says the target system "
+    "is EXISTING / reachable / accessible / already-running / the user can log "
+    "into it (e.g. 'my existing Proxmox', 'the reachable Proxmox environment', "
+    "'i can log in'), it is INSTALLED and REACHABLE — do NOT emit a component "
+    "that reinstalls the OS, wipes all disks, reformats, or rebuilds from bare "
+    "metal. 'Wipe former user data / reset services / start fresh' on such a "
+    "system means clean the DATA and redeploy SERVICES in place — NOT a fresh OS "
+    "install or a disk wipe (removing data is not the same as wiping disks or "
+    "reinstalling an OS). Only emit a from-scratch reinstall / bare-metal-rebuild "
+    "component when the idea UNAMBIGUOUSLY asks to rebuild from scratch (e.g. "
+    "'bare-metal rebuild', the OS \"won't boot / needs reinstalling\", 'reformat "
+    "everything') AND gives no sign the system is already reachable."
 )
 
 DECOMPOSE_COMPONENTS_TOOL = Tool(

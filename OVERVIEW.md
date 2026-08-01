@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.698 Fix — the preserve-existing-system guard reaches the DECOMPOSITION path too (umbrella → component inverted "clean the reachable Proxmox" into "bare-metal rebuild") (2026-08-01)
+
+**Report.** "In my recent test it kept thinking it was getting errors or messing up when receiving the proper information." Traced to live assist session `5f7c5638` (job `c19bd247`), sitting at T10. The operator's frustration note recorded on the session: *"what am i doing here? Proxmox VE is already on the server, this has been stated multiple times."* The plan kept walking them through **Download Proxmox ISO (T5) → Wipe all disks (T6) → Install Proxmox VE (T8) → Configure ZFS from scratch (T9)** on a box that already runs Proxmox. The §17.677 note-replan *did* fire and salvaged it mid-session (dropped T8, revised T9 to "configure ZFS on the already-running Proxmox") — a band-aid over a plan that was wrong from birth.
+
+**Root cause — the decomposition path never got the §17.649/§17.694/§17.695 preserve guard.** This was a `component` job of an umbrella decomposition. The umbrella idea said *"Configure the **reachable** Proxmox environment by **wiping former user data and resetting services**"* — i.e. Proxmox is up; clean the data/services on top. `decomposition.extract_components` (`DECOMPOSE_SYSTEM`) inverted that into a component literally titled *"Proxmox VE **Bare-Metal Rebuild**"* whose `description`/`input_text` read *"Wipe all former user data… install a **fresh** Proxmox VE hypervisor."* That description becomes the child's `input_text` — the FIRST thing the child's synthesis sees — so the (now §17.695-aware) synthesis + refine + DAG all had nothing left to preserve; the destructive premise was already baked in one layer upstream. The three preserve layers §17.649/694/695 added (refine, synthesis, DAG) all live on the single-`/go` path; the umbrella→component split is a separate code path that missed them (same class as §17.662–663's "Phase 2 has its own research path").
+
+**Fix.** Added the preserve-existing-system guard to `DECOMPOSE_SYSTEM` (`app/modules/decomposition.py`), mirroring the §17.695 wording: an EXISTING / reachable / accessible / already-running / "can log in" system is INSTALLED — do NOT emit a component that reinstalls the OS, wipes all disks, reformats, or rebuilds from bare metal; "wipe former user data / reset services / start fresh" on such a system = clean DATA + redeploy SERVICES in place (removing data ≠ wiping disks ≠ reinstalling an OS); a from-scratch reinstall/bare-metal component only when the idea UNAMBIGUOUSLY asks for it AND gives no sign the system is reachable.
+
+**Verification (live, real models — `/tmp/decompose_ab.py`, N=6 per arm + LLM judge).** On the exact umbrella idea: **OLD `DECOMPOSE_SYSTEM` → 6/6 REBUILD** (every sample emitted a fresh-install / wipe-all-disks foundation component); **NEW → 0/6 REBUILD** (all PRESERVE — "without reinstalling the OS", "preserving the hypervisor installation", "leaving the hypervisor OS intact per the existing-installation constraint"). Pure prompt-constant change; no logic touched, no test asserts on the string. Module AST-parses; assembled prompt = 1276 chars with guard clauses intact. **Deferred:** context_only divergence detection flags the operator's true-state reports as `divergence=TRUE` (T5/T6/T9 here) but never surfaces or acts on them — the operator had to notice and leave a note manually. Wiring that signal into the §17.677 surface-and-ask path is the natural follow-up.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.697 Fix — runbook command-correctness rule (the "lvs -o lv_name vg_name" footgun) (2026-08-01)
 
 **Report.** Mid-assist on a Proxmox cleanup component, step T16 "Remove orphaned storage volumes" gave a command that errored: `lvs --noheadings -o lv_name vg_name | grep pve | …` → *"Volume group vg_name not found"*. The step still committed with a spurious *"⚠️ This may have failed."*
