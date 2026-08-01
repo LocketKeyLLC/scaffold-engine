@@ -22049,6 +22049,27 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.693 Change — semantic pivot detection (impact-analyzer arbiter) + the "Moving on to T10" tracking bug (2026-08-01)
+
+**Report (6th pivot report + "loses track of tasks / relative info").** Two failures from the chat store:
+1. **Pivot still missed.** At msg [33] the operator wrote *"i already have proxmox VE installed… we only need to remove old containers and data and start new i am already logged in."* — a genuine pivot that invalidates the whole reinstall branch, but **lexically unremarkable** (no phrase gate can catch it), and the classifier routed it to **`skip`** → skipped one step, presented the next (equally irrelevant) reinstall step. Phrase-widening (§17.679/691/692) has hit its ceiling: this class is SEMANTIC, not lexical.
+2. **Tracking bug.** Every commit said *"Moving on to `T10`"* regardless of the real next step. `_next_pending_node_key` ordered by raw `node_key` — a LEXICAL sort where `"T1" < "T10" < "T2"` — so after T1 the "next" was always T10, both in the message AND stashed as the remembered node_key.
+
+**Root-cause reframing.** The reliable semantic component already exists: §17.677's `analyze_note_impact` (it correctly flags affected steps — proven in the §17.691 live test). The bug was never detection *capability*; it was *routing* — pivots only reached the analyzer when the classifier tagged them `note`, and it kept tagging them `skip`/`question`. So: **stop trusting lexical gates as the primary pivot detector; make the impact analyzer the arbiter.**
+
+**Fix.**
+- **Tracking:** `_next_pending_node_key` now `JOIN dag_nodes … ORDER BY execution_order NULLS LAST, node_key` — matches what `get_next_step` actually presents (live: returns T1, not T10).
+- **Semantic pivot (`§17.693`):** `assist_agent.detect_reroute` runs `analyze_note_impact` over the PENDING plan for a substantive turn; if ≥1 step is affected it records the message as a decision note (feed-forward) + stages a `pending_replan` and returns the proposal, else returns None (a **pure dry run — no side effects**). Exposed at `POST /assist/{sid}/reroute`. Gated by `assist_pivot_detect_enabled` (default on); fail-soft. Extracted `_stage_replan_proposal` shared with `assess_note_impact`.
+- **Pipeline routing:** on a turn the classifier read as `skip`/`question`, before acting: a cheap regex pivot → note→re-plan; else if the message is substantive (≥ `assist_pivot_min_words`=6, i.e. the operator gave context, not a bare "skip") → `reroute_check` (the impact analyzer); if it reshapes the plan → surface the re-plan (shared `_render_replan_surface`) instead of skipping/re-rendering. Short/bare turns stay below the bar (no extra LLM call). The old post-routing regex pivot check is removed (subsumed).
+
+**Verification.** `tests/test_assist_reroute.py` (5: stages-when-affected, dry-run-when-clear, disabled, inactive-session, fail-soft) + `tests/test_scaffold_router_note_replan.py` +3 (semantic-skip→re-plan, clear-skip→skips, short-skip→no-LLM); assist suites green (orchestrator 107, pipeline 141); openapi + ci-tier-0 green. **Live** (throwaway reinstall-style job + real analyzer): `_next_pending_node_key`→**T1**; `detect_reroute` on the exact [33] message staged a re-plan flagging **all 6 pending steps as drop** (already installed → no VT-d / storage / ISO / USB / wipe-install / networking). Orchestrator + pipelines restarted (live).
+
+**Design note.** This makes pivot detection reliable by construction — any message that semantically invalidates pending steps is caught, regardless of phrasing — while keeping the cheap regex as a fast-path and bounding cost to substantive skip/question turns. It should end the phrase-whack-a-mole.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.692 Fix — the REAL pivot root cause: smart (curly) apostrophes broke every deterministic gate; + mid-deliberation refinements (2026-08-01)
 
 **Report.** "Still having issues with pivoting" — the 5th such report despite §17.638/651/666/679/691. Root-caused from the chat store (not another phrase-widening): at msg [42] the operator typed *"…can't we just wipe the old containers and start fresh?"* — which §17.691's `_QUESTION_PIVOT_RE` (`can'?t we just`) **should** have matched, but didn't. The apostrophe is a **curly** `’` (U+2019), not a straight `'` — the operator's phone/macOS auto-corrects smart quotes. Every deterministic gate matches straight apostrophes only, so **all** apostrophe-bearing pivots ("can't", "couldn't", "why don't", "isn't", "wouldn't"), the confirm gate, and the replan yes/no gate silently failed on this operator's input. That — not a missing phrase — is why pivots kept "regressing." Verified: the exact [42] bytes match the regex only **after** normalization.

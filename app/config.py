@@ -757,6 +757,15 @@ class Settings(BaseSettings):
     # resolves in one turn (the LLM marks it resolved immediately). Fail-soft:
     # any deliberation error falls back to the plain single-turn commit.
     assist_decision_deliberation_enabled: bool = True
+    # §17.693 — semantic pivot detection. Deterministic phrase gates (§17.679/
+    # 691/692) miss pivots phrased as references to the operator's ACTUAL
+    # situation ("I already have Proxmox installed, we only need to remove the
+    # old containers") — the classifier then mis-routes them to skip/question and
+    # the plan marches on with now-irrelevant steps. When on, a substantive turn
+    # the classifier read as skip/question is checked against the pending plan by
+    # the §17.677 impact analyzer; if it invalidates steps, the engine surfaces a
+    # re-plan instead. Fail-soft + dry-run (no side effects when nothing's hit).
+    assist_pivot_detect_enabled: bool = True
     # §17.492 — deterministic scan of generated walkthroughs / fixes for
     # high-confidence destructive commands (rm -rf, dd, mkfs, DROP TABLE, force
     # push, …); matches are surfaced as a prominent "review before running"

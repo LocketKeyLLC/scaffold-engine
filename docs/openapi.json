@@ -4756,6 +4756,62 @@
         ]
       }
     },
+    "/assist/{session_id}/reroute": {
+      "post": {
+        "description": "§17.693 — semantic pivot check for a substantive turn the classifier read\nas skip/question. Runs the §17.677 impact analyzer over the pending plan; if\nthe message invalidates steps, records it as a decision note + stages a\npending_replan and returns ``{has_impact: true, proposal}``. Otherwise\n``{has_impact: false}`` — a pure dry run so the caller proceeds with the\noriginal intent. Reuses AssistInterpretInput ({message, node_key, history}).",
+        "operationId": "assist_reroute_assist__session_id__reroute_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistInterpretInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Reroute",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/{session_id}/research": {
       "post": {
         "description": "Confirm an operator-supplied question via SearXNG/Milvus + a short\ncited synthesis. A side query — not persisted to the step's guidance.",

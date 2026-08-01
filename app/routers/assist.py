@@ -684,6 +684,24 @@ async def assist_note(session_id: str, body: AssistNoteInput, db=Depends(get_db)
     return out
 
 
+@router.post("/assist/{session_id}/reroute")
+async def assist_reroute(session_id: str, body: AssistInterpretInput, db=Depends(get_db)):
+    """§17.693 — semantic pivot check for a substantive turn the classifier read
+    as skip/question. Runs the §17.677 impact analyzer over the pending plan; if
+    the message invalidates steps, records it as a decision note + stages a
+    pending_replan and returns ``{has_impact: true, proposal}``. Otherwise
+    ``{has_impact: false}`` — a pure dry run so the caller proceeds with the
+    original intent. Reuses AssistInterpretInput ({message, node_key, history})."""
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    proposal = await assist_agent.detect_reroute(
+        session_id=session_id, message=body.message, db=db,
+    )
+    return {"session_id": session_id, "has_impact": bool(proposal),
+            "proposal": proposal}
+
+
 @router.get("/assist/{session_id}/replan")
 async def assist_replan_get(session_id: str, db=Depends(get_db)):
     """§17.677 — the session's un-resolved note-triggered plan-fix proposal.

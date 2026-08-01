@@ -246,6 +246,69 @@ class TestPivotGateRouting:
         submit.assert_called_once()
         chat_turn.assert_not_called()
 
+    def test_semantic_pivot_skip_surfaces_replan_not_skip(self, pipe):
+        """§17.693 — the reported [33] failure: a substantive turn the classifier
+        read as `skip` that references the operator's real situation ("i already
+        have proxmox installed… we only need to remove old containers") must be
+        caught by the impact check and surface a re-plan, NOT silently skip."""
+        interp = {"intent": "skip", "note_text": "", "note_kind": "note",
+                  "evidence": "", "error_text": "", "query": "", "node_key": "T3",
+                  "is_collect": False, "is_decision": False}
+        affected = [{"node_key": "T3", "action": "drop",
+                     "current_assumption": "download the ISO",
+                     "proposed_change": "already installed — no ISO needed"}]
+        with patch.object(_vendor, "fast_classify_turn", return_value=None), \
+             patch.object(_vendor, "assist_interpret", return_value=interp), \
+             patch.object(_vendor, "fetch_pending_replan", return_value=None), \
+             patch.object(_vendor, "reroute_check", return_value=affected) as reroute, \
+             patch.object(_vendor, "assist_skip",
+                          return_value=iter(["SKIPPED"])) as skip:
+            out = "".join(_vendor.assist_nl_turn(
+                pipe, _SID,
+                "i already have proxmox VE installed and web access, we only need to remove old containers and start new",
+                node_key="T3"))
+        assert "changes the plan" in out
+        assert "Apply these plan changes?" in out
+        reroute.assert_called_once()
+        skip.assert_not_called()
+
+    def test_skip_without_impact_still_skips(self, pipe):
+        """A substantive skip that the impact check clears (no affected steps)
+        proceeds as a normal skip — no false re-plan."""
+        interp = {"intent": "skip", "note_text": "", "note_kind": "note",
+                  "evidence": "", "error_text": "", "query": "", "node_key": "T3",
+                  "is_collect": False, "is_decision": False}
+        with patch.object(_vendor, "fast_classify_turn", return_value=None), \
+             patch.object(_vendor, "assist_interpret", return_value=interp), \
+             patch.object(_vendor, "fetch_pending_replan", return_value=None), \
+             patch.object(_vendor, "reroute_check", return_value=None) as reroute, \
+             patch.object(_vendor, "_recall_node_key", return_value="T3"), \
+             patch.object(_vendor, "assist_skip",
+                          return_value=iter(["SKIPPED"])) as skip:
+            out = "".join(_vendor.assist_nl_turn(
+                pipe, _SID, "skip this one, i handled it manually earlier today",
+                node_key="T3"))
+        assert "SKIPPED" in out
+        reroute.assert_called_once()
+        skip.assert_called_once()
+
+    def test_short_skip_does_not_trigger_impact_check(self, pipe):
+        """A bare short skip stays below the word bar — no impact LLM call."""
+        interp = {"intent": "skip", "note_text": "", "note_kind": "note",
+                  "evidence": "", "error_text": "", "query": "", "node_key": "T3",
+                  "is_collect": False, "is_decision": False}
+        with patch.object(_vendor, "fast_classify_turn", return_value=None), \
+             patch.object(_vendor, "assist_interpret", return_value=interp), \
+             patch.object(_vendor, "fetch_pending_replan", return_value=None), \
+             patch.object(_vendor, "reroute_check", return_value=None) as reroute, \
+             patch.object(_vendor, "_recall_node_key", return_value="T3"), \
+             patch.object(_vendor, "assist_skip",
+                          return_value=iter(["SKIPPED"])) as skip:
+            out = "".join(_vendor.assist_nl_turn(pipe, _SID, "skip it", node_key="T3"))
+        assert "SKIPPED" in out
+        reroute.assert_not_called()   # below assist_pivot_min_words
+        skip.assert_called_once()
+
     def test_genuine_question_still_re_renders(self, pipe):
         """A non-pivot question must still get the current step's guidance."""
         interp = {"intent": "question", "note_text": "", "note_kind": "note",

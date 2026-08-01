@@ -1590,12 +1590,21 @@ async def _maybe_replan(
 
 
 async def _next_pending_node_key(*, session_id: str, db) -> Optional[str]:
+    # §17.693 — order by the DAG's execution_order, NOT the raw node_key. A plain
+    # `ORDER BY node_key` sorts lexically, so after T1 the "next" pending step was
+    # reported as `T10` ("T1" < "T10" < "T2") — the wrong step, shown in every
+    # "Moving on to X" line AND stashed as the remembered node_key. Mirror the
+    # ordering get_next_step / _load_presented_step use so the reported next step
+    # matches the one actually presented.
     row = (await db.execute(
         text("""
-            SELECT node_key FROM assist_steps
-             WHERE session_id = :sid
-               AND status IN ('pending', 'presented')
-             ORDER BY node_key LIMIT 1
+            SELECT s.node_key
+              FROM assist_steps s
+              JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid
+               AND s.status IN ('pending', 'presented')
+             ORDER BY d.execution_order NULLS LAST, s.node_key
+             LIMIT 1
         """),
         {"sid": session_id},
     )).mappings().first()
@@ -1926,15 +1935,27 @@ async def assess_note_impact(
     affected = impact.get("affected") or []
     if not affected:
         return None
+    return await _stage_replan_proposal(
+        session_id=session_id, note_text=note_text, note_kind=note_kind,
+        affected=affected, db=db,
+    )
+
+
+async def _stage_replan_proposal(
+    *, session_id: str, note_text: str, note_kind: str,
+    affected: list, db,
+) -> dict:
+    """§17.677/§17.693 — stash a pending_replan proposal on the session for the
+    operator to confirm. Read-modify-write merge so other metadata keys survive;
+    one pending proposal at a time (a fresh one overwrites any unresolved prior).
+    """
+    from datetime import datetime, timezone
     proposal = {
         "note_text": note_text,
         "note_kind": note_kind,
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "proposals": affected,
     }
-    # Read-modify-write merge — never clobber other metadata keys (mirrors
-    # set_environment). One pending proposal at a time; a fresh note overwrites
-    # any unresolved prior one.
     await db.execute(
         text("""
             UPDATE assist_sessions
@@ -1947,10 +1968,65 @@ async def assess_note_impact(
     )
     await db.commit()
     logger.info(
-        "assist_note_replan_proposed session_id=%s kind=%s affected=%d",
+        "assist_replan_proposed session_id=%s kind=%s affected=%d",
         session_id, note_kind, len(affected),
     )
     return proposal
+
+
+async def detect_reroute(
+    *, session_id: str, message: str, db,
+) -> dict | None:
+    """§17.693 — semantic pivot detection for a substantive turn the classifier
+    read as ``skip`` / ``question``.
+
+    Deterministic pivot patterns miss references to the operator's ACTUAL
+    situation ("I already have Proxmox installed, we only need to remove the old
+    containers") — lexically unremarkable, but they invalidate whole branches of
+    the plan. This runs the §17.677 impact analyzer (the reliable semantic
+    component) over the PENDING nodes; when ≥1 is affected, it records the
+    message as a plan note (feed-forward) AND stages a pending_replan, returning
+    the proposal for the pipeline to surface. Returns None when nothing is
+    affected — a pure dry run with NO side effects, so the caller proceeds with
+    the original intent. Fail-soft: any error → None (never trap the turn).
+    """
+    from app.config import settings
+    from app.modules import assist_replan
+
+    if (not settings.assist_pivot_detect_enabled
+            or not settings.assist_note_replan_enabled
+            or not (message or "").strip()):
+        return None
+    sess = (await db.execute(
+        text("SELECT job_id, status FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess or sess["status"] not in ("active", "paused"):
+        return None
+    job_id = str(sess["job_id"])
+    try:
+        impact = await assist_replan.analyze_note_impact(
+            db=db, job_id=job_id, note_text=message, note_kind="decision",
+        )
+    except Exception as e:  # noqa: BLE001 — never trap the turn on analysis
+        logger.warning("detect_reroute_failed session_id=%s err=%r", session_id, e)
+        return None
+    affected = impact.get("affected") or []
+    if not affected:
+        return None  # not a pivot — caller proceeds with skip/question
+    # It reshapes the plan. Record the operator's message as a decision note so
+    # it feeds forward, then stage the proposal for surface-and-ask.
+    try:
+        await record_note(
+            session_id=session_id, text_=message, kind="decision",
+            node_key=None, db=db,
+        )
+    except Exception as e:  # noqa: BLE001 — the replan is what matters
+        logger.warning("detect_reroute_note_failed session_id=%s err=%r", session_id, e)
+    return await _stage_replan_proposal(
+        session_id=session_id, note_text=message, note_kind="decision",
+        affected=affected, db=db,
+    )
 
 
 def _pending_replan_from_metadata(metadata: Any) -> dict | None:

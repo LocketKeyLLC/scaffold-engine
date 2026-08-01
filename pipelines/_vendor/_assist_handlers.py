@@ -1671,6 +1671,31 @@ def _looks_like_decision_confirm(msg: str) -> bool:
     return bool(msg) and bool(_DECISION_CONFIRM_RE.search(_normalize_punct(msg)))
 
 
+def _word_count(msg: str) -> int:
+    return len((msg or "").split())
+
+
+def reroute_check(pipe, session_id: str, msg: str) -> list | None:
+    """§17.693 — POST /assist/{sid}/reroute. Returns the affected-steps proposal
+    list when the operator's message reshapes the plan (a reference to their real
+    situation that invalidates pending steps), else None. Fail-soft — a hiccup
+    must never block the turn (the caller just proceeds with skip/question)."""
+    try:
+        r = _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/reroute",
+            json={"message": msg},
+            headers=pipe._auth_headers(),
+            timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
+        )
+        if r.status_code < 400:
+            d = r.json()
+            if isinstance(d, dict) and d.get("has_impact"):
+                return (d.get("proposal") or {}).get("proposals") or None
+    except (requests.exceptions.RequestException, ValueError) as e:
+        pipe.logger.debug("assist reroute check failed: %s", e)
+    return None
+
+
 def assist_nl_turn(
     pipe, session_id: str, msg: str, *,
     node_key: str | None = None, chat_id: str | None = None,
@@ -1723,6 +1748,28 @@ def assist_nl_turn(
     # questions classify as `ask` (→ research) and never reach here.
     if is_collect and intent == "question" and not _looks_like_pivot(msg):
         intent = "submit"
+
+    # §17.693 — semantic pivot / re-plan detection. A `skip` or `question` here
+    # may be a pivot the classifier MIS-ROUTED: a reference to the operator's
+    # ACTUAL situation that invalidates PENDING steps ("I already have Proxmox
+    # installed, we only need to remove the old containers and start new") —
+    # lexically unremarkable, so no phrase gate catches it and a bare skip marches
+    # the plan on with now-irrelevant steps. Cheap regex first (obvious pivots);
+    # then a reliable impact check (the §17.677 analyzer) for substantive turns
+    # the regex missed. Either surfaces a re-plan instead of skipping/re-rendering.
+    if intent in ("skip", "question"):
+        if _looks_like_pivot(msg):
+            yield from assist_note_cmd(
+                pipe, session_id, msg.strip(), kind=_pivot_kind(msg), node_key=node_key,
+            )
+            return
+        if _word_count(msg) >= getattr(pipe.valves, "assist_pivot_min_words", 6):
+            affected = reroute_check(pipe, session_id, msg)
+            if affected:
+                yield "🔀 Based on what you told me, this changes the plan.\n\n"
+                yield _render_replan_surface(affected)
+                return
+        # not a pivot → fall through to the normal skip / question handling below
 
     if intent == "advance":
         yield from assist_next(pipe, session_id, chat_id=chat_id); return
@@ -1792,18 +1839,9 @@ def assist_nl_turn(
         yield from assist_env_cmd(
             pipe, session_id, verbosity=_verbosity_from_message(msg), chat_id=chat_id,
         ); return
-    # §17.679 — before falling through to a re-render of the current step, catch
-    # a PIVOT the classifier missed. A pivot ("actually… / …instead / change it
-    # to… / <global change> throughout") reshapes the plan, so route it through
-    # the note→re-plan path (§17.677): the engine surfaces which pending steps
-    # the pivot affects and offers to fix them — instead of repeating a now-stale
-    # step (the recurring "it repeated something now irrelevant" bug).
-    if _looks_like_pivot(msg):
-        yield from assist_note_cmd(
-            pipe, session_id, msg.strip(), kind=_pivot_kind(msg), node_key=node_key,
-        )
-        return
-    # question (default) — the existing guide/refine turn.
+    # question (default) — the existing guide/refine turn. Pivots (regex or the
+    # §17.693 semantic impact check) already returned above, so anything here is
+    # a genuine question/refinement about the current step.
     yield from assist_chat_turn(
         pipe, session_id, msg, node_key=node_key, chat_id=chat_id, history=history,
     )
@@ -2216,13 +2254,19 @@ def assist_note_cmd(
     if not affected:
         yield "_I'll carry this forward into the remaining steps. Say _\"next\"_ to continue._"
         return
-    # Surface-and-ask: show the impact, wait for a yes/no before rewriting.
+    yield _render_replan_surface(affected)
+
+
+def _render_replan_surface(affected: list, *, lead: str | None = None) -> str:
+    """§17.677/§17.693 — the surface-and-ask block: list the pending steps a
+    plan change affects (drop/revise + why), then ask for a yes/no. Shared by the
+    note path and the §17.693 semantic-pivot path so both read identically."""
+    n = len([p for p in (affected or []) if isinstance(p, dict)])
     lines = [
-        f"This affects **{len(affected)}** pending "
-        f"step{'s' if len(affected) != 1 else ''}:",
+        lead or (f"This affects **{n}** pending step{'s' if n != 1 else ''}:"),
         "",
     ]
-    for p in affected:
+    for p in (affected or []):
         if not isinstance(p, dict):
             continue
         nk = p.get("node_key", "?")
@@ -2236,4 +2280,4 @@ def assist_note_cmd(
         if change:
             lines.append(f"    → {change}")
     lines += ["", "**Apply these plan changes?** (yes / no / edit)"]
-    yield "\n".join(lines)
+    return "\n".join(lines)

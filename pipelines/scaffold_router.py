@@ -715,6 +715,13 @@ class Pipeline:
         # resolve. 0 → send no history (the orchestrator also caps the block).
         assist_history_turns: int = 6
 
+        # §17.693 — semantic pivot detection: a `skip`/`question` turn with at
+        # least this many words (i.e. the operator gave context/reasoning, not a
+        # bare command) is checked against the pending plan by the §17.677 impact
+        # analyzer; if it invalidates steps, the engine surfaces a re-plan. Bare
+        # "skip" / short clarifications stay below the bar (no extra LLM call).
+        assist_pivot_min_words: int = 6
+
         # §17.633 — cross-chat assist continuity. OWUI sends no chat_id and a
         # NEW chat has no session marker in history, so neither the chatmap nor
         # the history-recovery path can find in-progress assist work started in
