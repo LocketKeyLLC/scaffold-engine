@@ -1703,6 +1703,83 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str], list[str
 # DAG semantic validation (standalone, unit-testable)
 # ---------------------------------------------------------------------------
 
+def _acyclic_residual(nodes: list[dict]) -> list[str]:
+    """Kahn's topological sort; returns the node_keys still in a cycle (empty ⇒
+    the graph is acyclic). Ignores deps pointing outside the node set."""
+    ids = {n["id"] for n in nodes}
+    in_degree: dict[str, int] = {n["id"]: 0 for n in nodes}
+    adjacency: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+    for node in nodes:
+        for dep in node.get("depends_on", []) or []:
+            if dep in ids and dep != node["id"]:
+                adjacency[dep].append(node["id"])
+                in_degree[node["id"]] += 1
+    queue: deque[str] = deque(k for k, v in in_degree.items() if v == 0)
+    seen = 0
+    while queue:
+        cur = queue.popleft()
+        seen += 1
+        for nb in adjacency[cur]:
+            in_degree[nb] -= 1
+            if in_degree[nb] == 0:
+                queue.append(nb)
+    return [k for k, v in in_degree.items() if v > 0]
+
+
+def break_cycles(nodes: list[dict]) -> list[tuple[str, str]]:
+    """§17.696 — deterministically break dependency cycles so a cyclic LLM DAG is
+    REPAIRED, not failed. A cyclic draw used to raise → the whole component job
+    failed with 0 nodes (e.g. the "VLAN Segmentation & AdGuard Home DNS"
+    component). This mirrors the §17.668-670 well-formedness passes: remove the
+    minimal set of back-edges found by a DFS (a standard feedback-arc heuristic)
+    so the result is GUARANTEED acyclic. Deterministic — nodes and neighbours are
+    visited in sorted key order, so the same cyclic draw always heals the same
+    way. Returns the removed ``(node_key, dropped_dep)`` edges for logging;
+    mutates each node's ``depends_on`` in place."""
+    ids = {n["id"] for n in nodes}
+    # adjacency: dep -> [dependents]  (edge dep→node means node depends_on dep)
+    adj: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+    for node in nodes:
+        for dep in node.get("depends_on", []) or []:
+            if dep in ids and dep != node["id"]:
+                adj[dep].append(node["id"])
+    for k in adj:
+        adj[k].sort()
+    color: dict[str, int] = {k: 0 for k in adj}  # 0=white 1=gray(on-stack) 2=black
+    removed: list[tuple[str, str]] = []
+
+    def dfs(root: str) -> None:
+        # Iterative DFS with an explicit stack (avoids recursion limits on large
+        # graphs). A back-edge to a GRAY node is a cycle edge → mark for removal.
+        stack: list[tuple[str, int]] = [(root, 0)]
+        color[root] = 1
+        while stack:
+            u, i = stack[-1]
+            if i < len(adj[u]):
+                stack[-1] = (u, i + 1)
+                w = adj[u][i]           # edge u→w  (w depends_on u)
+                if color[w] == 1:
+                    removed.append((w, u))   # drop w's dependency on u
+                elif color[w] == 0:
+                    color[w] = 1
+                    stack.append((w, 0))
+            else:
+                color[u] = 2
+                stack.pop()
+
+    for k in sorted(adj):
+        if color[k] == 0:
+            dfs(k)
+    if removed:
+        remset = set(removed)
+        for node in nodes:
+            node["depends_on"] = [
+                d for d in (node.get("depends_on") or [])
+                if (node["id"], d) not in remset
+            ]
+    return removed
+
+
 def validate_dag(nodes: list[dict]) -> tuple[list[dict], list[str]]:
     """Validate and clean a parsed DAG node list.
 
@@ -1710,9 +1787,10 @@ def validate_dag(nodes: list[dict]) -> tuple[list[dict], list[str]]:
       - Dependency reference validation (strips invalid refs)
       - Self-reference removal
       - Tool validation (defaults invalid tools to 'LLM')
-      - Cycle detection via topological sort
+      - Cycle detection via topological sort; §17.696 — cycles are BROKEN
+        (back-edges removed) and only raise if somehow still cyclic.
 
-    Returns (cleaned_nodes, warnings). Raises ValueError on cycles.
+    Returns (cleaned_nodes, warnings).
     """
     warnings: list[str] = []
     valid_keys = {n["id"] for n in nodes}
@@ -1769,6 +1847,23 @@ def validate_dag(nodes: list[dict]) -> tuple[list[dict], list[str]]:
 
     if sorted_count != len(nodes):
         cycle_nodes = [k for k, v in in_degree.items() if v > 0]
+        # §17.696 — REPAIR, don't fail. Deterministically remove the back-edges
+        # that form the cycle(s), then re-check. Previously this raised and the
+        # whole component job failed with 0 nodes.
+        if settings.dag_break_cycles_enabled:
+            removed = break_cycles(nodes)
+            residual = _acyclic_residual(nodes)
+            if removed and not residual:
+                pairs = ", ".join(f"{n}⊘{d}" for n, d in removed)
+                msg = (f"dag_cycle_broken: removed back-edge(s) {pairs} "
+                       f"(cycle involved {cycle_nodes})")
+                logger.warning(msg)
+                warnings.append(msg)
+                return nodes, warnings
+            logger.error(
+                "dag_cycle_unbroken: involved=%s removed=%s residual=%s",
+                cycle_nodes, removed, residual,
+            )
         msg = f"dag_cycle_detected: involved_keys={cycle_nodes}"
         logger.error(msg)
         raise ValueError(msg)

@@ -908,6 +908,12 @@ class Settings(BaseSettings):
     # config steps that never join) into a SINGLE final sink, so the plan flows to
     # one deliverable instead of several loose ends. Deterministic, cycle-safe.
     dag_converge_terminals_enabled: bool = True
+    # §17.696 — deterministically BREAK dependency cycles in a generated DAG
+    # (remove the minimal back-edges) instead of failing the whole component job
+    # with 0 nodes. A cyclic LLM draw ("VLAN Segmentation & AdGuard Home DNS"
+    # failed this way) is now repaired like the other §17.668-670 well-formedness
+    # passes. Off ⇒ pre-§17.696 behaviour (raise → job fails on any cycle).
+    dag_break_cycles_enabled: bool = True
     execution_global_retry_cap: int = Field(default=20, ge=0, le=1000)
     # Sprint X.24 — process-wide cap on concurrent execute_all_nodes runs.
     # Each run drives its own inference loop and holds short-lived DB

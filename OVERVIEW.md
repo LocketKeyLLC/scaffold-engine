@@ -22049,6 +22049,22 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.696 Fix — a cyclic generated DAG is REPAIRED (back-edges removed), not failed with 0 nodes (2026-08-01)
+
+**Report.** During a live umbrella run, the component job "VLAN Segmentation & AdGuard Home DNS" **failed with 0 nodes**; the other 4 components generated fine (25/39/31/19 nodes). `jobs.error_summary` = `dag_cycle_detected: involved_keys=[T1..T19]`. (Not a cross-component ordering issue as first suspected — components generate their DAGs independently; it was a dependency CYCLE inside that one component's DAG.)
+
+**Root cause.** The DAG generator's LLM emitted a cyclic dependency graph. `validate_dag` (Kahn's topological sort) detected the cycle and **raised `ValueError`** → `_fail_job` → the whole component failed with 0 persisted nodes. Every OTHER well-formedness defect is REPAIRED deterministically (§17.668 connect isolated, §17.670 converge terminals, §17.669 clear over-marks, §17.671 wire decisions) — but a cycle alone failed hard, with no recovery.
+
+**Fix.** New `break_cycles(nodes)` — a deterministic feedback-arc heuristic: an iterative DFS (explicit stack, so large graphs can't hit the recursion limit) visits nodes/neighbours in sorted key order and removes the minimal set of **back-edges** (edges to a node currently on the DFS stack), which is guaranteed to yield an acyclic graph. `validate_dag` now, on detecting a cycle, calls `break_cycles`, re-checks with `_acyclic_residual` (Kahn's), and returns the healed graph with a `dag_cycle_broken` warning instead of raising; it only raises if somehow still cyclic (never observed). Gated by `dag_break_cycles_enabled` (default true; off ⇒ pre-§17.696 raise-and-fail). Deterministic — the same cyclic draw always heals the same way, preserving the LLM's intended forward flow.
+
+**Verification.** `tests/test_dag_cycle_break.py` (5: minimal back-edge removal on a 3-cycle, no-op on acyclic, interlocking multi-cycle fully healed, `validate_dag` repairs-not-raises, gate-off still raises); DAG suites green (`test_dag_generator` + `test_dag_validator` + cycle-break = 123). Manual check: a T1→T2→T3→T1 (+ tail) cycle heals by dropping one edge → clean chain, residual empty.
+
+**Live-run note.** The fix goes live on the next orchestrator restart; the restart was deferred here because a sibling component was mid-execution (node running). The already-failed component can be regenerated out-of-band (fresh import = new code) once safe.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.695 Fix — an ACCESSIBLE existing system is preserved (clean in-place, not reinstall) — end to end, and recorded in the brief (2026-08-01)
 
 **Report.** "It still didn't honor my correction… the whole memory retention and additions. There should be a project note that records this." Confirmed from the chat store: msg [0] *"Resituate the Proxmox VE Server, **i can log in** but the IP address does not appear to be working… I'd like to wipe the former user and all data and **start over fresh**."* There was NO later correction this run, so §17.694's timeline rule didn't fire — yet the brief at [5] still read *"Perform a fresh installation of Proxmox VE to wipe existing data,"* and by assist step T9 the plan reached *"Ready to wipe all three disks"* — even though the operator had said the OS is on the 600GB SSD (already installed) and could log in.
