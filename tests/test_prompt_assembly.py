@@ -567,3 +567,18 @@ class TestAssembleJobDigest:
     async def test_empty_when_no_completed_work(self):
         db = _fake_digest_db([])
         assert await pa.assemble_job_digest(db=db, job_id="j1") == ""
+
+
+def test_runbook_has_command_correctness_rule():
+    # §17.697 — the T16 failure: `lvs -o lv_name vg_name` (space, not comma)
+    # made lvs treat vg_name as a volume group → "Volume group vg_name not
+    # found". The runbook prompt now warns against comma-list flags split by
+    # spaces and bare pseudo-placeholder tokens.
+    R = pa.EXECUTION_SYSTEM_RUNBOOK
+    assert "Command correctness" in R
+    assert "COMMA-SEPARATED LIST" in R
+    assert "lvs -o lv_name,vg_name".replace(" -o ", " -o ") in R or "lv_name,vg_name" in R
+    assert "snake_case" in R
+    # shell guidance in assist mode reuses this prompt, so the rule reaches both
+    from app.modules.assist_guide import guide_system_for_tool
+    assert "Command correctness" in guide_system_for_tool("shell")

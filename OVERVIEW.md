@@ -22049,6 +22049,22 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.697 Fix — runbook command-correctness rule (the "lvs -o lv_name vg_name" footgun) (2026-08-01)
+
+**Report.** Mid-assist on a Proxmox cleanup component, step T16 "Remove orphaned storage volumes" gave a command that errored: `lvs --noheadings -o lv_name vg_name | grep pve | …` → *"Volume group vg_name not found"*. The step still committed with a spurious *"⚠️ This may have failed."*
+
+**Root cause.** The guidance intended to output TWO columns (`lv_name` AND `vg_name`, so the piped `grep pve` matches the VG column) — which requires the comma form `-o lv_name,vg_name`. The LLM dropped the comma; a SPACE makes `lvs` read `vg_name` as a positional volume-group argument → error. (An earlier step, T14, used the correct comma form — so it's a non-deterministic generation slip, not a systematic one.) The runbook prompt (`prompt_assembly.EXECUTION_SYSTEM_RUNBOOK`, shared by the assist guidance AND the autonomous executor) had strong placeholder rules but nothing about command *syntax*. The step's actual outcome was fine (there ARE no orphaned volumes), but the invalid check couldn't confirm it, hence the soft-fail.
+
+**Fix.** Added a "Command correctness (§17.697)" block to `EXECUTION_SYSTEM_RUNBOOK`: (1) a flag taking a COMMA-SEPARATED LIST (`lvs/vgs/pvs/lsblk/ps/zfs list -o col1,col2`, `--type a,b`, …) must join items with commas, never spaces (with the exact bad/good `lvs` example); (2) don't drop a bare lowercase snake_case token (`vg_name`, `pool_name`) where the command expects a real name — use the concrete value from context (`pve`) or a `<PLACEHOLDER>`; (3) prefer commands whose success is self-evident over a filter against a column you forgot to select. Reaches both the human runbook guidance (`guide_system_for_tool("shell")`) and the executor.
+
+**Verification.** `tests/test_prompt_assembly.py` +1 (rule present in the runbook prompt AND in the shell guidance system prompt); prompt-assembly suite green. Live: `generate_guidance` for a T16-style "confirm no orphaned LVM/ZFS volumes in the pve VG" step now emits the comma-correct `lvs -o lv_name,vg_name` form. Orchestrator restarted (live).
+
+**Note.** Prompt-level mitigation (LLM generation isn't 100% deterministic), but it targets the exact failure class and costs little. The T16 instance itself was harmless — no orphaned volumes existed; the fix prevents the malformed check going forward.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.696 Fix — a cyclic generated DAG is REPAIRED (back-edges removed), not failed with 0 nodes (2026-08-01)
 
 **Report.** During a live umbrella run, the component job "VLAN Segmentation & AdGuard Home DNS" **failed with 0 nodes**; the other 4 components generated fine (25/39/31/19 nodes). `jobs.error_summary` = `dag_cycle_detected: involved_keys=[T1..T19]`. (Not a cross-component ordering issue as first suspected — components generate their DAGs independently; it was a dependency CYCLE inside that one component's DAG.)
