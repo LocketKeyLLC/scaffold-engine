@@ -1490,9 +1490,30 @@ _REPLAN_NO = {
 }
 
 
+# §17.692 — smart-punctuation normalization. Phones / macOS auto-correct
+# straight quotes to CURLY ones ("can't" → "can’t", U+2019), and the operator
+# types on such a device. Every deterministic gate below matches straight
+# apostrophes only (`can'?t`), so "can’t we just wipe it" silently missed the
+# pivot detector (§17.691) and re-rendered the stale step — the recurring
+# "it won't pivot" bug. Fold curly quotes / dashes / ellipsis to their ASCII
+# forms up front so ALL the deterministic matchers (pivot, confirm, replan
+# yes/no, fast-verb) see a normal apostrophe. Semantics are unchanged.
+_SMART_PUNCT = str.maketrans({
+    "’": "'", "‘": "'",   # ’ ‘  curly single quotes
+    "“": '"', "”": '"',   # “ ”  curly double quotes
+    "–": "-", "—": "-",   # – —  en / em dash
+    "…": "...",                 # …    ellipsis
+    " ": " ",                   #      non-breaking space
+})
+
+
+def _normalize_punct(s: str) -> str:
+    return s.translate(_SMART_PUNCT) if s else s
+
+
 def _replan_decision(msg: str) -> str | None:
     """'apply' / 'discard' for a bare yes/no, else None."""
-    norm = (msg or "").strip().lower().strip(".!?,;: ").strip()
+    norm = _normalize_punct(msg or "").strip().lower().strip(".!?,;: ").strip()
     if norm in _REPLAN_YES:
         return "apply"
     if norm in _REPLAN_NO:
@@ -1616,9 +1637,11 @@ def _looks_like_pivot(msg: str) -> bool:
     """§17.679/§17.691 — True when `msg` changes direction / reshapes the plan
     (as opposed to asking about, or refining, the current step). Deterministic
     (no LLM). Covers declarative pivots (_PIVOT_RE), whole-deliverable changes
-    (_GLOBAL_CHANGE_RE), and question-framed alternatives (_QUESTION_PIVOT_RE)."""
+    (_GLOBAL_CHANGE_RE), and question-framed alternatives (_QUESTION_PIVOT_RE).
+    §17.692 — normalizes smart apostrophes first so "can’t we just" matches."""
     if not msg:
         return False
+    msg = _normalize_punct(msg)
     return (bool(_PIVOT_RE.search(msg))
             or bool(_GLOBAL_CHANGE_RE.search(msg))
             or bool(_QUESTION_PIVOT_RE.search(msg)))
@@ -1645,7 +1668,7 @@ _DECISION_CONFIRM_RE = re.compile(
 
 
 def _looks_like_decision_confirm(msg: str) -> bool:
-    return bool(msg) and bool(_DECISION_CONFIRM_RE.search(msg))
+    return bool(msg) and bool(_DECISION_CONFIRM_RE.search(_normalize_punct(msg)))
 
 
 def assist_nl_turn(
@@ -1662,6 +1685,11 @@ def assist_nl_turn(
     research), status/explain_plan (the DAG), set_env/set_verbosity (environment
     capture). Falls back to the step-guidance turn for questions/refinements.
     Slash commands bypass this entirely (dispatched earlier)."""
+    # §17.692 — fold smart quotes/dashes to ASCII up front so every deterministic
+    # gate (pivot, confirm, replan yes/no, fast-verb) sees a normal apostrophe.
+    # The operator's device auto-curls "can't" → "can’t", which silently broke
+    # pivot detection (§17.691) and re-rendered the stale step.
+    msg = _normalize_punct(msg or "")
     # §17.677 — a bare yes/no resolves a pending note-triggered plan fix before
     # any other classification. Only pays the GET when the message *looks* like a
     # confirm (deterministic phrase match), so normal turns are unaffected.
@@ -1683,11 +1711,17 @@ def assist_nl_turn(
         node_key = d.get("node_key") or node_key
         # §17.690 — is_collect covers decision AND gather steps (both deliberate).
         is_collect = bool(d.get("is_collect") or d.get("is_decision"))
-    # §17.689/§17.690 — deterministic backstop: on a collect step (decision or
-    # gather), a confirmation the classifier read as a bare `question` ("looks
-    # good", "yes", "that's all") is really the operator settling the step →
-    # route to submit so the server-side deliberation resolves + commits.
-    if is_collect and intent == "question" and _looks_like_decision_confirm(msg):
+    # §17.689/§17.690/§17.692 — on a COLLECT step (decision or gather), a
+    # substantive turn the classifier read as a bare `question` is really the
+    # operator WORKING the decision: a confirmation ("looks good"), a refinement
+    # ("can we make the port random?"), a partial answer, or a clarification.
+    # Route it to submit so the server-side deliberation incorporates it (adjust
+    # the proposal / list what's missing / resolve) with the accumulated context,
+    # instead of re-rendering the step and losing that context. A PIVOT is the
+    # one exception — it must reshape the PLAN, so it falls through to the
+    # note→re-plan gate below (§17.679/§17.691). Genuine external-lookup
+    # questions classify as `ask` (→ research) and never reach here.
+    if is_collect and intent == "question" and not _looks_like_pivot(msg):
         intent = "submit"
 
     if intent == "advance":

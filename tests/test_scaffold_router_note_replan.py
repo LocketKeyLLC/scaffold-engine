@@ -127,10 +127,23 @@ class TestPivotDetector:
         ("couldn't we just reuse the current setup?", "decision"),
         ("why don't we just use the running server?", "decision"),
         ("is there any need to reinstall at all?", "decision"),
+        # §17.692 — CURLY apostrophes (U+2019) from smart-quote keyboards must
+        # match too — this is the exact class the operator's device produced.
+        ("so i already have Proxmox VE downloaded, can’t we just wipe the old containers and start fresh?", "decision"),
+        ("why don’t we just do it over the network?", "decision"),
+        ("isn’t it easier to clean the existing install?", "decision"),
+        ("couldn’t we just reuse it?", "decision"),
     ])
     def test_pivots_detected_with_kind(self, msg, kind):
         assert _vendor._looks_like_pivot(msg) is True
         assert _vendor._pivot_kind(msg) == kind
+
+    def test_normalize_punct_folds_smart_quotes(self):
+        assert _vendor._normalize_punct("can’t") == "can't"
+        assert _vendor._normalize_punct("“hi”") == '"hi"'
+        assert _vendor._normalize_punct("a—b") == "a-b"
+        # a curly-apostrophe pivot the raw regex would miss is caught after norm
+        assert _vendor._looks_like_pivot("can’t we just skip the reinstall?") is True
 
     @pytest.mark.parametrize("msg", [
         "what does this step mean?", "can you add a call to action?",
@@ -189,6 +202,48 @@ class TestPivotGateRouting:
         assert "📌 Noted" in out
         note_cmd.assert_called_once()
         assert note_cmd.call_args.kwargs["kind"] == "decision"
+        chat_turn.assert_not_called()
+
+    def test_curly_apostrophe_pivot_routes_to_note(self, pipe):
+        """§17.692 — the reported regression: a curly-apostrophe pivot (from a
+        smart-quote keyboard) must route to note→re-plan, not re-render."""
+        interp = {"intent": "question", "note_text": "", "note_kind": "note",
+                  "evidence": "", "error_text": "", "query": "", "node_key": "T6",
+                  "is_collect": False, "is_decision": False}
+        with patch.object(_vendor, "fast_classify_turn", return_value=None), \
+             patch.object(_vendor, "assist_interpret", return_value=interp), \
+             patch.object(_vendor, "fetch_pending_replan", return_value=None), \
+             patch.object(_vendor, "assist_note_cmd",
+                          return_value=iter(["📌 Noted (decision): ..."])) as note_cmd, \
+             patch.object(_vendor, "assist_chat_turn",
+                          return_value=iter(["RE-RENDER"])) as chat_turn:
+            out = "".join(_vendor.assist_nl_turn(
+                pipe, _SID,
+                "so i already have Proxmox VE downloaded, can’t we just wipe the old containers and start fresh?",
+                node_key="T6"))
+        assert "📌 Noted" in out
+        note_cmd.assert_called_once()
+        chat_turn.assert_not_called()
+
+    def test_collect_step_refinement_feeds_deliberation_not_rerender(self, pipe):
+        """§17.692 — on a collect step, a non-pivot refinement the classifier read
+        as `question` ("can we make the port random?") must feed the deliberation
+        (submit), not re-render the step and lose the accumulated proposal."""
+        interp = {"intent": "question", "note_text": "", "note_kind": "note",
+                  "evidence": "", "error_text": "", "query": "", "node_key": "T3",
+                  "is_collect": True, "is_decision": True}
+        with patch.object(_vendor, "fast_classify_turn", return_value=None), \
+             patch.object(_vendor, "assist_interpret", return_value=interp), \
+             patch.object(_vendor, "fetch_pending_replan", return_value=None), \
+             patch.object(_vendor, "_recall_node_key", return_value="T3"), \
+             patch.object(_vendor, "assist_submit",
+                          return_value=iter(["DELIBERATION"])) as submit, \
+             patch.object(_vendor, "assist_chat_turn",
+                          return_value=iter(["RE-RENDER"])) as chat_turn:
+            out = "".join(_vendor.assist_nl_turn(
+                pipe, _SID, "can we make the SSH port somewhat random?", node_key="T3"))
+        assert "DELIBERATION" in out
+        submit.assert_called_once()
         chat_turn.assert_not_called()
 
     def test_genuine_question_still_re_renders(self, pipe):

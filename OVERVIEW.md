@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.692 Fix — the REAL pivot root cause: smart (curly) apostrophes broke every deterministic gate; + mid-deliberation refinements (2026-08-01)
+
+**Report.** "Still having issues with pivoting" — the 5th such report despite §17.638/651/666/679/691. Root-caused from the chat store (not another phrase-widening): at msg [42] the operator typed *"…can't we just wipe the old containers and start fresh?"* — which §17.691's `_QUESTION_PIVOT_RE` (`can'?t we just`) **should** have matched, but didn't. The apostrophe is a **curly** `’` (U+2019), not a straight `'` — the operator's phone/macOS auto-corrects smart quotes. Every deterministic gate matches straight apostrophes only, so **all** apostrophe-bearing pivots ("can't", "couldn't", "why don't", "isn't", "wouldn't"), the confirm gate, and the replan yes/no gate silently failed on this operator's input. That — not a missing phrase — is why pivots kept "regressing." Verified: the exact [42] bytes match the regex only **after** normalization.
+
+**Fix 1 (the systemic one) — normalize smart punctuation up front.** `_normalize_punct` folds `’‘ → '`, `“” → "`, en/em-dash → `-`, `…` → `...`, NBSP → space. Applied at `assist_nl_turn` entry (so `fast_classify_turn`, the LLM interpret, and note/evidence content all get ASCII) **and** defensively inside `_looks_like_pivot` / `_looks_like_decision_confirm` / `_replan_decision` (correct for any caller/test). Semantics unchanged; every deterministic matcher now sees a normal apostrophe.
+
+**Fix 2 — mid-deliberation refinements.** At [26] *"can we make the SSH port somewhat random?"* (a refinement on a decision step, no apostrophe) the classifier said `question` and the engine **re-rendered** the step, discarding the accumulated proposal. The §17.689/690 backstop only converted `question`→`submit` for CONFIRMATIONS. Broadened: on a COLLECT step (decision/gather), ANY non-pivot `question` (refinement / clarification / partial answer / confirmation) routes to the deliberation (submit) so it incorporates the input; a PIVOT still falls through to note→re-plan; genuine external questions classify `ask`→research and never reach here.
+
+**Verification.** `tests/test_scaffold_router_note_replan.py` +4 curly-apostrophe detector cases + `_normalize_punct` unit + 2 routing tests (curly pivot→note; collect refinement→deliberation); pipeline assist suites green (185). **Live:** the exact [42] curly message matches the pivot regex only after normalization; and a live `deliberate_decision` fed the [26] refinement returned `needs_input` with an UPDATED proposal (a random high port) rather than a re-render. Pipeline-only change (no orchestrator/schema); pipelines container restarted (live).
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.691 Fix — QUESTION-framed pivots reshape the plan (was: re-rendered the stale step) (2026-08-01)
 
 **Report (OWUI run).** "It had issues pivoting from the user's references and instructions mid-assist." Reproduced from the chat store: the plan was a **bare-metal Proxmox reinstall via USB**, but the operator already had a **working, reachable** Proxmox (msg [26] "I got into the browser… by fixing it!"). At [28] they asked *"can't i just erase the old containers and start fresh? i have access and can log in."* — a clear pivot to a simpler approach. The engine classified it `question` and **re-rendered a stale disk-wipe step** instead of reshaping the plan.
