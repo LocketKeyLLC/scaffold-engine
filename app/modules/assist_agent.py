@@ -393,6 +393,38 @@ async def _load_presented_step(*, session_id: str, job_id: str, db) -> Optional[
     }
 
 
+async def _take_divergence_notice(*, session_id: str, db) -> dict | None:
+    """§17.699 — pull a not-yet-surfaced divergence-triggered ``pending_replan``
+    and flip it to ``surfaced=True`` so /assist next announces it exactly once.
+
+    Only ``note_kind == 'divergence'`` proposals are auto-surfaced here — the
+    note (§17.677) and pivot (§17.693) proposals are surfaced synchronously in
+    their own turn, so they're left untouched (returning them here would
+    double-announce them). Issues the flip as an un-committed UPDATE; the
+    caller's transaction commit persists it, keeping flip-and-show atomic.
+    Returns the proposal (pre-flip) for rendering, or None."""
+    row = (await db.execute(
+        text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not row:
+        return None
+    pr = _pending_replan_from_metadata(row.get("metadata"))
+    if not pr or pr.get("note_kind") != "divergence" or pr.get("surfaced"):
+        return None
+    flipped = dict(pr)
+    flipped["surfaced"] = True
+    await db.execute(
+        text("""
+            UPDATE assist_sessions
+               SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb)
+             WHERE id = :sid
+        """),
+        {"sid": session_id, "patch": json.dumps({"pending_replan": flipped})},
+    )
+    return pr
+
+
 async def get_next_step(*, session_id: str, db) -> Optional[dict]:
     """Claim the next step for the human to work.
 
@@ -424,11 +456,20 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
         return None
     job_id = str(sess["job_id"])
 
+    # §17.699 — one-time proactive surface of a divergence-triggered plan fix.
+    # Flips the staged proposal to surfaced (carried by the transaction's
+    # commits below) and returns it so we attach it to whatever step we hand
+    # back. Attach on EVERY step-returning path so we never flip-without-show
+    # (which would silently swallow the notice forever).
+    replan_notice = await _take_divergence_notice(session_id=session_id, db=db)
+
     # §17.645 — one step in flight at a time. Re-present an already-presented,
     # not-yet-submitted step instead of claiming a new (possibly far) node.
     in_flight = await _load_presented_step(session_id=session_id, job_id=job_id, db=db)
     if in_flight is not None:
         await db.commit()
+        if replan_notice:
+            in_flight["replan_notice"] = replan_notice
         return in_flight
 
     # Claim atomically. Dep gating: every node listed in dag_nodes.depends_on
@@ -469,7 +510,10 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
         # recoverable via `/assist next`. (Post-§17.645 this is normally caught
         # by the in-flight guard above; kept as a belt-and-suspenders fallback
         # for legacy sessions with a presented step but a race on the claim.)
-        return await _load_presented_step(session_id=session_id, job_id=job_id, db=db)
+        fallback = await _load_presented_step(session_id=session_id, job_id=job_id, db=db)
+        if fallback is not None and replan_notice:
+            fallback["replan_notice"] = replan_notice
+        return fallback
 
     node_key = claimed["node_key"]
     await db.execute(
@@ -512,6 +556,8 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
         # §17.486 — cache state so the client knows whether a cached
         # walkthrough already exists or one will be generated on demand.
         "guidance_status": claimed.get("guidance_status") or "none",
+        # §17.699 — proactive divergence re-plan heads-up (None unless staged).
+        "replan_notice": replan_notice,
     }
 
 

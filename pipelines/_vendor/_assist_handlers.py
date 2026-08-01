@@ -813,6 +813,24 @@ def assist_next(
         assist_remember(
             pipe, chat_id, session_id=session_id, last_node_key=step["node_key"],
         )
+    # §17.699 — a divergence on an earlier submit staged a proactive plan-fix
+    # proposal (the server flips it to surfaced so this announces exactly once).
+    # Surface it BEFORE the step so the operator can re-plan first; a plain
+    # yes/no on the next turn resolves it via the existing _replan_decision path.
+    notice = step.get("replan_notice")
+    affected = (notice or {}).get("proposals") if isinstance(notice, dict) else None
+    if affected:
+        src = (notice or {}).get("source_node") or "the last step"
+        yield (
+            f"⚠️ Heads up — what you reported for `{src}` looks like it diverges "
+            f"from the plan, so some steps below may no longer fit.\n\n"
+        )
+        yield _render_replan_surface(
+            affected,
+            lead=f"This affects **{len([p for p in affected if isinstance(p, dict)])}** "
+                 f"pending step(s):",
+        )
+        yield "\n\n---\n\n"
     yield render_step(step)
     # §17.486 — auto-generate the human walkthrough for the claimed step.
     # Separate POST so the slow LLM call doesn't block the fast /next claim;

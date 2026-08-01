@@ -645,9 +645,89 @@ async def apply_selective_replan(
 # ── Top-level dispatcher ───────────────────────────────────────────────────
 
 
+async def stage_divergence_replan(
+    *, db, session_id: str, job_id: str, node_key: str, title: str,
+    evidence: str, reason: str, model_overrides: dict | None = None,
+) -> dict | None:
+    """§17.699 — turn a detected MAJOR divergence into a surface-and-ask re-plan.
+
+    The submit-path divergence verifier already knows a just-committed step's
+    evidence departs from its plan; on context_only that only set an invisible
+    ``divergence=TRUE`` flag. Here we treat the operator's ACTUAL result as new
+    information about the system's real state and run the §17.677 note-impact
+    analyzer over the still-pending nodes. When ≥1 pending node is invalidated,
+    stage a ``pending_replan`` proposal (``note_kind='divergence'``,
+    ``surfaced=False``) so /assist next surfaces it once and the operator
+    resolves it with the same yes/no confirm+apply path as a note or pivot.
+
+    Fail-soft and self-gating: disabled by valve, non-active session, no
+    affected pending nodes, or any error → returns None and stages nothing.
+    Never rewrites the plan directly; only proposes.
+    """
+    from datetime import datetime, timezone
+
+    from app.config import settings
+
+    if not settings.assist_divergence_replan_enabled:
+        return None
+    sess = (await db.execute(
+        text("SELECT status FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess or sess["status"] not in ("active", "paused"):
+        return None
+    # Frame the operator's real result (and why it diverged) as a decision note
+    # about the true system state — the analyzer maps that onto the pending plan.
+    note_text = (
+        f"While working the step \"{title or node_key}\", my actual result was: "
+        f"{(evidence or '').strip()[:1500]}"
+    )
+    if reason:
+        note_text += f"\n\n(This differs from that step's original plan: {reason})"
+    try:
+        impact = await analyze_note_impact(
+            db=db, job_id=job_id, note_text=note_text, note_kind="decision",
+            model_overrides=model_overrides,
+        )
+    except Exception as e:  # noqa: BLE001 — a flaky analyzer must never surface
+        logger.warning("divergence_replan_analyze_failed session_id=%s err=%r", session_id, e)
+        return None
+    affected = impact.get("affected") or []
+    if not affected:
+        return None
+    proposal = {
+        "note_text": note_text,
+        "note_kind": "divergence",
+        "source_node": node_key,
+        "reason": reason,
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "proposals": affected,
+        "surfaced": False,
+    }
+    # Read-modify-write merge so sibling metadata keys survive; one pending
+    # proposal at a time (a fresh one overwrites any unresolved prior — matches
+    # _stage_replan_proposal's latest-wins contract).
+    await db.execute(
+        text("""
+            UPDATE assist_sessions
+               SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb),
+                   updated_at = NOW()
+             WHERE id = :sid
+        """),
+        {"sid": session_id, "patch": json.dumps({"pending_replan": proposal})},
+    )
+    await db.commit()
+    logger.info(
+        "assist_divergence_replan_proposed session_id=%s node=%s affected=%d",
+        session_id, node_key, len(affected),
+    )
+    return proposal
+
+
 async def _detect_and_mark_in_background(
     *,
     session_id: str,
+    job_id: str,
     node_key: str,
     title: str,
     prompt: str,
@@ -657,6 +737,11 @@ async def _detect_and_mark_in_background(
 ) -> None:
     """Background worker for context_only: run divergence detection and
     write the `divergence=TRUE` flag on assist_steps if applicable.
+
+    §17.699 — on a MAJOR divergence, also stage a surface-and-ask re-plan
+    proposal (``stage_divergence_replan``) so the operator is proactively asked
+    whether to fix the now-inconsistent pending plan, instead of the divergence
+    being a flag they never see.
 
     Uses its own AsyncSession because the request-scoped session that
     spawned this task may have been closed by the time we run. Catches
@@ -682,10 +767,16 @@ async def _detect_and_mark_in_background(
                 {"sid": session_id, "nk": node_key},
             )
             await bg_db.commit()
-        logger.info(
-            "assist_divergence_marked_async session_id=%s node=%s reason=%r",
-            session_id, node_key, div.get("reason"),
-        )
+            logger.info(
+                "assist_divergence_marked_async session_id=%s node=%s reason=%r",
+                session_id, node_key, div.get("reason"),
+            )
+            # §17.699 — proactively propose a plan fix from the divergence.
+            await stage_divergence_replan(
+                db=bg_db, session_id=session_id, job_id=job_id,
+                node_key=node_key, title=title, evidence=evidence,
+                reason=div.get("reason") or "", model_overrides=model_overrides,
+            )
     except Exception as e:
         logger.warning(
             "assist_divergence_background_failed session_id=%s node=%s err=%r",
@@ -740,7 +831,7 @@ async def maybe_replan(
         # so the task isn't GC'd before completion.
         task = asyncio.create_task(
             _detect_and_mark_in_background(
-                session_id=session_id, node_key=node_key,
+                session_id=session_id, job_id=job_id, node_key=node_key,
                 title=title, prompt=prompt, evidence=evidence,
                 model_overrides=model_overrides, is_decision=is_decision,
             )

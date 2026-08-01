@@ -636,13 +636,15 @@ async def test_get_next_step_represents_inflight_before_claiming(monkeypatch):
     db = AsyncMock()
     db.execute.side_effect = [
         _result(mappings_first={"id": "s1", "job_id": "j1", "status": "active"}),
+        # §17.699 — the divergence-notice metadata SELECT (no proposal staged).
+        _result(mappings_first={"metadata": None}),
     ]
     inflight = {"node_key": "T1", "re_presented": True}
     monkeypatch.setattr(assist_agent, "_load_presented_step",
                         AsyncMock(return_value=inflight))
     res = await assist_agent.get_next_step(session_id="s1", db=db)
     assert res is inflight
-    assert db.execute.await_count == 1  # session SELECT only — no claim
+    assert db.execute.await_count == 2  # session SELECT + notice SELECT; no claim
 
 
 @pytest.mark.asyncio
@@ -652,10 +654,12 @@ async def test_get_next_step_claims_when_nothing_inflight(monkeypatch):
     db = AsyncMock()
     db.execute.side_effect = [
         _result(mappings_first={"id": "s1", "job_id": "j1", "status": "active"}),
+        # §17.699 — the divergence-notice metadata SELECT (no proposal staged).
+        _result(mappings_first={"metadata": None}),
         _result(mappings_first=None),  # claim UPDATE → nothing claimable
     ]
     monkeypatch.setattr(assist_agent, "_load_presented_step",
                         AsyncMock(return_value=None))
     res = await assist_agent.get_next_step(session_id="s1", db=db)
     assert res is None
-    assert db.execute.await_count == 2  # session SELECT + claim attempt
+    assert db.execute.await_count == 3  # session SELECT + notice SELECT + claim

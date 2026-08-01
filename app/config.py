@@ -657,6 +657,17 @@ class Settings(BaseSettings):
     # ("surface-and-ask", not silent auto-rewrite). Disable to keep notes purely
     # feed-forward-as-text (§17.654 behavior) with no impact analysis.
     assist_note_replan_enabled: bool = True
+    # §17.699 — proactive divergence re-plan. On context_only (the default
+    # policy), the background verifier already detects when a submitted step's
+    # evidence diverges from its plan, but it only sets an invisible
+    # `assist_steps.divergence=TRUE` flag — the operator had to notice the plan
+    # was wrong themselves and raise a note. When enabled, a MAJOR divergence
+    # additionally runs the §17.677 note-impact analyzer over the pending nodes
+    # and stages a surface-and-ask proposal (`metadata.pending_replan`,
+    # note_kind='divergence'), which /assist next surfaces once. Reuses the
+    # note/pivot confirm+apply path end to end. Disable to keep divergence
+    # purely observational (the pre-§17.699 behavior).
+    assist_divergence_replan_enabled: bool = True
     # §17.486 — Assist Mode guidance layer. When a human claims a step, the
     # engine generates a human-executable walkthrough (copy-paste terminal
     # commands for shell/codegen work, step-by-step instructions for
