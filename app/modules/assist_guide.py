@@ -911,7 +911,7 @@ _DELIBERATE_TOOL = model_router.Tool(
     },
 )
 
-_DELIBERATE_SYSTEM = """You help a human operator finalize ONE decision step whose deliverable is a CONCRETE artifact (a table / list / plan / config with specific values). You are given the step's task, the project context, and the conversation so far (including any proposal you already made). Call resolve_or_continue exactly once.
+_DELIBERATE_SYSTEM_DECISION = """You help a human operator finalize ONE decision step whose deliverable is a CONCRETE artifact (a table / list / plan / config with specific values). You are given the step's task, the project context, and the conversation so far (including any proposal you already made). Call resolve_or_continue exactly once.
 
 Choose the outcome:
 
@@ -925,6 +925,34 @@ Rules:
 - Never invent values the operator must own (real public IPs, ISP specifics) — use sensible, clearly-labeled defaults they can change.
 - Keep `message` tight and skimmable. No preamble, no emoji, no completion checkmarks."""
 
+# §17.690 — the SAME across-turns machinery for a GATHER step: one whose task
+# asks the operator to PROVIDE several specific pieces of information (e.g.
+# "Operator provides: exact model, disk inventory, GPU(s), NIC models"). The
+# operator commonly supplies these ONE PORTION AT A TIME; the step used to
+# commit on the first portion (the reported bug — disk inventory pasted, step
+# committed with model/GPU/NIC still missing). Now it accumulates across turns
+# and only resolves once every requested item is present.
+_DELIBERATE_SYSTEM_GATHER = """You help a human operator complete ONE step whose deliverable is SPECIFIC INFORMATION they provide — the task lists exactly which items. You are given the step's task, the project context, and the conversation so far (which may already contain items the operator supplied in EARLIER turns). Call resolve_or_continue exactly once.
+
+The operator often provides the requested items ONE PIECE AT A TIME across several messages. Your job is to accumulate them and know when the set is complete.
+
+Choose the outcome:
+
+- status="resolved" when EVERY item the task asks for has now been provided across the whole conversation (an item the operator marks as absent or unknown — "no GPU", "not sure of the NIC model", "N/A" — COUNTS as provided; do not block on it). Emit `decision_record` = the COMPLETE, self-contained record of ALL the gathered information, every requested item labeled, assembled from the entire conversation — ready for later steps to build from.
+
+- status="needs_input" when one or more requested items are STILL missing. In `message`: briefly acknowledge what you have CAPTURED so far, then clearly list ONLY the specific items still MISSING, and invite the operator to provide the rest. They may answer a piece at a time.
+
+Rules:
+- Track the WHOLE conversation: information given in earlier turns still counts — NEVER re-ask for something already provided, and never discard earlier pieces.
+- Resolve as soon as the full set is present (or explicitly marked absent/unknown) — do not force extra rounds.
+- Do NOT invent or assume values the operator must supply — ask for them.
+- Keep `message` tight and skimmable. No preamble, no emoji, no completion checkmarks."""
+
+_DELIBERATE_SYSTEMS = {
+    "decision": _DELIBERATE_SYSTEM_DECISION,
+    "gather": _DELIBERATE_SYSTEM_GATHER,
+}
+
 
 async def deliberate_decision(
     *,
@@ -935,19 +963,30 @@ async def deliberate_decision(
     operator_notes: Optional[list[dict]] = None,
     conversation: Optional[str] = None,
     latest_message: str,
+    kind: str = "decision",
 ) -> dict:
-    """§17.689 — one turn of decision deliberation.
+    """§17.689/§17.690 — one turn of a COLLECT step's deliberation.
+
+    ``kind='decision'`` — the deliverable is a choice / concrete artifact the
+    operator decides (§17.689). ``kind='gather'`` — the deliverable is specific
+    information the operator supplies, often one portion at a time (§17.690).
+    Both accumulate across turns and commit only when complete.
 
     Returns ``{status: 'needs_input'|'resolved'|'error', message, decision_record}``.
     Fail-soft: any model/parse failure returns ``status='error'`` so the caller
     can fall back to the plain single-turn commit rather than trapping the
-    operator in a broken decision loop.
+    operator in a broken loop.
     """
     role = settings.assist_guide_model_role
-    parts = [
+    system = _DELIBERATE_SYSTEMS.get(kind, _DELIBERATE_SYSTEM_DECISION)
+    lead = (
+        f"Gather step: {title}\n\n"
+        f"The information this step must collect from the operator:\n{task_prompt}"
+        if kind == "gather" else
         f"Decision step: {title}\n\n"
         f"What this step must ultimately produce (the concrete deliverable):\n{task_prompt}"
-    ]
+    )
+    parts = [lead]
     if job_digest and job_digest.strip():
         parts.append(job_digest.strip())
     env_block = render_environment_block(environment)
@@ -960,14 +999,14 @@ async def deliberate_decision(
         parts.append(conversation.strip())
     parts.append(f"## Operator's latest message\n{(latest_message or '').strip()}")
     parts.append(
-        "Decide whether this decision is now resolved or needs another round, "
-        "and call resolve_or_continue."
+        "Decide whether this step is now resolved (complete) or needs another "
+        "round, and call resolve_or_continue."
     )
     user = "\n\n".join(parts)
     try:
         resp = await model_router.tool_call(
             [
-                {"role": "system", "content": _DELIBERATE_SYSTEM},
+                {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             [_DELIBERATE_TOOL],

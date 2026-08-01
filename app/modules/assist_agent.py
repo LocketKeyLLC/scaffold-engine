@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid as _uuid
 from dataclasses import asdict
 from typing import Any, AsyncGenerator, Optional
@@ -884,6 +885,7 @@ async def classify_session_turn(
         "intent": "question", "evidence": "", "error_text": "", "query": "",
         "note_text": "", "note_kind": "note",
         "node_key": node_key, "title": None, "is_decision": False,
+        "is_collect": False,
     }
     if not (message or "").strip():
         return fallback
@@ -912,10 +914,13 @@ async def classify_session_turn(
         )
     except ValueError:
         return fallback
-    # §17.689 — on a decision node, a made/confirmed choice routes to `submit`
-    # (→ server-side deliberation), and the flag rides back so the pipeline can
-    # apply a deterministic confirm backstop.
-    is_decision = (node_row.get("node_type") or "").lower() == "decision"
+    # §17.689/§17.690 — on a COLLECT step (a decision, or a 'gather' step that
+    # asks the operator to provide info), a made/confirmed answer routes to
+    # `submit` (→ server-side deliberation). `is_decision` drives the classifier
+    # bias; `is_collect` rides back so the pipeline can apply its neutral banner
+    # + deterministic confirm backstop to gather steps too.
+    kind = _collect_step_kind(node_row.get("node_type"), ctx.base_prompt)
+    is_decision = kind == "decision"
     res = await assist_guide.classify_turn(
         message=message, title=ctx.title, task_prompt=ctx.base_prompt,
         tool=ctx.tool, conversation=_conversation_block_for(history),  # §17.687
@@ -924,6 +929,7 @@ async def classify_session_turn(
     res["node_key"] = nk
     res["title"] = ctx.title
     res["is_decision"] = is_decision
+    res["is_collect"] = kind is not None
     return res
 
 
@@ -1245,11 +1251,37 @@ async def verify_submit_outcome(
     )
 
 
+# §17.690 — a GATHER step's task asks the operator to PROVIDE several specific
+# pieces of information ("Operator provides: exact model, disk inventory,
+# GPU(s), NIC models"). The planner phrases these as "Operator provides /
+# supplies / must provide …". Detection is intentionally a touch loose: a false
+# match just resolves in one turn like a normal submit (no harm), whereas a miss
+# re-opens the reported bug (a partial answer commits with the rest missing).
+_GATHER_TASK_RE = re.compile(
+    r"operator\s+(?:provides?|supplies|must\s+provide|will\s+provide|"
+    r"needs?\s+to\s+provide|to\s+provide)",
+    re.I,
+)
+
+
+def _collect_step_kind(node_type: str | None, task_prompt: str) -> Optional[str]:
+    """§17.689/§17.690 — classify a step as a COLLECT step whose deliverable the
+    operator supplies across one or more turns. Returns ``'decision'`` (a choice
+    / concrete artifact), ``'gather'`` (specific requested information), or
+    ``None`` (not a collect step — commit normally)."""
+    if (node_type or "").lower() == "decision":
+        return "decision"
+    if _GATHER_TASK_RE.search(task_prompt or ""):
+        return "gather"
+    return None
+
+
 async def run_step_decision(
     *, session_id: str, node_key: str, message: str,
     history: list[dict] | None = None, db,
 ) -> Optional[dict]:
-    """§17.689 — one turn of decision deliberation for a DECISION node.
+    """§17.689/§17.690 — one turn of a COLLECT step's deliberation (a decision
+    node, or a 'gather' step that asks the operator to provide specific info).
 
     Called by the submit endpoint BEFORE committing. Returns:
       - ``None`` when deliberation does not apply — the step isn't claimable
@@ -1279,7 +1311,9 @@ async def run_step_decision(
     )).mappings().first()
     if not row or row.get("status") != "presented":
         return None
-    if (row.get("node_type") or "").lower() != "decision":
+    task_prompt = row.get("prompt_template") or ""
+    kind = _collect_step_kind(row.get("node_type"), task_prompt)
+    if kind is None:
         return None
     job_id = str(row["job_id"])
     environment = _environment_from_metadata(row["metadata"])
@@ -1291,21 +1325,24 @@ async def run_step_decision(
     from app.modules import assist_guide
     res = await assist_guide.deliberate_decision(
         title=row["title"] or node_key,
-        task_prompt=row["prompt_template"] or "",
+        task_prompt=task_prompt,
         environment=environment,
         job_digest=job_digest,
         operator_notes=operator_notes,
         conversation=conversation,
         latest_message=message,
+        kind=kind,
     )
     status = res.get("status")
     if status == "needs_input" and (res.get("message") or "").strip():
-        return {"status": "needs_input", "message": res["message"].strip()}
+        return {"status": "needs_input", "message": res["message"].strip(),
+                "collect_kind": kind}
     if status == "resolved" and (res.get("decision_record") or "").strip():
         return {
             "status": "resolved",
             "decision_record": res["decision_record"].strip(),
             "message": (res.get("message") or "").strip(),
+            "collect_kind": kind,
         }
     # error / unusable (e.g. resolved with no record) → plain single-turn commit.
     return None

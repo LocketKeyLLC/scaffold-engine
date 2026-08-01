@@ -22049,6 +22049,24 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.690 Fix — GATHER steps accumulate info across turns too (partial answer no longer commits) (2026-08-01)
+
+**Report (OWUI run).** On the Proxmox build, step **T2 "Gather host hardware details"** (task: *"Operator provides: exact Supermicro model, disk inventory, GPU(s), NIC models"*) — the operator pasted **only** the disk inventory (`lsblk`). It committed immediately and advanced. The verifier even flagged it: *"Disk inventory is provided… but server model, GPU(s), and NIC models are… not yet provided. The step is incomplete"* — yet it still committed. The operator was supplying the requested info **one portion at a time**; the engine took the first portion as the whole answer.
+
+**Root cause.** §17.689's across-turns accumulation only covered `node_type='decision'`. A **gather** step (the operator supplies several specified pieces of information) is a `task`/`output` node, so it fell straight through to the plain single-turn commit — the same premature-commit shape §17.689 fixed for decisions, one node-class over.
+
+**Fix — generalize the §17.689 "collect step" machinery to gather steps.** The interception point (`run_step_decision` in the submit path), the accumulation substrate (§17.687 conversation history), and the pipeline plumbing all already existed; this widens the gate and adds a gather framing:
+- `assist_agent._collect_step_kind(node_type, task_prompt)` → `'decision'` | `'gather'` | `None`. `gather` is detected from the planner's convention via `_GATHER_TASK_RE` ("Operator provides / supplies / must provide …"). Detection is deliberately a touch loose — a **false match is harmless** (a step whose info is already complete just resolves in one turn like a normal submit), while a miss re-opens the bug.
+- `run_step_decision` gates on `_collect_step_kind(...) is not None` (was `node_type=='decision'`) and passes `kind` through; returns `collect_kind` in its result.
+- `assist_guide.deliberate_decision(..., kind='decision')` gains a `'gather'` system prompt (`_DELIBERATE_SYSTEM_GATHER`): accumulate the requested items across the WHOLE conversation, never re-ask for what's already given, an item marked absent/unknown ("no GPU") COUNTS as provided, `needs_input` = acknowledge captured + list only what's still missing, `resolved` = a complete self-contained record of ALL items.
+- `classify_session_turn` returns `is_collect` (decision **or** gather); the pipeline's neutral "🤔 Working through this step…" banner + the deterministic `_looks_like_decision_confirm` backstop now apply to gather too. `collect_kind` rides the response so `assist_submit` words it right (gather → "send the remaining details, one piece at a time" / "📌 Recorded"; decision → "confirm or change" / "📌 Decision recorded").
+
+**Verification.** `tests/test_assist_decision_deliberation.py` +4 (kind classifier, gather deliberation, gather needs_input gate, plain-task-not-intercepted) + `tests/test_scaffold_router_decision_deliberation.py` +2 (gather render); assist suites green (orchestrator 163, pipeline 95). **Live model, the exact T2 flow:** turn 1 pastes only `lsblk` → `needs_input` ("Captured disk inventory… Still need: model, GPU(s), NIC models"); turn 2 provides the rest (disk inventory in the §17.687 history) → `resolved` with a complete hardware record (model + disk table + GPU: None + NICs). No request-schema change (`collect_kind` is response-only); openapi-check + ci-tier-0 green; orchestrator + pipelines restarted (live).
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.689 Feature — multi-turn decision deliberation: a concrete-artifact decision is assembled across turns, committed on confirm (2026-07-31)
 
 **Closes the §17.688 deferral.** §17.688 stopped the "3 VLANs → may have failed" *error*, but the committed evidence was still just "3 vlans" — the concrete VLAN table (IDs/subnets/DHCP/isolation) that T12/T17 build from was left to be invented at implementation time. This makes a decision node whose deliverable is a concrete artifact stay OPEN across turns: **propose → the operator confirms/adjusts → commit the full, confirmed artifact.**

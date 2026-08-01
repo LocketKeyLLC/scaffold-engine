@@ -490,8 +490,8 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
             message=body.output, history=body.history, db=db,
         )
     if deliberation is not None and deliberation["status"] == "needs_input":
-        # Do NOT commit — keep the step open and hand back the proposal so the
-        # operator can confirm or adjust on the next turn.
+        # Do NOT commit — keep the step open and hand back the proposal / the
+        # still-missing items so the operator can continue on the next turn.
         return {
             "session_id": session_id,
             "node_key": body.node_key,
@@ -500,6 +500,7 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
             "no_op": False,
             "next_node_key": None,
             "decision_message": deliberation["message"],
+            "collect_kind": deliberation.get("collect_kind"),
             "mirror_divergence": False,
         }
 
@@ -509,9 +510,11 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
     # generic success verify for that path.
     commit_evidence = body.output
     decision_message = None
+    decision_kind = None
     if deliberation is not None and deliberation["status"] == "resolved":
         commit_evidence = deliberation["decision_record"]
         decision_message = deliberation.get("message") or None
+        decision_kind = deliberation.get("collect_kind")
     elif body.action == "submit" and settings.assist_verify_on_submit:
         verdict = await assist_agent.verify_submit_outcome(
             session_id=session_id, node_key=body.node_key, evidence=body.output, db=db,
@@ -551,6 +554,8 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         # show what was recorded alongside the commit.
         if decision_message and isinstance(result, dict):
             result["decision_message"] = decision_message
+        if decision_kind and isinstance(result, dict):
+            result["collect_kind"] = decision_kind
         # §17.490 — learn the concrete values the operator used for this step's
         # placeholders so later walkthroughs are concrete. Best-effort; only
         # fires on a real commit and when the step's guidance had placeholders.

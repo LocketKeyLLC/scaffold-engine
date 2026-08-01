@@ -67,6 +67,44 @@ class TestDeliberatingRender:
         assert "committed" in out.lower()
 
 
+class TestGatherRender:
+    def test_gather_deliberating_invites_remaining_pieces(self, pipe):
+        # §17.690 — a gather step that has only part of the requested info shows
+        # what's captured + what's missing, and invites the rest a piece at a time.
+        sess = MagicMock()
+        sess.post.return_value = _make_response(200, {
+            "status": "deliberating",
+            "node_key": "T2",
+            "committed": False,
+            "collect_kind": "gather",
+            "decision_message": "Captured: disk inventory. Still need: model, GPU(s), NIC models.",
+        })
+        with patch.object(_vendor, "_ss", return_value=sess), \
+             patch.object(_vendor, "assist_remember"):
+            out = "".join(_vendor.assist_submit(
+                pipe, _SID, "T2", "<lsblk output>", chat_id="c1",
+            ))
+        assert "Still need" in out
+        assert "one piece at a time" in out.lower()
+        assert "looks good" not in out.lower()  # not the decision-confirm hint
+        assert "committed" not in out.lower()
+
+    def test_gather_resolved_uses_neutral_recorded_label(self, pipe):
+        sess = MagicMock()
+        sess.post.return_value = _make_response(200, {
+            "status": "committed", "node_key": "T2", "committed": True,
+            "next_node_key": None, "collect_kind": "gather",
+            "decision_message": "All hardware details recorded.",
+        })
+        with patch.object(_vendor, "_ss", return_value=sess), \
+             patch.object(_vendor, "assist_remember"):
+            out = "".join(_vendor.assist_submit(
+                pipe, _SID, "T2", "no GPU; NIC is Intel X540", chat_id="c1",
+            ))
+        assert "📌 **Recorded.**" in out
+        assert "Decision recorded" not in out
+
+
 class TestDecisionConfirmBackstop:
     @pytest.mark.parametrize("msg", [
         "looks good", "Looks Good!", "sounds good", "that works", "go with that",

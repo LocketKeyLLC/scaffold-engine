@@ -887,14 +887,18 @@ def assist_submit(
     # operator confirms or adjusts on the next turn (the step is NOT committed).
     if d.get("status") == "deliberating":
         assist_remember(pipe, chat_id, session_id=session_id, last_node_key=node_key)
+        gather = d.get("collect_kind") == "gather"
         msg = (d.get("decision_message") or "").strip() or (
-            "Let's lock in this decision — here's what I have so far."
+            "Here's where this step stands so far."
         )
-        yield (
-            msg
-            + "\n\n_Reply to confirm (e.g. \"looks good\") or tell me what to "
+        hint = (
+            "\n\n_Send the remaining details whenever you have them — one piece "
+            "at a time is fine. I'll record it once everything's in._"
+            if gather else
+            "\n\n_Reply to confirm (e.g. \"looks good\") or tell me what to "
             "change — I'll record the final plan once you're happy._"
         )
+        yield msg + hint
         return
     # §17.487 — hard-block path: the success-check judged this a failure and
     # `assist_block_on_failed_verify` is on, so the node was NOT marked done.
@@ -935,10 +939,13 @@ def assist_submit(
         and bool(next_nk)
         and outcome != "failed"
     )
-    # §17.689 — a resolved decision commits the concrete artifact the engine
-    # assembled (not the operator's "looks good"). Lead with what was recorded.
+    # §17.689/§17.690 — a resolved collect step commits the artifact the engine
+    # assembled across turns (not the operator's "looks good"/last portion).
+    # Lead with what was recorded.
     decision_msg = (d.get("decision_message") or "").strip()
-    prefix = f"📌 **Decision recorded.** {decision_msg}\n\n" if decision_msg else ""
+    _rec_label = ("Recorded" if d.get("collect_kind") == "gather"
+                  else "Decision recorded")
+    prefix = f"📌 **{_rec_label}.** {decision_msg}\n\n" if decision_msg else ""
     msg = f"{prefix}✅ Step `{node_key}` committed. "
     if next_nk:
         msg += (f"Moving on to `{next_nk}`…" if auto_advance
@@ -1637,7 +1644,7 @@ def assist_nl_turn(
         return
     intent = fast_classify_turn(msg)
     evidence, error_text, query, note_text, note_kind = "", "", "", "", "note"
-    is_decision = False
+    is_collect = False
     if intent is None:
         d = assist_interpret(pipe, session_id, msg, node_key=node_key, history=history)
         intent = d.get("intent") or "question"
@@ -1647,12 +1654,13 @@ def assist_nl_turn(
         note_text = d.get("note_text") or ""
         note_kind = d.get("note_kind") or "note"
         node_key = d.get("node_key") or node_key
-        is_decision = bool(d.get("is_decision"))
-    # §17.689 — deterministic backstop: on a decision step, a confirmation the
-    # classifier read as a bare `question` ("looks good", "yes") is really the
-    # operator settling the decision → route to submit so the server-side
-    # deliberation resolves + commits the concrete artifact.
-    if is_decision and intent == "question" and _looks_like_decision_confirm(msg):
+        # §17.690 — is_collect covers decision AND gather steps (both deliberate).
+        is_collect = bool(d.get("is_collect") or d.get("is_decision"))
+    # §17.689/§17.690 — deterministic backstop: on a collect step (decision or
+    # gather), a confirmation the classifier read as a bare `question` ("looks
+    # good", "yes", "that's all") is really the operator settling the step →
+    # route to submit so the server-side deliberation resolves + commits.
+    if is_collect and intent == "question" and _looks_like_decision_confirm(msg):
         intent = "submit"
 
     if intent == "advance":
@@ -1677,10 +1685,10 @@ def assist_nl_turn(
             # No step claimed yet — pull the next one instead of a dead-end.
             yield from assist_next(pipe, session_id, chat_id=chat_id); return
         ev = (evidence or msg).strip() or "Operator confirmed this step is complete."
-        # §17.689 — on a decision step the server may deliberate (assemble the
-        # concrete artifact across turns) rather than commit outright, so use a
-        # neutral banner instead of "recording what you did".
-        yield ("_🤔 Working through this decision…_\n\n" if is_decision
+        # §17.689/§17.690 — on a collect step (decision or gather) the server may
+        # deliberate (assemble the deliverable across turns) rather than commit
+        # outright, so use a neutral banner instead of "recording what you did".
+        yield ("_🤔 Working through this step…_\n\n" if is_collect
                else "_📝 Recording what you did for this step…_\n\n")
         yield from assist_submit(
             pipe, session_id, nk, ev, chat_id=chat_id, history=history,
