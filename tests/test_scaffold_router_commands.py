@@ -259,6 +259,49 @@ class TestGoCommand:
 
 
 @pytest.mark.smoke
+class TestSynthesisTimelineReconciliation:
+    """§17.694 — the pre-/go synthesis must treat the conversation as a timeline:
+    a later message that corrects an earlier one wins, and a problem the user
+    later says is resolved must not drive the plan (the reported 'it kept
+    planning a fresh reinstall after I said the IP was fixed' bug)."""
+
+    def test_prompt_has_timeline_and_resolved_guidance(self):
+        p = _mod.SYNTHESIS_SYSTEM_PROMPT
+        assert "TIMELINE" in p
+        assert "LATER statement WINS" in p or "LATER" in p
+        assert "RESOLVED" in p
+        # the specific escalation the bug produced is explicitly forbidden
+        assert "reinstall" in p.lower()
+        assert "remove old data" in p.lower() or "clean up the existing" in p.lower()
+
+    def test_synthesize_forwards_the_correction_to_the_model(self, pipe):
+        # The correction ("I have access now") MUST reach the model, alongside
+        # the initial statement — the model can only reconcile what it sees.
+        messages = [
+            {"role": "user", "content": "the IP is broken, i want to wipe and start over fresh"},
+            {"role": "assistant", "content": "What's the goal?"},
+            {"role": "user", "content": "I have access now, it was the wrong ethernet port; just remove the old data"},
+        ]
+        captured = {}
+
+        def _post(url, json=None, timeout=None, **kw):
+            captured["messages"] = json["messages"]
+            r = MagicMock(); r.status_code = 200
+            r.json.return_value = {"choices": [{"message": {"content": "Set up a home lab."}}]}
+            return r
+
+        with patch.object(_mod, "_HTTP_SESSION") as sess:
+            sess.post.side_effect = _post
+            text, used_fallback = pipe._synthesize_idea(messages)
+        assert used_fallback is False
+        transcript = captured["messages"][1]["content"]
+        assert "I have access now" in transcript          # the correction reached the model
+        assert "wipe and start over" in transcript         # alongside the original
+        # and the system prompt carried the reconciliation instruction
+        assert "TIMELINE" in captured["messages"][0]["content"]
+
+
+@pytest.mark.smoke
 class TestConfirmCommand:
     """/confirm command flow in pipe()."""
 

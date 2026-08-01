@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.694 Fix — pre-/go synthesis reconciles the conversation as a timeline (a later correction wins) (2026-08-01)
+
+**Report.** "When establishing the base plan (before /go) the system doesn't recognize changes from the initial statement. I said I'd figured out the IP address issue, but it didn't remember and again planned a fresh download/reinstall instead of just removing the old data." Confirmed from the chat store: msg [0] *"…the IP address does not appear to be working… I'd like to wipe the former user and all data and start over fresh"*; msg [2] **corrected** it *"I have access now and can log in via web browser, it was plugged into the wrong ethernet port."* The proposed launch brief at [5] still read *"Perform a fresh installation of Proxmox VE."*
+
+**Root cause.** `_synthesize_idea` (pipeline `/go`) feeds the WHOLE conversation transcript to `SYNTHESIS_SYSTEM_PROMPT` to "extract the final agreed-upon plan" — but that prompt said only "using only details the user confirmed." It treated every message as ADDITIVE, with no notion that a later message can UPDATE/CORRECT/SUPERSEDE an earlier one. So a problem the operator reported first and RESOLVED later still drove the plan, and "wipe former user data and start fresh" escalated into a from-scratch OS reinstall. (The server-side §17.649 non-destructive rule lives in the *refine* step, which only sees the already-synthesized text — by then the reinstall was baked in, so the fix must be at synthesis, where the full timeline is visible.)
+
+**Fix.** Rewrote `SYNTHESIS_SYSTEM_PROMPT` to reconcile the conversation as a TIMELINE: a later user message that updates/corrects/contradicts an earlier one WINS and the superseded detail is discarded; a problem later reported RESOLVED/fixed/working is treated as resolved (never carried forward, never escalated into a from-scratch reinstall); and "remove old data / clean up the existing system" is kept distinct from "wipe disks / reinstall the OS" unless the operator's LATEST intent clearly asks for a rebuild. Uses details "AS OF THEIR LATEST WORD."
+
+**Verification.** **Live A/B on the exact transcript** (triage model `qwen3.5:397b-cloud`): the OLD prompt → *"Set up a fresh Proxmox VE Server by wiping all existing users and data to start anew…"*; the NEW prompt → *"Clean up former user data on the accessible Proxmox VE server… Set up a Palworld server…"* — recognizes access is restored and reads the intent as in-place cleanup, not an OS reinstall. `tests/test_scaffold_router_commands.py` +2 (prompt carries the timeline/resolved/reinstall guidance; `_synthesize_idea` forwards the correction alongside the original to the model); command/synthesis suites green (193). Pipeline-only change (no orchestrator/schema); pipelines container restarted (live).
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.693 Change — semantic pivot detection (impact-analyzer arbiter) + the "Moving on to T10" tracking bug (2026-08-01)
 
 **Report (6th pivot report + "loses track of tasks / relative info").** Two failures from the chat store:

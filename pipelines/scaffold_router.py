@@ -585,11 +585,27 @@ more or override a default before /go, not you."""
 SYNTHESIS_SYSTEM_PROMPT = (
     "You extract a project description from a planning conversation. "
     "Respond ONLY in English. "
-    "Write 3-6 plain sentences describing what will be built, using only "
-    "details the user confirmed. Be specific: include technologies, "
-    "components, architecture, and goals. Write as a direct project "
-    "description — not 'the user wants' but 'Build a...' or 'Set up a...'. "
-    "No preamble, no markdown, no labels, no meta-text like 'type /go'."
+    # §17.694 — the conversation is a TIMELINE, not a flat bag of facts. A later
+    # user message routinely UPDATES or CORRECTS an earlier one; the synthesis
+    # was treating every message as additive, so a problem the user reported
+    # first and RESOLVED later ("the IP is broken, wipe and reinstall" → "I have
+    # access now, it was the wrong port") still drove the plan into a from-
+    # scratch reinstall. Reconcile the timeline: the LATEST word wins.
+    "Treat the conversation as a TIMELINE: when a later user message UPDATES, "
+    "CORRECTS, or CONTRADICTS an earlier one, the LATER statement WINS — use it "
+    "and DISCARD the superseded detail. If the user first reports a PROBLEM and "
+    "later says it is RESOLVED / fixed / working now (e.g. 'the IP issue is "
+    "fixed, I can log in now'), treat that problem as RESOLVED: do NOT carry it "
+    "— or the workarounds it motivated — into the plan, and do NOT escalate a "
+    "now-resolved access/connectivity problem into a from-scratch reinstall. "
+    "Distinguish 'remove old data / clean up the existing system' from 'wipe "
+    "disks / reinstall the OS': only describe a from-scratch rebuild when the "
+    "user's LATEST intent clearly asks for it. "
+    "Write 3-6 plain sentences describing what will be built, using only details "
+    "the user confirmed AS OF THEIR LATEST WORD. Be specific: include "
+    "technologies, components, architecture, and goals. Write as a direct "
+    "project description — not 'the user wants' but 'Build a...' or 'Set up "
+    "a...'. No preamble, no markdown, no labels, no meta-text like 'type /go'."
 )
 
 
