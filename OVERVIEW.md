@@ -22049,6 +22049,24 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.703 Fix — the execution-context monitor: capture `root@pve` on EVERY submit (not only a committed, non-failed one) + change-awareness (2026-08-02)
+
+**Report.** "Everything was working amazingly… then it forgot I was operating through `root@pve` for some reason." §17.701 added the shell-context sensor (`_detect_shell_context` → `metadata.environment.profile`, re-injected into every step's guidance via `render_environment_block`), but wired it INSIDE `learn_from_submit`, which the submit router calls only when ALL of: `assist_learn_substitutions` valve on **and** `action=='submit'` **and** the verdict is **not** `failed` **and** the step actually `committed`. Worse, a `failed` verdict with `assist_block_on_failed_verify` returns early (assist.py) *before* `learn_from_submit` runs. So the very common case — the operator pastes a block whose output shows an error, and that paste still carries `root@pve:~#` — never recorded the context. The engine only "knew" `root@pve` transiently from recent conversation/evidence; once that aged out of context it reverted to generic guidance. Confirmed the re-plan path only *merges* `metadata` (siblings survive), so the profile was never erased — it was never durably *captured*.
+
+**Design note (operator asked: "should there be a sub-system agent that monitors the environment?").** Yes, but a **deterministic sensor, not an always-on LLM agent** — same lesson as §17.679 (a deterministic pivot gate beat an unreliable LLM classifier, re-reported 3×). A pasted shell prompt is a hard signal a regex nails with zero latency/cost/false-flips. So §17.701's sensor was right; its *placement* was the bug.
+
+**Changes.**
+1. **Promoted the sensor to a standalone monitor** — new `assist_agent.capture_execution_context(session_id, evidence, db)`. `_detect_shell_context` now returns `(user, host)`; `_exec_context_profile(user, host)` builds the profile string, marked with the `_EXEC_CTX_SENTINEL` prefix (`"Operator runs commands as "`) so change-detection can tell an auto-capture from an operator-set profile.
+2. **Unconditional capture on every submit** — the submit router (`routers/assist.py`) calls the monitor up front, BEFORE the verify block's failed-verdict early-return, and independent of the learn-substitutions valve. `learn_from_submit` now delegates to the same function (idempotent) so CLI/other callers stay covered.
+3. **Change-awareness (retention, not one-shot)** — empty profile → capture; a prior auto-capture naming a DIFFERENT `user@host` (e.g. `root@pve`→`root@ct100`) → switch; same host → no-op; an operator-set (non-sentinel) profile → left untouched (explicit outranks inferred, mirroring the only-add-new substitutions rule). A frozen-forever profile was the opposite failure mode of the reported one.
+4. **Operator confirmation** — the submit response carries `execution_context: {user, host, changed}` (also on the `verification_failed` early-return); the pipeline (`_vendor/_assist_handlers.py`) renders "🖥️ Noted — you're working on `root@pve`" / "Switched to …".
+
+**Verification.** New unit tests (`test_assist_agent_guidance.py`, +7): captures-when-empty, **captures-from-failed-paste** (the reported bug), no-prompt no-op (short-circuits before any DB read), same-host no-op, switch-updates, respects-operator-profile, fail-soft. `test_assist_agent_guidance.py` 32 passed; broader assist suite (`test_assist_agent` + note/divergence replan + multiline-evidence + decision-verify) 72 passed. Decision logic table-tested across all five branches.
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.702 Change — enable the learning flywheel AND wire it into the assist path (a completed project becomes a reusable exemplar) (2026-08-02)
 
 **Ask.** "Enable [RAG ingest of completed work], and anything else that will assist." Enabling the valve alone would have done NOTHING for this operator: `maybe_ingest_exemplar` (the flywheel hook, `flywheel.py`) was called ONLY from the autonomous `execution_agent` completion path (execution_agent.py:995) — but this operator's entire workflow completes in ASSIST mode, whose finalizer (`assist_agent._maybe_finalize_session`) never fed the flywheel. Same class of assist-vs-autonomous gap as §17.701.

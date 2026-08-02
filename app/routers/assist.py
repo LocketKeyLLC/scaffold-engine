@@ -479,6 +479,18 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
                     "mirror_divergence": False,
                 }
 
+    # §17.703 — execution-environment monitor. Capture the operator's shell
+    # context (`user@host` in ONE interactive shell) from THIS submit's evidence,
+    # unconditionally and up front — BEFORE the verify block can early-return on a
+    # failed verdict, and independent of the substitution-learning valve. This is
+    # the fix for "the engine forgot I was operating through root@pve": the old
+    # §17.701 capture only ran inside learn_from_submit, i.e. only on a committed,
+    # non-failed submit with learning enabled, so an error/failed paste (which
+    # still carries the real prompt) never recorded the context. Fail-soft.
+    captured_ctx = await assist_agent.capture_execution_context(
+        session_id=session_id, evidence=body.output, db=db,
+    )
+
     # §17.689 — decision deliberation. A decision node's concrete artifact is
     # assembled ACROSS turns: a partial answer must NOT terminally commit. Runs
     # before verify/submit; returns None (→ plain single-turn commit) unless this
@@ -536,6 +548,9 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
                 "next_node_key": None,
                 "success_verdict": verdict,
                 "mirror_divergence": False,
+                # §17.703 — even a blocked submit records the operator's shell
+                # context; surface it so the re-submit's guidance stays anchored.
+                "execution_context": captured_ctx,
             }
     try:
         result = await assist_agent.submit_step(
@@ -578,6 +593,10 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
                     result["learned_substitutions"] = learned
             except Exception:  # never fail a submit on the learn step
                 pass
+        # §17.703 — surface a newly-captured / switched shell context so the
+        # pipeline can confirm it ("noted: you're on root@pve").
+        if captured_ctx and isinstance(result, dict):
+            result["execution_context"] = captured_ctx
         return result
     except ValueError as exc:
         msg = str(exc)

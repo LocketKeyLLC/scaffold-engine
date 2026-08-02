@@ -1002,6 +1002,13 @@ def assist_submit(
     if learned:
         pairs = ", ".join(f"`{k}`=`{v}`" for k, v in learned.items())
         msg += f"\n\n📌 Learned for later steps: {pairs}"
+    # §17.703 — confirm the operator's execution context so they see it stuck
+    # (and can correct it if a stray prompt was mis-read).
+    ctx = d.get("execution_context") or {}
+    if ctx.get("host"):
+        who = f"`{ctx.get('user', '')}@{ctx['host']}`".replace("`@", "`")
+        verb = "Switched to" if ctx.get("changed") else "Noted — you're working on"
+        msg += f"\n\n🖥️ {verb} {who}; later steps will target that single shell."
     yield msg
     # §17.638 — chain straight into the next step (claim + walkthrough) so the
     # operator keeps moving instead of re-reading the finished one. assist_next

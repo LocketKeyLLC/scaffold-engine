@@ -330,6 +330,110 @@ async def test_learn_from_submit_nothing_new_skips_write():
     setenv.assert_not_called()  # no new keys → no write
 
 
+# ── §17.703: capture_execution_context (execution-environment monitor) ─────
+
+
+def _capture_env(profile: str):
+    """Patch get_environment to a session whose profile is `profile`."""
+    return patch.object(
+        assist_agent, "get_environment",
+        new=AsyncMock(return_value={"profile": profile, "substitutions": {}}),
+    )
+
+
+@pytest.mark.asyncio
+async def test_capture_execution_context_captures_when_empty():
+    db = AsyncMock()
+    with _capture_env(""), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+        out = await assist_agent.capture_execution_context(
+            session_id="s", evidence="root@pve:~# ls -la", db=db,
+        )
+    assert out == {"user": "root", "host": "pve", "changed": False}
+    profile = setenv.call_args.kwargs["profile"]
+    assert profile.startswith(assist_agent._EXEC_CTX_SENTINEL)
+    assert "root@pve" in profile
+
+
+@pytest.mark.asyncio
+async def test_capture_execution_context_captures_from_failed_paste():
+    # The reported bug: an error paste still carries the real prompt. It MUST
+    # capture (the router calls this before the failed-verdict early return).
+    db = AsyncMock()
+    evidence = "root@pve:/etc/pve# systemctl start x\nJob failed. See systemctl status."
+    with _capture_env(""), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+        out = await assist_agent.capture_execution_context(
+            session_id="s", evidence=evidence, db=db,
+        )
+    assert out and out["host"] == "pve"
+    setenv.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_capture_execution_context_no_prompt_is_noop():
+    db = AsyncMock()
+    with patch.object(assist_agent, "get_environment", new=AsyncMock()) as getenv, \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+        out = await assist_agent.capture_execution_context(
+            session_id="s", evidence="I finished the step, it worked", db=db,
+        )
+    assert out is None
+    getenv.assert_not_called()  # short-circuits before any DB read
+    setenv.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_capture_execution_context_same_host_noop():
+    db = AsyncMock()
+    prior = assist_agent._exec_context_profile("root", "pve")
+    with _capture_env(prior), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+        out = await assist_agent.capture_execution_context(
+            session_id="s", evidence="root@pve:~# whoami", db=db,
+        )
+    assert out is None
+    setenv.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_capture_execution_context_switch_updates():
+    db = AsyncMock()
+    prior = assist_agent._exec_context_profile("root", "pve")
+    with _capture_env(prior), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+        out = await assist_agent.capture_execution_context(
+            session_id="s", evidence="root@ct100:~# uname -a", db=db,
+        )
+    assert out == {"user": "root", "host": "ct100", "changed": True}
+    assert "ct100" in setenv.call_args.kwargs["profile"]
+
+
+@pytest.mark.asyncio
+async def test_capture_execution_context_respects_operator_profile():
+    db = AsyncMock()
+    with _capture_env("I run ansible from a laptop across 3 nodes"), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+        out = await assist_agent.capture_execution_context(
+            session_id="s", evidence="root@pve:~# ls", db=db,
+        )
+    assert out is None                # explicit operator profile is sacred
+    setenv.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_capture_execution_context_fail_soft():
+    # A raising set_environment must not propagate out of the monitor.
+    db = AsyncMock()
+    with _capture_env(""), \
+         patch.object(assist_agent, "set_environment",
+                      new=AsyncMock(side_effect=RuntimeError("db down"))):
+        out = await assist_agent.capture_execution_context(
+            session_id="s", evidence="root@pve:~# ls", db=db,
+        )
+    assert out is None
+
+
 # ── §17.493: generate_step_guidance_stream ─────────────────────────────────
 
 

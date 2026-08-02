@@ -1224,26 +1224,88 @@ async def set_environment(
 # doesn't fire on prose that merely mentions an email-like `user@host`.
 _SHELL_PROMPT_RE = re.compile(r"(?m)^\s*([A-Za-z_][\w.-]*)@([\w.-]+):[^\n#$]*[#$]")
 
+# §17.703 — sentinel prefix marking a profile string that WE auto-captured (vs.
+# one the operator set explicitly via `/assist env`). Change-detection only ever
+# replaces an auto-captured profile; an operator's explicit profile is sacred.
+_EXEC_CTX_SENTINEL = "Operator runs commands as "
 
-def _detect_shell_context(evidence: str) -> Optional[str]:
+
+def _detect_shell_context(evidence: str) -> Optional[tuple[str, str]]:
     """§17.701 — infer the operator's execution context from a pasted shell
-    prompt. Returns a concise profile string (recorded into
-    ``metadata.environment.profile``) when a prompt is present, else None.
+    prompt. Returns ``(user, host)`` when a prompt line is present, else None.
+    Anchored on a leading prompt line so it doesn't fire on prose that merely
+    mentions an email-like ``user@host``."""
+    m = _SHELL_PROMPT_RE.search(evidence or "")
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def _exec_context_profile(user: str, host: str) -> str:
+    """Build the single-interactive-shell profile string for ``user@host``.
 
     Recording it makes later guidance single-shell-safe with the REAL host/user
     (reinforcing §17.700's runbook rule at the per-session level): the model is
     told the operator pastes a block into ONE shell on that host, not a
     multi-terminal SSH setup."""
-    m = _SHELL_PROMPT_RE.search(evidence or "")
-    if not m:
-        return None
-    user, host = m.group(1), m.group(2)
     return (
-        f"Operator runs commands as {user}@{host} in ONE interactive shell "
+        f"{_EXEC_CTX_SENTINEL}{user}@{host} in ONE interactive shell "
         f"(the host's console / a single SSH session), pasting a command block "
         f"and pasting the output back — NOT a multi-terminal setup. Keep every "
         f"step runnable in that single shell."
     )
+
+
+async def capture_execution_context(
+    *, session_id: str, evidence: str, db,
+) -> Optional[dict]:
+    """§17.703 — the deterministic execution-environment monitor.
+
+    Detects the operator's execution context (``user@host`` in ONE interactive
+    shell) from a pasted prompt in their evidence and keeps
+    ``metadata.environment.profile`` in sync with it. Runs on EVERY submit —
+    decoupled from the substitution-learning valve and from the success verdict
+    — so it captures on a failed/error paste too (that's still the operator's
+    real shell). Returns ``{user, host, changed}`` when it wrote a profile, else
+    None. Fail-soft: any error returns None and never disturbs the submit.
+
+    Retention semantics (why this is a *monitor*, not a one-shot capture):
+      • profile empty            → capture it.
+      • profile is a prior auto-capture (``_EXEC_CTX_SENTINEL``) that names a
+        DIFFERENT host/user → the operator moved (e.g. ``root@pve`` →
+        ``root@ct100``); replace it.
+      • profile already names this exact ``user@host`` → no-op.
+      • profile was set explicitly by the operator (``/assist env``, no
+        sentinel) → leave it; an explicit profile outranks an inferred one
+        (mirrors the only-add-new rule in :func:`learn_from_submit`).
+    """
+    try:
+        detected = _detect_shell_context(evidence)
+        if not detected:
+            return None
+        user, host = detected
+        env = await get_environment(session_id=session_id, db=db) or {}
+        current = (env.get("profile") or "").strip()
+        marker = f"{_EXEC_CTX_SENTINEL}{user}@{host} "
+        if marker in current:
+            return None  # already recorded this exact context
+        # Respect an operator-set (non-sentinel, non-empty) profile.
+        if current and not current.startswith(_EXEC_CTX_SENTINEL):
+            return None
+        changed = bool(current)  # a prior auto-capture named a different host
+        await set_environment(
+            session_id=session_id, profile=_exec_context_profile(user, host), db=db,
+        )
+        logger.info(
+            "assist_%s_shell_context session_id=%s ctx=%s@%s",
+            "switched" if changed else "captured", session_id, user, host,
+        )
+        return {"user": user, "host": host, "changed": changed}
+    except Exception as e:  # noqa: BLE001 — context capture must never break submit
+        logger.debug(
+            "shell_context_capture_failed session_id=%s err=%r", session_id, e,
+        )
+        return None
 
 
 async def learn_from_submit(
@@ -1264,26 +1326,14 @@ async def learn_from_submit(
     """
     from app.modules import assist_guide
 
-    # §17.701 — record the single-interactive-shell context from a pasted prompt
-    # (e.g. `root@pve:~#`) the first time we see one, when the profile is unset.
-    # Independent of the placeholder logic below (works off raw evidence), and
-    # fail-soft so it never disturbs the submit.
-    try:
-        ctx_profile = _detect_shell_context(evidence)
-        if ctx_profile:
-            _env = await get_environment(session_id=session_id, db=db) or {}
-            if not (_env.get("profile") or "").strip():
-                await set_environment(
-                    session_id=session_id, profile=ctx_profile, db=db,
-                )
-                logger.info(
-                    "assist_captured_shell_context session_id=%s node_key=%s",
-                    session_id, node_key,
-                )
-    except Exception as e:  # noqa: BLE001 — context capture must never break submit
-        logger.debug(
-            "shell_context_capture_failed session_id=%s err=%r", session_id, e,
-        )
+    # §17.701/703 — keep the operator's execution context (single interactive
+    # shell, `user@host`) in sync. Delegated to the standalone monitor, which is
+    # idempotent and fail-soft. The router ALSO calls it unconditionally on every
+    # submit (§17.703); this call keeps CLI/other callers of learn_from_submit
+    # covered without a second code path.
+    await capture_execution_context(
+        session_id=session_id, evidence=evidence, db=db,
+    )
 
     cached = await assist_guide.read_cached_guidance(
         session_id=session_id, node_key=node_key, db=db,
