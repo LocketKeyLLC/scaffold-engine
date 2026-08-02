@@ -44,6 +44,7 @@ from app.modules.prompt_assembly import (
     StepContext,
 )
 from app.utils.llm_retry import chat_until_nonempty
+from app.utils.tool_call_args import read_tool_args
 
 logger = logging.getLogger("scaffold.assist_guide")
 
@@ -625,7 +626,8 @@ def render_environment_block(environment: dict | None) -> str:
         return ""
     profile = (environment.get("profile") or "").strip()
     subs = environment.get("substitutions") or {}
-    if not profile and not subs:
+    facts = [str(f).strip() for f in (environment.get("facts") or []) if str(f).strip()]
+    if not profile and not subs and not facts:
         return ""
     parts = [
         "## Operator environment (use these concrete values; emit a <PLACEHOLDER> "
@@ -635,6 +637,16 @@ def render_environment_block(environment: dict | None) -> str:
         parts.append(profile)
     if subs:
         parts.append("\n".join(f"- {k} = {v}" for k, v in subs.items()))
+    # §17.709 — durable facts observed about the operator's ACTUAL system. Ground
+    # on these; never assume a fresh/empty system when facts describe an existing
+    # one (or say a check was inconclusive).
+    if facts:
+        parts.append(
+            "### Known facts about the operator's system (OBSERVED — ground on "
+            "these; do NOT assume a fresh/empty system, and treat anything marked "
+            "unknown/unverified as still open):\n"
+            + "\n".join(f"- {f}" for f in facts)
+        )
     return "\n\n".join(parts)
 
 
@@ -922,6 +934,7 @@ Choose the outcome:
 Rules:
 - Resolve as soon as the operator confirms — never force an extra round once they've said yes.
 - Do NOT pre-assume a count, topology, or set the operator has not agreed to.
+- GROUND on the observed system facts + project context above. NEVER assume the system is fresh, empty, or new: if the facts describe an EXISTING system, decide for THAT system; if a needed detail was not captured or a check was inconclusive (a command errored / returned empty), treat it as UNKNOWN and ask — do NOT invent a "fresh install" assumption to fill the gap.
 - Never invent values the operator must own (real public IPs, ISP specifics) — use sensible, clearly-labeled defaults they can change.
 - Keep `message` tight and skimmable. No preamble, no emoji, no completion checkmarks."""
 
@@ -944,6 +957,7 @@ Choose the outcome:
 
 Rules:
 - Track the WHOLE conversation: information given in earlier turns still counts — NEVER re-ask for something already provided, and never discard earlier pieces.
+- GROUND on the observed system facts + project context above — a fact captured from an earlier step (e.g. the audit) COUNTS as provided; do not re-ask for it, and never assume a fresh/empty system to skip an item.
 - Resolve as soon as the full set is present (or explicitly marked absent/unknown) — do not force extra rounds.
 - Do NOT invent or assume values the operator must supply — ask for them.
 - Keep `message` tight and skimmable. No preamble, no emoji, no completion checkmarks."""
@@ -1325,6 +1339,90 @@ async def extract_substitutions(
         val = str(v).strip()
         if key in allowed and val:
             out[key] = val
+    return out
+
+
+# ── Session facts ledger (§17.709 — durable observed system state) ──────────
+
+_RECORD_FACTS_TOOL = model_router.Tool(
+    name="record_facts",
+    description=(
+        "Record durable FACTS about the operator's ACTUAL system, observed in "
+        "the command output they pasted, that LATER steps must know."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "facts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Short, standalone factual statements about the operator's "
+                    "REAL system — e.g. 'Existing Proxmox VE 9.2.6 (not a fresh "
+                    "install)', 'Network: vmbr0 = 192.168.1.156/24, gw "
+                    "192.168.1.1', 'Two ZFS pools: rpool, tank'. Rules: (1) only "
+                    "state what the output actually shows; NEVER guess. (2) If a "
+                    "command ERRORED or returned empty because a service was down "
+                    "(e.g. 'Connection refused', 'command not found'), record that "
+                    "the state is UNKNOWN/unverified — do NOT record 'none' or "
+                    "'fresh' from a failed check. (3) Prefer facts about existing "
+                    "software/versions, users, VMs/containers, storage/pools, and "
+                    "network config. Return [] if the output shows nothing durable."
+                ),
+            }
+        },
+        "required": ["facts"],
+    },
+)
+
+_FACTS_SYSTEM = (
+    "You extract durable facts about a human operator's ACTUAL system from the "
+    "command output they pasted, so later steps ground on reality instead of "
+    "assuming. Report only what the output shows; never guess. A command that "
+    "errored or returned empty means that aspect is UNKNOWN — never infer a "
+    "'fresh' or 'empty' system from a failed or blank check. Call record_facts "
+    "exactly once."
+)
+
+
+async def distill_facts(
+    *, evidence: str, title: str = "", task_prompt: str = "",
+    role: str = "model_general",
+) -> list[str]:
+    """§17.709 — distill durable facts about the operator's real system from
+    their pasted evidence. Reasoning/extraction task → ``model_general`` (NOT
+    the verifier; cf. §17.677). Fail-soft → ``[]``. Bounds each fact's length so
+    a runaway model can't bloat the ledger."""
+    if not (evidence or "").strip():
+        return []
+    try:
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": _FACTS_SYSTEM},
+                {"role": "user", "content": (
+                    (f"STEP: {title}\n" if title else "")
+                    + (f"TASK: {task_prompt}\n\n" if task_prompt else "\n")
+                    + f"Operator output:\n{evidence[:6000]}\n\nCall record_facts."
+                )},
+            ],
+            tools=[_RECORD_FACTS_TOOL],
+            role=role,
+            temperature=0.0,
+            tool_choice="auto",
+            max_tokens=1024,
+        )
+    except Exception as exc:  # noqa: BLE001 — fact capture must never break submit
+        logger.warning("assist_distill_facts_failed: %s", exc)
+        return []
+    args = read_tool_args(resp)
+    raw = (args or {}).get("facts") or []
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for f in raw:
+        t = str(f).strip()
+        if t:
+            out.append(t[:300])
     return out
 
 

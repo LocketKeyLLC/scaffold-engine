@@ -481,6 +481,20 @@ def test_render_environment_block_profile_and_subs():
     assert "HOST_IP = 10.0.0.5" in out
 
 
+def test_render_environment_block_includes_facts():
+    # §17.709 — the facts ledger renders with an explicit don't-assume-fresh rule.
+    out = assist_guide.render_environment_block(
+        {"profile": "", "substitutions": {},
+         "facts": ["Existing Proxmox VE 9.2.6 (not a fresh install)",
+                   "Network: vmbr0 = 192.168.1.156/24"]}
+    )
+    assert "Known facts about the operator's system" in out
+    assert "not a fresh install" in out
+    assert "do NOT assume a fresh" in out          # grounding rule present
+    # facts alone (no profile/subs) are enough to render the block
+    assert out != ""
+
+
 @pytest.mark.asyncio
 async def test_guidance_injects_environment():
     captured = {}
@@ -648,6 +662,49 @@ def _values_resp(values, success=True):
     else:
         r.tool_calls = []
     return r
+
+
+def _facts_resp(facts, success=True):
+    r = MagicMock()
+    r.success = success
+    r.text = ""
+    if success:
+        call = MagicMock()
+        call.arguments = {"facts": facts}
+        r.tool_calls = [call]
+    else:
+        r.tool_calls = []
+    return r
+
+
+@pytest.mark.asyncio
+async def test_distill_facts_parses_and_bounds():
+    # §17.709 — parses the facts array; blanks dropped, each fact length-bounded.
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_facts_resp(
+                          ["Existing Proxmox VE 9.2.6", "x" * 400, "   "]))):
+        out = await assist_guide.distill_facts(
+            evidence="root@pve:~# pveversion\npve-manager/9.2.6",
+        )
+    assert "Existing Proxmox VE 9.2.6" in out
+    assert all(f.strip() for f in out)          # blanks dropped
+    assert all(len(f) <= 300 for f in out)      # bounded
+
+
+@pytest.mark.asyncio
+async def test_distill_facts_empty_evidence_skips_llm():
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:
+        out = await assist_guide.distill_facts(evidence="   ")
+    assert out == []
+    tc.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_distill_facts_failsoft():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(side_effect=RuntimeError("model down"))):
+        out = await assist_guide.distill_facts(evidence="some output")
+    assert out == []
 
 
 @pytest.mark.asyncio

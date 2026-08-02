@@ -1136,10 +1136,13 @@ def _environment_from_metadata(metadata: Any) -> dict:
             metadata = {}
     env = (metadata or {}).get("environment") if isinstance(metadata, dict) else None
     if not isinstance(env, dict):
-        return {"profile": "", "substitutions": {}}
+        return {"profile": "", "substitutions": {}, "facts": []}
+    facts = env.get("facts")
     return {
         "profile": env.get("profile") or "",
         "substitutions": env.get("substitutions") or {},
+        # §17.709 — durable observed facts about the operator's system.
+        "facts": facts if isinstance(facts, list) else [],
     }
 
 
@@ -1176,14 +1179,18 @@ async def set_environment(
     profile: str | None = None,
     substitutions: dict | None = None,
     verbosity: str | None = None,
+    facts: list[str] | None = None,
     db,
 ) -> dict:
     """Merge environment facts into `assist_sessions.metadata`.
 
     `profile` replaces the free-text profile when provided. `substitutions`
     are merged key-by-key (so `/assist env KEY=value` adds one without
-    clobbering the rest). `verbosity` (§17.499) sets metadata.verbosity. Read-
-    modify-write under the row so we never drop other `metadata` keys.
+    clobbering the rest). `verbosity` (§17.499) sets metadata.verbosity.
+    `facts` (§17.709) are APPENDED to the durable facts ledger, de-duplicated
+    (case-insensitive) against what's there, oldest-dropped-first to the
+    `assist_facts_max` cap. Read-modify-write under the row so we never drop
+    other `metadata` keys.
     """
     if verbosity is not None and verbosity not in _VERBOSITY_LEVELS:
         raise ValueError(f"verbosity must be one of {_VERBOSITY_LEVELS}, got {verbosity!r}")
@@ -1200,6 +1207,17 @@ async def set_environment(
         merged = dict(current.get("substitutions") or {})
         merged.update(substitutions)
         current["substitutions"] = merged
+    if facts:
+        from app.config import settings as _s
+        existing = list(current.get("facts") or [])
+        seen = {str(f).strip().lower() for f in existing}
+        for f in facts:
+            t = str(f).strip()
+            if t and t.lower() not in seen:
+                existing.append(t)
+                seen.add(t.lower())
+        # Cap: keep the most recent (oldest drop first).
+        current["facts"] = existing[-int(_s.assist_facts_max):]
     # Single jsonb merge patch — environment always, verbosity when given.
     patch: dict[str, Any] = {"environment": current}
     if verbosity is not None:
@@ -1359,6 +1377,56 @@ async def learn_from_submit(
     return new
 
 
+async def capture_session_facts(
+    *, session_id: str, node_key: str, evidence: str, db,
+) -> list[str]:
+    """§17.709 — distill durable facts about the operator's ACTUAL system from a
+    submit's evidence and append them to the session facts ledger
+    (``metadata.environment.facts``), which renders into EVERY later step's
+    guidance + decision-deliberation context.
+
+    This is the retention layer substitution-learning misses: an audit /
+    inventory / gather step carries real system state but has no
+    ``<PLACEHOLDER>`` tokens, so ``learn_from_submit`` retained nothing and later
+    decisions fabricated assumptions ("Assumption: Fresh Proxmox VE server"). Now
+    the facts survive independently of placeholders and of digest truncation.
+    Best-effort: any failure returns ``[]`` and never disturbs the submit.
+    """
+    from app.config import settings
+    from app.modules import assist_guide
+
+    if not settings.assist_capture_facts_enabled or not (evidence or "").strip():
+        return []
+    try:
+        row = (await db.execute(
+            text("""
+                SELECT d.title, d.prompt_template
+                  FROM assist_steps s
+                  JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+                 WHERE s.session_id = :sid AND s.node_key = :nk
+            """),
+            {"sid": session_id, "nk": node_key},
+        )).mappings().first()
+        facts = await assist_guide.distill_facts(
+            evidence=evidence,
+            title=(row or {}).get("title") or "",
+            task_prompt=(row or {}).get("prompt_template") or "",
+        )
+        if not facts:
+            return []
+        await set_environment(session_id=session_id, facts=facts, db=db)
+        logger.info(
+            "assist_captured_facts session_id=%s node_key=%s n=%d",
+            session_id, node_key, len(facts),
+        )
+        return facts
+    except Exception as e:  # noqa: BLE001 — fact capture must never break submit
+        logger.debug(
+            "capture_session_facts_failed session_id=%s err=%r", session_id, e,
+        )
+        return []
+
+
 # ── Submit / commit human evidence ───────────────────────────────────────
 
 
@@ -1465,6 +1533,8 @@ async def build_inputs_checklist(*, session_id: str, db) -> dict:
         "session_id": session_id,
         "items": items,
         "provided": env.get("substitutions") or {},
+        # §17.709 — durable facts learned about the operator's system so far.
+        "facts": env.get("facts") or [],
         "open_count": sum(1 for i in items if not i["done"]),
         "total": len(items),
     }

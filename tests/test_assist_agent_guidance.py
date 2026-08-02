@@ -165,15 +165,68 @@ async def test_run_step_research_empty_question_raises():
 
 
 def test_environment_from_metadata_variants():
-    assert assist_agent._environment_from_metadata(None) == {"profile": "", "substitutions": {}}
-    assert assist_agent._environment_from_metadata({"other": 1}) == {"profile": "", "substitutions": {}}
+    assert assist_agent._environment_from_metadata(None) == {
+        "profile": "", "substitutions": {}, "facts": []}
+    assert assist_agent._environment_from_metadata({"other": 1}) == {
+        "profile": "", "substitutions": {}, "facts": []}
     got = assist_agent._environment_from_metadata(
-        {"environment": {"profile": "Ubuntu", "substitutions": {"A": "1"}}}
+        {"environment": {"profile": "Ubuntu", "substitutions": {"A": "1"},
+                         "facts": ["Existing PVE 9.2.6"]}}
     )
-    assert got == {"profile": "Ubuntu", "substitutions": {"A": "1"}}
+    assert got == {"profile": "Ubuntu", "substitutions": {"A": "1"},
+                   "facts": ["Existing PVE 9.2.6"]}
     # tolerates a JSON string body
     got2 = assist_agent._environment_from_metadata('{"environment": {"profile": "X"}}')
     assert got2["profile"] == "X"
+    assert got2["facts"] == []  # §17.709 — always a list
+
+
+@pytest.mark.asyncio
+async def test_set_environment_appends_and_dedups_facts():
+    # §17.709 — facts append to the ledger, de-dup case-insensitively.
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"metadata": {"environment": {
+            "profile": "", "substitutions": {}, "facts": ["Existing PVE 9.2.6"]}}}),
+        _result(None),
+    ])
+    db.commit = AsyncMock()
+    out = await assist_agent.set_environment(
+        session_id="s",
+        facts=["existing pve 9.2.6", "Network: vmbr0 = 192.168.1.156/24"],  # 1st is a dup
+        db=db,
+    )
+    assert out["facts"] == ["Existing PVE 9.2.6", "Network: vmbr0 = 192.168.1.156/24"]
+
+
+@pytest.mark.asyncio
+async def test_capture_session_facts_distills_and_stores():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(
+        {"title": "Audit", "prompt_template": "run the audit"}))
+    with patch("app.modules.assist_guide.distill_facts",
+               new=AsyncMock(return_value=["Existing Proxmox (not fresh)"])), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+        out = await assist_agent.capture_session_facts(
+            session_id="s", node_key="T1",
+            evidence="root@pve:~# pveversion\npve-manager/9.2.6", db=db,
+        )
+    assert out == ["Existing Proxmox (not fresh)"]
+    assert setenv.call_args.kwargs["facts"] == ["Existing Proxmox (not fresh)"]
+
+
+@pytest.mark.asyncio
+async def test_capture_session_facts_no_facts_skips_write():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result({"title": "x", "prompt_template": "y"}))
+    with patch("app.modules.assist_guide.distill_facts",
+               new=AsyncMock(return_value=[])), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+        out = await assist_agent.capture_session_facts(
+            session_id="s", node_key="T1", evidence="ok", db=db,
+        )
+    assert out == []
+    setenv.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -209,7 +262,7 @@ async def test_get_environment_returns_shape():
         _result({"metadata": {"environment": {"profile": "P", "substitutions": {}}}}),
     ])
     out = await assist_agent.get_environment(session_id="s", db=db)
-    assert out == {"profile": "P", "substitutions": {}, "verbosity": "normal"}
+    assert out == {"profile": "P", "substitutions": {}, "facts": [], "verbosity": "normal"}
 
 
 # ── §17.487: verify_submit_outcome ─────────────────────────────────────────

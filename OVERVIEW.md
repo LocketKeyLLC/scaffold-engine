@@ -22049,6 +22049,26 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.709 Feature — the session FACTS ledger: gathered system state is retained and grounded on (stops fabricated "fresh install" assumptions) (2026-08-02)
+
+**Report (recurring — "requesting information but not properly recording or retaining it").** Live session `6ca41d83` ("In-Place Proxmox Cleanup"): the operator ran the T1 audit and pasted real state (existing PVE 9.2.6, `vmbr0=192.168.1.156/24`, and — because pve-cluster was down — `ipcc_send_rec: Connection refused` on the user/VM/ZFS checks). Yet decision steps T2–T5 all committed with **"Assumption: Fresh Proxmox VE server"**, and `metadata.environment.substitutions` stayed `{}`.
+
+**Deep dive (mapped all 5 carry-forward mechanisms).** The retention layer had a hole: `learn_from_submit`/`extract_substitutions` (§17.490) ONLY distills values when the step's guidance had `<PLACEHOLDER>` tokens (assist_guide.py — early-returns `{}` otherwise). An audit/inventory/gather step carries real state but has NO placeholders, so it retained **nothing**. The raw audit text was in the job digest, but it was partial (cluster-dependent commands empty/errored) and the deliberation prompts said "don't pre-assume" without ever saying "never assume a fresh/empty system; a failed check means UNKNOWN, not none." So the model read empty sections as "fresh" and fabricated.
+
+**Strategy — a durable facts ledger: capture → retain → inject → ground.**
+1. **Capture** — `assist_guide.distill_facts` (LLM, `model_general` — a reasoning/extraction task, NOT the verifier, per §17.677) pulls durable facts about the operator's ACTUAL system from every substantive submit's evidence. Its prompt forbids guessing and mandates: a command that errored/returned empty → record the state as **UNKNOWN**, never infer "none/fresh" from a failed check. `assist_agent.capture_session_facts` orchestrates it; runs on EVERY committed submit (even a failed-verdict one — a failed audit IS a fact) via the submit router. Independent of placeholders.
+2. **Retain** — `set_environment(facts=…)` appends to `metadata.environment.facts` (case-insensitive dedup, oldest-drop-first cap `assist_facts_max`=40). No migration (reuses the environment JSONB). `_environment_from_metadata`/`get_environment` now carry `facts`.
+3. **Inject** — `render_environment_block` renders a "### Known facts about the operator's system (OBSERVED — ground on these; do NOT assume a fresh/empty system…)" block. Since every guidance + decision-deliberation path already calls it, the facts reach them all — compact, so they survive digest truncation.
+4. **Ground** — `_DELIBERATE_SYSTEM_DECISION` + `_DELIBERATE_SYSTEM_GATHER` gain an explicit rule: ground on observed facts; NEVER assume fresh/empty; an uncaptured/inconclusive detail is UNKNOWN → ask, don't fabricate.
+
+Surfaced to the operator: submit shows "🧠 Noted about your system: …"; `/assist checklist` shows a "🧠 Known about your system" section (facts threaded through `build_inputs_checklist`). Gate `assist_capture_facts_enabled` (default true).
+
+**Verification. LIVE (load-bearing — mocks hid the §17.677 model_general false-negative):** `distill_facts` on the exact partial-audit evidence returned 6 correct facts, including *"pveum user list failed with 'Connection refused' — user list is UNKNOWN"*, *"Proxmox VE 9.2.6"*, the vmbr0 network, and *"current_state.txt is incomplete"* — never "fresh/none." Unit: `distill_facts` parse/bound/fail-soft; `set_environment` facts append+dedup+cap; `capture_session_facts` distill→store; `render_environment_block` + checklist + submit render surface facts; env-shape tests updated for the new `facts` key. Affected suites green (253). Restarted; health 200.
+
+**Pre-existing (NOT introduced here):** 5 tests in `test_assist_handoff_policy.py` / `test_hands_on_assist_gate.py` fail identically with and without this change (they exercise `run_step_decision` against a bare AsyncMock db) — a separate test-maintenance issue.
+
+---
+
 ### §17.708 Fix — a FAILED step no longer triggers a "this may be an error / your result diverges, re-plan" double-signal (2026-08-02)
 
 **Report (recurring — "we have fixed this multiple times").** "I again received a 'this may be an error' message when it should have been updating itself." Live session `d7ece0ee`, step T1 ("Audit current system state"): the operator pasted `pveum user list` output that contained `ipcc_send_rec[1] failed: Connection refused`.

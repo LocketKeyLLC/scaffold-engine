@@ -509,26 +509,36 @@ def render_checklist(d: dict) -> str:
     """§17.707 — render the operator-input checklist (decisions to make + info to
     supply), ticking off what's already done and listing values learned so far."""
     items = d.get("items") or []
-    if not items:
-        return ("📋 **What I need from you:** nothing outstanding — this plan has "
-                "no decisions or inputs to collect from you. Just work the steps "
-                "(paste each command's output and I'll record it).")
     _label = {"decision": "Decide", "gather": "Provide"}
-    open_lines, done_lines = [], []
-    for it in items:
-        mark = "☑" if it.get("done") else "☐"
-        lab = _label.get(it.get("kind"), "Input")
-        line = f"{mark} **{lab}:** {it.get('title', '?')} _(`{it.get('node_key', '?')}`)_"
-        (done_lines if it.get("done") else open_lines).append(line)
-    out = [f"📋 **What I need from you** ({d.get('open_count', 0)} open / {d.get('total', 0)} total)\n"]
-    if open_lines:
-        out.append("\n".join(open_lines))
-    if done_lines:
-        out.append("\n_Already handled:_\n" + "\n".join(done_lines))
+    out: list[str] = []
+    if not items:
+        out.append("📋 **What I need from you:** no decisions or inputs to collect "
+                   "from you for this plan — just work the steps (paste each "
+                   "command's output and I'll record it).")
+    else:
+        open_lines, done_lines = [], []
+        for it in items:
+            mark = "☑" if it.get("done") else "☐"
+            lab = _label.get(it.get("kind"), "Input")
+            line = f"{mark} **{lab}:** {it.get('title', '?')} _(`{it.get('node_key', '?')}`)_"
+            (done_lines if it.get("done") else open_lines).append(line)
+        out.append(f"📋 **What I need from you** ({d.get('open_count', 0)} open / "
+                   f"{d.get('total', 0)} total)\n")
+        if open_lines:
+            out.append("\n".join(open_lines))
+        if done_lines:
+            out.append("\n_Already handled:_\n" + "\n".join(done_lines))
     provided = d.get("provided") or {}
     if provided:
         pairs = ", ".join(f"`{k}`=`{v}`" for k, v in provided.items())
         out.append(f"\n_Provided so far:_ {pairs}")
+    # §17.709 — durable facts learned about the operator's real system.
+    facts = d.get("facts") or []
+    if facts:
+        shown = facts[:8]
+        bullets = "\n".join(f"- {f}" for f in shown)
+        more = f"\n_(+{len(facts) - len(shown)} more)_" if len(facts) > len(shown) else ""
+        out.append(f"\n🧠 **Known about your system:**\n{bullets}{more}")
     out.append("\n_This list fills in as you go — paste output or state a "
                "decision and I'll tick it off._")
     return "\n".join(out)
@@ -1068,6 +1078,14 @@ def assist_submit(
     if learned:
         pairs = ", ".join(f"`{k}`=`{v}`" for k, v in learned.items())
         msg += f"\n\n📌 Learned for later steps: {pairs}"
+    # §17.709 — durable facts distilled about the operator's system; surfaced so
+    # they can see what later steps will ground on (and correct a mis-read).
+    facts = d.get("captured_facts") or []
+    if facts:
+        shown = facts[:6]
+        bullets = "\n".join(f"- {f}" for f in shown)
+        more = f"\n_(+{len(facts) - len(shown)} more)_" if len(facts) > len(shown) else ""
+        msg += f"\n\n🧠 **Noted about your system** (later steps will use this):\n{bullets}{more}"
     # §17.703 — confirm the operator's execution context so they see it stuck
     # (and can correct it if a stray prompt was mis-read).
     ctx = d.get("execution_context") or {}

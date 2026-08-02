@@ -727,6 +727,20 @@ class Settings(BaseSettings):
     # fail-soft; only-add-new (never overwrites a value the operator set or a
     # previously-learned one).
     assist_learn_substitutions: bool = True
+    # §17.709 — the session FACTS ledger. Substitution-learning only fires when a
+    # step's guidance had <PLACEHOLDER> tokens, so an audit/inventory/gather step
+    # (real system state, no placeholders) retained NOTHING — later decision steps
+    # then fabricated assumptions ("Assumption: Fresh Proxmox VE server") despite
+    # the audit. On each substantive submit we now distill durable FACTS about the
+    # operator's actual system (installed software/versions, existing
+    # users/VMs/pools/storage/network, whether it's a fresh vs existing system,
+    # and inconclusive checks — e.g. a command that errored so state is UNKNOWN)
+    # into metadata.environment.facts, rendered into EVERY later guidance +
+    # decision context (compact, so it survives digest truncation). model_general
+    # (a reasoning/extraction task, not verification); fail-soft. Cap keeps the
+    # injected block bounded; oldest facts drop first.
+    assist_capture_facts_enabled: bool = True
+    assist_facts_max: int = Field(default=40, ge=1, le=200)
     # §17.499 — default walkthrough verbosity (terse | normal | detailed).
     # Per-session override via /assist verbose. terse = commands + one-line
     # whys (expert); detailed = explain why each step matters + what to watch

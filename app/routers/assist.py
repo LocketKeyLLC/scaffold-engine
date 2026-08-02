@@ -607,6 +607,23 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
                     result["learned_substitutions"] = learned
             except Exception:  # never fail a submit on the learn step
                 pass
+        # §17.709 — distill durable facts about the operator's system from this
+        # submit into the session facts ledger (the retention layer placeholder
+        # learning misses — an audit/inventory step has real state but no
+        # placeholders). Runs even on a FAILED verdict: a failed audit
+        # ("Connection refused") is itself a fact ("state unverified"), and
+        # capturing it is what stops the next decision assuming a fresh system.
+        if (settings.assist_capture_facts_enabled and body.action == "submit"
+                and isinstance(result, dict) and result.get("status") == "committed"):
+            try:
+                facts = await assist_agent.capture_session_facts(
+                    session_id=session_id, node_key=body.node_key,
+                    evidence=body.output, db=db,
+                )
+                if facts:
+                    result["captured_facts"] = facts
+            except Exception:  # never fail a submit on the facts step
+                pass
         # §17.703 — surface a newly-captured / switched shell context so the
         # pipeline can confirm it ("noted: you're on root@pve").
         if captured_ctx and isinstance(result, dict):

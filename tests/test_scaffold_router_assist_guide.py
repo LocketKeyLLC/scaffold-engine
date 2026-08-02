@@ -332,7 +332,7 @@ class TestChecklist:
 
     def test_render_empty_says_nothing_outstanding(self):
         out = _vendor.render_checklist({"items": [], "provided": {}, "open_count": 0, "total": 0})
-        assert "nothing outstanding" in out
+        assert "no decisions or inputs to collect" in out
 
     def test_render_marks_open_and_done_and_provided(self):
         d = {
@@ -351,6 +351,14 @@ class TestChecklist:
         assert "Already handled" in out
         assert "`HOST_IP`=`10.0.0.5`" in out
         assert "2 open / 3 total" in out
+
+    def test_render_shows_known_facts(self):
+        # §17.709 — the checklist surfaces what's been learned about the system.
+        d = {"items": [], "provided": {}, "open_count": 0, "total": 0,
+             "facts": ["Existing Proxmox VE 9.2.6 (not fresh)"]}
+        out = _vendor.render_checklist(d)
+        assert "Known about your system" in out
+        assert "not fresh" in out
 
     @pytest.mark.parametrize("msg", [
         "what do you need from me?",
@@ -473,6 +481,18 @@ class TestSubmitLearnedSubstitutions:
         with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
             out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
         assert "Learned for later steps" not in out
+
+    def test_submit_surfaces_captured_facts(self, pipe):
+        # §17.709 — durable facts distilled from the submit are surfaced.
+        pipe.valves.assist_auto_advance = False
+        body = {"status": "committed", "no_op": False, "next_node_key": "T3",
+                "mirror_divergence": False,
+                "captured_facts": ["Existing Proxmox VE 9.2.6 (not fresh)",
+                                   "vmbr0 = 192.168.1.156/24"]}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
+        assert "Noted about your system" in out
+        assert "not fresh" in out
 
 
 # ── §17.491: sandbox-grounded verdict rendering ─────────────────────────────
