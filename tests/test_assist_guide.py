@@ -481,6 +481,72 @@ def test_render_environment_block_profile_and_subs():
     assert "HOST_IP = 10.0.0.5" in out
 
 
+def test_render_session_memory_consolidates_all():
+    # §17.710b — one block with context + facts + provided + notes + grounding.
+    out = assist_guide.render_session_memory(
+        {"profile": "root@pve web console",
+         "facts": ["Existing Proxmox VE 9.2.6 (not fresh)"],
+         "substitutions": {"HOST_IP": "10.0.0.5"}},
+        [{"kind": "constraint", "text": "only 2 physical NICs"}],
+    )
+    assert "Session memory" in out
+    assert "do NOT assume a fresh" in out          # grounding rule baked in
+    assert "root@pve web console" in out
+    assert "Existing Proxmox VE 9.2.6" in out
+    assert "HOST_IP = 10.0.0.5" in out
+    assert "only 2 physical NICs" in out
+
+
+def test_render_session_memory_empty():
+    assert assist_guide.render_session_memory({"profile": "", "substitutions": {}, "facts": []}) == ""
+    assert assist_guide.render_session_memory(None, None) == ""
+
+
+def test_render_session_memory_budget_keeps_facts_drops_notes():
+    # Over budget → notes/provided dropped before facts (grounding-critical).
+    mem = assist_guide.render_session_memory(
+        {"profile": "ctx", "facts": ["FACT-KEEP-ME"], "substitutions": {}},
+        [{"kind": "note", "text": "LOW-PRIORITY-NOTE " * 40}],  # big → over budget
+        budget=300,
+    )
+    assert "FACT-KEEP-ME" in mem            # facts survive
+    assert "LOW-PRIORITY-NOTE" not in mem   # notes dropped first
+
+
+def test_memory_or_legacy_valve_off_uses_legacy(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "assist_unified_memory_enabled", False)
+    parts = assist_guide._render_memory_or_legacy(
+        {"profile": "P", "facts": ["F"], "substitutions": {}}, [{"kind": "note", "text": "N"}])
+    joined = "\n".join(parts)
+    assert "Operator environment" in joined          # legacy env block
+    assert "Operator notes & additions" in joined     # legacy notes block
+    assert "Session memory" not in joined
+
+
+def test_memory_or_legacy_valve_on_uses_unified(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "assist_unified_memory_enabled", True)
+    monkeypatch.setattr(assist_guide.settings, "assist_umem_inject", True)
+    parts = assist_guide._render_memory_or_legacy(
+        {"profile": "P", "facts": ["F"], "substitutions": {}}, [{"kind": "note", "text": "N"}])
+    joined = "\n".join(parts)
+    assert "Session memory" in joined
+    assert "Operator environment" not in joined       # legacy renderers not used
+    assert "Operator notes & additions" not in joined
+
+
+def test_guide_prompt_uses_unified_memory_when_valve_on(monkeypatch):
+    monkeypatch.setattr(assist_guide.settings, "assist_unified_memory_enabled", True)
+    monkeypatch.setattr(assist_guide.settings, "assist_umem_inject", True)
+    prompt = assist_guide._build_guide_user_prompt(
+        _ctx("shell"), None, [], None,
+        environment={"profile": "root@pve", "facts": ["Existing PVE 9.2.6"], "substitutions": {}},
+        operator_notes=[{"kind": "constraint", "text": "keep the existing VMs"}],
+    )
+    assert "Session memory" in prompt
+    assert "Existing PVE 9.2.6" in prompt
+    assert "keep the existing VMs" in prompt
+
+
 def test_render_environment_block_includes_facts():
     # §17.709 — the facts ledger renders with an explicit don't-assume-fresh rule.
     out = assist_guide.render_environment_block(

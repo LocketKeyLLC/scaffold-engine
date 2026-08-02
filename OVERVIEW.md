@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.710b Feature — unified session memory, Stage B: one consolidated memory block, one injection path (2026-08-02)
+
+**Why.** Stage A made capture lossless; Stage B collapses the scattered *injection* into one path. Today retained signals reach prompts through separate renderers wired inconsistently across sites (`render_environment_block` + `render_operator_notes_block` in guidance and deliberation; env-only in verify). A new signal has to be wired into each site by hand — the same "many narrow channels" fragility, on the read side. Stage B routes them all through one renderer so "retained → actually used" no longer depends on which prompt path you're in.
+
+**Changes (behind `assist_umem_inject`; legacy path byte-identical when off).**
+- `assist_guide.render_session_memory(environment, operator_notes, budget)` — ONE block: execution context + observed facts + provided values + operator notes, in priority order, truncated to `assist_umem_max_chars` (drops notes → provided before ever trimming the grounding-critical facts). Grounding rule baked into the header ("do NOT assume a fresh/empty system; unknown = still open").
+- `_render_memory_or_legacy(environment, operator_notes)` — the single decision point: unified block when `assist_unified_memory_enabled && assist_umem_inject`, else the legacy two blocks. Swapped in at all three injection sites: `_build_guide_user_prompt` (guidance), `deliberate_decision` (decisions/gather), `verify_step_success` (success verdict). No new end-to-end plumbing — `environment` (with §17.709 facts) and `operator_notes` already reach every site.
+
+**Verification. LIVE A/B (load-bearing):** `deliberate_decision` on a "which stale users to remove" decision, with facts saying the host is existing PVE 9.2.6 and the user list is UNKNOWN (Connection refused) — with inject **ON** the model refused to fabricate a removal list ("I can't produce a meaningful list without knowing what users exist … remove no users") — i.e. it consumed the unified memory block and grounded on it; inject **OFF** produced the equivalent grounded answer (no regression — §17.709 already injects the same facts via the legacy path). Unit: `render_session_memory` consolidation / empty / budget-keeps-facts-drops-notes; `_render_memory_or_legacy` legacy-vs-unified by valve; `_build_guide_user_prompt` emits the unified header when on. Suites 138 green; restarted, health 200; ci-tier-0 green. Still gated off by default (master valve).
+
+**Next:** §17.710c — warn-only grounding gate (pre-commit contradiction check). Then §17.710d — surface memory in checklist/status, flip the master valve after live validation, retire the redundant legacy channels.
+
+---
+
 ### §17.710a Feature — unified session memory, Stage A: unconditional lossless capture of every turn (2026-08-02)
 
 **Why.** Retention kept partially recurring because it flowed through many narrow, trigger-specific channels (placeholder substitution-learning §17.490, exec-context regex §17.703, note classifier §17.677, facts distiller §17.709) — each capturing only what matched its exact trigger. Anything that didn't (an audit paste with no placeholders, a message the LLM mislabeled `question`) was never even recorded. Stage A inverts this: capture EVERYTHING once, unconditionally, before any classification — the durable substrate Stage B (§17.710b) will derive the consolidated `session_memory` from. Staged behind valves so it rolls out incrementally against today's behavior.

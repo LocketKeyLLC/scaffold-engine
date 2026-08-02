@@ -674,6 +674,80 @@ def render_operator_notes_block(notes: list[dict] | None) -> str:
     )
 
 
+def render_session_memory(
+    environment: dict | None, operator_notes: list[dict] | None = None,
+    *, budget: int | None = None,
+) -> str:
+    """§17.710b — ONE consolidated session-memory block: execution context +
+    observed facts + provided values + operator notes, in priority order and
+    truncated to ``budget`` chars. This is the single injection path that
+    replaces the separate env + notes blocks when ``assist_umem_inject`` is on,
+    so every prompt (guidance / deliberation / verify) grounds on the same
+    memory through one renderer. Grounding rule is baked in: never assume a
+    fresh/empty system; treat anything marked unknown as still open."""
+    environment = environment or {}
+    profile = (environment.get("profile") or "").strip()
+    facts = [str(f).strip() for f in (environment.get("facts") or []) if str(f).strip()]
+    subs = environment.get("substitutions") or {}
+    notes = [
+        n for n in (operator_notes or [])
+        if isinstance(n, dict) and (n.get("text") or "").strip()
+    ]
+    if not (profile or facts or subs or notes):
+        return ""
+    header = (
+        "## Session memory — what's known so far (ground on this; do NOT assume a "
+        "fresh/empty system, and treat anything marked unknown/unverified as still open)"
+    )
+    # Priority order: context + facts are load-bearing for grounding; provided
+    # values next; notes last. Dropped from the tail if over budget (facts are
+    # never dropped — only trimmed).
+    sections: list[str] = [header]
+    if profile:
+        sections.append(f"**Execution context:** {profile}")
+    if facts:
+        sections.append("**Observed facts:**\n" + "\n".join(f"- {f}" for f in facts))
+    if subs:
+        sections.append("**Provided values:**\n" + "\n".join(f"- {k} = {v}" for k, v in subs.items()))
+    if notes:
+        sections.append(
+            "**Operator notes / requirements (carry forward):**\n"
+            + "\n".join(f"- [{(n.get('kind') or 'note')}] {n['text'].strip()}" for n in notes)
+        )
+    block = "\n\n".join(sections)
+    if budget and len(block) > budget:
+        # Drop lowest-priority whole sections (notes, then provided) before
+        # falling back to a hard cut — keeps the grounding-critical facts intact.
+        while len(sections) > 2 and len("\n\n".join(sections)) > budget:
+            sections.pop()  # tail = notes → provided → facts (facts kept: >2 guard)
+        block = "\n\n".join(sections)
+        if len(block) > budget:
+            block = block[:budget].rstrip() + "\n… (memory truncated)"
+    return block
+
+
+def _render_memory_or_legacy(
+    environment: dict | None, operator_notes: list[dict] | None,
+) -> list[str]:
+    """§17.710b — the single decision point for memory injection. When
+    ``assist_umem_inject`` is on, return the unified ``render_session_memory``
+    block; else the legacy separate environment + notes blocks (byte-identical
+    to pre-§17.710b). Returns the non-empty parts to append to a prompt."""
+    if settings.assist_unified_memory_enabled and settings.assist_umem_inject:
+        mem = render_session_memory(
+            environment, operator_notes, budget=settings.assist_umem_max_chars,
+        )
+        return [mem] if mem else []
+    out: list[str] = []
+    env_block = render_environment_block(environment)
+    if env_block:
+        out.append(env_block)
+    notes_block = render_operator_notes_block(operator_notes)
+    if notes_block:
+        out.append(notes_block)
+    return out
+
+
 def render_conversation_block(
     history: list[dict] | None, *, max_chars: int = 4000,
 ) -> str:
@@ -818,7 +892,9 @@ async def verify_step_success(
                 "grounded_by": "sandbox",
             }
 
-    env_block = render_environment_block(environment)
+    # §17.710b — verify grounds on the unified memory (facts help judge against
+    # the real system) or the legacy env block, per the valve. No notes here.
+    env_block = "\n\n".join(_render_memory_or_legacy(environment, None))
     if is_decision:  # §17.688 — judge the CHOICE, not the downstream artifact
         system = _VERIFY_DECISION_SYSTEM
         user = (
@@ -1003,12 +1079,8 @@ async def deliberate_decision(
     parts = [lead]
     if job_digest and job_digest.strip():
         parts.append(job_digest.strip())
-    env_block = render_environment_block(environment)
-    if env_block:
-        parts.append(env_block)
-    notes_block = render_operator_notes_block(operator_notes)
-    if notes_block:
-        parts.append(notes_block)
+    # §17.710b — unified session memory (or legacy env + notes) per the valve.
+    parts.extend(_render_memory_or_legacy(environment, operator_notes))
     if conversation and conversation.strip():
         parts.append(conversation.strip())
     parts.append(f"## Operator's latest message\n{(latest_message or '').strip()}")
@@ -1539,12 +1611,9 @@ def _build_guide_user_prompt(
         parts.append(f"Task description: {node_description.strip()}")
     if job_digest and job_digest.strip():
         parts.append(job_digest.strip())
-    env_block = render_environment_block(environment)
-    if env_block:
-        parts.append(env_block)
-    notes_block = render_operator_notes_block(operator_notes)
-    if notes_block:
-        parts.append(notes_block)
+    # §17.710b — one injection path (unified session memory) or the legacy
+    # env + notes blocks, per the assist_umem_inject valve.
+    parts.extend(_render_memory_or_legacy(environment, operator_notes))
     if conversation and conversation.strip():  # §17.687 — recent back-and-forth
         parts.append(conversation.strip())
     research_block = _render_research_block(sources)
