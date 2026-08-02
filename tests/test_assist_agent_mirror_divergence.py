@@ -23,7 +23,7 @@ branches — plus an OWUI render guard that the pipeline appends a
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -128,6 +128,49 @@ class TestMirrorDivergenceResponseShape:
         )
         assert out["mirror_divergence"] is True
         assert out["status"] == "skipped"
+
+    async def test_failed_verdict_skips_divergence_replan(self):
+        """§17.708 — a submit whose verify verdict is FAILED (command errored)
+        must NOT run divergence detection: it's a recover-and-retry situation,
+        not a plan divergence. `_maybe_replan` is never called."""
+        db = AsyncMock()
+        db.execute.side_effect = [
+            _result(mappings_first=_claim_row()),        # SELECT step FOR UPDATE
+            _result(rowcount=1),                         # UPDATE assist_steps
+            _result(rowcount=1),                         # UPDATE dag_nodes
+            _result(),                                    # session activity touch
+            _result(mappings_first={"node_key": "T2"}),  # next_pending (no policy SELECT — replan skipped)
+            _result(),                                    # current_node_key -> T2
+        ]
+        with patch.object(assist_agent, "_maybe_replan",
+                          new=AsyncMock(return_value=None)) as mr:
+            out = await assist_agent.submit_step(
+                session_id="sess-1", node_key="T1",
+                evidence="pveum user list\nipcc_send_rec[1] failed: Connection refused",
+                action="submit", verdict_failed=True, db=db,
+            )
+        mr.assert_not_called()
+        assert out["status"] == "committed"
+        assert out["replan"] is None
+
+    async def test_non_failed_verdict_runs_divergence_replan(self):
+        """§17.708 — the default (non-failed) path still runs divergence detection."""
+        db = AsyncMock()
+        db.execute.side_effect = [
+            _result(mappings_first=_claim_row()),
+            _result(rowcount=1),
+            _result(rowcount=1),
+            _result(),
+            _result(mappings_first={"node_key": "T2"}),
+            _result(),
+        ]
+        with patch.object(assist_agent, "_maybe_replan",
+                          new=AsyncMock(return_value=None)) as mr:
+            await assist_agent.submit_step(
+                session_id="sess-1", node_key="T1", evidence="all good, 0 errors",
+                action="submit", verdict_failed=False, db=db,
+            )
+        mr.assert_awaited_once()
 
     async def test_skip_no_divergence_when_both_rows_updated(self):
         db = AsyncMock()

@@ -22049,6 +22049,24 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.708 Fix — a FAILED step no longer triggers a "this may be an error / your result diverges, re-plan" double-signal (2026-08-02)
+
+**Report (recurring — "we have fixed this multiple times").** "I again received a 'this may be an error' message when it should have been updating itself." Live session `d7ece0ee`, step T1 ("Audit current system state"): the operator pasted `pveum user list` output that contained `ipcc_send_rec[1] failed: Connection refused`.
+
+**Deep dive (code + web).** Two independent, VERDICT-BLIND mechanisms fired on one failed command:
+- `verify_step_success` (assist_guide.py, §17.487) correctly judged `outcome="failed"` (its tool prompt lists "Connection refused" as a failure signal). But `assist_block_on_failed_verify=False`, so it committed anyway → the contradictory *"✅ Step committed … ⚠️ This may have failed."* (the message the operator kept seeing, `_assist_handlers.py:1044`).
+- `detect_divergence` (assist_replan.py, the §17.699 `context_only` async path) ran **independent of the verdict**. Its prompt only asks "does the output meet the task's intent?" — a failed command output trivially "fails to inspect /etc/pve/user.cfg", so it flagged a **major divergence** and staged a downstream re-plan → *"⚠️ Heads up — what you reported diverges… steps below may no longer fit."* Per the [Proxmox forums](https://forum.proxmox.com/threads/pve-cluster-service-doesnt-start-and-ipcc_send_rec-failed.146224/), `ipcc_send_rec: Connection refused` = `pve-cluster`/`pmxcfs` is down (hostname/`/etc/hosts` mismatch, DB corruption, or corosync) — a recover-the-environment situation, NOT a reason to re-plan the storage/network steps.
+
+**Root defect.** A step that *failed* (command errored) is categorically not a semantic divergence that should re-plan downstream work. Divergence detection was blind to the success verdict we already computed.
+
+**Fix (deterministic verdict gate — §17.679 lesson, don't lean on the LLM).**
+1. **Server** — thread `verdict_failed` from the submit router → `submit_step` → the divergence path. When the §17.487 verifier judged the submit a failure, `submit_step` SKIPS `_maybe_replan` entirely (logs `assist_replan_skipped_failed_verdict`). No spurious downstream re-plan on a failed command.
+2. **Pipeline messaging** — the committed-render no longer says "✅ committed … moving on" and then contradicts it. On a failed verdict it now leads coherently: *"📝 Recorded your evidence for `T1`, but ⚠️ this step doesn't look like it succeeded. <reason> That's usually something to fix here, not a change to the plan — run `/assist fix` for a diagnosis + recovery, then redo and resubmit."* (auto-advance already gated off on failure, §17.638). `/assist fix` already researches the error (so the operator gets the pve-cluster recovery steps), so no domain-specifics are hard-coded here.
+
+**Verification.** Server (`test_assist_agent_mirror_divergence.py`, +2): a failed-verdict submit never calls `_maybe_replan` (`replan=None`), a non-failed one still does. Pipeline (`test_scaffold_router_assist_guide.py`): failed render is fix-first (no "committed … moving on"), updated the two stale assertions; sandbox-failed/block/succeeded renders unchanged. Suites: 183 (affected) + 50 (broader assist) passed. Orchestrator + pipelines restarted, health 200.
+
+---
+
 ### §17.707 Feature — the operator-input checklist: "what does the plan still need from me?" (2026-08-02)
 
 **Ask.** "Shouldn't it create a list of what it needs, then fill out the components as they come through each chat message?" (operator's own idea, greenlit after §17.705/706).

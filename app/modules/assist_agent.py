@@ -1551,11 +1551,19 @@ async def submit_step(
     evidence_meta: dict | None = None,
     action: str = "submit",
     friction_note: str | None = None,
+    verdict_failed: bool = False,
     db,
 ) -> dict:
     """Record human evidence for one step. Mirrors to `dag_nodes.output_text`.
 
     `action` is "submit" (mark dag_node done) or "skip" (mark skipped).
+
+    `verdict_failed` (§17.708) — the §17.487 success verifier judged this
+    evidence a FAILURE (a command errored / non-zero exit / "Connection
+    refused"). When True, divergence detection is skipped: a failed step is a
+    RECOVER situation (fix + retry), not a semantic divergence that should
+    re-plan downstream steps. Passing it prevents the confusing double-signal
+    ("⚠️ this may have failed" + "⚠️ your result diverges, re-plan…").
 
     Concurrency: requires the step's prior status to be 'presented'.
     Double-submit is a no-op.
@@ -1698,11 +1706,22 @@ async def submit_step(
         len(evidence) if evidence else 0,
     )
     # Re-plan check (only on action='submit'; skip evidence is not divergence).
+    # §17.708 — and NOT when the step's evidence was judged a failure: a command
+    # that errored (e.g. Proxmox `ipcc_send_rec: Connection refused` = pve-cluster
+    # down) is a recover-and-retry situation, not a semantic divergence that
+    # should re-plan the downstream steps. Detecting "the failed output doesn't
+    # meet the task's intent" and proposing to drop later steps is exactly the
+    # confusing behavior the operator kept hitting.
     replan_result = None
-    if action == "submit":
+    if action == "submit" and not verdict_failed:
         replan_result = await _maybe_replan(
             session_id=session_id, job_id=job_id,
             node_key=node_key, evidence=evidence, db=db,
+        )
+    elif action == "submit" and verdict_failed:
+        logger.info(
+            "assist_replan_skipped_failed_verdict session_id=%s node_key=%s",
+            session_id, node_key,
         )
     # Detect session completion.
     next_pending = await _next_pending_node_key(session_id=session_id, db=db)

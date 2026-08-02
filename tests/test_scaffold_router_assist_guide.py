@@ -412,14 +412,18 @@ class TestSubmitVerdictRender:
         return sess
 
     def test_submit_warns_on_failed_verdict(self, pipe):
+        # §17.708 — a failed verdict is recorded (warn mode, not blocked) but
+        # framed as fix-first, not "✅ committed … moving on" (contradictory).
         body = {"status": "committed", "no_op": False, "next_node_key": "T3",
                 "mirror_divergence": False,
                 "success_verdict": {"outcome": "failed", "reason": "Traceback present"}}
         with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
             out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "boom", chat_id=None))
-        assert "committed" in out                  # still advanced (warn mode)
-        assert "may have failed" in out
-        assert "Traceback present" in out
+        assert "Recorded your evidence" in out             # recorded (warn mode)
+        assert "doesn't look like it succeeded" in out     # coherent failure lead
+        assert "Traceback present" in out                  # reason surfaced
+        assert "/assist fix" in out                        # points at recovery
+        assert "committed. Moving on" not in out           # NOT a celebratory advance
 
     def test_submit_block_path_not_advanced(self, pipe):
         body = {"status": "verification_failed", "no_op": False, "committed": False,
@@ -557,8 +561,10 @@ class TestSubmitAutoAdvance:
         with patch.object(_vendor, "_ss", return_value=self._explode_on_get(
                 submit_body, "must not advance on a soft-fail verdict")):
             out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "boom", chat_id=None))
-        assert "committed" in out
-        assert "Next: `T3`. Run `/assist next`" in out  # falls back to manual hint
+        # §17.708 — recorded but framed fix-first; does NOT auto-advance
+        # (the _explode_on_get guards that), points forward manually instead.
+        assert "Recorded your evidence" in out
+        assert "move on to `T3`" in out
 
     def test_no_advance_when_valve_off(self, pipe):
         pipe.valves.assist_auto_advance = False

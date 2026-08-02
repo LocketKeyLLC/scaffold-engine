@@ -1019,12 +1019,29 @@ def assist_submit(
     _rec_label = ("Recorded" if d.get("collect_kind") == "gather"
                   else "Decision recorded")
     prefix = f"📌 **{_rec_label}.** {decision_msg}\n\n" if decision_msg else ""
-    msg = f"{prefix}✅ Step `{node_key}` committed. "
-    if next_nk:
-        msg += (f"Moving on to `{next_nk}`…" if auto_advance
-                else f"Next: `{next_nk}`. Run `/assist next` to fetch.")
+    if outcome == "failed":
+        # §17.708 — coherent failure framing. Don't say "✅ committed … moving on"
+        # and then contradict it with "⚠️ this may have failed". A failed step is
+        # recorded but is a FIX-and-retry situation, NOT a plan divergence (the
+        # server no longer stages a downstream re-plan for it). Lead with that.
+        head = ("🛑 **Ran your code in the sandbox — it errored.**" if ran
+                else "⚠️ **This step doesn't look like it succeeded.**")
+        _reason = (verdict.get("reason") or "").strip()
+        msg = (
+            f"{prefix}📝 Recorded your evidence for `{node_key}`, but {head} {_reason}\n\n"
+            f"That's usually something to fix here, not a change to the plan — run "
+            f"`/assist fix <the error>` for a diagnosis + recovery steps, then redo "
+            f"and resubmit."
+        )
+        if next_nk:
+            msg += f" Once it's working, say _\"next\"_ to move on to `{next_nk}`."
     else:
-        msg += f"All steps terminal — run `/assist done` to view compiled output."
+        msg = f"{prefix}✅ Step `{node_key}` committed. "
+        if next_nk:
+            msg += (f"Moving on to `{next_nk}`…" if auto_advance
+                    else f"Next: `{next_nk}`. Run `/assist next` to fetch.")
+        else:
+            msg += "All steps terminal — run `/assist done` to view compiled output."
     # §17.286 — mirror invariant divergence: assist_steps was updated
     # but dag_nodes was already in a terminal status. Append a
     # warning so the operator sees the race without grepping logs.
@@ -1038,15 +1055,9 @@ def assist_submit(
         )
     # §17.487 — warn mode: surface the success verdict without blocking.
     # §17.491 — when grounded_by includes 'sandbox', the code was actually run.
-    # (verdict/outcome/ran computed above — reused by the auto-advance gate.)
-    if outcome == "failed":
-        head = ("🛑 **Ran your code in the sandbox — it errored.**" if ran
-                else "⚠️ **This may have failed.**")
-        msg += (
-            f"\n\n{head} {verdict.get('reason', '')}\n"
-            f"Run `/assist fix <the error>` or re-do and resubmit."
-        )
-    elif outcome == "succeeded" and ran:
+    # §17.708 — the 'failed' case is now handled in the lead above (coherent
+    # fix-first framing); only the positive/ambiguous notes are appended here.
+    if outcome == "succeeded" and ran:
         msg += "\n\n✓ _Verified by running your code in the sandbox._"
     elif (outcome == "unclear" and verdict.get("reason")
           and verdict["reason"] != "verification unavailable"):

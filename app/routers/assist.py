@@ -572,6 +572,9 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
             evidence_meta=body.evidence_meta,
             action=body.action,
             friction_note=body.friction_note,
+            # §17.708 — a failed-verdict submit skips divergence re-plan (a failed
+            # command is a recover situation, not a plan divergence).
+            verdict_failed=(bool(verdict) and verdict.get("outcome") == "failed"),
             db=db,
         )
         if verdict is not None and isinstance(result, dict):
