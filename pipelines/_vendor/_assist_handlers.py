@@ -479,6 +479,14 @@ def assist_status(pipe, session_id: str) -> Generator[str, None, None]:
     # §17.654 — surface captured notes & additions so the operator sees
     # everything the engine is carrying forward, at a glance.
     yield _render_notes_block(d.get("notes"))
+    # §17.710d — surface the session-memory facts (what the engine knows about
+    # the operator's real system) in the roll-up.
+    facts = d.get("memory_facts") or []
+    if facts:
+        shown = facts[:8]
+        bullets = "\n".join(f"- {f}" for f in shown)
+        more = f"\n_(+{len(facts) - len(shown)} more)_" if len(facts) > len(shown) else ""
+        yield f"\n🧠 **Known about your system:**\n{bullets}{more}\n"
 
 
 def _render_notes_block(notes) -> str:

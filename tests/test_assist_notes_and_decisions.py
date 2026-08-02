@@ -57,7 +57,9 @@ def test_user_prompt_uses_decision_trailer_and_notes_block():
         _ctx(), None, [], None, operator_notes=notes, is_decision=True,
     )
     assert assist_guide._GUIDE_DECISION_TRAILER in user
-    assert "Operator notes & additions" in user
+    # §17.710b — valve-agnostic: the NOTE is injected (appears in both the legacy
+    # notes block and the unified session-memory block), regardless of the
+    # assist_umem_inject state that this test's container env may set.
     assert "wants a DMZ segment" in user
 
 

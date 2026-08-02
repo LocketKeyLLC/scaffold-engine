@@ -574,7 +574,10 @@ async def test_guidance_injects_environment():
             ctx=_ctx("shell"), research=False, node_key="T3",
             environment={"profile": "Ubuntu 24.04", "substitutions": {"HOST_IP": "10.0.0.5"}},
         )
-    assert "Operator environment" in captured["user"]
+    # §17.710b — valve-agnostic: assert the environment VALUES are injected
+    # (they appear in both the legacy env block and the unified memory block),
+    # not the header, so the test doesn't depend on the assist_umem_inject state.
+    assert "Ubuntu 24.04" in captured["user"]
     assert "HOST_IP = 10.0.0.5" in captured["user"]
 
 

@@ -22049,6 +22049,22 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.710d Feature — unified session memory, Stage D: surface + cutover (the memory path goes live) (2026-08-02)
+
+**What.** The cutover that makes the unified retention path active for operators, plus surfacing the memory.
+- **Surface.** `get_session` now returns `memory_facts` (the distilled facts, not the raw metadata blob); pipeline `/assist status` renders a "🧠 Known about your system" block. `/assist checklist` already surfaced facts (§17.709). So the operator can see what the engine retains, from both roll-ups.
+- **Cutover (via compose env, NOT code defaults).** `docker-compose.yml` sets `ASSIST_UNIFIED_MEMORY_ENABLED=true`, `ASSIST_UMEM_CAPTURE=true`, `ASSIST_UMEM_INJECT=true` (grounding stays **opt-in** — `ASSIST_UMEM_GROUNDING=false` — because it adds a `model_general` call per submit). Code defaults stay `False` so the test suite + fresh installs exercise the legacy path; the running orchestrator is flipped at runtime and is reversible from `.env` with zero code change (the §17.702 pattern).
+
+**Why compose env, not code defaults.** pytest runs inside the orchestrator container, so flipping the code default would silently turn the valves on for the whole suite. Keeping the default off (tests exercise legacy) while the container env flips it on (operators get the unified path) cleanly separates the two. Two guidance-prompt tests that asserted the *legacy block header* were made **valve-agnostic** (assert the injected env/note VALUES, which appear in both the legacy and unified blocks) so they pass in either state.
+
+**Verification. LIVE end-to-end (valves on in the recreated container):** a real `/submit` of a Proxmox audit through the actual endpoint → committed, the raw turn landed in `assist_turns` (Stage A capture live), and `environment.facts` distilled correctly ("PVE 9.2.6", "user list UNKNOWN — daemon may not be running"). Live valve state confirmed `master/capture/inject=on, grounding=off`. Full assist sweep under the live valve-on env: **626 passed**, only the 5 unrelated pre-existing reds (handoff-policy AsyncMock + umbrella-rollup — identical set with/without this work). ci-tier-0 green; OpenAPI regenerated.
+
+**Legacy channels: kept as the valve-off fallback, not deleted.** `render_environment_block` / `render_operator_notes_block` and the §17.490/703/709 capture paths still populate the environment the unified block consumes; `_render_memory_or_legacy` falls back to them when `assist_umem_inject` is off. Deleting them is deferred until the unified path has production burn-in — the valve is the safe revert until then.
+
+**§17.710 complete (A–D):** capture (lossless, unconditional) → inject (one consolidated block, one path) → ground (warn-only) → surfaced + live. The recurring "requesting info but not retaining it" pattern is addressed at its root: retention no longer depends on a turn matching one narrow trigger.
+
+---
+
 ### §17.710c Feature — unified session memory, Stage C: warn-only grounding gate (2026-08-02)
 
 **Why.** Stages A/B get the facts captured and in front of the model; the grounding gate closes the loop — it catches the model IGNORING them. A committed result that contradicts known memory (the classic: a decision that "Assumes: Fresh Proxmox VE server" when memory says an existing PVE 9.2.6) gets a non-blocking heads-up instead of sliding through silently.

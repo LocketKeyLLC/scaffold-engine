@@ -312,6 +312,14 @@ services:
       # both are overridable from .env.
       EXEMPLAR_INGEST_ENABLED: "${EXEMPLAR_INGEST_ENABLED:-true}"
       EXEMPLAR_MIN_GROUNDING: "${EXEMPLAR_MIN_GROUNDING:-0.85}"
+      # §17.710d — unified session memory. Enabled at RUNTIME here (code defaults
+      # stay False so tests + fresh installs exercise the legacy path). Master +
+      # capture (Stage A) + inject (Stage B) on; grounding (Stage C) stays
+      # opt-in — it adds a model_general call per submit. All overridable from .env.
+      ASSIST_UNIFIED_MEMORY_ENABLED: "${ASSIST_UNIFIED_MEMORY_ENABLED:-true}"
+      ASSIST_UMEM_CAPTURE: "${ASSIST_UMEM_CAPTURE:-true}"
+      ASSIST_UMEM_INJECT: "${ASSIST_UMEM_INJECT:-true}"
+      ASSIST_UMEM_GROUNDING: "${ASSIST_UMEM_GROUNDING:-false}"
     env_file:
       - .env
     volumes:

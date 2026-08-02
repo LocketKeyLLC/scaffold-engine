@@ -317,7 +317,8 @@ async def get_session(*, session_id: str, db) -> Optional[dict]:
     sess = (await db.execute(
         text("""
             SELECT id, job_id, status, current_node_key, handoff_policy,
-                   replan_policy, started_at, last_activity_at, completed_at, notes
+                   replan_policy, started_at, last_activity_at, completed_at,
+                   notes, metadata
               FROM assist_sessions WHERE id = :sid
         """),
         {"sid": session_id},
@@ -343,10 +344,15 @@ async def get_session(*, session_id: str, db) -> Optional[dict]:
         """),
         {"sid": session_id},
     )).scalar() or 0
+    # §17.710d — surface the session memory facts in the roll-up (drop the raw
+    # metadata blob from the response; expose only the distilled facts).
+    sess_dict = dict(sess)
+    env = _environment_from_metadata(sess_dict.pop("metadata", None))
     return {
-        **{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(sess).items()},
+        **{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in sess_dict.items()},
         "step_counts": {r["status"]: r["cnt"] for r in rollup},
         "divergence_count": int(divergence_count),
+        "memory_facts": env.get("facts") or [],
     }
 
 
