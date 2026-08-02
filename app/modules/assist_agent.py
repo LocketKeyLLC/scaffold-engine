@@ -1427,6 +1427,64 @@ async def capture_session_facts(
         return []
 
 
+# ── Unified session memory (§17.710a — lossless raw capture) ──────────────
+
+
+async def ingest_turn(
+    *, session_id: str, role: str, kind: str, content: str,
+    node_key: str | None = None, evidence_kind: str | None = None, db,
+) -> bool:
+    """§17.710a — append a raw turn to the append-only ``assist_turns``
+    transcript, UNCONDITIONALLY and BEFORE any intent classification.
+
+    This is the lossless capture layer the narrow retention channels missed:
+    whatever didn't match a channel's trigger (an audit paste with no
+    placeholders, a message the classifier mislabeled) still lands here, so
+    Stage B can derive ``session_memory`` from the transcript. Gated on the
+    master + capture valves; commits its own insert so a later rollback in the
+    caller can't lose the turn; fail-soft (never disturbs the caller). Returns
+    True iff a row was written."""
+    from app.config import settings
+
+    if not (settings.assist_unified_memory_enabled and settings.assist_umem_capture):
+        return False
+    # A skip carries no content but is still a real turn worth recording.
+    if not (content or "").strip() and kind != "skip":
+        return False
+    try:
+        # INSERT…SELECT pulls the session's job_id and no-ops if the session is
+        # unknown (no matching row → nothing inserted).
+        res = await db.execute(
+            text("""
+                INSERT INTO assist_turns
+                    (session_id, job_id, node_key, role, kind, content, evidence_kind)
+                SELECT :sid, s.job_id, :nk, :role, :kind, :content, :ek
+                  FROM assist_sessions s WHERE s.id = :sid
+            """),
+            {"sid": session_id, "nk": node_key, "role": role, "kind": kind,
+             "content": content or "", "ek": evidence_kind},
+        )
+        await db.commit()
+        return bool(getattr(res, "rowcount", 0))
+    except Exception as e:  # noqa: BLE001 — capture must never break the turn
+        logger.debug("ingest_turn_failed session_id=%s err=%r", session_id, e)
+        return False
+
+
+async def list_turns(*, session_id: str, limit: int = 200, db) -> list[dict]:
+    """§17.710a — the session's raw transcript, oldest-first. Backs GET
+    /assist/{sid}/turns and (Stage B) session_memory consolidation."""
+    rows = (await db.execute(
+        text("""
+            SELECT id, node_key, role, kind, content, evidence_kind, created_at
+              FROM assist_turns WHERE session_id = :sid
+             ORDER BY created_at, id LIMIT :lim
+        """),
+        {"sid": session_id, "lim": int(limit)},
+    )).mappings().all()
+    return [dict(r) for r in rows]
+
+
 # ── Submit / commit human evidence ───────────────────────────────────────
 
 

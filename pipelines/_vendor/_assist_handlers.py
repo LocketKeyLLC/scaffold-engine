@@ -1423,6 +1423,27 @@ def assist_chat_turn(
     )
 
 
+def record_turn_bg(pipe, session_id: str, content: str, *,
+                   kind: str = "message", node_key: str | None = None) -> None:
+    """§17.710a — best-effort raw-turn capture. Called for EVERY chat message
+    before any client-side routing, so the transcript is lossless even when a
+    message is fast-verb'd or the classifier mislabels it. Fire-and-forget: a
+    capture hiccup must never affect the conversation, and the endpoint is a
+    no-op server-side unless the unified-memory capture valve is on."""
+    if not (content or "").strip():
+        return
+    try:
+        _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/turn",
+            json={"role": "operator", "kind": kind, "content": content,
+                  "node_key": node_key},
+            headers=pipe._auth_headers(),
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # §17.626 — natural-language turns. Plain chat in an active session drives the
 # whole flow (advance / skip / submit / fix / finalize / pause) without the
@@ -1895,6 +1916,11 @@ def assist_nl_turn(
     # The operator's device auto-curls "can't" → "can’t", which silently broke
     # pivot detection (§17.691) and re-rendered the stale step.
     msg = _normalize_punct(msg or "")
+    # §17.710a — lossless capture: record the raw message BEFORE any classifier
+    # or fast-verb routing, so the transcript never depends on the intent being
+    # read correctly. Fire-and-forget; server no-ops unless the capture valve is
+    # on (slash/curl paths are captured server-side at their endpoints instead).
+    record_turn_bg(pipe, session_id, msg, kind="message", node_key=node_key)
     # §17.677 — a bare yes/no resolves a pending note-triggered plan fix before
     # any other classification. Only pays the GET when the message *looks* like a
     # confirm (deterministic phrase match), so normal turns are unaffected.

@@ -8,8 +8,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.config import settings as _settings
 from app.modules import assist_agent
 from app.modules.prompt_assembly import StepContext
+
+
+def _result_rowcount(n):
+    r = MagicMock()
+    r.rowcount = n
+    return r
 
 
 def _ctx():
@@ -528,6 +535,70 @@ async def test_build_inputs_checklist_missing_session():
     db.execute = AsyncMock(side_effect=[_result(None)])
     with pytest.raises(ValueError, match="not found"):
         await assist_agent.build_inputs_checklist(session_id="nope", db=db)
+
+
+# ── §17.710a: ingest_turn (unconditional raw capture) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ingest_turn_noop_when_valve_off():
+    db = AsyncMock()
+    with patch.object(_settings, "assist_unified_memory_enabled", False):
+        out = await assist_agent.ingest_turn(
+            session_id="s", role="operator", kind="submit", content="x", db=db)
+    assert out is False
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ingest_turn_writes_when_valve_on():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result_rowcount(1))
+    db.commit = AsyncMock()
+    with patch.object(_settings, "assist_unified_memory_enabled", True), \
+         patch.object(_settings, "assist_umem_capture", True):
+        out = await assist_agent.ingest_turn(
+            session_id="s", role="operator", kind="submit",
+            content="root@pve:~# ls", node_key="T1", db=db)
+    assert out is True
+    db.commit.assert_awaited_once()
+    sql = db.execute.call_args.args[0].text
+    assert "INSERT INTO assist_turns" in sql
+
+
+@pytest.mark.asyncio
+async def test_ingest_turn_skips_empty_non_skip():
+    db = AsyncMock()
+    with patch.object(_settings, "assist_unified_memory_enabled", True), \
+         patch.object(_settings, "assist_umem_capture", True):
+        out = await assist_agent.ingest_turn(
+            session_id="s", role="operator", kind="submit", content="   ", db=db)
+    assert out is False
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ingest_turn_records_empty_skip():
+    # A skip carries no content but IS a real turn.
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result_rowcount(1))
+    db.commit = AsyncMock()
+    with patch.object(_settings, "assist_unified_memory_enabled", True), \
+         patch.object(_settings, "assist_umem_capture", True):
+        out = await assist_agent.ingest_turn(
+            session_id="s", role="operator", kind="skip", content="", db=db)
+    assert out is True
+
+
+@pytest.mark.asyncio
+async def test_ingest_turn_failsoft():
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=RuntimeError("db down"))
+    with patch.object(_settings, "assist_unified_memory_enabled", True), \
+         patch.object(_settings, "assist_umem_capture", True):
+        out = await assist_agent.ingest_turn(
+            session_id="s", role="operator", kind="submit", content="x", db=db)
+    assert out is False
 
 
 # ── §17.493: generate_step_guidance_stream ─────────────────────────────────

@@ -22049,6 +22049,23 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.710a Feature — unified session memory, Stage A: unconditional lossless capture of every turn (2026-08-02)
+
+**Why.** Retention kept partially recurring because it flowed through many narrow, trigger-specific channels (placeholder substitution-learning §17.490, exec-context regex §17.703, note classifier §17.677, facts distiller §17.709) — each capturing only what matched its exact trigger. Anything that didn't (an audit paste with no placeholders, a message the LLM mislabeled `question`) was never even recorded. Stage A inverts this: capture EVERYTHING once, unconditionally, before any classification — the durable substrate Stage B (§17.710b) will derive the consolidated `session_memory` from. Staged behind valves so it rolls out incrementally against today's behavior.
+
+**Changes.**
+- **Migration `057_assist_turns.sql`** — append-only `assist_turns` transcript (`session_id, job_id, node_key, role, kind, content, evidence_kind, created_at`), indexed `(session_id, created_at, id)`, FK `session_id → assist_sessions(id) ON DELETE CASCADE` (turns vanish with their session, and transitively when a job is deleted). Single `DO $mig$` block (asyncpg prepared-statement rule); drop-then-add FK so it's idempotent whether the table pre-exists.
+- **`assist_agent.ingest_turn`** — writes one raw turn via `INSERT…SELECT` (resolves `job_id` from the session; no-ops if the session is unknown), commits its own insert so a later caller rollback can't lose it, fail-soft. `list_turns` reads the transcript oldest-first.
+- **Endpoints** `POST /assist/{sid}/turn` (pipeline calls it for every chat message) + `GET /assist/{sid}/turns`. Server-side capture also wired into `POST /submit` (before any verify/branch — covers slash/curl/NL from all clients) and `POST /note`.
+- **Pipeline** `record_turn_bg` fires at the TOP of `assist_nl_turn` (before the replan/fast-verb/classifier gates), fire-and-forget, 10s timeout — so a message is on disk even if it's fast-verb'd or mislabeled.
+- **Valves** (all default so behavior is unchanged): `assist_unified_memory_enabled=False` (master), `assist_umem_capture=True`, `assist_umem_inject=False`, `assist_umem_grounding=False`, `assist_umem_max_chars=4000`. Nothing captures until the master gate flips on.
+
+**Verification.** 5 unit tests (valve gates on/off, empty-non-skip skipped, empty-skip recorded, fail-soft). **LIVE:** the exact `INSERT…SELECT` against the real schema resolves `job_id` and the FK cascade deletes turns on job-delete (psql smoke); and the REAL `ingest_turn`→`list_turns`→cascade path through the app's async session with the valve on (wrote + read back + cascade-cleaned). Live endpoints gated correctly (`recorded:false` valve-off). Affected suites 180 green; migration applied clean (restart-verified). Stage A is inert recording — no guidance/decision behavior changes until §17.710b flips `assist_umem_inject`.
+
+**Grounding policy (decided):** Stage C will be **warn-only** (non-blocking, §17.708 style). **Capture topology (decided):** a dedicated server-side `/turn` endpoint (server is source of truth), not piggybacked on `/interpret`.
+
+---
+
 ### §17.709 Feature — the session FACTS ledger: gathered system state is retained and grounded on (stops fabricated "fresh install" assumptions) (2026-08-02)
 
 **Report (recurring — "requesting information but not properly recording or retaining it").** Live session `6ca41d83` ("In-Place Proxmox Cleanup"): the operator ran the T1 audit and pasted real state (existing PVE 9.2.6, `vmbr0=192.168.1.156/24`, and — because pve-cluster was down — `ipcc_send_rec: Connection refused` on the user/VM/ZFS checks). Yet decision steps T2–T5 all committed with **"Assumption: Fresh Proxmox VE server"**, and `metadata.environment.substitutions` stayed `{}`.

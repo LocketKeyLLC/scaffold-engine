@@ -533,6 +533,52 @@
         "title": "AssistSubmitInput",
         "type": "object"
       },
+      "AssistTurnInput": {
+        "properties": {
+          "content": {
+            "default": "",
+            "description": "The raw turn text.",
+            "title": "Content",
+            "type": "string"
+          },
+          "evidence_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Kind"
+          },
+          "kind": {
+            "default": "message",
+            "description": "submit | message | skip | note | guidance | decision.",
+            "title": "Kind",
+            "type": "string"
+          },
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Key"
+          },
+          "role": {
+            "default": "operator",
+            "description": "'operator' | 'engine'.",
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "title": "AssistTurnInput",
+        "type": "object"
+      },
       "Body_research_pdf_endpoint_research_pdf_post": {
         "properties": {
           "file": {
@@ -5009,6 +5055,118 @@
           }
         ],
         "summary": "Assist Submit",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/turn": {
+      "post": {
+        "description": "§17.710a — record ONE raw turn to the append-only transcript. The pipeline\ncalls this first for every chat message so capture is unconditional (never\ngated on how the message later classifies). No-op unless the unified-memory\ncapture valve is on; always returns 200 (fail-soft) so it never blocks the\nconversation.",
+        "operationId": "assist_record_turn_assist__session_id__turn_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistTurnInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Record Turn",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/turns": {
+      "get": {
+        "description": "§17.710a — the session's raw transcript, oldest-first.",
+        "operationId": "assist_list_turns_assist__session_id__turns_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist List Turns",
         "tags": [
           "Assist"
         ]

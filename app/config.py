@@ -741,6 +741,18 @@ class Settings(BaseSettings):
     # injected block bounded; oldest facts drop first.
     assist_capture_facts_enabled: bool = True
     assist_facts_max: int = Field(default=40, ge=1, le=200)
+    # §17.710 — unified session memory. Master gate + per-stage sub-valves so the
+    # refactor rolls out incrementally and each stage A/Bs against today's
+    # behavior. Default OFF: `assist_unified_memory_enabled=False` keeps the
+    # legacy scattered-channel behavior exactly. Stage A (capture) is inert
+    # recording — safe even alone once the master gate is on. Stage B (inject)
+    # and C (grounding, warn-only) are toggled independently. `umem_max_chars`
+    # bounds the single injected memory block (Stage B). See db/migrations/057.
+    assist_unified_memory_enabled: bool = False   # master gate for §17.710
+    assist_umem_capture: bool = True              # Stage A — record raw turns
+    assist_umem_inject: bool = False              # Stage B — consolidate + inject
+    assist_umem_grounding: bool = False           # Stage C — pre-commit warn on contradiction
+    assist_umem_max_chars: int = Field(default=4000, ge=500, le=20000)
     # §17.499 — default walkthrough verbosity (terse | normal | detailed).
     # Per-session override via /assist verbose. terse = commands + one-line
     # whys (expert); detailed = explain why each step matters + what to watch

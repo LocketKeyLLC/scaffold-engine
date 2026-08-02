@@ -130,6 +130,19 @@ class AssistInterpretInput(BaseModel):
     )
 
 
+class AssistTurnInput(BaseModel):
+    # §17.710a — a raw turn for the append-only transcript. Captured
+    # unconditionally by the pipeline for every chat message, before routing.
+    role: str = Field(default="operator", description="'operator' | 'engine'.")
+    kind: str = Field(
+        default="message",
+        description="submit | message | skip | note | guidance | decision.",
+    )
+    content: str = Field(default="", description="The raw turn text.")
+    node_key: Optional[str] = Field(default=None)
+    evidence_kind: Optional[str] = Field(default=None)
+
+
 class AssistEnvInput(BaseModel):
     profile: Optional[str] = Field(
         default=None, description="Free-text environment profile (OS, shell, package manager)."
@@ -456,8 +469,39 @@ async def assist_get_checklist(session_id: str, db=Depends(get_db)):
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.post("/assist/{session_id}/turn")
+async def assist_record_turn(session_id: str, body: AssistTurnInput, db=Depends(get_db)):
+    """§17.710a — record ONE raw turn to the append-only transcript. The pipeline
+    calls this first for every chat message so capture is unconditional (never
+    gated on how the message later classifies). No-op unless the unified-memory
+    capture valve is on; always returns 200 (fail-soft) so it never blocks the
+    conversation."""
+    recorded = await assist_agent.ingest_turn(
+        session_id=session_id, role=body.role, kind=body.kind, content=body.content,
+        node_key=body.node_key, evidence_kind=body.evidence_kind, db=db,
+    )
+    return {"session_id": session_id, "recorded": recorded}
+
+
+@router.get("/assist/{session_id}/turns")
+async def assist_list_turns(session_id: str, limit: int = 200, db=Depends(get_db)):
+    """§17.710a — the session's raw transcript, oldest-first."""
+    turns = await assist_agent.list_turns(session_id=session_id, limit=limit, db=db)
+    return {"session_id": session_id, "turns": turns}
+
+
 @router.post("/assist/{session_id}/submit")
 async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get_db)):
+    # §17.710a — lossless capture, BEFORE any verify/deliberate/commit branching.
+    # Source of truth for ALL clients (slash / curl / NL), so a submit is
+    # recorded even on paths that never call the pipeline's /turn. No-op unless
+    # the capture valve is on; fail-soft.
+    await assist_agent.ingest_turn(
+        session_id=session_id, role="operator",
+        kind=("skip" if body.action == "skip" else "submit"),
+        content=body.output, node_key=body.node_key,
+        evidence_kind=body.evidence_kind, db=db,
+    )
     # §17.487 — success verification. Runs BEFORE submit_step (so the slow LLM
     # call never holds submit_step's row lock, and submit_step stays pure).
     # Only for action='submit'; verify_submit_outcome returns None unless the
@@ -716,6 +760,12 @@ async def assist_note(session_id: str, body: AssistNoteInput, db=Depends(get_db)
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     if not sess:
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    # §17.710a — capture the note as a raw turn too (source of truth for all
+    # clients); no-op unless the capture valve is on.
+    await assist_agent.ingest_turn(
+        session_id=session_id, role="operator", kind="note",
+        content=body.text, node_key=body.node_key, db=db,
+    )
     note = await assist_agent.record_note(
         session_id=session_id, text_=body.text, kind=body.kind,
         node_key=body.node_key, db=db,
