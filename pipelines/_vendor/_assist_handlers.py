@@ -2157,8 +2157,22 @@ def assist_env_cmd(
     env_block = render_environment(d.get("environment"))
     if show:
         yield env_block
-    else:
-        yield f"✅ Environment updated.\n\n{env_block}"
+        return
+    yield f"✅ Environment updated.\n\n{env_block}"
+    # §17.706 — apply it immediately: re-render the CURRENT step so its commands
+    # honor the just-changed environment. Previously the cached step stayed
+    # stale, so an operator who stated "root@pve via the web console" kept seeing
+    # hedged, generic guidance ("SSH or web shell / open a terminal") — the
+    # reported "it couldn't tell I was on the Proxmox web console". force=True
+    # bypasses the guidance cache; the one-time research pause is now visible
+    # (§17.704). Only when a live step is resolvable from this chat — on the
+    # curl/CLI path (no chat_id) there's nothing to recall, so it just confirms.
+    nk = _recall_node_key(pipe, chat_id, None)
+    if nk:
+        yield "\n\n---\n\n_Applying that to this step…_\n"
+        yield from assist_guide_stream_cmd(
+            pipe, session_id, node_key=nk, force=True, chat_id=chat_id,
+        )
 
 
 def assist_fix_cmd(

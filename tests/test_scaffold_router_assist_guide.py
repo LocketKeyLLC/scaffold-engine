@@ -278,6 +278,53 @@ class TestEnvFixDispatch:
         assert "Usage:" in out
 
 
+# ── §17.706: an env change re-renders the current step ──────────────────────
+
+
+class TestEnvReRendersStep:
+
+    @staticmethod
+    def _put_session(body):
+        sess = MagicMock()
+        sess.put.return_value = _make_response(200, body)
+        return sess
+
+    def test_env_update_rerenders_current_step(self, pipe):
+        body = {"session_id": _SID,
+                "environment": {"profile": "root@pve web console", "substitutions": {}}}
+        with patch.object(_vendor, "_ss", return_value=self._put_session(body)), \
+             patch.object(_vendor, "_recall_node_key", return_value="T1"), \
+             patch.object(_vendor, "assist_guide_stream_cmd",
+                          side_effect=lambda *a, **k: iter(["REGEN"])) as regen:
+            out = "".join(_vendor.assist_env_cmd(
+                pipe, _SID, profile="root@pve web console", chat_id="c1"))
+        assert "Environment updated" in out
+        assert "Applying that to this step" in out
+        assert "REGEN" in out                       # the step was re-rendered
+        _, kwargs = regen.call_args
+        assert kwargs.get("node_key") == "T1"
+        assert kwargs.get("force") is True          # bypasses the stale guidance cache
+
+    def test_env_update_no_live_step_just_confirms(self, pipe):
+        body = {"session_id": _SID, "environment": {"profile": "x", "substitutions": {}}}
+        with patch.object(_vendor, "_ss", return_value=self._put_session(body)), \
+             patch.object(_vendor, "_recall_node_key", return_value=None), \
+             patch.object(_vendor, "assist_guide_stream_cmd", side_effect=AssertionError):
+            out = "".join(_vendor.assist_env_cmd(pipe, _SID, profile="x", chat_id=None))
+        assert "Environment updated" in out
+        assert "Applying that to this step" not in out   # nothing to re-render
+
+    def test_env_show_does_not_rerender(self, pipe):
+        body = {"session_id": _SID, "environment": {"profile": "x", "substitutions": {}}}
+        sess = MagicMock()
+        sess.get.return_value = _make_response(200, body)
+        with patch.object(_vendor, "_ss", return_value=sess), \
+             patch.object(_vendor, "_recall_node_key", return_value="T1"), \
+             patch.object(_vendor, "assist_guide_stream_cmd", side_effect=AssertionError):
+            out = "".join(_vendor.assist_env_cmd(pipe, _SID, show=True, chat_id="c1"))
+        assert "Applying that to this step" not in out   # reads are read-only
+
+
 # ── §17.487: render_fix + render_environment ────────────────────────────────
 
 

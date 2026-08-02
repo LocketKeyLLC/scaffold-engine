@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.706 UX — stating your environment mid-assist now re-renders the current step to honor it (2026-08-02)
+
+**Report (follow-up to §17.705).** The operator told the session "root@pve through the web browser", it was saved to `environment.profile`, yet T1's guidance kept hedging ("physical console, SSH, or web shell" / "open a terminal") — "it couldn't tell I was on the Proxmox web console." Cause: T1's walkthrough was cached BEFORE the operator stated their environment, and `assist_env_cmd` only PUT the env + printed "Environment updated" — it never re-rendered the current step, so the stated context never reached the guidance the operator was looking at.
+
+**Fix.** `assist_env_cmd` (pipelines/_vendor/_assist_handlers.py), after a successful env update (not a read), now re-renders the current step via `assist_guide_stream_cmd(force=True)` — bypassing the guidance cache so the walkthrough reflects the just-set profile / substitutions / verbosity. Gated on a live step resolvable from the chat (`_recall_node_key`); on the curl/CLI path (no chat_id) it degrades to the old confirm-only behavior. The one-time research pause is now visible (§17.704), so the regen doesn't read as a hang. Covers both the NL `set_env` turn and `/assist env`.
+
+**Verification.** `test_scaffold_router_assist_guide.py` (+3): an update with a live step re-renders (force=True, correct node_key); no live step → confirm only; a read (`show`) never re-renders. Suite 47 passed. Pipelines restarted (clean, healthy).
+
+---
+
 ### §17.705 Fix — a pasted shell transcript is recognized as the step's result (deterministic), so nothing is lost mid-assist (2026-08-02)
 
 **Report.** "It could not tell the user was feeding copy-pasted info from a shell through the Proxmox VE. It also was still not properly keeping track of everything." Live session `798019a1` was parked at T1 ("Audit current system state", presented, **no evidence**) — the operator had pasted the audit output but it was never recorded.
