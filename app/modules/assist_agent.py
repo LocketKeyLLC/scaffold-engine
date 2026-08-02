@@ -1765,6 +1765,13 @@ async def _resolve_live_node_key(
     return healed
 
 
+# §17.702 — assist work is operator-executed on real systems, so it clears the
+# exemplar grounding floor by construction (unlike unverified autonomous LLM
+# output, which the 0.85 floor exists to filter). High but not 1.0 so a stricter
+# floor can still be set to opt assist work out.
+_ASSIST_EXEMPLAR_GROUNDING = 0.9
+
+
 async def _maybe_finalize_session(*, session_id: str, db) -> None:
     """If all steps are terminal, mark session + job completed."""
     incomplete = (await db.execute(
@@ -1830,6 +1837,37 @@ async def _maybe_finalize_session(*, session_id: str, db) -> None:
             await persist_job_artifacts(
                 str(sess["job_id"]), db, deliverable_kind=kind,
             )
+            # §17.702 — feed the learning flywheel from ASSIST too. A component
+            # finished in assist mode is OPERATOR-EXECUTED on real systems — the
+            # strongest kind of "proven solution" the exemplar corpus wants — but
+            # the flywheel hook lived ONLY on the autonomous execution path
+            # (execution_agent), so the operator's whole workflow never became a
+            # reusable exemplar even with the valve on. Operator-grounded ⇒ pass a
+            # high grounding score; maybe_ingest_exemplar still gates on the opt-in
+            # valve + plan_only/empty-output. Gate on ≥1 committed step so a
+            # walk that was entirely skipped (no real executed work) isn't learned.
+            try:
+                committed = (await db.execute(
+                    text("SELECT count(*) FROM assist_steps "
+                         "WHERE session_id = :sid AND status = 'committed'"),
+                    {"sid": session_id},
+                )).scalar() or 0
+                if committed:
+                    _dom = (await db.execute(
+                        text("SELECT refined_brief->>'domain' FROM jobs WHERE id = :jid"),
+                        {"jid": sess["job_id"]},
+                    )).scalar() or "eng"
+                    from app.modules.flywheel import maybe_ingest_exemplar
+                    await maybe_ingest_exemplar(
+                        job_id=str(sess["job_id"]), compiled_output=compiled,
+                        deliverable_kind=kind,
+                        grounding_score=_ASSIST_EXEMPLAR_GROUNDING, domain=_dom,
+                    )
+            except Exception as e:  # noqa: BLE001 — ingest is best-effort
+                logger.warning(
+                    "assist_exemplar_ingest_failed job_id=%s err=%s",
+                    sess["job_id"], e,
+                )
     except Exception as e:  # noqa: BLE001 — finalization must survive compile errors
         logger.warning(
             "assist_compile_failed session_id=%s job_id=%s err=%s",

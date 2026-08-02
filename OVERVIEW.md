@@ -22049,6 +22049,25 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.702 Change — enable the learning flywheel AND wire it into the assist path (a completed project becomes a reusable exemplar) (2026-08-02)
+
+**Ask.** "Enable [RAG ingest of completed work], and anything else that will assist." Enabling the valve alone would have done NOTHING for this operator: `maybe_ingest_exemplar` (the flywheel hook, `flywheel.py`) was called ONLY from the autonomous `execution_agent` completion path (execution_agent.py:995) — but this operator's entire workflow completes in ASSIST mode, whose finalizer (`assist_agent._maybe_finalize_session`) never fed the flywheel. Same class of assist-vs-autonomous gap as §17.701.
+
+**Changes.**
+1. **Enabled the valve** — `EXEMPLAR_INGEST_ENABLED: "${EXEMPLAR_INGEST_ENABLED:-true}"` (+ `EXEMPLAR_MIN_GROUNDING:-0.85`) in the orchestrator `environment:` block (docker-compose.yml). Live: `settings.exemplar_ingest_enabled = True`.
+2. **Wired assist completion into the flywheel** — `_maybe_finalize_session` now calls `maybe_ingest_exemplar` after compiling the deliverable + persisting artifacts, gated on ≥1 committed step (a fully-skipped walk has no executed work to learn from). Assist work is OPERATOR-EXECUTED on real systems — the strongest "proven solution" the corpus wants — so it passes a high grounding score `_ASSIST_EXEMPLAR_GROUNDING = 0.9` (clears the 0.85 floor by construction; a stricter floor can still opt it out). Domain comes from `refined_brief->>'domain'` (default eng). Component-level (each decomposed component is a self-contained buildable deliverable); the umbrella stitch is not re-ingested. Best-effort — an ingest failure never blocks finalization.
+3. **Registered the `exemplar` TTL** — added `"exemplar": 365 * 86400` to `config.TTL_POLICY` (proven solutions live long, like `curated`), which also silences the `staleness_unknown_source_type` warning `get_ttl_for_source` logged on every exemplar ingest.
+
+Retrieval already existed: `dag_generator` injects `source_type='exemplar'` matches as few-shot into DAG planning (post-filtered so the RAG hot path is untouched) — so future related builds now benefit from this operator's real, executed runbooks.
+
+**Verification (live).** Valve `True` after `compose up -d`. Direct `maybe_ingest_exemplar(grounding=0.9, kind='assist_completed')` on a sample Proxmox runbook → `attempted=True`, Milvus `entry_count 2943 → 2944`. `get_ttl_for_source('exemplar')` = 365d, no warning. Suites green: assist_agent + decomposition + flywheel (48). Orchestrator recreated for the env (+ restarted for the TTL); live.
+
+**Note for the operator.** Ingest is quality-gated by `EXEMPLAR_MIN_GROUNDING` (0.85) and only fires for real executed work; raise the floor or set `EXEMPLAR_INGEST_ENABLED=false` in `.env` to opt back out. Exemplars auto-expire after 365 days (re-ingested on re-run).
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.701 Fix — a parked umbrella re-completes after its components finish via assist; + children-snapshot sync + execution-context capture (2026-08-02)
 
 **Context.** A "confirm proper operation + retention of a project" audit of the live homelab umbrella (`956d33c6` + 4 components). Retention itself is SOUND — direct verification: brief/evidence/`dag_nodes.output_text` (mirror invariant)/learned substitutions (`USERNAME=ceph`)/decisions all durable in Postgres, and a **live orchestrator restart** left the session byte-identical and resumable (re-presented T7 with retained upstream). But the audit surfaced one real operational bug and two improvements.

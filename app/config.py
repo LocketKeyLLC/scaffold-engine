@@ -88,6 +88,11 @@ TTL_POLICY = {
     "curated": 365 * 86400,
     "official_docs": 365 * 86400,
     "ai_generated": 180 * 86400,
+    # §17.702 — exemplar: a completed project's deliverable, ingested by the
+    # learning flywheel. Operator-executed / high-grounding proven solutions, so
+    # a long TTL like curated docs (also silences the per-ingest unknown-source
+    # warning from get_ttl_for_source).
+    "exemplar": 365 * 86400,
     "release_notes": 365 * 86400,
     "test_code": 365 * 86400,
     "ci_config": 365 * 86400,

@@ -306,6 +306,12 @@ services:
       SCAFFOLD_AUTH_DISABLED: "${SCAFFOLD_AUTH_DISABLED:-0}"
       SCHEDULER_ENABLED: "true"
       SCHEDULER_TIMEZONE: "UTC"
+      # §17.702 — learning flywheel: ingest a completed project's deliverable as
+      # a retrievable RAG exemplar so future related builds get it as a few-shot.
+      # Default-on here; EXEMPLAR_MIN_GROUNDING (0.85) still gates quality, and
+      # both are overridable from .env.
+      EXEMPLAR_INGEST_ENABLED: "${EXEMPLAR_INGEST_ENABLED:-true}"
+      EXEMPLAR_MIN_GROUNDING: "${EXEMPLAR_MIN_GROUNDING:-0.85}"
     env_file:
       - .env
     volumes:
