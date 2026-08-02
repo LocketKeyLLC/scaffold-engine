@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.705 Fix — a pasted shell transcript is recognized as the step's result (deterministic), so nothing is lost mid-assist (2026-08-02)
+
+**Report.** "It could not tell the user was feeding copy-pasted info from a shell through the Proxmox VE. It also was still not properly keeping track of everything." Live session `798019a1` was parked at T1 ("Audit current system state", presented, **no evidence**) — the operator had pasted the audit output but it was never recorded.
+
+**Diagnosis.** A conversational (non-slash) message in an active session routes through `assist_nl_turn` → `fast_classify_turn` (short verbs only) → the **LLM turn-classifier** (`classify_turn`). A raw shell paste has no verb, so it fell to the LLM, which misread the Proxmox audit output as a `question`/`ask` and re-rendered the step — so the paste was never committed as T1's evidence (nothing "tracked"), and because it never reached `/assist/{sid}/submit`, the §17.703 execution-context capture never ran on it either. This is the §17.679 pattern again: **an unreliable LLM classifier where a deterministic signal exists.** (The operator's `environment.profile` WAS set — "root@pve through the web browser" — via a correctly-classified `set_env` on a different message; that half worked.)
+
+**Fix (pipeline, deterministic).** New `_looks_like_shell_evidence(msg)` in `pipelines/_vendor/_assist_handlers.py`, anchored on a real prompt line (`_SHELL_PROMPT_LINE_RE`, same shape as the server's `_SHELL_PROMPT_RE`). `assist_nl_turn` now pre-empts the LLM classifier: when `fast_classify_turn` misses and the message is a pasted shell transcript, route to `submit` with the transcript as evidence. Conservative — a paste that ENDS on a question ("…but which pool?") is left to the classifier (genuine ask/fix). Compounding value: the submit path records the evidence (walkthrough advances), captures/keeps the root@pve context (§17.703), AND learns concrete values from the output for later steps' placeholders (§17.490) — which is itself part of the operator's "keep a list and fill it in as info comes" request.
+
+**Verification.** `test_assist_nl_turns.py` (+7): detector positives (prompt line present) / negatives (prose, email-like `user@host`, paste-ending-in-question, empty); routing test proves a shell paste hits `assist_submit` with the full transcript as evidence and **never** calls the classifier. Suite 77 passed. Pipelines restarted (clean, healthy).
+
+**Known, deferred (surfaced to the operator).** (1) T1's guidance still hedges ("SSH or web shell", "open a terminal") because it was cached BEFORE the profile was set, and `assist_env_cmd` doesn't re-render the current step on an env change — so a mid-step `set_env` isn't reflected until a forced re-render. (2) A first-class per-step GATHER/checklist that accumulates operator-provided pieces across several chat messages (the operator's explicit "create a list of what it needs, then fill components as they come" idea) generalizes §17.689/§17.690 beyond decision/gather nodes. Both proposed as follow-ups.
+
+---
+
 ### §17.704 UX — a slow assist step is now VISIBLE instead of looking like a timeout (2026-08-02)
 
 **Report.** "I attempted a fresh build, except this time the orchestrator timed out." Investigation (job set created 16:13, umbrella + 5 components):

@@ -1702,6 +1702,37 @@ def _pivot_kind(msg: str) -> str:
     return "preference" if _GLOBAL_CHANGE_RE.search(msg or "") else "decision"
 
 
+# §17.705 — a pasted shell prompt line (root@pve:~# …). Anchored to the START of
+# a line so an email-like `user@host` in prose doesn't match. Same shape as the
+# server-side `_SHELL_PROMPT_RE` (assist_agent) that captures execution context.
+_SHELL_PROMPT_LINE_RE = re.compile(
+    r"(?m)^\s*[A-Za-z_][\w.-]*@[\w.-]+:[^\n#$]*[#$]"
+)
+
+
+def _looks_like_shell_evidence(msg: str) -> bool:
+    """§17.705 — deterministic: is this message a pasted shell transcript the
+    operator is reporting as the current step's RESULT (not a question)?
+
+    Anchored on a real prompt line (`root@pve:~# …`) — the strongest, lowest-
+    false-positive signal, and the same one the server uses to learn the
+    execution context. This exists because the LLM turn-classifier misroutes a
+    raw paste (it read the operator's Proxmox audit output as a `question`/`ask`
+    and re-rendered the step, so the paste was never recorded and the operator's
+    root@pve context was never captured — §17.679's lesson: prefer a
+    deterministic gate over re-tuning the classifier).
+
+    Conservative: if the paste ENDS on a question ("…here's the output, but which
+    pool?") it's left to the classifier — that's a genuine ask/fix, not a plain
+    submit."""
+    if not msg or not _SHELL_PROMPT_LINE_RE.search(msg):
+        return False
+    lines = [ln for ln in msg.strip().splitlines() if ln.strip()]
+    if lines and lines[-1].rstrip().endswith("?"):
+        return False
+    return True
+
+
 # §17.689 — deterministic backstop: a confirmation of a proposed decision the
 # classifier read as a bare question still routes to submit (→ deliberation
 # resolves + commits). Confirmations only — a made choice like "3 vlans" already
@@ -1774,6 +1805,16 @@ def assist_nl_turn(
     intent = fast_classify_turn(msg)
     evidence, error_text, query, note_text, note_kind = "", "", "", "", "note"
     is_collect = False
+    # §17.705 — deterministic pre-empt: a pasted shell transcript IS the operator
+    # reporting this step's result. Recognize it BEFORE the (unreliable) LLM
+    # classifier so it is always recorded as evidence — and so the submit path
+    # captures/keeps the root@pve execution context (§17.703) and learns concrete
+    # values from the output for later steps (§17.490). The reported failure was
+    # exactly this: a Proxmox audit paste read as a `question` and re-rendered,
+    # so nothing was tracked. §17.679 lesson: deterministic gate over the LLM.
+    if intent is None and _looks_like_shell_evidence(msg):
+        intent = "submit"
+        evidence = msg.strip()
     if intent is None:
         d = assist_interpret(pipe, session_id, msg, node_key=node_key, history=history)
         intent = d.get("intent") or "question"

@@ -149,6 +149,45 @@ def test_submit_without_node_key_pulls_next(pipe):
     stubs["assist_submit"].assert_not_called()
 
 
+# ── §17.705: pasted shell transcript → submit (deterministic, no classifier) ──
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("msg", [
+    "root@pve:~# qm list\n VMID NAME STATUS\n 100 vm1 running",
+    "  root@pve:/etc/pve# cat storage.cfg\ndir: local\n    path /var/lib/vz",
+    "root@pve:~$ zfs list\nNAME   USED  AVAIL\nrpool  2.1G  100G",
+])
+def test_looks_like_shell_evidence_positive(msg):
+    assert _ah._looks_like_shell_evidence(msg)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("msg", [
+    "how do I list the VMs?",
+    "I think I'm on ubuntu 24.04",
+    "what does root@pve mean?",                                   # no prompt line
+    "root@pve:~# qm list\nVMID NAME\n... but which one do I remove?",  # ends on ?
+    "",
+])
+def test_looks_like_shell_evidence_negative(msg):
+    assert not _ah._looks_like_shell_evidence(msg)
+
+
+@pytest.mark.smoke
+def test_shell_paste_routes_to_submit_without_classifier(pipe):
+    # The reported failure: a Proxmox audit paste was read as a question and
+    # re-rendered, never recorded. It must deterministically submit — no LLM.
+    paste = ("root@pve:~# pveum user list\nUSER            \nroot@pam\n"
+             "root@pve:~# qm list\n VMID NAME STATUS")
+    out, stubs, interp = _route(pipe, paste)
+    assert "SUBMIT" in out
+    interp.assert_not_called()                    # deterministic gate — no LLM round-trip
+    args, kwargs = stubs["assist_submit"].call_args
+    assert args[2] == "T1"                         # recalled current step
+    assert args[3] == paste.strip()                # the whole transcript is the evidence
+
+
 # ── match_assist_candidate ────────────────────────────────────────────────
 
 
