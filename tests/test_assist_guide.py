@@ -757,6 +757,51 @@ async def test_distill_facts_parses_and_bounds():
     assert all(len(f) <= 300 for f in out)      # bounded
 
 
+def _grounding_resp(contradicts, reason="", success=True):
+    r = MagicMock()
+    r.success = success
+    r.text = ""
+    if success:
+        call = MagicMock()
+        call.arguments = {"contradicts": contradicts, "reason": reason}
+        r.tool_calls = [call]
+    else:
+        r.tool_calls = []
+    return r
+
+
+@pytest.mark.asyncio
+async def test_check_grounding_flags_contradiction():
+    env = {"profile": "", "substitutions": {},
+           "facts": ["Existing Proxmox VE 9.2.6 (not a fresh install)"]}
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_grounding_resp(
+                          True, "assumes a fresh install but host is existing PVE 9.2.6"))):
+        out = await assist_guide.check_grounding(
+            evidence="Assumption: fresh Proxmox VE server — no stale accounts.", environment=env)
+    assert out["contradicts"] is True
+    assert "fresh" in out["reason"]
+
+
+@pytest.mark.asyncio
+async def test_check_grounding_noop_without_memory():
+    # No facts/profile/subs/notes → no memory to check → no LLM call.
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:
+        out = await assist_guide.check_grounding(
+            evidence="anything", environment={"profile": "", "substitutions": {}, "facts": []})
+    assert out["contradicts"] is False
+    tc.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_grounding_failsoft():
+    env = {"facts": ["Existing PVE"], "substitutions": {}, "profile": ""}
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(side_effect=RuntimeError("model down"))):
+        out = await assist_guide.check_grounding(evidence="x", environment=env)
+    assert out["contradicts"] is False
+
+
 @pytest.mark.asyncio
 async def test_distill_facts_empty_evidence_skips_llm():
     with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:

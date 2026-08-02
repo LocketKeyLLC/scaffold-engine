@@ -1086,6 +1086,13 @@ def assist_submit(
         bullets = "\n".join(f"- {f}" for f in shown)
         more = f"\n_(+{len(facts) - len(shown)} more)_" if len(facts) > len(shown) else ""
         msg += f"\n\n🧠 **Noted about your system** (later steps will use this):\n{bullets}{more}"
+    # §17.710c — warn-only grounding gate: the result looks inconsistent with
+    # what we already know. Non-blocking (recorded), just a heads-up.
+    grounding = d.get("grounding_warning") or {}
+    if grounding.get("reason"):
+        msg += (f"\n\n⚠️ **Heads up — this looks inconsistent with what I know "
+                f"about your system:** {grounding['reason']}\n"
+                f"_Recorded anyway — double-check if that's not what you meant._")
     # §17.703 — confirm the operator's execution context so they see it stuck
     # (and can correct it if a stray prompt was mis-read).
     ctx = d.get("execution_context") or {}

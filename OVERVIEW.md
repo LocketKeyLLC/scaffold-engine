@@ -22049,6 +22049,21 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.710c Feature — unified session memory, Stage C: warn-only grounding gate (2026-08-02)
+
+**Why.** Stages A/B get the facts captured and in front of the model; the grounding gate closes the loop — it catches the model IGNORING them. A committed result that contradicts known memory (the classic: a decision that "Assumes: Fresh Proxmox VE server" when memory says an existing PVE 9.2.6) gets a non-blocking heads-up instead of sliding through silently.
+
+**Changes (behind `assist_umem_grounding`; warn-only, per the plan).**
+- `assist_guide.check_grounding(evidence, environment, operator_notes)` — `model_general` (reasoning task, not the verifier; cf. §17.677) checks the result against `render_session_memory`. Conservative: flags ONLY a genuine conflict with a known fact (default `contradicts=false` when unsure); no-op with no memory; fail-soft. `_RECORD_GROUNDING_TOOL` / `_GROUNDING_SYSTEM`.
+- `assist_agent.check_submit_grounding` — orchestrates it over the session's environment (facts/provided/profile) + notes. Runs in the submit router on a committed submit, **before** `capture_session_facts` folds in this submit's own facts (so a result can't be judged consistent with its own claims). Returns `{reason}` only on contradiction.
+- Router attaches `grounding_warning` to the submit response; pipeline renders "⚠️ Heads up — this looks inconsistent with what I know about your system: <reason>. Recorded anyway — double-check…" Non-blocking (§17.708 style).
+
+**Verification. LIVE A/B (load-bearing):** with facts "existing PVE 9.2.6 (NOT fresh)", a result asserting *"Assumption: Fresh Proxmox VE server — no stale accounts"* → `contradicts=True` with a precise reason; a consistent result ("reviewed users on the existing host, removed the old deploy account") → `contradicts=False`. Unit: contradiction flagged, no-memory no-op (no LLM call), fail-soft; `check_submit_grounding` valve-off no-op / reason-on-contradiction / none-when-consistent; pipeline renders the warn. Suites 186 green; ci-tier-0 green; restarted, health 200. Gated off by default.
+
+**Next:** §17.710d — surface memory in `/assist checklist` + `/status`, then flip the master valve after live end-to-end validation, and retire the redundant legacy retention channels once the unified path is proven.
+
+---
+
 ### §17.710b Feature — unified session memory, Stage B: one consolidated memory block, one injection path (2026-08-02)
 
 **Why.** Stage A made capture lossless; Stage B collapses the scattered *injection* into one path. Today retained signals reach prompts through separate renderers wired inconsistently across sites (`render_environment_block` + `render_operator_notes_block` in guidance and deliberation; env-only in verify). A new signal has to be wired into each site by hand — the same "many narrow channels" fragility, on the read side. Stage B routes them all through one renderer so "retained → actually used" no longer depends on which prompt path you're in.

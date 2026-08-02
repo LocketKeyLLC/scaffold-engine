@@ -601,6 +601,52 @@ async def test_ingest_turn_failsoft():
     assert out is False
 
 
+# ── §17.710c: check_submit_grounding (warn-only gate) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_check_submit_grounding_noop_when_valve_off():
+    db = AsyncMock()
+    with patch.object(_settings, "assist_unified_memory_enabled", False):
+        out = await assist_agent.check_submit_grounding(
+            session_id="s", node_key="T1", evidence="x", db=db)
+    assert out is None
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_check_submit_grounding_returns_reason_on_contradiction():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result({"notes": []}))
+    with patch.object(_settings, "assist_unified_memory_enabled", True), \
+         patch.object(_settings, "assist_umem_grounding", True), \
+         patch.object(assist_agent, "get_environment",
+                      new=AsyncMock(return_value={"facts": ["Existing PVE 9.2.6"],
+                                                  "substitutions": {}, "profile": ""})), \
+         patch("app.modules.assist_guide.check_grounding",
+               new=AsyncMock(return_value={"contradicts": True, "reason": "assumes fresh"})):
+        out = await assist_agent.check_submit_grounding(
+            session_id="s", node_key="T1",
+            evidence="Assumption: fresh Proxmox VE server", db=db)
+    assert out == {"reason": "assumes fresh"}
+
+
+@pytest.mark.asyncio
+async def test_check_submit_grounding_none_when_consistent():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result({"notes": []}))
+    with patch.object(_settings, "assist_unified_memory_enabled", True), \
+         patch.object(_settings, "assist_umem_grounding", True), \
+         patch.object(assist_agent, "get_environment",
+                      new=AsyncMock(return_value={"facts": ["x"],
+                                                  "substitutions": {}, "profile": ""})), \
+         patch("app.modules.assist_guide.check_grounding",
+               new=AsyncMock(return_value={"contradicts": False})):
+        out = await assist_agent.check_submit_grounding(
+            session_id="s", node_key="T1", evidence="looks fine", db=db)
+    assert out is None
+
+
 # ── §17.493: generate_step_guidance_stream ─────────────────────────────────
 
 

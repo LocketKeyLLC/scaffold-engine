@@ -1498,6 +1498,87 @@ async def distill_facts(
     return out
 
 
+# ── Grounding gate (§17.710c — warn when a result contradicts memory) ───────
+
+_RECORD_GROUNDING_TOOL = model_router.Tool(
+    name="record_grounding",
+    description=(
+        "Report whether the operator's step result CONTRADICTS what's already "
+        "known about their system (the session memory)."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "contradicts": {
+                "type": "boolean",
+                "description": (
+                    "True ONLY if the result states or assumes something that "
+                    "conflicts with a KNOWN fact — e.g. it assumes a fresh/empty "
+                    "system when memory says an existing one, or names a value "
+                    "that conflicts with a provided value. Adding NEW information, "
+                    "normal progress, or anything memory doesn't speak to is NOT "
+                    "a contradiction."
+                ),
+            },
+            "reason": {
+                "type": "string",
+                "description": "One short sentence naming the conflict. Omit if not contradicts.",
+            },
+        },
+        "required": ["contradicts"],
+    },
+)
+
+_GROUNDING_SYSTEM = (
+    "You check whether a human operator's step result is CONSISTENT with what is "
+    "already known about their system. You are given the session memory (observed "
+    "facts, provided values, notes) and the operator's result for this step. Flag "
+    "a contradiction ONLY when the result conflicts with a known fact — most "
+    "often assuming a fresh/empty system when memory shows an existing one. Be "
+    "conservative: adding new info or anything memory is silent on is NOT a "
+    "contradiction; default to contradicts=false when unsure. Call record_grounding once."
+)
+
+
+async def check_grounding(
+    *, evidence: str, environment: dict | None,
+    operator_notes: list[dict] | None = None, role: str = "model_general",
+) -> dict:
+    """§17.710c — warn-only grounding check. Does ``evidence`` contradict the
+    session memory? Returns ``{contradicts: bool, reason: str}``. A reasoning
+    task → ``model_general`` (not the verifier; cf. §17.677). Fail-soft →
+    ``{contradicts: False}``; no-op (same) when there's no memory to check
+    against."""
+    memory = render_session_memory(environment, operator_notes)
+    if not memory or not (evidence or "").strip():
+        return {"contradicts": False}
+    try:
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": _GROUNDING_SYSTEM},
+                {"role": "user", "content": (
+                    f"{memory}\n\n## Operator's result for this step\n"
+                    f"{evidence[:6000]}\n\nCall record_grounding."
+                )},
+            ],
+            tools=[_RECORD_GROUNDING_TOOL],
+            role=role,
+            temperature=0.0,
+            tool_choice="auto",
+            max_tokens=1024,
+        )
+    except Exception as exc:  # noqa: BLE001 — a flaky gate must never block a submit
+        logger.warning("assist_grounding_check_failed: %s", exc)
+        return {"contradicts": False}
+    args = read_tool_args(resp)
+    if not args or "contradicts" not in args:
+        return {"contradicts": False}
+    return {
+        "contradicts": bool(args.get("contradicts")),
+        "reason": (args.get("reason") or "").strip(),
+    }
+
+
 # ── Destructive-command safety gate (§17.492) ──────────────────────────────
 
 # High-confidence, command-context-anchored patterns only — a destructive

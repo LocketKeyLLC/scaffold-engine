@@ -651,6 +651,21 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
                     result["learned_substitutions"] = learned
             except Exception:  # never fail a submit on the learn step
                 pass
+        # §17.710c — warn-only grounding gate. BEFORE capturing this submit's own
+        # facts, check the result against prior memory; a contradiction (e.g. a
+        # decision assuming a fresh host when memory says an existing one)
+        # surfaces a non-blocking warning. No-op unless the grounding valve is on.
+        if (body.action == "submit"
+                and isinstance(result, dict) and result.get("status") == "committed"):
+            try:
+                grounding = await assist_agent.check_submit_grounding(
+                    session_id=session_id, node_key=body.node_key,
+                    evidence=body.output, db=db,
+                )
+                if grounding:
+                    result["grounding_warning"] = grounding
+            except Exception:  # never fail a submit on the grounding gate
+                pass
         # §17.709 — distill durable facts about the operator's system from this
         # submit into the session facts ledger (the retention layer placeholder
         # learning misses — an audit/inventory step has real state but no

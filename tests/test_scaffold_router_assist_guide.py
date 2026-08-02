@@ -482,6 +482,18 @@ class TestSubmitLearnedSubstitutions:
             out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
         assert "Learned for later steps" not in out
 
+    def test_submit_surfaces_grounding_warning(self, pipe):
+        # §17.710c — a contradiction with known memory surfaces a non-blocking warning.
+        pipe.valves.assist_auto_advance = False
+        body = {"status": "committed", "no_op": False, "next_node_key": "T3",
+                "mirror_divergence": False,
+                "grounding_warning": {"reason": "assumes a fresh install but host is existing PVE 9.2.6"}}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T2", "done", chat_id=None))
+        assert "looks inconsistent with what I know" in out
+        assert "existing PVE 9.2.6" in out
+        assert "Recorded anyway" in out            # warn-only, not blocked
+
     def test_submit_surfaces_captured_facts(self, pipe):
         # §17.709 — durable facts distilled from the submit are surfaced.
         pipe.valves.assist_auto_advance = False

@@ -1427,6 +1427,49 @@ async def capture_session_facts(
         return []
 
 
+async def check_submit_grounding(
+    *, session_id: str, node_key: str, evidence: str, db,
+) -> Optional[dict]:
+    """§17.710c — warn-only grounding gate. Does this submit's result contradict
+    what we already know about the operator's system? Reads the session
+    environment (facts/provided/profile) + notes as memory, asks the grounding
+    checker, and returns ``{reason}`` ONLY on a contradiction (else None) so the
+    caller can surface a non-blocking warning. Gated on the master + grounding
+    valves; fail-soft. Run BEFORE this submit's own facts are folded in, so the
+    result can't be judged consistent with its own claims."""
+    from app.config import settings
+    from app.modules import assist_guide
+
+    if not (settings.assist_unified_memory_enabled and settings.assist_umem_grounding):
+        return None
+    if not (evidence or "").strip():
+        return None
+    try:
+        env = await get_environment(session_id=session_id, db=db) or {}
+        notes = None
+        sess = (await db.execute(
+            text("SELECT notes FROM assist_sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).mappings().first()
+        if sess:
+            notes = _coerce_notes(sess.get("notes"))
+        verdict = await assist_guide.check_grounding(
+            evidence=evidence, environment=env, operator_notes=notes,
+        )
+        if verdict.get("contradicts"):
+            logger.info(
+                "assist_grounding_contradiction session_id=%s node_key=%s reason=%r",
+                session_id, node_key, verdict.get("reason"),
+            )
+            return {"reason": verdict.get("reason") or ""}
+        return None
+    except Exception as e:  # noqa: BLE001 — never block a submit on the gate
+        logger.debug(
+            "check_submit_grounding_failed session_id=%s err=%r", session_id, e,
+        )
+        return None
+
+
 # ── Unified session memory (§17.710a — lossless raw capture) ──────────────
 
 
