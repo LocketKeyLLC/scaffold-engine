@@ -36,6 +36,7 @@ import queue as _q
 import re
 import sys
 import threading as _th
+import time
 from typing import Generator
 
 import requests
@@ -1222,16 +1223,39 @@ def assist_guide_stream_cmd(
     sse_const = _sse_events_const(pipe)
     started = False
     got_text = False
+    # §17.704 — visible progress while the FIRST token is pending. The research
+    # pre-pass (Milvus rerank + web fetch) runs server-side before any delta, and
+    # on a research-heavy step that is tens of seconds to a couple of minutes of
+    # silence — during which this loop only saw queue-empties / SSE keepalives and
+    # emitted an invisible ZWSP, so the operator read it as a hang / timeout.
+    # Now the wait is surfaced: a one-time notice, then a ~10 s elapsed trail.
+    # Self-gating — a fast or cached step yields its first delta before the
+    # keepalive timeout, so nothing below fires. Once content starts we revert to
+    # the ZWSP so the trail never clutters the walkthrough.
+    wait_started_at = None
+
+    def _waiting_notice():
+        nonlocal wait_started_at
+        if started:
+            return "​"
+        if wait_started_at is None:
+            wait_started_at = time.monotonic()
+            return (
+                "\n🔎 _Preparing this step — gathering references and drafting the "
+                "walkthrough. A research-heavy step can take up to a minute…_\n"
+            )
+        return f"\n_…still working ({int(time.monotonic() - wait_started_at)}s elapsed)…_"
+
     try:
         while True:
             try:
                 msg_type, f1, f2 = q.get(timeout=pipe.valves.keepalive_interval)
             except _q.Empty:
-                yield "​"; continue
+                yield _waiting_notice(); continue
             if msg_type == "connected":
                 continue
             if msg_type == "heartbeat":
-                yield "​"; continue
+                yield _waiting_notice(); continue
             if msg_type == "http_error":
                 yield f"❌ HTTP {f1}: {(f2 or '')[:200]}"; return
             if msg_type == "error":

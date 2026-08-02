@@ -4,6 +4,8 @@ Covers the /assist guide + /assist research dispatch, the auto-guide trigger
 on /assist next, and the render_guidance / render_research formatters. The
 orchestrator HTTP calls are stubbed (no live services). Run with --noconftest.
 """
+import json
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -124,6 +126,59 @@ class TestAutoGuideTrigger:
              patch.object(_vendor, "assist_guide_cmd", side_effect=AssertionError):
             out = "".join(_vendor.assist_next(pipe, _SID, chat_id=None))
         assert "T2" in out  # step still rendered, just no walkthrough
+
+
+# ── §17.704: visible progress while the first token is pending ──────────────
+
+
+class TestGuideStreamProgress:
+    """A research-heavy step is silent server-side (Milvus rerank + web fetch)
+    before the first delta. The stream consumer must surface that wait instead
+    of emitting an invisible ZWSP, so the operator doesn't read it as a hang."""
+
+    @staticmethod
+    def _sse(pipe):
+        return type(pipe).pipe.__globals__["_SSE"]
+
+    def test_progress_notice_and_trail_before_first_token(self, pipe):
+        SSE = self._sse(pipe)
+        pipe.valves.keepalive_interval = 0.05  # short so Empty ticks are cheap
+
+        def fake_reader(url, body, q, *, stop_event=None, r_holder=None):
+            time.sleep(0.16)  # simulate the research pre-pass silence (≥2 ticks)
+            q.put(("event", SSE.ASSIST_GUIDE_DELTA,
+                   json.dumps({"text": "Run `pveversion`."})))
+            q.put(("event", SSE.ASSIST_GUIDE_DONE,
+                   json.dumps({"status": "ready", "guidance_meta": {}, "cached": False})))
+            q.put(("done", None, None))
+
+        with patch.object(pipe, "_stream_sse_to_queue", side_effect=fake_reader):
+            out = "".join(_vendor.assist_guide_stream_cmd(pipe, _SID, node_key="T1"))
+
+        assert "Preparing this step" in out          # one-time notice fired
+        assert "elapsed" in out                       # elapsed trail on later ticks
+        assert "Run `pveversion`." in out             # content still streamed after
+        assert "How to do this step" in out           # heading rendered normally
+
+    def test_no_progress_when_first_token_is_immediate(self, pipe):
+        # Self-gating: a fast/cached step yields its first delta before the
+        # keepalive timeout, so the notice never fires. A large keepalive means
+        # the consumer's get() blocks until content arrives (no Empty tick).
+        SSE = self._sse(pipe)
+        pipe.valves.keepalive_interval = 30
+
+        def fake_reader(url, body, q, *, stop_event=None, r_holder=None):
+            q.put(("event", SSE.ASSIST_GUIDE_DELTA, json.dumps({"text": "Immediate."})))
+            q.put(("event", SSE.ASSIST_GUIDE_DONE,
+                   json.dumps({"status": "ready", "guidance_meta": {}, "cached": False})))
+            q.put(("done", None, None))
+
+        with patch.object(pipe, "_stream_sse_to_queue", side_effect=fake_reader):
+            out = "".join(_vendor.assist_guide_stream_cmd(pipe, _SID, node_key="T1"))
+
+        assert "Preparing this step" not in out
+        assert "elapsed" not in out
+        assert "Immediate." in out
 
 
 # ── formatters ─────────────────────────────────────────────────────────────
