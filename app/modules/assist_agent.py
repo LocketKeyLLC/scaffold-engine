@@ -1218,6 +1218,34 @@ async def set_environment(
     return current
 
 
+# §17.701 — a pasted interactive-shell prompt (e.g. `root@pve:~#`) reveals the
+# operator's ACTUAL execution context: one interactive shell on a named host
+# (typically the Proxmox web console). Anchored on a leading prompt line so it
+# doesn't fire on prose that merely mentions an email-like `user@host`.
+_SHELL_PROMPT_RE = re.compile(r"(?m)^\s*([A-Za-z_][\w.-]*)@([\w.-]+):[^\n#$]*[#$]")
+
+
+def _detect_shell_context(evidence: str) -> Optional[str]:
+    """§17.701 — infer the operator's execution context from a pasted shell
+    prompt. Returns a concise profile string (recorded into
+    ``metadata.environment.profile``) when a prompt is present, else None.
+
+    Recording it makes later guidance single-shell-safe with the REAL host/user
+    (reinforcing §17.700's runbook rule at the per-session level): the model is
+    told the operator pastes a block into ONE shell on that host, not a
+    multi-terminal SSH setup."""
+    m = _SHELL_PROMPT_RE.search(evidence or "")
+    if not m:
+        return None
+    user, host = m.group(1), m.group(2)
+    return (
+        f"Operator runs commands as {user}@{host} in ONE interactive shell "
+        f"(the host's console / a single SSH session), pasting a command block "
+        f"and pasting the output back — NOT a multi-terminal setup. Keep every "
+        f"step runnable in that single shell."
+    )
+
+
 async def learn_from_submit(
     *, session_id: str, node_key: str, evidence: str, db,
 ) -> dict:
@@ -1229,8 +1257,33 @@ async def learn_from_submit(
     overwriting an operator-set or previously-learned value). Returns the dict
     of newly-learned values (for the caller to surface). Best-effort: any
     failure returns ``{}`` and never disturbs the submit.
+
+    §17.701 — also captures the operator's execution context (single interactive
+    shell) from a pasted prompt, once, when unset — independent of placeholder
+    substitutions.
     """
     from app.modules import assist_guide
+
+    # §17.701 — record the single-interactive-shell context from a pasted prompt
+    # (e.g. `root@pve:~#`) the first time we see one, when the profile is unset.
+    # Independent of the placeholder logic below (works off raw evidence), and
+    # fail-soft so it never disturbs the submit.
+    try:
+        ctx_profile = _detect_shell_context(evidence)
+        if ctx_profile:
+            _env = await get_environment(session_id=session_id, db=db) or {}
+            if not (_env.get("profile") or "").strip():
+                await set_environment(
+                    session_id=session_id, profile=ctx_profile, db=db,
+                )
+                logger.info(
+                    "assist_captured_shell_context session_id=%s node_key=%s",
+                    session_id, node_key,
+                )
+    except Exception as e:  # noqa: BLE001 — context capture must never break submit
+        logger.debug(
+            "shell_context_capture_failed session_id=%s err=%r", session_id, e,
+        )
 
     cached = await assist_guide.read_cached_guidance(
         session_id=session_id, node_key=node_key, db=db,
@@ -1782,6 +1835,25 @@ async def _maybe_finalize_session(*, session_id: str, db) -> None:
             "assist_compile_failed session_id=%s job_id=%s err=%s",
             session_id, sess["job_id"], e,
         )
+    # §17.701 — a component finished via assist must roll its umbrella up. The
+    # umbrella parked at 'awaiting_assist' when its children reached the hands-on
+    # gate; without this it stays there forever once every component is done via
+    # assist (the cleanup safety net only re-finalizes 'aggregating' umbrellas),
+    # so the unified whole-project deliverable would never assemble. Best-effort:
+    # a rollup failure must not block the operator's session from finalizing.
+    parent_id = (await db.execute(
+        text("SELECT parent_job_id FROM jobs WHERE id = :jid"),
+        {"jid": sess["job_id"]},
+    )).scalar()
+    if parent_id:
+        try:
+            from app.modules.decomposition import _rollup_umbrella
+            await _rollup_umbrella(db, str(parent_id))
+        except Exception as e:  # noqa: BLE001 — never block finalize on rollup
+            logger.warning(
+                "assist_umbrella_rollup_failed job_id=%s parent=%s err=%s",
+                sess["job_id"], parent_id, e,
+            )
     await db.commit()
     logger.info("assist_session_completed session_id=%s job_id=%s",
                 session_id, sess["job_id"])

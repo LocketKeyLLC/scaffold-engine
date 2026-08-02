@@ -220,10 +220,13 @@ class TestUmbrellaCompile:
         ]
         upd = MagicMock()
         upd.first.return_value = object()      # won the finalize race
+        # §17.701 — _rollup_umbrella first refreshes the children snapshot; a
+        # metadata SELECT whose .scalar() is None short-circuits that refresh.
+        rmeta = MagicMock(); rmeta.scalar.return_value = None
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[counts, title, kids, upd])
+        db.execute = AsyncMock(side_effect=[rmeta, counts, title, kids, upd])
         await dc._rollup_umbrella(db, "u")
-        params = db.execute.call_args_list[3].args[1]   # the UPDATE
+        params = db.execute.call_args_list[4].args[1]   # the UPDATE
         assert params["s"] == "completed"
         co = params["co"]
         assert "# KM System" in co
@@ -235,11 +238,12 @@ class TestUmbrellaCompile:
         counts = self._counts(2, 2, 0)        # all terminal, none completed
         upd = MagicMock()
         upd.first.return_value = object()
+        rmeta = MagicMock(); rmeta.scalar.return_value = None  # §17.701 refresh short-circuit
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[counts, upd])
+        db.execute = AsyncMock(side_effect=[rmeta, counts, upd])
         await dc._rollup_umbrella(db, "u")
-        assert db.execute.await_count == 2    # counts + UPDATE only; no compile SELECTs
-        params = db.execute.call_args_list[1].args[1]
+        assert db.execute.await_count == 3    # refresh + counts + UPDATE; no compile SELECTs
+        params = db.execute.call_args_list[2].args[1]
         assert params["s"] == "failed" and params["co"] is None
 
     async def test_lost_finalize_race_does_not_commit(self):
@@ -250,8 +254,9 @@ class TestUmbrellaCompile:
         kids.mappings.return_value.all.return_value = []
         upd = MagicMock()
         upd.first.return_value = None         # another caller already finalized
+        rmeta = MagicMock(); rmeta.scalar.return_value = None  # §17.701 refresh short-circuit
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[counts, title, kids, upd])
+        db.execute = AsyncMock(side_effect=[rmeta, counts, title, kids, upd])
         await dc._rollup_umbrella(db, "u")
         db.commit.assert_not_awaited()        # we lost the race -> no commit
 
@@ -288,10 +293,24 @@ class TestRollupUmbrella:
         assert db.execute.call_args_list[-1].args[1]["s"] == "awaiting_assist"
         db.commit.assert_awaited()
 
+    async def test_repromotes_from_awaiting_assist_when_last_component_done(self):
+        # §17.701 — once every component is done (none still awaiting), a parked
+        # umbrella re-completes. The UPDATE guard must accept 'awaiting_assist'
+        # (not just 'aggregating') and skip the no-op self-transition.
+        db = self._db_returning({"total": 2, "terminal": 2, "done": 2, "awaiting": 0})
+        await dc._rollup_umbrella(db, "umb")
+        upd = db.execute.call_args_list[-1]
+        sql = str(upd.args[0])
+        assert "awaiting_assist" in sql        # guard re-promotes a parked umbrella
+        assert "status <> :s" in sql           # skips awaiting_assist -> awaiting_assist churn
+        assert upd.args[1]["s"] == "completed"
+        db.commit.assert_awaited()
+
     async def test_noop_while_children_still_running(self):
         db = self._db_returning({"total": 3, "terminal": 2, "done": 1, "awaiting": 0})
         await dc._rollup_umbrella(db, "umb")
-        assert db.execute.call_count == 1          # SELECT only; no UPDATE
+        # §17.701 — refresh metadata SELECT + counts SELECT; still no UPDATE.
+        assert db.execute.call_count == 2
         db.commit.assert_not_awaited()
 
 

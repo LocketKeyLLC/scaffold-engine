@@ -22049,6 +22049,24 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.701 Fix — a parked umbrella re-completes after its components finish via assist; + children-snapshot sync + execution-context capture (2026-08-02)
+
+**Context.** A "confirm proper operation + retention of a project" audit of the live homelab umbrella (`956d33c6` + 4 components). Retention itself is SOUND — direct verification: brief/evidence/`dag_nodes.output_text` (mirror invariant)/learned substitutions (`USERNAME=ceph`)/decisions all durable in Postgres, and a **live orchestrator restart** left the session byte-identical and resumable (re-presented T7 with retained upstream). But the audit surfaced one real operational bug and two improvements.
+
+**Bug — the umbrella never completes when components are finished via assist.** `_maybe_finalize_session` marks a component `completed` (+ compiles its deliverable + persists artifacts) but never rolled the parent umbrella up. `_rollup_umbrella`'s promotion UPDATE was guarded `WHERE status = 'aggregating'`, and a decomposition parks the umbrella at `awaiting_assist` once its children hit the hands-on gate — so once parked, NOTHING re-finalized it (the cleanup safety net also only catches `aggregating`). Every component done via assist ⇒ umbrella stranded at `awaiting_assist` forever, whole-project deliverable never assembled. **Fix:** (1) `_maybe_finalize_session` now calls `_rollup_umbrella(parent)` when the finished job has a `parent_job_id` (best-effort, never blocks finalize); (2) the rollup guard is now `status IN ('aggregating','awaiting_assist') AND status <> :s` so a parked umbrella re-promotes awaiting_assist → completed (and skips no-op awaiting→awaiting churn while other components remain). **Live smoke (real DB, disposable umbrella + 2 children):** complete C1 → umbrella STAYS awaiting_assist; complete C2 → umbrella → completed with the unified deliverable assembled from BOTH outputs.
+
+**Improvement 1 — stale children snapshot.** `metadata.children[].status` was written once at decomposition (`'refining'`) and never synced (misled the audit; every USER-FACING surface already reads child status LIVE via `parent_job_id`, so impact was metadata-only). New `_refresh_umbrella_children_snapshot` rebuilds `children[].status` from live job rows on every rollup tick (preserves label/job_id/component_index), committing itself.
+
+**Improvement 2 — execution-context capture (reinforces §17.700).** `environment.profile` was empty, so the operator's "I paste into the Proxmox web console" context wasn't recorded. `learn_from_submit` now runs `_detect_shell_context` on submitted evidence: a pasted prompt like `root@pve:~#` (anchored to a leading prompt line so `john@example.com` prose doesn't trip it) records a concise single-interactive-shell profile (`root@pve`, one shell, paste-a-block) into `metadata.environment.profile` when unset — sharpening later guidance per-session. Live-verified end to end (empty → captured).
+
+**Deferred (surfaced, not fixed — operator's call):** cross-NEW-chat reconnection relies on `/assist/candidates` (OWUI sends no `chat_id`; the §17.538 durable fallback has nothing to key on) — an OWUI limitation; and completed-project artifacts are NOT ingested into the RAG corpus by default (`exemplar_ingest_enabled=false`, grounding floor 0.85) — a one-flag opt-in with corpus-quality tradeoffs, left to the operator.
+
+**Verification.** New `test_repromotes_from_awaiting_assist_when_last_component_done` + updated 4 rollup mocks for the refresh SELECT; `_detect_shell_context` unit-checked (matches real prompts, ignores prose). Suites green: decomposition (43) + assist_agent + note/divergence replan + prompt_assembly (125 total). Two live smokes (umbrella rollup, context capture) PASS. Orchestrator restarted (live).
+
+**§17.408 review shelf remaining:** `cleanup.py`, `assist_*`.
+
+---
+
 ### §17.700 Fix — runbook guidance is single-interactive-shell-safe (the operator pastes a block into the Proxmox web console) (2026-08-02)
 
 **Report.** "Again the engine could not distinguish that i was copy and pasting from the web browser terminal for the Proxmox VE server, and it was trying to make the PVE container when i was in it." Traced to assist session `3d8e22a4` (job `01a1c45e`, "Clean Proxmox Host for Fresh Deployment" — note §17.698 held: the plan was a correct in-place clean, T1–T21, not a reinstall). The failure was in the T7 **"Remove cluster configuration"** walkthrough. From the OWUI transcript, two compounding faults:

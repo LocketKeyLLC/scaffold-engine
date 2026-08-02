@@ -238,11 +238,68 @@ async def _compile_umbrella_deliverable(db: AsyncSession, umbrella_id: str) -> s
     return "\n".join(parts).rstrip() + "\n"
 
 
+async def _refresh_umbrella_children_snapshot(
+    db: AsyncSession, umbrella_id: str,
+) -> None:
+    """§17.701 — keep ``metadata.children[].status`` in sync with the live child
+    job statuses. The snapshot was written ONCE at decomposition time (all
+    'refining') and never updated, so raw metadata inspection was misleading.
+    Every USER-FACING surface (``/results``, ``/status``, assist's umbrella
+    guard) already reads child status LIVE via ``parent_job_id`` — this is
+    housekeeping so the denormalized snapshot doesn't lie. Preserves each entry's
+    label / job_id / component_index; only refreshes ``status``. Commits itself."""
+    meta = (await db.execute(
+        text("SELECT metadata FROM jobs WHERE id = :u"), {"u": umbrella_id},
+    )).scalar()
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (ValueError, TypeError):
+            meta = None
+    if not isinstance(meta, dict):
+        return
+    kids = meta.get("children")
+    if not isinstance(kids, list) or not kids:
+        return
+    live = {
+        str(r["id"]): r["status"]
+        for r in (await db.execute(
+            text("SELECT id, status FROM jobs WHERE parent_job_id = :u"),
+            {"u": umbrella_id},
+        )).mappings().all()
+    }
+    changed = False
+    for k in kids:
+        if (isinstance(k, dict) and k.get("job_id") in live
+                and k.get("status") != live[k["job_id"]]):
+            k["status"] = live[k["job_id"]]
+            changed = True
+    if changed:
+        meta["children"] = kids
+        await db.execute(
+            text("UPDATE jobs SET metadata = CAST(:m AS jsonb), updated_at = NOW() "
+                 "WHERE id = :u"),
+            {"m": json.dumps(meta), "u": umbrella_id},
+        )
+        await db.commit()
+
+
 async def _rollup_umbrella(db: AsyncSession, umbrella_id: str) -> None:
     """Recompute an umbrella's status from its children. Idempotent + safe to
-    call repeatedly; only promotes from 'aggregating' to a terminal state once
-    every child is terminal. On 'completed', also assembles the unified
-    deliverable from the children's outputs (§17.533)."""
+    call repeatedly; only promotes to a terminal state once every child is
+    terminal. On 'completed', also assembles the unified deliverable from the
+    children's outputs (§17.533).
+
+    §17.701 — re-promotes from ``awaiting_assist`` too, not just ``aggregating``.
+    A decomposition parks the umbrella at ``awaiting_assist`` once its children
+    reach the hands-on gate; when the operator then FINISHES those components via
+    assist mode, this must fire again to carry the umbrella awaiting_assist →
+    completed and assemble the unified deliverable. Pre-§17.701 the UPDATE guard
+    was ``status = 'aggregating'``, so a parked umbrella could never re-complete
+    (and the cleanup safety net only catches 'aggregating'), stranding the
+    whole-project deliverable forever once every component was done via assist."""
+    # Keep the denormalized child-status snapshot honest on every rollup tick.
+    await _refresh_umbrella_children_snapshot(db, umbrella_id)
     row = (await db.execute(
         text("""
             SELECT count(*) AS total,
@@ -274,12 +331,17 @@ async def _rollup_umbrella(db: AsyncSession, umbrella_id: str) -> None:
         if new_status in ("completed", "awaiting_assist") else None
     )
     # COALESCE keeps any prior compiled_output if a racing finalizer already set
-    # it; the status='aggregating' guard makes the finalize itself single-winner.
+    # it; the status guard makes the finalize single-winner. §17.701 — accept
+    # 'awaiting_assist' too so a parked umbrella re-completes when its last
+    # component finishes via assist, and `status <> :s` skips the no-op
+    # awaiting_assist → awaiting_assist churn while other components remain.
     result = await db.execute(
         text("""
             UPDATE jobs SET status = :s,
                 compiled_output = COALESCE(:co, compiled_output)
-            WHERE id = :u AND status = 'aggregating'
+            WHERE id = :u
+              AND status IN ('aggregating', 'awaiting_assist')
+              AND status <> :s
             RETURNING id
         """),
         {"s": new_status, "co": compiled, "u": umbrella_id},
