@@ -3988,6 +3988,52 @@
         ]
       }
     },
+    "/assist/{session_id}/checklist": {
+      "get": {
+        "description": "§17.707 — the operator-input checklist (decisions to make + info to\nsupply) for the session's plan, with live done/open status + values learned\nso far.",
+        "operationId": "assist_get_checklist_assist__session_id__checklist_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Get Checklist",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/{session_id}/env": {
       "get": {
         "operationId": "assist_get_env_assist__session_id__env_get",

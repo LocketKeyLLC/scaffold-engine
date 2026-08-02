@@ -325,6 +325,53 @@ class TestEnvReRendersStep:
         assert "Applying that to this step" not in out   # reads are read-only
 
 
+# ── §17.707: operator-input checklist ───────────────────────────────────────
+
+
+class TestChecklist:
+
+    def test_render_empty_says_nothing_outstanding(self):
+        out = _vendor.render_checklist({"items": [], "provided": {}, "open_count": 0, "total": 0})
+        assert "nothing outstanding" in out
+
+    def test_render_marks_open_and_done_and_provided(self):
+        d = {
+            "items": [
+                {"node_key": "T2", "kind": "decision", "title": "Decide storage", "done": False},
+                {"node_key": "T3", "kind": "gather", "title": "Provide specs", "done": False},
+                {"node_key": "T4", "kind": "decision", "title": "Decide VLANs", "done": True},
+            ],
+            "provided": {"HOST_IP": "10.0.0.5"},
+            "open_count": 2, "total": 3,
+        }
+        out = _vendor.render_checklist(d)
+        assert "☐ **Decide:** Decide storage" in out
+        assert "☐ **Provide:** Provide specs" in out
+        assert "☑ **Decide:** Decide VLANs" in out
+        assert "Already handled" in out
+        assert "`HOST_IP`=`10.0.0.5`" in out
+        assert "2 open / 3 total" in out
+
+    @pytest.mark.parametrize("msg", [
+        "what do you need from me?",
+        "what do you still need from me",
+        "show me the checklist",
+        "what inputs do you need",
+        "what's left for me to provide?",
+        "what do I need to decide",
+    ])
+    def test_checklist_phrases_match(self, msg):
+        assert _vendor._looks_like_checklist_request(msg)
+
+    @pytest.mark.parametrize("msg", [
+        "what do I need to do here?",     # about the current step, not the input list
+        "how do I install nginx?",
+        "next",
+    ])
+    def test_non_checklist_phrases_dont_match(self, msg):
+        assert not _vendor._looks_like_checklist_request(msg)
+
+
 # ── §17.487: render_fix + render_environment ────────────────────────────────
 
 

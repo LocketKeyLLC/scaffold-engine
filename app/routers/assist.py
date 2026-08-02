@@ -445,6 +445,17 @@ async def assist_get_env(session_id: str, db=Depends(get_db)):
     return {"session_id": session_id, "environment": env}
 
 
+@router.get("/assist/{session_id}/checklist")
+async def assist_get_checklist(session_id: str, db=Depends(get_db)):
+    """§17.707 — the operator-input checklist (decisions to make + info to
+    supply) for the session's plan, with live done/open status + values learned
+    so far."""
+    try:
+        return await assist_agent.build_inputs_checklist(session_id=session_id, db=db)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @router.post("/assist/{session_id}/submit")
 async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get_db)):
     # §17.487 — success verification. Runs BEFORE submit_step (so the slow LLM

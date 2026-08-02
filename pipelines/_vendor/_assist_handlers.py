@@ -425,7 +425,7 @@ def handle_assist(
         # /assist <subcommand> ... — route to subcommand handler
         if arg1 in ("next", "submit", "skip", "handoff", "pause", "resume",
                     "done", "friction", "guide", "research", "env", "fix",
-                    "verbose", "status"):
+                    "verbose", "status", "checklist"):
             yield from dispatch_assist_sub(
                 pipe, arg1, parts[2:], fenced,
                 chat_id=chat_id, raw_head=head,
@@ -505,6 +505,56 @@ def _render_notes_block(notes) -> str:
     return "\n".join(lines) + "\n" if len(lines) > 1 else ""
 
 
+def render_checklist(d: dict) -> str:
+    """§17.707 — render the operator-input checklist (decisions to make + info to
+    supply), ticking off what's already done and listing values learned so far."""
+    items = d.get("items") or []
+    if not items:
+        return ("📋 **What I need from you:** nothing outstanding — this plan has "
+                "no decisions or inputs to collect from you. Just work the steps "
+                "(paste each command's output and I'll record it).")
+    _label = {"decision": "Decide", "gather": "Provide"}
+    open_lines, done_lines = [], []
+    for it in items:
+        mark = "☑" if it.get("done") else "☐"
+        lab = _label.get(it.get("kind"), "Input")
+        line = f"{mark} **{lab}:** {it.get('title', '?')} _(`{it.get('node_key', '?')}`)_"
+        (done_lines if it.get("done") else open_lines).append(line)
+    out = [f"📋 **What I need from you** ({d.get('open_count', 0)} open / {d.get('total', 0)} total)\n"]
+    if open_lines:
+        out.append("\n".join(open_lines))
+    if done_lines:
+        out.append("\n_Already handled:_\n" + "\n".join(done_lines))
+    provided = d.get("provided") or {}
+    if provided:
+        pairs = ", ".join(f"`{k}`=`{v}`" for k, v in provided.items())
+        out.append(f"\n_Provided so far:_ {pairs}")
+    out.append("\n_This list fills in as you go — paste output or state a "
+               "decision and I'll tick it off._")
+    return "\n".join(out)
+
+
+def assist_checklist_cmd(pipe, session_id: str) -> Generator[str, None, None]:
+    """§17.707 — GET /assist/{sid}/checklist and render it."""
+    try:
+        r = _ss(pipe).get(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/checklist",
+            headers=pipe._auth_headers(),
+            timeout=pipe.valves.request_timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code == 404:
+        yield f"❌ No assist session `{session_id}`."; return
+    if r.status_code >= 400:
+        yield f"❌ Could not fetch checklist: HTTP {r.status_code} {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError:
+        yield f"❌ Checklist: non-JSON reply; raw: {r.text[:200]}"; return
+    yield render_checklist(d)
+
+
 def dispatch_assist_sub(
     pipe, sub: str, args: list, fenced: str, *, chat_id: str | None,
     raw_head: str | None = None,
@@ -577,6 +627,10 @@ def dispatch_assist_sub(
         if not sid:
             yield no_session_msg("status"); return
         yield from assist_status(pipe, sid); return
+    if sub == "checklist":  # §17.707
+        if not sid:
+            yield no_session_msg("checklist"); return
+        yield from assist_checklist_cmd(pipe, sid); return
     if sub == "done":
         if not sid:
             yield no_session_msg("done"); return
@@ -1733,6 +1787,23 @@ def _looks_like_shell_evidence(msg: str) -> bool:
     return True
 
 
+# §17.707 — the operator asking what inputs/decisions the plan still needs from
+# them. High-precision phrasing ("from me" / "to provide|decide" / "checklist")
+# so a plain step question ("what do I need to do here?") is NOT swept in.
+_CHECKLIST_RE = re.compile(
+    r"\bcheck\s?list\b"
+    r"|\bwhat\s+(?:do|does)\s+(?:you|it)\s+(?:still\s+)?need\s+(?:from\s+me|to\s+know)\b"
+    r"|\bwhat\s+(?:else\s+)?do\s+(?:you|i)\s+need\s+to\s+(?:provide|decide|give|tell)\b"
+    r"|\bwhat(?:'?s|\s+is|\s+are)\s+(?:still\s+)?(?:left|outstanding|remaining|needed)\s+(?:from|for)\s+me\b"
+    r"|\bwhat\s+(?:inputs?|information|info|decisions?)\s+(?:do\s+you|are)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_checklist_request(msg: str) -> bool:
+    return bool(msg) and bool(_CHECKLIST_RE.search(_normalize_punct(msg)))
+
+
 # §17.689 — deterministic backstop: a confirmation of a proposed decision the
 # classifier read as a bare question still routes to submit (→ deliberation
 # resolves + commits). Confirmations only — a made choice like "3 vlans" already
@@ -1815,6 +1886,9 @@ def assist_nl_turn(
     if intent is None and _looks_like_shell_evidence(msg):
         intent = "submit"
         evidence = msg.strip()
+    # §17.707 — "what do you need from me?" → the live operator-input checklist.
+    if intent is None and _looks_like_checklist_request(msg):
+        yield from assist_checklist_cmd(pipe, session_id); return
     if intent is None:
         d = assist_interpret(pipe, session_id, msg, node_key=node_key, history=history)
         intent = d.get("intent") or "question"

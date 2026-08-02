@@ -1425,6 +1425,51 @@ def _collect_step_kind(node_type: str | None, task_prompt: str) -> Optional[str]
     return None
 
 
+async def build_inputs_checklist(*, session_id: str, db) -> dict:
+    """§17.707 — the operator-input checklist for the session's plan.
+
+    A read-only, LIVE view of what the engine needs FROM the operator across the
+    whole component: the decisions they must make (``decision`` nodes) and the
+    information they must supply (``gather`` steps, per ``_collect_step_kind``),
+    each marked done/open from the node's live status, plus the concrete values
+    learned so far (``environment.substitutions``). Because it reflects live
+    state, it "fills in" as the operator works — no separate accumulator to drift
+    out of sync. Returns ``{session_id, items[], provided{}, open_count, total}``.
+    """
+    sess = (await db.execute(
+        text("SELECT job_id, metadata FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    rows = (await db.execute(
+        text("""
+            SELECT node_key, node_type, title, prompt_template, status
+              FROM dag_nodes WHERE job_id = :jid ORDER BY node_key
+        """),
+        {"jid": str(sess["job_id"])},
+    )).mappings().all()
+    items: list[dict] = []
+    for r in rows:
+        kind = _collect_step_kind(r["node_type"], r["prompt_template"] or "")
+        if not kind:
+            continue
+        items.append({
+            "node_key": r["node_key"],
+            "kind": kind,  # 'decision' | 'gather'
+            "title": r["title"] or r["node_key"],
+            "done": (r["status"] or "").lower() == "done",
+        })
+    env = _environment_from_metadata(sess.get("metadata"))
+    return {
+        "session_id": session_id,
+        "items": items,
+        "provided": env.get("substitutions") or {},
+        "open_count": sum(1 for i in items if not i["done"]),
+        "total": len(items),
+    }
+
+
 async def run_step_decision(
     *, session_id: str, node_key: str, message: str,
     history: list[dict] | None = None, db,

@@ -188,6 +188,17 @@ def test_shell_paste_routes_to_submit_without_classifier(pipe):
     assert args[3] == paste.strip()                # the whole transcript is the evidence
 
 
+@pytest.mark.smoke
+def test_checklist_request_routes_to_checklist_without_classifier(pipe):
+    with patch.object(_ah, "assist_checklist_cmd",
+                      side_effect=lambda *a, **k: iter(["CHECKLIST"])) as cl, \
+         patch.object(_ah, "assist_interpret", MagicMock(side_effect=AssertionError)):
+        out = "".join(_ah.assist_nl_turn(
+            pipe, "s1", "what do you need from me?", node_key="T1", chat_id="c1"))
+    assert "CHECKLIST" in out
+    cl.assert_called_once()
+
+
 # ── match_assist_candidate ────────────────────────────────────────────────
 
 

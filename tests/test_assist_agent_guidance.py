@@ -434,6 +434,49 @@ async def test_capture_execution_context_fail_soft():
     assert out is None
 
 
+# ── §17.707: build_inputs_checklist ────────────────────────────────────────
+
+
+def _result_all(rows):
+    r = MagicMock()
+    r.mappings.return_value.all.return_value = rows
+    return r
+
+
+@pytest.mark.asyncio
+async def test_build_inputs_checklist():
+    db = AsyncMock()
+    sess = {"job_id": "j1",
+            "metadata": {"environment": {"substitutions": {"HOST_IP": "10.0.0.5"}}}}
+    nodes = [
+        {"node_key": "T1", "node_type": "task", "title": "Audit",
+         "prompt_template": "run the audit block", "status": "done"},          # not a collect step
+        {"node_key": "T2", "node_type": "decision", "title": "Decide storage",
+         "prompt_template": "pick zfs or lvm", "status": "pending"},           # decision, open
+        {"node_key": "T3", "node_type": "task", "title": "Provide specs",
+         "prompt_template": "Operator provides: model, disks", "status": "pending"},  # gather, open
+        {"node_key": "T4", "node_type": "decision", "title": "Decide VLANs",
+         "prompt_template": "choose ids", "status": "done"},                   # decision, done
+    ]
+    db.execute = AsyncMock(side_effect=[_result(sess), _result_all(nodes)])
+    out = await assist_agent.build_inputs_checklist(session_id="s", db=db)
+    by = {i["node_key"]: i for i in out["items"]}
+    assert set(by) == {"T2", "T3", "T4"}                 # T1 (plain task) excluded
+    assert by["T2"]["kind"] == "decision" and by["T2"]["done"] is False
+    assert by["T3"]["kind"] == "gather" and by["T3"]["done"] is False
+    assert by["T4"]["done"] is True
+    assert out["open_count"] == 2 and out["total"] == 3
+    assert out["provided"] == {"HOST_IP": "10.0.0.5"}
+
+
+@pytest.mark.asyncio
+async def test_build_inputs_checklist_missing_session():
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[_result(None)])
+    with pytest.raises(ValueError, match="not found"):
+        await assist_agent.build_inputs_checklist(session_id="nope", db=db)
+
+
 # ── §17.493: generate_step_guidance_stream ─────────────────────────────────
 
 

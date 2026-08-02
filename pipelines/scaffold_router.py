@@ -2349,6 +2349,7 @@ class Pipeline:
         "| `/assist pause [<session_id>]` | Pause; resume later. |\n"
         "| `/assist resume [<session_id>]` | Resume a paused session. |\n"
         "| `/assist status [<session_id>]` | Show session status, current step, and per-status step counts. |\n"
+        "| `/assist checklist [<session_id>]` | Show what the plan still needs from you (decisions + info), ticked off as you go. |\n"
         "| `/assist done [<session_id>]` | Show the compiled output (clears chat memory). |\n"
         "| `/assist friction [<session_id>] [<node_key>] <note>` | Log a friction note. |\n"
         "| `/assist help` | Show this message. |\n\n"

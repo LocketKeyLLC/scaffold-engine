@@ -61,6 +61,21 @@ class TestAssistStatus:
         out = "".join(pipe._handle_assist("/assist status", body=None))
         assert "status" in out.lower()
 
+    def test_checklist_routes_via_dispatch(self, pipe):
+        """§17.707 — `/assist checklist <sid>` reaches the checklist (not the
+        help fallback / not misread as a job_id to start)."""
+        sess = MagicMock()
+        sess.get.return_value = _make_response(200, {
+            "session_id": _SID, "open_count": 1, "total": 1,
+            "items": [{"node_key": "T2", "kind": "decision",
+                       "title": "Decide storage", "done": False}],
+            "provided": {},
+        })
+        with patch.object(_vendor, "_ss", return_value=sess):
+            out = "".join(pipe._handle_assist(f"/assist checklist {_SID}", body=None))
+        assert "What I need from you" in out
+        assert "Decide storage" in out
+
 
 class TestAssistStartNonUuid:
     """§17.521 — `/assist <title>` (non-UUID) is caught early with a hint,

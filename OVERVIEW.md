@@ -22049,6 +22049,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.707 Feature — the operator-input checklist: "what does the plan still need from me?" (2026-08-02)
+
+**Ask.** "Shouldn't it create a list of what it needs, then fill out the components as they come through each chat message?" (operator's own idea, greenlit after §17.705/706).
+
+**Design.** A checklist is a READ-ONLY, LIVE view — not a new accumulator that can drift. `assist_agent.build_inputs_checklist(session_id)` derives, from the component's DAG, the items the engine needs FROM the operator: every `decision` node and every `gather` step (`_collect_step_kind`, §17.689/690), each marked done/open from the node's live status, plus the concrete values learned so far (`environment.substitutions`, §17.490). Because it reads live state, it "fills in as info comes" for free — a committed decision flips ☐→☑, a learned `HOST_IP` shows under *Provided so far* — with nothing to keep in sync.
+
+**Surface.** `GET /assist/{sid}/checklist`. Pipeline `assist_checklist_cmd` + `render_checklist` (☐/☑ per item, *Already handled* + *Provided so far* sections). Reachable three ways: slash `/assist checklist [<sid>]` (added to the subcommand whitelist + `_ASSIST_HELP`); and conversationally via a deterministic gate `_looks_like_checklist_request` in `assist_nl_turn` ("what do you need from me?", "what's left for me to provide?", "show me the checklist") — high-precision phrasing so a step question ("what do I need to do here?") is NOT swept in (§17.679: deterministic gate, not the LLM classifier).
+
+**Verification.** Server: `build_inputs_checklist` picks only decision/gather nodes (plain task excluded), done/open correct, substitutions surfaced; missing-session → ValueError→404. Pipeline: render (empty / open+done+provided), phrase gate (6 positive / 3 negative), NL routing bypasses the classifier, slash dispatch reaches the checklist (not misread as a job_id). Suites: 34 (server) + 143 (pipeline) passed. **Live**: hit `GET /assist/{sid}/checklist` on the real stuck session → correctly surfaced its 2 decision nodes (`Decide storage architecture`, `Decide VLAN IDs and bridge`), 2 open / 2 total. `ci-tier-0` green; `docs/openapi.json` regenerated for the new route.
+
+**Note.** This lists decisions + explicit gather steps + learned values — it does NOT yet turn an arbitrary task (e.g. "Audit current system state") into a multi-slot checklist. That deeper per-step slot accumulation remains the follow-up flagged in §17.705.
+
+---
+
 ### §17.706 UX — stating your environment mid-assist now re-renders the current step to honor it (2026-08-02)
 
 **Report (follow-up to §17.705).** The operator told the session "root@pve through the web browser", it was saved to `environment.profile`, yet T1's guidance kept hedging ("physical console, SSH, or web shell" / "open a terminal") — "it couldn't tell I was on the Proxmox web console." Cause: T1's walkthrough was cached BEFORE the operator stated their environment, and `assist_env_cmd` only PUT the env + printed "Environment updated" — it never re-rendered the current step, so the stated context never reached the guidance the operator was looking at.
