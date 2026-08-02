@@ -582,3 +582,22 @@ def test_runbook_has_command_correctness_rule():
     # shell guidance in assist mode reuses this prompt, so the rule reaches both
     from app.modules.assist_guide import guide_system_for_tool
     assert "Command correctness" in guide_system_for_tool("shell")
+
+
+def test_runbook_has_execution_context_rule():
+    # §17.700 — the T7 failure: guidance told the operator to `pmxcfs -l` in one
+    # terminal and edit in a SECOND terminal, impossible in the Proxmox web
+    # console (a single interactive shell the operator pastes a block into), and
+    # it marched into cluster teardown on a host that was already standalone
+    # (pvecm status errored). The runbook prompt now demands single-shell-safe,
+    # idempotent, error-means-skip guidance that doesn't restart the operator's
+    # own session's services.
+    R = pa.EXECUTION_SYSTEM_RUNBOOK
+    assert "Execution context" in R
+    assert "ONE shell only" in R
+    assert "second terminal" in R          # the exact anti-pattern it forbids
+    assert "SELF-CONTAINED and idempotent" in R
+    assert "pve-cluster" in R              # don't restart the session's own service
+    # the rule reaches assist shell guidance too
+    from app.modules.assist_guide import guide_system_for_tool
+    assert "Execution context" in guide_system_for_tool("shell")
