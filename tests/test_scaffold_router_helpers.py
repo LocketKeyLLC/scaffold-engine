@@ -418,7 +418,7 @@ class TestFmt:
 
 @pytest.mark.smoke
 class TestWindowMessages:
-    """_window_messages: caps triage history to last N turns; pins first user message."""
+    """_window_messages: caps triage history to last N turns; §17.713 pins EVERY user turn."""
 
     def test_returns_input_when_under_window(self, pipe):
         """Conversation shorter than window: pass through unchanged."""
@@ -429,16 +429,28 @@ class TestWindowMessages:
         pipe.valves.triage_history_window = 8
         assert pipe._window_messages(msgs) == msgs
 
-    def test_pins_first_user_when_outside_window(self, pipe):
-        """First user message is preserved when older than the tail window."""
-        msgs = [{"role": "user", "content": "seed"}]
-        msgs += [{"role": "assistant", "content": f"a{i}"} for i in range(5)]
-        msgs += [{"role": "user", "content": f"u{i}"} for i in range(5)]
-        pipe.valves.triage_history_window = 4
+    def test_pins_all_user_messages_even_mid_conversation(self, pipe):
+        """§17.713 — EVERY user turn is retained (facts live there), even one
+        stated mid-conversation, so the refine loop never drops a fact and the
+        operator isn't forced to repeat himself. Assistant blocks are windowed."""
+        msgs = [
+            {"role": "user", "content": "seed"},
+            {"role": "assistant", "content": "scope0"},
+            {"role": "user", "content": "my IP is 192.168.1.156"},   # mid-convo fact
+            {"role": "assistant", "content": "scope1"},
+            {"role": "assistant", "content": "scope2"},
+            {"role": "assistant", "content": "scope3"},
+            {"role": "user", "content": "latest"},
+        ]
+        pipe.valves.triage_history_window = 2
         out = pipe._window_messages(msgs)
-        assert out[0] == {"role": "user", "content": "seed"}
-        assert len(out) == 5  # 1 pinned + 4 tail
-        assert out[-4:] == msgs[-4:]
+        user_contents = [m["content"] for m in out if m["role"] == "user"]
+        assert "seed" in user_contents
+        assert "my IP is 192.168.1.156" in user_contents      # the dropped-fact case, fixed
+        assert "latest" in user_contents
+        assert out[-2:] == msgs[-2:]                            # recency tail preserved
+        # earlier user turns precede the tail (chronological)
+        assert out.index({"role": "user", "content": "seed"}) == 0
 
     def test_no_duplicate_when_first_user_in_tail(self, pipe):
         """If the first user message already lies inside the tail, don't duplicate it."""
@@ -459,21 +471,21 @@ class TestWindowMessages:
         assert out == msgs[-3:]
 
     def test_window_size_one_floor(self, pipe):
-        """A window value of 0 or negative is clamped to 1; first user still pinned."""
+        """A window value of 0 or negative is clamped to 1. §17.713 — with every
+        user turn pinned, an all-user conversation is fully preserved."""
         msgs = [{"role": "user", "content": f"u{i}"} for i in range(5)]
         pipe.valves.triage_history_window = 0
         out = pipe._window_messages(msgs)
-        # n clamped to 1; first user (u0) outside tail -> pinned + tail (u4)
-        assert out == [msgs[0], msgs[-1]]
+        assert out == msgs  # all user facts kept; nothing dropped
 
     def test_preserves_message_order(self, pipe):
-        """Pinned-then-tail must remain chronological."""
+        """§17.713 — all user turns pinned, chronological, then the recency tail."""
         msgs = [{"role": "user", "content": "seed"}]
         msgs += [{"role": "user", "content": f"u{i}"} for i in range(10)]
         pipe.valves.triage_history_window = 3
         out = pipe._window_messages(msgs)
-        assert out[0]["content"] == "seed"
-        assert [m["content"] for m in out[1:]] == ["u7", "u8", "u9"]
+        # every user turn survives, in order (all-user convo → full preservation)
+        assert [m["content"] for m in out] == ["seed"] + [f"u{i}" for i in range(10)]
 
 @pytest.mark.smoke
 class TestLogPipeInputs:

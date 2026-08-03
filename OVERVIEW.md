@@ -22049,6 +22049,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.713 Fix — pre-`/go` refine loop dropped operator facts (forced the operator to repeat himself) (2026-08-02)
+
+**Report + evidence.** "It did not retain some information and needed to be reminded." The OWUI transcript (chat "🏠 Home Lab Setup Plan", 34 msgs) shows it plainly: *"i already stated that i fixed the connection and am accessing via web browser through a shell"* and *"i already informed you that i regained access to the Proxmox Web UI as well as give you the ip address."* The operator gave the IP (192.168.1.156) and access status early, then had to restate them.
+
+**Diagnosis.** This is the pre-`/go` REFINE loop (the "Scope so far:" running summary via `_call_triage`), distinct from the assist-mode unified memory (§17.710) and from synthesis (which already uses full history, §17.694). `_window_messages` capped the triage history to the last `triage_history_window` (=8) turns and pinned ONLY the first user message (a qwen3:4b CPU-latency mitigation). In a 34-message conversation, the mid-conversation user turns where the IP and access were stated aged past the 8-turn tail and were dropped from the refine context — so the running summary couldn't carry them and the operator had to repeat.
+
+**Fix.** `_window_messages` now pins EVERY user turn (facts live in user messages, and those are short), plus the last N turns for recency. The long, token-heavy messages the window really bounds are the assistant "Scope so far" blocks — those stay windowed, so the qwen3:4b latency mitigation holds; operator facts are never dropped. Pipeline-only (`scaffold_router.py`); synthesis at `/go` was already full-history.
+
+**Verification.** `test_scaffold_router_helpers.py::TestWindowMessages` updated for the new semantics: a mid-conversation fact ("my IP is 192.168.1.156") now survives the window; all-user conversations are fully preserved; recency tail + chronological order held. 1130 scaffold_router tests pass; pipelines restarted (clean load).
+
+---
+
 ### §17.712 Fix — research "0 results" on a simple question: broaden SearXNG engines + a 0-results fallback (2026-08-02)
 
 **Report.** In a pre-`/go` conversation the operator asked whether something (Zenarmor) "required payment or was free"; the engine researched and **came back with 0 results.**

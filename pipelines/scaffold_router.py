@@ -1305,22 +1305,32 @@ class Pipeline:
     # ------------------------------------------------------------------
 
     def _window_messages(self, messages: List[dict]) -> List[dict]:
-        """Cap triage history to last N turns; always pin the first user message.
+        """Cap triage history to last N turns, but PIN EVERY user message.
 
-        Mitigates qwen3:4b CPU latency growth on long conversations.
-        Window size is set by valves.triage_history_window.
+        §17.713 — pinning only the FIRST user message dropped mid-conversation
+        operator-stated FACTS (a given IP `192.168.1.156`, "I regained web-UI
+        access") once they aged past the N-turn tail, so the "Scope so far"
+        refine loop couldn't see them and the operator had to repeat himself
+        ("i already informed you…"). Operator facts live in the USER turns and
+        those are short; the long, token-heavy messages the window really bounds
+        are the assistant "Scope so far" blocks. So keep ALL user turns + the
+        last N turns (recency, incl. the latest assistant scope). Still mitigates
+        qwen3:4b CPU latency growth (assistant blocks stay windowed); window size
+        is valves.triage_history_window. Synthesis at /go already uses full
+        history (§17.694), so this only shapes the refine step.
         """
         n = max(1, int(self.valves.triage_history_window))
         if len(messages) <= n:
             return messages
-        first_user_idx = next(
-            (i for i, m in enumerate(messages) if m.get("role") == "user"),
-            None,
-        )
         tail = messages[-n:]
-        if first_user_idx is None or first_user_idx >= len(messages) - n:
-            return tail
-        return [messages[first_user_idx]] + tail
+        tail_ids = {id(m) for m in tail}
+        # Every earlier user turn (facts), in order, then the recent tail.
+        pinned_users = [
+            m for m in messages[:-n]
+            if isinstance(m, dict) and m.get("role") == "user"
+            and id(m) not in tail_ids
+        ]
+        return pinned_users + tail
 
     @staticmethod
     def _strip_think(text: str) -> str:
