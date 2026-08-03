@@ -8,12 +8,28 @@ the handoff_step tests + a live smoke).
 """
 from __future__ import annotations
 
+import contextlib
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.routers import assist as assist_router
 from app.routers.assist import AssistSubmitInput
+
+
+def _quiet_submit_side_effects():
+    """§17.689/§17.709/§17.710 — silence the submit-path side effects these
+    handoff/learning tests don't exercise (decision deliberation, facts
+    distillation, unified-memory capture + grounding). They were added to the
+    submit handler after these tests were written and otherwise run real DB/LLM
+    work against the bare AsyncMock db. Router-level gate settings, so flipping
+    them off skips the calls entirely — and makes the tests hermetic against the
+    container's live valve env."""
+    return (
+        patch.object(assist_router.settings, "assist_decision_deliberation_enabled", False),
+        patch.object(assist_router.settings, "assist_capture_facts_enabled", False),
+        patch.object(assist_router.settings, "assist_unified_memory_enabled", False),
+    )
 
 
 def _skip_body(node_key="T1"):
@@ -67,14 +83,17 @@ async def test_skip_manual_policy_does_not_handoff():
 @pytest.mark.asyncio
 async def test_submit_action_never_auto_handoffs():
     """A normal submit (not skip) never triggers auto-handoff, even under an auto policy."""
-    with patch.object(assist_router.assist_agent, "get_session",
-                      new=AsyncMock(return_value={"status": "active", "handoff_policy": "auto_on_skip"})), \
-         patch.object(assist_router.assist_agent, "spawn_handoff_background") as spawn, \
-         patch.object(assist_router.settings, "assist_verify_on_submit", False), \
-         patch.object(assist_router.assist_agent, "learn_from_submit",
-                      new=AsyncMock(return_value=None)), \
-         patch.object(assist_router.assist_agent, "submit_step",
-                      new=AsyncMock(return_value={"status": "committed"})) as submit:
+    with contextlib.ExitStack() as es:
+        for p in _quiet_submit_side_effects():
+            es.enter_context(p)
+        es.enter_context(patch.object(assist_router.assist_agent, "get_session",
+                         new=AsyncMock(return_value={"status": "active", "handoff_policy": "auto_on_skip"})))
+        spawn = es.enter_context(patch.object(assist_router.assist_agent, "spawn_handoff_background"))
+        es.enter_context(patch.object(assist_router.settings, "assist_verify_on_submit", False))
+        es.enter_context(patch.object(assist_router.assist_agent, "learn_from_submit",
+                         new=AsyncMock(return_value=None)))
+        submit = es.enter_context(patch.object(assist_router.assist_agent, "submit_step",
+                         new=AsyncMock(return_value={"status": "committed"})))
         result = await assist_router.assist_submit(
             "sid-1", AssistSubmitInput(node_key="T1", action="submit", output="did it"), AsyncMock(),
         )
@@ -111,8 +130,11 @@ async def test_failed_verdict_suppresses_substitution_learning():
     """A `failed` verdict means the evidence is unrelated to this step; learning
     from it produces garbage subs (STORAGE=4TB from '4TB drive'). Skip it — the
     step still commits (block valve off by default), just without learning."""
-    gs, ver, ss, learn = _patch_submit("failed")
-    with gs, ver, ss, learn as learn_mock:
+    with contextlib.ExitStack() as es:
+        gs, ver, ss, learn = _patch_submit("failed")
+        for p in (gs, ver, ss, *_quiet_submit_side_effects()):
+            es.enter_context(p)
+        learn_mock = es.enter_context(learn)
         result = await assist_router.assist_submit("sid-1", _submit_body(), AsyncMock())
     assert result["status"] == "committed"
     learn_mock.assert_not_called()
@@ -124,8 +146,11 @@ async def test_failed_verdict_suppresses_substitution_learning():
 async def test_nonfailed_verdict_still_learns(outcome):
     """`succeeded`/`unclear` (and None) still learn — only a definite `failed`
     verdict suppresses it, so the §17.644 guard doesn't over-block."""
-    gs, ver, ss, learn = _patch_submit(outcome)
-    with gs, ver, ss, learn as learn_mock:
+    with contextlib.ExitStack() as es:
+        gs, ver, ss, learn = _patch_submit(outcome)
+        for p in (gs, ver, ss, *_quiet_submit_side_effects()):
+            es.enter_context(p)
+        learn_mock = es.enter_context(learn)
         result = await assist_router.assist_submit("sid-1", _submit_body(), AsyncMock())
     learn_mock.assert_called_once()
     assert result["learned_substitutions"] == {"STORAGE": "4TB"}

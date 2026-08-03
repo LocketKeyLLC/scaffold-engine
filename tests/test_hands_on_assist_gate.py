@@ -128,12 +128,16 @@ async def test_rollup_umbrella_awaiting_assist_propagates(monkeypatch):
     async def _fake_compile(db, umbrella_id):
         return "UMBRELLA DELIVERABLE"
     monkeypatch.setattr(decomposition, "_compile_umbrella_deliverable", _fake_compile)
+    # §17.701 added a children-snapshot refresh at the top of _rollup_umbrella;
+    # it issues its own db.execute calls. Neutralize it so the side_effect list
+    # below maps 1:1 to the count query + the UPDATE this test asserts on.
+    monkeypatch.setattr(decomposition, "_refresh_umbrella_children_snapshot", AsyncMock())
     db = AsyncMock()
     # roll-up count query: 3 children, all terminal, 2 completed, 1 awaiting.
     count_row = {"total": 3, "terminal": 3, "done": 2, "awaiting": 1}
     db.execute.side_effect = [
         _mapping_result(count_row),      # SELECT count(*) FILTER (...)
-        _result(first=("umbrella-1",)),  # UPDATE ... WHERE status='aggregating' RETURNING id
+        _result(first=("umbrella-1",)),  # UPDATE ... WHERE status IN ('aggregating','awaiting_assist') RETURNING id
     ]
     await decomposition._rollup_umbrella(db, "umbrella-1")
     # The UPDATE (2nd execute) must set status to awaiting_assist.

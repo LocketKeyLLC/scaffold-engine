@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.711 Test-maintenance — the 5 stale assist tests back to green (2026-08-02)
+
+Test-only (no product code). The assist sweep carried 5 long-standing reds, tests that predated later submit-path / rollup additions and were never updated:
+- `test_assist_handoff_policy.py` (4: the submit + failed/succeeded/unclear-verdict cases) called `assist_submit` with a bare `AsyncMock` db but didn't silence the submit-path side effects added after they were written — `run_step_decision` (§17.689 deliberation) issued a real DB query against the mock (`'coroutine' object has no attribute 'first'`), and §17.709/710 added facts-distill + unified-memory capture. Fix: a `_quiet_submit_side_effects()` helper flips the router-level gates off (`assist_decision_deliberation_enabled`, `assist_capture_facts_enabled`, `assist_unified_memory_enabled`) so each test exercises only the handoff/learning branch it's about — and is hermetic against the container's live valve env.
+- `test_hands_on_assist_gate.py::test_rollup_umbrella_awaiting_assist_propagates`: §17.701 added `_refresh_umbrella_children_snapshot` at the top of `_rollup_umbrella`, whose own `db.execute` calls shifted the test's `side_effect` list (so `await_args_list[1]` was the count query, not the UPDATE → `KeyError: 's'`). Fix: monkeypatch the snapshot refresh to a no-op so the mock sequence maps 1:1.
+
+Also made two guidance-prompt tests valve-agnostic (assert injected VALUES, not the legacy block header) since pytest now runs in the valve-on container (§17.710d). Full assist sweep: **631 passed, 0 failed** (was 626 + 5 red).
+
+---
+
 ### §17.710d Feature — unified session memory, Stage D: surface + cutover (the memory path goes live) (2026-08-02)
 
 **What.** The cutover that makes the unified retention path active for operators, plus surfacing the memory.
