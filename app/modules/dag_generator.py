@@ -358,6 +358,15 @@ on the existing system (remove the old user / old VMs / containers / data, then
 deploy the wanted services). Only include a from-scratch reinstall / disk wipe
 when the brief's goals UNAMBIGUOUSLY call for a bare-metal rebuild.
 
+§17.717 — Honor ALREADY-PROVIDED prerequisites. If the brief's `inputs_available`
+or `constraints` say a required resource is ALREADY acquired or prepared by the
+operator (installation media written / plugged in, an ISO / image / template
+already downloaded or present, hardware already installed), do NOT emit nodes
+that acquire, download, create, or re-prepare it — start from the first node that
+USES it. E.g. if the Proxmox installer is already on a USB in the server, do NOT
+emit "download the ISO" or "write the USB"; begin at "boot from the USB and
+install". Only emit an acquisition node when the resource is NOT already on hand.
+
 §17.663 — If (and ONLY if) the brief contains an `operator_decision` object (a key
 choice the research surfaced, with an `options` list), you MUST include an early
 node of `type: "decision"` named after that decision, put its options (each label

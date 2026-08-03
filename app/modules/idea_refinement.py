@@ -80,7 +80,16 @@ those as `inputs_available` entries (e.g. "Proxmox VE already installed and
 reachable (operator can log in)", "OS on the 600GB SSD") AND add an explicit
 `constraints` entry naming what to preserve and the in-place intent (e.g.
 "PRESERVE the existing accessible Proxmox install and its OS disk — clean in
-place; do NOT reinstall the OS or wipe the OS drive"). Do not drop these facts."""
+place; do NOT reinstall the OS or wipe the OS drive"). Do not drop these facts.
+
+§17.717 — ALSO record operator-provided PREREQUISITES that are already acquired
+or prepared (installation media written / plugged in, an ISO / image / template
+downloaded or present, hardware already installed) as `inputs_available` entries
+(e.g. "Proxmox VE installer already written to a USB drive plugged into the
+server") AND add a `constraints` entry that the plan must START from the ready
+resource — do NOT put acquiring, downloading, creating, or re-preparing what the
+operator already has into `goals`. If the operator says a step is already DONE,
+treat it as done. Do not drop these facts."""
 
 REFINE_PROMPT = """Analyze this idea and produce a structured brief:
 

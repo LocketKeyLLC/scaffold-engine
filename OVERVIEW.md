@@ -22049,6 +22049,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.717 Fix — pre-`/go` plan re-acquired what the operator already had: "I already have Proxmox on a USB, just install it" → plan still opened with Download ISO + Write USB (2026-08-03)
+
+**Report + evidence.** Operator corrected the plan BEFORE `/go`: *"i already have the proxmox installer on a usb flash drive plugged into the server, i just need help installing it."* The generated plan still opened with **T1 Download Proxmox VE ISO → T2 Prepare bootable installation media → T3 Install**. Traced the live umbrella job: the umbrella's synthesized `input_text` read *"Install Proxmox VE **fresh** onto the SSD…"* with the USB correction **entirely absent** — the correction was dropped at the `/go` SYNTHESIS step, before decompose/DAG ever ran. (The "USB/IPMI media" that surfaced in the component brief's `inputs_available` was a GENERIC inference the component refine made — "you need media to install an OS" — not the operator's statement.)
+
+**Diagnosis.** The pipeline had a `PRESERVE an existing/reachable system → don't reinstall` guard (§17.649/694/695) in all four planning sites (refine, synthesis, decompose, DAG-gen, per §17.698). But it had **no sibling guard for operator-provided PREREQUISITES that are already acquired/prepared** — a *fresh* install where the operator has already done the acquisition (media downloaded + written + plugged in). Synthesis is told to describe what will be BUILT, so it drops what the operator already HAS/DID; the DAG_SYSTEM prompt even teaches "download + burn the Proxmox ISO" as a normal acquire-prerequisite step. Same flatten-away-the-correction class as §17.694/§17.714, in the pre-`/go` path.
+
+**Fix.** Added a consistent §17.717 "respect already-provided prerequisites → start from the ready resource, don't re-acquire" guard to the **same four sites** (§17.698 multi-site lesson — a `/go` prompt fix must reach decompose too): `SYNTHESIS_SYSTEM_PROMPT` (pipeline — the root loss: preserve "already have / already did" as an available input and start from it), `REFINE_SYSTEM` (record it into `inputs_available` + a `constraints` entry, keep it out of `goals`), `DECOMPOSE_SYSTEM` (carry the prereq into the component it applies to; don't emit re-acquire scope), and `DAG_PROMPT` (do NOT emit acquire/download/create/prepare nodes for an already-on-hand resource — start at the node that USES it).
+
+**Verification.** LIVE model draws at every stage: synthesis on the reported conversation → *"A Proxmox VE installer is already prepared on a USB flash drive and connected to the server. The installation will boot from that USB drive…"* (no download); decompose → Proxmox component reads *"The USB installer is already prepared and inserted — start from the boot menu, not from downloading or flashing media"*; DAG-gen on a media-ready brief → nodes **T1 Install Proxmox to SSD from USB / T2 network / T3 storage / T4 verify** — zero download-ISO or write-USB nodes (was T1 Download → T2 Write USB → T3 Install). 112 + 91 + 116 tests pass across idea_refinement / dag_generator / ideation / scaffold_router. Both containers restarted (orchestrator + pipelines, since the synthesis prompt lives in the pipeline).
+
+---
+
 ### §17.716 Fix — execution-context (user@host) staleness: profile now refreshes from EVERY message, incl. a prose host change (2026-08-03)
 
 **Report + evidence.** Secondary finding flagged in §17.714/715: the live session's `environment.profile` still said `root@pve` long after the operator wrote *"the root@DeFruscio-HomeLab now, could that be the reason it is having issues connecting?"* (turn at 02:30). Guidance kept telling the model the operator worked on `pve`.

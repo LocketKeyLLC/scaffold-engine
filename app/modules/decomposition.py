@@ -110,6 +110,17 @@ DECOMPOSE_SYSTEM = (
     "component when the idea UNAMBIGUOUSLY asks to rebuild from scratch (e.g. "
     "'bare-metal rebuild', the OS \"won't boot / needs reinstalling\", 'reformat "
     "everything') AND gives no sign the system is already reachable."
+    # §17.717 — a component's `description` becomes a child's input_text; if a
+    # prerequisite the operator already prepared is dropped here, the child
+    # re-acquires it (the reported miss: operator had the Proxmox installer on a
+    # USB already plugged in, and the component still planned download + write).
+    "\n\nPRESERVE operator-provided PREREQUISITES. If the idea says a required "
+    "resource is ALREADY acquired / prepared / on-hand (e.g. 'the Proxmox "
+    "installer is already on a USB plugged into the server', 'the ISO is already "
+    "downloaded'), carry that fact into the description of the component it "
+    "applies to and frame that component as STARTING from the ready resource — do "
+    "NOT emit a component or scope that re-acquires, re-downloads, or re-prepares "
+    "what the operator already has."
 )
 
 DECOMPOSE_COMPONENTS_TOOL = Tool(

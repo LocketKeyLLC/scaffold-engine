@@ -616,6 +616,21 @@ SYNTHESIS_SYSTEM_PROMPT = (
     "Distinguish 'remove old data / clean up the existing system' from 'wipe "
     "disks / reinstall the OS': only describe a from-scratch rebuild when the "
     "user's LATEST intent clearly asks for it. "
+    # §17.717 — the operator often states a PREREQUISITE is already ACQUIRED /
+    # PREPARED / ON-HAND ("I already have the Proxmox installer on a USB, plugged
+    # in", "the ISO is downloaded", "the template is on the host"). Synthesis
+    # dropped these because it described only what to BUILD — so the plan
+    # re-downloaded / re-prepared what the operator already had (the reported
+    # miss: the plan opened with 'Download Proxmox ISO' + 'Write USB' after the
+    # operator said the USB was already made and plugged in). Preserve them.
+    "If the user says a required RESOURCE or PREREQUISITE is ALREADY acquired, "
+    "downloaded, prepared, written, plugged in, or otherwise ON-HAND (e.g. 'I "
+    "already have the Proxmox installer on a USB drive plugged into the server', "
+    "'the ISO is already downloaded', 'the template is already on the host'), "
+    "STATE that as an already-available input and describe the work as STARTING "
+    "from it — do NOT include acquiring, downloading, creating, or re-preparing "
+    "what the operator already has. If the user says they have ALREADY DONE a "
+    "step, treat it as done and begin after it. "
     "Write 3-6 plain sentences describing what will be built, using only details "
     "the user confirmed AS OF THEIR LATEST WORD. Be specific: include "
     "technologies, components, architecture, and goals. Write as a direct "
