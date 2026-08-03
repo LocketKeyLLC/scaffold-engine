@@ -480,6 +480,14 @@ async def assist_record_turn(session_id: str, body: AssistTurnInput, db=Depends(
         session_id=session_id, role=body.role, kind=body.kind, content=body.content,
         node_key=body.node_key, evidence_kind=body.evidence_kind, db=db,
     )
+    # §17.715 — unconditional per-message derive: review this raw turn for any
+    # durable plan-relevant memory and log it, off the request path. No-op unless
+    # the derive valve is on; only operator messages (not the assistant's own
+    # turns). Fire-and-forget so /turn stays fast and never blocks the chat.
+    if (body.role or "").strip().lower() == "operator":
+        assist_agent.schedule_derive_turn_memory(
+            session_id=session_id, node_key=body.node_key, message=body.content,
+        )
     return {"session_id": session_id, "recorded": recorded}
 
 

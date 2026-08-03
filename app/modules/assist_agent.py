@@ -1476,6 +1476,138 @@ async def check_submit_grounding(
         return None
 
 
+# ── Unconditional per-turn derive (§17.715 — review + log EVERY message) ────
+
+# Strong refs so fire-and-forget derive tasks aren't GC'd mid-flight; tests
+# await them via drain_derive_tasks(). Same pattern as assist_replan's
+# _BACKGROUND_TASKS.
+_DERIVE_TASKS: set = set()
+
+# Pure control tokens carry no durable info — skip the extraction call for a
+# bare "yes"/"next"/"ok" (a real plan change is always ≥2 words: "drop it",
+# "use wireguard"). Cheap pre-filter only; anything with 2+ words goes through.
+_TRIVIAL_TURN = {
+    "yes", "no", "y", "n", "ok", "okay", "next", "skip", "done", "pause",
+    "resume", "continue", "stop", "go", "sure", "yep", "yeah", "nope",
+    "thanks", "thx", "ty", "cool", "great", "perfect", "confirm", "confirmed",
+}
+
+
+def _norm_note(text_: str) -> str:
+    return " ".join((text_ or "").lower().split())
+
+
+async def derive_turn_memory(
+    *, session_id: str, node_key: str | None, message: str, db,
+) -> dict:
+    """§17.715 — the unconditional review the trigger-gated paths miss: extract
+    any durable, plan-relevant memory from ONE operator message and LOG it into
+    the notes/facts guidance injects. Dedup-safe (won't restate standing memory).
+    Silent — does NOT surface an interactive re-plan (that stays on the §17.693
+    pivot path). Gated on the master + derive valves; fail-soft (returns a
+    summary dict, never raises).
+
+    This closes the gap §17.710a left: capture was made unconditional, but the
+    derive/review step was still gated on intent (skip/question≥6w pivots,
+    explicit notes, submit-facts). A plan change stated in a message routed to
+    ask/fix/etc. was captured raw yet never became memory that shapes later
+    steps. Now every message is reviewed."""
+    from app.config import settings
+    from app.modules import assist_guide
+
+    result = {"notes_added": 0, "facts_added": 0}
+    if not (settings.assist_unified_memory_enabled and settings.assist_umem_derive):
+        return result
+    msg = (message or "").strip()
+    if len(msg.split()) < 2 or msg.lower() in _TRIVIAL_TURN:
+        return result
+    try:
+        sess = (await db.execute(
+            text("SELECT status, notes, metadata FROM assist_sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).mappings().first()
+        if not sess or sess["status"] not in ("active", "paused"):
+            return result
+        existing_notes = _coerce_notes(sess.get("notes"))
+        env = _environment_from_metadata(sess.get("metadata"))
+        known_note_texts = [n.get("text", "") for n in existing_notes if n.get("text")]
+        known_facts = [str(f) for f in (env.get("facts") or [])]
+        derived = await assist_guide.distill_turn_memory(
+            message=msg, known_notes=known_note_texts, known_facts=known_facts,
+        )
+        # Dedup notes against what's already recorded (exact/substring, both
+        # ways) so a restated standing decision doesn't pile up on every turn.
+        seen = {_norm_note(t) for t in known_note_texts}
+        for n in derived.get("notes") or []:
+            cand = _norm_note(n["text"])
+            if not cand or cand in seen:
+                continue
+            if any(cand in s or s in cand for s in seen):
+                continue
+            stored = await record_note(
+                session_id=session_id, text_=n["text"], kind=n["kind"],
+                node_key=node_key, db=db,
+            )
+            if stored:
+                seen.add(cand)
+                result["notes_added"] += 1
+        # Facts: set_environment already dedups case-insensitively + caps.
+        new_facts = [f for f in (derived.get("facts") or [])]
+        if new_facts:
+            await set_environment(session_id=session_id, facts=new_facts, db=db)
+            result["facts_added"] = len(new_facts)
+        if result["notes_added"] or result["facts_added"]:
+            logger.info(
+                "assist_derived_turn_memory session_id=%s notes=+%d facts=+%d",
+                session_id, result["notes_added"], result["facts_added"],
+            )
+    except Exception as e:  # noqa: BLE001 — the scribe must never break the turn
+        logger.debug("derive_turn_memory_failed session_id=%s err=%r", session_id, e)
+    return result
+
+
+async def _derive_turn_memory_bg(
+    *, session_id: str, node_key: str | None, message: str,
+) -> None:
+    """Background worker: open a fresh session (the request session is gone by
+    the time this runs) and derive. Swallows every exception — a scribe hiccup
+    surfaces only in logs, never as an unhandled-task warning."""
+    try:
+        async with async_session() as bg_db:
+            await derive_turn_memory(
+                session_id=session_id, node_key=node_key, message=message, db=bg_db,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("derive_turn_memory_bg_failed session_id=%s err=%r", session_id, e)
+
+
+def schedule_derive_turn_memory(
+    *, session_id: str, node_key: str | None, message: str,
+) -> None:
+    """§17.715 — fire-and-forget the per-turn derive off the request path so the
+    conversation never waits on it (same posture as context_only divergence).
+    No-op unless the derive valve is on. Strong ref via ``_DERIVE_TASKS`` so the
+    task isn't GC'd before it finishes."""
+    from app.config import settings
+    if not (settings.assist_unified_memory_enabled and settings.assist_umem_derive):
+        return
+    task = asyncio.create_task(
+        _derive_turn_memory_bg(
+            session_id=session_id, node_key=node_key, message=message,
+        )
+    )
+    _DERIVE_TASKS.add(task)
+    task.add_done_callback(_DERIVE_TASKS.discard)
+
+
+async def drain_derive_tasks() -> None:
+    """Await all in-flight derive tasks. Tests call this between a /turn and any
+    assertion on the derived notes/facts; production never waits."""
+    if not _DERIVE_TASKS:
+        return
+    await asyncio.gather(*list(_DERIVE_TASKS), return_exceptions=True)
+
+
 # ── Unified session memory (§17.710a — lossless raw capture) ──────────────
 
 

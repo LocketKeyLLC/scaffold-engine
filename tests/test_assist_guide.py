@@ -856,6 +856,53 @@ async def test_distill_facts_failsoft():
     assert out == []
 
 
+# ── §17.715 — unconditional per-turn derive ────────────────────────────────
+
+
+def _turn_memory_resp(notes, facts, success=True):
+    r = MagicMock()
+    r.success = success
+    r.text = ""
+    call = MagicMock()
+    call.arguments = {"notes": notes, "facts": facts}
+    r.tool_calls = [call] if success else []
+    return r
+
+
+@pytest.mark.asyncio
+async def test_distill_turn_memory_shapes_and_filters():
+    # §17.715 — valid notes/facts pass; bad kinds + blanks are dropped.
+    resp = _turn_memory_resp(
+        notes=[
+            {"kind": "decision", "text": "Operator will drop the VPN and use WireGuard."},
+            {"kind": "bogus", "text": "should be filtered (bad kind)"},
+            {"kind": "constraint", "text": "  "},  # blank → dropped
+        ],
+        facts=["Router is a UniFi UDM at 192.168.1.1", "  "],
+    )
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock(return_value=resp)):
+        out = await assist_guide.distill_turn_memory(message="let's drop the VPN, use WireGuard")
+    assert [n["kind"] for n in out["notes"]] == ["decision"]
+    assert "WireGuard" in out["notes"][0]["text"]
+    assert out["facts"] == ["Router is a UniFi UDM at 192.168.1.1"]
+
+
+@pytest.mark.asyncio
+async def test_distill_turn_memory_empty_message_skips_llm():
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:
+        out = await assist_guide.distill_turn_memory(message="   ")
+    assert out == {"notes": [], "facts": []}
+    tc.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_distill_turn_memory_failsoft():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(side_effect=RuntimeError("model down"))):
+        out = await assist_guide.distill_turn_memory(message="anything substantive here")
+    assert out == {"notes": [], "facts": []}
+
+
 @pytest.mark.asyncio
 async def test_extract_substitutions_no_placeholders_skips_llm():
     with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:

@@ -753,6 +753,16 @@ class Settings(BaseSettings):
     assist_umem_inject: bool = False              # Stage B — consolidate + inject
     assist_umem_grounding: bool = False           # Stage C — pre-commit warn on contradiction
     assist_umem_max_chars: int = Field(default=4000, ge=500, le=20000)
+    # §17.715 — unconditional per-message DERIVE. §17.710a made CAPTURE
+    # unconditional, but the review-and-log step stayed trigger-gated (only
+    # skip/question≥6w pivots, explicit notes, and submit-facts). A plan change
+    # in a message routed to ask/fix/etc. was captured raw but never derived into
+    # the notes/facts guidance injects. When on, EVERY operator message runs one
+    # cheap model_general extraction (off the request path, dedup-safe) that logs
+    # any plan-relevant note (decision/constraint/addition/preference) or durable
+    # fact. Silent scribe — the interactive re-plan surface stays on the explicit
+    # pivot path (§17.693). Default OFF (legacy behavior); flip live via env.
+    assist_umem_derive: bool = False              # §17.715 — derive memory from every turn
     # §17.499 — default walkthrough verbosity (terse | normal | detailed).
     # Per-session override via /assist verbose. terse = commands + one-line
     # whys (expert); detailed = explain why each step matters + what to watch

@@ -1577,6 +1577,138 @@ async def distill_facts(
     return out
 
 
+# ── Unconditional per-turn derive (§17.715 — review + log EVERY message) ────
+
+_RECORD_TURN_MEMORY_TOOL = model_router.Tool(
+    name="record_turn_memory",
+    description=(
+        "Log any DURABLE, plan-relevant information the operator stated in this "
+        "one message, so later steps retain it. Two buckets: plan notes and "
+        "system facts."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "notes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["decision", "constraint", "addition", "preference"],
+                            "description": (
+                                "decision = a choice/change of direction that "
+                                "reshapes the plan ('let's do a fresh install "
+                                "instead', 'drop the VPN'); constraint = a hard "
+                                "limit ('only 2 NICs', 'must stay under $50'); "
+                                "addition = a NEW requirement to fold in ('also add "
+                                "a Palworld server'); preference = a soft "
+                                "leaning ('I'd rather use WireGuard')."
+                            ),
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": (
+                                "One self-contained sentence stating the note in "
+                                "the third person ('Operator has decided to …'). "
+                                "Standalone — do not reference 'this' or 'that'."
+                            ),
+                        },
+                    },
+                    "required": ["kind", "text"],
+                },
+                "description": (
+                    "Plan-affecting statements the operator made THIS message. "
+                    "Empty unless they actually decided/constrained/added/preferred "
+                    "something new."
+                ),
+            },
+            "facts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Durable facts about the operator's REAL system stated in this "
+                    "message (e.g. 'Router is a UniFi UDM at 192.168.1.1'). Only "
+                    "what they actually said; never guess."
+                ),
+            },
+        },
+        "required": ["notes", "facts"],
+    },
+)
+
+_TURN_MEMORY_SYSTEM = (
+    "You are a memory scribe for a human-in-the-loop build session. Read ONE "
+    "operator message and extract only DURABLE, plan-relevant information worth "
+    "carrying into later steps: decisions / changes of direction, hard "
+    "constraints, new requirements, stated preferences (as notes), and concrete "
+    "facts about their real system (as facts). Be conservative and precise:\n"
+    "- Return EMPTY notes and facts for a question, a request for help, an "
+    "acknowledgement ('ok', 'thanks'), small talk, or a refinement that does not "
+    "change the plan.\n"
+    "- Do NOT restate anything already listed under ALREADY KNOWN — only NEW "
+    "information the operator added in this message.\n"
+    "- Never guess or infer beyond what the message says.\n"
+    "Call record_turn_memory exactly once."
+)
+
+
+async def distill_turn_memory(
+    *, message: str, known_notes: list[str] | None = None,
+    known_facts: list[str] | None = None, role: str = "model_general",
+) -> dict:
+    """§17.715 — extract durable, plan-relevant memory from ONE operator message:
+    ``{"notes": [{"kind","text"}], "facts": [str]}``. This is the unconditional
+    review the trigger-gated pivot/note/facts paths miss. Reasoning/extraction →
+    ``model_general`` (cf. §17.677). Conservative (empty for questions / chit-
+    chat / step-refinements). ``known_*`` are folded into the prompt so the model
+    does not restate standing memory. Fail-soft → ``{"notes": [], "facts": []}``."""
+    empty = {"notes": [], "facts": []}
+    if not (message or "").strip():
+        return empty
+    known_lines = ""
+    if known_notes or known_facts:
+        known_lines = "ALREADY KNOWN (do not repeat):\n" + "\n".join(
+            f"- {k}" for k in [*(known_notes or []), *(known_facts or [])]
+        ) + "\n\n"
+    try:
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": _TURN_MEMORY_SYSTEM},
+                {"role": "user", "content": (
+                    known_lines
+                    + f"Operator message:\n{message[:4000]}\n\nCall record_turn_memory."
+                )},
+            ],
+            tools=[_RECORD_TURN_MEMORY_TOOL],
+            role=role,
+            temperature=0.0,
+            tool_choice="auto",
+            max_tokens=1024,
+        )
+    except Exception as exc:  # noqa: BLE001 — a scribe must never break the turn
+        logger.warning("assist_distill_turn_memory_failed: %s", exc)
+        return empty
+    args = read_tool_args(resp)
+    if not args:
+        return empty
+    notes_out: list[dict] = []
+    for n in (args.get("notes") or []):
+        if not isinstance(n, dict):
+            continue
+        t = str(n.get("text") or "").strip()
+        k = str(n.get("kind") or "").strip().lower()
+        if t and k in ("decision", "constraint", "addition", "preference"):
+            notes_out.append({"kind": k, "text": t[:400]})
+    facts_out: list[str] = []
+    for f in (args.get("facts") or []):
+        t = str(f).strip()
+        if t:
+            facts_out.append(t[:300])
+    return {"notes": notes_out, "facts": facts_out}
+
+
 # ── Grounding gate (§17.710c — warn when a result contradicts memory) ───────
 
 _RECORD_GROUNDING_TOOL = model_router.Tool(

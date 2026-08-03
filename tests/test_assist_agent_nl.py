@@ -102,3 +102,61 @@ async def test_list_candidates_filters_umbrella_and_zero_node():
     ids = [c["job_id"] for c in out]
     assert ids == ["j1"]  # umbrella + 0-node dropped
     assert out[0]["node_count"] == 9
+
+
+# ── §17.715 — unconditional per-turn derive (gating + dedup) ────────────────
+
+
+@pytest.mark.asyncio
+async def test_derive_turn_memory_valve_off_noops():
+    db = AsyncMock()
+    with patch("app.config.settings.assist_unified_memory_enabled", False):
+        out = await assist_agent.derive_turn_memory(
+            session_id="s1", node_key="T2",
+            message="let's do a fresh install instead", db=db)
+    assert out == {"notes_added": 0, "facts_added": 0}
+    db.execute.assert_not_called()          # returns before any DB work
+
+
+@pytest.mark.asyncio
+async def test_derive_turn_memory_trivial_turn_skips_llm_and_db():
+    db = AsyncMock()
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_derive", True):
+        out = await assist_agent.derive_turn_memory(
+            session_id="s1", node_key="T2", message="yes", db=db)
+    assert out == {"notes_added": 0, "facts_added": 0}
+    db.execute.assert_not_called()          # bare control token → no extraction
+
+
+@pytest.mark.asyncio
+async def test_derive_turn_memory_dedups_and_records_new():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(mappings_first={
+        "status": "active",
+        "notes": [{"kind": "decision",
+                   "text": "Operator has decided to abandon in-place reconfiguration."}],
+        "metadata": {"environment": {"facts": ["Existing PVE 9.2.6"]}},
+    }))
+    derived = {
+        "notes": [
+            {"kind": "decision", "text": "abandon in-place reconfiguration"},  # substring dup → skip
+            {"kind": "constraint", "text": "Keep everything on a single NVMe drive."},  # new → record
+        ],
+        "facts": ["USB install media is prepared and plugged in"],
+    }
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_derive", True), \
+         patch("app.modules.assist_guide.distill_turn_memory",
+               new=AsyncMock(return_value=derived)), \
+         patch.object(assist_agent, "record_note",
+                      new=AsyncMock(return_value={"kind": "constraint"})) as rn, \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+        out = await assist_agent.derive_turn_memory(
+            session_id="s1", node_key="T2",
+            message="keep it all on one nvme, usb is ready", db=db)
+    assert rn.await_count == 1                       # only the NEW note recorded
+    assert rn.await_args.kwargs["kind"] == "constraint"
+    assert out["notes_added"] == 1
+    se.assert_awaited_once()                         # facts folded in once
+    assert out["facts_added"] == 1
