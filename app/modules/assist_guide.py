@@ -1633,6 +1633,22 @@ _RECORD_TURN_MEMORY_TOOL = model_router.Tool(
                     "what they actually said; never guess."
                 ),
             },
+            "execution_context": {
+                "type": "object",
+                "properties": {
+                    "user": {"type": "string", "description": "Shell user, e.g. 'root'."},
+                    "host": {"type": "string", "description": "Hostname, e.g. 'DeFruscio-HomeLab'."},
+                },
+                "description": (
+                    "Set ONLY when the operator states, in prose, the shell "
+                    "user@host they are NOW running commands on / logged into — "
+                    "e.g. 'I'm on root@DeFruscio-HomeLab now', 'switched to "
+                    "root@pve2'. This changes where later steps run. OMIT for a "
+                    "passing mention, an email address, an example, or the host of "
+                    "some OTHER machine they are not operating from. Requires BOTH "
+                    "user and host; omit the whole object if either is unclear."
+                ),
+            },
         },
         "required": ["notes", "facts"],
     },
@@ -1706,7 +1722,16 @@ async def distill_turn_memory(
         t = str(f).strip()
         if t:
             facts_out.append(t[:300])
-    return {"notes": notes_out, "facts": facts_out}
+    out = {"notes": notes_out, "facts": facts_out}
+    # §17.716 — an explicit prose statement of the operator's current shell host
+    # (what the anchored prompt-line sensor can't see). Only when BOTH parts are
+    # present; the caller re-validates + applies under the §17.703 retention rules.
+    ec = args.get("execution_context")
+    if isinstance(ec, dict):
+        u, h = str(ec.get("user") or "").strip(), str(ec.get("host") or "").strip()
+        if u and h:
+            out["execution_context"] = {"user": u, "host": h}
+    return out
 
 
 # ── Grounding gate (§17.710c — warn when a result contradicts memory) ───────

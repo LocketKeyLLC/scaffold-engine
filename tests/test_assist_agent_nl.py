@@ -160,3 +160,89 @@ async def test_derive_turn_memory_dedups_and_records_new():
     assert out["notes_added"] == 1
     se.assert_awaited_once()                         # facts folded in once
     assert out["facts_added"] == 1
+
+
+# ── §17.716 — per-message execution-context freshness ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_apply_shell_context_switches_auto_captured_host():
+    db = AsyncMock()
+    prior = assist_agent._EXEC_CTX_SENTINEL + "root@pve in ONE interactive shell …"
+    with patch.object(assist_agent, "get_environment",
+                      new=AsyncMock(return_value={"profile": prior})), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+        out = await assist_agent._apply_shell_context(
+            session_id="s1", user="root", host="DeFruscio-HomeLab", db=db)
+    assert out["changed"] is True
+    se.assert_awaited_once()
+    assert "root@DeFruscio-HomeLab" in se.await_args.kwargs["profile"]
+
+
+@pytest.mark.asyncio
+async def test_apply_shell_context_respects_operator_set_profile():
+    db = AsyncMock()
+    with patch.object(assist_agent, "get_environment",
+                      new=AsyncMock(return_value={"profile": "I use tmux with 3 panes"})), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+        out = await assist_agent._apply_shell_context(
+            session_id="s1", user="root", host="pve2", db=db)   # no sentinel → sacred
+    assert out is None
+    se.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_apply_shell_context_rejects_garbage_host():
+    db = AsyncMock()
+    with patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+        out = await assist_agent._apply_shell_context(
+            session_id="s1", user="root", host="not a host!", db=db)
+    assert out is None
+    se.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_derive_turn_memory_updates_profile_from_prose():
+    # §17.716 — the reported miss: a PROSE host change (no prompt line) now
+    # updates the profile via the LLM's execution_context.
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(mappings_first={
+        "status": "active", "notes": [],
+        "metadata": {"environment": {
+            "profile": assist_agent._EXEC_CTX_SENTINEL + "root@pve in ONE shell"}},
+    }))
+    derived = {"notes": [], "facts": [],
+               "execution_context": {"user": "root", "host": "DeFruscio-HomeLab"}}
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_derive", True), \
+         patch("app.modules.assist_guide.distill_turn_memory",
+               new=AsyncMock(return_value=derived)), \
+         patch.object(assist_agent, "_apply_shell_context", new=AsyncMock()) as ap:
+        await assist_agent.derive_turn_memory(
+            session_id="s1", node_key="T2",
+            message="the root@DeFruscio-HomeLab now, could that be the reason", db=db)
+    ap.assert_awaited_once()
+    assert ap.await_args.kwargs["host"] == "DeFruscio-HomeLab"
+    assert ap.await_args.kwargs["source"] == "prose"
+
+
+@pytest.mark.asyncio
+async def test_derive_turn_memory_captures_prompt_line_in_nonsubmit_message():
+    # §17.716 — a prompt line pasted in a message (deterministic) wins over the
+    # LLM prose path.
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(mappings_first={
+        "status": "active", "notes": [], "metadata": {"environment": {}},
+    }))
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_derive", True), \
+         patch("app.modules.assist_guide.distill_turn_memory",
+               new=AsyncMock(return_value={"notes": [], "facts": []})), \
+         patch.object(assist_agent, "_apply_shell_context", new=AsyncMock()) as ap:
+        await assist_agent.derive_turn_memory(
+            session_id="s1", node_key="T2",
+            message="here's what i get:\nroot@DeFruscio-HomeLab:~# pvecm status\nnot ready",
+            db=db)
+    ap.assert_awaited_once()
+    assert ap.await_args.kwargs["source"] == "turn"
+    assert ap.await_args.kwargs["host"] == "DeFruscio-HomeLab"

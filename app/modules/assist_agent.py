@@ -1280,8 +1280,48 @@ def _exec_context_profile(user: str, host: str) -> str:
     )
 
 
+# §17.716 — validate a (user, host) from ANY source (deterministic paste OR the
+# per-turn LLM) before it can touch the profile, so a garbled host never lands.
+_CTX_USER_RE = re.compile(r"^[A-Za-z_][\w.-]*$")
+_CTX_HOST_RE = re.compile(r"^[\w][\w.-]*$")
+
+
+async def _apply_shell_context(
+    *, session_id: str, user: str, host: str, db, source: str = "paste",
+) -> Optional[dict]:
+    """§17.716 — apply a detected ``user@host`` to ``metadata.environment.profile``
+    under the §17.703 retention rules, regardless of how it was detected (a
+    pasted prompt line, or an explicit prose statement the per-turn LLM read).
+    Centralizes the write so every source obeys the same rules:
+      • profile empty                        → capture it.
+      • prior auto-capture (``_EXEC_CTX_SENTINEL``), different host → switch it.
+      • profile already names this ``user@host``                   → no-op.
+      • operator-set (non-sentinel) profile   → leave it (explicit outranks
+        inferred; mirrors :func:`learn_from_submit`).
+    Returns ``{user, host, changed}`` on a write, else None."""
+    user, host = (user or "").strip(), (host or "").strip()
+    if not (_CTX_USER_RE.match(user) and _CTX_HOST_RE.match(host)):
+        return None
+    env = await get_environment(session_id=session_id, db=db) or {}
+    current = (env.get("profile") or "").strip()
+    marker = f"{_EXEC_CTX_SENTINEL}{user}@{host} "
+    if marker in current:
+        return None  # already recorded this exact context
+    if current and not current.startswith(_EXEC_CTX_SENTINEL):
+        return None  # respect an operator-set profile
+    changed = bool(current)  # a prior auto-capture named a different host
+    await set_environment(
+        session_id=session_id, profile=_exec_context_profile(user, host), db=db,
+    )
+    logger.info(
+        "assist_%s_shell_context session_id=%s ctx=%s@%s source=%s",
+        "switched" if changed else "captured", session_id, user, host, source,
+    )
+    return {"user": user, "host": host, "changed": changed}
+
+
 async def capture_execution_context(
-    *, session_id: str, evidence: str, db,
+    *, session_id: str, evidence: str, db, source: str = "paste",
 ) -> Optional[dict]:
     """§17.703 — the deterministic execution-environment monitor.
 
@@ -1290,41 +1330,18 @@ async def capture_execution_context(
     ``metadata.environment.profile`` in sync with it. Runs on EVERY submit —
     decoupled from the substitution-learning valve and from the success verdict
     — so it captures on a failed/error paste too (that's still the operator's
-    real shell). Returns ``{user, host, changed}`` when it wrote a profile, else
-    None. Fail-soft: any error returns None and never disturbs the submit.
-
-    Retention semantics (why this is a *monitor*, not a one-shot capture):
-      • profile empty            → capture it.
-      • profile is a prior auto-capture (``_EXEC_CTX_SENTINEL``) that names a
-        DIFFERENT host/user → the operator moved (e.g. ``root@pve`` →
-        ``root@ct100``); replace it.
-      • profile already names this exact ``user@host`` → no-op.
-      • profile was set explicitly by the operator (``/assist env``, no
-        sentinel) → leave it; an explicit profile outranks an inferred one
-        (mirrors the only-add-new rule in :func:`learn_from_submit`).
-    """
+    real shell). §17.716 — ALSO runs per-message (see ``derive_turn_memory``) so
+    a prompt line pasted in a non-submit message (a question / fix) is not
+    missed. Returns ``{user, host, changed}`` when it wrote a profile, else None.
+    Fail-soft: any error returns None and never disturbs the caller."""
     try:
         detected = _detect_shell_context(evidence)
         if not detected:
             return None
         user, host = detected
-        env = await get_environment(session_id=session_id, db=db) or {}
-        current = (env.get("profile") or "").strip()
-        marker = f"{_EXEC_CTX_SENTINEL}{user}@{host} "
-        if marker in current:
-            return None  # already recorded this exact context
-        # Respect an operator-set (non-sentinel, non-empty) profile.
-        if current and not current.startswith(_EXEC_CTX_SENTINEL):
-            return None
-        changed = bool(current)  # a prior auto-capture named a different host
-        await set_environment(
-            session_id=session_id, profile=_exec_context_profile(user, host), db=db,
+        return await _apply_shell_context(
+            session_id=session_id, user=user, host=host, db=db, source=source,
         )
-        logger.info(
-            "assist_%s_shell_context session_id=%s ctx=%s@%s",
-            "switched" if changed else "captured", session_id, user, host,
-        )
-        return {"user": user, "host": host, "changed": changed}
     except Exception as e:  # noqa: BLE001 — context capture must never break submit
         logger.debug(
             "shell_context_capture_failed session_id=%s err=%r", session_id, e,
@@ -1535,6 +1552,24 @@ async def derive_turn_memory(
         derived = await assist_guide.distill_turn_memory(
             message=msg, known_notes=known_note_texts, known_facts=known_facts,
         )
+        # §17.716 — keep the execution context (user@host) fresh from EVERY
+        # message, not just submits. (a) deterministic: a prompt line pasted in a
+        # non-submit message; (b) the operator saying in prose they've moved hosts
+        # (what the anchored regex can't catch — the reported root@pve →
+        # root@DeFruscio-HomeLab miss). Deterministic wins; both go through the
+        # shared §17.703 retention rules (respect operator-set profiles).
+        det = _detect_shell_context(msg)
+        if det:
+            await _apply_shell_context(
+                session_id=session_id, user=det[0], host=det[1], db=db, source="turn",
+            )
+        else:
+            ec = derived.get("execution_context")
+            if isinstance(ec, dict) and ec.get("user") and ec.get("host"):
+                await _apply_shell_context(
+                    session_id=session_id, user=ec["user"], host=ec["host"],
+                    db=db, source="prose",
+                )
         # Dedup notes against what's already recorded (exact/substring, both
         # ways) so a restated standing decision doesn't pile up on every turn.
         seen = {_norm_note(t) for t in known_note_texts}
