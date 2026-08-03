@@ -497,6 +497,41 @@ def test_render_session_memory_consolidates_all():
     assert "only 2 physical NICs" in out
 
 
+def test_render_session_memory_reset_supersedes_stale_facts():
+    # §17.714 — when the operator declares a fresh start, the append-only facts
+    # ledger + the "never assume fresh" rule must NOT override the decision.
+    # Regression for the live homelab report: operator abandoned in-place
+    # reconfig for a fresh Proxmox install, but guidance kept operating on the
+    # stale CPU-governor facts because they led the block as authoritative.
+    out = assist_guide.render_session_memory(
+        {"profile": "root@pve single shell",
+         "facts": ["Current governor: performance", "Scaling driver: intel_cpufreq"],
+         "substitutions": {}},
+        [{"kind": "decision",
+          "text": "Operator has decided to abandon in-place reconfiguration and "
+                  "instead perform a fresh Proxmox VE install."}],
+    )
+    assert out.startswith("## Session memory — the operator has CHANGED DIRECTION")
+    assert "do NOT assume a fresh" not in out          # anti-fresh rule suspended
+    assert "SUSPENDED" in out
+    # the decision leads; the now-stale facts are demoted below it
+    assert out.index("abandon in-place") < out.index("Current governor")
+    assert "Earlier observations" in out
+    assert "re-verify" in out
+
+
+def test_render_session_memory_benign_note_keeps_normal_grounding():
+    # §17.714 — a plain constraint/preference must NOT trip reset mode; the
+    # normal anti-fresh grounding stays in force (no false positive).
+    out = assist_guide.render_session_memory(
+        {"profile": "root@pve", "facts": ["Existing Proxmox VE 9.2.6 (not fresh)"],
+         "substitutions": {}},
+        [{"kind": "constraint", "text": "only 2 physical NICs; prefer a clean minimal config"}],
+    )
+    assert "do NOT assume a fresh" in out               # normal grounding intact
+    assert "CHANGED DIRECTION" not in out
+
+
 def test_render_session_memory_empty():
     assert assist_guide.render_session_memory({"profile": "", "substitutions": {}, "facts": []}) == ""
     assert assist_guide.render_session_memory(None, None) == ""

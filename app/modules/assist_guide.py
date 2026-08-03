@@ -674,6 +674,44 @@ def render_operator_notes_block(notes: list[dict] | None) -> str:
     )
 
 
+# §17.714 — deterministic "operator has changed direction / wants a fresh
+# start" detection. The facts ledger is append-only (``set_environment`` never
+# retracts), and the "never assume a fresh system" grounding rule (§17.709) was
+# built for the OPPOSITE failure (the model fabricating a fresh install when one
+# already existed). So once the operator EXPLICITLY decides to reinstall /
+# rebuild / start over, the earlier-gathered facts describe an abandoned
+# approach and the anti-fresh rule actively fights the operator's stated intent
+# — the recurring "it's not following the conversation" report. Detect the reset
+# intent and let the renderer foreground the decision + suspend the anti-fresh
+# rule (§17.679 lesson: deterministic gate, don't re-tune an LLM). Patterns are
+# reset/rebuild-anchored — a bare "install" or "clean" must NOT trip them.
+_RESET_INTENT_PATTERNS: tuple[re.Pattern, ...] = (
+    re.compile(r"\bre-?install(ing|ed)?\b", re.I),
+    re.compile(r"\bre-?imag(e|ing|ed)\b", re.I),
+    re.compile(r"\bfresh\b.{0,24}\binstall\b", re.I),
+    re.compile(r"\bclean\s+install\b", re.I),
+    re.compile(r"\bstart(ing)?\s+(over|fresh|clean|from\s+scratch)\b", re.I),
+    re.compile(r"\bfrom\s+scratch\b", re.I),
+    re.compile(r"\brebuild(ing|s)?\b", re.I),
+    re.compile(r"\bbare[-\s]?metal\s+(install|reinstall|rebuild)\b", re.I),
+    re.compile(r"\bwipe\b.{0,30}\b(install|reinstall|reimage|rebuild)\b", re.I),
+    re.compile(r"\babandon\b.{0,48}\binstead\b", re.I),
+)
+
+
+def _operator_reset_intent(notes: list[dict] | None) -> bool:
+    """§17.714 — True when an operator note/decision declares a fresh start or
+    rebuild that supersedes previously-gathered system state. Deterministic on
+    the note text (any kind — a pivot lands as ``kind='decision'`` via §17.693,
+    but honor it wherever it was recorded)."""
+    for n in notes or []:
+        if not isinstance(n, dict):
+            continue
+        if any(p.search(n.get("text") or "") for p in _RESET_INTENT_PATTERNS):
+            return True
+    return False
+
+
 def render_session_memory(
     environment: dict | None, operator_notes: list[dict] | None = None,
     *, budget: int | None = None,
@@ -684,7 +722,13 @@ def render_session_memory(
     replaces the separate env + notes blocks when ``assist_umem_inject`` is on,
     so every prompt (guidance / deliberation / verify) grounds on the same
     memory through one renderer. Grounding rule is baked in: never assume a
-    fresh/empty system; treat anything marked unknown as still open."""
+    fresh/empty system; treat anything marked unknown as still open.
+
+    §17.714 — SUPERSESSION: when an operator note declares a fresh start /
+    rebuild (``_operator_reset_intent``), lead with that decision, DEMOTE the
+    now-superseded facts to "earlier observations (re-verify)", and SUSPEND the
+    anti-fresh rule — the append-only facts ledger otherwise keeps injecting the
+    abandoned approach as authoritative ground truth on every later step."""
     environment = environment or {}
     profile = (environment.get("profile") or "").strip()
     facts = [str(f).strip() for f in (environment.get("facts") or []) if str(f).strip()]
@@ -695,31 +739,66 @@ def render_session_memory(
     ]
     if not (profile or facts or subs or notes):
         return ""
-    header = (
-        "## Session memory — what's known so far (ground on this; do NOT assume a "
-        "fresh/empty system, and treat anything marked unknown/unverified as still open)"
-    )
-    # Priority order: context + facts are load-bearing for grounding; provided
-    # values next; notes last. Dropped from the tail if over budget (facts are
-    # never dropped — only trimmed).
-    sections: list[str] = [header]
-    if profile:
-        sections.append(f"**Execution context:** {profile}")
-    if facts:
-        sections.append("**Observed facts:**\n" + "\n".join(f"- {f}" for f in facts))
-    if subs:
-        sections.append("**Provided values:**\n" + "\n".join(f"- {k} = {v}" for k, v in subs.items()))
-    if notes:
-        sections.append(
-            "**Operator notes / requirements (carry forward):**\n"
-            + "\n".join(f"- [{(n.get('kind') or 'note')}] {n['text'].strip()}" for n in notes)
+    if _operator_reset_intent(notes):
+        # §17.714 — operator has explicitly chosen a fresh start. Direction
+        # first (protected from budget-trim by the >2 guard below), facts
+        # demoted + reframed, anti-fresh rule suspended.
+        header = (
+            "## Session memory — the operator has CHANGED DIRECTION (read this first)\n"
+            "The operator has decided to start fresh / rebuild. Their **current "
+            "direction** below SUPERSEDES the earlier gathered state — follow it: "
+            "do NOT keep operating against the prior system or try to argue them "
+            "back to it. For THIS session the usual \"never assume a fresh system\" "
+            "rule is SUSPENDED — they have explicitly chosen a fresh start; still "
+            "treat anything unknown/unverified as open and ask."
         )
+        sections: list[str] = [header]
+        if notes:
+            sections.append(
+                "**Operator's current direction (latest decision — supersedes the state below):**\n"
+                + "\n".join(f"- [{(n.get('kind') or 'note')}] {n['text'].strip()}" for n in notes)
+            )
+        if facts:
+            sections.append(
+                "**Earlier observations (gathered during the PREVIOUS approach the "
+                "operator has since abandoned — re-verify before relying on any of "
+                "them; most will not hold after the fresh start):**\n"
+                + "\n".join(f"- {f}" for f in facts)
+            )
+        if subs:
+            sections.append("**Provided values:**\n" + "\n".join(f"- {k} = {v}" for k, v in subs.items()))
+        if profile:
+            sections.append(
+                "**Execution context (re-confirm the host/hostname after a rebuild):** " + profile
+            )
+    else:
+        header = (
+            "## Session memory — what's known so far (ground on this; do NOT assume a "
+            "fresh/empty system, and treat anything marked unknown/unverified as still open)"
+        )
+        # Priority order: context + facts are load-bearing for grounding; provided
+        # values next; notes last. Dropped from the tail if over budget (facts are
+        # never dropped — only trimmed).
+        sections = [header]
+        if profile:
+            sections.append(f"**Execution context:** {profile}")
+        if facts:
+            sections.append("**Observed facts:**\n" + "\n".join(f"- {f}" for f in facts))
+        if subs:
+            sections.append("**Provided values:**\n" + "\n".join(f"- {k} = {v}" for k, v in subs.items()))
+        if notes:
+            sections.append(
+                "**Operator notes / requirements (carry forward):**\n"
+                + "\n".join(f"- [{(n.get('kind') or 'note')}] {n['text'].strip()}" for n in notes)
+            )
     block = "\n\n".join(sections)
     if budget and len(block) > budget:
-        # Drop lowest-priority whole sections (notes, then provided) before
-        # falling back to a hard cut — keeps the grounding-critical facts intact.
+        # Drop lowest-priority whole sections from the tail before a hard cut.
+        # The >2 guard keeps [header, section#2]: in the normal block that's the
+        # grounding-critical facts; in a §17.714 reset block it's the operator's
+        # current direction — the load-bearing part in each case.
         while len(sections) > 2 and len("\n\n".join(sections)) > budget:
-            sections.pop()  # tail = notes → provided → facts (facts kept: >2 guard)
+            sections.pop()
         block = "\n\n".join(sections)
         if len(block) > budget:
             block = block[:budget].rstrip() + "\n… (memory truncated)"
@@ -1010,7 +1089,7 @@ Choose the outcome:
 Rules:
 - Resolve as soon as the operator confirms — never force an extra round once they've said yes.
 - Do NOT pre-assume a count, topology, or set the operator has not agreed to.
-- GROUND on the observed system facts + project context above. NEVER assume the system is fresh, empty, or new: if the facts describe an EXISTING system, decide for THAT system; if a needed detail was not captured or a check was inconclusive (a command errored / returned empty), treat it as UNKNOWN and ask — do NOT invent a "fresh install" assumption to fill the gap.
+- GROUND on the observed system facts + project context above. NEVER assume the system is fresh, empty, or new: if the facts describe an EXISTING system, decide for THAT system; if a needed detail was not captured or a check was inconclusive (a command errored / returned empty), treat it as UNKNOWN and ask — do NOT invent a "fresh install" assumption to fill the gap. EXCEPTION (§17.714): if the session memory says the operator has CHANGED DIRECTION / chosen to reinstall or rebuild, follow THAT decision — a fresh start is then what they asked for, not an assumption; treat the earlier "observed facts" as describing the abandoned system.
 - Never invent values the operator must own (real public IPs, ISP specifics) — use sensible, clearly-labeled defaults they can change.
 - Keep `message` tight and skimmable. No preamble, no emoji, no completion checkmarks."""
 
@@ -1536,7 +1615,10 @@ _GROUNDING_SYSTEM = (
     "a contradiction ONLY when the result conflicts with a known fact — most "
     "often assuming a fresh/empty system when memory shows an existing one. Be "
     "conservative: adding new info or anything memory is silent on is NOT a "
-    "contradiction; default to contradicts=false when unsure. Call record_grounding once."
+    "contradiction; default to contradicts=false when unsure. §17.714: if the "
+    "memory says the operator has CHANGED DIRECTION / chosen to reinstall or "
+    "rebuild, a result that assumes a fresh system is CONSISTENT, not a "
+    "contradiction. Call record_grounding once."
 )
 
 
