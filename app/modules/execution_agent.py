@@ -823,14 +823,30 @@ async def _searxng_search(query: str, max_results: int = 5) -> str:
     """Call SearXNG JSON API, return formatted results."""
     try:
         from app.utils.http_clients import get_searxng_client
+        from app.modules.research_extractors import (
+            _engines_for_category, SEARXNG_FALLBACK_ENGINES,
+        )
         client = get_searxng_client()
+        # §17.712 — use the curated `engines` backbone (NOT `categories=general`,
+        # which is additive and floods with aggressive keyword-matchers per
+        # §17.503) + a 0-results fallback to the widest net, so a transient
+        # CAPTCHA on the general engines doesn't return "No search results".
         resp = await client.get(
             "/search",
-            params={"q": query, "format": "json", "categories": "general"},
+            params={"q": query, "format": "json",
+                    "engines": _engines_for_category("general")},
         )
         resp.raise_for_status()
         data = resp.json()
         results = data.get("results", [])[:max_results]
+        if not results:
+            fb = await client.get(
+                "/search",
+                params={"q": query, "format": "json",
+                        "engines": SEARXNG_FALLBACK_ENGINES},
+            )
+            if fb.status_code == 200:
+                results = fb.json().get("results", [])[:max_results]
         if not results:
             return "No search results found."
         lines = []

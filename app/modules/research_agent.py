@@ -79,6 +79,7 @@ from app.modules.research_extractors import (
     _searxng_cache_get,
     _searxng_cache_key,
     _searxng_cache_set,
+    SEARXNG_FALLBACK_ENGINES,
 )
 from app.modules.research_state import (
     HEARTBEAT_INTERVAL_SECONDS,
@@ -615,6 +616,28 @@ async def _search_queries(
                 )
                 if resp.status_code == 200:
                     results = resp.json().get("results", [])[:10]
+                    # §17.712 — 0-results fallback. The category engines returned
+                    # nothing (commonly a transient CAPTCHA/rate-limit on the
+                    # general engines). Retry ONCE with the widest general net so
+                    # a single blocked engine can't zero the query. Only on empty,
+                    # so it costs nothing on the common path.
+                    if not results:
+                        try:
+                            fb = await client.get(
+                                "/search",
+                                params={"q": query_text, "format": "json",
+                                        "engines": SEARXNG_FALLBACK_ENGINES},
+                            )
+                            if fb.status_code == 200:
+                                results = fb.json().get("results", [])[:10]
+                                if results:
+                                    logger.info(
+                                        "searxng_fallback_recovered: query=%s results=%d",
+                                        query_text, len(results),
+                                    )
+                        except Exception as e:
+                            logger.warning("searxng_fallback_failed: query='%s' error=%s",
+                                           query_text, e)
                     await _searxng_cache_set(query_text, results)
                     logger.info("searxng_cache_miss: query=%s results=%d", query_text, len(results))
                     state.search_history.add(query_key)

@@ -22049,6 +22049,22 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.712 Fix — research "0 results" on a simple question: broaden SearXNG engines + a 0-results fallback (2026-08-02)
+
+**Report.** In a pre-`/go` conversation the operator asked whether something (Zenarmor) "required payment or was free"; the engine researched and **came back with 0 results.**
+
+**Diagnosis (live).** Logs showed every SearXNG query returning `results=0`. Root cause: the query was categorized `"it"` → engines `github,duckduckgo,startpage`. github is a CODE-search engine (useless for a pricing question), and duckduckgo + startpage were both CAPTCHA'd at that moment — so nothing answered. Probing each engine live: `bing` returned 10 results (it was UP) but **wasn't in the set**; duckduckgo/startpage/brave/google/qwant were all CAPTCHA'd or rate-limited. Engine reliability ROTATES over time (the §17.503 "google/bing are dead" note was stale — bing is now the most reliable here), so a narrow 1–2-general-engine set is fragile.
+
+**Fix (`research_extractors.py` + both search call sites).**
+1. **Broadened the engine sets** — every `CATEGORY_ENGINES` entry now leads with a general-web BACKBONE (`duckduckgo,bing,brave,startpage,mojeek`); category engines (github/arxiv/scholar) are ADDED, not used alone. SearXNG aggregates, so a CAPTCHA'd engine just contributes nothing — breadth is free resilience. The reported query now returns 27 results incl. "Zenarmor Subscriptions".
+2. **0-results fallback** — when a category query returns nothing, retry ONCE with the widest net (`SEARXNG_FALLBACK_ENGINES` = backbone + qwant + wikipedia). Fires only on empty, so no cost on the common path. Added to `research_agent._fetch_one` (the `/research` path that failed) AND `execution_agent._searxng_search` (the assist `ask` path — also switched from `categories=general`, the §17.503 flooding anti-pattern, to the curated `engines` backbone).
+
+**Verification. LIVE:** the exact failing query "Zenarmor free vs paid" → 27 results with the new "it" set; `_searxng_search` returns real Zenarmor pages through the app path; the fallback retry recovers when the category engines return 0. Tests: `test_research_searxng_engines.py` updated for the new strategy (+ a fallback-retry test + a backbone-in-every-category test); 680 research/extractor/execution tests pass. Orchestrator restarted, health 200.
+
+**Deferred (needs the operator's specifics):** the paired "it didn't retain some information and needed to be reminded" happened in the PRE-`/go` conversation (ideation → synthesis, §17.694 timeline reconciliation), a different subsystem from the assist-mode unified memory (§17.710) — and no job was created ("we never got there"), so there's no transcript to diagnose. Which fact was dropped is needed to fix it correctly rather than guess.
+
+---
+
 ### §17.711 Test-maintenance — the 5 stale assist tests back to green (2026-08-02)
 
 Test-only (no product code). The assist sweep carried 5 long-standing reds, tests that predated later submit-path / rollup additions and were never updated:

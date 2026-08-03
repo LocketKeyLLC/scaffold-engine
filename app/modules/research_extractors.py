@@ -67,12 +67,28 @@ DEFAULT_SOURCE_SCORE = 0.50
 # whatever the (now-removed) `categories` param dragged in (MDN). Each category
 # now carries a reliable general-web backbone (duckduckgo + startpage) plus its
 # specialist engines. Revisit if the SearXNG engine roster changes.
+# §17.712 — every set leads with a BROAD general-web backbone, because engine
+# reliability rotates: duckduckgo/startpage/brave/google/qwant all CAPTCHA or
+# rate-limit intermittently, and when the 1-2 engines in a narrow set are all
+# blocked the query returns 0 (the reported "is Zenarmor free or paid → 0
+# results": the old "it" set was github,duckduckgo,startpage — github is a CODE
+# engine, useless for a pricing question, and both general engines were CAPTCHA'd
+# while `bing` — not in the set — was up). SearXNG aggregates across engines, so
+# breadth is free resilience: a CAPTCHA'd engine just contributes nothing.
+# Category-specific engines (github/arxiv/scholar) are ADDED to the backbone,
+# not used alone. `bing` is included (the §17.503 "google/bing dead" note is
+# stale — bing is currently the most reliable general engine here).
+_GENERAL_BACKBONE = "duckduckgo,bing,brave,startpage,mojeek"
 CATEGORY_ENGINES: dict[str, str] = {
-    "it": "github,duckduckgo,startpage",
-    "science": "arxiv,google scholar,duckduckgo",
-    "news": "duckduckgo news,duckduckgo",
-    "general": "duckduckgo,startpage,brave",
+    "it": f"{_GENERAL_BACKBONE},github",
+    "science": f"arxiv,google scholar,{_GENERAL_BACKBONE}",
+    "news": f"duckduckgo news,{_GENERAL_BACKBONE}",
+    "general": _GENERAL_BACKBONE,
 }
+# §17.712 — the 0-results fallback set: the widest general net (adds qwant +
+# wikipedia). Retried once when the category engines return nothing, so a single
+# transient CAPTCHA can't zero a query.
+SEARXNG_FALLBACK_ENGINES = "duckduckgo,bing,brave,startpage,mojeek,qwant,wikipedia"
 
 _EXTRACT_BATCH_FULL_PAGE = 5
 _EXTRACT_BATCH_SNIPPET = 10
@@ -614,9 +630,8 @@ async def _searxng_cache_set(query: str, results) -> None:
 
 
 def _engines_for_category(category: str) -> str:
-    # §17.503 — default to the reliable general-web backbone (google/bing are
-    # dead on this instance) for any unmapped category.
-    return CATEGORY_ENGINES.get(category, "duckduckgo,startpage")
+    # §17.712 — unmapped categories fall back to the broad general backbone.
+    return CATEGORY_ENGINES.get(category, _GENERAL_BACKBONE)
 
 
 # =============================================================================
