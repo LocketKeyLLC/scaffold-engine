@@ -2010,7 +2010,7 @@ A second full audit run as a **multi-agent workflow**: 66 agents — one correct
 - ✅ §17.615 node/execution cluster: topology-aware truncation, sizing convergence evidence guard, size stage_error on non-persist, async confirm off the threadpool, decompose TOCTOU advisory lock (2026-07-18 audit #14/26/27/35/36); #12 DB-session-across-LLM was deferred here, now RESOLVED in §17.619.
 - ✅ §17.616 RAG/provenance batching: one batched exact-hash dedup query + multi-row provenance INSERT (2026-07-18 audit #31/33); #32 fetch_cache SCAN deferred (needs shared-Redis infra change).
 - ✅ §17.617 wired half-wired features: JobSummary parent_job_id/component_index populated + status.py class rename, assist divergence_count surfaced (2026-07-18 audit #19/13); #16 SO disputed-claim + #20 handoff_policy deferred (unverifiable feature work).
-- ✅ §17.618 CLOSEOUT of the 2026-07-18 multi-agent audit: 34 confirmed + #42 doc-drift resolved (§17.608–617), 4 deferred (#12/16/20/32), #41 reviewed-intentional. Ledger in AUDIT_2026-07-18.md.
+- ✅ §17.618 CLOSEOUT of the 2026-07-18 multi-agent audit: 34 confirmed + #42 doc-drift resolved (§17.608–617), 4 deferred (#12/16/20/32), #41 reviewed-intentional. Ledger in docs/AUDIT_2026-07-18.md.
 - ✅ §17.619 resolved deferred #12: single `db.commit()` releases the pooled connection before compile-synthesis's LLM call (no session-across-LLM); live-LLM verified.
 - ✅ §17.620 resolved deferred #32: fetch_cache counts via O(1) `DBSIZE` on a dedicated Redis DB (db1); live Redis verified (caught a `from_url(db=)` gotcha).
 - ✅ §17.621 resolved deferred #20: assist `handoff_policy` auto values delegate to the autonomous executor on skip via a background handoff; live wiring verified.
@@ -23390,7 +23390,7 @@ Picks up the audit #12 deferral (see §17.615/§17.618). On investigation the fi
 
 ### §17.618 Closeout — 2026-07-18 whole-repo multi-agent improvement audit (2026-07-18)
 
-**Closes the 2026-07-18 multi-agent improvement audit** (§17.608–618). Methodology: 15 subsystem finders × 4 dimensions (reliability/performance/quality/feature), each finding vetted by two independent adversarial skeptics (correctness + intentionality lenses), then deduped/ranked — 55 raw → 40 confirmed + 9 contested. The two-skeptic gauntlet held to the documented ~31% true-positive prior; **zero critical data-loss/corruption/auth-bypass defects** surfaced, confirming a mature, well-hardened codebase. Full ledger: `AUDIT_2026-07-18.md`.
+**Closes the 2026-07-18 multi-agent improvement audit** (§17.608–618). Methodology: 15 subsystem finders × 4 dimensions (reliability/performance/quality/feature), each finding vetted by two independent adversarial skeptics (correctness + intentionality lenses), then deduped/ranked — 55 raw → 40 confirmed + 9 contested. The two-skeptic gauntlet held to the documented ~31% true-positive prior; **zero critical data-loss/corruption/auth-bypass defects** surfaced, confirming a mature, well-hardened codebase. Full ledger: `docs/AUDIT_2026-07-18.md`.
 
 **Resolved — 34 confirmed + 2 contested-doc:**
 - §17.608 rerank cap mismatch (#1, High) · §17.609 SSE lifecycle #2/#9/#39 (High) · §17.610 cloud retry/backoff + provider bugs #3/#29/#38 (High)

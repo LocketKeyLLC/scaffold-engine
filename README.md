@@ -1,5 +1,9 @@
 # Scaffold Engine
 
+[![CI](https://github.com/LocketKeyLLC/scaffold-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/LocketKeyLLC/scaffold-engine/actions/workflows/ci.yml)
+[![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](./LICENSE)
+[![Release](https://img.shields.io/github/v/tag/LocketKeyLLC/scaffold-engine?label=release)](./CHANGELOG.md)
+
 A self-hosted DAG orchestration engine for multi-step LLM workflows. You give it an idea; it researches the topic, plans an execution graph, runs each step with verification, and hands back a compiled output. Everything runs locally on your hardware (Ollama for inference, Milvus for vector search, Postgres for state, SearXNG for web search) — no cloud calls unless you opt in.
 
 This README is a **complete from-zero walkthrough**: every command, what it does, what you'll see, and what to do if it goes wrong. If you finish reading this end-to-end you should be able to clone the repo on a fresh machine and have your first compiled output ~45 minutes later.
@@ -8,6 +12,7 @@ For details beyond setup-and-first-run, read:
 
 - **[USER_GUIDE.md](./USER_GUIDE.md)** — every command, organized by what you're trying to do (start a project, do research, run a manual walkthrough, schedule something recurring, …).
 - **[OVERVIEW.md](./OVERVIEW.md)** — comprehensive technical reference. Architecture, every module, every public function, the full database schema, configuration, the TOON data format, the logging catalog, known issues, sprint history, and a glossary.
+- **[CHANGELOG.md](./CHANGELOG.md)** — release-level history. **[CONTRIBUTING.md](./CONTRIBUTING.md)** — dev setup and PR ground rules. **[SECURITY.md](./SECURITY.md)** — how to report vulnerabilities.
 
 ---
 
@@ -253,4 +258,4 @@ Active solo development. v1.0.0 tagged 2026-05-07; API contract pinned at v1.1.0
 
 ## License
 
-See `LICENSE`.
+[Business Source License 1.1](./LICENSE). Free for personal, internal, research, and evaluation use; offering scaffold-engine (or a product substantially derived from it) to third parties commercially requires a license from LocketKey LLC. Each version converts to Apache 2.0 on its Change Date. Contact LocketKey LLC for commercial licensing.
