@@ -94,15 +94,21 @@ class TestValidateDAG:
         assert "T2" not in cleaned[1]["depends_on"]
         assert any("self_reference_removed" in w for w in warnings)
 
-    # 4. Cycle detection — raises ValueError
+    # 4. Cycle detection — §17.696 repairs by default (covered in
+    # test_dag_cycle_break.py); with the valve OFF the legacy raise remains.
     def test_cycle_detected(self):
         nodes = [
             _node("T1", ["T3"]),
             _node("T2", ["T1"]),
             _node("T3", ["T2"]),
         ]
-        with pytest.raises(ValueError, match="dag_cycle_detected"):
-            validate_dag(copy.deepcopy(nodes))
+        old = dag_mod.settings.dag_break_cycles_enabled
+        dag_mod.settings.dag_break_cycles_enabled = False
+        try:
+            with pytest.raises(ValueError, match="dag_cycle_detected"):
+                validate_dag(copy.deepcopy(nodes))
+        finally:
+            dag_mod.settings.dag_break_cycles_enabled = old
 
     # 5. Invalid tool — defaults to LLM, warning logged
     def test_invalid_tool_defaulted(self):

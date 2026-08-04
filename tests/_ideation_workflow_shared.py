@@ -183,4 +183,23 @@ def _mock_db_for_claim(claimed_row, existing_row_after_fail=None):
     return db
 
 
-__all__ = ['AsyncMock', 'MagicMock', '_MODULE_PATH', '_llm_response', '_tool_response', '_load_module', '_mock_db_for_claim', '_mod', 'importlib', 'json', 'os', 'patch', 'pytest', 'pytestmark', 'sys']
+@pytest.fixture(autouse=True)
+def stub_generate_options():
+    """§17.718 — Phase 2's options gen (§17.663) does a function-local
+    ``from app.modules.research_agent import _generate_options``, which bypasses
+    every ``_mod.*`` patch and reaches the REAL model_router → a LIVE Ollama
+    call. Locally that call succeeds (just a slow test); in cloud CI
+    172.18.0.1:11434 blackholes and the test dies on pytest-timeout (30 s).
+    Default every test to options=None; the §17.663 options tests re-patch
+    inside their own bodies (nested patch wins).
+    """
+    try:
+        import app.modules.research_agent as ra
+    except Exception:  # pragma: no cover — app not importable in this env
+        yield
+        return
+    with patch.object(ra, "_generate_options", AsyncMock(return_value=None)):
+        yield
+
+
+__all__ = ['AsyncMock', 'MagicMock', '_MODULE_PATH', '_llm_response', '_tool_response', '_load_module', '_mock_db_for_claim', '_mod', 'importlib', 'json', 'os', 'patch', 'pytest', 'pytestmark', 'stub_generate_options', 'sys']

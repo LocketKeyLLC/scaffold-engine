@@ -22049,6 +22049,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.718 Fix — cloud-CI Tier 1 red: Phase-2 ideation tests made a LIVE Ollama call (30 s timeout on the runner) + stale cycle-detection test (2026-08-04)
+
+**Report + evidence.** Main CI red on every push since 2026-07-14; the §17.716/717 runs failed Tier 1 with 4 tests: 3× `tests/test_ideation_workflow_phase2.py` (`test_research_happy_path`, `test_research_uses_model_router_not_general`, `test_research_user_feedback_folded_into_brief`) each dying on the 30 s pytest-timeout, + `tests/test_validate_dag.py::test_cycle_detected` (`DID NOT RAISE ValueError`; the captured log shows `dag_cycle_broken`). Local runs (dev container AND a fresh `requirements-ci.txt` venv) all PASSED — the timeouts were CI-environment-only.
+
+**Diagnosis.** (1) A socket/httpx trace on `test_research_happy_path` showed one live `POST http://172.18.0.1:11434/api/chat` from `research_agent._generate_options` — the §17.663 Phase-2 options generation. The call site does a **function-local** `from app.modules.research_agent import _generate_options`, which bypasses every `_mod.*` patch the tests set up and reaches the REAL `model_router` → real Ollama provider. Locally 172.18.0.1:11434 answers (the test just runs ~5 s slow — invisible); on a GitHub runner that bridge IP blackholes and the connect hangs past pytest-timeout. The two §17.663 options tests patch `ra._generate_options` correctly; the 3 pre-§17.663 tests were never updated — "function-local import defeats the module patch," and mocks hid the live call. (2) `test_cycle_detected` predates §17.696, which deliberately changed `validate_dag` from raise → deterministic cycle REPAIR under `dag_break_cycles_enabled` (default True); §17.696 added `tests/test_dag_cycle_break.py` covering both valve states but missed the legacy test.
+
+**Fix.** Tests only — both runtime behaviors are intentional. (1) `tests/_ideation_workflow_shared.py` gains an autouse `stub_generate_options` fixture patching `app.modules.research_agent._generate_options` → `None` for every ideation-workflow test (exported via `__all__`; the §17.663 options tests re-patch inside their own bodies — nested patch wins). (2) `test_cycle_detected` now flips `dag_mod.settings.dag_break_cycles_enabled = False` (try/finally-restored) and keeps asserting the legacy raise; the repair path stays covered by `test_dag_cycle_break.py`.
+
+**Verification.** CI-equivalent venv (`requirements-ci.txt`, `PYTHONPATH=.:sdk`, `SCAFFOLD_CI_SMOKE_MODE=1`) with a socket-connect tracer: the 5 touched files → 40 passed, **zero** outbound connects (was 1 live Ollama call per Phase-2 test). Dev container: same 40 pass. Full host `ci-smoke` mirror green. GitHub CI on the push is the final gate.
+
+---
+
 ### §17.717 Fix — pre-`/go` plan re-acquired what the operator already had: "I already have Proxmox on a USB, just install it" → plan still opened with Download ISO + Write USB (2026-08-03)
 
 **Report + evidence.** Operator corrected the plan BEFORE `/go`: *"i already have the proxmox installer on a usb flash drive plugged into the server, i just need help installing it."* The generated plan still opened with **T1 Download Proxmox VE ISO → T2 Prepare bootable installation media → T3 Install**. Traced the live umbrella job: the umbrella's synthesized `input_text` read *"Install Proxmox VE **fresh** onto the SSD…"* with the USB correction **entirely absent** — the correction was dropped at the `/go` SYNTHESIS step, before decompose/DAG ever ran. (The "USB/IPMI media" that surfaced in the component brief's `inputs_available` was a GENERIC inference the component refine made — "you need media to install an OS" — not the operator's statement.)
