@@ -6,6 +6,8 @@
 
 A self-hosted DAG orchestration engine for multi-step LLM workflows. You give it an idea; it researches the topic, plans an execution graph, runs each step with verification, and hands back a compiled output. Everything runs locally on your hardware (Ollama for inference, Milvus for vector search, Postgres for state, SearXNG for web search) — no cloud calls unless you opt in.
 
+![A generated job in the native web UI: pipeline stages, node counts, and the 26-step execution plan the engine produced from a one-line idea](./docs/img/job-detail.png)
+
 This README is a **complete from-zero walkthrough**: every command, what it does, what you'll see, and what to do if it goes wrong. If you finish reading this end-to-end you should be able to clone the repo on a fresh machine and have your first compiled output ~45 minutes later.
 
 For details beyond setup-and-first-run, read:
