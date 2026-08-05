@@ -6,7 +6,20 @@ Day-to-day development is tracked at sprint granularity in [OVERVIEW.md](./OVERV
 
 ## [Unreleased]
 
-- Ongoing §17.x sprint work since v1.0.0: execution-context and session-memory fixes, per-message plan derivation, observability/alerting expansion, retrieval-quality tooling, and closure of the 2026-07-18 audit work queue (see `docs/AUDIT_2026-07-18.md` / OVERVIEW §16).
+## [1.1.0] — 2026-08-05
+
+790 commits since v1.0.0. Highlights:
+
+- **Task decomposition** — a large idea now splits into an umbrella project with component jobs, each running the full research → plan → execute pipeline, with live roll-up of progress (`/decompose`, OVERVIEW §17.523+).
+- **Assist Mode matured into the flagship surface** — cross-chat continuity, decision nodes (suggest-don't-decide), plan-affecting notes that trigger surface-and-ask re-planning, mid-session pivots, and a unified session memory with supersession so the assistant follows corrections instead of stale facts (§17.633–§17.714).
+- **Execution-context awareness** — the assistant tracks which `user@host` the operator is actually on (deterministic sensor + per-message refresh) and threads it into every step (§17.701–§17.716).
+- **Research reliability** — search-engine rotation fixes with 0-results fallback, research-derived operator options that become explicit DAG decision nodes, and timeline-aware brief synthesis where later corrections supersede earlier statements (§17.662+, §17.694, §17.712).
+- **DAG quality passes** — deterministic post-generation passes connect isolated nodes, converge terminal leaves, enforce a single deliverable, and repair (rather than fail) cyclic generated graphs (§17.668–670, §17.696).
+- **Formal verification** — SymbiYosys-backed formal property checking for hardware-design workflows (§17.414–417).
+- **Natural-language routing** — safe read commands routable by plain language alongside slash commands (§17.655+).
+- **Platform** — PyMilvus 3 / MilvusClient migration, Python 3.14 across the stack, dependency refresh (redis 8, fastapi 0.140, opentelemetry 1.44).
+- **Hardening** — two full multi-agent audits closed out (2026-06 architectural review; 2026-07-18 audit, ledger in `docs/AUDIT_2026-07-18.md`); cloud CI made trustworthy again (§17.718).
+- **Governance** — LICENSE (BUSL-1.1), CONTRIBUTING, SECURITY, this changelog.
 
 ## [1.0.0] — 2026-05-07
 
@@ -24,6 +37,7 @@ First stable release.
 
 Early pre-release: core orchestrator, initial DAG execution, and RAG pipeline.
 
-[Unreleased]: https://github.com/LocketKeyLLC/scaffold-engine/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/LocketKeyLLC/scaffold-engine/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/LocketKeyLLC/scaffold-engine/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/LocketKeyLLC/scaffold-engine/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/LocketKeyLLC/scaffold-engine/releases/tag/v0.2.0
