@@ -256,8 +256,8 @@ The default `docker compose up -d` brings up everything below — there's no opt
 
 ## Status
 
-Active solo development. v1.0.0 tagged 2026-05-07; API contract pinned at v1.1.0 (`docs/openapi.json`). The audit-flagged work queue (10 items) is closed in code; see OVERVIEW §16. For the current test-suite counts and any known failures, see OVERVIEW §14.1 — that section is updated each sprint; the README intentionally does not duplicate the number.
+Active solo development. Latest release: v1.1.0 (2026-08-05) — see [CHANGELOG.md](./CHANGELOG.md). API contract pinned at v1.1.0 (`docs/openapi.json`). The audit-flagged work queue (10 items) is closed in code; see OVERVIEW §16. For the current test-suite counts and any known failures, see OVERVIEW §14.1 — that section is updated each sprint; the README intentionally does not duplicate the number.
 
 ## License
 
-[Business Source License 1.1](./LICENSE). Free for personal, internal, research, and evaluation use; offering scaffold-engine (or a product substantially derived from it) to third parties commercially requires a license from LocketKey LLC. Each version converts to Apache 2.0 on its Change Date. Contact LocketKey LLC for commercial licensing.
+[Business Source License 1.1](./LICENSE). Free for personal, internal, research, and evaluation use; offering scaffold-engine (or a product substantially derived from it) to third parties commercially requires a license from LocketKey LLC — see **[COMMERCIAL.md](./COMMERCIAL.md)** for what's free, what needs a license, and how to get one. Each version converts to Apache 2.0 on its Change Date.

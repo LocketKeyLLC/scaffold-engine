@@ -1,0 +1,4 @@
+# Renders the "Sponsor" button on the repo front page.
+# The github: entry activates once the account is enrolled at github.com/sponsors.
+github: AEDeFruscio
+custom: ["https://github.com/LocketKeyLLC/scaffold-engine/blob/main/COMMERCIAL.md"]
