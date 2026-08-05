@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.719 Deps — close out the 14 open dependabot PRs as one locally-verified batch (2026-08-04)
+
+**What.** All 14 open dependabot PRs (#111–121, #123–125) applied locally in three grouped commits instead of 14 metered-runner CI cycles; dependabot auto-closes the PRs on seeing the manifests updated. (1) **Sidecars** (8 PRs): fastapi 0.115.6→0.139.2 + uvicorn 0.50.0→0.51.0 across ngspice/verilator/symbiyosys/coderunner. (2) **Actions** (3 PRs): setup-python 5→7 (also clears the Node-20 deprecation warning every run emitted), build-push-action 6→7, login-action 3→4. (3) **App deps** (3 PRs): redis client 7.4.0→**8.0.1** (major), prance 25.4.8.0→26.7.19.0, and the 10-package minor-patch group (fastapi 0.140.1, json_repair 0.61.7, opentelemetry 1.44.0/0.65b0, prometheus-client 0.26.0, sentence-transformers 5.6.1) — requirements.txt and requirements-ci.txt updated in lockstep (#82 no-drift rule).
+
+**Compat checks.** fastapi 0.140.1 resolves cleanly against the §17.584 CVE-pinned starlette==1.3.1 (`pip check` clean in a fresh requirements-ci venv). prance 26 exercised against the LIVE `/openapi.json` via the exact `openapi_ingest` path (`ResolvingParser(spec_string=…)`, 93 paths resolved). redis 8 client verified against the live scaffold-redis (health up, 4032 keys).
+
+**Verification.** New pins installed into the dev container, orchestrator restarted, `/health` fully green (Postgres/Ollama/Milvus/Redis/reranker/all 3 sidecars). Full live-services suite on the bumped deps: **4992 passed, 1 skipped** (the known corpus-dependent topology-select 409 skip), 0 failures. Sidecar images rebuilt on the new pins + health-verified. GitHub CI green post-push is the final gate.
+
+---
+
 ### §17.718 Fix — cloud-CI Tier 1 red: Phase-2 ideation tests made a LIVE Ollama call (30 s timeout on the runner) + stale cycle-detection test (2026-08-04)
 
 **Report + evidence.** Main CI red on every push since 2026-07-14; the §17.716/717 runs failed Tier 1 with 4 tests: 3× `tests/test_ideation_workflow_phase2.py` (`test_research_happy_path`, `test_research_uses_model_router_not_general`, `test_research_user_feedback_folded_into_brief`) each dying on the 30 s pytest-timeout, + `tests/test_validate_dag.py::test_cycle_detected` (`DID NOT RAISE ValueError`; the captured log shows `dag_cycle_broken`). Local runs (dev container AND a fresh `requirements-ci.txt` venv) all PASSED — the timeouts were CI-environment-only.
