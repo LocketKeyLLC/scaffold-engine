@@ -22055,7 +22055,9 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 **Compat checks.** fastapi 0.140.1 resolves cleanly against the §17.584 CVE-pinned starlette==1.3.1 (`pip check` clean in a fresh requirements-ci venv). prance 26 exercised against the LIVE `/openapi.json` via the exact `openapi_ingest` path (`ResolvingParser(spec_string=…)`, 93 paths resolved). redis 8 client verified against the live scaffold-redis (health up, 4032 keys).
 
-**Verification.** New pins installed into the dev container, orchestrator restarted, `/health` fully green (Postgres/Ollama/Milvus/Redis/reranker/all 3 sidecars). Full live-services suite on the bumped deps: **4992 passed, 1 skipped** (the known corpus-dependent topology-select 409 skip), 0 failures. Sidecar images rebuilt on the new pins + health-verified. GitHub CI green post-push is the final gate.
+**Verification.** New pins installed into the dev container, orchestrator restarted, `/health` fully green (Postgres/Ollama/Milvus/Redis/reranker/all 3 sidecars). Full live-services suite on the bumped deps: **4992 passed, 1 skipped** (the known corpus-dependent topology-select 409 skip), 0 failures. Sidecar images rebuilt on the new pins + health-verified. GitHub CI green post-push: all three workflows (CI / Scaffold Engine CI / Build CI image) success on d75c222.
+
+**Addendum (same day).** Dependabot retargeted the 7 still-open sidecar PRs in place to the next upstream releases (fastapi 0.139.2→0.141.1, uvicorn 0.51.0→0.52.1); folded that second wave in immediately — all four sidecars (incl. coderunner's uvicorn, pre-empting the successor PR to #111) bumped, rebuilt, health-verified, and the symbiyosys path exercised end-to-end (`test_formal_verify_db` passes live).
 
 ---
 
