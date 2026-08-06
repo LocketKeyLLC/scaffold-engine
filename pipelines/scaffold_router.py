@@ -779,6 +779,13 @@ class Pipeline:
         # Off → the pre-§17.633 behavior (in-progress work is only reachable
         # from its original chat or via an explicit `/assist <job_id>`).
         assist_continuity_enabled: bool = True
+        # §17.721 — a strong topic match must NOT silently hijack the chat onto
+        # a DIFFERENT job while another session was active within this many
+        # minutes (live: a topic-rich message reconnected to the Jellyfin
+        # sibling while the operator was mid-conversation installing Proxmox).
+        # Within the window the reconnect degrades to a pick-list instead.
+        # 0 disables the guard (pre-§17.721 behavior).
+        assist_reconnect_hot_minutes: int = 15
 
         # §17.628 — engine-wide natural-language command routing. When a chat
         # has NO active assist session, a plain sentence that clearly names a
@@ -2580,6 +2587,31 @@ class Pipeline:
         # Strong, unique topic match (≥2 distinctive shared tokens) → resume now.
         match, ambiguous = _assist.match_assist_candidate(msg, cands)
         if match and not ambiguous:
+            # §17.721 — a strong TITLE match is not proof of intent when a
+            # DIFFERENT session was just active: a topic-rich message in a
+            # marker-less chat strong-matched a sibling job's title and
+            # answered from ITS step while the operator was mid-conversation
+            # on another (the Jellyfin-vs-Proxmox-install report). When the
+            # match and the recently-active session disagree, ask instead of
+            # guessing. A match ON the hot session resumes as before, and an
+            # EXPLICIT resume phrasing naming the job ("continue the proxmox
+            # setup") is deliberate — it overrides the hot session too.
+            hot_min = getattr(self.valves, "assist_reconnect_hot_minutes", 15)
+            hot = (_assist.hot_candidate(cands, minutes=hot_min)
+                   if hot_min > 0 and not self._looks_like_resume(msg) else None)
+            if hot and hot.get("job_id") != match.get("job_id"):
+                mins = _assist.minutes_since_activity(hot)
+                self.logger.info(
+                    "continuity: strong topic match job=%s conflicts with "
+                    "recently-active job=%s (%.0fm ago) → pick-list",
+                    match.get("job_id"), hot.get("job_id"), mins or 0)
+                header = (
+                    f"⚠️ Your message matches **{match.get('title')}**, but you "
+                    f"were working on **{hot.get('title')}** "
+                    f"{max(1, int(mins or 0))} min ago — which one did you mean?"
+                )
+                return iter([header + "\n\n"
+                             + _assist.render_candidate_list(cands)])
             self.logger.info("continuity: reconnect (strong topic match) job=%s",
                              match.get("job_id"))
             return _assist.assist_start(self, match["job_id"], chat_id=chat_id)

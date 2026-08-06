@@ -201,6 +201,97 @@ class TestReconnect:
 
 
 # ---------------------------------------------------------------------------
+# §17.721 — hot-session guard (strong match vs recently-active sibling)
+# ---------------------------------------------------------------------------
+
+
+def _iso_minutes_ago(m):
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(minutes=m)).isoformat()
+
+
+def _cands_with_hot(hot_idx, minutes=3):
+    cands = [dict(c) for c in CANDS]
+    cands[hot_idx]["last_activity_at"] = _iso_minutes_ago(minutes)
+    return cands
+
+
+# A bare topic-rich message (no resume phrasing, no build verb) that
+# strong-matches CANDS[0] with distinctive tokens (proxmox, dual, xeon —
+# "installation" is a stopword) — the §17.721 live-bug shape: a statement
+# about one job's topic sent while a DIFFERENT session was mid-conversation.
+_TOPIC_MSG = "the proxmox on my dual xeon is showing me three options"
+
+
+@pytest.mark.smoke
+class TestHotSessionGuard:
+    def test_strong_match_conflicting_with_hot_session_shows_picklist(self, pipe):
+        # Matches CANDS[0], but CANDS[1] (firewall) was active 3 min ago —
+        # ask, don't hijack (the Jellyfin-vs-Proxmox-install report).
+        fc, as_ = _mock_assist(candidates=_cands_with_hot(hot_idx=1))
+        with fc, as_:
+            out = "".join(pipe._reconnect_in_progress(_TOPIC_MSG, chat_id=None))
+        assert "RESUMED:" not in out
+        assert "ASSIST_PICK" in out
+        assert "Firewall and VPN Gateway Setup" in out    # the hot one is named
+        assert "active" in out                             # recency surfaced
+
+    def test_strong_match_on_the_hot_session_resumes(self, pipe):
+        fc, as_ = _mock_assist(candidates=_cands_with_hot(hot_idx=0))
+        with fc, as_:
+            out = "".join(pipe._reconnect_in_progress(_TOPIC_MSG, chat_id=None))
+        assert out == "RESUMED:11111111-1111-1111-1111-111111111111"
+
+    def test_explicit_resume_naming_the_job_overrides_hot_session(self, pipe):
+        # "continue the proxmox installation" names the job deliberately — the
+        # hot firewall session must not divert an explicit resume to a pick-list.
+        fc, as_ = _mock_assist(candidates=_cands_with_hot(hot_idx=1))
+        with fc, as_:
+            out = "".join(pipe._reconnect_in_progress(
+                "continue the proxmox installation", chat_id=None))
+        assert out == "RESUMED:11111111-1111-1111-1111-111111111111"
+
+    def test_stale_activity_does_not_divert(self, pipe):
+        # Activity outside the hot window (default 15m) → pre-§17.721 behavior.
+        fc, as_ = _mock_assist(candidates=_cands_with_hot(hot_idx=1, minutes=120))
+        with fc, as_:
+            out = "".join(pipe._reconnect_in_progress(_TOPIC_MSG, chat_id=None))
+        assert out == "RESUMED:11111111-1111-1111-1111-111111111111"
+
+    def test_valve_zero_disables_guard(self, pipe):
+        pipe.valves.assist_reconnect_hot_minutes = 0
+        fc, as_ = _mock_assist(candidates=_cands_with_hot(hot_idx=1))
+        with fc, as_:
+            out = "".join(pipe._reconnect_in_progress(_TOPIC_MSG, chat_id=None))
+        assert out == "RESUMED:11111111-1111-1111-1111-111111111111"
+
+    def test_minutes_since_activity_parses_and_tolerates(self):
+        m = _mod._assist.minutes_since_activity(
+            {"last_activity_at": _iso_minutes_ago(5)})
+        assert m is not None and 4.5 <= m <= 6
+        # Z-suffix ISO (json-serialized UTC) parses too
+        from datetime import datetime, timedelta, timezone
+        z = (datetime.now(timezone.utc) - timedelta(minutes=5)) \
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        mz = _mod._assist.minutes_since_activity({"last_activity_at": z})
+        assert mz is not None and 4.5 <= mz <= 6
+        assert _mod._assist.minutes_since_activity({}) is None
+        assert _mod._assist.minutes_since_activity(
+            {"last_activity_at": None}) is None
+        assert _mod._assist.minutes_since_activity(
+            {"last_activity_at": "not-a-date"}) is None
+
+    def test_hot_candidate_picks_most_recent_within_window(self):
+        cands = [dict(c) for c in CANDS]
+        cands[0]["last_activity_at"] = _iso_minutes_ago(10)
+        cands[1]["last_activity_at"] = _iso_minutes_ago(2)
+        cands[2]["last_activity_at"] = _iso_minutes_ago(200)   # outside window
+        hot = _mod._assist.hot_candidate(cands, minutes=15)
+        assert hot is not None and hot["job_id"] == cands[1]["job_id"]
+        assert _mod._assist.hot_candidate(CANDS, minutes=15) is None  # no timestamps
+
+
+# ---------------------------------------------------------------------------
 # _in_progress_banner
 # ---------------------------------------------------------------------------
 

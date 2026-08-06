@@ -104,6 +104,26 @@ async def test_list_candidates_filters_umbrella_and_zero_node():
     assert out[0]["node_count"] == 9
 
 
+@pytest.mark.asyncio
+async def test_list_candidates_threads_last_activity():
+    # §17.721 — the live session's last_activity_at is threaded through (ISO)
+    # so the pipeline reconnect can prefer the session the operator is actually
+    # mid-conversation in; jobs without a live session carry None.
+    from datetime import datetime, timezone
+    ts = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+    rows = [
+        {"id": "j1", "title": "Proxmox", "status": "assisted_running",
+         "job_type": "legacy", "node_count": 9, "last_activity_at": ts},
+        {"id": "j2", "title": "Firewall", "status": "awaiting_assist",
+         "job_type": "legacy", "node_count": 5, "last_activity_at": None},
+    ]
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(mappings_all=rows))
+    out = await assist_agent.list_assist_candidates(db=db)
+    assert out[0]["last_activity_at"] == ts.isoformat()
+    assert out[1]["last_activity_at"] is None
+
+
 # ── §17.715 — unconditional per-turn derive (gating + dedup) ────────────────
 
 

@@ -1033,11 +1033,18 @@ async def list_assist_candidates(
     it so a topic match or "continue" can't resurface a completed/cancelled job;
     the explicit-redo default (``False``) keeps the full re-openable list."""
     statuses = ASSIST_INPROGRESS_STATUSES if in_progress else ASSIST_ELIGIBLE_STATUSES
+    # §17.721 — thread the live session's last_activity_at through so the
+    # pipeline's continuity reconnect can tell "the session the operator is
+    # mid-conversation in" apart from a title-similar sibling. Only an
+    # active/paused session counts as live activity.
     rows = (await db.execute(
         text("""
             SELECT j.id, j.title, j.status, j.job_type,
-                   (SELECT COUNT(*) FROM dag_nodes n WHERE n.job_id = j.id) AS node_count
+                   (SELECT COUNT(*) FROM dag_nodes n WHERE n.job_id = j.id) AS node_count,
+                   s.last_activity_at
               FROM jobs j
+              LEFT JOIN assist_sessions s
+                ON s.job_id = j.id AND s.status IN ('active', 'paused')
              WHERE j.status = ANY(:statuses)
              ORDER BY j.created_at DESC
              LIMIT :lim
@@ -1051,11 +1058,13 @@ async def list_assist_candidates(
             continue
         if not r.get("node_count"):
             continue
+        la = r.get("last_activity_at")
         out.append({
             "job_id": str(r["id"]),
             "title": r["title"],
             "status": r["status"],
             "node_count": int(r["node_count"]),
+            "last_activity_at": la.isoformat() if la is not None else None,
         })
     return out
 

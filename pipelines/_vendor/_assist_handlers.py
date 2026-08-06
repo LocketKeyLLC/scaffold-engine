@@ -37,6 +37,7 @@ import re
 import sys
 import threading as _th
 import time
+from datetime import datetime, timezone
 from typing import Generator
 
 import requests
@@ -2190,6 +2191,37 @@ def fetch_assist_candidates(pipe) -> list:
     return []
 
 
+def minutes_since_activity(cand: dict) -> float | None:
+    """§17.721 — minutes since the candidate's assist session last saw activity
+    (from the server's ``last_activity_at`` ISO timestamp), or None when the
+    server sent no timestamp / it doesn't parse."""
+    ts = (cand or {}).get("last_activity_at") or ""
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 60.0)
+
+
+def hot_candidate(candidates: list, *, minutes: float) -> dict | None:
+    """§17.721 — the most-recently-active candidate whose session saw activity
+    within ``minutes``, or None. Used by the continuity reconnect so a strong
+    title match on a SIBLING job can't silently hijack a chat away from the
+    session the operator is actually mid-conversation in."""
+    best, best_m = None, None
+    for c in candidates or []:
+        m = minutes_since_activity(c)
+        if m is None or m > minutes:
+            continue
+        if best_m is None or m < best_m:
+            best, best_m = c, m
+    return best
+
+
 def render_candidate_list(candidates: list) -> str:
     """Offer the assistable jobs to choose from (ambiguous natural-start)."""
     lines = [
@@ -2197,9 +2229,13 @@ def render_candidate_list(candidates: list) -> str:
         "",
     ]
     for c in candidates[:8]:
+        # §17.721 — surface recent session activity so the operator can spot
+        # the job they were just working on among title-similar siblings.
+        m = minutes_since_activity(c)
+        active = f" · 🕐 active {max(1, int(m))}m ago" if m is not None and m <= 120 else ""
         lines.append(
-            f"- **{c.get('title', '(untitled)')}** — `{c.get('status', '?')}` · "
-            f"start with `/assist {c.get('job_id', '')}`"
+            f"- **{c.get('title', '(untitled)')}** — `{c.get('status', '?')}`"
+            f"{active} · start with `/assist {c.get('job_id', '')}`"
         )
     if len(candidates) > 8:
         lines.append(f"- …and {len(candidates) - 8} more (`/here` lists all).")
