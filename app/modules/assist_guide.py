@@ -696,6 +696,21 @@ _RESET_INTENT_PATTERNS: tuple[re.Pattern, ...] = (
     re.compile(r"\bbare[-\s]?metal\s+(install|reinstall|rebuild)\b", re.I),
     re.compile(r"\bwipe\b.{0,30}\b(install|reinstall|reimage|rebuild)\b", re.I),
     re.compile(r"\babandon\b.{0,48}\binstead\b", re.I),
+    # §17.720 — the live pivot said none of the above. The operator announced an
+    # OS install from removable media / a new ISO / an in-progress installer
+    # ("set up the new Proxmox ISO first", "i am currently installing it",
+    # "options from the USB they are to install") and every pattern missed, so
+    # the answers kept arguing them back to the in-place plan. Installing an OS
+    # image from boot media over a system the plan calls existing IS a fresh
+    # start — anchor on the media/ISO + install pairing so a bare "install
+    # nginx" still cannot trip it.
+    re.compile(
+        r"\b(currently|now|in\s+the\s+middle\s+of|busy)\s+(re)?installing\s+"
+        r"(it|the\s+(os|operating\s+system|system))\b", re.I),
+    re.compile(r"\binstall(ing|er|ation)?\b.{0,50}\b(usb|flash\s*drive|bootable|installation\s+media)\b", re.I),
+    re.compile(r"\b(usb|flash\s*drive|bootable\s+media)\b.{0,50}\binstall", re.I),
+    re.compile(r"\bnew\b.{0,24}\biso\b", re.I),
+    re.compile(r"\bboot(ing|ed)?\s+(from|into|off)\s+(the\s+)?(usb|flash|installer|iso)\b", re.I),
 )
 
 
@@ -746,9 +761,11 @@ def render_session_memory(
         header = (
             "## Session memory — the operator has CHANGED DIRECTION (read this first)\n"
             "The operator has decided to start fresh / rebuild. Their **current "
-            "direction** below SUPERSEDES the earlier gathered state — follow it: "
-            "do NOT keep operating against the prior system or try to argue them "
-            "back to it. For THIS session the usual \"never assume a fresh system\" "
+            "direction** below SUPERSEDES the earlier gathered state AND any "
+            "project goal / brief wording elsewhere in this prompt that conflicts "
+            "with it — follow it: do NOT keep operating against the prior system, "
+            "argue them back to it, or restate the old plan as what they should "
+            "be doing. For THIS session the usual \"never assume a fresh system\" "
             "rule is SUSPENDED — they have explicitly chosen a fresh start; still "
             "treat anything unknown/unverified as open and ask."
         )
@@ -1660,9 +1677,14 @@ _TURN_MEMORY_SYSTEM = (
     "carrying into later steps: decisions / changes of direction, hard "
     "constraints, new requirements, stated preferences (as notes), and concrete "
     "facts about their real system (as facts). Be conservative and precise:\n"
-    "- Return EMPTY notes and facts for a question, a request for help, an "
+    "- Return EMPTY notes and facts for a PURE question, request for help, "
     "acknowledgement ('ok', 'thanks'), small talk, or a refinement that does not "
     "change the plan.\n"
+    "- A question can still CARRY durable information — when the operator states "
+    "or corrects the state of their system inside a question (\"no, i am "
+    "currently installing it, and have three options — which do I choose?\"), "
+    "record that stated/corrected state as a fact even though the message asks "
+    "something. Only the pure ask itself is not memory.\n"
     "- Do NOT restate anything already listed under ALREADY KNOWN — only NEW "
     "information the operator added in this message.\n"
     "- Never guess or infer beyond what the message says.\n"

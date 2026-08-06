@@ -162,6 +162,67 @@ async def test_run_step_research_resolves_domain():
 
 
 @pytest.mark.asyncio
+async def test_run_step_research_grounds_on_operator_notes_with_supersession():
+    """§17.720 — the ask/research path was NOTES-blind: it injected only the
+    legacy env block, so a session whose notes recorded the operator's pivot
+    ("set up the new Proxmox ISO first") kept answering from the brief's
+    in-place plan ("your existing installation…"). The path must inject the
+    unified memory — notes + facts — and the §17.714 reset supersession must
+    engage on the recorded pivot note."""
+    sess = {
+        "id": "s", "job_id": "j", "status": "active", "current_node_key": "T1",
+        "notes": [{"kind": "decision",
+                   "text": "Operator has decided to set up the new Proxmox ISO "
+                           "first before other tasks."}],
+        "metadata": {"environment": {
+            "profile": "",
+            "facts": ["A flash drive with the Proxmox ISO is plugged into the server."],
+            "substitutions": {},
+        }},
+    }
+    db = _db_with_session(
+        sess,
+        extra_rows=[{"domain": "net"},
+                    {"refined_brief": {"description": "In-place cleanup of the existing Proxmox host"}}],
+    )
+    with patch("app.modules.assist_guide.research_one",
+               new=AsyncMock(return_value={"question": "q", "sources": [], "answer": None})) as research, \
+         patch("app.modules.assist_agent._job_digest_for", new=AsyncMock(return_value="")), \
+         patch.object(_settings, "assist_unified_memory_enabled", True), \
+         patch.object(_settings, "assist_umem_inject", True):
+        await assist_agent.run_step_research(
+            session_id="s", question="which installer option should I choose?", db=db,
+        )
+    ctx = research.call_args.kwargs["job_context"] or ""
+    assert "new Proxmox ISO" in ctx                 # the operator's pivot reaches the answer
+    assert "flash drive" in ctx                     # facts still present
+    assert "CHANGED DIRECTION" in ctx               # §17.714 supersession engaged
+
+
+@pytest.mark.asyncio
+async def test_run_step_research_notes_reach_context_on_legacy_path_too():
+    """§17.720 — with the unified valves OFF, the legacy branch of
+    _render_memory_or_legacy still carries the operator-notes block (the old
+    code passed no notes at all)."""
+    sess = {
+        "id": "s", "job_id": "j", "status": "active", "current_node_key": "T1",
+        "notes": [{"kind": "decision", "text": "Use the new Proxmox ISO on the USB."}],
+        "metadata": {"environment": {"profile": "root@pve", "facts": [], "substitutions": {}}},
+    }
+    db = _db_with_session(
+        sess, extra_rows=[{"domain": "net"}, {"refined_brief": {"description": "goal"}}],
+    )
+    with patch("app.modules.assist_guide.research_one",
+               new=AsyncMock(return_value={"question": "q", "sources": [], "answer": None})) as research, \
+         patch("app.modules.assist_agent._job_digest_for", new=AsyncMock(return_value="")), \
+         patch.object(_settings, "assist_unified_memory_enabled", False):
+        await assist_agent.run_step_research(session_id="s", question="q?", db=db)
+    ctx = research.call_args.kwargs["job_context"] or ""
+    assert "new Proxmox ISO" in ctx
+    assert "root@pve" in ctx
+
+
+@pytest.mark.asyncio
 async def test_run_step_research_empty_question_raises():
     db = AsyncMock()
     with pytest.raises(ValueError, match="empty"):
@@ -562,8 +623,12 @@ async def test_ingest_turn_writes_when_valve_on():
             content="root@pve:~# ls", node_key="T1", db=db)
     assert out is True
     db.commit.assert_awaited_once()
-    sql = db.execute.call_args.args[0].text
-    assert "INSERT INTO assist_turns" in sql
+    calls = db.execute.call_args_list
+    assert "INSERT INTO assist_turns" in calls[0].args[0].text
+    # §17.720 — a captured turn bumps the session's activity clock so an
+    # actively-chatting session doesn't rank as idle (reaper/reconnect recency).
+    assert len(calls) == 2
+    assert "last_activity_at = now()" in calls[1].args[0].text
 
 
 @pytest.mark.asyncio

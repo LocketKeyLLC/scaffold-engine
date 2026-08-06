@@ -532,6 +532,37 @@ def test_render_session_memory_benign_note_keeps_normal_grounding():
     assert "CHANGED DIRECTION" not in out
 
 
+def test_operator_reset_intent_media_install_language():
+    # §17.720 — the live pivot said none of the §17.714 phrases. The operator
+    # announced an OS install from removable media / a new ISO / an in-progress
+    # installer, and every pattern missed — so answers kept arguing them back to
+    # the in-place plan. These are the exact reported phrasings.
+    for txt in (
+        "Operator has decided to set up the new Proxmox ISO first before other tasks.",
+        "no, i am currently installing it, and have three options",
+        "This is the options from the USB they are to install one of those options",
+        "I booted from the USB installer",
+        "installing Proxmox from the flash drive now",
+    ):
+        assert assist_guide._operator_reset_intent(
+            [{"kind": "decision", "text": txt}]), txt
+
+
+def test_operator_reset_intent_plain_install_not_tripped():
+    # A bare "install <software>" (the whole project installs things) and other
+    # benign phrasings must NOT flip reset mode.
+    for txt in (
+        "install nginx on the VM",
+        "please install docker and configure the compose file",
+        "download the ISO for later",
+        "only 2 physical NICs; prefer a clean minimal config",
+        "now installing the jellyfin package via apt",
+        "currently installing docker on the media VM",
+    ):
+        assert not assist_guide._operator_reset_intent(
+            [{"kind": "note", "text": txt}]), txt
+
+
 def test_render_session_memory_empty():
     assert assist_guide.render_session_memory({"profile": "", "substitutions": {}, "facts": []}) == ""
     assert assist_guide.render_session_memory(None, None) == ""

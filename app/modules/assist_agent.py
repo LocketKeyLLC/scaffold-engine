@@ -794,13 +794,12 @@ async def run_step_research(
     established rather than a project-blind web lookup.
     """
     from app.modules import assist_guide
-    from app.modules.assist_guide import render_environment_block
 
     if not (question or "").strip():
         raise ValueError("research question is empty")
     sess = (await db.execute(
         text("""
-            SELECT id, job_id, status, current_node_key, metadata
+            SELECT id, job_id, status, current_node_key, metadata, notes
               FROM assist_sessions WHERE id = :sid
         """),
         {"sid": session_id},
@@ -824,14 +823,20 @@ async def run_step_research(
     )).mappings().first()
     brief = (job_row or {}).get("refined_brief") or {}
     environment = _environment_from_metadata(sess.get("metadata"))
+    operator_notes = _coerce_notes(sess.get("notes"))
     digest = await _job_digest_for(db=db, job_id=job_id)
     context_parts: list[str] = []
     goal = (brief or {}).get("description") or (brief or {}).get("title") or ""
     if isinstance(goal, str) and goal.strip():
         context_parts.append(f"## Project goal\n{goal.strip()}")
-    env_block = render_environment_block(environment)
-    if env_block:
-        context_parts.append(env_block)
+    # §17.720 — this path grounded on the bare env block only, so operator NOTES
+    # (their decisions/pivots) never reached the answer: a session whose notes
+    # said "set up the new Proxmox ISO first" kept getting answers arguing for
+    # the brief's in-place plan. Inject the same unified memory (notes + facts,
+    # with §17.714 supersession) every other prompt site grounds on.
+    context_parts.extend(
+        assist_guide._render_memory_or_legacy(environment, operator_notes)
+    )
     if digest:
         context_parts.append(digest)
     conversation = _conversation_block_for(history)  # §17.687
@@ -1680,6 +1685,19 @@ async def ingest_turn(
             {"sid": session_id, "nk": node_key, "role": role, "kind": kind,
              "content": content or "", "ek": evidence_kind},
         )
+        # §17.720 — a captured turn IS session activity. Without this bump an
+        # actively-chatting session kept its pre-§17.710a last_activity_at, so
+        # it ranked as idle (reaper staleness, reconnect recency) while the
+        # operator was mid-conversation in it.
+        if getattr(res, "rowcount", 0):
+            await db.execute(
+                text("""
+                    UPDATE assist_sessions
+                       SET last_activity_at = now(), updated_at = now()
+                     WHERE id = :sid
+                """),
+                {"sid": session_id},
+            )
         await db.commit()
         return bool(getattr(res, "rowcount", 0))
     except Exception as e:  # noqa: BLE001 — capture must never break the turn
