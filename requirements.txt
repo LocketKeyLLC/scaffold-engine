@@ -31,7 +31,8 @@ psycopg2-binary==2.9.12
 # §17.585 — pypdf 5.1.0→6.14.2 (major; clears ~30 GHSAs). Code uses only the
 # stable modern API (PdfReader/.pages/.extract_text() at research_extractors.py
 # + forum_ingest.py), unaffected by the 6.0 removals.
-pypdf==6.14.2
+# §17.724 — 6.14.2→6.15.0 (GHSA-fwg2-594c-jp42 + GHSA-fp3f-mc75-235c).
+pypdf==6.15.0
 pdfplumber==0.11.10  # §17.585 — was 0.11.4; pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
 python-multipart==0.0.32  # §17.585 — was 0.0.17 (GHSA); fastapi form/file parsing
 # §17.458 — server-side markdown rendering for the web UI's compiled_output.

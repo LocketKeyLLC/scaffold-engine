@@ -22049,6 +22049,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.724 Deps — pypdf 6.14.2→6.15.0: two fresh GHSAs turned the CVE-scan gate red on the §17.722/723 push (2026-08-07)
+
+**What.** The `76d3323` push came back split: Tier 1 green, but the pip-audit CVE scan failed on **pypdf 6.14.2 — GHSA-fwg2-594c-jp42 + GHSA-fp3f-mc75-235c** (both fixed in 6.15.0; advisories published after the last green run on `ad987e0`, so any push this week would have tripped it — unrelated to the diff). Bumped `pypdf==6.15.0` in `requirements.txt` + `requirements-ci.txt` in lockstep (#82 no-drift rule).
+
+**Verification.** 6.15.0 installed into the dev container; the two pypdf-consuming suites (`test_research_pdf_mode.py` + `test_forum_ingest.py`) — 79 passed. The exact CI pip-audit command (same `--ignore-vuln` flags) run locally against all three requirements files: "No known vulnerabilities found" ×3. Note: the prod image still bakes 6.14.2 until its next rebuild; the running dev container has 6.15.0 live.
+
+---
+
 ### §17.722 Fix — session-memory budget cliff: the injected memory collapsed to header + profile once the facts ledger outgrew `assist_umem_max_chars` (2026-08-07)
 
 **Report + evidence.** Live P40-passthrough session (`c308ae02`, job `34bf2eb0`): "operating amazingly, but then began to have issues retaining information / working out problems." Capture was healthy (38 raw turns, 40 facts, 6 substitutions incl. VMID=100/VM_NAME=AI-VM, 6 notes incl. the DeFruscioBridge decision and the fill-in-my-values preference). Reproduced the injection against the LIVE session data: full `render_session_memory` block = **4,914 chars**, budget = 4,000 (code default; no compose override) → what every guidance/ask/verify prompt actually received = **410 chars — the header + execution profile only**. All facts, values, and notes were silently evicted mid-session, which is exactly when the complaints started (placeholder commands, "the bridge does not exist", re-asking known state).
