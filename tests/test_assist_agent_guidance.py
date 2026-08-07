@@ -273,7 +273,7 @@ async def test_capture_session_facts_distills_and_stores():
     db.execute = AsyncMock(return_value=_result(
         {"title": "Audit", "prompt_template": "run the audit"}))
     with patch("app.modules.assist_guide.distill_facts",
-               new=AsyncMock(return_value=["Existing Proxmox (not fresh)"])), \
+               new=AsyncMock(return_value={"facts": ["Existing Proxmox (not fresh)"], "superseded": []})), \
          patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
         out = await assist_agent.capture_session_facts(
             session_id="s", node_key="T1",
@@ -288,7 +288,7 @@ async def test_capture_session_facts_no_facts_skips_write():
     db = AsyncMock()
     db.execute = AsyncMock(return_value=_result({"title": "x", "prompt_template": "y"}))
     with patch("app.modules.assist_guide.distill_facts",
-               new=AsyncMock(return_value=[])), \
+               new=AsyncMock(return_value={"facts": [], "superseded": []})), \
          patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
         out = await assist_agent.capture_session_facts(
             session_id="s", node_key="T1", evidence="ok", db=db,
@@ -786,3 +786,137 @@ async def test_generate_step_guidance_threads_verbosity():
                                            "cached": False, "guidance_meta": {}})) as ensure:
         await assist_agent.generate_step_guidance(session_id="s", research=False, db=db)
     assert ensure.call_args.kwargs["verbosity"] == "terse"
+
+
+# ── §17.725 — fact supersession ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_set_environment_retracts_contradicted_facts():
+    # §17.725 — retract_facts removes normalized matches BEFORE new facts fold
+    # in; non-matching retractions are ignored.
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"metadata": {"environment": {
+            "profile": "", "substitutions": {},
+            "facts": ["P40 GPU is in IOMMU group 13", "ZFS pool 'oasis' active"]}}}),
+        _result(None),
+    ])
+    db.commit = AsyncMock()
+    out = await assist_agent.set_environment(
+        session_id="s",
+        facts=["Tesla P40 (02:00.0) is in IOMMU group 37"],
+        retract_facts=["p40 gpu is in iommu group 13",   # normalized match → gone
+                       "never was in the ledger"],        # ignored
+        db=db,
+    )
+    assert out["facts"] == [
+        "ZFS pool 'oasis' active",
+        "Tesla P40 (02:00.0) is in IOMMU group 37",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_capture_session_facts_applies_retraction_under_valve():
+    # §17.725 — with master+supersede on, the distiller sees the known ledger
+    # and its verbatim retractions reach set_environment(retract_facts=…).
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(
+        {"title": "Audit", "prompt_template": "run the audit"}))
+    distilled = {"facts": ["Tesla P40 (02:00.0) is in IOMMU group 37"],
+                 "superseded": ["P40 GPU is in IOMMU group 13"]}
+    with patch.object(_settings, "assist_unified_memory_enabled", True), \
+         patch.object(_settings, "assist_umem_supersede", True), \
+         patch.object(assist_agent, "get_environment",
+                      new=AsyncMock(return_value={
+                          "facts": ["P40 GPU is in IOMMU group 13"],
+                          "substitutions": {}, "profile": ""})), \
+         patch("app.modules.assist_guide.distill_facts",
+               new=AsyncMock(return_value=distilled)) as df, \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+        out = await assist_agent.capture_session_facts(
+            session_id="s", node_key="T1",
+            evidence="lspci: 02:00.0 Tesla P40", db=db,
+        )
+    assert df.call_args.kwargs["known_facts"] == ["P40 GPU is in IOMMU group 13"]
+    assert se.call_args.kwargs["retract_facts"] == ["P40 GPU is in IOMMU group 13"]
+    assert out == ["Tesla P40 (02:00.0) is in IOMMU group 37"]
+
+
+@pytest.mark.asyncio
+async def test_capture_session_facts_valve_off_no_known_no_retract():
+    # Valves off → distiller gets no known ledger, no retraction is applied.
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(
+        {"title": "Audit", "prompt_template": "run the audit"}))
+    with patch.object(_settings, "assist_unified_memory_enabled", False), \
+         patch("app.modules.assist_guide.distill_facts",
+               new=AsyncMock(return_value={"facts": ["F1"],
+                                           "superseded": ["should be ignored"]})) as df, \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+        await assist_agent.capture_session_facts(
+            session_id="s", node_key="T1", evidence="output", db=db,
+        )
+    assert df.call_args.kwargs["known_facts"] is None
+    assert se.call_args.kwargs["retract_facts"] is None
+
+
+# ── §17.726 — assistant reply capture + transcript-fallback history ─────────
+
+
+@pytest.mark.asyncio
+async def test_generate_step_guidance_captures_fresh_reply():
+    sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3",
+            "metadata": {}}
+    db = _db_with_session(sess, extra_rows=[{"status": "presented"}])
+    with patch.object(assist_agent, "_assemble_ctx_for_node",
+                      new=AsyncMock(return_value=({"description": "d", "domain": None}, _ctx()))), \
+         patch("app.modules.assist_guide.ensure_guidance",
+               new=AsyncMock(return_value={"guidance": "do the thing", "status": "ready",
+                                           "cached": False, "guidance_meta": {}})), \
+         patch.object(assist_agent, "capture_assistant_reply", new=AsyncMock()) as cap:
+        await assist_agent.generate_step_guidance(session_id="s", research=False, db=db)
+    cap.assert_awaited_once()
+    assert cap.await_args.kwargs["kind"] == "guide"
+    assert cap.await_args.kwargs["content"] == "do the thing"
+
+
+@pytest.mark.asyncio
+async def test_generate_step_guidance_cache_hit_not_recaptured():
+    # A cache hit re-shows text already in the transcript — no duplicate turn.
+    sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3",
+            "metadata": {}}
+    db = _db_with_session(sess, extra_rows=[{"status": "presented"}])
+    with patch.object(assist_agent, "_assemble_ctx_for_node",
+                      new=AsyncMock(return_value=({"description": "d", "domain": None}, _ctx()))), \
+         patch("app.modules.assist_guide.ensure_guidance",
+               new=AsyncMock(return_value={"guidance": "same text", "status": "ready",
+                                           "cached": True, "guidance_meta": {}})), \
+         patch.object(assist_agent, "capture_assistant_reply", new=AsyncMock()) as cap:
+        await assist_agent.generate_step_guidance(session_id="s", research=False, db=db)
+    cap.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generate_step_guidance_history_falls_back_to_transcript():
+    # §17.726 — no client history + master valve on → the durable transcript
+    # rebuilds the conversation block.
+    sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3",
+            "metadata": {}}
+    db = _db_with_session(sess, extra_rows=[{"status": "presented"}])
+    rebuilt = [{"role": "assistant", "content": "earlier walkthrough"},
+               {"role": "user", "content": "it worked"}]
+    with patch.object(_settings, "assist_unified_memory_enabled", True), \
+         patch.object(assist_agent, "_assemble_ctx_for_node",
+                      new=AsyncMock(return_value=({"description": "d", "domain": None}, _ctx()))), \
+         patch.object(assist_agent, "history_from_turns",
+                      new=AsyncMock(return_value=rebuilt)) as hft, \
+         patch.object(assist_agent, "_conversation_block_for",
+                      return_value="") as conv, \
+         patch("app.modules.assist_guide.ensure_guidance",
+               new=AsyncMock(return_value={"guidance": "g", "status": "ready",
+                                           "cached": True, "guidance_meta": {}})):
+        await assist_agent.generate_step_guidance(
+            session_id="s", research=False, history=None, db=db)
+    hft.assert_awaited_once()
+    assert conv.call_args.args[0] == rebuilt

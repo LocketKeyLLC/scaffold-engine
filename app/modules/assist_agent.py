@@ -719,6 +719,11 @@ async def generate_step_guidance(
     # (read from the session row already fetched — no extra round-trip).
     is_decision = (node_row.get("node_type") or "").lower() == "decision"
     operator_notes = _coerce_notes(sess.get("notes"))
+    # §17.726 — no client history (curl / cross-chat reconnect) → rebuild the
+    # recent dialogue from the durable transcript.
+    history = await _history_or_transcript(
+        history=history, session_id=session_id, db=db, exclude_tail=refine,
+    )
     conversation = _conversation_block_for(history)  # §17.687
 
     res = await assist_guide.ensure_guidance(
@@ -738,6 +743,13 @@ async def generate_step_guidance(
         conversation=conversation,
         db=db,
     )
+    # §17.726 — record what the engine told the operator (freshly generated
+    # only; a cache hit re-shows text already in the transcript).
+    if (res.get("guidance") or "").strip() and not res.get("cached"):
+        await capture_assistant_reply(
+            session_id=session_id, node_key=nk, kind="guide",
+            content=res["guidance"], db=db,
+        )
     return {
         "session_id": session_id,
         "job_id": job_id,
@@ -803,8 +815,16 @@ async def generate_step_guidance_stream(
     )
     is_decision = (node_row.get("node_type") or "").lower() == "decision"  # §17.654
     operator_notes = _coerce_notes(sess.get("notes"))
+    # §17.726 — no client history → rebuild from the durable transcript.
+    history = await _history_or_transcript(
+        history=history, session_id=session_id, db=db, exclude_tail=refine,
+    )
     conversation = _conversation_block_for(history)  # §17.687
 
+    # §17.726 — tee the streamed walkthrough so the assembled reply lands in the
+    # transcript once the stream completes (fresh generations only).
+    _buf: list[str] = []
+    _cached = False
     async for ev in assist_guide.generate_guidance_stream(
         session_id=session_id,
         node_key=nk,
@@ -822,7 +842,16 @@ async def generate_step_guidance_stream(
         conversation=conversation,
         db=db,
     ):
+        if ev.get("type") == "delta":
+            _buf.append(ev.get("text") or "")
+        else:
+            _cached = bool(ev.get("cached"))
         yield ev
+    if _buf and not _cached:
+        await capture_assistant_reply(
+            session_id=session_id, node_key=nk, kind="guide",
+            content="".join(_buf), db=db,
+        )
 
 
 async def run_step_research(
@@ -887,6 +916,10 @@ async def run_step_research(
     )
     if digest:
         context_parts.append(digest)
+    # §17.726 — no client history → rebuild from the durable transcript.
+    history = await _history_or_transcript(
+        history=history, session_id=session_id, db=db, exclude_tail=question,
+    )
     conversation = _conversation_block_for(history)  # §17.687
     if conversation:
         context_parts.append(conversation)
@@ -896,6 +929,12 @@ async def run_step_research(
         question=question, node_key=nk or "?", domain=domain,
         job_context=job_context, context_hint=_kb_hint_from(brief, environment),
     )
+    # §17.726 — the answer is what the engine told the operator; record it.
+    if (res.get("answer") or "").strip():
+        await capture_assistant_reply(
+            session_id=session_id, node_key=nk, kind="ask",
+            content=res["answer"], db=db,
+        )
     return {"session_id": session_id, "node_key": nk, **res}
 
 
@@ -953,6 +992,10 @@ async def run_step_fix(
         exclude_node_keys={nk, *ctx.upstream_outputs.keys()},
     )
 
+    # §17.726 — no client history → rebuild from the durable transcript.
+    history = await _history_or_transcript(
+        history=history, session_id=session_id, db=db, exclude_tail=error,
+    )
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
@@ -964,6 +1007,12 @@ async def run_step_fix(
         job_digest=job_digest,
         conversation=_conversation_block_for(history),  # §17.687
     )
+    # §17.726 — record the corrective steps the engine gave the operator.
+    if (res.get("fix") or "").strip():
+        await capture_assistant_reply(
+            session_id=session_id, node_key=nk, kind="fix",
+            content=res["fix"], db=db,
+        )
     # Capture the blocker on the friction trail (best-effort).
     try:
         await record_friction(
@@ -1248,6 +1297,7 @@ async def set_environment(
     substitutions: dict | None = None,
     verbosity: str | None = None,
     facts: list[str] | None = None,
+    retract_facts: list[str] | None = None,
     db,
 ) -> dict:
     """Merge environment facts into `assist_sessions.metadata`.
@@ -1257,8 +1307,11 @@ async def set_environment(
     clobbering the rest). `verbosity` (§17.499) sets metadata.verbosity.
     `facts` (§17.709) are APPENDED to the durable facts ledger, de-duplicated
     (case-insensitive) against what's there, oldest-dropped-first to the
-    `assist_facts_max` cap. Read-modify-write under the row so we never drop
-    other `metadata` keys.
+    `assist_facts_max` cap. `retract_facts` (§17.725) removes ledger entries a
+    new observation directly contradicts — normalized exact match only, applied
+    BEFORE the new facts fold in (the raw assist_turns transcript keeps the
+    retracted text, so nothing is destroyed). Read-modify-write under the row
+    so we never drop other `metadata` keys.
     """
     if verbosity is not None and verbosity not in _VERBOSITY_LEVELS:
         raise ValueError(f"verbosity must be one of {_VERBOSITY_LEVELS}, got {verbosity!r}")
@@ -1275,6 +1328,18 @@ async def set_environment(
         merged = dict(current.get("substitutions") or {})
         merged.update(substitutions)
         current["substitutions"] = merged
+    if retract_facts:
+        # §17.725 — retract contradicted facts BEFORE folding the new ones in.
+        gone = {str(r).strip().lower() for r in retract_facts if str(r).strip()}
+        existing = list(current.get("facts") or [])
+        kept = [f for f in existing if str(f).strip().lower() not in gone]
+        if len(kept) != len(existing):
+            removed = [f for f in existing if str(f).strip().lower() in gone]
+            logger.info(
+                "assist_facts_retracted session_id=%s n=%d retracted=%r",
+                session_id, len(removed), removed,
+            )
+            current["facts"] = kept
     if facts:
         from app.config import settings as _s
         existing = list(current.get("facts") or [])
@@ -1492,17 +1557,29 @@ async def capture_session_facts(
             """),
             {"sid": session_id, "nk": node_key},
         )).mappings().first()
-        facts = await assist_guide.distill_facts(
+        # §17.725 — show the distiller the current ledger so a contradicted fact
+        # can be echoed for retraction (valve-gated at fold time below).
+        known_facts: list[str] = []
+        if settings.assist_unified_memory_enabled and settings.assist_umem_supersede:
+            env_now = await get_environment(session_id=session_id, db=db) or {}
+            known_facts = [str(f) for f in (env_now.get("facts") or [])]
+        res = await assist_guide.distill_facts(
             evidence=evidence,
             title=(row or {}).get("title") or "",
             task_prompt=(row or {}).get("prompt_template") or "",
+            known_facts=known_facts or None,
         )
-        if not facts:
+        facts = res.get("facts") or []
+        superseded = (res.get("superseded") or []) if known_facts else []
+        if not facts and not superseded:
             return []
-        await set_environment(session_id=session_id, facts=facts, db=db)
+        await set_environment(
+            session_id=session_id, facts=facts,
+            retract_facts=superseded or None, db=db,
+        )
         logger.info(
-            "assist_captured_facts session_id=%s node_key=%s n=%d",
-            session_id, node_key, len(facts),
+            "assist_captured_facts session_id=%s node_key=%s n=%d retracted=%d",
+            session_id, node_key, len(facts), len(superseded),
         )
         return facts
     except Exception as e:  # noqa: BLE001 — fact capture must never break submit
@@ -1649,14 +1726,25 @@ async def derive_turn_memory(
                 seen.add(cand)
                 result["notes_added"] += 1
         # Facts: set_environment already dedups case-insensitively + caps.
+        # §17.725 — retract the known facts this message directly contradicted
+        # (verbatim ledger matches only), valve-gated.
         new_facts = [f for f in (derived.get("facts") or [])]
-        if new_facts:
-            await set_environment(session_id=session_id, facts=new_facts, db=db)
+        superseded = (
+            list(derived.get("superseded") or [])
+            if settings.assist_umem_supersede else []
+        )
+        if new_facts or superseded:
+            await set_environment(
+                session_id=session_id, facts=new_facts,
+                retract_facts=superseded or None, db=db,
+            )
             result["facts_added"] = len(new_facts)
-        if result["notes_added"] or result["facts_added"]:
+            result["facts_retracted"] = len(superseded)
+        if result["notes_added"] or result["facts_added"] or superseded:
             logger.info(
-                "assist_derived_turn_memory session_id=%s notes=+%d facts=+%d",
+                "assist_derived_turn_memory session_id=%s notes=+%d facts=+%d facts=-%d",
                 session_id, result["notes_added"], result["facts_added"],
+                len(superseded),
             )
     except Exception as e:  # noqa: BLE001 — the scribe must never break the turn
         logger.debug("derive_turn_memory_failed session_id=%s err=%r", session_id, e)
@@ -1760,6 +1848,82 @@ async def ingest_turn(
     except Exception as e:  # noqa: BLE001 — capture must never break the turn
         logger.debug("ingest_turn_failed session_id=%s err=%r", session_id, e)
         return False
+
+
+async def capture_assistant_reply(
+    *, session_id: str, node_key: str | None, kind: str, content: str, db,
+) -> bool:
+    """§17.726 — record what the ENGINE told the operator (guide / ask / fix /
+    deliberation) as a ``role='assistant'`` turn. Pre-§17.726 the transcript was
+    operator-only (``record_turn_bg`` hard-codes the role), so across the
+    engine's fresh-per-call model the only memory of its own replies was the
+    pipeline's 6-turn OWUI history window — gone entirely on a cross-chat
+    reconnect. Same valve gating + fail-soft as ``ingest_turn``; bounded so a
+    long walkthrough doesn't bloat the transcript (the full text lives in the
+    guidance cache / step output anyway)."""
+    return await ingest_turn(
+        session_id=session_id, role="assistant", kind=kind,
+        content=(content or "")[:8000], node_key=node_key, db=db,
+    )
+
+
+async def history_from_turns(
+    *, session_id: str, db, limit: int = 12, exclude_tail: str | None = None,
+) -> list[dict]:
+    """§17.726 — rebuild a recent-conversation ``history`` from the durable
+    transcript when the client sent none (curl/CLI, or a cross-chat reconnect
+    where the new OWUI chat has no shared history). Returns oldest-first
+    ``[{role: 'user'|'assistant', content}]`` shaped for
+    ``render_conversation_block``. ``exclude_tail`` drops the most recent
+    operator turn when it IS the current message (it's threaded separately as
+    the refine/question/error). Fail-soft → []."""
+    try:
+        rows = (await db.execute(
+            text("""
+                SELECT role, content FROM assist_turns
+                 WHERE session_id = :sid AND kind <> 'skip'
+                 ORDER BY created_at DESC, id DESC LIMIT :lim
+            """),
+            {"sid": session_id, "lim": int(limit)},
+        )).mappings().all()
+    except Exception as e:  # noqa: BLE001 — a fallback must never break the turn
+        logger.debug("history_from_turns_failed session_id=%s err=%r", session_id, e)
+        return []
+    out: list[dict] = []
+    for r in rows:
+        content = (r.get("content") or "").strip()
+        if not content:
+            continue
+        role = "assistant" if (r.get("role") or "") == "assistant" else "user"
+        # The same paste often lands twice (a 'message' row + a 'submit' row) —
+        # collapse consecutive duplicates so the rebuilt history reads clean.
+        if out and out[-1]["role"] == role and out[-1]["content"] == content:
+            continue
+        out.append({"role": role, "content": content})
+    out.reverse()
+    if (
+        exclude_tail and out and out[-1]["role"] == "user"
+        and out[-1]["content"].strip() == exclude_tail.strip()
+    ):
+        out.pop()
+    return out
+
+
+async def _history_or_transcript(
+    *, history: list[dict] | None, session_id: str, db,
+    exclude_tail: str | None = None,
+) -> list[dict] | None:
+    """§17.726 — prefer the client-supplied history (same-chat OWUI, freshest);
+    fall back to the durable transcript when none arrived. Gated on the master
+    valve so the legacy path is byte-identical with the stack off."""
+    if history:
+        return history
+    from app.config import settings
+    if not settings.assist_unified_memory_enabled:
+        return history
+    return await history_from_turns(
+        session_id=session_id, db=db, exclude_tail=exclude_tail,
+    ) or None
 
 
 async def list_turns(*, session_id: str, limit: int = 200, db) -> list[dict]:
@@ -1948,9 +2112,18 @@ async def run_step_decision(
     )
     status = res.get("status")
     if status == "needs_input" and (res.get("message") or "").strip():
+        # §17.726 — the deliberation reply is what the engine told the operator.
+        await capture_assistant_reply(
+            session_id=session_id, node_key=node_key, kind="deliberation",
+            content=res["message"].strip(), db=db,
+        )
         return {"status": "needs_input", "message": res["message"].strip(),
                 "collect_kind": kind}
     if status == "resolved" and (res.get("decision_record") or "").strip():
+        await capture_assistant_reply(
+            session_id=session_id, node_key=node_key, kind="deliberation",
+            content=(res.get("message") or res["decision_record"]).strip(), db=db,
+        )
         return {
             "status": "resolved",
             "decision_record": res["decision_record"].strip(),

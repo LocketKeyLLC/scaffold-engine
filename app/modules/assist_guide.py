@@ -1601,7 +1601,19 @@ _RECORD_FACTS_TOOL = model_router.Tool(
                     "software/versions, users, VMs/containers, storage/pools, and "
                     "network config. Return [] if the output shows nothing durable."
                 ),
-            }
+            },
+            "superseded_facts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "§17.725 — KNOWN facts (from the provided list) that this "
+                    "output DIRECTLY CONTRADICTS, echoed VERBATIM, character for "
+                    "character. Only a real conflict counts (the output shows the "
+                    "opposite / a different value for the same thing). A "
+                    "refinement, an addition, or a fact the output is silent on "
+                    "is NOT superseded. Return [] when unsure."
+                ),
+            },
         },
         "required": ["facts"],
     },
@@ -1612,21 +1624,53 @@ _FACTS_SYSTEM = (
     "command output they pasted, so later steps ground on reality instead of "
     "assuming. Report only what the output shows; never guess. A command that "
     "errored or returned empty means that aspect is UNKNOWN — never infer a "
-    "'fresh' or 'empty' system from a failed or blank check. Call record_facts "
-    "exactly once."
+    "'fresh' or 'empty' system from a failed or blank check. If a KNOWN fact "
+    "list is provided and this output directly contradicts one of those facts, "
+    "echo that known fact VERBATIM in superseded_facts so the ledger can retract "
+    "it — but only for a real conflict, never for an addition or refinement. "
+    "Call record_facts exactly once."
 )
+
+
+def _match_superseded(raw: object, known_facts: list[str] | None) -> list[str]:
+    """§17.725 — filter a model's ``superseded_facts`` echo down to entries that
+    actually exist in the known ledger (normalized case/whitespace match),
+    returning the LEDGER's spelling so retraction is an exact removal. A cap of
+    5 bounds the damage a hallucinating model could do in one call."""
+    if not raw or not isinstance(raw, list) or not known_facts:
+        return []
+    by_norm = {str(k).strip().lower(): str(k) for k in known_facts}
+    out: list[str] = []
+    for s in raw:
+        hit = by_norm.get(str(s).strip().lower())
+        if hit and hit not in out:
+            out.append(hit)
+        if len(out) >= 5:
+            break
+    return out
 
 
 async def distill_facts(
     *, evidence: str, title: str = "", task_prompt: str = "",
-    role: str = "model_general",
-) -> list[str]:
+    known_facts: list[str] | None = None, role: str = "model_general",
+) -> dict:
     """§17.709 — distill durable facts about the operator's real system from
-    their pasted evidence. Reasoning/extraction task → ``model_general`` (NOT
-    the verifier; cf. §17.677). Fail-soft → ``[]``. Bounds each fact's length so
-    a runaway model can't bloat the ledger."""
+    their pasted evidence: ``{"facts": [str], "superseded": [str]}``.
+    Reasoning/extraction task → ``model_general`` (NOT the verifier; cf.
+    §17.677). Fail-soft → empty dict shape. Bounds each fact's length so a
+    runaway model can't bloat the ledger. §17.725: when ``known_facts`` is
+    given, the model may echo (verbatim) the known facts this output directly
+    contradicts; ``superseded`` returns only echoes that match the ledger."""
+    empty = {"facts": [], "superseded": []}
     if not (evidence or "").strip():
-        return []
+        return empty
+    known_block = ""
+    if known_facts:
+        known_block = (
+            "KNOWN FACTS (already in the ledger — do not repeat; if this output "
+            "DIRECTLY CONTRADICTS one, echo it verbatim in superseded_facts):\n"
+            + "\n".join(f"- {k}" for k in known_facts) + "\n\n"
+        )
     try:
         resp = await model_router.tool_call(
             messages=[
@@ -1634,6 +1678,7 @@ async def distill_facts(
                 {"role": "user", "content": (
                     (f"STEP: {title}\n" if title else "")
                     + (f"TASK: {task_prompt}\n\n" if task_prompt else "\n")
+                    + known_block
                     + f"Operator output:\n{evidence[:6000]}\n\nCall record_facts."
                 )},
             ],
@@ -1645,17 +1690,20 @@ async def distill_facts(
         )
     except Exception as exc:  # noqa: BLE001 — fact capture must never break submit
         logger.warning("assist_distill_facts_failed: %s", exc)
-        return []
+        return empty
     args = read_tool_args(resp)
     raw = (args or {}).get("facts") or []
     if not isinstance(raw, list):
-        return []
+        return empty
     out: list[str] = []
     for f in raw:
         t = str(f).strip()
         if t:
             out.append(t[:300])
-    return out
+    return {
+        "facts": out,
+        "superseded": _match_superseded((args or {}).get("superseded_facts"), known_facts),
+    }
 
 
 # ── Unconditional per-turn derive (§17.715 — review + log EVERY message) ────
@@ -1714,6 +1762,18 @@ _RECORD_TURN_MEMORY_TOOL = model_router.Tool(
                     "what they actually said; never guess."
                 ),
             },
+            "superseded_facts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "§17.725 — entries from ALREADY KNOWN FACTS that this message "
+                    "DIRECTLY CONTRADICTS, echoed VERBATIM, character for "
+                    "character. Only a real conflict counts (the operator states "
+                    "the opposite / corrects the value). A refinement, an "
+                    "addition, or a fact the message is silent on is NOT "
+                    "superseded. Return [] when unsure."
+                ),
+            },
             "execution_context": {
                 "type": "object",
                 "properties": {
@@ -1751,6 +1811,10 @@ _TURN_MEMORY_SYSTEM = (
     "something. Only the pure ask itself is not memory.\n"
     "- Do NOT restate anything already listed under ALREADY KNOWN — only NEW "
     "information the operator added in this message.\n"
+    "- If the message DIRECTLY CONTRADICTS one of the ALREADY KNOWN FACTS (the "
+    "operator states the opposite or corrects the value), echo that known fact "
+    "verbatim in superseded_facts so the ledger can retract it. Only a real "
+    "conflict — never an addition or refinement.\n"
     "- Never guess or infer beyond what the message says.\n"
     "Call record_turn_memory exactly once."
 )
@@ -1766,14 +1830,22 @@ async def distill_turn_memory(
     ``model_general`` (cf. §17.677). Conservative (empty for questions / chit-
     chat / step-refinements). ``known_*`` are folded into the prompt so the model
     does not restate standing memory. Fail-soft → ``{"notes": [], "facts": []}``."""
-    empty = {"notes": [], "facts": []}
+    empty = {"notes": [], "facts": [], "superseded": []}
     if not (message or "").strip():
         return empty
     known_lines = ""
-    if known_notes or known_facts:
-        known_lines = "ALREADY KNOWN (do not repeat):\n" + "\n".join(
-            f"- {k}" for k in [*(known_notes or []), *(known_facts or [])]
+    if known_notes:
+        known_lines += "ALREADY KNOWN NOTES (do not repeat):\n" + "\n".join(
+            f"- {k}" for k in known_notes
         ) + "\n\n"
+    if known_facts:
+        # §17.725 — facts listed separately so a contradiction can be echoed
+        # verbatim into superseded_facts for retraction.
+        known_lines += (
+            "ALREADY KNOWN FACTS (do not repeat; if this message DIRECTLY "
+            "CONTRADICTS one, echo it verbatim in superseded_facts):\n"
+            + "\n".join(f"- {k}" for k in known_facts) + "\n\n"
+        )
     try:
         resp = await model_router.tool_call(
             messages=[
@@ -1808,7 +1880,13 @@ async def distill_turn_memory(
         t = str(f).strip()
         if t:
             facts_out.append(t[:300])
-    out = {"notes": notes_out, "facts": facts_out}
+    out = {
+        "notes": notes_out,
+        "facts": facts_out,
+        # §17.725 — known facts this message directly contradicts (verbatim
+        # ledger spellings only), for retraction at fold time.
+        "superseded": _match_superseded(args.get("superseded_facts"), known_facts),
+    }
     # §17.716 — an explicit prose statement of the operator's current shell host
     # (what the anchored prompt-line sensor can't see). Only when BOTH parts are
     # present; the caller re-validates + applies under the §17.703 retention rules.

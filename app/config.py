@@ -763,6 +763,16 @@ class Settings(BaseSettings):
     # fact. Silent scribe — the interactive re-plan surface stays on the explicit
     # pivot path (§17.693). Default OFF (legacy behavior); flip live via env.
     assist_umem_derive: bool = False              # §17.715 — derive memory from every turn
+    # §17.725 — fact SUPERSESSION. The ledger is append-only and `set_environment`
+    # only dedups exact matches, so a new observation that CONTRADICTS an earlier
+    # fact left both in the ledger (live: "P40 in group 13" AND "P40 in group 37")
+    # and every later prompt grounded on the contradiction. When on, the two
+    # distillers (§17.709 submit facts, §17.715 per-turn scribe) are shown the
+    # known facts and may echo the ones the new evidence directly contradicts;
+    # those verbatim matches are RETRACTED from the ledger as the new facts fold
+    # in. The raw assist_turns transcript keeps everything (§17.710a), so a
+    # retraction never destroys evidence. Default OFF; flip live via env.
+    assist_umem_supersede: bool = False           # §17.725 — retract contradicted facts
     # §17.499 — default walkthrough verbosity (terse | normal | detailed).
     # Per-session override via /assist verbose. terse = commands + one-line
     # whys (expert); detailed = explain why each step matters + what to watch

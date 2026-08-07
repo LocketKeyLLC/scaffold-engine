@@ -871,9 +871,11 @@ async def test_distill_facts_parses_and_bounds():
         out = await assist_guide.distill_facts(
             evidence="root@pve:~# pveversion\npve-manager/9.2.6",
         )
-    assert "Existing Proxmox VE 9.2.6" in out
-    assert all(f.strip() for f in out)          # blanks dropped
-    assert all(len(f) <= 300 for f in out)      # bounded
+    facts = out["facts"]
+    assert "Existing Proxmox VE 9.2.6" in facts
+    assert all(f.strip() for f in facts)          # blanks dropped
+    assert all(len(f) <= 300 for f in facts)      # bounded
+    assert out["superseded"] == []
 
 
 def _grounding_resp(contradicts, reason="", success=True):
@@ -925,7 +927,7 @@ async def test_check_grounding_failsoft():
 async def test_distill_facts_empty_evidence_skips_llm():
     with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:
         out = await assist_guide.distill_facts(evidence="   ")
-    assert out == []
+    assert out == {"facts": [], "superseded": []}
     tc.assert_not_called()
 
 
@@ -934,18 +936,20 @@ async def test_distill_facts_failsoft():
     with patch.object(assist_guide.model_router, "tool_call",
                       new=AsyncMock(side_effect=RuntimeError("model down"))):
         out = await assist_guide.distill_facts(evidence="some output")
-    assert out == []
+    assert out == {"facts": [], "superseded": []}
 
 
 # ── §17.715 — unconditional per-turn derive ────────────────────────────────
 
 
-def _turn_memory_resp(notes, facts, success=True):
+def _turn_memory_resp(notes, facts, success=True, superseded=None):
     r = MagicMock()
     r.success = success
     r.text = ""
     call = MagicMock()
     call.arguments = {"notes": notes, "facts": facts}
+    if superseded is not None:
+        call.arguments["superseded_facts"] = superseded
     r.tool_calls = [call] if success else []
     return r
 
@@ -972,7 +976,7 @@ async def test_distill_turn_memory_shapes_and_filters():
 async def test_distill_turn_memory_empty_message_skips_llm():
     with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:
         out = await assist_guide.distill_turn_memory(message="   ")
-    assert out == {"notes": [], "facts": []}
+    assert out == {"notes": [], "facts": [], "superseded": []}
     tc.assert_not_called()
 
 
@@ -981,7 +985,58 @@ async def test_distill_turn_memory_failsoft():
     with patch.object(assist_guide.model_router, "tool_call",
                       new=AsyncMock(side_effect=RuntimeError("model down"))):
         out = await assist_guide.distill_turn_memory(message="anything substantive here")
-    assert out == {"notes": [], "facts": []}
+    assert out == {"notes": [], "facts": [], "superseded": []}
+
+
+@pytest.mark.asyncio
+async def test_distill_turn_memory_superseded_filtered_to_known():
+    # §17.725 — only verbatim (normalized) matches against known_facts survive;
+    # hallucinated retractions are dropped, and the LEDGER's spelling returns.
+    known = ["P40 GPU is in IOMMU group 13", "ZFS pool 'oasis' active"]
+    resp = _turn_memory_resp(
+        notes=[], facts=["Tesla P40 (02:00.0) is in IOMMU group 37"],
+        superseded=["p40 gpu is in iommu group 13",      # case-normalized match
+                    "some fact that was never recorded"],  # hallucinated → dropped
+    )
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock(return_value=resp)):
+        out = await assist_guide.distill_turn_memory(
+            message="the P40 is actually 02:00.0 in group 37",
+            known_facts=known,
+        )
+    assert out["superseded"] == ["P40 GPU is in IOMMU group 13"]  # ledger spelling
+    assert out["facts"] == ["Tesla P40 (02:00.0) is in IOMMU group 37"]
+
+
+def test_match_superseded_caps_at_five():
+    known = [f"FACT-{i}" for i in range(10)]
+    out = assist_guide._match_superseded([f"fact-{i}" for i in range(10)], known)
+    assert len(out) == 5
+
+
+def test_match_superseded_empty_without_known():
+    assert assist_guide._match_superseded(["anything"], None) == []
+    assert assist_guide._match_superseded(None, ["known"]) == []
+
+
+@pytest.mark.asyncio
+async def test_distill_facts_superseded_filtered_to_known():
+    # §17.725 — the submit-path distiller returns retractions the same way.
+    r = MagicMock()
+    r.success = True
+    r.text = ""
+    call = MagicMock()
+    call.arguments = {
+        "facts": ["Tesla P40 (02:00.0) is in IOMMU group 37"],
+        "superseded_facts": ["P40 GPU is in IOMMU group 13", "never recorded"],
+    }
+    r.tool_calls = [call]
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock(return_value=r)):
+        out = await assist_guide.distill_facts(
+            evidence="lspci shows 02:00.0 Tesla P40",
+            known_facts=["P40 GPU is in IOMMU group 13"],
+        )
+    assert out["superseded"] == ["P40 GPU is in IOMMU group 13"]
+    assert out["facts"] == ["Tesla P40 (02:00.0) is in IOMMU group 37"]
 
 
 @pytest.mark.asyncio

@@ -266,3 +266,92 @@ async def test_derive_turn_memory_captures_prompt_line_in_nonsubmit_message():
     ap.assert_awaited_once()
     assert ap.await_args.kwargs["source"] == "turn"
     assert ap.await_args.kwargs["host"] == "DeFruscio-HomeLab"
+
+
+# ── §17.725 — per-turn supersession + §17.726 assistant capture/history ─────
+
+
+@pytest.mark.asyncio
+async def test_derive_turn_memory_applies_supersession_under_valve():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(mappings_first={
+        "status": "active", "notes": [],
+        "metadata": {"environment": {"facts": ["P40 GPU is in IOMMU group 13"]}},
+    }))
+    derived = {
+        "notes": [], "facts": ["Tesla P40 (02:00.0) is in IOMMU group 37"],
+        "superseded": ["P40 GPU is in IOMMU group 13"],
+    }
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_derive", True), \
+         patch("app.config.settings.assist_umem_supersede", True), \
+         patch("app.modules.assist_guide.distill_turn_memory",
+               new=AsyncMock(return_value=derived)), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+        out = await assist_agent.derive_turn_memory(
+            session_id="s1", node_key="T2",
+            message="no — the P40 is 02:00.0, in group 37", db=db)
+    assert se.call_args.kwargs["retract_facts"] == ["P40 GPU is in IOMMU group 13"]
+    assert out["facts_retracted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_derive_turn_memory_supersede_valve_off_ignores_retractions():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(mappings_first={
+        "status": "active", "notes": [],
+        "metadata": {"environment": {"facts": ["OLD"]}},
+    }))
+    derived = {"notes": [], "facts": ["NEW"], "superseded": ["OLD"]}
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_derive", True), \
+         patch("app.config.settings.assist_umem_supersede", False), \
+         patch("app.modules.assist_guide.distill_turn_memory",
+               new=AsyncMock(return_value=derived)), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+        await assist_agent.derive_turn_memory(
+            session_id="s1", node_key="T2", message="the old fact is wrong", db=db)
+    assert se.call_args.kwargs["retract_facts"] is None
+
+
+@pytest.mark.asyncio
+async def test_capture_assistant_reply_ingests_as_assistant_role():
+    with patch.object(assist_agent, "ingest_turn",
+                      new=AsyncMock(return_value=True)) as ing:
+        ok = await assist_agent.capture_assistant_reply(
+            session_id="s1", node_key="T2", kind="guide",
+            content="walkthrough text", db=AsyncMock())
+    assert ok is True
+    assert ing.await_args.kwargs["role"] == "assistant"
+    assert ing.await_args.kwargs["kind"] == "guide"
+
+
+@pytest.mark.asyncio
+async def test_capture_assistant_reply_bounds_content():
+    with patch.object(assist_agent, "ingest_turn",
+                      new=AsyncMock(return_value=True)) as ing:
+        await assist_agent.capture_assistant_reply(
+            session_id="s1", node_key=None, kind="ask",
+            content="x" * 20000, db=AsyncMock())
+    assert len(ing.await_args.kwargs["content"]) == 8000
+
+
+@pytest.mark.asyncio
+async def test_history_from_turns_maps_dedups_and_excludes_tail():
+    # Rows come newest-first from the query; the helper returns oldest-first,
+    # collapses the message+submit double-record, maps roles for
+    # render_conversation_block, and drops the tail when it IS the current msg.
+    rows = [
+        {"role": "operator", "content": "what next?"},           # current msg (tail)
+        {"role": "assistant", "content": "run the audit"},
+        {"role": "operator", "content": "pasted output"},        # submit row
+        {"role": "operator", "content": "pasted output"},        # message row (dup)
+    ]
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(mappings_all=rows))
+    out = await assist_agent.history_from_turns(
+        session_id="s1", db=db, exclude_tail="what next?")
+    assert out == [
+        {"role": "user", "content": "pasted output"},
+        {"role": "assistant", "content": "run the audit"},
+    ]
