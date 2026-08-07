@@ -175,11 +175,59 @@ async def start_assist_session(
             VALUES (:jid, :hp, :rp, 'active')
             ON CONFLICT (job_id) DO UPDATE
                 SET last_activity_at = NOW()
-            RETURNING id, job_id, status, handoff_policy, replan_policy
+            RETURNING id, job_id, status, handoff_policy, replan_policy,
+                      (xmax = 0) AS inserted
         """),
         {"jid": job_id, "hp": handoff_policy, "rp": replan_policy},
     )).mappings().first()
     session_id = str(sess_row["id"])
+
+    # §17.723 — seed a NEW component session's environment from its most
+    # recently active sibling under the same umbrella. The facts ledger /
+    # substitutions / execution profile live per-SESSION, but the components of
+    # one umbrella run against the SAME physical system — pre-§17.723 every
+    # component started blind and the operator had to re-teach known state
+    # ("we are using a zfspool, it should be in your notes"). Only fires on a
+    # brand-new session (never overwrites state a session already gathered).
+    if sess_row.get("inserted"):
+        sibling = (await db.execute(
+            text("""
+                SELECT s.metadata->'environment' AS env
+                  FROM assist_sessions s
+                  JOIN jobs sj ON sj.id = s.job_id
+                 WHERE sj.parent_job_id = (
+                           SELECT parent_job_id FROM jobs WHERE id = :jid
+                       )
+                   AND sj.parent_job_id IS NOT NULL
+                   AND s.job_id <> :jid
+                   AND s.metadata ? 'environment'
+                 ORDER BY s.last_activity_at DESC
+                 LIMIT 1
+            """),
+            {"jid": job_id},
+        )).mappings().first()
+        if sibling and sibling["env"]:
+            env = sibling["env"]
+            if isinstance(env, str):
+                env = json.loads(env)
+            if isinstance(env, dict) and any(
+                env.get(k) for k in ("profile", "facts", "substitutions")
+            ):
+                await db.execute(
+                    text("""
+                        UPDATE assist_sessions
+                           SET metadata = COALESCE(metadata, '{}'::jsonb)
+                                          || CAST(:patch AS jsonb)
+                         WHERE id = :sid
+                    """),
+                    {"sid": session_id, "patch": json.dumps({"environment": env})},
+                )
+                logger.info(
+                    "assist_env_seeded_from_sibling session_id=%s job_id=%s "
+                    "facts=%d subs=%d",
+                    session_id, job_id, len(env.get("facts") or []),
+                    len(env.get("substitutions") or {}),
+                )
 
     # §17.623 — re-open reset. The job already ran to a terminal state; reset
     # every non-pending DAG node so the assist session seeds a full redo. Clear

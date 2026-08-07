@@ -321,6 +321,11 @@ services:
       ASSIST_UMEM_INJECT: "${ASSIST_UMEM_INJECT:-true}"
       ASSIST_UMEM_GROUNDING: "${ASSIST_UMEM_GROUNDING:-false}"
       ASSIST_UMEM_DERIVE: "${ASSIST_UMEM_DERIVE:-true}"
+      # §17.722 — the code default (4000) is too small for a real session: a
+      # mature facts ledger alone exceeds it, and pre-§17.722 that collapsed
+      # the injected memory to just the header + profile. 12000 chars ≈ 3k
+      # tokens — comfortably inside every guidance prompt.
+      ASSIST_UMEM_MAX_CHARS: "${ASSIST_UMEM_MAX_CHARS:-12000}"
     env_file:
       - .env
     volumes:

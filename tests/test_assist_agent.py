@@ -199,6 +199,79 @@ async def test_start_session_on_awaiting_assist_seeds_directly():
 
 @pytest.mark.smoke
 @pytest.mark.asyncio
+async def test_start_session_seeds_environment_from_sibling():
+    """§17.723 — a NEW component session inherits the environment (facts /
+    substitutions / profile) of its most recently active sibling session under
+    the same umbrella: the components run against the same physical system, so
+    a new component must not start blind."""
+    sibling_env = {
+        "profile": "root@pve single shell",
+        "facts": ["ZFS pool 'oasis' active"],
+        "substitutions": {"POOL_NAME": "oasis"},
+    }
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _result(mappings_first={
+            "id": "job-c2", "status": "awaiting_assist",
+            "job_type": "component", "node_count": 3,
+        }),
+        _result(mappings_first={
+            "id": "sess-c2", "job_id": "job-c2", "status": "active",
+            "handoff_policy": "manual", "replan_policy": "context_only",
+            "inserted": True,
+        }),
+        _result(mappings_first={"env": sibling_env}),  # sibling env lookup
+        _result(),                          # UPDATE session metadata (seed)
+        _result(),                          # UPDATE jobs status
+        _result(),                          # INSERT seed assist_steps
+        _result(scalar=3),                  # SELECT total
+        _result(scalar=3),                  # SELECT pending
+    ]
+    out = await assist_agent.start_assist_session(
+        job_id="55555555-5555-5555-5555-555555555555", db=db,
+    )
+    assert out["session_id"] == "sess-c2"
+    seed_updates = [
+        c for c in db.execute.await_args_list
+        if c.args and "metadata" in str(c.args[0])
+        and len(c.args) > 1 and "oasis" in str(c.args[1])
+    ]
+    assert seed_updates, "sibling environment was not seeded into the new session"
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_start_session_existing_session_does_not_seed():
+    """§17.723 — reconnecting to an EXISTING session (ON CONFLICT path,
+    inserted=False) must never overwrite the environment it already gathered."""
+    db = AsyncMock()
+    db.execute.side_effect = [
+        _result(mappings_first={
+            "id": "job-c3", "status": "assisted_executing",
+            "job_type": "component", "node_count": 3,
+        }),
+        _result(mappings_first={
+            "id": "sess-c3", "job_id": "job-c3", "status": "active",
+            "handoff_policy": "manual", "replan_policy": "context_only",
+            "inserted": False,
+        }),
+        _result(),                          # UPDATE jobs status
+        _result(),                          # INSERT seed assist_steps
+        _result(scalar=3),                  # SELECT total
+        _result(scalar=3),                  # SELECT pending
+    ]
+    out = await assist_agent.start_assist_session(
+        job_id="66666666-6666-6666-6666-666666666666", db=db,
+    )
+    assert out["session_id"] == "sess-c3"
+    assert not [
+        c for c in db.execute.await_args_list
+        if c.args and "parent_job_id" in str(c.args[0])
+    ], "sibling env lookup ran for an existing session"
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
 async def test_start_session_umbrella_returns_assist_unavailable():
     """§17.561 — /assist on an umbrella job returns structured guidance, not a
     phantom empty session. No INSERT/UPDATE, no commit; child rollup attached."""

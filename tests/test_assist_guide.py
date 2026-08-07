@@ -579,6 +579,56 @@ def test_render_session_memory_budget_keeps_facts_drops_notes():
     assert "LOW-PRIORITY-NOTE" not in mem   # notes dropped first
 
 
+def test_render_session_memory_big_ledger_trims_facts_not_notes():
+    # §17.722 — the live regression: a mature facts ledger alone exceeded the
+    # budget and the old section-pop evicted notes → values → the ENTIRE facts
+    # section, leaving only header + profile. Now the facts LIST trims
+    # (oldest dropped, newest kept) and the small high-signal sections survive.
+    facts = [f"FACT-{i:03d} " + "x" * 90 for i in range(40)]  # ~3.8k chars
+    mem = assist_guide.render_session_memory(
+        {"profile": "root@pve single shell", "facts": facts,
+         "substitutions": {"VMID": "100", "VM_NAME": "AI-VM"}},
+        [{"kind": "decision", "text": "bridge must be named DeFruscioBridge"}],
+        budget=3000,
+    )
+    assert len(mem) <= 3000
+    assert "DeFruscioBridge" in mem          # notes survive
+    assert "VMID = 100" in mem               # provided values survive
+    assert "root@pve single shell" in mem    # profile survives
+    assert "FACT-039" in mem                 # newest fact kept
+    assert "FACT-000" not in mem             # oldest fact trimmed
+    assert "older facts omitted" in mem      # trim is announced, not silent
+
+
+def test_render_session_memory_under_budget_keeps_everything():
+    facts = [f"FACT-{i}" for i in range(5)]
+    mem = assist_guide.render_session_memory(
+        {"profile": "ctx", "facts": facts, "substitutions": {"K": "V"}},
+        [{"kind": "note", "text": "NOTE-1"}],
+        budget=4000,
+    )
+    for f in facts:
+        assert f in mem
+    assert "NOTE-1" in mem and "K = V" in mem
+    assert "older facts omitted" not in mem
+
+
+def test_render_session_memory_reset_mode_trims_facts_keeps_direction():
+    # §17.714 + §17.722 — reset mode: the operator's direction leads and stays;
+    # the demoted earlier-observations list trims newest-kept under budget.
+    facts = [f"OLD-FACT-{i:03d} " + "y" * 90 for i in range(40)]
+    mem = assist_guide.render_session_memory(
+        {"profile": "root@pve", "facts": facts, "substitutions": {}},
+        [{"kind": "decision", "text": "wipe it and do a clean install of Proxmox"}],
+        budget=3000,
+    )
+    assert len(mem) <= 3000
+    assert "CHANGED DIRECTION" in mem
+    assert "clean install of Proxmox" in mem  # direction survives
+    assert "OLD-FACT-039" in mem              # newest demoted fact kept
+    assert "OLD-FACT-000" not in mem          # oldest trimmed
+
+
 def test_memory_or_legacy_valve_off_uses_legacy(monkeypatch):
     monkeypatch.setattr(assist_guide.settings, "assist_unified_memory_enabled", False)
     parts = assist_guide._render_memory_or_legacy(

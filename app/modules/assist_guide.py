@@ -754,6 +754,23 @@ def render_session_memory(
     ]
     if not (profile or facts or subs or notes):
         return ""
+
+    # §17.722 — the facts section is ELASTIC under budget pressure: the ledger
+    # is append-only and grows without bound, while every other section stays
+    # small. Track where it sits so the trim below can shrink the facts LIST
+    # (oldest dropped — the newest facts describe the system's current state)
+    # instead of popping whole sections.
+    facts_idx: int | None = None
+    direction_idx: int | None = None  # §17.714 reset-mode direction — never dropped
+    facts_header = ""
+
+    def _facts_section(header_: str, items: list[str], omitted: int) -> str:
+        marker = (
+            f"\n(… {omitted} older facts omitted to fit the memory budget — newest kept)"
+            if omitted else ""
+        )
+        return header_ + marker + "\n" + "\n".join(f"- {f}" for f in items)
+
     if _operator_reset_intent(notes):
         # §17.714 — operator has explicitly chosen a fresh start. Direction
         # first (protected from budget-trim by the >2 guard below), facts
@@ -771,17 +788,19 @@ def render_session_memory(
         )
         sections: list[str] = [header]
         if notes:
+            direction_idx = len(sections)
             sections.append(
                 "**Operator's current direction (latest decision — supersedes the state below):**\n"
                 + "\n".join(f"- [{(n.get('kind') or 'note')}] {n['text'].strip()}" for n in notes)
             )
         if facts:
-            sections.append(
+            facts_header = (
                 "**Earlier observations (gathered during the PREVIOUS approach the "
                 "operator has since abandoned — re-verify before relying on any of "
-                "them; most will not hold after the fresh start):**\n"
-                + "\n".join(f"- {f}" for f in facts)
+                "them; most will not hold after the fresh start):**"
             )
+            facts_idx = len(sections)
+            sections.append(_facts_section(facts_header, facts, 0))
         if subs:
             sections.append("**Provided values:**\n" + "\n".join(f"- {k} = {v}" for k, v in subs.items()))
         if profile:
@@ -794,13 +813,16 @@ def render_session_memory(
             "fresh/empty system, and treat anything marked unknown/unverified as still open)"
         )
         # Priority order: context + facts are load-bearing for grounding; provided
-        # values next; notes last. Dropped from the tail if over budget (facts are
-        # never dropped — only trimmed).
+        # values next; notes last. Under budget pressure the facts LIST trims
+        # first (newest kept); whole sections drop from the tail only when even
+        # that isn't enough.
         sections = [header]
         if profile:
             sections.append(f"**Execution context:** {profile}")
         if facts:
-            sections.append("**Observed facts:**\n" + "\n".join(f"- {f}" for f in facts))
+            facts_header = "**Observed facts:**"
+            facts_idx = len(sections)
+            sections.append(_facts_section(facts_header, facts, 0))
         if subs:
             sections.append("**Provided values:**\n" + "\n".join(f"- {k} = {v}" for k, v in subs.items()))
         if notes:
@@ -810,12 +832,54 @@ def render_session_memory(
             )
     block = "\n\n".join(sections)
     if budget and len(block) > budget:
-        # Drop lowest-priority whole sections from the tail before a hard cut.
-        # The >2 guard keeps [header, section#2]: in the normal block that's the
-        # grounding-critical facts; in a §17.714 reset block it's the operator's
-        # current direction — the load-bearing part in each case.
-        while len(sections) > 2 and len("\n\n".join(sections)) > budget:
-            sections.pop()
+        # §17.722 — trim the facts LIST first, whole sections only as a last
+        # resort. The old logic popped whole sections from the tail (notes →
+        # values → the ENTIRE facts section), so the moment a session's ledger
+        # outgrew the budget the injected memory collapsed to just the header +
+        # execution profile — the live "worked great, then suddenly stopped
+        # retaining anything" cliff (facts, VMID/VM_NAME values, and the
+        # operator's own notes all silently vanished from every prompt).
+        if facts_idx is None:
+            # No facts section — the old behavior (pop tail, keep the header +
+            # the load-bearing second section) is still right.
+            while len(sections) > 2 and len("\n\n".join(sections)) > budget:
+                sections.pop()
+        else:
+            while True:
+                overhead = sum(
+                    len(s) + 2 for i, s in enumerate(sections) if i != facts_idx
+                )
+                # Room for the facts section, reserving space for the
+                # omitted-count marker line.
+                room = budget - overhead - 80
+                kept: list[str] = []
+                used = len(facts_header)
+                for f in reversed(facts):
+                    line = len(f) + 3  # "- " prefix + newline
+                    if used + line > room:
+                        break
+                    kept.append(f)
+                    used += line
+                kept.reverse()
+                if kept:
+                    sections[facts_idx] = _facts_section(
+                        facts_header, kept, len(facts) - len(kept)
+                    )
+                    break
+                # Not even one (newest) fact fits — drop the lowest-priority
+                # section and retry with the freed room. The header, the facts
+                # slot, and a §17.714 direction section are never dropped.
+                droppable = [
+                    i for i in range(len(sections))
+                    if i not in (0, facts_idx, direction_idx)
+                ]
+                if not droppable:
+                    del sections[facts_idx]
+                    break
+                drop = max(droppable)
+                del sections[drop]
+                if drop < facts_idx:
+                    facts_idx -= 1
         block = "\n\n".join(sections)
         if len(block) > budget:
             block = block[:budget].rstrip() + "\n… (memory truncated)"
