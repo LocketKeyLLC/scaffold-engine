@@ -1905,6 +1905,40 @@ def _looks_like_decision_confirm(msg: str) -> bool:
     return bool(msg) and bool(_DECISION_CONFIRM_RE.search(_normalize_punct(msg)))
 
 
+# §17.733 — a genuine HOW-TO / should-I / which-one question during a step. The
+# LLM classifier keeps filing these as `question` (→ re-render the SAME step
+# walkthrough, often a cache hit → no new answer, no research), the recurring
+# §17.651/674 misroute. The reported symptom: "am i supposed to use console? or
+# one of the console selections?" got the step echoed back, never researched.
+# §17.679 lesson: deterministic gate over re-tuning the classifier. Matching one
+# of these while the classifier said `question` reroutes to `ask` (research —
+# which threads project memory + current, sourced facts, §17.650/729). Anchored
+# on help-seeking interrogatives so a plan-refinement ("can we make the port
+# random?") or a pivot (handled earlier) doesn't trip it.
+_HOWTO_QUESTION_RE = re.compile(
+    r"\b(?:"
+    r"how\s+(?:do|can|would|should|to)\b|"
+    r"am\s+i\s+(?:supposed|meant)\s+to\b|are\s+we\s+(?:supposed|meant)\s+to\b|"
+    r"should\s+i\b|should\s+we\b|do\s+i\s+(?:need|have)\s+to\b|"
+    r"which\s+(?:one|option|selection|.*\bshould)\b|"
+    r"what\s+(?:do|should)\s+(?:i|we)\b|what'?s\s+the\s+best\s+way\b|"
+    r"best\s+way\s+to\b|is\s+it\s+better\s+to\b|is\s+there\s+a\s+way\b|"
+    # NB: no bare "what does … mean" — that's usually a "clarify THIS step"
+    # question (→ re-render), not an external lookup.
+    r"why\s+(?:is|does|won'?t|can'?t|isn'?t)\b"
+    r")",
+    re.I,
+)
+
+
+def _looks_like_howto_question(msg: str) -> bool:
+    """§17.733 — True when `msg` is a help-seeking how-to/which/should-I question
+    that deserves a researched answer, not a re-render of the current step."""
+    if not msg:
+        return False
+    return bool(_HOWTO_QUESTION_RE.search(_normalize_punct(msg)))
+
+
 def _word_count(msg: str) -> int:
     return len((msg or "").split())
 
@@ -2090,6 +2124,18 @@ def assist_nl_turn(
     if intent == "set_verbosity":
         yield from assist_env_cmd(
             pipe, session_id, verbosity=_verbosity_from_message(msg), chat_id=chat_id,
+        ); return
+    # §17.733 — a how-to / should-I / which-one question the classifier filed as
+    # `question` is really an `ask`: re-rendering the step walkthrough (below)
+    # doesn't answer "am i supposed to use the console?" and never researches.
+    # Route it to the research path (project memory + current sourced facts).
+    # Deterministic gate — pivots + shell-evidence already returned above, so
+    # this only ever upgrades a genuine question to a researched answer.
+    if intent == "question" and _looks_like_howto_question(msg):
+        nk = _recall_node_key(pipe, chat_id, node_key)
+        yield from assist_research_cmd(
+            pipe, session_id, msg.strip(), node_key=nk, chat_id=chat_id,
+            history=history,
         ); return
     # question (default) — the existing guide/refine turn. Pivots (regex or the
     # §17.693 semantic impact check) already returned above, so anything here is

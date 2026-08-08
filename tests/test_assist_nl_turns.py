@@ -400,6 +400,47 @@ def test_ask_routes_to_research(pipe):
 
 
 @pytest.mark.smoke
+@pytest.mark.parametrize("msg", [
+    "am i supposed to use console? or one of the console selections?",
+    "how do i run the installer from here?",
+    "which option should i pick at the boot menu?",
+    "what's the best way to get the OS installed?",
+    "should i use the graphical or terminal installer?",
+    "why won't the VM boot into the installer?",
+])
+def test_howto_question_reroutes_to_research(pipe, msg):
+    # §17.733 — a how-to/should-I question the classifier filed as `question`
+    # is upgraded to the research path (not a re-render of the current step).
+    out, stubs, _ = _route(pipe, msg, intent_dict={"intent": "question"})
+    assert "ASK" in out and "QUESTION" not in out
+    assert stubs["assist_research_cmd"].call_args[0][2] == msg
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("msg", [
+    "what did you mean by that?",          # about the walkthrough, not how-to
+    "can you make the port random?",       # a refinement
+    "looks good to me",                    # a confirmation
+])
+def test_plain_question_still_re_renders(pipe, msg):
+    # Non-how-to questions stay on the guide/refine path (no research upgrade).
+    out, stubs, _ = _route(pipe, msg, intent_dict={"intent": "question"})
+    assert "QUESTION" in out and "ASK" not in out
+
+
+def test_looks_like_howto_question_gate():
+    yes = ["how do i attach the iso", "am i supposed to reboot now",
+           "should i enable secure boot", "which kernel should i choose",
+           "what should i do next here", "why is the console blank"]
+    no = ["the install finished ok", "here is the output",
+          "next", "use vault for the pool", "3 vlans please"]
+    for m in yes:
+        assert _ah._looks_like_howto_question(m), m
+    for m in no:
+        assert not _ah._looks_like_howto_question(m), m
+
+
+@pytest.mark.smoke
 def test_status_and_plan_route(pipe):
     assert "STATUS" in _route(pipe, "where am i")[0]
     assert "PLAN" in _route(pipe, "show me the plan")[0]
