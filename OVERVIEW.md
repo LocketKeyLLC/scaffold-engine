@@ -22049,6 +22049,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.735 Verify — live OWUI-path e2e of the §17.734 broken-foundation fix: names the root cause, fixes it, confirms it before continuing (2026-08-08)
+
+**What.** Drove the real pipe (:9099, `/assist` start on a scratch job whose one step installs a package via apt — needs internet), then reported the failure-class through the pipe: "the apt install fails, no internet, I thought networking was set up but it isn't." Cascade-deleted after. No code changes — records the §17.734 verification on the OWUI transport.
+
+**Results.** The `fix` response (1) named the ROOT cause not the surface error — "the VM's network was never properly set up… The plan assumed networking was already working, but it is not"; (2) gave the complete foundation fix (bridge → VM interface → IP → reach internet), not a band-aid; (3) `## Then` confirmed the foundation FIRST — "Once the VM can successfully `ping google.com`… you can return to the original step" — instead of the old "quick fix then install"; (4) `## If that fails` escalated a host-level network failure as something that "may need its own dedicated step". The reported "pulled me forward without addressing it" behavior is gone. Scratch job cascade-deleted; the P40 session untouched (its real state: 13/21 done, T14 active — the operator finished the OS install in their own session and is now on the driver step blocked by exactly this networking gap).
+
+---
+
 ### §17.734 Fix — the fix path band-aided a broken FOUNDATION and pushed the operator toward the nominal step instead of addressing the real problem (2026-08-08)
 
 **Report + evidence.** Operator, on the P40 job: "it appears to be having an issue with something it believed was set up, but [it] isn't; it pulled me to move forward without addressing the issue." Traced the live session (`c308ae02`): OS installed (T13 done), advanced to T14 "Install NVIDIA driver" — which needs internet — but the VM's NIC is on `DeFruscioBridge`, an **isolated bridge with no physical uplink** (a recorded fact), so `apt`/`wget` fail (turn 188). The engine's `fix` responses (turns 189/199) diagnosed the isolated bridge correctly but framed the fix as a quick NAT band-aid and "…then install the NVIDIA driver", steering back to T14 rather than treating "the VM's networking was never actually set up for internet" as the real problem. (§17.731 held — T14 stayed `pending`, not falsely committed.)
