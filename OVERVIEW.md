@@ -22049,6 +22049,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.737 Verify — live OWUI-path e2e of the §17.736 add-a-step feature: "add a step for this" inserts + guides + sequences (2026-08-08)
+
+**What.** Drove the real pipe (:9099, `/assist` start on a scratch web-app job with a single deploy step that implicitly needs internet), then said "before this we need to get the VM online — can you add a step to set up the VM networking properly?". Cascade-deleted after. No code changes — records the §17.736 verification on the OWUI transport.
+
+**Results.** The pipe replied "➕ Added a step: **Configure the VM's network for internet access** — we'll do this first, then continue where you were" and immediately presented its walkthrough ("Step 1 of 2", Inputs needed → find bridge → attach → ping test — a real phased copy-paste guide, not a stub). DB-verified sequencing: `ADD1` pending with no unmet deps (claimable now) and set as `current_node_key`; the original `T1` now `depends_on: {ADD1}` (waits until networking is done). The deterministic gate fired (no classifier round-trip). Scratch job cascade-deleted; the P40 session intact (ADD1 pending, T13 done, T14 waiting on ADD1 — the operator's real networking step ready to resume).
+
+---
+
 ### §17.736 Feature — assist can now ADD a guided step mid-session: a foundational gap the plan never covered becomes a proper walkthrough, not scattered one-off fixes (2026-08-08)
 
 **Report + evidence.** Operator, continuing the P40 job: "it continues to not know how to properly connect the two [the VM to the network] … given all its info it should walk me through what it needs, then give it all copy-paste back and forth." Traced the live session (`c308ae02`): 14 turns on T14 "Install NVIDIA driver" reactively band-aiding a networking blocker (console blank → boot order → NAT → missing iptables pkg → pve-enterprise.list) with no throughline — because the plan has NO networking step, and the `fix`/`ask` paths are one-shot. The re-plan machinery (§17.677) could `drop`/`revise` a node but **could not ADD one**, so "connect the VM to the internet" had nowhere to live as a coherent, verified task.
