@@ -34,9 +34,20 @@ def _drive_pipe(pipe, user_message: str, messages: list[dict]) -> str:
     §17.626 — natural-language assist START runs before the nudge and would
     otherwise make a live `/assist/candidates` call. The nudge is the FALLBACK
     for when no existing job matches, so stub the start to 'no match' (None) to
-    exercise that fallback deterministically."""
+    exercise that fallback deterministically.
+
+    §17.734 — the pipe path ALSO calls `_reconnect_in_progress` (§17.633
+    cross-chat continuity → live `/assist/candidates`) and `_nl_command_route`
+    (§17.628 → live reads) before triage. Both are fail-soft, so they normally
+    fast-fail in CI's no-network env — but intermittently HANG on DNS (30s
+    pytest-timeout), the flaky-red these smoke tests hit. Stub them to their
+    no-op result so the nudge fallback is exercised hermetically (per
+    [[project_assist_crosschat_continuity]]: pipeline tests MUST stub the
+    live-fetching continuity methods)."""
     with patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT"), \
-         patch.object(pipe, "_assist_try_natural_start", return_value=None):
+         patch.object(pipe, "_assist_try_natural_start", return_value=None), \
+         patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+         patch.object(pipe, "_nl_command_route", return_value=None):
         return "".join(pipe.pipe(user_message, "model-id", messages, {}))
 
 

@@ -190,7 +190,13 @@ class TestNoiseInputGuard:
         """First-turn input is exempt — the welcome preamble handles
         orientation, no second-guess on top."""
         messages = [{"role": "user", "content": "a"}]
-        with patch.object(pipe, "_call_triage", return_value="triage response") as mock_triage:
+        # §17.734 — stub the fail-soft live-fetching pipe steps (§17.633
+        # reconnect + §17.628 command route) so this smoke test never touches
+        # the network; in CI they intermittently HANG on DNS (30s timeout).
+        with patch.object(pipe, "_call_triage", return_value="triage response") as mock_triage, \
+             patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+             patch.object(pipe, "_nl_command_route", return_value=None), \
+             patch.object(pipe, "_assist_try_natural_start", return_value=None):
             list(pipe.pipe("a", "test-model", messages, {}))
         mock_triage.assert_called_once()
 
