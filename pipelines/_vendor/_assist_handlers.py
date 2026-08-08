@@ -2049,6 +2049,17 @@ def assist_nl_turn(
                 pipe, session_id, msg.strip(), kind=_pivot_kind(msg), node_key=node_key,
             )
             return
+        # §17.733 — a genuine how-to question ("am i supposed to use the
+        # console?") is NOT a plan pivot: route it to research BEFORE the fuzzy
+        # §17.693 impact check, which (LLM-based) over-eagerly reads a how-to as
+        # a plan change and surfaces a spurious re-plan. Deterministic pivots
+        # already returned just above, so a real pivot still wins.
+        if intent == "question" and _looks_like_howto_question(msg):
+            nk = _recall_node_key(pipe, chat_id, node_key)
+            yield from assist_research_cmd(
+                pipe, session_id, msg.strip(), node_key=nk, chat_id=chat_id,
+                history=history,
+            ); return
         if _word_count(msg) >= getattr(pipe.valves, "assist_pivot_min_words", 6):
             affected = reroute_check(pipe, session_id, msg)
             if affected:
@@ -2125,21 +2136,10 @@ def assist_nl_turn(
         yield from assist_env_cmd(
             pipe, session_id, verbosity=_verbosity_from_message(msg), chat_id=chat_id,
         ); return
-    # §17.733 — a how-to / should-I / which-one question the classifier filed as
-    # `question` is really an `ask`: re-rendering the step walkthrough (below)
-    # doesn't answer "am i supposed to use the console?" and never researches.
-    # Route it to the research path (project memory + current sourced facts).
-    # Deterministic gate — pivots + shell-evidence already returned above, so
-    # this only ever upgrades a genuine question to a researched answer.
-    if intent == "question" and _looks_like_howto_question(msg):
-        nk = _recall_node_key(pipe, chat_id, node_key)
-        yield from assist_research_cmd(
-            pipe, session_id, msg.strip(), node_key=nk, chat_id=chat_id,
-            history=history,
-        ); return
     # question (default) — the existing guide/refine turn. Pivots (regex or the
-    # §17.693 semantic impact check) already returned above, so anything here is
-    # a genuine question/refinement about the current step.
+    # §17.693 semantic impact check) already returned above, and §17.733 how-to
+    # questions were rerouted to research in the skip/question block above, so
+    # anything here is a genuine clarification/refinement about the current step.
     yield from assist_chat_turn(
         pipe, session_id, msg, node_key=node_key, chat_id=chat_id, history=history,
     )
