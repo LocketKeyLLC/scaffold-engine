@@ -1939,6 +1939,29 @@ def _looks_like_howto_question(msg: str) -> bool:
     return bool(_HOWTO_QUESTION_RE.search(_normalize_punct(msg)))
 
 
+# §17.736 — explicit "make this a proper step" requests. When the operator hits
+# a foundational task the plan never had a step for (get the VM connected to the
+# internet) and the §17.734 fix offered "add a step for this", or they just ask
+# for one, insert + guide it. Tight, "step"-anchored so it doesn't steal a
+# how-to (§17.733) or a pivot (§17.679).
+_ADD_STEP_RE = re.compile(
+    r"\b(?:"
+    r"add\s+(?:a\s+|another\s+)?step|make\s+(?:it|this|that)\s+(?:its\s+own|a\s+separate)\s+step|"
+    r"(?:its|it)\s+own\s+step|(?:a\s+)?separate\s+step|create\s+(?:a\s+)?step|"
+    r"needs?\s+(?:its\s+own\s+|a\s+)?step|we\s+need\s+a\s+step|(?:a\s+)?step\s+for\s+(?:this|that|it)"
+    r")\b",
+    re.I,
+)
+
+
+def _looks_like_add_step_request(msg: str) -> bool:
+    """§17.736 — True when the operator explicitly asks to turn something into a
+    proper plan step (so we insert + guide it, not band-aid it as a one-off)."""
+    if not msg:
+        return False
+    return bool(_ADD_STEP_RE.search(_normalize_punct(msg)))
+
+
 def _word_count(msg: str) -> int:
     return len((msg or "").split())
 
@@ -2011,6 +2034,14 @@ def assist_nl_turn(
     # §17.707 — "what do you need from me?" → the live operator-input checklist.
     if intent is None and _looks_like_checklist_request(msg):
         yield from assist_checklist_cmd(pipe, session_id); return
+    # §17.736 — "add a step for this" / "make it its own step" → insert a proper
+    # guided step for a foundational task the plan didn't cover, then present its
+    # walkthrough (deterministic — explicit "step" language, so it doesn't steal
+    # a how-to or a pivot). Not gated on a pasted shell prompt above.
+    if intent is None and _looks_like_add_step_request(msg):
+        yield from assist_add_step_cmd(
+            pipe, session_id, msg.strip(), node_key=node_key, chat_id=chat_id,
+        ); return
     if intent is None:
         d = assist_interpret(pipe, session_id, msg, node_key=node_key, history=history)
         intent = d.get("intent") or "question"
@@ -2602,6 +2633,38 @@ def assist_note_cmd(
         yield "_I'll carry this forward into the remaining steps. Say _\"next\"_ to continue._"
         return
     yield _render_replan_surface(affected)
+
+
+def assist_add_step_cmd(
+    pipe, session_id: str, request: str, *,
+    node_key: str | None = None, chat_id: str | None = None,
+) -> Generator[str, None, None]:
+    """§17.736 — insert a new guided step (a foundational task the plan didn't
+    cover) and immediately present its walkthrough. Turns a reactive
+    band-aid-the-error loop into a proper gather→paste→verify step."""
+    if not (request or "").strip():
+        yield "What should the new step accomplish? e.g. \"add a step to set up the VM's networking\"."
+        return
+    try:
+        r = _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/add_step",
+            json={"request": request, "before_node_key": node_key},
+            headers=pipe._auth_headers(),
+            timeout=pipe.valves.request_timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        yield f"❌ Connection error: {e}"; return
+    if r.status_code >= 400:
+        yield f"❌ HTTP {r.status_code}: {r.text[:200]}"; return
+    try:
+        d = r.json()
+    except ValueError:
+        d = {}
+    title = (d.get("title") or "the new step").strip()
+    yield (f"➕ Added a step: **{title}** — we'll do this first, then continue "
+           f"where you were.\n\n")
+    # Present its walkthrough right away (the new node is now the current step).
+    yield from assist_next(pipe, session_id, chat_id=chat_id)
 
 
 def _render_replan_surface(affected: list, *, lead: str | None = None) -> str:

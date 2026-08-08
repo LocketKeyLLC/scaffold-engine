@@ -2937,6 +2937,144 @@ async def record_note(
     return {"kind": k, "node_key": node_key, "text": note_text}
 
 
+async def add_step(
+    *, session_id: str, request: str, before_node_key: str | None = None, db,
+) -> dict:
+    """§17.736 — insert a new guided step the plan doesn't cover, to run BEFORE
+    the current blocked step, and point the session at it.
+
+    The reported gap: the operator hit a foundational task the plan never had a
+    step for (get the VM connected to the internet), so it was handled as
+    scattered one-off `fix`es with no throughline. Re-plan could drop/revise but
+    not ADD. This drafts a concrete step (model_general, project-grounded),
+    inserts a `dag_nodes` + `assist_steps` row, makes the blocked step DEPEND on
+    it (so it's sequenced first via the normal dep gate), resets the blocked
+    step from presented→pending, and sets ``current_node_key`` to the new node.
+    The new step is then guided by the ordinary walkthrough machinery — the
+    gather→paste→verify (§17.731) loop the operator asked for. Fail-soft only on
+    the draft; the insert itself raises ValueError on a bad session so the
+    router maps it to a 4xx.
+    """
+    from app.modules import assist_guide
+
+    sess = (await db.execute(
+        text("""
+            SELECT job_id, status, current_node_key, metadata, notes
+              FROM assist_sessions WHERE id = :sid
+        """),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    if sess["status"] not in ("active", "paused"):
+        raise ValueError(f"session status {sess['status']!r} cannot add a step")
+    job_id = str(sess["job_id"])
+    before = before_node_key or sess["current_node_key"]
+
+    # Anchor node: the step this new one runs before (its deps + order + tool are
+    # inherited so the new node is claimable now and the anchor waits on it).
+    anchor = None
+    if before:
+        anchor = (await db.execute(
+            text("""
+                SELECT node_key, depends_on, execution_order, tool, domain
+                  FROM dag_nodes WHERE job_id = :jid AND node_key = :nk
+            """),
+            {"jid": job_id, "nk": before},
+        )).mappings().first()
+
+    # Draft the step, grounded in the project's brief + memory.
+    brief_row = (await db.execute(
+        text("SELECT refined_brief FROM jobs WHERE id = :id"), {"id": job_id},
+    )).mappings().first()
+    brief = (brief_row or {}).get("refined_brief") or {}
+    environment = _environment_from_metadata(sess.get("metadata"))
+    ctx_parts: list[str] = []
+    goal = (brief or {}).get("description") or (brief or {}).get("title") or ""
+    if isinstance(goal, str) and goal.strip():
+        ctx_parts.append(f"## Project goal\n{goal.strip()}")
+    ctx_parts.extend(assist_guide._render_memory_or_legacy(environment, None))
+    drafted = await assist_guide.draft_step(
+        request=request, job_context="\n\n".join(ctx_parts) or None,
+    )
+
+    # Unique node_key: ADD1, ADD2, … (distinct from the T-series; sorts before
+    # T* so a same-order tie still serves it first, though the dep gate is what
+    # actually sequences it).
+    existing = {
+        r["node_key"] for r in (await db.execute(
+            text("SELECT node_key FROM dag_nodes WHERE job_id = :jid"), {"jid": job_id},
+        )).mappings().all()
+    }
+    n = 1
+    while f"ADD{n}" in existing:
+        n += 1
+    new_key = f"ADD{n}"
+
+    new_deps = list((anchor or {}).get("depends_on") or [])
+    order = (anchor or {}).get("execution_order")
+    tool = (anchor or {}).get("tool") or "shell"
+    domain = (anchor or {}).get("domain")
+
+    await db.execute(
+        text("""
+            INSERT INTO dag_nodes
+                (job_id, node_key, title, description, node_type, status,
+                 depends_on, prompt_template, tool, domain, execution_order)
+            VALUES (:jid, :nk, :title, :desc, 'task', 'pending',
+                    :deps, :prompt, :tool, :domain, :order)
+        """),
+        {"jid": job_id, "nk": new_key, "title": drafted["title"],
+         "desc": drafted["description"], "deps": new_deps,
+         "prompt": drafted["description"], "tool": tool, "domain": domain,
+         "order": order},
+    )
+    await db.execute(
+        text("""
+            INSERT INTO assist_steps (session_id, job_id, node_key, status)
+            VALUES (:sid, :jid, :nk, 'pending')
+        """),
+        {"sid": session_id, "jid": job_id, "nk": new_key},
+    )
+    # Sequence: the anchor now depends on the new node, and is reset to pending
+    # so get_next_step serves the new node first (not the re-presented anchor).
+    if anchor:
+        await db.execute(
+            text("""
+                UPDATE dag_nodes
+                   SET depends_on = array_append(coalesce(depends_on,'{}'), :nk),
+                       updated_at = NOW()
+                 WHERE job_id = :jid AND node_key = :anchor
+            """),
+            {"jid": job_id, "nk": new_key, "anchor": before},
+        )
+        await db.execute(
+            text("""
+                UPDATE assist_steps SET status = 'pending', updated_at = NOW()
+                 WHERE session_id = :sid AND node_key = :anchor
+                   AND status = 'presented'
+            """),
+            {"sid": session_id, "anchor": before},
+        )
+    await db.execute(
+        text("""
+            UPDATE assist_sessions SET current_node_key = :nk, updated_at = NOW()
+             WHERE id = :sid
+        """),
+        {"sid": session_id, "nk": new_key},
+    )
+    await db.commit()
+    logger.info(
+        "assist_added_step session_id=%s job_id=%s new=%s before=%s title=%r",
+        session_id, job_id, new_key, before, drafted["title"],
+    )
+    return {
+        "session_id": session_id, "node_key": new_key,
+        "title": drafted["title"], "description": drafted["description"],
+        "before_node_key": before,
+    }
+
+
 async def assess_note_impact(
     *, session_id: str, note_kind: str, note_text: str, db,
 ) -> dict | None:

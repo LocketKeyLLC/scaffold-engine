@@ -920,3 +920,49 @@ async def test_generate_step_guidance_history_falls_back_to_transcript():
             session_id="s", research=False, history=None, db=db)
     hft.assert_awaited_once()
     assert conv.call_args.args[0] == rebuilt
+
+
+# ── §17.736 — add a guided step mid-assist ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_add_step_inserts_node_and_points_session():
+    # session, anchor (T14) lookup, brief lookup, existing-keys, INSERT node,
+    # INSERT step, UPDATE anchor deps, UPDATE anchor step, UPDATE session.
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"job_id": "j1", "status": "active", "current_node_key": "T14",
+                 "metadata": {}, "notes": []}),               # session
+        _result({"node_key": "T14", "depends_on": ["T13"],
+                 "execution_order": 14, "tool": "shell", "domain": None}),  # anchor
+        _result({"refined_brief": {"description": "Build a homelab"}}),      # brief
+        _result_all([{"node_key": "T13"}, {"node_key": "T14"}]),            # existing keys
+        _result(None),  # INSERT dag_nodes
+        _result(None),  # INSERT assist_steps
+        _result(None),  # UPDATE anchor depends_on
+        _result(None),  # UPDATE anchor step presented->pending
+        _result(None),  # UPDATE session current_node_key
+    ])
+    db.commit = AsyncMock()
+    with patch("app.modules.assist_guide.draft_step",
+               new=AsyncMock(return_value={
+                   "title": "Configure the VM's network for internet access",
+                   "description": "Give VM 100 internet; done when it can ping an external host."})):
+        out = await assist_agent.add_step(
+            session_id="s1", request="set up the VM networking properly", db=db)
+    assert out["node_key"] == "ADD1"                       # first ADD key
+    assert out["before_node_key"] == "T14"
+    assert "network" in out["title"].lower()
+    # the anchor was made to depend on the new node, and reset to pending
+    sqls = [str(c.args[0]) for c in db.execute.await_args_list]
+    assert any("array_append" in s for s in sqls)          # T14 now depends on ADD1
+    assert any("current_node_key = :nk" in s for s in sqls)  # session repointed
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_step_rejects_bad_session():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(None))
+    with pytest.raises(ValueError, match="not found"):
+        await assist_agent.add_step(session_id="nope", request="x", db=db)

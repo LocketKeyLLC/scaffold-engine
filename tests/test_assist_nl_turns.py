@@ -79,6 +79,7 @@ def _route(pipe, msg, *, intent_dict=None, recall_nk="T1"):
         "assist_handoff": "HANDOFF",
         "assist_research_cmd": "ASK",
         "assist_env_cmd": "ENV",
+        "assist_add_step_cmd": "ADDSTEP",
     }
     patchers = {name: MagicMock(side_effect=lambda *a, _s=s, **k: iter([_s]))
                 for name, s in stubs.items()}
@@ -426,6 +427,44 @@ def test_plain_question_still_re_renders(pipe, msg):
     # Non-how-to questions stay on the guide/refine path (no research upgrade).
     out, stubs, _ = _route(pipe, msg, intent_dict={"intent": "question"})
     assert "QUESTION" in out and "ASK" not in out
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("msg", [
+    "add a step for this",
+    "can you add a step to set up the VM networking",
+    "make it its own step",
+    "we need a step for the networking",
+    "create a step to configure the network properly",
+])
+def test_add_step_request_routes_to_add_step(pipe, msg):
+    # §17.736 — explicit "make this a step" requests insert + guide a new step
+    # (they never reach the classifier).
+    out, stubs, interp = _route(pipe, msg)
+    assert "ADDSTEP" in out
+    interp.assert_not_called()   # deterministic pre-classifier intercept
+    assert stubs["assist_add_step_cmd"].call_args[0][2] == msg
+
+
+@pytest.mark.parametrize("msg", [
+    "how do i set up the network",   # how-to → research, not add-step
+    "the network isn't working",     # a problem report, not a step request
+    "next step",                     # advancing
+])
+def test_non_add_step_messages_do_not_route_to_add_step(pipe, msg):
+    assert not _ah._looks_like_add_step_request(msg)
+
+
+def test_looks_like_add_step_gate():
+    yes = ["add a step", "add another step for this", "make this its own step",
+           "create a step for the networking", "we need a step for it",
+           "a step for that", "needs its own step"]
+    no = ["how do i do this", "the install failed", "use vault", "next",
+          "what does this step mean", "should i reboot"]
+    for m in yes:
+        assert _ah._looks_like_add_step_request(m), m
+    for m in no:
+        assert not _ah._looks_like_add_step_request(m), m
 
 
 def test_looks_like_howto_question_gate():

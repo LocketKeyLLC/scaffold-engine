@@ -119,6 +119,16 @@ class AssistFixInput(BaseModel):
     )
 
 
+class AssistAddStepInput(BaseModel):
+    request: str = Field(
+        description="What the new step should accomplish (the operator's request)."
+    )
+    before_node_key: Optional[str] = Field(
+        default=None,
+        description="Insert before this step (defaults to the current step).",
+    )
+
+
 class AssistInterpretInput(BaseModel):
     message: str = Field(description="The operator's plain-language message.")
     node_key: Optional[str] = Field(
@@ -820,6 +830,25 @@ async def assist_note(session_id: str, body: AssistNoteInput, db=Depends(get_db)
     if proposal:
         out["replan_proposal"] = proposal
     return out
+
+
+@router.post("/assist/{session_id}/add_step")
+async def assist_add_step(session_id: str, body: AssistAddStepInput, db=Depends(get_db)):
+    """§17.736 — insert a new guided step (a foundational task the plan didn't
+    cover) to run before the current step, then point the session at it. The
+    caller follows with GET /assist/{sid}/next to present its walkthrough."""
+    if not (body.request or "").strip():
+        raise HTTPException(status_code=422, detail="request text is empty")
+    try:
+        return await assist_agent.add_step(
+            session_id=session_id, request=body.request,
+            before_node_key=body.before_node_key, db=db,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        raise HTTPException(
+            status_code=404 if "not found" in msg else 409, detail=msg
+        )
 
 
 @router.post("/assist/{session_id}/reroute")

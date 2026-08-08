@@ -121,6 +121,32 @@
         "title": "ArtifactRead",
         "type": "object"
       },
+      "AssistAddStepInput": {
+        "properties": {
+          "before_node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Insert before this step (defaults to the current step).",
+            "title": "Before Node Key"
+          },
+          "request": {
+            "description": "What the new step should accomplish (the operator's request).",
+            "title": "Request",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request"
+        ],
+        "title": "AssistAddStepInput",
+        "type": "object"
+      },
       "AssistChatMapInput": {
         "properties": {
           "last_node_key": {
@@ -4029,6 +4055,62 @@
           }
         ],
         "summary": "Assist Get Session",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/add_step": {
+      "post": {
+        "description": "§17.736 — insert a new guided step (a foundational task the plan didn't\ncover) to run before the current step, then point the session at it. The\ncaller follows with GET /assist/{sid}/next to present its walkthrough.",
+        "operationId": "assist_add_step_assist__session_id__add_step_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistAddStepInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Add Step",
         "tags": [
           "Assist"
         ]

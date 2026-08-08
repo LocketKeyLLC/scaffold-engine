@@ -305,7 +305,7 @@ Use these section headings, in order, and omit any that don't apply:
 
 Root-cause rule (§17.734) — do NOT rush the operator forward past a broken foundation:
 - If the real cause is that something the plan ASSUMED was already set up is NOT actually working — a prerequisite/earlier-established capability (networking/internet, a mount, a service, DNS, credentials), or the operator explicitly says "X isn't set up / that never got configured / that's not working" about a believed-done thing — then THAT is the problem to solve, not the nominal step. Say so plainly in ## Diagnosis ("the driver install needs internet, but the VM's networking was never actually set up for it — that's the real blocker"). Do NOT frame the root fix as a quick hurdle to clear on the way to the original step, and do NOT tell them to proceed with the step until the foundation is confirmed working.
-- Give the COMPLETE fix for the root cause, not a partial band-aid. If getting it right is a substantial setup task the plan does not cover as its own step, add a `## Needs its own step` section: state that this really should be a proper step in the plan (e.g. "Configure the VM's network for internet access") and that they can say "add a step for this" to make it one — rather than you improvising a fragile inline workaround.
+- Give the COMPLETE fix for the root cause, not a partial band-aid. If getting it right is a substantial setup task the plan does not cover as its own step, add a `## Needs its own step` section: state that this really should be a proper step in the plan (e.g. "Configure the VM's network for internet access") and tell them to reply **"add a step for this"** — the engine will then insert that step and walk them through it copy-paste, gather-and-fix, before returning here (§17.736) — rather than you improvising a fragile inline workaround.
 - When you fix a foundation, correct the record: if the environment/memory still describes it as set up/working, note the corrected reality in ## Diagnosis (e.g. "the bridge exists but is isolated — no internet uplink") so later steps stop assuming it works.
 
 Hard rules:
@@ -1766,6 +1766,90 @@ async def distill_facts(
         "facts": out,
         "superseded": _match_superseded((args or {}).get("superseded_facts"), known_facts),
     }
+
+
+# ── Draft an inserted step (§17.736 — turn a foundational gap into a step) ──
+
+_DRAFT_STEP_TOOL = model_router.Tool(
+    name="draft_step",
+    description=(
+        "Draft ONE new plan step from the operator's request to add work the "
+        "plan doesn't cover (e.g. a setup task a later step depends on)."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": (
+                    "A short imperative step title, e.g. 'Configure the VM's "
+                    "network for internet access'. No numbering."
+                ),
+            },
+            "description": {
+                "type": "string",
+                "description": (
+                    "1-3 sentences stating the step's concrete GOAL and how it's "
+                    "confirmed done (the deliverable), grounded in the project "
+                    "context. No command list — the walkthrough is generated "
+                    "separately."
+                ),
+            },
+        },
+        "required": ["title", "description"],
+    },
+)
+
+_DRAFT_STEP_SYSTEM = (
+    "You turn an operator's request into ONE concrete plan step for a "
+    "human-in-the-loop build. Use the project context (its hosts, addresses, "
+    "decisions) so the step is specific to THIS system, not generic. The step "
+    "should be the smallest coherent unit that resolves the operator's need "
+    "(e.g. 'Configure the VM's network for internet access', with a clear "
+    "done-condition like 'the VM can ping an external host'). Call draft_step "
+    "exactly once."
+)
+
+
+async def draft_step(
+    *, request: str, job_context: str | None = None, role: str = "model_general",
+) -> dict:
+    """§17.736 — draft ``{title, description}`` for a step the operator asked to
+    add (a foundational task the plan doesn't cover). Fail-soft: on any error
+    returns a title/description derived from the raw request so the insert still
+    succeeds."""
+    req = (request or "").strip()
+    fallback = {
+        "title": (req[:80] or "Additional setup step"),
+        "description": req[:400] or "Operator-requested step added mid-assist.",
+    }
+    if not req:
+        return fallback
+    try:
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": _DRAFT_STEP_SYSTEM},
+                {"role": "user", "content": (
+                    (f"{job_context.strip()}\n\n" if (job_context or "").strip() else "")
+                    + f"Operator's request for a new step:\n{req[:1000]}\n\n"
+                    "Call draft_step."
+                )},
+            ],
+            tools=[_DRAFT_STEP_TOOL],
+            role=role,
+            temperature=0.1,
+            tool_choice="auto",
+            max_tokens=1024,
+        )
+    except Exception as exc:  # noqa: BLE001 — never block the insert on the draft
+        logger.warning("assist_draft_step_failed: %s", exc)
+        return fallback
+    args = read_tool_args(resp) or {}
+    title = str(args.get("title") or "").strip()[:120]
+    desc = str(args.get("description") or "").strip()[:600]
+    if not title:
+        return fallback
+    return {"title": title, "description": desc or fallback["description"]}
 
 
 # ── Ledger consolidation (§17.727 — merge redundant same-truth facts) ───────

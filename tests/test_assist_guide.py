@@ -1617,3 +1617,38 @@ async def test_searxng_structured_uses_backbone_and_filters_junk():
     urls = [r["url"] for r in out]
     assert "https://ubuntu.com/download" in urls
     assert "https://bank.example" not in urls          # junk filtered
+
+
+# ── §17.736 — draft an inserted step ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_draft_step_parses_title_and_description():
+    r = MagicMock()
+    r.success = True
+    r.text = ""
+    call = MagicMock()
+    call.arguments = {"title": "Configure the VM's network for internet access",
+                      "description": "Give VM 100 internet; done when it can ping 8.8.8.8."}
+    r.tool_calls = [call]
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock(return_value=r)):
+        out = await assist_guide.draft_step(
+            request="set up the VM networking properly",
+            job_context="## Project goal\nBuild a homelab on Proxmox")
+    assert "network" in out["title"].lower()
+    assert "ping" in out["description"].lower()
+
+
+@pytest.mark.asyncio
+async def test_draft_step_failsoft_uses_request():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(side_effect=RuntimeError("model down"))):
+        out = await assist_guide.draft_step(request="set up the VM networking")
+    assert out["title"] == "set up the VM networking"     # falls back to the request
+    assert out["description"]
+
+
+@pytest.mark.asyncio
+async def test_draft_step_empty_request():
+    out = await assist_guide.draft_step(request="   ")
+    assert out["title"] and out["description"]            # never empty
