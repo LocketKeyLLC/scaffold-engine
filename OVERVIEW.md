@@ -22049,6 +22049,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.730 Verify — live OWUI-path e2e of the §17.729 research fix: current + sourced, no stale version (2026-08-08)
+
+**What.** Drove a fresh conversation through the REAL pipe OWUI uses (`scaffold_router` :9099, accumulated messages, no chat_id) on a scratch Nextcloud/Proxmox job, asking the exact failure-class question — "research the current latest Nextcloud version and which Ubuntu LTS to use right now" — then cascade-deleted the scratch job. No code changes; this records the verification evidence for §17.729 on the path the "Ubuntu 22.04.3 from memory" report came from.
+
+**Results (DB-checked).** The `ask` answer recommended **Ubuntu 24.04 LTS** (0 mentions of 22.04), REFUSED to hardcode a Nextcloud version — handed over a command to fetch the latest stable dynamically ("don't hardcode a version number") — and cited **3 real on-topic sources** (Milvus + two Nextcloud/Ubuntu pages incl. a 2026 guide), with the relevance filter keeping bing's junk out (0 banking/Chrome/Office noise). Captured as a `role='assistant', kind='ask'` turn (§17.726 still holding). Scratch job cascade-deleted (0 orphan turns); the real P40 session untouched (its own +1 fact at 02:28 was the operator's genuine turn where they'd booted the 22.04.3 ISO the OLD stale answer sent them to — real observed state, correctly recorded, not test leakage). Caveat re-confirmed: the answer's quality depends on ≥1 search engine being reachable (rotates; bing/brave were up); when all are CAPTCHA'd the currency guard still says "fetch the current version" rather than inventing one.
+
+---
+
 ### §17.729 Fix — assist research gave stale, unsourced answers ("Ubuntu 22.04.3" from memory): keyword-focus the query, filter engine junk, propagate the §17.712 backbone, and stop asserting unconfirmed versions (2026-08-08)
 
 **Report + evidence.** Continuing the DeFruscio HomeLab P40 component (job `34bf2eb0`, session `c308ae02`), the operator asked "can you walk me through fixing the VM 100 step by step" and got an `ask` answer recommending **Ubuntu Server 22.04.3** with NO sources — a stale version from the model's memory (today is 2026-08-08; 24.04 LTS is current). The complaint: assist should RESEARCH what it's unaware of for up-to-date, accurate info.
