@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.728 Verify — live OWUI-path e2e of the §17.722–727 memory stack: every rung held (2026-08-07)
+
+**What.** Scripted a full conversation through the REAL pipe path OWUI uses (`scaffold_router` via the pipelines server :9099, accumulated messages, no chat_id — the production shape) against a scratch 4-node Pi-hole job, DB-checked after every turn, then cascade-deleted the scratch job. No code changes — this entry records the verification evidence for the week's retention fixes on the exact path the original "stopped retaining information" report came from.
+
+**Sequence + results.** (1) `/assist <job>` → walkthrough generated → **§17.726**: the reply landed in `assist_turns` as `role='assistant', kind='guide'`. (2) Pasted audit evidence (`root@scratchpve`, pool `tank` zfspool 1.92 TB, `vmbr0` 192.168.50.10/24, gw .1) → facts distilled, `PROXMOX_HOST_IP` substitution learned, single-shell exec context captured — and the NEXT walkthrough used `--storage tank` / `bridge=vmbr0` / `gw=192.168.50.1` CONCRETE, with placeholders only for genuinely ungiven values (**§17.722** injection holding mid-session). (3) Mid-session correction "renamed the pool — it's `vault` now, not `tank`" → **§17.725** live through the full pipe: the tank fact RETRACTED from the ledger, replaced by a rename fact carrying all details (`local` untouched); the next command request returned `--rootfs vault:8` with the operator-supplied ID/IP/password filled copy-paste-ready. (4) **NEW chat, zero history, no marker**: "where were we on the pi-hole setup?" → reconnected to the right session/step; "remind me the exact command you gave" → reproduced it EXACTLY (vault, CT 200, 192.168.50.53, the password) — **§17.726** transcript fallback ends the cross-chat amnesia. Final transcript: both sides captured (3×guide + 1×ask assistant turns; 6 operator turns). Teardown verified (cascade → 0 orphan turns/sessions); the real P40 session untouched (active, 23 facts).
+
+**Soft observation (not filed as a bug).** "remind me what command you gave" routed as a guidance re-render rather than a direct recall answer — content was correct and consistent (grounded on the transcript), only the framing regenerated the walkthrough. A dedicated "recall" intent is a candidate § if it annoys in real use.
+
+---
+
 ### §17.727 Feature — ledger consolidation: redundant same-truth facts merge into one entry, lossless by construction (2026-08-07)
 
 **Report (the last §17.725/726 remaining).** §17.725 retracts direct contradictions, but redundant restatements still piled up — the live P40 ledger stated the oasis pool three ways and VM 100's config six ways, bloating every prompt and burning the §17.722 memory budget on repetition.
