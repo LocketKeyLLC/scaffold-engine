@@ -443,6 +443,23 @@ class TestSubmitVerdictRender:
         assert "exit 1" in out
         assert "/assist fix" in out
 
+    def test_submit_incomplete_path_not_advanced(self, pipe):
+        # §17.731 — an 'incomplete' block renders the not-finished framing
+        # (nothing broke, more to do), names what's left, and offers skip.
+        body = {"status": "step_incomplete", "no_op": False, "committed": False,
+                "next_node_key": None,
+                "success_verdict": {
+                    "outcome": "incomplete",
+                    "reason": "Only the ISO was downloaded; the OS is not installed.",
+                    "suggestion": "Run the installer and boot into the installed system."}}
+        with patch.object(_vendor, "_ss", return_value=self._post_session(body)):
+            out = "".join(_vendor.assist_submit(pipe, _SID, "T13", "wget iso...", chat_id=None))
+        assert "isn't finished yet" in out
+        assert "not marked done" in out
+        assert "not installed" in out                # reason surfaced
+        assert "/assist skip" in out                 # override offered
+        assert "committed. Moving on" not in out
+
     def test_submit_quiet_on_success_verdict(self, pipe):
         pipe.valves.assist_auto_advance = False  # §17.638 — verdict render only
         body = {"status": "committed", "no_op": False, "next_node_key": "T3",

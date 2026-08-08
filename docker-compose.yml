@@ -332,6 +332,13 @@ services:
       # the injected memory to just the header + profile. 12000 chars ≈ 3k
       # tokens — comfortably inside every guidance prompt.
       ASSIST_UMEM_MAX_CHARS: "${ASSIST_UMEM_MAX_CHARS:-12000}"
+      # §17.731 — enforce step verification live: a submit whose evidence shows
+      # a clear failure, or shows the step's deliverable isn't done yet
+      # (incomplete — e.g. the OS installer only downloaded / at the boot menu),
+      # does NOT mark the step done. The step stays claimable; /assist skip
+      # overrides a false block. Code defaults stay off (legacy + tests).
+      ASSIST_BLOCK_ON_FAILED_VERIFY: "${ASSIST_BLOCK_ON_FAILED_VERIFY:-true}"
+      ASSIST_BLOCK_ON_INCOMPLETE_VERIFY: "${ASSIST_BLOCK_ON_INCOMPLETE_VERIFY:-true}"
     env_file:
       - .env
     volumes:

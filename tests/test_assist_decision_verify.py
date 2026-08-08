@@ -72,7 +72,8 @@ async def test_verify_non_decision_keeps_default_system():
             tool="shell", evidence="ALTER TABLE ... OK", is_decision=False,
         )
     assert captured["system"] != assist_guide._VERIFY_DECISION_SYSTEM
-    assert "verify whether a human operator's step succeeded" in captured["system"]
+    # §17.731 — non-decision verify judges against the step's GOAL.
+    assert "achieved ITS GOAL" in captured["system"]
 
 
 @pytest.mark.asyncio

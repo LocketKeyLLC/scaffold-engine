@@ -29,6 +29,12 @@ def _quiet_submit_side_effects():
         patch.object(assist_router.settings, "assist_decision_deliberation_enabled", False),
         patch.object(assist_router.settings, "assist_capture_facts_enabled", False),
         patch.object(assist_router.settings, "assist_unified_memory_enabled", False),
+        # §17.731 — the container now runs with the block valves ON (compose);
+        # these legacy tests assert the commit-despite-verdict behavior, so pin
+        # the valves OFF to stay hermetic against the live env (same §17.710d
+        # lesson: pytest runs inside the valve-on container).
+        patch.object(assist_router.settings, "assist_block_on_failed_verify", False),
+        patch.object(assist_router.settings, "assist_block_on_incomplete_verify", False),
     )
 
 

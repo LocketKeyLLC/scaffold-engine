@@ -767,6 +767,25 @@ async def test_verify_step_success_invalid_outcome_coerced_to_unclear():
     assert v["outcome"] == "unclear"
 
 
+@pytest.mark.asyncio
+async def test_verify_step_success_incomplete_is_a_valid_outcome():
+    # §17.731 — the live failure: "Install guest OS" evidence is only the ISO
+    # download + boot menu → 'incomplete' (setup done, deliverable not).
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_verdict_resp(
+                          "incomplete",
+                          reason="Evidence downloads the installer and shows the boot menu; the OS is not installed.",
+                          suggestion="Run the installer, create a user, and boot into the installed system."))):
+        v = await assist_guide.verify_step_success(
+            title="Install guest OS", task_prompt="Install Ubuntu Server in VM 100",
+            tool="shell",
+            evidence="wget ubuntu-22.04.3-live-server.iso ... GNU GRUB ... Try or Install Ubuntu Server",
+        )
+    assert v["outcome"] == "incomplete"
+    assert "not installed" in v["reason"]
+    assert v["suggestion"]
+
+
 # ── §17.487: generate_fix ──────────────────────────────────────────────────
 
 

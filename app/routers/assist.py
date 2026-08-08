@@ -594,18 +594,29 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         verdict = await assist_agent.verify_submit_outcome(
             session_id=session_id, node_key=body.node_key, evidence=body.output, db=db,
         )
-        if (verdict and verdict.get("outcome") == "failed"
-                and settings.assist_block_on_failed_verify):
+        _v_outcome = verdict.get("outcome") if verdict else None
+        # §17.731 — block a commit that would mark the step done when the
+        # evidence shows either a clear failure OR the step's deliverable isn't
+        # actually done yet ('incomplete' — e.g. the OS installer was only
+        # downloaded / is at its boot menu). Each is independently valve-gated;
+        # the step stays 'presented' so the operator finishes it (or /assist
+        # skip to override a false block).
+        _blocked = (
+            (_v_outcome == "failed" and settings.assist_block_on_failed_verify)
+            or (_v_outcome == "incomplete" and settings.assist_block_on_incomplete_verify)
+        )
+        if _blocked:
             # Hard-block: do NOT commit — the step stays 'presented' (claimable)
             # for a clean re-submit. Log the blocker to the friction trail.
             await assist_agent.record_friction(
                 session_id=session_id, node_key=body.node_key,
-                note=f"verify-blocked: {verdict.get('reason', '')}", db=db,
+                note=f"verify-blocked ({_v_outcome}): {verdict.get('reason', '')}", db=db,
             )
             return {
                 "session_id": session_id,
                 "node_key": body.node_key,
-                "status": "verification_failed",
+                "status": ("step_incomplete" if _v_outcome == "incomplete"
+                           else "verification_failed"),
                 "committed": False,
                 "no_op": False,
                 "next_node_key": None,
@@ -625,8 +636,11 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
             action=body.action,
             friction_note=body.friction_note,
             # §17.708 — a failed-verdict submit skips divergence re-plan (a failed
-            # command is a recover situation, not a plan divergence).
-            verdict_failed=(bool(verdict) and verdict.get("outcome") == "failed"),
+            # command is a recover situation, not a plan divergence). §17.731 —
+            # an 'incomplete' commit (blocking valve off) is likewise not a
+            # divergence.
+            verdict_failed=(bool(verdict)
+                            and verdict.get("outcome") in ("failed", "incomplete")),
             db=db,
         )
         if verdict is not None and isinstance(result, dict):
@@ -645,8 +659,9 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         # noise), so learning from it produces garbage substitutions (e.g.
         # STORAGE=4TB scraped from "the 4TB drive is partitioned") that then
         # propagate into later steps' placeholders. `unclear`/`succeeded`/None
-        # still learn — only a definite `failed` verdict suppresses it.
-        _verdict_failed = bool(verdict) and verdict.get("outcome") == "failed"
+        # still learn — a definite `failed` OR `incomplete` (§17.731) verdict
+        # suppresses it (incomplete evidence = setup only, wrong to learn from).
+        _verdict_failed = bool(verdict) and verdict.get("outcome") in ("failed", "incomplete")
         if (settings.assist_learn_substitutions and body.action == "submit"
                 and not _verdict_failed
                 and isinstance(result, dict) and result.get("status") == "committed"):

@@ -718,6 +718,18 @@ class Settings(BaseSettings):
     # user can act on it regardless.
     assist_verify_on_submit: bool = True
     assist_block_on_failed_verify: bool = False
+    # §17.731 — block a commit when the evidence shows the step's DELIVERABLE
+    # isn't done yet (verdict 'incomplete'), distinct from a command 'failed'.
+    # The live failure: "Install guest OS" was marked done from an ISO-download
+    # paste (operator was still at the installer boot menu) — not a failure
+    # signal, so the conservative verifier said 'unclear' and it committed,
+    # marching the plan two steps past reality. 'incomplete' catches "you did
+    # the setup but not the actual task". Conservative by design (the verifier
+    # only returns it on affirmative not-done evidence; ambiguity stays
+    # 'unclear' → commits). Code default off (preserves legacy + tests); live
+    # via compose. The step stays claimable so the operator finishes it — or
+    # `/assist skip` to override a false block.
+    assist_block_on_incomplete_verify: bool = False
     # §17.490 — after a submit, extract the concrete values the operator
     # actually used (the IP/path/name they filled into a <PLACEHOLDER> the
     # walkthrough emitted) from their evidence and fold them into the session

@@ -992,6 +992,23 @@ def assist_submit(
         )
         yield msg + hint
         return
+    # §17.731 — hard-block path: the evidence shows the step's deliverable
+    # isn't done yet (setup/earlier phase only), so the node was NOT marked
+    # done. Distinct framing from a failure — nothing broke, there's just more
+    # to do — and it names what's left + the skip override.
+    if d.get("status") == "step_incomplete":
+        v = d.get("success_verdict") or {}
+        msg = (
+            f"⏳ Step `{node_key}` isn't finished yet — not marked done.\n\n"
+            f"_{v.get('reason', 'The evidence shows setup, not the completed step.')}_\n\n"
+        )
+        if v.get("suggestion"):
+            msg += f"Next: {v['suggestion']}\n\n"
+        msg += (
+            "Finish the step and paste the result, or `/assist fix <the error>` "
+            "if you're stuck. If it really is done, `/assist skip` to move on."
+        )
+        yield msg; return
     # §17.487 — hard-block path: the success-check judged this a failure and
     # `assist_block_on_failed_verify` is on, so the node was NOT marked done.
     if d.get("status") == "verification_failed":
@@ -1029,7 +1046,7 @@ def assist_submit(
         getattr(pipe.valves, "assist_auto_advance", True)
         and d.get("status") == "committed"
         and bool(next_nk)
-        and outcome != "failed"
+        and outcome not in ("failed", "incomplete")  # §17.731
     )
     # §17.689/§17.690 — a resolved collect step commits the artifact the engine
     # assembled across turns (not the operator's "looks good"/last portion).

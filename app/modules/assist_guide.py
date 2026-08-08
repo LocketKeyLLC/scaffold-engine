@@ -1001,18 +1001,32 @@ def render_conversation_block(
 _JUDGE_OUTCOME_TOOL = model_router.Tool(
     name="judge_step_outcome",
     description=(
-        "Judge whether the operator's pasted evidence shows the step SUCCEEDED. "
-        "Look for failure signals: error messages, tracebacks, non-zero exit "
-        "codes, 'command not found', 'permission denied', 'No such file', empty "
-        "output where output was expected. Be conservative — only 'failed' on a "
-        "clear failure signal; 'unclear' when ambiguous or there's not enough to tell."
+        "Judge, from the operator's pasted evidence, whether THIS step's actual "
+        "goal (the Task title) was achieved. Four outcomes:\n"
+        "- 'succeeded': the evidence shows the step's DELIVERABLE is done (e.g. "
+        "for 'Install the OS', a login prompt / `lsb_release` from inside the "
+        "installed system; for 'Configure X', the applied config confirmed).\n"
+        "- 'failed': a clear failure signal — error, traceback, non-zero exit, "
+        "'command not found', 'permission denied', 'No such file'.\n"
+        "- 'incomplete': the evidence shows the operator did SETUP or an EARLIER "
+        "phase of this step but NOT the step's actual deliverable — e.g. 'Install "
+        "the OS' but the evidence only downloads the installer ISO or sits at the "
+        "boot/installer menu; 'Install the driver' but the evidence is the same "
+        "download / a boot screen. Use this when the goal is affirmatively NOT "
+        "reached yet.\n"
+        "- 'unclear': you genuinely can't tell. \n"
+        "Be conservative about 'incomplete' and 'failed': if the deliverable "
+        "MIGHT be present, or you can't tell, use 'unclear' (not 'incomplete'). "
+        "Judge against the TASK TITLE's goal, not merely 'is there an error'."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "outcome": {"type": "string", "enum": ["succeeded", "failed", "unclear"]},
+            "outcome": {"type": "string",
+                        "enum": ["succeeded", "failed", "incomplete", "unclear"]},
             "reason": {"type": "string", "description": "One sentence, citing the signal."},
-            "suggestion": {"type": "string", "description": "If failed: the likely next move."},
+            "suggestion": {"type": "string",
+                           "description": "If failed/incomplete: the concrete next move to finish the step."},
         },
         "required": ["outcome", "reason"],
     },
@@ -1107,15 +1121,21 @@ async def verify_step_success(
         )
     else:
         system = (
-            "You verify whether a human operator's step succeeded, from the "
-            "output they pasted. Conservative: 'failed' only on a clear "
-            "failure signal, 'unclear' when you can't tell."
+            "You verify whether a human operator's step achieved ITS GOAL, from "
+            "the output they pasted. Judge against the step's Task title — not "
+            "merely 'is there an error'. §17.731: if the evidence shows only "
+            "SETUP or an earlier phase (e.g. the installer downloaded / the boot "
+            "menu shown, but the OS not actually installed), the step is "
+            "'incomplete', not 'succeeded'. Stay conservative: 'failed' only on a "
+            "clear failure signal; 'incomplete' only when the deliverable is "
+            "affirmatively NOT reached yet; 'unclear' when you genuinely can't "
+            "tell (do NOT guess 'incomplete' out of caution)."
         )
         user = (
-            f"Task: {title}\n\n{task_prompt}\n\n"
+            f"Task (this step's goal): {title}\n\n{task_prompt}\n\n"
             + (f"{env_block}\n\n" if env_block else "")
             + f"Operator's pasted evidence / output for this step:\n{evidence[:6000]}\n\n"
-            "Call judge_step_outcome."
+            "Does the evidence show THIS step's goal was achieved? Call judge_step_outcome."
         )
     try:
         resp = await model_router.tool_call(
@@ -1138,7 +1158,7 @@ async def verify_step_success(
                 "suggestion": "", "grounded_by": "model"}
     args = resp.tool_calls[0].arguments or {}
     outcome = args.get("outcome")
-    if outcome not in ("succeeded", "failed", "unclear"):
+    if outcome not in ("succeeded", "failed", "incomplete", "unclear"):
         outcome = "unclear"
     reason = (args.get("reason") or "").strip()
     # §17.491 — the code ran cleanly in the sandbox; the LLM judged task-fit.
