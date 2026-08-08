@@ -153,6 +153,27 @@ def test_research_synth_prompt_is_actionable_not_a_source_recap():
     assert "copy-paste" in low
 
 
+def test_fix_prompt_carries_root_cause_rule():
+    """§17.734 — the fix prompt must handle a broken FOUNDATION (a prerequisite
+    the plan assumed is set up but isn't) as the real problem, not band-aid it
+    and push the operator toward completing the nominal step. The live failure:
+    'install NVIDIA driver' needed internet, but the VM's bridge was isolated —
+    the fix kept steering back to the driver instead of addressing networking."""
+    fix = assist_guide.GUIDE_SYSTEM_FIX
+    low = fix.lower()
+    assert "root-cause rule" in low
+    # names the broken-foundation / contradicted-belief case
+    assert "was never actually set up" in low or "isn't actually working" in low \
+        or "assumed was already set up" in low
+    # must NOT rush forward past it
+    assert "do not rush" in low or "not a quick hurdle" in low \
+        or "until the foundation is confirmed" in low
+    # can escalate to a real plan step instead of a fragile inline workaround
+    assert "needs its own step" in low
+    # the pre-§17.734 over-scoping that caused the push-forward is gone
+    assert "for this error only. nothing more" not in low
+
+
 def test_every_guide_prompt_carries_target_safety():
     """§17.648 — every human guide/fix prompt must carry the target-machine
     safety rule: a wipe/install step acts ON the target (in place, booted from

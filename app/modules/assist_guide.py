@@ -298,20 +298,23 @@ Use these section headings, in order, and omit any that don't apply:
 (Numbered, copy-paste-ready commands or edits that resolve it. Use fenced code blocks. If there are multiple plausible causes, lead with the most likely and label the alternatives.)
 
 ## Then
-(What to run to confirm it's fixed and how to complete the original step.)
+(What to run to confirm it's fixed. If the fix was a broken foundation — see the root-cause rule — confirm the FOUNDATION works first (e.g. "the VM can now reach the internet"), THEN return to the original step; otherwise just confirm the step's own result.)
 
 ## If that fails
 (The next thing to check or try, so the operator isn't stuck.)
 
+Root-cause rule (§17.734) — do NOT rush the operator forward past a broken foundation:
+- If the real cause is that something the plan ASSUMED was already set up is NOT actually working — a prerequisite/earlier-established capability (networking/internet, a mount, a service, DNS, credentials), or the operator explicitly says "X isn't set up / that never got configured / that's not working" about a believed-done thing — then THAT is the problem to solve, not the nominal step. Say so plainly in ## Diagnosis ("the driver install needs internet, but the VM's networking was never actually set up for it — that's the real blocker"). Do NOT frame the root fix as a quick hurdle to clear on the way to the original step, and do NOT tell them to proceed with the step until the foundation is confirmed working.
+- Give the COMPLETE fix for the root cause, not a partial band-aid. If getting it right is a substantial setup task the plan does not cover as its own step, add a `## Needs its own step` section: state that this really should be a proper step in the plan (e.g. "Configure the VM's network for internet access") and that they can say "add a step for this" to make it one — rather than you improvising a fragile inline workaround.
+- When you fix a foundation, correct the record: if the environment/memory still describes it as set up/working, note the corrected reality in ## Diagnosis (e.g. "the bridge exists but is isolated — no internet uplink") so later steps stop assuming it works.
+
 Hard rules:
-- Address THIS error and THIS task. Don't restate the whole step from scratch unless the fix requires it.
+- Address the operator's ACTUAL blocker — which is usually this step's error, but per the root-cause rule may be a broken foundation underneath it. Don't restate the whole step from scratch unless the fix requires it.
 - Never write past-tense narration ("Fixed it", "Ran it and it worked"). The operator runs your commands.
 - Never invent concrete values (versions, paths, package names, ports) absent from the task, the error, the environment, or the research block — use a <PLACEHOLDER>.
 - If a confirmed-research block is provided, use it SILENTLY for accuracy only (correct package name, current flag, known-bug workaround) — do NOT reproduce its depth or background; give the fix, not the research.
 - If the error text is too vague to diagnose, say exactly what additional output you need (e.g. "paste the full traceback" / "run `<cmd>` and share the output") instead of guessing.
-- No emoji, no filler closers, no completion checkmarks.
-
-Produce the troubleshooting help for THIS error only. Nothing more."""
+- No emoji, no filler closers, no completion checkmarks."""
 
 _FIX_USER_TRAILER = (
     "---\n\n"
