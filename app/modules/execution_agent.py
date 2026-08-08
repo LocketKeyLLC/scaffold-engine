@@ -825,6 +825,7 @@ async def _searxng_search(query: str, max_results: int = 5) -> str:
         from app.utils.http_clients import get_searxng_client
         from app.modules.research_extractors import (
             _engines_for_category, SEARXNG_FALLBACK_ENGINES,
+            relevant_search_results,
         )
         client = get_searxng_client()
         # §17.712 — use the curated `engines` backbone (NOT `categories=general`,
@@ -838,7 +839,7 @@ async def _searxng_search(query: str, max_results: int = 5) -> str:
         )
         resp.raise_for_status()
         data = resp.json()
-        results = data.get("results", [])[:max_results]
+        results = data.get("results", [])
         if not results:
             fb = await client.get(
                 "/search",
@@ -846,7 +847,11 @@ async def _searxng_search(query: str, max_results: int = 5) -> str:
                         "engines": SEARXNG_FALLBACK_ENGINES},
             )
             if fb.status_code == 200:
-                results = fb.json().get("results", [])[:max_results]
+                results = fb.json().get("results", [])
+        # §17.729 — drop keyword-matcher junk (e.g. bing returning "Download
+        # Google Chrome" for a Proxmox query) BEFORE the top-N slice, so the
+        # cap keeps relevant hits rather than junk that outranked them.
+        results = relevant_search_results(query, results)[:max_results]
         if not results:
             return "No search results found."
         lines = []

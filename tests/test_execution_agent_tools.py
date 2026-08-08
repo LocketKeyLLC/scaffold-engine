@@ -53,14 +53,17 @@ class TestSearXNGSearchErrorHandling:
         from app.modules.execution_agent import _searxng_search
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
+        # §17.729 — a realistic result shares a distinctive token with the query
+        # (the relevance filter drops results that share none).
         resp.json.return_value = {"results": [
-            {"title": "Result 1", "content": "Snippet 1", "url": "https://example.com"},
+            {"title": "Result 1 about widgets", "content": "widget snippet",
+             "url": "https://example.com"},
         ]}
         client = self._mock_client(response=resp)
         with patch("app.utils.http_clients.get_searxng_client", return_value=client):
-            result = await _searxng_search("test query")
-        assert "[1] Result 1" in result
-        assert "Snippet 1" in result
+            result = await _searxng_search("widget query")
+        assert "[1] Result 1 about widgets" in result
+        assert "widget snippet" in result
 
 
 @pytest.mark.smoke

@@ -370,7 +370,13 @@ _RESEARCH_SYNTH_SYSTEM = (
     "not ask for. Cite a source index like [1] for a specific fact or command you "
     "drew from it, but the ANSWER is the procedure, not the citation. If neither "
     "the project context nor the sources let you answer, say so plainly and name "
-    "what you'd need — do not guess. No preamble, no filler."
+    "what you'd need — do not guess. No preamble, no filler.\n"
+    "CURRENCY: do NOT state a specific version number, release name, or "
+    "download URL from memory — those go stale. Use an exact version/URL ONLY "
+    "when a source here confirms it. Otherwise tell the operator how to get the "
+    "current one (e.g. 'download the latest LTS from the official releases "
+    "page', 'check the newest driver with <command>') instead of naming a "
+    "possibly-outdated one."
 )
 
 
@@ -502,16 +508,41 @@ async def _detect_unknowns(
 
 async def _searxng_structured(query: str, max_results: int = 5) -> list[dict]:
     """§17.500 — structured SearXNG results ([{title, content, url}]) so we can
-    fetch the result pages. Fail-soft → []."""
+    fetch the result pages. Fail-soft → [].
+
+    §17.729 — brought in line with `execution_agent._searxng_search`: this DEEP
+    path (the one `/assist research` + `/assist fix` use — the reported "gave me
+    Ubuntu 22.04.3 from memory" failure went through here) still called
+    `categories=general` (additive, floods with keyword-matchers per §17.503)
+    with NO 0-results fallback. Now it uses the curated `engines` backbone,
+    retries the widest net on 0 results (§17.712), and RELEVANCE-FILTERS the
+    hits so a live keyword-matcher's navigational junk can't reach the fetcher.
+    """
+    from app.utils.http_clients import get_searxng_client
+    from app.modules.research_extractors import (
+        _engines_for_category, SEARXNG_FALLBACK_ENGINES, relevant_search_results,
+    )
     try:
-        from app.utils.http_clients import get_searxng_client
-        resp = await get_searxng_client().get(
-            "/search", params={"q": query, "format": "json", "categories": "general"},
+        client = get_searxng_client()
+        resp = await client.get(
+            "/search",
+            params={"q": query, "format": "json",
+                    "engines": _engines_for_category("general")},
         )
         resp.raise_for_status()
+        results = resp.json().get("results") or []
+        if not results:
+            fb = await client.get(
+                "/search",
+                params={"q": query, "format": "json",
+                        "engines": SEARXNG_FALLBACK_ENGINES},
+            )
+            if fb.status_code == 200:
+                results = fb.json().get("results") or []
+        results = relevant_search_results(query, results)
         return [
             {"title": r.get("title", ""), "content": r.get("content", ""), "url": r.get("url", "")}
-            for r in (resp.json().get("results") or [])[:max_results]
+            for r in results[:max_results]
             if r.get("url")
         ]
     except Exception as exc:
@@ -539,7 +570,7 @@ async def _deep_web_sources(query: str, *, top_n: int) -> list[dict]:
 
 async def _confirm_query(
     query: str, *, node_key: str, domain: Optional[str], deep: bool = False,
-    kb_query_extra: Optional[str] = None,
+    kb_query_extra: Optional[str] = None, web_query: Optional[str] = None,
 ) -> list[dict]:
     """Confirm one query via Milvus (local KB) + web.
 
@@ -547,8 +578,11 @@ async def _confirm_query(
     SearXNG result PAGES (real doc content); otherwise (the auto-guide pre-pass)
     it uses fast search snippets. ``kb_query_extra`` (§17.650) biases ONLY the
     local-KB embedding query with project entities (brief/environment) so a
-    generic operator question still retrieves this project's ingested research;
-    the web query stays the raw question so open-web results aren't polluted.
+    generic operator question still retrieves this project's ingested research.
+    ``web_query`` (§17.729) is the query used for the WEB search — a
+    keyword-focused rewrite of a conversational question; the KB query stays the
+    raw ``query`` (embeddings handle prose fine, and §17.650 keeps the KB query
+    intact). Defaults to ``query`` so callers that don't focus are unchanged.
     Returns ``{query, kind, text[, url]}`` source dicts, only non-empty/
     non-failure. Never raises (helpers are fail-soft).
     """
@@ -556,20 +590,21 @@ async def _confirm_query(
 
     sources: list[dict] = []
     kb_query = f"{query}\n{kb_query_extra.strip()}" if (kb_query_extra or "").strip() else query
+    web_q = (web_query or "").strip() or query
     milvus = await _milvus_search(kb_query, node_key=node_key, domain=domain)
     if _is_useful_grounding(milvus):
         sources.append({"query": query, "kind": "milvus", "text": milvus.strip()})
 
     if deep and settings.assist_research_fetch_top_n > 0:
-        web = await _deep_web_sources(query, top_n=settings.assist_research_fetch_top_n)
+        web = await _deep_web_sources(web_q, top_n=settings.assist_research_fetch_top_n)
         if web:
             sources.extend(web)
             return sources
         # fetch found nothing → fall through to the snippet path.
 
-    searx = await _searxng_search(query)
+    searx = await _searxng_search(web_q)
     if _is_useful_grounding(searx):
-        sources.append({"query": query, "kind": "searxng", "text": searx.strip()})
+        sources.append({"query": web_q, "kind": "searxng", "text": searx.strip()})
     return sources
 
 
@@ -608,7 +643,11 @@ def _render_research_block(sources: list[dict]) -> str:
         "## Research (confirmed facts — for YOUR accuracy only, NOT to reproduce)\n"
         "Use these to get package names, versions, flags, and exact commands "
         "right. Do NOT copy this material, its background, or its depth into the "
-        "walkthrough — the reader needs the steps, not the research."
+        "walkthrough — the reader needs the steps, not the research.\n"
+        "§17.729 CURRENCY: a version number, release name, or download URL that "
+        "these sources do NOT confirm is likely STALE — do not state it from "
+        "memory. Prefer telling the operator to fetch the current one (latest "
+        "LTS / newest driver) over naming a possibly-outdated specific value."
     ]
     for i, s in enumerate(sources, 1):
         src = f"{s['kind']}: {s['url']}" if s.get("url") else s["kind"]
@@ -2630,6 +2669,64 @@ async def generate_guidance_stream(
 # ── Explicit one-off research (/assist research <question>) ───────────────
 
 
+_FOCUS_QUERY_SYSTEM = (
+    "You turn an operator's conversational question into ONE concise web-search "
+    "query — the keywords a person would actually type. Drop filler ('can you "
+    "walk me through', 'step by step', 'how do I'), keep the concrete nouns: "
+    "product/tool names, the specific action, error text, versions. If PROJECT "
+    "keywords are given, fold in the ones that pin down the RIGHT tech (e.g. the "
+    "platform 'Proxmox') so the search doesn't drift to a different tool — but "
+    "don't pad with every keyword. If the question asks for the CURRENT/LATEST/"
+    "newest of something, keep that word — it matters. Reply with ONLY the "
+    "query, no quotes, no preamble."
+)
+
+
+async def _focus_web_query(question: str, *, role: str, hint: str = "") -> str:
+    """§17.729 — compress a conversational question into a keyword search query.
+
+    The ask/`/assist research` path used the operator's RAW message as the
+    SearXNG query ("can you walk me through fixing the VM 100 step by step"),
+    which keyword engines can't match — so research returned nothing and the
+    answer fell back to the model's stale memory (the reported Ubuntu 22.04.3).
+    ``hint`` (the project goal/entities) anchors the query on the RIGHT stack —
+    without it "fix the VM" drifted to VirtualBox/VMware instead of Proxmox.
+    Fail-soft: any hiccup (or a question already short AND with no project hint
+    to fold in) returns the original text, so this only ever helps.
+    """
+    q = (question or "").strip()
+    if len(q.split()) <= 6 and not (hint or "").strip():
+        return q  # already terse and no project context to fold — skip the call
+    try:
+        user = q[:1000]
+        if (hint or "").strip():
+            user = f"PROJECT: {hint.strip()[:300]}\n\nQuestion: {q[:1000]}"
+        resp = await chat_until_nonempty(
+            model_router.chat,
+            [
+                {"role": "system", "content": _FOCUS_QUERY_SYSTEM},
+                {"role": "user", "content": user},
+            ],
+            {"role": role},
+            temperature=0.0,
+            # §17.465 — model_general is a thinking model; a tight cap gets spent
+            # on reasoning and returns empty. 2048 clears the reasoning for what
+            # is a one-line answer.
+            max_tokens=2048,
+            draws=3,
+            label="assist_focus_query",
+        )
+    except Exception as exc:  # noqa: BLE001 — never block research on this
+        logger.debug("assist_focus_web_query_failed: %s", exc)
+        return q
+    if resp and resp.success:
+        lines = [ln.strip().strip('"') for ln in (resp.text or "").splitlines()]
+        focused = next((ln for ln in lines if ln), "")
+        if focused:
+            return focused[:200]
+    return q
+
+
 async def research_one(
     *, question: str, node_key: str = "?", domain: Optional[str] = None,
     synthesize: bool = True, job_context: Optional[str] = None,
@@ -2645,9 +2742,13 @@ async def research_one(
     ``_confirm_query``).
     """
     role = settings.assist_guide_model_role
+    # §17.729 — search on a keyword-focused query, not the raw conversational
+    # question (which returns nothing → stale-memory fallback). The original
+    # `question` still drives synthesis below; only the retrieval query changes.
+    web_q = await _focus_web_query(question, role=role, hint=context_hint or "")
     sources = await _confirm_query(
         question, node_key=node_key, domain=domain, deep=True,
-        kb_query_extra=context_hint,
+        kb_query_extra=context_hint, web_query=web_q,
     )
     answer: Optional[str] = None
     # Synthesize when we have web/KB sources OR project context to relay — a

@@ -431,6 +431,8 @@ async def test_research_one_synthesizes_from_job_context_without_web_sources():
          patch.object(assist_guide, "_deep_web_sources", new=AsyncMock(return_value=[])), \
          patch("app.modules.execution_agent._searxng_search",
                new=AsyncMock(return_value="No search results found.")), \
+         patch.object(assist_guide, "_focus_web_query",
+                      new=AsyncMock(return_value="connect two computers")), \
          patch.object(assist_guide.model_router, "chat",
                       new=AsyncMock(return_value=_resp("Use HOST_A=10.0.0.1"))) as chat:
         res = await assist_guide.research_one(
@@ -1490,3 +1492,88 @@ async def test_consolidate_facts_skips_overlong_merge_instead_of_truncating():
                       new=AsyncMock(return_value=_merge_resp(merges))):
         out = await assist_guide.consolidate_facts(facts)
     assert out == []
+
+
+# ── §17.729 — keyword-focus the ask query + deep-path relevance filter ───────
+
+
+@pytest.mark.asyncio
+async def test_focus_web_query_compresses_conversational_question():
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp("Proxmox attach ISO qm set boot order"))):
+        out = await assist_guide._focus_web_query(
+            "can you walk me through fixing the VM 100 step by step",
+            role="model_general",
+        )
+    assert out == "Proxmox attach ISO qm set boot order"
+
+
+@pytest.mark.asyncio
+async def test_focus_web_query_skips_llm_for_short_query():
+    with patch.object(assist_guide.model_router, "chat", new=AsyncMock()) as chat:
+        out = await assist_guide._focus_web_query("what flag enables it", role="model_general")
+    assert out == "what flag enables it"
+    chat.assert_not_called()   # ≤6 words → already keyword-ish
+
+
+@pytest.mark.asyncio
+async def test_focus_web_query_failsoft_returns_original():
+    long_q = "can you please walk me through the entire thing step by step now"
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(side_effect=RuntimeError("model down"))):
+        out = await assist_guide._focus_web_query(long_q, role="model_general")
+    assert out == long_q
+
+
+@pytest.mark.asyncio
+async def test_research_one_searches_focused_query_not_raw_question():
+    # §17.729 — the retrieval query is the focused one; the raw question still
+    # drives synthesis.
+    captured = {}
+
+    async def _fake_confirm(q, **kw):
+        captured["kb_q"] = q                    # positional = raw question (KB)
+        captured["web_q"] = kw.get("web_query")  # §17.729 focused web query
+        return [{"query": q, "kind": "web", "text": "docs", "url": "https://d"}]
+
+    with patch.object(assist_guide, "_focus_web_query",
+                      new=AsyncMock(return_value="ubuntu server latest lts iso")), \
+         patch.object(assist_guide, "_confirm_query", new=_fake_confirm), \
+         patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp("answer"))) as chat:
+        res = await assist_guide.research_one(
+            question="hey can you help me get the newest ubuntu onto this vm please")
+    assert captured["web_q"] == "ubuntu server latest lts iso"   # web uses focused
+    assert "newest ubuntu" in captured["kb_q"]                   # KB keeps raw (§17.650)
+    user_msg = next(m["content"] for m in chat.call_args.kwargs["messages"]
+                    if m["role"] == "user")
+    assert "newest ubuntu" in user_msg   # original question still framed synthesis
+
+
+@pytest.mark.asyncio
+async def test_searxng_structured_uses_backbone_and_filters_junk():
+    # §17.729 — deep path: curated engines (not categories=general) + relevance
+    # filter drops keyword-matcher junk before the fetcher sees it.
+    calls = {}
+
+    def _fake_get(path, params=None):
+        calls["params"] = params
+        r = MagicMock(status_code=200)
+        r.raise_for_status = MagicMock()
+        r.json = MagicMock(return_value={"results": [
+            {"title": "Ubuntu Server download page", "content": "get ubuntu lts",
+             "url": "https://ubuntu.com/download"},
+            {"title": "Current | Future of Banking", "content": "crypto",
+             "url": "https://bank.example"},
+        ]})
+        return r
+
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=_fake_get)
+    with patch("app.utils.http_clients.get_searxng_client", return_value=client):
+        out = await assist_guide._searxng_structured("ubuntu server download")
+    assert "categories" not in calls["params"]         # backbone, not categories=general
+    assert "engines" in calls["params"]
+    urls = [r["url"] for r in out]
+    assert "https://ubuntu.com/download" in urls
+    assert "https://bank.example" not in urls          # junk filtered

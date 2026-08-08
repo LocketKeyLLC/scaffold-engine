@@ -103,3 +103,55 @@ class TestEngineMap:
 
     def test_default_falls_back_to_general_backbone(self):
         assert _engines_for_category("unknown-cat") == _GENERAL_BACKBONE
+
+
+# ── §17.729 — relevance filter for keyword-matcher (bing) junk ──────────────
+
+from app.modules.research_extractors import (  # noqa: E402
+    relevant_search_results, _query_tokens,
+)
+
+
+def test_relevance_filter_drops_navigational_junk():
+    # The live failure shape: bing keyword-matches "install/download" and
+    # returns Chrome/Office/banking pages for a technical query.
+    q = "install Pi-hole Proxmox LXC container"
+    results = [
+        {"title": "Pi-hole v6 Installation Guide for Proxmox VE 9 LXC", "content": "pihole lxc"},
+        {"title": "Download and install Google Chrome", "content": "browser"},
+        {"title": "Current | Future of Banking", "content": "crypto accounts"},
+        {"title": "Installing Pi-Hole on Proxmox", "content": "natural born coder"},
+    ]
+    kept = relevant_search_results(q, results)
+    titles = [r["title"] for r in kept]
+    assert any("Pi-hole v6" in t for t in titles)
+    assert any("Installing Pi-Hole" in t for t in titles)
+    assert "Download and install Google Chrome" not in titles  # only filler overlap
+    assert "Current | Future of Banking" not in titles
+
+
+def test_relevance_filter_keeps_all_when_query_is_all_filler():
+    # No distinctive tokens to judge on → conservative: keep everything.
+    results = [{"title": "anything", "content": "x"}, {"title": "else", "content": "y"}]
+    assert relevant_search_results("how do i set it up", results) == results
+
+
+def test_relevance_filter_preserves_order():
+    q = "proxmox zfs pool"
+    results = [
+        {"title": "zfs pool on proxmox", "content": ""},
+        {"title": "unrelated banking", "content": ""},
+        {"title": "proxmox storage guide", "content": "zfs"},
+    ]
+    kept = relevant_search_results(q, results)
+    assert [r["title"] for r in kept] == ["zfs pool on proxmox", "proxmox storage guide"]
+
+
+def test_query_tokens_strips_filler_and_numbers():
+    toks = _query_tokens("current Ubuntu Server LTS release version 2026")
+    assert "ubuntu" in toks
+    assert "lts" in toks
+    assert "current" not in toks   # filler
+    assert "version" not in toks   # filler
+    assert "server" not in toks    # filler
+    assert "2026" not in toks      # pure number

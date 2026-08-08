@@ -90,6 +90,54 @@ CATEGORY_ENGINES: dict[str, str] = {
 # transient CAPTCHA can't zero a query.
 SEARXNG_FALLBACK_ENGINES = "duckduckgo,bing,brave,startpage,mojeek,qwant,wikipedia"
 
+# §17.729 — generic filler that carries no topic signal, so a result matching
+# ONLY these isn't really relevant. Kept small + deliberately tech-flavored:
+# `bing` (an aggressive keyword-matcher and, per rotation, often the sole live
+# engine) latches onto words like "current"/"install"/"download" and returns
+# navigational junk ("Current | Future of Banking", "Download Google Chrome")
+# for technical queries. Dropping filler-only matches is what makes that junk
+# fall out of the relevance gate below.
+_QUERY_FILLER = frozenset({
+    "the", "a", "an", "to", "of", "for", "on", "in", "and", "or", "with", "how",
+    "do", "i", "my", "is", "are", "can", "you", "me", "step", "steps", "walk",
+    "through", "guide", "help", "need", "want", "get", "set", "up", "setup",
+    "install", "installing", "installation", "download", "configure", "current",
+    "latest", "new", "version", "release", "server", "using", "use", "make",
+    "run", "running", "it", "this", "that", "what", "which", "best", "way",
+})
+
+
+def _query_tokens(query: str) -> set[str]:
+    """Distinctive content tokens of a query (lowercased, ≥3 chars, filler +
+    pure-number tokens removed) — the words a relevant result should actually
+    share. Splits on non-alphanumerics so 'Pi-hole' → {'pi','hole'}."""
+    toks = {t for t in re.split(r"[^a-z0-9]+", query.lower()) if len(t) >= 3}
+    return {t for t in toks if t not in _QUERY_FILLER and not t.isdigit()}
+
+
+def relevant_search_results(
+    query: str, results: list[dict], *,
+    title_key: str = "title", content_key: str = "content",
+) -> list[dict]:
+    """§17.729 — drop results that share NO distinctive token with the query.
+
+    Defends every SearXNG path against keyword-matcher pollution regardless of
+    which engines are live this minute. Conservative by construction: when the
+    query has no distinctive tokens (all filler) there's nothing to judge on, so
+    ALL results are kept — the filter only ever removes clearly-off-topic hits,
+    never returns fewer than the query lets it judge. Order preserved.
+    """
+    want = _query_tokens(query)
+    if not want:
+        return results
+    kept: list[dict] = []
+    for r in results:
+        hay = f"{r.get(title_key, '')} {r.get(content_key, '')}".lower()
+        have = {t for t in re.split(r"[^a-z0-9]+", hay) if len(t) >= 3}
+        if want & have:
+            kept.append(r)
+    return kept
+
 _EXTRACT_BATCH_FULL_PAGE = 5
 _EXTRACT_BATCH_SNIPPET = 10
 
