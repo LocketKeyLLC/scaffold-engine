@@ -22049,6 +22049,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.732 Verify — live OWUI-path e2e of the §17.731 verify-block: incomplete blocks, genuine completion commits (2026-08-08)
+
+**What.** Drove a fresh conversation through the REAL pipe OWUI uses (`scaffold_router` :9099, `/assist` start → session bound via history marker, the pattern that routes NL turns to the assist submit path) on a scratch Postgres-on-Proxmox job whose T1 is "Install the guest OS", then cascade-deleted it. No code changes — records the §17.731 verification on the path the report came from.
+
+**Results (DB-checked).** (1) Submitted the exact failure shape — ISO attached, VM started, sitting at the GRUB boot menu — → pipe rendered "⏳ Step `T1` isn't finished yet — not marked done", reason "the OS installer hasn't been run yet … deliverable (login prompt / lsb_release) not reached", concrete next steps + the `/assist skip` override; **T1 stayed `pending`** (no false commit). (2) Submitted genuine completion — "rebooted into the installed system, lsb_release = Ubuntu 24.04.2" — → "✅ Step T1 committed. Moving on to T2" (also learned `VM_NAME=pg-vm` + switched exec context); **T1 → `done`**. So the verifier blocks setup-only evidence and passes real completion — no march-ahead, no over-block. Scratch job cascade-deleted; the DeFruscio HomeLab P40 session confirmed intact (12/21, at T13).
+
+---
+
 ### §17.731 Fix — the verifier rubber-stamped incomplete work: "Install guest OS" marked done from an ISO download, marching the plan two steps past reality (2026-08-08)
 
 **Report + evidence.** The operator: assist "still hasn't actually gotten the Ubuntu server up." Traced the live P40 session (`c308ae02`): DAG showed T13 "Install guest OS" and T14 "Install NVIDIA driver in guest" both `done`, current step T15 — but the submitted evidence for T13 was a paste of `wget …ubuntu-22.04.3-live-server.iso` + `qm set --ide2 …` + a FAILED `qm set --boot order=ide2;scsi0` (`-bash: scsi0: command not found`), and T14's evidence was the SAME download plus the Ubuntu installer's GRUB boot menu. So the operator was sitting at the installer boot menu — OS never installed — while the plan had marched TWO steps past, neither actual task (OS install, driver install) done.
