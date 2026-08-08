@@ -773,6 +773,17 @@ class Settings(BaseSettings):
     # in. The raw assist_turns transcript keeps everything (§17.710a), so a
     # retraction never destroys evidence. Default OFF; flip live via env.
     assist_umem_supersede: bool = False           # §17.725 — retract contradicted facts
+    # §17.727 — ledger CONSOLIDATION. §17.725 removes direct contradictions, but
+    # redundant same-truth facts still pile up (the live ledger stated the oasis
+    # pool three ways), bloating every prompt and burning the §17.722 budget on
+    # repetition. When on, a background pass (fired after a fold pushes the
+    # ledger past `assist_facts_consolidate_min`, debounced) asks model_general
+    # for MERGE GROUPS by index; application is deterministic and lossless by
+    # construction — only facts explicitly in a valid ≥2-member group are
+    # replaced (at the group's newest position), everything else is untouched,
+    # and the raw assist_turns transcript keeps the originals. Default OFF.
+    assist_umem_consolidate: bool = False         # §17.727 — merge redundant facts
+    assist_facts_consolidate_min: int = Field(default=30, ge=5, le=200)
     # §17.499 — default walkthrough verbosity (terse | normal | detailed).
     # Per-session override via /assist verbose. terse = commands + one-line
     # whys (expert); detailed = explain why each step matters + what to watch

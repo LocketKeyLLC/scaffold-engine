@@ -1434,3 +1434,59 @@ async def test_confirm_query_shallow_never_fetches(monkeypatch):
         out = await assist_guide._confirm_query("q", node_key="T1", domain=None, deep=False)
     deep.assert_not_called()  # auto-guide pre-pass stays snippet-fast
     assert [s["kind"] for s in out] == ["searxng"]
+
+
+# ── §17.727 — ledger consolidation (merge redundant same-truth facts) ───────
+
+
+def _merge_resp(merges, success=True):
+    r = MagicMock()
+    r.success = success
+    r.text = ""
+    call = MagicMock()
+    call.arguments = {"merges": merges}
+    r.tool_calls = [call] if success else []
+    return r
+
+
+@pytest.mark.asyncio
+async def test_consolidate_facts_validates_and_resolves_to_texts():
+    facts = ["oasis is a ZFS pool", "Storage 'oasis' (zfspool) active",
+             "oasis has 5.7 TB free", "Next available VM ID is 100"]
+    merges = [
+        {"replaces": [0, 1, 2], "text": "Storage 'oasis' is an active ZFS pool with 5.7 TB free"},
+        {"replaces": [3], "text": "a rewrite of one fact"},          # <2 → dropped
+        {"replaces": [0, 99], "text": "overlap + out-of-range"},     # 0 used, 99 invalid → dropped
+    ]
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_merge_resp(merges))):
+        out = await assist_guide.consolidate_facts(facts)
+    assert len(out) == 1
+    assert out[0]["replaces"] == facts[:3]      # indices resolved to ledger texts
+    assert "5.7 TB" in out[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_consolidate_facts_short_ledger_skips_llm():
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:
+        assert await assist_guide.consolidate_facts(["only one"]) == []
+    tc.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_consolidate_facts_failsoft():
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(side_effect=RuntimeError("model down"))):
+        assert await assist_guide.consolidate_facts(["a", "b"]) == []
+
+
+@pytest.mark.asyncio
+async def test_consolidate_facts_skips_overlong_merge_instead_of_truncating():
+    # §17.727 — a replacement too long to keep whole would lose details if
+    # truncated; the group is skipped (originals kept) — lossless over tidy.
+    facts = ["detail A", "detail B"]
+    merges = [{"replaces": [0, 1], "text": "x" * 700}]
+    with patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_merge_resp(merges))):
+        out = await assist_guide.consolidate_facts(facts)
+    assert out == []

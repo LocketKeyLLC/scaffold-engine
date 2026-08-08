@@ -1573,13 +1573,18 @@ async def capture_session_facts(
         superseded = (res.get("superseded") or []) if known_facts else []
         if not facts and not superseded:
             return []
-        await set_environment(
+        env_after = await set_environment(
             session_id=session_id, facts=facts,
             retract_facts=superseded or None, db=db,
         )
         logger.info(
             "assist_captured_facts session_id=%s node_key=%s n=%d retracted=%d",
             session_id, node_key, len(facts), len(superseded),
+        )
+        # §17.727 — a fold that pushed the ledger past the threshold triggers a
+        # background consolidation pass (debounced inside).
+        schedule_consolidate_facts(
+            session_id=session_id, fact_count=_fact_count_of(env_after),
         )
         return facts
     except Exception as e:  # noqa: BLE001 — fact capture must never break submit
@@ -1734,12 +1739,16 @@ async def derive_turn_memory(
             if settings.assist_umem_supersede else []
         )
         if new_facts or superseded:
-            await set_environment(
+            env_after = await set_environment(
                 session_id=session_id, facts=new_facts,
                 retract_facts=superseded or None, db=db,
             )
             result["facts_added"] = len(new_facts)
             result["facts_retracted"] = len(superseded)
+            # §17.727 — background consolidation when the ledger has grown big.
+            schedule_consolidate_facts(
+                session_id=session_id, fact_count=_fact_count_of(env_after),
+            )
         if result["notes_added"] or result["facts_added"] or superseded:
             logger.info(
                 "assist_derived_turn_memory session_id=%s notes=+%d facts=+%d facts=-%d",
@@ -1791,6 +1800,177 @@ async def drain_derive_tasks() -> None:
     if not _DERIVE_TASKS:
         return
     await asyncio.gather(*list(_DERIVE_TASKS), return_exceptions=True)
+
+
+# ── Ledger consolidation (§17.727 — merge redundant same-truth facts) ───────
+
+_CONSOLIDATE_TASKS: set = set()
+
+
+def _fact_count_of(env: object) -> int:
+    """Ledger size from a ``set_environment`` return — tolerant of mocks and
+    malformed shapes (a bad count must never break the fold that produced it)."""
+    if isinstance(env, dict):
+        facts = env.get("facts")
+        if isinstance(facts, list):
+            return len(facts)
+    return 0
+
+# Re-consolidate only after the ledger has grown by this many facts since the
+# last pass — one model call per burst of growth, not per fold.
+_CONSOLIDATE_REGROW = 5
+
+
+def _apply_fact_merges(current: list[str], merges: list[dict]) -> list[str]:
+    """§17.727 — deterministic, lossless-by-construction application of merge
+    groups to the CURRENT ledger, by VALUE (the ledger may have gained/lost
+    entries while the model was thinking). Per group: members present in the
+    ledger are removed and the replacement lands at the position of the group's
+    NEWEST member (so §17.722's newest-kept trimming still treats fresh info as
+    fresh); a group with <2 members still present is skipped (a retraction or
+    cap already handled the rest); anything not in a valid group is untouched."""
+    member_of: dict[str, int] = {}
+    for mid, m in enumerate(merges):
+        for t in m.get("replaces") or []:
+            member_of[str(t).strip().lower()] = mid
+    last_pos: dict[int, int] = {}
+    present: dict[int, int] = {}
+    for pos, f in enumerate(current):
+        mid = member_of.get(str(f).strip().lower())
+        if mid is not None:
+            last_pos[mid] = pos
+            present[mid] = present.get(mid, 0) + 1
+    active = {mid for mid, n in present.items() if n >= 2}
+    out: list[str] = []
+    seen: set[str] = set()
+    for pos, f in enumerate(current):
+        mid = member_of.get(str(f).strip().lower())
+        if mid is None or mid not in active:
+            text_ = f
+        elif pos == last_pos[mid]:
+            text_ = str(merges[mid].get("text") or "").strip() or f
+        else:
+            continue
+        key = text_.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text_)
+    return out
+
+
+async def consolidate_session_facts(*, session_id: str, db) -> dict:
+    """§17.727 — one consolidation pass over the session's facts ledger: ask
+    the model for redundant-group merges, apply them losslessly, record the
+    debounce watermark. Gated on the master + consolidate valves; skips below
+    the size threshold or when the ledger hasn't regrown since the last pass.
+    Fail-soft — returns a summary dict, never raises."""
+    from app.config import settings
+    from app.modules import assist_guide
+
+    result = {"before": 0, "after": 0, "merges": 0}
+    if not (settings.assist_unified_memory_enabled and settings.assist_umem_consolidate):
+        return result
+    try:
+        sess = (await db.execute(
+            text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).mappings().first()
+        if not sess:
+            return result
+        env = _environment_from_metadata(sess.get("metadata"))
+        facts = [str(f) for f in (env.get("facts") or [])]
+        result["before"] = result["after"] = len(facts)
+        meta = sess.get("metadata")
+        if isinstance(meta, str):
+            meta = json.loads(meta or "{}")
+        watermark = int((meta or {}).get("facts_consolidated_n") or 0)
+        if (
+            len(facts) < int(settings.assist_facts_consolidate_min)
+            or len(facts) < watermark + _CONSOLIDATE_REGROW
+        ):
+            return result
+        merges = await assist_guide.consolidate_facts(facts)
+        # Watermark even when nothing merged, so a ledger with no redundancy
+        # isn't re-scanned on every subsequent fold.
+        if merges:
+            # Re-read under the row lock and apply by value — folds/retractions
+            # that landed while the model was thinking survive untouched.
+            locked = (await db.execute(
+                text("SELECT metadata FROM assist_sessions WHERE id = :sid FOR UPDATE"),
+                {"sid": session_id},
+            )).mappings().first()
+            cur_env = _environment_from_metadata((locked or {}).get("metadata"))
+            cur = [str(f) for f in (cur_env.get("facts") or [])]
+            new = _apply_fact_merges(cur, merges)
+            if new != cur:
+                cur_env["facts"] = new
+                await db.execute(
+                    text("""
+                        UPDATE assist_sessions
+                           SET metadata = COALESCE(metadata, '{}'::jsonb)
+                                          || CAST(:patch AS jsonb),
+                               updated_at = NOW()
+                         WHERE id = :sid
+                    """),
+                    {"sid": session_id, "patch": json.dumps({
+                        "environment": cur_env,
+                        "facts_consolidated_n": len(new),
+                    })},
+                )
+                await db.commit()
+                result["after"] = len(new)
+                result["merges"] = len(merges)
+                logger.info(
+                    "assist_facts_consolidated session_id=%s before=%d after=%d merges=%d",
+                    session_id, len(cur), len(new), len(merges),
+                )
+                return result
+        await db.execute(
+            text("""
+                UPDATE assist_sessions
+                   SET metadata = COALESCE(metadata, '{}'::jsonb)
+                                  || CAST(:patch AS jsonb)
+                 WHERE id = :sid
+            """),
+            {"sid": session_id,
+             "patch": json.dumps({"facts_consolidated_n": len(facts)})},
+        )
+        await db.commit()
+    except Exception as e:  # noqa: BLE001 — tidying must never break the turn
+        logger.debug("consolidate_session_facts_failed session_id=%s err=%r", session_id, e)
+    return result
+
+
+async def _consolidate_facts_bg(*, session_id: str) -> None:
+    """Background worker with its own session (mirrors ``_derive_turn_memory_bg``)."""
+    try:
+        async with async_session() as bg_db:
+            await consolidate_session_facts(session_id=session_id, db=bg_db)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("consolidate_facts_bg_failed session_id=%s err=%r", session_id, e)
+
+
+def schedule_consolidate_facts(*, session_id: str, fact_count: int) -> None:
+    """§17.727 — fire-and-forget a consolidation pass when a fold pushed the
+    ledger past the threshold. The pass itself re-checks the threshold AND the
+    regrowth watermark, so over-scheduling is cheap (an early return, no model
+    call). No-op unless the consolidate valve is on."""
+    from app.config import settings
+    if not (settings.assist_unified_memory_enabled and settings.assist_umem_consolidate):
+        return
+    if fact_count < int(settings.assist_facts_consolidate_min):
+        return
+    task = asyncio.create_task(_consolidate_facts_bg(session_id=session_id))
+    _CONSOLIDATE_TASKS.add(task)
+    task.add_done_callback(_CONSOLIDATE_TASKS.discard)
+
+
+async def drain_consolidate_tasks() -> None:
+    """Await in-flight consolidation tasks (tests only; production never waits)."""
+    if not _CONSOLIDATE_TASKS:
+        return
+    await asyncio.gather(*list(_CONSOLIDATE_TASKS), return_exceptions=True)
 
 
 # ── Unified session memory (§17.710a — lossless raw capture) ──────────────

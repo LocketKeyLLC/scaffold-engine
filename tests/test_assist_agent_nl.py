@@ -355,3 +355,113 @@ async def test_history_from_turns_maps_dedups_and_excludes_tail():
         {"role": "user", "content": "pasted output"},
         {"role": "assistant", "content": "run the audit"},
     ]
+
+
+# ── §17.727 — ledger consolidation ──────────────────────────────────────────
+
+
+def test_apply_fact_merges_lossless_and_positioned():
+    current = [
+        "oasis is a ZFS pool",              # group member (oldest)
+        "Next available VM ID is 100",      # untouched
+        "Storage 'oasis' active, 5.7 TB",   # group member (newest) → merged lands here
+        "Tesla P40 (02:00.0) in group 37",  # untouched
+    ]
+    merges = [{"replaces": ["oasis is a ZFS pool", "Storage 'oasis' active, 5.7 TB"],
+               "text": "Storage 'oasis' is an active ZFS pool with 5.7 TB free"}]
+    out = assist_agent._apply_fact_merges(current, merges)
+    assert out == [
+        "Next available VM ID is 100",
+        "Storage 'oasis' is an active ZFS pool with 5.7 TB free",
+        "Tesla P40 (02:00.0) in group 37",
+    ]
+
+
+def test_apply_fact_merges_skips_degraded_groups():
+    # A member vanished (retraction/cap) while the model was thinking → <2
+    # present → the group is skipped and the survivor stays as-is; facts that
+    # appended mid-flight are untouched.
+    current = ["survivor fact", "appended while thinking"]
+    merges = [{"replaces": ["survivor fact", "gone fact"], "text": "merged text"}]
+    out = assist_agent._apply_fact_merges(current, merges)
+    assert out == ["survivor fact", "appended while thinking"]
+
+
+@pytest.mark.asyncio
+async def test_consolidate_session_facts_below_threshold_skips_llm():
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(mappings_first={
+        "metadata": {"environment": {"facts": ["a", "b", "c"]}},
+    }))
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_consolidate", True), \
+         patch("app.config.settings.assist_facts_consolidate_min", 30), \
+         patch("app.modules.assist_guide.consolidate_facts", new=AsyncMock()) as cf:
+        out = await assist_agent.consolidate_session_facts(session_id="s1", db=db)
+    cf.assert_not_called()
+    assert out["merges"] == 0
+
+
+@pytest.mark.asyncio
+async def test_consolidate_session_facts_watermark_debounces():
+    # Ledger at threshold but unchanged since the last pass → no model call.
+    facts = [f"F{i}" for i in range(10)]
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_result(mappings_first={
+        "metadata": {"environment": {"facts": facts}, "facts_consolidated_n": 10},
+    }))
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_consolidate", True), \
+         patch("app.config.settings.assist_facts_consolidate_min", 5), \
+         patch("app.modules.assist_guide.consolidate_facts", new=AsyncMock()) as cf:
+        await assist_agent.consolidate_session_facts(session_id="s1", db=db)
+    cf.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_consolidate_session_facts_applies_and_watermarks():
+    facts = [f"F{i}" for i in range(6)] + ["oasis pool", "oasis pool active 5.7TB"]
+    meta = {"environment": {"facts": facts}}
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result(mappings_first={"metadata": meta}),   # read
+        _result(mappings_first={"metadata": meta}),   # FOR UPDATE re-read
+        _result(mappings_first=None),                 # UPDATE
+    ])
+    db.commit = AsyncMock()
+    merges = [{"replaces": ["oasis pool", "oasis pool active 5.7TB"],
+               "text": "Storage 'oasis' is an active ZFS pool (5.7 TB)"}]
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_consolidate", True), \
+         patch("app.config.settings.assist_facts_consolidate_min", 5), \
+         patch("app.modules.assist_guide.consolidate_facts",
+               new=AsyncMock(return_value=merges)):
+        out = await assist_agent.consolidate_session_facts(session_id="s1", db=db)
+    assert out["before"] == 8 and out["after"] == 7 and out["merges"] == 1
+    # The written patch carries the merged ledger + the watermark.
+    upd = db.execute.await_args_list[-1]
+    import json as _json
+    patch_arg = _json.loads(upd.args[1]["patch"])
+    assert patch_arg["facts_consolidated_n"] == 7
+    assert "Storage 'oasis' is an active ZFS pool (5.7 TB)" in patch_arg["environment"]["facts"]
+    assert "oasis pool" not in patch_arg["environment"]["facts"]
+    db.commit.assert_awaited()
+
+
+def test_schedule_consolidate_facts_valve_and_threshold_gated():
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_consolidate", False):
+        assist_agent.schedule_consolidate_facts(session_id="s", fact_count=100)
+    assert not assist_agent._CONSOLIDATE_TASKS
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_consolidate", True), \
+         patch("app.config.settings.assist_facts_consolidate_min", 30):
+        assist_agent.schedule_consolidate_facts(session_id="s", fact_count=10)
+    assert not assist_agent._CONSOLIDATE_TASKS
+
+
+def test_fact_count_of_tolerates_mocks():
+    assert assist_agent._fact_count_of({"facts": ["a", "b"]}) == 2
+    assert assist_agent._fact_count_of({"facts": "notalist"}) == 0
+    assert assist_agent._fact_count_of(MagicMock()) == 0
+    assert assist_agent._fact_count_of(None) == 0

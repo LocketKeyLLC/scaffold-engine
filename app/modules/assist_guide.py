@@ -1706,6 +1706,137 @@ async def distill_facts(
     }
 
 
+# ── Ledger consolidation (§17.727 — merge redundant same-truth facts) ───────
+
+_CONSOLIDATE_TOOL = model_router.Tool(
+    name="propose_fact_merges",
+    description=(
+        "Propose merges of REDUNDANT facts in a system-state ledger: groups of "
+        "entries that state the same truth about the same subject, each with "
+        "one replacement sentence carrying ALL their distinct details."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "merges": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "replaces": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": (
+                                "Indices (from the numbered list) of 2 or more "
+                                "facts that state the SAME truth about the SAME "
+                                "subject. Never group facts about different "
+                                "subjects, and never group facts that add "
+                                "distinct information unless the replacement "
+                                "sentence carries every detail."
+                            ),
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": (
+                                "ONE replacement sentence containing ALL the "
+                                "distinct details from the group — nothing "
+                                "dropped, nothing invented."
+                            ),
+                        },
+                    },
+                    "required": ["replaces", "text"],
+                },
+                "description": (
+                    "Only clearly-redundant groups. A fact that is unsure, "
+                    "unique, or only loosely related stays UNGROUPED (omit it "
+                    "entirely — ungrouped facts are kept as-is). Return [] when "
+                    "nothing is clearly redundant."
+                ),
+            }
+        },
+        "required": ["merges"],
+    },
+)
+
+_CONSOLIDATE_SYSTEM = (
+    "You tidy a ledger of observed facts about a human operator's real system. "
+    "Multiple entries often state the SAME truth with different wording or "
+    "detail level (e.g. the same storage pool described three ways). Propose "
+    "merge groups: each group lists the indices of clearly-redundant entries "
+    "plus ONE replacement sentence that preserves EVERY distinct detail from "
+    "the group (sizes, versions, addresses, names, states). Rules: never merge "
+    "entries about different subjects; never drop a detail; never invent one; "
+    "an entry you are not sure about stays ungrouped (it is kept as-is). "
+    "Conflicting entries are NOT redundant — leave conflicts ungrouped. Call "
+    "propose_fact_merges exactly once."
+)
+
+
+async def consolidate_facts(
+    facts: list[str], *, role: str = "model_general",
+) -> list[dict]:
+    """§17.727 — propose merges of redundant ledger facts. Returns validated
+    groups ``[{"replaces": [fact-text, …], "text": merged}]`` (indices resolved
+    to the ledger's texts so the caller can apply by VALUE, robust to a ledger
+    that changed while the model was thinking). Validation is strict — out-of-
+    range/duplicate indices dropped, groups need ≥2 distinct members, no fact
+    in two groups, replacement text bounded — and fail-soft → []."""
+    if not facts or len(facts) < 2:
+        return []
+    numbered = "\n".join(f"[{i}] {f}" for i, f in enumerate(facts))
+    try:
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": _CONSOLIDATE_SYSTEM},
+                {"role": "user", "content": (
+                    f"Ledger:\n{numbered}\n\nCall propose_fact_merges."
+                )},
+            ],
+            tools=[_CONSOLIDATE_TOOL],
+            role=role,
+            temperature=0.0,
+            tool_choice="auto",
+            # A thinking model_general spends output tokens on reasoning BEFORE
+            # the tool call, and a 37-fact ledger is a big prompt — 2048 starved
+            # every draw into tool_call_empty_redraw (same pitfall as §17.583 /
+            # the qwen3.5 empty-content lesson). Be generous here; this call is
+            # rare (debounced, threshold-gated).
+            max_tokens=8192,
+        )
+    except Exception as exc:  # noqa: BLE001 — tidying must never break anything
+        logger.warning("assist_consolidate_facts_failed: %s", exc)
+        return []
+    args = read_tool_args(resp)
+    raw = (args or {}).get("merges") or []
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    used: set[int] = set()
+    for m in raw:
+        if not isinstance(m, dict):
+            continue
+        text_ = str(m.get("text") or "").strip()
+        if not text_:
+            continue
+        idxs: list[int] = []
+        for i in (m.get("replaces") or []):
+            try:
+                i = int(i)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < len(facts) and i not in used and i not in idxs:
+                idxs.append(i)
+        if len(idxs) < 2:
+            continue  # a "merge" of one is a rewrite — not allowed
+        if len(text_) > 600:
+            # A replacement that long can't be truncated without losing the
+            # details it exists to preserve — skip the group (originals kept).
+            continue
+        used.update(idxs)
+        out.append({"replaces": [facts[i] for i in idxs], "text": text_})
+    return out
+
+
 # ── Unconditional per-turn derive (§17.715 — review + log EVERY message) ────
 
 _RECORD_TURN_MEMORY_TOOL = model_router.Tool(
