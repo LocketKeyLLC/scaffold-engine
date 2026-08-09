@@ -1964,7 +1964,19 @@ _PROBLEM_SOLVING_FRAMING = (
     "of typos and mistakes (like picking the wrong machine type in a hand-written "
     "`qm create`). Give a CLI equivalent only as a brief one-line alternative, or "
     "when the UI genuinely cannot do it. When you diagnose or choose the move, say "
-    "in ONE line which tool is simplest here — and pick it."
+    "in ONE line which tool is simplest here — and pick it.\n"
+    "5. HISTORY IS NOT A MANDATE — AND FOLLOW THE OPERATOR'S DIRECTION. The "
+    "recorded facts and earlier turns describe what has ALREADY BEEN TRIED — often "
+    "a long chain of shell commands — but that is HISTORY, not a reason to keep "
+    "using the CLI (or the same failed approach). Choose the best tool for the "
+    "NEXT move regardless of how earlier steps happened to be done, and do not let "
+    "a wall of past `qm`/shell facts anchor you to the shell. If the operator "
+    "DIRECTS a path or tool — 'why aren't we using the web UI', 'let's use the "
+    "GUI', 'I want copy-paste', 'isn't there an easier way', 'let's start over' — "
+    "treat it as an INSTRUCTION: switch to it immediately and lead with it; do NOT "
+    "explain why the current/CLI path is fine and then keep going down it. Web "
+    "search results skewing toward CLI is likewise not a reason to hand back CLI — "
+    "mine them for the facts and re-express the procedure in the chosen tool."
 )
 
 

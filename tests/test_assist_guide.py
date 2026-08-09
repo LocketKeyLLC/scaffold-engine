@@ -1807,6 +1807,9 @@ def test_apply_problem_solving_appends_when_enabled():
     # §17.743 — prefer the easiest tool the operator has (native GUI over CLI)
     assert "prefer the easiest tool" in low
     assert "web ui" in low
+    # §17.744 — history isn't a mandate; follow the operator's explicit direction
+    assert "history is not a mandate" in low
+    assert "follow the operator's direction" in low
 
 
 def test_apply_problem_solving_noop_when_disabled():
