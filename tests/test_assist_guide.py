@@ -1690,3 +1690,76 @@ def test_render_step_recap_block():
     b = assist_guide.render_step_recap_block("GOAL: x\nOPEN: y")
     assert "Where we are on this step" in b
     assert "GOAL: x" in b
+
+
+# ── §17.741 operator-facing status panel + "do this next" callout ──────────
+
+
+def test_parse_recap_labeled_fields():
+    recap = (
+        "GOAL: VM online so apt works\n"
+        "DONE: bridge vmbr0 created\n"
+        "- VM boots\n"
+        "OPEN: no internet uplink yet\n"
+        "NEXT: add the uplink NIC to vmbr0, then re-test apt\n"
+        "CONTEXT: host=pve, VM=100"
+    )
+    p = assist_guide.parse_recap(recap)
+    assert p["goal"] == "VM online so apt works"
+    assert p["done"] == ["bridge vmbr0 created", "VM boots"]
+    assert p["open"] == ["no internet uplink yet"]
+    assert p["next"].startswith("add the uplink NIC")
+    assert p["context"] == "host=pve, VM=100"
+
+
+def test_parse_recap_tolerates_markdown_and_empty():
+    assert assist_guide.parse_recap("") == {
+        "goal": "", "done": [], "open": [], "next": "", "context": ""
+    }
+    assert assist_guide.parse_recap(None)["done"] == []
+    # bold/heading/bullet prefixes on the label line still parse
+    p = assist_guide.parse_recap("**GOAL:** x\n## DONE\n* a\n* b")
+    assert p["goal"] == "x"
+    assert p["done"] == ["a", "b"]
+
+
+def test_render_status_panel_shows_progress():
+    recap = "GOAL: g\nDONE: a\nOPEN: b\nNEXT: c"
+    out = assist_guide.render_status_panel(recap)
+    assert "📍 Where we are on this step" in out
+    assert "**Goal:** g" in out
+    assert "✅ **Done:** a" in out
+    assert "⬜ **Still open:** b" in out
+    assert "👉 **Next:** c" in out
+
+
+def test_render_status_panel_multiple_done_joined():
+    out = assist_guide.render_status_panel("GOAL: g\nDONE: a\n- x\n- y\nNEXT: z")
+    assert "✅ **Done:** a · x · y" in out
+
+
+def test_render_status_panel_empty_without_real_progress():
+    # goal-only (turn 1, nothing done yet) → no panel, not noise
+    assert assist_guide.render_status_panel("GOAL: g") == ""
+    assert assist_guide.render_status_panel("") == ""
+    assert assist_guide.render_status_panel(None) == ""
+
+
+def test_apply_next_callout_appends_when_enabled():
+    base = "SYSTEM PROMPT BODY"
+    out = assist_guide.apply_next_callout(base, is_decision=False, enabled=True)
+    assert out.startswith(base)
+    assert "## 👉 Do this next" in out
+    assert len(out) > len(base)
+
+
+def test_apply_next_callout_noop_when_disabled_or_decision():
+    base = "SYSTEM PROMPT BODY"
+    assert assist_guide.apply_next_callout(base, is_decision=False, enabled=False) == base
+    # a decision node never gets a "do this now" callout (it's a choice)
+    assert assist_guide.apply_next_callout(base, is_decision=True, enabled=True) == base
+
+
+def test_step_recap_system_prompt_carries_next_label():
+    # the recap now distills a NEXT action for the panel + model grounding
+    assert "NEXT:" in assist_guide._STEP_RECAP_SYSTEM

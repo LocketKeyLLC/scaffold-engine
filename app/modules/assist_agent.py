@@ -725,9 +725,9 @@ async def generate_step_guidance(
         history=history, session_id=session_id, db=db, exclude_tail=refine,
     )
     conversation = _conversation_block_for(history)  # §17.687
-    conversation = _with_step_recap(  # §17.738 — full-thread recap of THIS step
-        conversation, await get_step_recap(
-            session_id=session_id, node_key=nk, title=ctx.title, db=db))
+    _recap = await get_step_recap(  # §17.738 — full-thread recap of THIS step
+        session_id=session_id, node_key=nk, title=ctx.title, db=db)
+    conversation = _with_step_recap(conversation, _recap)
 
     res = await assist_guide.ensure_guidance(
         session_id=session_id,
@@ -753,7 +753,7 @@ async def generate_step_guidance(
             session_id=session_id, node_key=nk, kind="guide",
             content=res["guidance"], db=db,
         )
-    return {
+    result = {
         "session_id": session_id,
         "job_id": job_id,
         "node_key": nk,
@@ -761,6 +761,14 @@ async def generate_step_guidance(
         "tool": ctx.tool,
         **res,
     }
+    # §17.741 — surface the recap to the operator as a "📍 Where we are" panel
+    # above the walkthrough (the non-stream path renders result["status_panel"];
+    # the stream path yields it as a leading delta — see below).
+    if settings.assist_status_panel_enabled:
+        panel = assist_guide.render_status_panel(_recap)
+        if panel:
+            result["status_panel"] = panel
+    return result
 
 
 async def generate_step_guidance_stream(
@@ -823,9 +831,18 @@ async def generate_step_guidance_stream(
         history=history, session_id=session_id, db=db, exclude_tail=refine,
     )
     conversation = _conversation_block_for(history)  # §17.687
-    conversation = _with_step_recap(  # §17.738
-        conversation, await get_step_recap(
-            session_id=session_id, node_key=nk, title=ctx.title, db=db))
+    _recap = await get_step_recap(  # §17.738
+        session_id=session_id, node_key=nk, title=ctx.title, db=db)
+    conversation = _with_step_recap(conversation, _recap)
+
+    # §17.741 — lead with the operator-facing "📍 Where we are" panel, as a delta
+    # so it renders ABOVE the streamed walkthrough. Not teed into _buf: the panel
+    # is a derived, ephemeral view of the recap, not part of the guidance text
+    # captured to the transcript.
+    if settings.assist_status_panel_enabled:
+        _panel = assist_guide.render_status_panel(_recap)
+        if _panel:
+            yield {"type": "delta", "text": _panel + "\n\n"}
 
     # §17.726 — tee the streamed walkthrough so the assembled reply lands in the
     # transcript once the stream completes (fresh generations only).
@@ -1008,9 +1025,8 @@ async def run_step_fix(
     )
     # §17.738 — full-thread recap of THIS step so a long troubleshooting
     # marathon stays coherent (the 6-turn window loses it).
-    _fix_convo = _with_step_recap(
-        _conversation_block_for(history),
-        await get_step_recap(session_id=session_id, node_key=nk, title=ctx.title, db=db))
+    _recap = await get_step_recap(session_id=session_id, node_key=nk, title=ctx.title, db=db)
+    _fix_convo = _with_step_recap(_conversation_block_for(history), _recap)
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
@@ -1036,7 +1052,14 @@ async def run_step_fix(
         )
     except Exception as exc:  # never fail the fix on a friction-log hiccup
         logger.warning("assist_fix_friction_record_failed: %s", exc)
-    return {"session_id": session_id, "node_key": nk, "title": ctx.title, **res}
+    out = {"session_id": session_id, "node_key": nk, "title": ctx.title, **res}
+    # §17.741 — surface the "📍 Where we are" panel above the fix too, so a long
+    # troubleshooting marathon stays oriented for the operator, not just the model.
+    if settings.assist_status_panel_enabled:
+        panel = assist_guide.render_status_panel(_recap)
+        if panel:
+            out["status_panel"] = panel
+    return out
 
 
 async def classify_session_turn(
@@ -2195,7 +2218,10 @@ async def get_step_recap(
     from app.config import settings
     from app.modules import assist_guide
 
-    if not (settings.assist_step_recap_enabled and node_key):
+    # §17.741 — the operator-facing "📍 Where we are" panel is a presentation of
+    # this recap, so enabling the panel forces the recap to be computed even when
+    # the internal-only recap flag is off.
+    if not ((settings.assist_step_recap_enabled or settings.assist_status_panel_enabled) and node_key):
         return ""
     try:
         step = (await db.execute(

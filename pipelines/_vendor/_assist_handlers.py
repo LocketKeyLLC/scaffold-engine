@@ -346,7 +346,12 @@ def render_guidance(d: dict) -> str:
         )
     meta = d.get("guidance_meta") or {}
     sources = meta.get("research_sources") or []
-    out = render_destructive_banner(meta) + f"## 🧭 How to do this step\n\n{d['guidance']}\n"
+    # §17.741 — lead with the operator-facing "📍 Where we are" panel when the
+    # orchestrator supplied one (non-stream path; the stream path prepends it as
+    # a leading delta instead).
+    panel = (d.get("status_panel") or "").strip()
+    panel_block = f"{panel}\n\n" if panel else ""
+    out = panel_block + render_destructive_banner(meta) + f"## 🧭 How to do this step\n\n{d['guidance']}\n"
     if sources:
         cites = ", ".join(
             f"`{s.get('kind')}`: {s.get('query')}" for s in sources
@@ -365,7 +370,9 @@ def render_fix(d: dict) -> str:
             f"⚠️ Couldn't generate a fix for `{node_key}` right now. "
             f"Try `/assist research <the error>` for raw sources, or rephrase."
         )
-    out = render_destructive_banner(d.get("guidance_meta")) + f"## 🔧 Troubleshooting `{node_key}`\n\n{d['fix']}\n"
+    panel = (d.get("status_panel") or "").strip()  # §17.741
+    panel_block = f"{panel}\n\n" if panel else ""
+    out = panel_block + render_destructive_banner(d.get("guidance_meta")) + f"## 🔧 Troubleshooting `{node_key}`\n\n{d['fix']}\n"
     meta = d.get("guidance_meta") or {}
     sources = meta.get("research_sources") or []
     if sources:

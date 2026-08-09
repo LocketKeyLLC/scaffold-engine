@@ -344,6 +344,12 @@ services:
       # fix/guide/research from the full node transcript; cached, refreshed
       # every few turns. Code default off (tests); live here.
       ASSIST_STEP_RECAP_ENABLED: "${ASSIST_STEP_RECAP_ENABLED:-true}"
+      # §17.741 — surface the recap to the OPERATOR: a "📍 Where we are" panel
+      # (goal / done / open / next) above each walkthrough, and a leading
+      # "👉 Do this next" callout so the single immediate action draws the eye.
+      # Panel implies the recap (forces its computation). Code default off; live here.
+      ASSIST_STATUS_PANEL_ENABLED: "${ASSIST_STATUS_PANEL_ENABLED:-true}"
+      ASSIST_NEXT_CALLOUT_ENABLED: "${ASSIST_NEXT_CALLOUT_ENABLED:-true}"
     env_file:
       - .env
     volumes:

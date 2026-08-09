@@ -206,6 +206,23 @@ class TestRenderGuidance:
         })
         assert "cached" in out.lower()
 
+    def test_status_panel_leads_when_present(self):
+        # §17.741 — the "📍 Where we are" panel is prepended above the walkthrough.
+        panel = "**📍 Where we are on this step**\n- 👉 **Next:** do X\n"
+        out = _vendor.render_guidance({
+            "node_key": "T2", "status": "ready", "guidance": "## Run this\ndo it",
+            "guidance_meta": {}, "cached": False, "status_panel": panel,
+        })
+        assert "Where we are on this step" in out
+        assert out.index("Where we are") < out.index("How to do this step")
+
+    def test_no_panel_when_absent(self):
+        out = _vendor.render_guidance({
+            "node_key": "T2", "status": "ready", "guidance": "do it",
+            "guidance_meta": {}, "cached": False,
+        })
+        assert "Where we are" not in out
+
     def test_failed_degrades_gracefully(self):
         out = _vendor.render_guidance({
             "node_key": "T2", "status": "failed", "guidance": "",
@@ -398,6 +415,15 @@ class TestRenderFixEnv:
     def test_render_fix_failed(self):
         out = _vendor.render_fix({"node_key": "T2", "status": "failed", "fix": ""})
         assert "Couldn't generate a fix" in out
+
+    def test_render_fix_status_panel_leads(self):
+        # §17.741 — the panel leads on the fix path too (long troubleshooting).
+        out = _vendor.render_fix({
+            "node_key": "T2", "status": "ready", "fix": "## Diagnosis\nx",
+            "guidance_meta": {},
+            "status_panel": "**📍 Where we are on this step**\n- ⬜ **Still open:** y\n",
+        })
+        assert out.index("Where we are") < out.index("Troubleshooting")
 
     def test_render_environment_empty_nudges(self):
         out = _vendor.render_environment({"profile": "", "substitutions": {}})
