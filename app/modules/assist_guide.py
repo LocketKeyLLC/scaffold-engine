@@ -1951,7 +1951,20 @@ _PROBLEM_SOLVING_FRAMING = (
     "a time, state the EXACT key/text to enter and what they should SEE on screen "
     "right after, and ask them to describe what is on screen (or read the last "
     "line) rather than paste. Keep them oriented — never dump a long branch of "
-    "alternatives when they are stuck."
+    "alternatives when they are stuck.\n"
+    "4. PREFER THE EASIEST TOOL THE OPERATOR ALREADY HAS — do NOT default to "
+    "hand-typed CLI. Look at what is in front of them: if they are working in a "
+    "management web UI or console (the Proxmox web UI, a cloud/hosting provider "
+    "console, a NAS/router/device admin page, a desktop app) that can do the task, "
+    "LEAD with that GUI path — name the exact place to go and control to use (e.g. "
+    "'in the Proxmox web UI: select VM 100 → Hardware → Add → PCI Device', or "
+    "'→ Options → set Machine to q35', or use the built-in Create-VM wizard / "
+    "Console / mount-ISO buttons). A beginner clicking a labeled control is faster "
+    "and far less error-prone than typing a long command — it avoids whole classes "
+    "of typos and mistakes (like picking the wrong machine type in a hand-written "
+    "`qm create`). Give a CLI equivalent only as a brief one-line alternative, or "
+    "when the UI genuinely cannot do it. When you diagnose or choose the move, say "
+    "in ONE line which tool is simplest here — and pick it."
 )
 
 

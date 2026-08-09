@@ -1804,6 +1804,9 @@ def test_apply_problem_solving_appends_when_enabled():
     assert "honor the confirmed constraints" in low
     assert "stop cycling" in low
     assert "match the operator" in low
+    # §17.743 — prefer the easiest tool the operator has (native GUI over CLI)
+    assert "prefer the easiest tool" in low
+    assert "web ui" in low
 
 
 def test_apply_problem_solving_noop_when_disabled():
