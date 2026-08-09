@@ -974,7 +974,11 @@ async def test_add_step_rejects_bad_session():
 @pytest.mark.asyncio
 async def test_get_step_recap_valve_off_returns_empty():
     db = AsyncMock()
-    with patch.object(_settings, "assist_step_recap_enabled", False):
+    # §17.741 — the recap gate is `step_recap OR status_panel`; pin BOTH off so
+    # this stays deterministic when the container env sets ASSIST_STATUS_PANEL_
+    # ENABLED=true (the §17.710d container-valve gotcha).
+    with patch.object(_settings, "assist_step_recap_enabled", False), \
+         patch.object(_settings, "assist_status_panel_enabled", False):
         out = await assist_agent.get_step_recap(
             session_id="s", node_key="ADD1", title="net", db=db)
     assert out == ""

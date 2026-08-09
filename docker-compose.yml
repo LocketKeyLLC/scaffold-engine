@@ -350,6 +350,11 @@ services:
       # Panel implies the recap (forces its computation). Code default off; live here.
       ASSIST_STATUS_PANEL_ENABLED: "${ASSIST_STATUS_PANEL_ENABLED:-true}"
       ASSIST_NEXT_CALLOUT_ENABLED: "${ASSIST_NEXT_CALLOUT_ENABLED:-true}"
+      # §17.742 — problem-solving discipline for tangled, multi-attempt steps:
+      # honor confirmed CONSTRAINTS, stop cycling once approaches have failed
+      # (commit to one path), match the operator's real capability. Recap gains
+      # a CONSTRAINTS section (also shown in the panel). Code default off; live here.
+      ASSIST_PROBLEM_SOLVING_ENABLED: "${ASSIST_PROBLEM_SOLVING_ENABLED:-true}"
     env_file:
       - .env
     volumes:

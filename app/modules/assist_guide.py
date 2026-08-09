@@ -1780,6 +1780,11 @@ _STEP_RECAP_SYSTEM = (
     "DONE: sub-tasks already resolved in this step (bullet fragments).\n"
     "OPEN: what's still blocking / not yet working (bullet fragments) — be "
     "specific about the CURRENT blocker.\n"
+    "CONSTRAINTS: hard limits on HOW we can proceed that later steps MUST respect "
+    "— e.g. no copy-paste in this console, the guest agent is unavailable, "
+    "GUI-only, offline-only, a login the operator doesn't have — PLUS approaches "
+    "already tried and RULED OUT (don't retry them). One short fragment each; "
+    "omit if there are none.\n"
     "NEXT: one line — the single most immediate action to take now to move this "
     "step forward (plain words, e.g. 'add the uplink NIC to vmbr0, then re-test "
     "apt'). Omit only if the step is fully done.\n"
@@ -1846,26 +1851,26 @@ def render_step_recap_block(recap: str | None) -> str:
 # long problem-solving step reads as tracked rather than lost, and mandate a
 # leading "👉 Do this next" section so the single immediate action draws the eye.
 
-_RECAP_LABELS = ("GOAL", "DONE", "OPEN", "NEXT", "CONTEXT")
+_RECAP_LABELS = ("GOAL", "DONE", "OPEN", "CONSTRAINTS", "NEXT", "CONTEXT")
 
 
 def _recap_add(out: dict[str, Any], field: str, text_: str) -> None:
     text_ = text_.strip()
     if not text_:
         return
-    if field in ("done", "open"):
+    if field in ("done", "open", "constraints"):
         out[field].append(text_)
     else:  # goal / next / context are single-valued
         out[field] = (out[field] + " " + text_).strip() if out[field] else text_
 
 
 def parse_recap(recap: str | None) -> dict[str, Any]:
-    """§17.741 — parse a labeled recap into ``{goal, done[], open[], next,
-    context}``. The recap is line-oriented (``LABEL:`` leads a line, optionally
-    with inline text, then bullet fragments). Tolerant of markdown bullets,
-    missing labels, and free spacing. Blank/unparseable → empty fields; never
-    raises."""
-    out: dict[str, Any] = {"goal": "", "done": [], "open": [], "next": "", "context": ""}
+    """§17.741 — parse a labeled recap into ``{goal, done[], open[],
+    constraints[], next, context}``. The recap is line-oriented (``LABEL:`` leads
+    a line, optionally with inline text, then bullet fragments). Tolerant of
+    markdown bullets, missing labels, and free spacing. Blank/unparseable → empty
+    fields; never raises. (§17.742 added ``constraints``.)"""
+    out: dict[str, Any] = {"goal": "", "done": [], "open": [], "constraints": [], "next": "", "context": ""}
     r = (recap or "").strip()
     if not r:
         return out
@@ -1900,7 +1905,7 @@ def render_status_panel(recap: str | None) -> str:
     one DONE / OPEN / NEXT item): a goal-only recap (turn 1, nothing done yet)
     is not worth a panel and would just be noise. Never raises."""
     p = parse_recap(recap)
-    if not (p["done"] or p["open"] or p["next"]):
+    if not (p["done"] or p["open"] or p["next"] or p["constraints"]):
         return ""
     lines = ["**📍 Where we are on this step**", ""]
     if p["goal"]:
@@ -1909,9 +1914,53 @@ def render_status_panel(recap: str | None) -> str:
         lines.append("- ✅ **Done:** " + " · ".join(p["done"]))
     if p["open"]:
         lines.append("- ⬜ **Still open:** " + " · ".join(p["open"]))
+    if p["constraints"]:  # §17.742 — the limits/ruled-out approaches govern the next move
+        lines.append("- ⚠️ **Constraints:** " + " · ".join(p["constraints"]))
     if p["next"]:
         lines.append("- 👉 **Next:** " + p["next"])
     return "\n".join(lines) + "\n"
+
+
+# §17.742 — problem-solving discipline for TANGLED, multi-attempt steps. Appended
+# to fix/guide/ask so the engine stops thrashing (re-proposing ruled-out
+# approaches, asking for output the operator can't produce) and instead honors
+# the confirmed constraints, commits to ONE path once approaches have failed, and
+# matches the operator's real capability. Kept generic; the concrete constraints
+# come from the recap's CONSTRAINTS section (injected alongside).
+_PROBLEM_SOLVING_FRAMING = (
+    "Problem-solving discipline (for tangled, multi-attempt situations):\n"
+    "1. HONOR THE CONFIRMED CONSTRAINTS. Treat anything the running recap lists "
+    "under CONSTRAINTS — and any limit the operator has stated (no copy-paste in "
+    "this console, the guest agent is down, GUI-only, offline-only, a login they "
+    "don't have) — as a HARD limit. Never give an instruction a constraint rules "
+    "out: if they cannot copy-paste, give short commands to TYPE by hand and ask "
+    "them to read the result off the screen — do not ask them to paste output "
+    "they cannot copy; if a path is unavailable (guest agent, network, a service) "
+    "do not route through it. If unsure whether a limit still holds, ask one "
+    "short yes/no question instead of assuming.\n"
+    "2. WHEN SEVERAL APPROACHES HAVE ALREADY FAILED, STOP CYCLING. If the recap's "
+    "DONE/CONSTRAINTS or the transcript shows approaches already tried and failed "
+    "(e.g. guestmount, virt-customize, the guest agent), do NOT propose another "
+    "variant of a ruled-out approach. Step back: in one or two lines name what has "
+    "been ruled out and why, then COMMIT to the single most robust path that fits "
+    "the constraints and see it through to the goal — do not re-open the whole "
+    "strategy every turn. One coherent path beats five half-tried ones.\n"
+    "3. MATCH THE OPERATOR'S ACTUAL CAPABILITY. If they are in a limited "
+    "environment — a console/GUI with no copy-paste, hand-typing at a boot menu "
+    "or editor — drop to the smallest possible steps: ONE key or ONE short line at "
+    "a time, state the EXACT key/text to enter and what they should SEE on screen "
+    "right after, and ask them to describe what is on screen (or read the last "
+    "line) rather than paste. Keep them oriented — never dump a long branch of "
+    "alternatives when they are stuck."
+)
+
+
+def apply_problem_solving(system: str, *, enabled: bool) -> str:
+    """§17.742 — append the tangled-situation discipline to a system prompt when
+    the valve is on. No-op otherwise."""
+    if not enabled:
+        return system
+    return system + "\n\n" + _PROBLEM_SOLVING_FRAMING
 
 
 _NEXT_CALLOUT_DIRECTIVE = (
@@ -2598,6 +2647,9 @@ async def generate_guidance(
         system, is_decision=is_decision,
         enabled=settings.assist_next_callout_enabled,
     )
+    system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
+        system, enabled=settings.assist_problem_solving_enabled,
+    )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
@@ -2689,9 +2741,11 @@ async def generate_fix(
     resp = await chat_until_nonempty(
         model_router.chat,
         [
-            {"role": "system", "content": apply_next_callout(  # §17.741
-                apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
-                is_decision=False, enabled=settings.assist_next_callout_enabled)},
+            {"role": "system", "content": apply_problem_solving(  # §17.742
+                apply_next_callout(  # §17.741
+                    apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
+                    is_decision=False, enabled=settings.assist_next_callout_enabled),
+                enabled=settings.assist_problem_solving_enabled)},
             {"role": "user", "content": user},
         ],
         {"role": role},
@@ -2894,6 +2948,9 @@ async def generate_guidance_stream(
         system, is_decision=is_decision,
         enabled=settings.assist_next_callout_enabled,
     )
+    system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
+        system, enabled=settings.assist_problem_solving_enabled,
+    )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
@@ -3046,7 +3103,9 @@ async def research_one(
         resp = await chat_until_nonempty(
             model_router.chat,
             [
-                {"role": "system", "content": _RESEARCH_SYNTH_SYSTEM},
+                {"role": "system", "content": apply_problem_solving(  # §17.742
+                    _RESEARCH_SYNTH_SYSTEM,
+                    enabled=settings.assist_problem_solving_enabled)},
                 {"role": "user", "content": (
                     f"{ctx_block}"
                     f"Question: {question}\n\n"
