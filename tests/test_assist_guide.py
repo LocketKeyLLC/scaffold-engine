@@ -1652,3 +1652,41 @@ async def test_draft_step_failsoft_uses_request():
 async def test_draft_step_empty_request():
     out = await assist_guide.draft_step(request="   ")
     assert out["title"] and out["description"]            # never empty
+
+
+# ── §17.738 — per-step progress recap ───────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_summarize_step_progress_returns_recap():
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp(
+                          "GOAL: VM internet\nDONE: NAT set up\nOPEN: console blank\nCONTEXT: run on HOST"))):
+        out = await assist_guide.summarize_step_progress(
+            title="Configure networking",
+            transcript="Operator: apt fails\nAssistant: set up NAT\nOperator: done")
+    assert "GOAL:" in out and "DONE:" in out
+
+
+@pytest.mark.asyncio
+async def test_summarize_step_progress_empty_transcript_skips_llm():
+    with patch.object(assist_guide.model_router, "chat", new=AsyncMock()) as chat:
+        out = await assist_guide.summarize_step_progress(title="x", transcript="   ")
+    assert out == ""
+    chat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_summarize_step_progress_failsoft():
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(side_effect=RuntimeError("model down"))):
+        out = await assist_guide.summarize_step_progress(title="x", transcript="something")
+    assert out == ""
+
+
+def test_render_step_recap_block():
+    assert assist_guide.render_step_recap_block("") == ""
+    assert assist_guide.render_step_recap_block(None) == ""
+    b = assist_guide.render_step_recap_block("GOAL: x\nOPEN: y")
+    assert "Where we are on this step" in b
+    assert "GOAL: x" in b

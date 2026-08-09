@@ -831,6 +831,17 @@ class Settings(BaseSettings):
     assist_conversation_context_enabled: bool = True
     assist_conversation_context_turns: int = Field(default=6, ge=0, le=30)
     assist_conversation_context_max_chars: int = Field(default=4000, ge=0, le=20000)
+    # §17.738 — per-step running "progress recap". The 6-turn conversation
+    # window above loses the thread over a long troubleshooting step (observed:
+    # 37 turns on one step, engine re-suggesting resolved fixes and forgetting
+    # which machine commands run on). A recap distilled from the FULL node-scoped
+    # transcript (DB-backed) is injected into fix/guide/research AND surfaced to
+    # the operator, so both stay oriented. Refreshed only when the step's turn
+    # count grows by `assist_step_recap_every` since the last recap (cheap).
+    # Code default off (legacy + tests); live via compose.
+    assist_step_recap_enabled: bool = False
+    assist_step_recap_every: int = Field(default=3, ge=1, le=20)
+    assist_step_recap_min_turns: int = Field(default=4, ge=1, le=40)
     # §17.689 — multi-turn decision deliberation. A decision node whose
     # deliverable is a CONCRETE artifact (a VLAN table, a partition layout, a
     # config set) used to commit on the operator's FIRST partial answer ("3

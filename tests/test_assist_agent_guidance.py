@@ -966,3 +966,96 @@ async def test_add_step_rejects_bad_session():
     db.execute = AsyncMock(return_value=_result(None))
     with pytest.raises(ValueError, match="not found"):
         await assist_agent.add_step(session_id="nope", request="x", db=db)
+
+
+# ── §17.738 — per-step progress recap (agent-side caching + gating) ──────────
+
+
+@pytest.mark.asyncio
+async def test_get_step_recap_valve_off_returns_empty():
+    db = AsyncMock()
+    with patch.object(_settings, "assist_step_recap_enabled", False):
+        out = await assist_agent.get_step_recap(
+            session_id="s", node_key="ADD1", title="net", db=db)
+    assert out == ""
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_step_recap_uses_cache_when_not_grown():
+    # cached recap + turn count hasn't grown past the watermark → return cache,
+    # no LLM call.
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"progress_recap": "GOAL: cached", "progress_recap_turns": 10}),  # step row
+        _result_all([{"role": "operator", "content": "x"}] * 11),                 # 11 turns
+    ])
+    with patch.object(_settings, "assist_step_recap_enabled", True), \
+         patch.object(_settings, "assist_step_recap_every", 3), \
+         patch.object(_settings, "assist_step_recap_min_turns", 4), \
+         patch("app.modules.assist_guide.summarize_step_progress",
+               new=AsyncMock()) as summ:
+        out = await assist_agent.get_step_recap(
+            session_id="s", node_key="ADD1", title="net", db=db)
+    assert out == "GOAL: cached"
+    summ.assert_not_called()   # 11 < watermark(10)+every(3)=13
+
+
+@pytest.mark.asyncio
+async def test_get_step_recap_refreshes_when_grown():
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"progress_recap": "GOAL: stale", "progress_recap_turns": 4}),   # step row
+        _result_all([{"role": "operator", "content": f"m{i}"} for i in range(20)]),  # 20 turns
+        _result(None),   # UPDATE recap
+    ])
+    db.commit = AsyncMock()
+    with patch.object(_settings, "assist_step_recap_enabled", True), \
+         patch.object(_settings, "assist_step_recap_every", 3), \
+         patch.object(_settings, "assist_step_recap_min_turns", 4), \
+         patch("app.modules.assist_guide.summarize_step_progress",
+               new=AsyncMock(return_value="GOAL: fresh recap")) as summ:
+        out = await assist_agent.get_step_recap(
+            session_id="s", node_key="ADD1", title="net", db=db)
+    assert out == "GOAL: fresh recap"
+    summ.assert_awaited_once()
+    # the refreshed recap + new watermark were written
+    upd = [c for c in db.execute.await_args_list if "progress_recap = :r" in str(c.args[0])]
+    assert upd and upd[0].args[1]["n"] == 20
+
+
+@pytest.mark.asyncio
+async def test_get_step_recap_below_min_turns_no_refresh():
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result({"progress_recap": None, "progress_recap_turns": 0}),
+        _result_all([{"role": "operator", "content": "x"}] * 2),   # only 2 turns
+    ])
+    with patch.object(_settings, "assist_step_recap_enabled", True), \
+         patch.object(_settings, "assist_step_recap_min_turns", 4), \
+         patch("app.modules.assist_guide.summarize_step_progress",
+               new=AsyncMock()) as summ:
+        out = await assist_agent.get_step_recap(
+            session_id="s", node_key="ADD1", title="net", db=db)
+    assert out == ""            # nothing cached, too early to summarize
+    summ.assert_not_called()
+
+
+def test_render_node_transcript_dedups_and_labels():
+    turns = [
+        {"role": "operator", "content": "apt fails"},
+        {"role": "assistant", "content": "set up NAT"},
+        {"role": "operator", "content": "pasted"},   # message
+        {"role": "operator", "content": "pasted"},   # submit dup → collapsed
+    ]
+    out = assist_agent._render_node_transcript(turns)
+    assert out.count("Operator: pasted") == 1
+    assert "Assistant: set up NAT" in out
+
+
+def test_with_step_recap_orders_recap_first():
+    out = assist_agent._with_step_recap("Recent conversation: hi", "GOAL: x")
+    assert out.index("Where we are on this step") < out.index("Recent conversation")
+    # either part empty is fine
+    assert assist_agent._with_step_recap("", "GOAL: x").strip()
+    assert assist_agent._with_step_recap("convo", "").strip() == "convo"

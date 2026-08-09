@@ -339,6 +339,11 @@ services:
       # overrides a false block. Code defaults stay off (legacy + tests).
       ASSIST_BLOCK_ON_FAILED_VERIFY: "${ASSIST_BLOCK_ON_FAILED_VERIFY:-true}"
       ASSIST_BLOCK_ON_INCOMPLETE_VERIFY: "${ASSIST_BLOCK_ON_INCOMPLETE_VERIFY:-true}"
+      # §17.738 — running per-step progress recap so long troubleshooting steps
+      # stay coherent (the 6-turn window loses the thread). Injected into
+      # fix/guide/research from the full node transcript; cached, refreshed
+      # every few turns. Code default off (tests); live here.
+      ASSIST_STEP_RECAP_ENABLED: "${ASSIST_STEP_RECAP_ENABLED:-true}"
     env_file:
       - .env
     volumes:

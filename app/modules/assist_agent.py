@@ -725,6 +725,9 @@ async def generate_step_guidance(
         history=history, session_id=session_id, db=db, exclude_tail=refine,
     )
     conversation = _conversation_block_for(history)  # §17.687
+    conversation = _with_step_recap(  # §17.738 — full-thread recap of THIS step
+        conversation, await get_step_recap(
+            session_id=session_id, node_key=nk, title=ctx.title, db=db))
 
     res = await assist_guide.ensure_guidance(
         session_id=session_id,
@@ -820,6 +823,9 @@ async def generate_step_guidance_stream(
         history=history, session_id=session_id, db=db, exclude_tail=refine,
     )
     conversation = _conversation_block_for(history)  # §17.687
+    conversation = _with_step_recap(  # §17.738
+        conversation, await get_step_recap(
+            session_id=session_id, node_key=nk, title=ctx.title, db=db))
 
     # §17.726 — tee the streamed walkthrough so the assembled reply lands in the
     # transcript once the stream completes (fresh generations only).
@@ -923,6 +929,10 @@ async def run_step_research(
     conversation = _conversation_block_for(history)  # §17.687
     if conversation:
         context_parts.append(conversation)
+    recap_block = assist_guide.render_step_recap_block(  # §17.738
+        await get_step_recap(session_id=session_id, node_key=nk, title=nk or "", db=db))
+    if recap_block:
+        context_parts.append(recap_block)
     job_context = "\n\n".join(context_parts) or None
 
     res = await assist_guide.research_one(
@@ -996,6 +1006,11 @@ async def run_step_fix(
     history = await _history_or_transcript(
         history=history, session_id=session_id, db=db, exclude_tail=error,
     )
+    # §17.738 — full-thread recap of THIS step so a long troubleshooting
+    # marathon stays coherent (the 6-turn window loses it).
+    _fix_convo = _with_step_recap(
+        _conversation_block_for(history),
+        await get_step_recap(session_id=session_id, node_key=nk, title=ctx.title, db=db))
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
@@ -1005,7 +1020,7 @@ async def run_step_fix(
         domain=node_row.get("domain"),
         verbosity=verbosity,
         job_digest=job_digest,
-        conversation=_conversation_block_for(history),  # §17.687
+        conversation=_fix_convo,  # §17.687 + §17.738 recap
     )
     # §17.726 — record the corrective steps the engine gave the operator.
     if (res.get("fix") or "").strip():
@@ -1193,6 +1208,18 @@ def _conversation_block_for(history: list[dict] | None) -> str:
     except Exception as exc:  # noqa: BLE001 — never block the turn on a render
         logger.warning("assist_conversation_block_failed job_id_unknown: %s", exc)
         return ""
+
+
+def _with_step_recap(conversation: str, recap: str) -> str:
+    """§17.738 — prepend the running step recap to the conversation block so it
+    leads the recall context in guidance/fix prompts. Either part may be ""; the
+    recap comes FIRST (the load-bearing full-thread state) so a budget trim on
+    the conversation tail never drops it."""
+    from app.modules import assist_guide
+
+    block = assist_guide.render_step_recap_block(recap)
+    parts = [p for p in (block, conversation) if (p or "").strip()]
+    return "\n\n".join(parts)
 
 
 async def _job_digest_for(
@@ -2118,6 +2145,108 @@ async def list_turns(*, session_id: str, limit: int = 200, db) -> list[dict]:
         {"sid": session_id, "lim": int(limit)},
     )).mappings().all()
     return [dict(r) for r in rows]
+
+
+# ── Per-step progress recap (§17.738 — coherence over a long step) ──────────
+
+
+def _render_node_transcript(turns: list[dict], *, max_chars: int = 12000) -> str:
+    """§17.738 — render node-scoped turns into a compact transcript for the
+    recap summarizer. Operator/assistant labeled; message+submit double-records
+    collapsed; keeps the MOST RECENT within budget (drops oldest)."""
+    lines: list[str] = []
+    prev = None
+    for t in turns:
+        content = (t.get("content") or "").strip()
+        if not content:
+            continue
+        role = "Assistant" if (t.get("role") == "assistant") else "Operator"
+        sig = (role, content)
+        if sig == prev:
+            continue
+        prev = sig
+        if len(content) > 1500:  # a long assistant walkthrough — keep the head
+            content = content[:1500].rstrip() + " …"
+        lines.append(f"{role}: {content}")
+    # keep most-recent within budget
+    kept: list[str] = []
+    total = 0
+    for ln in reversed(lines):
+        if kept and total + len(ln) + 2 > max_chars:
+            break
+        kept.append(ln)
+        total += len(ln) + 2
+    kept.reverse()
+    return "\n\n".join(kept)
+
+
+async def get_step_recap(
+    *, session_id: str, node_key: str | None, title: str = "", db,
+) -> str:
+    """§17.738 — return the running progress recap for a step, refreshing it from
+    the full node-scoped transcript when it has grown by
+    ``assist_step_recap_every`` turns since the last recap (else return the
+    cached one). Gated on ``assist_step_recap_enabled``; fail-soft → "" so every
+    caller can thread it unconditionally.
+
+    This is what keeps fix/guide/research coherent over a long troubleshooting
+    step: the 6-turn window (§17.687) loses the thread; this recap is distilled
+    from the WHOLE step transcript (DB-backed, survives restarts) and cached."""
+    from app.config import settings
+    from app.modules import assist_guide
+
+    if not (settings.assist_step_recap_enabled and node_key):
+        return ""
+    try:
+        step = (await db.execute(
+            text("""
+                SELECT progress_recap, progress_recap_turns
+                  FROM assist_steps WHERE session_id = :sid AND node_key = :nk
+            """),
+            {"sid": session_id, "nk": node_key},
+        )).mappings().first()
+        if not step:
+            return ""
+        turns = (await db.execute(
+            text("""
+                SELECT role, content FROM assist_turns
+                 WHERE session_id = :sid AND node_key = :nk AND kind <> 'skip'
+                 ORDER BY created_at, id
+            """),
+            {"sid": session_id, "nk": node_key},
+        )).mappings().all()
+        n = len(turns)
+        cached = (step.get("progress_recap") or "").strip()
+        watermark = int(step.get("progress_recap_turns") or 0)
+        # Not enough history yet, or not grown enough since the last recap → use
+        # the cache (which may be "").
+        if n < int(settings.assist_step_recap_min_turns):
+            return cached
+        if cached and n < watermark + int(settings.assist_step_recap_every):
+            return cached
+        transcript = _render_node_transcript([dict(t) for t in turns])
+        recap = await assist_guide.summarize_step_progress(
+            title=title or node_key, transcript=transcript,
+        )
+        if not recap:
+            return cached
+        await db.execute(
+            text("""
+                UPDATE assist_steps
+                   SET progress_recap = :r, progress_recap_turns = :n, updated_at = NOW()
+                 WHERE session_id = :sid AND node_key = :nk
+            """),
+            {"r": recap, "n": n, "sid": session_id, "nk": node_key},
+        )
+        await db.commit()
+        logger.info(
+            "assist_step_recap_refreshed session_id=%s node_key=%s turns=%d",
+            session_id, node_key, n,
+        )
+        return recap
+    except Exception as e:  # noqa: BLE001 — recap must never break the turn
+        logger.debug("get_step_recap_failed session_id=%s err=%r", session_id, e)
+        return ""
 
 
 # ── Submit / commit human evidence ───────────────────────────────────────

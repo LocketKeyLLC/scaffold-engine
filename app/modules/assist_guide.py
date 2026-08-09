@@ -1768,6 +1768,74 @@ async def distill_facts(
     }
 
 
+# ── Per-step progress recap (§17.738 — stay coherent over a long step) ──────
+
+_STEP_RECAP_SYSTEM = (
+    "You keep a running recap of ONE step of a hands-on build, so the assistant "
+    "and the operator don't lose the thread over a long back-and-forth. You are "
+    "given the step's goal and the full transcript of work on it (operator "
+    "messages + the assistant's replies). Write a SHORT recap with these labels, "
+    "omitting any that are empty:\n"
+    "GOAL: one line — what this step must achieve (its done-condition).\n"
+    "DONE: sub-tasks already resolved in this step (bullet fragments).\n"
+    "OPEN: what's still blocking / not yet working (bullet fragments) — be "
+    "specific about the CURRENT blocker.\n"
+    "CONTEXT: key state that's easy to lose — especially WHICH machine the next "
+    "commands run on (host vs the VM/guest), IPs, filenames, and values already "
+    "chosen.\n"
+    "Ground ONLY in the transcript; never invent progress. Be terse (a compact "
+    "status board, not prose). If almost nothing has happened yet, a one-line "
+    "GOAL is enough."
+)
+
+
+async def summarize_step_progress(
+    *, title: str, transcript: str, role: str = "model_general",
+) -> str:
+    """§17.738 — a compact running recap of one step from its full transcript,
+    so fix/guide/research stay on-thread over a long troubleshooting marathon
+    (the 6-turn window loses it). Reasoning task → ``model_general``. Fail-soft
+    → "" so callers thread it unconditionally."""
+    if not (transcript or "").strip():
+        return ""
+    try:
+        resp = await chat_until_nonempty(
+            model_router.chat,
+            [
+                {"role": "system", "content": _STEP_RECAP_SYSTEM},
+                {"role": "user", "content": (
+                    f"Step goal: {title}\n\n"
+                    f"Transcript of work on this step (oldest first):\n{transcript[:12000]}\n\n"
+                    "Write the recap."
+                )},
+            ],
+            {"role": role},
+            temperature=0.1,
+            max_tokens=2048,   # thinking model clears reasoning before the recap
+            draws=2,
+            label="assist_step_recap",
+        )
+    except Exception as exc:  # noqa: BLE001 — a recap must never break the turn
+        logger.warning("assist_summarize_step_progress_failed: %s", exc)
+        return ""
+    if resp and resp.success:
+        return (resp.text or "").strip()[:2000]
+    return ""
+
+
+def render_step_recap_block(recap: str | None) -> str:
+    """§17.738 — the running recap as a prompt block. The assistant grounds on it
+    so it doesn't re-suggest resolved fixes or forget which machine we're on."""
+    r = (recap or "").strip()
+    if not r:
+        return ""
+    return (
+        "## Where we are on this step (running recap — ground on this; do NOT "
+        "re-suggest anything under DONE, and keep straight which machine the "
+        "next commands run on)\n" + r
+    )
+
+
 # ── Draft an inserted step (§17.736 — turn a foundational gap into a step) ──
 
 _DRAFT_STEP_TOOL = model_router.Tool(
