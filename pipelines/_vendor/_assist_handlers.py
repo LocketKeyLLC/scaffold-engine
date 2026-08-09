@@ -1786,6 +1786,7 @@ def assist_replan_confirm(
         return
     revised = d.get("revised") or []
     dropped = d.get("dropped") or []
+    reopened = d.get("reopened") or []  # §17.747
     parts = ["✅ Plan updated."]
     if revised:
         parts.append(
@@ -1794,8 +1795,17 @@ def assist_replan_confirm(
         )
     if dropped:
         parts.append(f"Dropped {', '.join(dropped)}.")
-    if not revised and not dropped:
-        parts.append("No pending steps needed changing after all.")
+    if reopened:
+        # §17.747 — the operator's change undid these completed steps; they're
+        # back to pending so their stale result no longer misleads later steps.
+        parts.append(
+            f"Reopened {', '.join(reopened)} — your change undid "
+            f"{'them' if len(reopened) != 1 else 'it'}, so "
+            f"{'they' if len(reopened) != 1 else 'it'} will be redone "
+            f"(prior result kept on the friction log)."
+        )
+    if not revised and not dropped and not reopened:
+        parts.append("No steps needed changing after all.")
     parts.append("Say _\"next\"_ to continue.")
     yield " ".join(parts)
 
@@ -2709,15 +2719,29 @@ def _render_replan_surface(affected: list, *, lead: str | None = None) -> str:
     plan change affects (drop/revise + why), then ask for a yes/no. Shared by the
     note path and the §17.693 semantic-pivot path so both read identically."""
     n = len([p for p in (affected or []) if isinstance(p, dict)])
-    lines = [
-        lead or (f"This affects **{n}** pending step{'s' if n != 1 else ''}:"),
-        "",
-    ]
+    # §17.747 — a reopen sends an ALREADY-DONE step back to pending (redo it), so
+    # the generic "pending step(s)" lead would misdescribe it. Adjust the wording
+    # when any reopen is present.
+    has_reopen = any(
+        isinstance(p, dict) and p.get("action") == "reopen" for p in (affected or [])
+    )
+    if has_reopen:
+        default_lead = (
+            f"This affects **{n}** step{'s' if n != 1 else ''} — including "
+            f"completed work that your change undoes:"
+        )
+    else:
+        default_lead = f"This affects **{n}** pending step{'s' if n != 1 else ''}:"
+    lines = [lead or default_lead, ""]
+    _ACT_LABEL = {
+        "drop": "drop",
+        "reopen": "reopen — redo this completed step",
+    }
     for p in (affected or []):
         if not isinstance(p, dict):
             continue
         nk = p.get("node_key", "?")
-        act = "drop" if p.get("action") == "drop" else "revise"
+        act = _ACT_LABEL.get(p.get("action"), "revise")
         assumption = (p.get("current_assumption") or "").strip()
         change = (p.get("proposed_change") or "").strip()
         head = f"- **{nk}** ({act})"

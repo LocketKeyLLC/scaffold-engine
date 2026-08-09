@@ -3351,6 +3351,11 @@ async def detect_reroute(
     try:
         impact = await assist_replan.analyze_note_impact(
             db=db, job_id=job_id, note_text=message, note_kind="decision",
+            # §17.747 — a pivot can also invalidate ALREADY-DONE steps (e.g.
+            # "delete the VM and recreate it" undoes the Ubuntu install / network
+            # config on the old VM). Let the analyzer propose reopening them so
+            # their stale "done" output stops leading the prompt as MANDATORY.
+            include_done_reopen=settings.assist_pivot_reopen_enabled,
         )
     except Exception as e:  # noqa: BLE001 — never trap the turn on analysis
         logger.warning("detect_reroute_failed session_id=%s err=%r", session_id, e)
@@ -3424,6 +3429,21 @@ async def apply_pending_replan(
             db=db, session_id=session_id, job_id=str(sess["job_id"]),
             proposals=pending.get("proposals") or [],
         )
+        # §17.747 — a reopened node's prior output is nulled on dag_nodes, but the
+        # operator's original submission is real history worth keeping. Preserve
+        # it on the step's friction trail (also recoverable from assist_turns) so
+        # the reopen is auditable and the redo starts informed.
+        for nk, prior in (result.get("reopened_prior") or {}).items():
+            if (prior or "").strip():
+                try:
+                    await record_friction(
+                        session_id=session_id, node_key=nk,
+                        note=("Reopened after operator pivot — prior result "
+                              f"(preserved): {prior.strip()[:600]}"),
+                        db=db,
+                    )
+                except Exception as e:  # noqa: BLE001 — preservation is best-effort
+                    logger.warning("reopen_friction_preserve_failed nk=%s err=%r", nk, e)
         summary = {"applied": True, **result}
     else:
         summary = {"applied": False, "discarded": True}

@@ -885,6 +885,15 @@ class Settings(BaseSettings):
     # the §17.677 impact analyzer; if it invalidates steps, the engine surfaces a
     # re-plan instead. Fail-soft + dry-run (no side effects when nothing's hit).
     assist_pivot_detect_enabled: bool = True
+    # §17.747 — on a detected PIVOT, also let the impact analyzer propose
+    # REOPENING already-done nodes whose result the pivot destroyed (e.g. "delete
+    # VM 100 and recreate" undoes the Ubuntu install + network config on the old
+    # VM). Surface-and-ask: the operator confirms via /replan/apply before any
+    # finished work is reset. Reopening resets the node to pending so its stale
+    # "done" output stops leading the prompt as MANDATORY upstream context.
+    # Code-default OFF (fresh installs / tests keep the pending-only behavior);
+    # live via compose ASSIST_PIVOT_REOPEN_ENABLED=true.
+    assist_pivot_reopen_enabled: bool = False
     # §17.492 — deterministic scan of generated walkthroughs / fixes for
     # high-confidence destructive commands (rm -rf, dd, mkfs, DROP TABLE, force
     # push, …); matches are surfaced as a prominent "review before running"
