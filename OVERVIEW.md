@@ -22049,6 +22049,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.739 Verify — live OWUI-path e2e of the §17.738 per-step recap: multi-sub-problem thread stays coherent, no re-suggesting resolved fixes (2026-08-08)
+
+**What.** Drove the real pipe (:9099, `/assist` start on a scratch "bring a VM online" job) through a multi-sub-problem troubleshooting thread — no-internet → NAT fixed → DNS fixed → port-8080 conflict (7 turns on one step, past the recap threshold) — then asked for orientation and a fix. Cascade-deleted after. No code changes — records the §17.738 verification on the OWUI transport.
+
+**Results.** (1) The recap cached from the thread: `GOAL: VM online + apt update / DONE: NAT enabled, VM pings 8.8.8.8 / OPEN: (current blocker) / CONTEXT: exact iptables cmd, guest type, which machine`. (2) A `/fix` on the current problem grounded on it: opened "We're here: VM 100 has internet, DNS works, apt update succeeds — the only thing stopping us is port 8080", focused ONLY on the open problem, did NOT re-suggest the resolved NAT/DNS fixes, and ran commands inside the VM (correct machine) — the exact "losing its place" behavior, fixed. Confirmed the recap (long-thread) + the §17.687 recent-window (freshest turns) complement each other — the response reflected the latest state even when the cached recap lagged a few turns. Bonus: "where are we?" routed to `/assist status` and coherently listed resolved+open from the facts ledger. Scratch job cascade-deleted; the P40 session intact (active, at ADD1, 37-turn recap cached).
+
+---
+
 ### §17.738 Fix — assist "loses its place and doesn't explain" over a long step: a DB-backed per-step progress recap keeps fix/guide/research on-thread (2026-08-08)
 
 **Report + evidence.** Operator: "it again appears to be losing its place and not properly explaining … please look into a comprehensive and complete solution." Traced the live P40 session (`c308ae02`): **37 turns on one step (ADD1)** spanning many sub-problems (NAT, serial console, qemu-guest-agent, apt enterprise repo, secure boot) — and at turn 258 the operator had to say *"that was what you were helping me fix"*, at 252 they circled back to the apt-repo problem from turn 226. **Mechanism (measured):** the fix/guide/research paths only ever see a **6-turn conversation window** (§17.687, `assist_conversation_context_turns`); on a 37-turn step that's ~16% of the thread, so the engine re-suggested resolved fixes, forgot which machine commands run on (host vs VM), and couldn't orient the operator. This is the systemic root behind the recurring "not following" reports on long steps, not another narrow misroute.
