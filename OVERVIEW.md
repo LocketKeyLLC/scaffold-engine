@@ -22049,6 +22049,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.740 Fix — `/assist next` (and submit/skip/…) demanded a session id in the operator's chat: slash subcommands now use the same chat_id-independent work fallback the NL path does (2026-08-08)
+
+**Report + evidence.** Operator: "I did `/assist next` in the same chat and it requires the job id." The NL turns had been resolving the session fine, but the SLASH subcommand didn't. Root cause: `_assist_handlers.resolve_session_id` (used by every `/assist <sub>`) resolved only via `explicit UUID > chatmap recall (chat_id)`. This host's OWUI sends **no chat_id** (long-standing — §17.539), so the chatmap is always empty and `/assist next` fell to `no_session_msg` ("pass a session id") — even though exactly ONE session was active and both the NL path (`_active_assist_session` → `_sole_active_session_via_work`, §17.646) and the top-level `/next` (§17.562) already resume it DB-side. The slash subcommands were the one path never wired to that fallback.
+
+**Fix.** `resolve_session_id` gains a third tier: explicit UUID > chatmap > `pipe._sole_active_session_via_work()` (returns None unless EXACTLY one session is active → no ambiguity; fail-soft). That fixes `/assist next|guide|research|status|checklist|pause|resume|done`. For `/assist submit|skip` (which also need a node_key), a SEPARATE `_slash_recall_node_key` adds the same work fallback (sole active session's `current_node_key`) — kept distinct from the shared `_recall_node_key` so the NL path's deliberate "no node → advance" behavior (`test_submit_without_node_key_pulls_next`) is unchanged.
+
+**Verification. LIVE (load-bearing):** through the real pipe, `/assist next` with NO id and NO chat_id → "↩️ Picking up your current step" → presented ADD1 (the operator's actual networking step, Step 14 of 22) with the §17.738 recap context — no "requires session id". Units (+9, `test_assist_slash_session_fallback.py`): explicit-UUID wins, chatmap wins over work, work fallback when both absent, None when zero active, fail-soft on work error, slash node-recall uses work fallback while the plain NL helper does NOT, and `/assist next` dispatch end-to-end resumes via the fallback. Full suite green; pipelines restarted (pipeline-only change). Note: this is the SLASH-command sibling of §17.646 (which fixed the NL path) — same DB-derived resolver, the last path that still demanded an explicit id.
+
+---
+
 ### §17.739 Verify — live OWUI-path e2e of the §17.738 per-step recap: multi-sub-problem thread stays coherent, no re-suggesting resolved fixes (2026-08-08)
 
 **What.** Drove the real pipe (:9099, `/assist` start on a scratch "bring a VM online" job) through a multi-sub-problem troubleshooting thread — no-internet → NAT fixed → DNS fixed → port-8080 conflict (7 turns on one step, past the recap threshold) — then asked for orientation and a fix. Cascade-deleted after. No code changes — records the §17.738 verification on the OWUI transport.

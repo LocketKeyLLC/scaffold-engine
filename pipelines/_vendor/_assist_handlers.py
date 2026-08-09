@@ -134,12 +134,31 @@ def assist_forget(pipe, chat_id: str | None) -> None:
 def resolve_session_id(
     pipe, args: list, chat_id: str | None,
 ) -> tuple[str | None, list]:
-    """If args[0] is UUID-shaped, pop and return it as session_id.
-    Otherwise look up via chat_id. Returns (session_id, remaining_args)."""
+    """Resolve the session id for a `/assist <sub>` command.
+
+    Order: explicit UUID arg > chatmap recall (chat_id) > §17.740 the single
+    active session from /work (DB-derived, chat_id-independent). Returns
+    (session_id, remaining_args).
+
+    §17.740 — this host's OWUI sends NO chat_id, so the chatmap recall always
+    returns None and every no-arg `/assist next|submit|guide|…` asked for an
+    explicit id — even though the NL path and top-level `/next` already resume
+    the sole active session via `_sole_active_session_via_work` (§17.646/562).
+    The slash subcommands were the one path left out. Falling back to the SAME
+    resolver (which returns None unless EXACTLY one session is active) closes
+    the gap without ambiguity — `/assist next` in the operator's chat now Just
+    Works."""
     if args and pipe._UUID_RE.match(args[0]):
         return args[0], args[1:]
     recalled = assist_recall(pipe, chat_id)
-    return ((recalled or {}).get("session_id"), args)
+    sid = (recalled or {}).get("session_id")
+    if not sid:
+        try:
+            work = pipe._sole_active_session_via_work()
+            sid = (work or {}).get("session_id")
+        except Exception as e:  # noqa: BLE001 — fallback must never break dispatch
+            pipe.logger.debug("resolve_session_id work-fallback failed: %s", e)
+    return sid, args
 
 
 def no_session_msg(sub: str) -> str:
@@ -587,11 +606,9 @@ def dispatch_assist_sub(
     if sub == "submit":
         if not sid:
             yield no_session_msg("submit"); return
-        # Node key: explicit arg > remembered last_node_key from chatmap.
-        node_key = rest[0] if rest else None
-        if not node_key:
-            recalled = assist_recall(pipe, chat_id)
-            node_key = (recalled or {}).get("last_node_key")
+        # Node key: explicit arg > remembered last_node_key (chatmap, then the
+        # §17.740 work fallback for this no-chat_id OWUI setup).
+        node_key = _slash_recall_node_key(pipe, chat_id, rest[0] if rest else None)
         if not node_key:
             yield (
                 "❌ No node specified and no recent step in chat memory. "
@@ -617,10 +634,7 @@ def dispatch_assist_sub(
     if sub == "skip":
         if not sid:
             yield no_session_msg("skip"); return
-        node_key = rest[0] if rest else None
-        if not node_key:
-            recalled = assist_recall(pipe, chat_id)
-            node_key = (recalled or {}).get("last_node_key")
+        node_key = _slash_recall_node_key(pipe, chat_id, rest[0] if rest else None)
         if not node_key:
             yield (
                 "❌ No node specified and no recent step in chat memory. "
@@ -1563,6 +1577,22 @@ def _recall_node_key(pipe, chat_id: str | None, node_key: str | None) -> str | N
     if node_key:
         return node_key
     return (assist_recall(pipe, chat_id) or {}).get("last_node_key")
+
+
+def _slash_recall_node_key(pipe, chat_id: str | None, node_key: str | None) -> str | None:
+    """§17.740 — node recall for `/assist submit|skip`: explicit arg > chatmap >
+    the sole active session's current step (DB-derived). The work fallback is
+    ONLY for the slash path (this no-chat_id OWUI setup); the NL path keeps its
+    'no node → advance' behavior, so this is deliberately separate from
+    ``_recall_node_key``."""
+    nk = _recall_node_key(pipe, chat_id, node_key)
+    if nk:
+        return nk
+    try:
+        return (pipe._sole_active_session_via_work() or {}).get("last_node_key")
+    except Exception as e:  # noqa: BLE001 — never break dispatch on the fallback
+        pipe.logger.debug("_slash_recall_node_key work-fallback failed: %s", e)
+        return None
 
 
 # Verbosity keyword heuristics (§17.627) — used when the classifier routes a
