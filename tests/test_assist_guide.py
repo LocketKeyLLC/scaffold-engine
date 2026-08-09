@@ -1724,6 +1724,30 @@ def test_render_step_recap_block():
     assert "GOAL: x" in b
 
 
+def test_render_step_recap_block_asserts_authority_over_stale_upstream():
+    # §17.746 — the recap is the authoritative CURRENT state; when a stale
+    # upstream/completed-step output (e.g. "Ubuntu installed") contradicts the
+    # recap's OPEN, the block tells the model to trust the recap. Without this,
+    # the MANDATORY upstream block wins and the engine pushes ahead on work that
+    # isn't actually done (the live "jumped to NVIDIA before Ubuntu was installed"
+    # retention failure).
+    b = assist_guide.render_step_recap_block("OPEN: Ubuntu not installed")
+    low = b.lower()
+    assert "authoritative" in low
+    assert "trust this recap" in low
+    assert "mandatory" in low  # explicitly overrides the MANDATORY upstream framing
+
+
+def test_step_recap_system_prompt_keeps_next_tool_neutral():
+    # §17.746 — the recap NEXT/OPEN must describe OBJECTIVES, not literal shell
+    # commands, so the walkthrough's prefer-GUI principle (§17.743) can pick the
+    # easiest tool instead of parroting the transcript's CLI.
+    sysp = assist_guide._STEP_RECAP_SYSTEM.lower()
+    assert "tool-neutral" in sysp
+    assert "not a literal shell command" in sysp or "never a literal shell command" in sysp
+    assert "do not copy command lines" in sysp
+
+
 # ── §17.741 operator-facing status panel + "do this next" callout ──────────
 
 

@@ -1785,15 +1785,23 @@ _STEP_RECAP_SYSTEM = (
     "GUI-only, offline-only, a login the operator doesn't have — PLUS approaches "
     "already tried and RULED OUT (don't retry them). One short fragment each; "
     "omit if there are none.\n"
-    "NEXT: one line — the single most immediate action to take now to move this "
-    "step forward (plain words, e.g. 'add the uplink NIC to vmbr0, then re-test "
-    "apt'). Omit only if the step is fully done.\n"
+    "NEXT: one line — the single most immediate action to take now, stated as an "
+    "OBJECTIVE in plain words: WHAT to achieve and WHY, NOT the specific command "
+    "to run. Describe the goal of the action (e.g. 'change VM 100's network card "
+    "to the Intel E1000 model so the installer detects it, then restart the "
+    "installer'), never a literal shell command line (do NOT write 'run "
+    "`qm set …`'). A later step chooses the easiest TOOL for this objective — "
+    "often a GUI — so the recap must stay tool-neutral and not bias it toward the "
+    "CLI. Omit only if the step is fully done.\n"
     "CONTEXT: key state that's easy to lose — especially WHICH machine the next "
     "commands run on (host vs the VM/guest), IPs, filenames, and values already "
     "chosen.\n"
     "Ground ONLY in the transcript; never invent progress. Be terse (a compact "
-    "status board, not prose). If almost nothing has happened yet, a one-line "
-    "GOAL is enough."
+    "status board, not prose). For OPEN and NEXT, describe blockers and "
+    "objectives in tool-neutral plain words — the exact shell commands live in "
+    "the transcript, not here; do NOT copy command lines into the recap (that "
+    "would wrongly anchor the next answer to the CLI when a GUI is easier). If "
+    "almost nothing has happened yet, a one-line GOAL is enough."
 )
 
 
@@ -1838,9 +1846,15 @@ def render_step_recap_block(recap: str | None) -> str:
     if not r:
         return ""
     return (
-        "## Where we are on this step (running recap — ground on this; do NOT "
-        "re-suggest anything under DONE, and keep straight which machine the "
-        "next commands run on)\n" + r
+        "## Where we are on this step (running recap — the AUTHORITATIVE current "
+        "state of the work; ground on this). It reflects what is TRUE RIGHT NOW, "
+        "including rework the operator has done. If an earlier completed-step / "
+        "upstream output above (even one marked MANDATORY) claims something is "
+        "already done, but this recap's OPEN says it is NOT yet working, TRUST "
+        "THIS RECAP — the operator likely redid or undid that work (e.g. rebuilt "
+        "a machine), so the older output is stale. Do NOT re-suggest anything "
+        "under DONE, do NOT push ahead to later work while an OPEN item blocks "
+        "it, and keep straight which machine the next commands run on.\n" + r
     )
 
 
