@@ -2725,6 +2725,7 @@ async def generate_fix(
     domain: Optional[str] = None,
     verbosity: str = "normal",
     job_digest: Optional[str] = None,
+    operator_notes: Optional[list[dict]] = None,
     conversation: Optional[str] = None,
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
@@ -2751,9 +2752,11 @@ async def generate_fix(
     parts = [ctx.assembled_prompt]
     if job_digest and job_digest.strip():   # §17.653 — project-wide context
         parts.append(job_digest.strip())
-    env_block = render_environment_block(environment)
-    if env_block:
-        parts.append(env_block)
+    # §17.745 — same unified session memory (facts + provided values + operator
+    # notes, with §17.714 reset supersession) that guide/ask/decision inject.
+    # Previously /fix rendered only the legacy env block (facts, no notes), so a
+    # captured pivot or tool preference never reached the fix walkthrough.
+    parts.extend(_render_memory_or_legacy(environment, operator_notes))
     if conversation and conversation.strip():  # §17.687 — recent back-and-forth
         parts.append(conversation.strip())
     parts.append(f"## Error the operator hit\n{error_text.strip()}")

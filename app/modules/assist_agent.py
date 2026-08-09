@@ -987,7 +987,7 @@ async def run_step_fix(
         raise ValueError("error text is empty")
     sess = (await db.execute(
         text("""
-            SELECT id, job_id, status, current_node_key, metadata
+            SELECT id, job_id, status, current_node_key, metadata, notes
               FROM assist_sessions WHERE id = :sid
         """),
         {"sid": session_id},
@@ -1013,6 +1013,14 @@ async def run_step_fix(
 
     environment = _environment_from_metadata(sess.get("metadata"))
     verbosity = _verbosity_from_metadata(sess.get("metadata"))
+    # §17.745 — the fix path was the last memory-blind injection site (§17.720
+    # closed guide/ask/decision but not fix). It fetched only `environment` and
+    # rendered the legacy env block, so the operator's captured notes/decisions —
+    # incl. an explicit pivot ("delete the VM and recreate from scratch") or an
+    # easiest-tool preference ("enable copy-paste instead of typing") — never
+    # reached the MOST-used assist path, and §17.714 reset supersession could
+    # not fire. Thread them so /fix honors the same session memory as /guide.
+    operator_notes = _coerce_notes(sess.get("notes"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
     job_digest = await _job_digest_for(  # §17.653 — troubleshooting is project-aware too
         db=db, job_id=job_id,
@@ -1036,6 +1044,7 @@ async def run_step_fix(
         domain=node_row.get("domain"),
         verbosity=verbosity,
         job_digest=job_digest,
+        operator_notes=operator_notes,  # §17.745 — /fix now sees notes + reset supersession
         conversation=_fix_convo,  # §17.687 + §17.738 recap
     )
     # §17.726 — record the corrective steps the engine gave the operator.

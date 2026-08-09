@@ -838,7 +838,39 @@ async def test_generate_fix_includes_error_and_env_in_prompt():
         )
     assert "permission denied" in captured["user"]
     assert "Error the operator hit" in captured["user"]
-    assert "Operator environment" in captured["user"]
+    # §17.745 — /fix now injects unified session memory (valve-aware) instead of
+    # the always-legacy env block. Assert the injected VALUE (the profile), which
+    # appears in both the legacy and unified blocks, so the test is valve-agnostic
+    # (pytest runs in the valve-on container — the §17.710d gotcha).
+    assert "Ubuntu" in captured["user"]
+
+
+@pytest.mark.asyncio
+async def test_generate_fix_threads_operator_notes_and_reset_supersession():
+    # §17.745 — /fix was memory-blind (no operator_notes, legacy env block, no
+    # §17.714 reset supersession). A captured pivot ("delete the VM and recreate
+    # from scratch") must now reach the fix prompt AND flip it into reset mode so
+    # the engine stops repairing the abandoned system.
+    captured = {}
+
+    async def _capture_chat(messages, **kw):
+        captured["user"] = messages[1]["content"]
+        return _resp("fixed steps")
+
+    with patch.object(assist_guide.settings, "assist_unified_memory_enabled", True), \
+         patch.object(assist_guide.settings, "assist_umem_inject", True), \
+         patch.object(assist_guide.model_router, "chat", new=_capture_chat):
+        await assist_guide.generate_fix(
+            ctx=_ctx("shell"), error_text="boot loop persists",
+            research=False, node_key="T14",
+            environment={"profile": "root@pve", "facts": ["VM 100 boots to GRUB"]},
+            operator_notes=[{"kind": "decision",
+                             "text": "delete the VM and recreate it from scratch"}],
+        )
+    # the operator's pivot reached the prompt …
+    assert "recreate it from scratch" in captured["user"]
+    # … and it flipped the memory block into §17.714 reset/supersession mode.
+    assert "CHANGED DIRECTION" in captured["user"]
 
 
 @pytest.mark.asyncio
