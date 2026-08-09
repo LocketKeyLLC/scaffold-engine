@@ -116,6 +116,48 @@ class TestAnalyzeNoteImpact:
             )
         assert out == {"affected": []}
 
+    async def test_pivot_reopen_filters_to_done_keys(self):
+        # §17.747 — with include_done_reopen, the analyzer also examines DONE
+        # nodes and proposes reopen. reopen is valid ONLY for a done node; a
+        # reopen tagged on a pending node (wrong status) is dropped, and a
+        # revise/drop tagged on a done node is dropped too.
+        pending = [{"node_key": "T14", "title": "Install NVIDIA driver", "description": None}]
+        done = [
+            {"node_key": "T13", "title": "Install Ubuntu", "output_text": "logged into VM"},
+            {"node_key": "ADD1", "title": "Networking", "output_text": "VM has internet"},
+        ]
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            _result(all_=pending),   # pending nodes
+            _result(all_=done),      # done nodes (include_done_reopen)
+            _result(first_=None),    # refined_brief
+        ])
+        resp = _resp({"affected": [
+            {"node_key": "T13", "action": "reopen",
+             "current_assumption": "Ubuntu installed", "proposed_change": "VM recreated"},
+            {"node_key": "T14", "action": "reopen"},   # pending → wrong status, dropped
+            {"node_key": "ADD1", "action": "revise"},  # done → wrong action, dropped
+        ]})
+        with patch("app.model_router.tool_call", AsyncMock(return_value=resp)):
+            out = await assist_replan.analyze_note_impact(
+                db=db, job_id=_JID, note_text="delete VM 100 and recreate it",
+                note_kind="decision", include_done_reopen=True,
+            )
+        assert [(p["node_key"], p["action"]) for p in out["affected"]] == [("T13", "reopen")]
+
+    async def test_pivot_reopen_off_ignores_done_nodes(self):
+        # Default (no pivot): done nodes are never fetched, reopen never proposed
+        # — the pending-only §17.677 behavior is byte-identical.
+        pending = [{"node_key": "T14", "title": "t", "description": None}]
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[_result(all_=pending), _result(first_=None)])
+        resp = _resp({"affected": [{"node_key": "T13", "action": "reopen"}]})
+        with patch("app.model_router.tool_call", AsyncMock(return_value=resp)):
+            out = await assist_replan.analyze_note_impact(
+                db=db, job_id=_JID, note_text="x", note_kind="decision",
+            )
+        assert out == {"affected": []}  # reopen ignored without include_done_reopen
+
 
 @pytest.mark.smoke
 class TestRecordPlanImpactTool:
@@ -123,7 +165,7 @@ class TestRecordPlanImpactTool:
         schema = assist_replan.RECORD_PLAN_IMPACT_TOOL.input_schema
         assert schema["required"] == ["affected"]
         item = schema["properties"]["affected"]["items"]
-        assert set(item["properties"]["action"]["enum"]) == {"revise", "drop"}
+        assert set(item["properties"]["action"]["enum"]) == {"revise", "drop", "reopen"}
         assert item["required"] == ["node_key", "action"]
 
     def test_tool_name(self):
@@ -146,7 +188,8 @@ class TestApplyNoteReplan:
             db=db, session_id=_SID, job_id=_JID,
             proposals=[{"node_key": "T5", "action": "drop"}],
         )
-        assert out == {"revised": [], "dropped": ["T5"]}
+        assert out == {"revised": [], "dropped": ["T5"],
+                       "reopened": [], "reopened_prior": {}}
         db.commit.assert_awaited_once()
 
     async def test_revise_appends_description_and_busts_guidance(self):
@@ -161,7 +204,8 @@ class TestApplyNoteReplan:
             proposals=[{"node_key": "T1", "action": "revise",
                         "proposed_change": "switch to passphrase LUKS"}],
         )
-        assert out == {"revised": ["T1"], "dropped": []}
+        assert out == {"revised": ["T1"], "dropped": [],
+                       "reopened": [], "reopened_prior": {}}
         # the description UPDATE carried the concrete change
         sqls = [str(c.args[0]) for c in db.execute.await_args_list]
         params = [c.args[1] for c in db.execute.await_args_list]
@@ -178,7 +222,31 @@ class TestApplyNoteReplan:
             db=db, session_id=_SID, job_id=_JID,
             proposals=[{"node_key": "T1", "action": "revise", "proposed_change": "x"}],
         )
-        assert out == {"revised": [], "dropped": []}
+        assert out == {"revised": [], "dropped": [],
+                       "reopened": [], "reopened_prior": {}}
+
+    async def test_reopen_resets_done_node_and_preserves_prior(self):
+        # §17.747 — reopen captures the prior output, resets the done node +
+        # its step to pending (so it drops from the done-only upstream block),
+        # and returns the prior for the caller to preserve.
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[
+            _result(all_=[{"node_key": "T13", "output_text": "logged into VM"}]),  # prior SELECT
+            _result(all_=[{"node_key": "T13"}]),   # dag_nodes UPDATE RETURNING
+            _result(),                              # assist_steps UPDATE
+        ])
+        db.commit = AsyncMock()
+        out = await assist_replan.apply_note_replan(
+            db=db, session_id=_SID, job_id=_JID,
+            proposals=[{"node_key": "T13", "action": "reopen",
+                        "proposed_change": "VM recreated"}],
+        )
+        assert out["reopened"] == ["T13"]
+        assert out["reopened_prior"] == {"T13": "logged into VM"}
+        sqls = [str(c.args[0]) for c in db.execute.await_args_list]
+        # dag_nodes reset guarded on status='done'; step reset to pending
+        assert any("status = 'pending'" in s and "output_text = NULL" in s for s in sqls)
+        assert any("AND status = 'done'" in s for s in sqls)
 
 
 # ── assess_note_impact (agent gate) ─────────────────────────────────────────

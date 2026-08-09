@@ -987,7 +987,7 @@ async def run_step_fix(
         raise ValueError("error text is empty")
     sess = (await db.execute(
         text("""
-            SELECT id, job_id, status, current_node_key, metadata
+            SELECT id, job_id, status, current_node_key, metadata, notes
               FROM assist_sessions WHERE id = :sid
         """),
         {"sid": session_id},
@@ -1013,6 +1013,14 @@ async def run_step_fix(
 
     environment = _environment_from_metadata(sess.get("metadata"))
     verbosity = _verbosity_from_metadata(sess.get("metadata"))
+    # §17.745 — the fix path was the last memory-blind injection site (§17.720
+    # closed guide/ask/decision but not fix). It fetched only `environment` and
+    # rendered the legacy env block, so the operator's captured notes/decisions —
+    # incl. an explicit pivot ("delete the VM and recreate from scratch") or an
+    # easiest-tool preference ("enable copy-paste instead of typing") — never
+    # reached the MOST-used assist path, and §17.714 reset supersession could
+    # not fire. Thread them so /fix honors the same session memory as /guide.
+    operator_notes = _coerce_notes(sess.get("notes"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
     job_digest = await _job_digest_for(  # §17.653 — troubleshooting is project-aware too
         db=db, job_id=job_id,
@@ -1036,6 +1044,7 @@ async def run_step_fix(
         domain=node_row.get("domain"),
         verbosity=verbosity,
         job_digest=job_digest,
+        operator_notes=operator_notes,  # §17.745 — /fix now sees notes + reset supersession
         conversation=_fix_convo,  # §17.687 + §17.738 recap
     )
     # §17.726 — record the corrective steps the engine gave the operator.
@@ -3342,6 +3351,11 @@ async def detect_reroute(
     try:
         impact = await assist_replan.analyze_note_impact(
             db=db, job_id=job_id, note_text=message, note_kind="decision",
+            # §17.747 — a pivot can also invalidate ALREADY-DONE steps (e.g.
+            # "delete the VM and recreate it" undoes the Ubuntu install / network
+            # config on the old VM). Let the analyzer propose reopening them so
+            # their stale "done" output stops leading the prompt as MANDATORY.
+            include_done_reopen=settings.assist_pivot_reopen_enabled,
         )
     except Exception as e:  # noqa: BLE001 — never trap the turn on analysis
         logger.warning("detect_reroute_failed session_id=%s err=%r", session_id, e)
@@ -3415,6 +3429,21 @@ async def apply_pending_replan(
             db=db, session_id=session_id, job_id=str(sess["job_id"]),
             proposals=pending.get("proposals") or [],
         )
+        # §17.747 — a reopened node's prior output is nulled on dag_nodes, but the
+        # operator's original submission is real history worth keeping. Preserve
+        # it on the step's friction trail (also recoverable from assist_turns) so
+        # the reopen is auditable and the redo starts informed.
+        for nk, prior in (result.get("reopened_prior") or {}).items():
+            if (prior or "").strip():
+                try:
+                    await record_friction(
+                        session_id=session_id, node_key=nk,
+                        note=("Reopened after operator pivot — prior result "
+                              f"(preserved): {prior.strip()[:600]}"),
+                        db=db,
+                    )
+                except Exception as e:  # noqa: BLE001 — preservation is best-effort
+                    logger.warning("reopen_friction_preserve_failed nk=%s err=%r", nk, e)
         summary = {"applied": True, **result}
     else:
         summary = {"applied": False, "discarded": True}

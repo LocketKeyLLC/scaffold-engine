@@ -220,6 +220,32 @@ left out. If genuinely nothing is affected, return an empty list. Call \
 record_plan_impact exactly once."""
 
 
+# §17.747 — pivot-triggered done-node reopening. Appended to the note-impact
+# prompt ONLY on a pivot (detect_reroute), so a routine note never risks
+# throwing away finished work. The asymmetry is deliberate: for PENDING nodes we
+# "err toward flagging" (a wrong revise is cheap to dismiss); for DONE nodes we
+# "err toward LEAVING DONE" (a wrong reopen sends the operator back to redo
+# real work). The classic trigger is "delete VM 100 and recreate it" — that
+# destroys everything installed/configured on the old VM, so those completed
+# steps are no longer true and must be reopened.
+_DONE_REOPEN_SUFFIX = """
+
+Separately: the operator's {kind} may also UNDO work that is ALREADY MARKED DONE \
+— e.g. deleting and recreating a machine destroys everything that was installed \
+or configured on the OLD machine, so those completed steps are no longer true. \
+Here are the steps already marked DONE, each with a short summary of what it \
+produced:
+{done_nodes}
+
+For each done step whose completed RESULT the {kind} destroys or invalidates (so \
+it would have to be redone from scratch), add an entry with action="reopen". Be \
+CONSERVATIVE — reopening throws finished work away and sends the operator back to \
+redo it. Only reopen a step when its result clearly no longer holds (the thing it \
+built or configured is gone or is being replaced). A done step about a DIFFERENT \
+resource the change does not touch (e.g. host-level setup when only a guest VM is \
+being rebuilt) stays DONE — do NOT reopen it. When unsure, leave it done."""
+
+
 RECORD_PLAN_IMPACT_TOOL = Tool(
     name="record_plan_impact",
     description=(
@@ -254,15 +280,21 @@ RECORD_PLAN_IMPACT_TOOL = Tool(
                             "description": (
                                 "For action='revise', the concrete change to "
                                 "make to the step. For action='drop', why it is "
-                                "no longer needed. One sentence."
+                                "no longer needed. For action='reopen', what the "
+                                "note destroyed so the completed step must be "
+                                "redone. One sentence."
                             ),
                         },
                         "action": {
                             "type": "string",
-                            "enum": ["revise", "drop"],
+                            "enum": ["revise", "drop", "reopen"],
                             "description": (
-                                "'drop' if the step is now unnecessary/impossible; "
-                                "'revise' if it should still happen but differently."
+                                "'drop' if a pending step is now "
+                                "unnecessary/impossible; 'revise' if a pending "
+                                "step should still happen but differently; "
+                                "'reopen' if an ALREADY-DONE step's result was "
+                                "destroyed/invalidated by the note and must be "
+                                "redone from scratch."
                             ),
                         },
                     },
@@ -278,12 +310,22 @@ RECORD_PLAN_IMPACT_TOOL = Tool(
 async def analyze_note_impact(
     *, db, job_id: str, note_text: str, note_kind: str,
     model_overrides: dict | None = None,
+    include_done_reopen: bool = False,
 ) -> dict:
     """§17.677 — ask whether a newly-raised note invalidates any pending node's
     plan. Returns ``{"affected": [{node_key, current_assumption, proposed_change,
     action}]}`` — only nodes the model flags, filtered to node_keys that are
     actually pending. Fail-soft: model error / no tool_call / no pending nodes →
     ``{"affected": []}`` so the note is still recorded and confirmed as before.
+
+    §17.747 — with ``include_done_reopen`` (set only on a PIVOT, via
+    ``detect_reroute``), ALSO examine already-DONE nodes and let the model
+    propose ``action='reopen'`` for any whose completed result the pivot
+    destroys (e.g. "delete VM 100 and recreate" undoes everything installed on
+    the old VM). Reopening a done node resets it to pending so its now-false
+    output stops being injected as MANDATORY upstream context. Conservative by
+    construction (see ``_DONE_REOPEN_SUFFIX``) and still surface-and-ask — the
+    operator confirms before any finished work is reset.
     """
     if not (note_text or "").strip():
         return {"affected": []}
@@ -299,13 +341,32 @@ async def analyze_note_impact(
         """),
         {"jid": job_id},
     )).mappings().all()
-    if not rows:
+    # §17.747 — done nodes are candidates for reopening on a pivot only.
+    done_rows = []
+    if include_done_reopen:
+        done_rows = (await db.execute(
+            text("""
+                SELECT node_key, title, output_text
+                  FROM dag_nodes
+                 WHERE job_id = :jid
+                   AND status = 'done'
+                 ORDER BY node_key
+            """),
+            {"jid": job_id},
+        )).mappings().all()
+    if not rows and not done_rows:
         return {"affected": []}
     pending_keys = {r["node_key"] for r in rows}
+    done_keys = {r["node_key"] for r in done_rows}
     nodes_block = "\n".join(
         f"- {r['node_key']}: {r['title']}"
         + (f" — {(r['description'] or '')[:240]}" if r["description"] else "")
         for r in rows
+    ) or "(none — every step is already done)"
+    done_block = "\n".join(
+        f"- {r['node_key']}: {r['title']}"
+        + (f" — produced: {(r['output_text'] or '')[:240]}" if r["output_text"] else "")
+        for r in done_rows
     )
     # Brief goals/constraints ground the model in the project's intent.
     brief = ""
@@ -337,6 +398,12 @@ async def analyze_note_impact(
         brief=brief,
         nodes=nodes_block[:6000],
     )
+    # §17.747 — on a pivot, append the done-node reopening section so the model
+    # can flag completed steps the pivot destroyed.
+    if done_rows:
+        msg += _DONE_REOPEN_SUFFIX.format(
+            kind=note_kind or "note", done_nodes=done_block[:6000],
+        )
     try:
         resp = await model_router.tool_call(
             messages=[{"role": "user", "content": msg}],
@@ -373,9 +440,16 @@ async def analyze_note_impact(
             continue
         nk = item.get("node_key")
         action = item.get("action")
-        # Drop hallucinated node_keys and any node the model tags that isn't
-        # actually pending — we only ever touch live, pending steps.
-        if nk not in pending_keys or action not in ("revise", "drop"):
+        # Drop hallucinated node_keys and mismatched actions. revise/drop only
+        # touch PENDING nodes; reopen (§17.747) only touches DONE nodes — a model
+        # that tags the wrong status is ignored so we never reset the wrong node.
+        if action in ("revise", "drop"):
+            if nk not in pending_keys:
+                continue
+        elif action == "reopen":
+            if nk not in done_keys:
+                continue
+        else:
             continue
         out.append({
             "node_key": nk,
@@ -394,14 +468,74 @@ async def apply_note_replan(
     ``drop`` → mark the node (and its step) skipped. ``revise`` → append the
     proposed change to the node's description (a persistent plan fix, not just
     transient guidance text) and bust the step's cached walkthrough so the next
-    /assist next regenerates it with the change in context. Every write is
-    guarded on ``dag_nodes.status = 'pending'`` so already-finished work is never
-    disturbed. Single transaction. Returns ``{"revised": [...], "dropped": [...]}``.
+    /assist next regenerates it with the change in context. §17.747 ``reopen`` →
+    reset an already-DONE node (its result destroyed by a pivot) back to pending,
+    returning its prior output so the caller can preserve it. drop/revise are
+    guarded on ``status='pending'`` and reopen on ``status='done'`` so the wrong
+    node is never touched. Single transaction. Returns ``{"revised", "dropped",
+    "reopened", "reopened_prior"}``.
     """
     revise_keys = [p["node_key"] for p in proposals if p.get("action") == "revise"]
     drop_keys = [p["node_key"] for p in proposals if p.get("action") == "drop"]
+    reopen_keys = [p["node_key"] for p in proposals if p.get("action") == "reopen"]
     dropped: list[str] = []
     revised: list[str] = []
+    reopened: list[str] = []
+    reopened_prior: dict[str, str] = {}
+
+    # §17.747 — reopen done nodes the pivot invalidated: capture the prior output
+    # (so the caller can preserve it), then reset the node + its step to pending.
+    # Guarded on status='done' so a concurrent change can never reset the wrong
+    # thing. Resetting to pending drops the node from fetch_upstream_outputs
+    # (done-only), so its now-false result stops being injected as MANDATORY
+    # upstream context — the structural fix the §17.746 recap-authority header
+    # only mitigated at the prompt level.
+    if reopen_keys:
+        prior = (await db.execute(
+            text("""
+                SELECT node_key, output_text FROM dag_nodes
+                 WHERE job_id = :jid AND node_key = ANY(:keys) AND status = 'done'
+            """),
+            {"jid": job_id, "keys": reopen_keys},
+        )).mappings().all()
+        reopened_prior = {r["node_key"]: (r["output_text"] or "") for r in prior}
+        res = (await db.execute(
+            text("""
+                UPDATE dag_nodes
+                   SET status = 'pending',
+                       output_text = NULL,
+                       completed_at = NULL,
+                       updated_at = NOW()
+                 WHERE job_id = :jid
+                   AND node_key = ANY(:keys)
+                   AND status = 'done'
+             RETURNING node_key
+            """),
+            {"jid": job_id, "keys": reopen_keys},
+        )).mappings().all()
+        reopened = [r["node_key"] for r in res]
+        if reopened:
+            await db.execute(
+                text("""
+                    UPDATE assist_steps
+                       SET status = 'pending',
+                           evidence = NULL,
+                           evidence_kind = NULL,
+                           evidence_meta = '{}'::jsonb,
+                           submitted_at = NULL,
+                           committed_at = NULL,
+                           replan_triggered = TRUE,
+                           guidance = NULL,
+                           guidance_meta = '{}'::jsonb,
+                           guidance_status = 'none',
+                           guidance_generated_at = NULL,
+                           updated_at = NOW()
+                     WHERE session_id = :sid
+                       AND node_key = ANY(:keys)
+                       AND status <> 'skipped'
+                """),
+                {"sid": session_id, "keys": reopened},
+            )
 
     if drop_keys:
         res = (await db.execute(
@@ -466,10 +600,13 @@ async def apply_note_replan(
 
     await db.commit()
     logger.info(
-        "assist_note_replan session_id=%s job_id=%s revised=%d dropped=%d",
-        session_id, job_id, len(revised), len(dropped),
+        "assist_note_replan session_id=%s job_id=%s revised=%d dropped=%d reopened=%d",
+        session_id, job_id, len(revised), len(dropped), len(reopened),
     )
-    return {"revised": revised, "dropped": dropped}
+    return {
+        "revised": revised, "dropped": dropped,
+        "reopened": reopened, "reopened_prior": reopened_prior,
+    }
 
 
 # ── Subgraph helpers ───────────────────────────────────────────────────────

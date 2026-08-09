@@ -355,6 +355,13 @@ services:
       # (commit to one path), match the operator's real capability. Recap gains
       # a CONSTRAINTS section (also shown in the panel). Code default off; live here.
       ASSIST_PROBLEM_SOLVING_ENABLED: "${ASSIST_PROBLEM_SOLVING_ENABLED:-true}"
+      # §17.747 — on a detected pivot, let the impact analyzer propose REOPENING
+      # already-done nodes the pivot destroyed (e.g. "delete VM 100 and recreate"
+      # undoes the guest-OS install / passthrough on the old VM). Surface-and-ask:
+      # the operator confirms before any finished work is reset. Reopening resets
+      # the node to pending so its stale "done" output stops leading later prompts
+      # as MANDATORY upstream context. Code default off (tests); live here.
+      ASSIST_PIVOT_REOPEN_ENABLED: "${ASSIST_PIVOT_REOPEN_ENABLED:-true}"
     env_file:
       - .env
     volumes:
