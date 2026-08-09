@@ -842,6 +842,20 @@ class Settings(BaseSettings):
     assist_step_recap_enabled: bool = False
     assist_step_recap_every: int = Field(default=3, ge=1, le=20)
     assist_step_recap_min_turns: int = Field(default=4, ge=1, le=40)
+    # §17.741 — surface the running recap to the OPERATOR as a "📍 Where we are"
+    # panel above each walkthrough (goal / done / open / next), so a first-timer
+    # can always see the engine holding the thread on a long problem-solving
+    # step. The panel is a presentation of the §17.738 recap, so enabling it
+    # also forces the recap to be computed (see get_step_recap) even if
+    # assist_step_recap_enabled is off. Code default off; live via compose.
+    assist_status_panel_enabled: bool = False
+    # §17.741 — lead each guide/fix turn with a "👉 Do this next" section: the
+    # single most-immediate action (one command / one concrete step), before the
+    # fuller walkthrough — so the operator's attention lands on what to do NOW.
+    # Prompt-level (a leading section the model emits); skipped for decision
+    # nodes (they suggest a choice, not an action). Code default off; live via
+    # compose.
+    assist_next_callout_enabled: bool = False
     # §17.689 — multi-turn decision deliberation. A decision node whose
     # deliverable is a CONCRETE artifact (a VLAN table, a partition layout, a
     # config set) used to commit on the operator's FIRST partial answer ("3

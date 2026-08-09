@@ -1780,6 +1780,9 @@ _STEP_RECAP_SYSTEM = (
     "DONE: sub-tasks already resolved in this step (bullet fragments).\n"
     "OPEN: what's still blocking / not yet working (bullet fragments) — be "
     "specific about the CURRENT blocker.\n"
+    "NEXT: one line — the single most immediate action to take now to move this "
+    "step forward (plain words, e.g. 'add the uplink NIC to vmbr0, then re-test "
+    "apt'). Omit only if the step is fully done.\n"
     "CONTEXT: key state that's easy to lose — especially WHICH machine the next "
     "commands run on (host vs the VM/guest), IPs, filenames, and values already "
     "chosen.\n"
@@ -1834,6 +1837,103 @@ def render_step_recap_block(recap: str | None) -> str:
         "re-suggest anything under DONE, and keep straight which machine the "
         "next commands run on)\n" + r
     )
+
+
+# ── Operator-facing status panel + "do this next" callout (§17.741) ─────────
+# The §17.738 recap above already distills a compact GOAL/DONE/OPEN/NEXT/CONTEXT
+# status board — but only into the MODEL's prompt. These helpers turn it into a
+# visible "📍 Where we are" panel the operator sees above each walkthrough, so a
+# long problem-solving step reads as tracked rather than lost, and mandate a
+# leading "👉 Do this next" section so the single immediate action draws the eye.
+
+_RECAP_LABELS = ("GOAL", "DONE", "OPEN", "NEXT", "CONTEXT")
+
+
+def _recap_add(out: dict[str, Any], field: str, text_: str) -> None:
+    text_ = text_.strip()
+    if not text_:
+        return
+    if field in ("done", "open"):
+        out[field].append(text_)
+    else:  # goal / next / context are single-valued
+        out[field] = (out[field] + " " + text_).strip() if out[field] else text_
+
+
+def parse_recap(recap: str | None) -> dict[str, Any]:
+    """§17.741 — parse a labeled recap into ``{goal, done[], open[], next,
+    context}``. The recap is line-oriented (``LABEL:`` leads a line, optionally
+    with inline text, then bullet fragments). Tolerant of markdown bullets,
+    missing labels, and free spacing. Blank/unparseable → empty fields; never
+    raises."""
+    out: dict[str, Any] = {"goal": "", "done": [], "open": [], "next": "", "context": ""}
+    r = (recap or "").strip()
+    if not r:
+        return out
+    current: Optional[str] = None
+    for raw_line in r.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        stripped = line.lstrip("#*-•> ").strip()
+        matched = None
+        for lab in _RECAP_LABELS:
+            up = stripped.upper()
+            if up.startswith(lab + ":") or up == lab:
+                matched = lab
+                # tolerate a bold label ("**GOAL:** x" → the "**" after the
+                # colon) as well as the plain "GOAL: x" the recap prompt emits.
+                rest = stripped[len(lab):].lstrip(": *").strip()
+                break
+        if matched is not None:
+            current = matched.lower()
+            if rest:
+                _recap_add(out, current, rest)
+            continue
+        if current:  # continuation / bullet under the current label
+            _recap_add(out, current, stripped)
+    return out
+
+
+def render_status_panel(recap: str | None) -> str:
+    """§17.741 — the operator-facing "📍 Where we are" panel, built from the
+    §17.738 recap. Returns "" unless the recap carries REAL progress (at least
+    one DONE / OPEN / NEXT item): a goal-only recap (turn 1, nothing done yet)
+    is not worth a panel and would just be noise. Never raises."""
+    p = parse_recap(recap)
+    if not (p["done"] or p["open"] or p["next"]):
+        return ""
+    lines = ["**📍 Where we are on this step**", ""]
+    if p["goal"]:
+        lines.append(f"- **Goal:** {p['goal']}")
+    if p["done"]:
+        lines.append("- ✅ **Done:** " + " · ".join(p["done"]))
+    if p["open"]:
+        lines.append("- ⬜ **Still open:** " + " · ".join(p["open"]))
+    if p["next"]:
+        lines.append("- 👉 **Next:** " + p["next"])
+    return "\n".join(lines) + "\n"
+
+
+_NEXT_CALLOUT_DIRECTIVE = (
+    "\n\nLEAD WITH THE ACTION: Begin your reply with a section titled exactly "
+    "`## 👉 Do this next` containing ONLY the single most immediate action the "
+    "operator should take right now — one command (in a fenced code block) or "
+    "one concrete step, copy-paste ready — plus a one-line 'then tell me what "
+    "it shows'. Keep it to a few lines. THEN continue with the full walkthrough "
+    "using the section headings defined above. Put nothing before the `## 👉 Do "
+    "this next` section, and do not invent a concrete value for it that the "
+    "task/context/research did not give you (use a <PLACEHOLDER> as elsewhere)."
+)
+
+
+def apply_next_callout(system: str, *, is_decision: bool, enabled: bool) -> str:
+    """§17.741 — append the 'lead with the immediate action' directive so a
+    walkthrough opens with a prominent 👉 Do this next callout. No-op for
+    decision nodes (the deliverable is a choice, not an action) and when the
+    valve is off."""
+    if not enabled or is_decision:
+        return system
+    return system + _NEXT_CALLOUT_DIRECTIVE
 
 
 # ── Draft an inserted step (§17.736 — turn a foundational gap into a step) ──
@@ -2494,6 +2594,10 @@ async def generate_guidance(
     system = apply_verbosity(
         guide_system_for_tool(ctx.tool, is_decision=is_decision), verbosity
     )
+    system = apply_next_callout(  # §17.741 — lead with the immediate action
+        system, is_decision=is_decision,
+        enabled=settings.assist_next_callout_enabled,
+    )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
@@ -2585,7 +2689,9 @@ async def generate_fix(
     resp = await chat_until_nonempty(
         model_router.chat,
         [
-            {"role": "system", "content": apply_verbosity(GUIDE_SYSTEM_FIX, verbosity)},
+            {"role": "system", "content": apply_next_callout(  # §17.741
+                apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
+                is_decision=False, enabled=settings.assist_next_callout_enabled)},
             {"role": "user", "content": user},
         ],
         {"role": role},
@@ -2783,6 +2889,10 @@ async def generate_guidance_stream(
 
     system = apply_verbosity(
         guide_system_for_tool(ctx.tool, is_decision=is_decision), verbosity
+    )
+    system = apply_next_callout(  # §17.741 — lead with the immediate action
+        system, is_decision=is_decision,
+        enabled=settings.assist_next_callout_enabled,
     )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
