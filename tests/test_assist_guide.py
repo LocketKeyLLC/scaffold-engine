@@ -1714,7 +1714,7 @@ def test_parse_recap_labeled_fields():
 
 def test_parse_recap_tolerates_markdown_and_empty():
     assert assist_guide.parse_recap("") == {
-        "goal": "", "done": [], "open": [], "next": "", "context": ""
+        "goal": "", "done": [], "open": [], "constraints": [], "next": "", "context": ""
     }
     assert assist_guide.parse_recap(None)["done"] == []
     # bold/heading/bullet prefixes on the label line still parse
@@ -1763,3 +1763,53 @@ def test_apply_next_callout_noop_when_disabled_or_decision():
 def test_step_recap_system_prompt_carries_next_label():
     # the recap now distills a NEXT action for the panel + model grounding
     assert "NEXT:" in assist_guide._STEP_RECAP_SYSTEM
+
+
+# ── §17.742 problem-solving discipline + recap CONSTRAINTS ─────────────────
+
+
+def test_parse_recap_captures_constraints():
+    recap = (
+        "GOAL: reset the ai-vm password\n"
+        "DONE: tried guestmount, virt-customize — both failed\n"
+        "CONSTRAINTS: no copy-paste in noVNC\n"
+        "- guest agent not running\n"
+        "NEXT: edit the GRUB boot entry to init=/bin/bash"
+    )
+    p = assist_guide.parse_recap(recap)
+    assert p["constraints"] == ["no copy-paste in noVNC", "guest agent not running"]
+    # CONSTRAINTS must not bleed into CONTEXT (shared 'CON' prefix)
+    assert p["context"] == ""
+    assert p["next"].startswith("edit the GRUB")
+
+
+def test_render_status_panel_shows_constraints():
+    recap = "GOAL: g\nOPEN: b\nCONSTRAINTS: no copy-paste\n- offline only\nNEXT: c"
+    out = assist_guide.render_status_panel(recap)
+    assert "⚠️ **Constraints:** no copy-paste · offline only" in out
+
+
+def test_render_status_panel_shows_when_only_constraints():
+    # constraints alone are worth surfacing even before other progress
+    out = assist_guide.render_status_panel("GOAL: g\nCONSTRAINTS: no copy-paste")
+    assert "⚠️ **Constraints:** no copy-paste" in out
+    assert out != ""
+
+
+def test_apply_problem_solving_appends_when_enabled():
+    base = "SYSTEM BODY"
+    out = assist_guide.apply_problem_solving(base, enabled=True)
+    assert out.startswith(base)
+    low = out.lower()
+    assert "honor the confirmed constraints" in low
+    assert "stop cycling" in low
+    assert "match the operator" in low
+
+
+def test_apply_problem_solving_noop_when_disabled():
+    base = "SYSTEM BODY"
+    assert assist_guide.apply_problem_solving(base, enabled=False) == base
+
+
+def test_step_recap_system_prompt_carries_constraints_label():
+    assert "CONSTRAINTS:" in assist_guide._STEP_RECAP_SYSTEM
