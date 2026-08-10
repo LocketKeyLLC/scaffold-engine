@@ -190,6 +190,59 @@ def test_shell_paste_routes_to_submit_without_classifier(pipe):
 
 
 @pytest.mark.smoke
+def test_last_assistant_was_fix_detection():
+    # §17.748 — detect a Troubleshooting fix from the rendered marker / banner.
+    assert _ah._last_assistant_was_fix(
+        [{"role": "assistant", "content": "## 🔧 Troubleshooting `T14`\n\nRun this…"}])
+    assert _ah._last_assistant_was_fix(
+        [{"role": "assistant", "content": "_🔧 Sounds like something went wrong — let me help…_"}])
+    # a normal guide walkthrough is NOT a fix; None/empty/user-only are safe
+    assert not _ah._last_assistant_was_fix(
+        [{"role": "assistant", "content": "## 🧭 How to do this step\napt update"}])
+    assert not _ah._last_assistant_was_fix(None)
+    assert not _ah._last_assistant_was_fix([{"role": "user", "content": "root@pve:~# ls"}])
+
+
+def _route_with_history(pipe, msg, history, *, recall_nk="T14"):
+    stubs = {"assist_submit": "SUBMIT", "assist_fix_cmd": "FIX", "assist_next": "ADVANCE"}
+    patchers = {name: MagicMock(side_effect=lambda *a, _s=s, **k: iter([_s]))
+                for name, s in stubs.items()}
+    with patch.object(_ah, "assist_recall",
+                      MagicMock(return_value={"last_node_key": recall_nk})), \
+         patch.object(_ah, "assist_interpret", MagicMock(side_effect=AssertionError)), \
+         patch.multiple(_ah, **patchers):
+        out = "".join(_ah.assist_nl_turn(
+            pipe, "s1", msg, node_key=recall_nk, chat_id="c1", history=history))
+    return out, patchers
+
+
+@pytest.mark.smoke
+def test_shell_paste_midfix_continues_fix_not_submit(pipe):
+    # §17.748 — the operator pasted output of a diagnostic the FIX asked them to
+    # run; continue the fix (specific next action), don't auto-submit and fire the
+    # "📝 Recording what you did… step not finished" verifier with generic advice.
+    paste = ("root@pve:~# pvesm list local --content iso\n"
+             "local:iso/ubuntu-26.04-live-server-amd64.iso iso 2918598656")
+    history = [{"role": "assistant",
+                "content": "## 🔧 Troubleshooting `T14`\n\nRun `pvesm list "
+                           "local --content iso` and tell me what it shows."}]
+    out, patchers = _route_with_history(pipe, paste, history)
+    assert "FIX" in out and "SUBMIT" not in out
+    args, _ = patchers["assist_fix_cmd"].call_args
+    assert paste.strip() in args[2]   # the diagnostic output feeds the fix
+
+
+@pytest.mark.smoke
+def test_shell_paste_after_guide_still_submits(pipe):
+    # Not mid-fix (last assistant was a guide) → §17.705 submit behavior holds.
+    paste = "root@pve:~# systemctl is-active nginx\nactive"
+    history = [{"role": "assistant",
+                "content": "## 🧭 How to do this step\nInstall and start nginx."}]
+    out, patchers = _route_with_history(pipe, paste, history, recall_nk="T5")
+    assert "SUBMIT" in out and "FIX" not in out
+
+
+@pytest.mark.smoke
 def test_checklist_request_routes_to_checklist_without_classifier(pipe):
     with patch.object(_ah, "assist_checklist_cmd",
                       side_effect=lambda *a, **k: iter(["CHECKLIST"])) as cl, \

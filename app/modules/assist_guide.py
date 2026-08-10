@@ -1990,7 +1990,18 @@ _PROBLEM_SOLVING_FRAMING = (
     "treat it as an INSTRUCTION: switch to it immediately and lead with it; do NOT "
     "explain why the current/CLI path is fine and then keep going down it. Web "
     "search results skewing toward CLI is likewise not a reason to hand back CLI — "
-    "mine them for the facts and re-express the procedure in the chosen tool."
+    "mine them for the facts and re-express the procedure in the chosen tool.\n"
+    "6. DON'T INVENT SYSTEM-SPECIFIC VALUES — VERIFY OR PLACEHOLDER. Never hardcode "
+    "a concrete filename, version number, path, disk, device/PCI id, or interface "
+    "name you have NOT actually seen in the operator's own output, facts, or recap "
+    "(e.g. an ISO like `ubuntu-24.04.1-live-server-amd64.iso`, a disk `/dev/sdX`, a "
+    "NIC `ens3`). These depend on THEIR system, not general knowledge, and a wrong "
+    "guess makes the whole command fail (exactly what happened when a made-up ISO "
+    "filename broke `qm create`). If you need such a value and it is not already "
+    "known, either (a) put a quick DISCOVERY step FIRST — list it (`pvesm list "
+    "local --content iso`, `lsblk`, `ip a`) and use the REAL result — or (b) write "
+    "it as a clearly-marked <PLACEHOLDER> and tell them exactly what to substitute. "
+    "For a one-shot command that fails on a wrong value, prefer discover-then-use."
 )
 
 

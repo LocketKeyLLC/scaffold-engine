@@ -768,6 +768,15 @@ class Pipeline:
         # "skip" / short clarifications stay below the bar (no extra LLM call).
         assist_pivot_min_words: int = 6
 
+        # §17.748 — when the operator pastes shell output while MID-FIX (the last
+        # assistant turn was a Troubleshooting fix that asked them to run a
+        # diagnostic and report back), treat it as a diagnostic REPLY that
+        # continues the fix, not a step submission that fires the "recording…
+        # step not finished, follow the runbook" verifier with generic advice.
+        # Precise conditions (shell paste + previous turn was a fix), so a normal
+        # step-completion paste still submits. Off → the pre-§17.748 behavior.
+        assist_fix_followup_enabled: bool = True
+
         # §17.633 — cross-chat assist continuity. OWUI sends no chat_id and a
         # NEW chat has no session marker in history, so neither the chatmap nor
         # the history-recovery path can find in-progress assist work started in
