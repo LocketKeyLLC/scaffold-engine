@@ -23,7 +23,7 @@ import json
 import logging
 import re
 import uuid as _uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional
 
 from sqlalchemy import text
@@ -652,6 +652,76 @@ async def _assemble_ctx_for_node(
     return dict(node_row), ctx
 
 
+# ── §17.751 — the single session-memory funnel ────────────────────────────
+
+
+@dataclass
+class GenerationMemory:
+    """The session-memory bundle EVERY operator-facing generation site injects.
+
+    Assembled in ONE place (``assemble_generation_memory``) so a new or edited
+    site cannot silently go memory-blind — the recurring failure mode the log
+    closed one site at a time (§17.650 digest, §17.687 history, §17.720 notes on
+    ask, §17.726 transcript rebuild, §17.738 recap, §17.745 notes on fix — each
+    titled "the LAST blind injection site"). Fields map to the params the
+    ``assist_guide.generate_*`` prompts expect; ``conversation`` already has the
+    step recap folded in via ``_with_step_recap``."""
+    environment: dict
+    verbosity: str
+    operator_notes: list[dict]
+    job_digest: str
+    history: list[dict]
+    recap: str
+    conversation: str
+
+
+async def assemble_generation_memory(
+    *, session_id: str, nk: str, sess: dict, db,
+    ctx: "StepContext | None" = None,
+    exclude_tail: str | None = None,
+    history: list[dict] | None = None,
+    digest_excludes: set[str] | None = None,
+    title: str | None = None,
+) -> GenerationMemory:
+    """§17.751 — assemble the full session-memory bundle for a generation turn.
+
+    The one funnel for the sources generation prompts kept forgetting:
+    environment + distilled facts (§17.709), operator notes & additions
+    (§17.654), the whole-project completed-work digest (§17.650), the recent
+    dialogue — rebuilt from the durable transcript when the client sent none, e.g.
+    a cross-chat reconnect (§17.687/726) — and the running step recap (§17.738).
+    Every operator-facing generation path (guide / stream / fix / research /
+    decision) routes through this, so parity is structural, not per-site
+    convention. Fail-soft throughout (each source already degrades to ""/[] on
+    error), so the bundle is always safe to thread.
+
+    ``digest_excludes`` defaults to the current node plus its direct upstream (both
+    already in ``ctx.assembled_prompt``); pass ``set()`` for a whole-project view
+    (the research/ask side-query). ``title`` overrides the recap heading when the
+    caller has no ``ctx``.
+    """
+    environment = _environment_from_metadata(sess.get("metadata"))
+    verbosity = _verbosity_from_metadata(sess.get("metadata"))
+    operator_notes = _coerce_notes(sess.get("notes"))
+    if digest_excludes is None:
+        digest_excludes = {nk, *(ctx.upstream_outputs.keys() if ctx else ())}
+    job_digest = await _job_digest_for(
+        db=db, job_id=str(sess["job_id"]), exclude_node_keys=digest_excludes,
+    )
+    history = await _history_or_transcript(
+        history=history, session_id=session_id, db=db, exclude_tail=exclude_tail,
+    )
+    recap = await get_step_recap(
+        session_id=session_id, node_key=nk,
+        title=title or (ctx.title if ctx else None) or nk, db=db,
+    )
+    conversation = _with_step_recap(_conversation_block_for(history), recap)
+    return GenerationMemory(
+        environment=environment, verbosity=verbosity, operator_notes=operator_notes,
+        job_digest=job_digest, history=history, recap=recap, conversation=conversation,
+    )
+
+
 # ── Guidance generation (§17.486 — human walkthrough per step) ────────────
 
 
@@ -704,30 +774,18 @@ async def generate_step_guidance(
     if research is None:
         research = settings.assist_guide_research
 
-    environment = _environment_from_metadata(sess.get("metadata"))
-    verbosity = _verbosity_from_metadata(sess.get("metadata"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
-    # §17.650 — the whole-project digest (minus this step's direct parents,
-    # already in ctx.assembled_prompt) so the walkthrough is consistent with
-    # research/plan done in other DAG branches, not just the immediate upstream.
-    job_digest = await _job_digest_for(
-        db=db, job_id=job_id,
-        exclude_node_keys={nk, *ctx.upstream_outputs.keys()},
-    )
     # §17.654 — decision nodes get the one-choice-at-a-time, suggest-don't-decide
-    # prompt; every step also carries the operator's captured notes & additions
-    # (read from the session row already fetched — no extra round-trip).
+    # prompt.
     is_decision = (node_row.get("node_type") or "").lower() == "decision"
-    operator_notes = _coerce_notes(sess.get("notes"))
-    # §17.726 — no client history (curl / cross-chat reconnect) → rebuild the
-    # recent dialogue from the durable transcript.
-    history = await _history_or_transcript(
-        history=history, session_id=session_id, db=db, exclude_tail=refine,
+    # §17.751 — single-funnel session memory (env+facts · whole-project digest ·
+    # notes · dialogue+transcript fallback · step recap) so this site can't drift
+    # memory-blind. Digest excludes this step + its direct parents (already in
+    # ctx.assembled_prompt).
+    mem = await assemble_generation_memory(
+        session_id=session_id, nk=nk, sess=sess, db=db, ctx=ctx,
+        exclude_tail=refine, history=history,
     )
-    conversation = _conversation_block_for(history)  # §17.687
-    _recap = await get_step_recap(  # §17.738 — full-thread recap of THIS step
-        session_id=session_id, node_key=nk, title=ctx.title, db=db)
-    conversation = _with_step_recap(conversation, _recap)
 
     res = await assist_guide.ensure_guidance(
         session_id=session_id,
@@ -738,12 +796,12 @@ async def generate_step_guidance(
         refine_hint=refine,
         force=force,
         domain=node_row.get("domain"),
-        environment=environment,
-        verbosity=verbosity,
-        job_digest=job_digest,
-        operator_notes=operator_notes,
+        environment=mem.environment,
+        verbosity=mem.verbosity,
+        job_digest=mem.job_digest,
+        operator_notes=mem.operator_notes,
         is_decision=is_decision,
-        conversation=conversation,
+        conversation=mem.conversation,
         db=db,
     )
     # §17.726 — record what the engine told the operator (freshly generated
@@ -765,7 +823,7 @@ async def generate_step_guidance(
     # above the walkthrough (the non-stream path renders result["status_panel"];
     # the stream path yields it as a leading delta — see below).
     if settings.assist_status_panel_enabled:
-        panel = assist_guide.render_status_panel(_recap)
+        panel = assist_guide.render_status_panel(mem.recap)
         if panel:
             result["status_panel"] = panel
     return result
@@ -817,30 +875,20 @@ async def generate_step_guidance_stream(
     if research is None:
         research = settings.assist_guide_research
 
-    environment = _environment_from_metadata(sess.get("metadata"))
-    verbosity = _verbosity_from_metadata(sess.get("metadata"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
-    job_digest = await _job_digest_for(  # §17.650 — whole-project digest
-        db=db, job_id=job_id,
-        exclude_node_keys={nk, *ctx.upstream_outputs.keys()},
-    )
     is_decision = (node_row.get("node_type") or "").lower() == "decision"  # §17.654
-    operator_notes = _coerce_notes(sess.get("notes"))
-    # §17.726 — no client history → rebuild from the durable transcript.
-    history = await _history_or_transcript(
-        history=history, session_id=session_id, db=db, exclude_tail=refine,
+    # §17.751 — single-funnel session memory (see assemble_generation_memory).
+    mem = await assemble_generation_memory(
+        session_id=session_id, nk=nk, sess=sess, db=db, ctx=ctx,
+        exclude_tail=refine, history=history,
     )
-    conversation = _conversation_block_for(history)  # §17.687
-    _recap = await get_step_recap(  # §17.738
-        session_id=session_id, node_key=nk, title=ctx.title, db=db)
-    conversation = _with_step_recap(conversation, _recap)
 
     # §17.741 — lead with the operator-facing "📍 Where we are" panel, as a delta
     # so it renders ABOVE the streamed walkthrough. Not teed into _buf: the panel
     # is a derived, ephemeral view of the recap, not part of the guidance text
     # captured to the transcript.
     if settings.assist_status_panel_enabled:
-        _panel = assist_guide.render_status_panel(_recap)
+        _panel = assist_guide.render_status_panel(mem.recap)
         if _panel:
             yield {"type": "delta", "text": _panel + "\n\n"}
 
@@ -857,12 +905,12 @@ async def generate_step_guidance_stream(
         refine_hint=refine,
         force=force,
         domain=node_row.get("domain"),
-        environment=environment,
-        verbosity=verbosity,
-        job_digest=job_digest,
-        operator_notes=operator_notes,
+        environment=mem.environment,
+        verbosity=mem.verbosity,
+        job_digest=mem.job_digest,
+        operator_notes=mem.operator_notes,
         is_decision=is_decision,
-        conversation=conversation,
+        conversation=mem.conversation,
         db=db,
     ):
         if ev.get("type") == "delta":
@@ -922,9 +970,15 @@ async def run_step_research(
         {"id": job_id},
     )).mappings().first()
     brief = (job_row or {}).get("refined_brief") or {}
-    environment = _environment_from_metadata(sess.get("metadata"))
-    operator_notes = _coerce_notes(sess.get("notes"))
-    digest = await _job_digest_for(db=db, job_id=job_id)
+    # §17.751 — same single-funnel session memory as guide/fix. `digest_excludes`
+    # is empty here: the ask/research side-query wants the WHOLE-project view
+    # (including the current node), not the walkthrough's parents-excluded digest.
+    mem = await assemble_generation_memory(
+        session_id=session_id, nk=nk or "?", sess=sess, db=db,
+        exclude_tail=question, history=history, digest_excludes=set(),
+        title=nk or "",
+    )
+    environment = mem.environment
     context_parts: list[str] = []
     goal = (brief or {}).get("description") or (brief or {}).get("title") or ""
     if isinstance(goal, str) and goal.strip():
@@ -935,19 +989,14 @@ async def run_step_research(
     # the brief's in-place plan. Inject the same unified memory (notes + facts,
     # with §17.714 supersession) every other prompt site grounds on.
     context_parts.extend(
-        assist_guide._render_memory_or_legacy(environment, operator_notes)
+        assist_guide._render_memory_or_legacy(mem.environment, mem.operator_notes)
     )
-    if digest:
-        context_parts.append(digest)
-    # §17.726 — no client history → rebuild from the durable transcript.
-    history = await _history_or_transcript(
-        history=history, session_id=session_id, db=db, exclude_tail=question,
-    )
-    conversation = _conversation_block_for(history)  # §17.687
+    if mem.job_digest:
+        context_parts.append(mem.job_digest)
+    conversation = _conversation_block_for(mem.history)  # §17.687
     if conversation:
         context_parts.append(conversation)
-    recap_block = assist_guide.render_step_recap_block(  # §17.738
-        await get_step_recap(session_id=session_id, node_key=nk, title=nk or "", db=db))
+    recap_block = assist_guide.render_step_recap_block(mem.recap)  # §17.738
     if recap_block:
         context_parts.append(recap_block)
     job_context = "\n\n".join(context_parts) or None
@@ -1011,41 +1060,26 @@ async def run_step_fix(
     if research is None:
         research = settings.assist_guide_research
 
-    environment = _environment_from_metadata(sess.get("metadata"))
-    verbosity = _verbosity_from_metadata(sess.get("metadata"))
-    # §17.745 — the fix path was the last memory-blind injection site (§17.720
-    # closed guide/ask/decision but not fix). It fetched only `environment` and
-    # rendered the legacy env block, so the operator's captured notes/decisions —
-    # incl. an explicit pivot ("delete the VM and recreate from scratch") or an
-    # easiest-tool preference ("enable copy-paste instead of typing") — never
-    # reached the MOST-used assist path, and §17.714 reset supersession could
-    # not fire. Thread them so /fix honors the same session memory as /guide.
-    operator_notes = _coerce_notes(sess.get("notes"))
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
-    job_digest = await _job_digest_for(  # §17.653 — troubleshooting is project-aware too
-        db=db, job_id=job_id,
-        exclude_node_keys={nk, *ctx.upstream_outputs.keys()},
+    # §17.745/751 — /fix is the most-used assist path and was historically the
+    # last memory-blind site; it now injects the SAME single-funnel session memory
+    # as /guide (env+facts · digest · notes+§17.714 supersession · dialogue+recap),
+    # so an explicit pivot or easiest-tool preference always reaches it.
+    mem = await assemble_generation_memory(
+        session_id=session_id, nk=nk, sess=sess, db=db, ctx=ctx,
+        exclude_tail=error, history=history,
     )
-
-    # §17.726 — no client history → rebuild from the durable transcript.
-    history = await _history_or_transcript(
-        history=history, session_id=session_id, db=db, exclude_tail=error,
-    )
-    # §17.738 — full-thread recap of THIS step so a long troubleshooting
-    # marathon stays coherent (the 6-turn window loses it).
-    _recap = await get_step_recap(session_id=session_id, node_key=nk, title=ctx.title, db=db)
-    _fix_convo = _with_step_recap(_conversation_block_for(history), _recap)
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
         research=research,
-        environment=environment,
+        environment=mem.environment,
         node_key=nk,
         domain=node_row.get("domain"),
-        verbosity=verbosity,
-        job_digest=job_digest,
-        operator_notes=operator_notes,  # §17.745 — /fix now sees notes + reset supersession
-        conversation=_fix_convo,  # §17.687 + §17.738 recap
+        verbosity=mem.verbosity,
+        job_digest=mem.job_digest,
+        operator_notes=mem.operator_notes,  # §17.745 — notes + reset supersession
+        conversation=mem.conversation,  # §17.687 + §17.738 recap
     )
     # §17.726 — record the corrective steps the engine gave the operator.
     if (res.get("fix") or "").strip():
@@ -1065,7 +1099,7 @@ async def run_step_fix(
     # §17.741 — surface the "📍 Where we are" panel above the fix too, so a long
     # troubleshooting marathon stays oriented for the operator, not just the model.
     if settings.assist_status_panel_enabled:
-        panel = assist_guide.render_status_panel(_recap)
+        panel = assist_guide.render_status_panel(mem.recap)
         if panel:
             out["status_panel"] = panel
     return out
@@ -2436,21 +2470,24 @@ async def run_step_decision(
     kind = _collect_step_kind(row.get("node_type"), task_prompt)
     if kind is None:
         return None
-    job_id = str(row["job_id"])
-    environment = _environment_from_metadata(row["metadata"])
-    operator_notes = _coerce_notes(row["notes"])
-    job_digest = await _job_digest_for(
-        db=db, job_id=job_id, exclude_node_keys={node_key},
+    # §17.751 — parity with the primary generators (guide/fix/research) via the
+    # single memory funnel: rebuild the dialogue from the durable transcript when
+    # the client sent none (curl / cross-chat reconnect) and fold in the step
+    # recap, so a long multi-turn decision keeps the thread instead of
+    # deliberating history-blind, and grounds on env/facts/notes/digest.
+    mem = await assemble_generation_memory(
+        session_id=session_id, nk=node_key, sess=row, db=db,
+        exclude_tail=message, history=history,
+        digest_excludes={node_key}, title=row["title"] or node_key,
     )
-    conversation = _conversation_block_for(history)
     from app.modules import assist_guide
     res = await assist_guide.deliberate_decision(
         title=row["title"] or node_key,
         task_prompt=task_prompt,
-        environment=environment,
-        job_digest=job_digest,
-        operator_notes=operator_notes,
-        conversation=conversation,
+        environment=mem.environment,
+        job_digest=mem.job_digest,
+        operator_notes=mem.operator_notes,
+        conversation=mem.conversation,
         latest_message=message,
         kind=kind,
     )
