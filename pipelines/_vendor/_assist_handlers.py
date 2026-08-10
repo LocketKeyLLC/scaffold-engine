@@ -2175,6 +2175,7 @@ def assist_nl_turn(
         if _looks_like_pivot(msg):
             yield from assist_note_cmd(
                 pipe, session_id, msg.strip(), kind=_pivot_kind(msg), node_key=node_key,
+                chat_id=chat_id,
             )
             return
         # §17.733 — a genuine how-to question ("am i supposed to use the
@@ -2270,6 +2271,7 @@ def assist_nl_turn(
         nk = _recall_node_key(pipe, chat_id, node_key)
         yield from assist_note_cmd(
             pipe, session_id, (note_text or msg).strip(), kind=note_kind, node_key=nk,
+            chat_id=chat_id,
         ); return
     if intent == "set_env":
         subs = dict(re.findall(r"([A-Za-z_]\w*)=(\S+)", msg))
@@ -2485,12 +2487,26 @@ def try_natural_start(pipe, msg: str, chat_id: str | None):
     return iter([render_candidate_list(candidates)])
 
 
+def _next_step_footer(node_key: str | None) -> str:
+    """§17.751 — the shared 'what to do next' pointer, defined ONCE, appended to
+    answer/acknowledgement turns that don't themselves re-present a step so no
+    operator-facing turn dead-ends (the §17.750 note-path lesson, generalized).
+    Empty when there's no current step to point at (curl/CLI, nothing claimed)."""
+    if not node_key:
+        return ""
+    return ("\n\n---\n👉 _When you've done this, paste the result for the current "
+            "step — or say **\"next\"** for the walkthrough again, ask another "
+            "question, or tell me what changed._")
+
+
 def assist_research_cmd(
     pipe, session_id: str, question: str, *,
     node_key: str | None = None, chat_id: str | None = None,
     history: list[dict] | None = None,
 ) -> Generator[str, None, None]:
-    """§17.486 — POST /assist/{sid}/research and render cited results."""
+    """§17.486 — POST /assist/{sid}/research and render cited results.
+    §17.751 — an answer is content, not a step, so tie it back to the current
+    step with the shared next-action footer instead of dead-ending."""
     try:
         r = _ss(pipe).post(
             f"{pipe.valves.orchestrator_url}/assist/{session_id}/research",
@@ -2510,6 +2526,9 @@ def assist_research_cmd(
     if not isinstance(d, dict):
         yield f"❌ Assist research: orchestrator reply not a dict; raw: {str(d)[:200]}"; return
     yield render_research(d)
+    # §17.751 — never leave an answer as a dead-end: point back to the step.
+    if getattr(pipe.valves, "assist_answer_tieback", True):
+        yield _next_step_footer(node_key or _recall_node_key(pipe, chat_id, None))
 
 
 def assist_env_cmd(
@@ -2716,9 +2735,13 @@ def assist_friction(
 def assist_note_cmd(
     pipe, session_id: str, note_text: str, *,
     kind: str = "note", node_key: str | None = None,
+    chat_id: str | None = None,
 ) -> Generator[str, None, None]:
     """§17.654 — record a session-level note/addition and confirm it back so the
-    operator knows it landed. The note feeds forward into later steps' guidance."""
+    operator knows it landed. The note feeds forward into later steps' guidance.
+    §17.750 — after confirming, re-present the CURRENT step's walkthrough (with
+    its copy-paste commands) so the operator has a clear next action instead of a
+    dead-end 'say next to continue'."""
     if not (note_text or "").strip():
         yield "What should I note? Tell me the requirement, constraint, or decision to remember."
         return
@@ -2744,10 +2767,29 @@ def assist_note_cmd(
         proposal = None
     yield f"📌 Noted ({label}): {note_text.strip()}\n\n"
     affected = (proposal or {}).get("proposals") if isinstance(proposal, dict) else None
-    if not affected:
-        yield "_I'll carry this forward into the remaining steps. Say _\"next\"_ to continue._"
+    if affected:
+        # The note changes the plan — surface the re-plan instead of the step.
+        yield _render_replan_surface(affected)
         return
-    yield _render_replan_surface(affected)
+    # §17.750 — re-anchor on the current step with concrete copy-paste commands.
+    # The note is recorded and feeds forward; re-render the walkthrough (cached,
+    # force=False) so the operator sees exactly what to do next rather than a bare
+    # "say next". Falls back to the old acknowledgement when there's no claimed
+    # step to re-present or the feature is toggled off.
+    nk = _recall_node_key(pipe, chat_id, node_key)
+    if nk and getattr(pipe.valves, "assist_note_represents_step", True):
+        yield "_Got it — here's where we are on the current step so you can keep going:_\n\n"
+        _cmd = (assist_guide_stream_cmd
+                if getattr(pipe.valves, "assist_stream", True) else assist_guide_cmd)
+        if _cmd is assist_guide_cmd:
+            yield "\n_Generating walkthrough…_\n\n"
+        yield from _cmd(
+            pipe, session_id, node_key=nk,
+            research=getattr(pipe.valves, "assist_guide_research", True),
+            force=False, chat_id=chat_id,
+        )
+        return
+    yield "_I'll carry this forward into the remaining steps. Say _\"next\"_ to continue._"
 
 
 def assist_add_step_cmd(

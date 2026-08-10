@@ -17,22 +17,62 @@ def pipe():
 
 
 class TestAssistNoteCmd:
-    def test_note_confirms_back_with_kind(self, pipe):
+    def test_note_confirms_back_then_represents_current_step(self, pipe):
+        # §17.750 — with a claimed step, confirming a note re-presents the
+        # current step's walkthrough (copy-paste commands) instead of a bare
+        # "say next" dead-end.
+        pipe.valves.assist_stream = False  # exercise the non-SSE guide path
+        sess = MagicMock()
+        sess.post.return_value = _make_response(
+            200, {"recorded": True, "note": {"kind": "addition", "text": "add a DMZ"}}
+        )
+        with patch.object(_vendor, "_ss", return_value=sess), \
+             patch.object(_vendor, "assist_guide_cmd",
+                          return_value=iter(["## Walkthrough\n```bash\necho hi\n```"])) as guide:
+            out = "".join(_vendor.assist_note_cmd(
+                pipe, _SID, "add a DMZ segment", kind="addition", node_key="T2",
+            ))
+        assert "📌 Noted (addition):" in out
+        assert "add a DMZ segment" in out
+        assert "carry this forward" not in out.lower()
+        assert "```bash" in out  # the re-presented walkthrough
+        # posted to the /note endpoint with the right body
+        _, kwargs = sess.post.call_args
+        assert kwargs["json"]["kind"] == "addition"
+        assert kwargs["json"]["text"] == "add a DMZ segment"
+        # re-presented the CURRENT step, cached (force=False), not a fresh gen
+        _, gkwargs = guide.call_args
+        assert gkwargs["node_key"] == "T2"
+        assert gkwargs["force"] is False
+
+    def test_note_without_step_keeps_plain_confirm(self, pipe):
+        # §17.750 — no claimed step to re-present → the old carry-forward hint.
         sess = MagicMock()
         sess.post.return_value = _make_response(
             200, {"recorded": True, "note": {"kind": "addition", "text": "add a DMZ"}}
         )
         with patch.object(_vendor, "_ss", return_value=sess):
             out = "".join(_vendor.assist_note_cmd(
-                pipe, _SID, "add a DMZ segment", kind="addition", node_key="T2",
+                pipe, _SID, "add a DMZ segment", kind="addition",
             ))
         assert "📌 Noted (addition):" in out
-        assert "add a DMZ segment" in out
         assert "carry this forward" in out.lower()
-        # posted to the /note endpoint with the right body
-        _, kwargs = sess.post.call_args
-        assert kwargs["json"]["kind"] == "addition"
-        assert kwargs["json"]["text"] == "add a DMZ segment"
+
+    def test_note_represent_valve_off_keeps_plain_confirm(self, pipe):
+        # §17.750 — flipping assist_note_represents_step off restores the bare
+        # acknowledgement even with a claimed step.
+        pipe.valves.assist_note_represents_step = False
+        sess = MagicMock()
+        sess.post.return_value = _make_response(
+            200, {"recorded": True, "note": {"kind": "addition", "text": "add a DMZ"}}
+        )
+        with patch.object(_vendor, "_ss", return_value=sess), \
+             patch.object(_vendor, "assist_guide_cmd") as guide:
+            out = "".join(_vendor.assist_note_cmd(
+                pipe, _SID, "add a DMZ segment", kind="addition", node_key="T2",
+            ))
+        assert "carry this forward" in out.lower()
+        guide.assert_not_called()
 
     def test_note_empty_text_prompts_for_content(self, pipe):
         # no HTTP call when there is nothing to record

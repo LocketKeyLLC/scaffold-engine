@@ -738,6 +738,21 @@ class Pipeline:
         # Suppressed on a soft-fail verdict (they may want to redo the step).
         # Flip off to restore the explicit-advance flow.
         assist_auto_advance: bool = True
+        # §17.750 — after recording a note/addition (a piece of info the
+        # operator relayed that isn't the current step's evidence), re-present
+        # the CURRENT step's walkthrough — with its copy-paste commands — so the
+        # reply is "noted, and here's what to do next" instead of a dead-end
+        # "say next to continue". Cached (force=False), so it's a fast re-render,
+        # not a fresh generation. Skipped when the note triggered a plan-fix
+        # proposal (that surfaces the re-plan instead). Flip off to restore the
+        # bare acknowledgement.
+        assist_note_represents_step: bool = True
+        # §17.751 — the next-action guarantee: an answer to a question (/ask →
+        # research) is content, not a step, so it used to dead-end with no pointer
+        # back to the work. Append a short "what to do next" footer tying the
+        # answer back to the current step. Shared `_next_step_footer` so the
+        # phrasing is defined once. Flip off to restore the bare answer.
+        assist_answer_tieback: bool = True
         # §17.537 — assist-aware chat routing. When a chat has an ACTIVE
         # assist session, plain (non-command) text is a conversational turn
         # ON that session — route it to the step guidance (refine=<text>)
