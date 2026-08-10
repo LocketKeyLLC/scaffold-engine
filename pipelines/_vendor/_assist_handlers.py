@@ -1917,6 +1917,23 @@ def _looks_like_shell_evidence(msg: str) -> bool:
     return True
 
 
+def _last_assistant_was_fix(history: list[dict] | None) -> bool:
+    """§17.748 — was the most recent assistant turn a Troubleshooting FIX?
+
+    A fix walks the operator through a diagnostic loop ("run this and tell me
+    what it shows"), so a shell-output paste that FOLLOWS a fix is a diagnostic
+    REPLY, not step completion. Detected from the stable marker ``render_fix``
+    emits (``## 🔧 Troubleshooting``) or the NL fix banner. Returns False when
+    there's no prior assistant turn (so behavior is unchanged without history).
+    """
+    for m in reversed(history or []):
+        if not isinstance(m, dict) or (m.get("role") or "") != "assistant":
+            continue
+        c = m.get("content") or ""
+        return ("🔧 Troubleshooting" in c) or ("something went wrong — let me help" in c)
+    return False
+
+
 # §17.707 — the operator asking what inputs/decisions the plan still needs from
 # them. High-precision phrasing ("from me" / "to provide|decide" / "checklist")
 # so a plain step question ("what do I need to do here?") is NOT swept in.
@@ -2145,6 +2162,23 @@ def assist_nl_turn(
                 yield _render_replan_surface(affected)
                 return
         # not a pivot → fall through to the normal skip / question handling below
+
+    # §17.748 — a shell-output paste while the operator is MID-FIX is a DIAGNOSTIC
+    # REPLY, not step completion. The last assistant turn was a Troubleshooting
+    # fix that asked them to run a command and report back; auto-submitting the
+    # paste (§17.705) fired the "📝 Recording what you did… step not finished,
+    # follow the runbook" verifier with GENERIC advice — the operator was
+    # answering "run pvesm list and tell me what it shows", not finishing the
+    # step. Continue the fix so the engine reads the actual output and gives the
+    # SPECIFIC next action. Conditions are precise (a shell paste AND the previous
+    # turn was a fix), so a genuine step-completion paste after a normal
+    # walkthrough still submits.
+    if (intent == "submit"
+            and getattr(pipe.valves, "assist_fix_followup_enabled", True)
+            and _looks_like_shell_evidence(msg)
+            and _last_assistant_was_fix(history)):
+        intent = "fix"
+        error_text = msg.strip()
 
     if intent == "advance":
         yield from assist_next(pipe, session_id, chat_id=chat_id); return

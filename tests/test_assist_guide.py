@@ -1866,6 +1866,9 @@ def test_apply_problem_solving_appends_when_enabled():
     # §17.744 — history isn't a mandate; follow the operator's explicit direction
     assert "history is not a mandate" in low
     assert "follow the operator's direction" in low
+    # §17.748 — don't invent system-specific values (ISO/disk/NIC); verify or placeholder
+    assert "don't invent system-specific values" in low
+    assert "placeholder" in low
 
 
 def test_apply_problem_solving_noop_when_disabled():
