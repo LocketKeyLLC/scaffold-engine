@@ -1370,6 +1370,17 @@ def _verbosity_from_metadata(metadata: Any) -> str:
     return v if v in _VERBOSITY_LEVELS else "normal"
 
 
+def _note_impact_facts_block(metadata: Any) -> str:
+    """§17.752 — the observed-facts block for the note-impact / pivot analyzer,
+    gated by ``assist_note_impact_facts_aware``. "" when off or no facts, so
+    callers thread it unconditionally."""
+    from app.config import settings
+    if not settings.assist_note_impact_facts_aware:
+        return ""
+    from app.modules import assist_guide
+    return assist_guide.render_facts_block(_environment_from_metadata(metadata))
+
+
 async def get_environment(*, session_id: str, db) -> Optional[dict]:
     """Return the session's environment profile + substitutions + verbosity. None if no session."""
     sess = (await db.execute(
@@ -2294,8 +2305,24 @@ async def get_step_recap(
         if cached and n < watermark + int(settings.assist_step_recap_every):
             return cached
         transcript = _render_node_transcript([dict(t) for t in turns])
+        # §17.752 — ground the recap in the durable ledgers too, not just this
+        # node's transcript: a constraint the operator stated on an earlier step,
+        # or a distilled system fact (§17.709), belongs in CONSTRAINTS/CONTEXT even
+        # if it wasn't re-said here. DONE/OPEN/NEXT stay transcript-derived.
+        facts_block = notes_block = ""
+        if settings.assist_recap_ledger_aware:
+            srow = (await db.execute(
+                text("SELECT notes, metadata FROM assist_sessions WHERE id = :sid"),
+                {"sid": session_id},
+            )).mappings().first()
+            if srow:
+                facts_block = assist_guide.render_facts_block(
+                    _environment_from_metadata(srow.get("metadata")))
+                notes_block = assist_guide.render_operator_notes_block(
+                    _coerce_notes(srow.get("notes")))
         recap = await assist_guide.summarize_step_progress(
             title=title or node_key, transcript=transcript,
+            facts_block=facts_block, notes_block=notes_block,
         )
         if not recap:
             return cached
@@ -3300,7 +3327,7 @@ async def assess_note_impact(
     if (note_kind or "note") == "note":
         return None
     sess = (await db.execute(
-        text("SELECT job_id, status FROM assist_sessions WHERE id = :sid"),
+        text("SELECT job_id, status, metadata FROM assist_sessions WHERE id = :sid"),
         {"sid": session_id},
     )).mappings().first()
     if not sess or sess["status"] not in ("active", "paused"):
@@ -3309,6 +3336,7 @@ async def assess_note_impact(
     try:
         impact = await assist_replan.analyze_note_impact(
             db=db, job_id=job_id, note_text=note_text, note_kind=note_kind,
+            facts_block=_note_impact_facts_block(sess.get("metadata")),  # §17.752
         )
     except Exception as e:  # noqa: BLE001 — never break the note on analysis
         logger.warning("assess_note_impact_failed session_id=%s err=%r", session_id, e)
@@ -3379,7 +3407,7 @@ async def detect_reroute(
             or not (message or "").strip()):
         return None
     sess = (await db.execute(
-        text("SELECT job_id, status FROM assist_sessions WHERE id = :sid"),
+        text("SELECT job_id, status, metadata FROM assist_sessions WHERE id = :sid"),
         {"sid": session_id},
     )).mappings().first()
     if not sess or sess["status"] not in ("active", "paused"):
@@ -3393,6 +3421,7 @@ async def detect_reroute(
             # config on the old VM). Let the analyzer propose reopening them so
             # their stale "done" output stops leading the prompt as MANDATORY.
             include_done_reopen=settings.assist_pivot_reopen_enabled,
+            facts_block=_note_impact_facts_block(sess.get("metadata")),  # §17.752
         )
     except Exception as e:  # noqa: BLE001 — never trap the turn on analysis
         logger.warning("detect_reroute_failed session_id=%s err=%r", session_id, e)

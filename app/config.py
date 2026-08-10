@@ -842,6 +842,21 @@ class Settings(BaseSettings):
     assist_step_recap_enabled: bool = False
     assist_step_recap_every: int = Field(default=3, ge=1, le=20)
     assist_step_recap_min_turns: int = Field(default=4, ge=1, le=40)
+    # §17.752 — the recap was node-scoped + transcript-only: it never read the
+    # durable ledgers, so a constraint the operator stated on an EARLIER step (a
+    # note) or a distilled system fact (§17.709) never reached CONSTRAINTS/CONTEXT
+    # unless it was re-said in THIS node's transcript. When on, get_step_recap also
+    # feeds the session's operator notes + observed facts into summarize_step_progress
+    # so the recap grounds on the full record — while DONE/OPEN/NEXT stay
+    # transcript-derived (a fact/constraint is not completed work). On by default:
+    # it only fires when the recap already runs, and the ledgers are trusted data
+    # already injected elsewhere. Flip off to restore the transcript-only recap.
+    assist_recap_ledger_aware: bool = True
+    # §17.752 — ground the note-impact / pivot analyzer (analyze_note_impact) in
+    # the observed facts ledger, not just the brief: whether a new note actually
+    # invalidates a pending step often depends on the operator's ACTUAL system
+    # (e.g. "no TPM" only breaks a step if the plan assumed one). On by default.
+    assist_note_impact_facts_aware: bool = True
     # §17.741 — surface the running recap to the OPERATOR as a "📍 Where we are"
     # panel above each walkthrough (goal / done / open / next), so a first-timer
     # can always see the engine holding the thread on a long problem-solving
