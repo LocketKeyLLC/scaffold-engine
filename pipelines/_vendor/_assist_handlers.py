@@ -1917,6 +1917,39 @@ def _looks_like_shell_evidence(msg: str) -> bool:
     return True
 
 
+_SHELL_ERROR_RE = re.compile(
+    r"command not found"
+    r"|no such file or directory"
+    r"|permission denied"
+    r"|operation not permitted"
+    r"|traceback \(most recent call last\)"
+    r"|(?:^|\n)\s*(?:error|fatal|panic|e)[:!]"      # error:/fatal:/E: at line start
+    r"|(?:^|\n)\s*error\b"
+    r"|cannot (?:open|access|stat|create|remove|find|execute|connect|locate)"
+    r"|could not (?:open|find|resolve|connect|create|load)"
+    r"|unable to "
+    r"|failed to "
+    r"|\bnot recognized\b"
+    r"|unknown (?:option|command|argument|flag)"
+    r"|invalid (?:option|argument|parameter|value|name)"
+    r"|connection (?:refused|timed out|reset)"
+    r"|does(?:n't| not) exist"
+    r"|no space left",
+    re.I | re.M,
+)
+
+
+def _looks_like_shell_error(msg: str) -> bool:
+    """§17.749 — does a pasted command transcript contain a real error? A step
+    whose command ERRORED is NOT done — recording it as a submit (and marking the
+    step complete, then advancing) is exactly the reported failure. High-precision
+    shell/tool error signatures only; a benign success (even one that says
+    'successfully created') doesn't trip it. Routing to fix on a rare false
+    positive is SAFE (the fix just confirms it worked and proceeds); missing a
+    real error and advancing is not."""
+    return bool(msg and _SHELL_ERROR_RE.search(msg))
+
+
 def _last_assistant_was_fix(history: list[dict] | None) -> bool:
     """§17.748 — was the most recent assistant turn a Troubleshooting FIX?
 
@@ -2163,20 +2196,21 @@ def assist_nl_turn(
                 return
         # not a pivot → fall through to the normal skip / question handling below
 
-    # §17.748 — a shell-output paste while the operator is MID-FIX is a DIAGNOSTIC
-    # REPLY, not step completion. The last assistant turn was a Troubleshooting
-    # fix that asked them to run a command and report back; auto-submitting the
-    # paste (§17.705) fired the "📝 Recording what you did… step not finished,
-    # follow the runbook" verifier with GENERIC advice — the operator was
-    # answering "run pvesm list and tell me what it shows", not finishing the
-    # step. Continue the fix so the engine reads the actual output and gives the
-    # SPECIFIC next action. Conditions are precise (a shell paste AND the previous
-    # turn was a fix), so a genuine step-completion paste after a normal
-    # walkthrough still submits.
+    # §17.748/§17.749 — a shell-output paste that should be DIAGNOSED, not
+    # submitted, in two cases: (a) §17.748 the operator is MID-FIX (the last
+    # assistant turn was a Troubleshooting fix asking them to run a command and
+    # report back — the paste is a diagnostic reply, not step completion); or
+    # (b) §17.749 the paste CONTAINS A REAL ERROR (e.g. `-bash: scsi0: command
+    # not found` from an unescaped `;`). Auto-submitting either one (§17.705)
+    # marked the step done and ADVANCED past a broken command without recording
+    # the error to fix — the reported failure. Route to fix so the engine reads
+    # the output and gives the specific next action / diagnoses the error.
+    # Conditions stay precise (a shell paste that is mid-fix OR carries an error),
+    # so a clean step-completion paste after a normal walkthrough still submits.
     if (intent == "submit"
             and getattr(pipe.valves, "assist_fix_followup_enabled", True)
             and _looks_like_shell_evidence(msg)
-            and _last_assistant_was_fix(history)):
+            and (_last_assistant_was_fix(history) or _looks_like_shell_error(msg))):
         intent = "fix"
         error_text = msg.strip()
 

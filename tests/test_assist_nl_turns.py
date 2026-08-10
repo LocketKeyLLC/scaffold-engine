@@ -243,6 +243,34 @@ def test_shell_paste_after_guide_still_submits(pipe):
 
 
 @pytest.mark.smoke
+def test_looks_like_shell_error():
+    # §17.749 — high precision: real errors trip it, benign successes don't.
+    assert _ah._looks_like_shell_error("scsi0: created\n-bash: scsi0: command not found")
+    assert _ah._looks_like_shell_error("E: Unable to locate package foo")
+    assert _ah._looks_like_shell_error("cp: cannot create file: Permission denied")
+    assert _ah._looks_like_shell_error("could not resolve host: example.com")
+    assert not _ah._looks_like_shell_error(
+        "Logical volume created.\nVM 100 created successfully.")
+    assert not _ah._looks_like_shell_error("VMID NAME STATUS\n100 vm running\n0 errors found")
+    assert not _ah._looks_like_shell_error("")
+
+
+@pytest.mark.smoke
+def test_error_paste_after_guide_routes_to_fix(pipe):
+    # §17.749 — a shell paste with a REAL error, even after a GUIDE (not a fix),
+    # routes to fix (diagnose) instead of submit (which silently marked the step
+    # done and advanced past a broken command — the reported failure).
+    paste = ("root@pve:~# qm create 100 --boot order=ide2;scsi0\n"
+             "scsi0: successfully created disk\n-bash: scsi0: command not found")
+    history = [{"role": "assistant",
+                "content": "## 🧭 How to do this step\nRun the qm create block."}]
+    out, patchers = _route_with_history(pipe, paste, history)
+    assert "FIX" in out and "SUBMIT" not in out
+    args, _ = patchers["assist_fix_cmd"].call_args
+    assert "command not found" in args[2]   # the error output feeds the fix
+
+
+@pytest.mark.smoke
 def test_checklist_request_routes_to_checklist_without_classifier(pipe):
     with patch.object(_ah, "assist_checklist_cmd",
                       side_effect=lambda *a, **k: iter(["CHECKLIST"])) as cl, \

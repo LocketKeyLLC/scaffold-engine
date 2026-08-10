@@ -1682,15 +1682,31 @@ _RECORD_FACTS_TOOL = model_router.Tool(
 )
 
 _FACTS_SYSTEM = (
-    "You extract durable facts about a human operator's ACTUAL system from the "
-    "command output they pasted, so later steps ground on reality instead of "
-    "assuming. Report only what the output shows; never guess. A command that "
-    "errored or returned empty means that aspect is UNKNOWN — never infer a "
-    "'fresh' or 'empty' system from a failed or blank check. If a KNOWN fact "
-    "list is provided and this output directly contradicts one of those facts, "
-    "echo that known fact VERBATIM in superseded_facts so the ledger can retract "
-    "it — but only for a real conflict, never for an addition or refinement. "
-    "Call record_facts exactly once."
+    "You extract durable facts about a human operator's ACTUAL system AND what "
+    "they are BUILDING from the command output they pasted, so later steps ground "
+    "on reality instead of assuming. Report only what the output shows; never "
+    "guess.\n"
+    "CAPTURE, specifically:\n"
+    "- The BUILD SPEC the operator just created or configured — the concrete "
+    "values that define their setup: names (VM/container/host/service names), "
+    "resource allocations (RAM, cores, disk sizes), storage/pool choices, network "
+    "(bridges, NICs, IPs, gateways, DNS), device assignments (PCI passthrough IDs, "
+    "GPUs), OS/image/ISO and version choices, ports, users. E.g. a `qm create` "
+    "that succeeds is the fact 'VM 100 (AI-VM) created: 4GB RAM, 2 cores, q35/OVMF, "
+    "32G disk on local-lvm, NIC e1000 on DeFruscioBridge, ISO ubuntu-26.04, agent "
+    "on'. These are the MOST important facts to keep — they are the operator's "
+    "personal build.\n"
+    "- Observed system STATE and blockers (what exists, what failed).\n"
+    "PARTIAL ERRORS: a trailing or single error does NOT invalidate the parts that "
+    "SUCCEEDED — capture the successful configuration AND, separately, record the "
+    "error as its own fact (e.g. 'the `qm create` ran but `-bash: scsi0: command "
+    "not found` — the boot-order `;` was unescaped so --agent/--boot may be "
+    "incomplete'). Only treat an aspect as UNKNOWN when the check for THAT aspect "
+    "errored or was blank — never infer a 'fresh'/'empty' system from a failure.\n"
+    "If a KNOWN fact list is provided and this output directly contradicts one of "
+    "those facts, echo that known fact VERBATIM in superseded_facts so the ledger "
+    "can retract it — but only for a real conflict, never for an addition or "
+    "refinement. Call record_facts exactly once."
 )
 
 
@@ -1733,27 +1749,40 @@ async def distill_facts(
             "DIRECTLY CONTRADICTS one, echo it verbatim in superseded_facts):\n"
             + "\n".join(f"- {k}" for k in known_facts) + "\n\n"
         )
-    try:
-        resp = await model_router.tool_call(
-            messages=[
-                {"role": "system", "content": _FACTS_SYSTEM},
-                {"role": "user", "content": (
-                    (f"STEP: {title}\n" if title else "")
-                    + (f"TASK: {task_prompt}\n\n" if task_prompt else "\n")
-                    + known_block
-                    + f"Operator output:\n{evidence[:6000]}\n\nCall record_facts."
-                )},
-            ],
-            tools=[_RECORD_FACTS_TOOL],
-            role=role,
-            temperature=0.0,
-            tool_choice="auto",
-            max_tokens=1024,
-        )
-    except Exception as exc:  # noqa: BLE001 — fact capture must never break submit
-        logger.warning("assist_distill_facts_failed: %s", exc)
-        return empty
-    args = read_tool_args(resp)
+    user_msg = (
+        (f"STEP: {title}\n" if title else "")
+        + (f"TASK: {task_prompt}\n\n" if task_prompt else "\n")
+        + known_block
+        + f"Operator output:\n{evidence[:6000]}\n\nCall record_facts."
+    )
+    # §17.749 — model_general (deepseek-v4-pro) is a THINKING model: at
+    # max_tokens=1024 it spends the whole budget reasoning and returns an EMPTY
+    # tool call (§17.465/583/727), so fact capture intermittently recorded
+    # NOTHING — a rich `qm create` submit distilled to zero facts, and the
+    # operator's build spec never reached the ledger. Give it the 8192 floor
+    # big-prompt tool calls need, and RE-DRAW when the model fails to call the
+    # tool at all (an empty-content flake) rather than losing the facts silently.
+    args = None
+    for _draw in range(3):
+        try:
+            resp = await model_router.tool_call(
+                messages=[
+                    {"role": "system", "content": _FACTS_SYSTEM},
+                    {"role": "user", "content": user_msg},
+                ],
+                tools=[_RECORD_FACTS_TOOL],
+                role=role,
+                temperature=0.0,
+                tool_choice="auto",
+                max_tokens=8192,
+            )
+        except Exception as exc:  # noqa: BLE001 — fact capture must never break submit
+            logger.warning("assist_distill_facts_failed: %s", exc)
+            return empty
+        args = read_tool_args(resp)
+        if args is not None:  # the model made the tool call (facts may be [])
+            break
+        logger.info("assist_distill_facts_empty_redraw draw=%d/3", _draw + 1)
     raw = (args or {}).get("facts") or []
     if not isinstance(raw, list):
         return empty
