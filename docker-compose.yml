@@ -355,6 +355,12 @@ services:
       # (commit to one path), match the operator's real capability. Recap gains
       # a CONSTRAINTS section (also shown in the panel). Code default off; live here.
       ASSIST_PROBLEM_SOLVING_ENABLED: "${ASSIST_PROBLEM_SOLVING_ENABLED:-true}"
+      # §17.753 — the cross-step "living project recap" (§17.679): a distilled,
+      # evolving whole-project state board (arc / decisions / remaining / cross-step
+      # constraints), refreshed as steps complete, prepended to the job digest for
+      # every generation site and threaded into the note/pivot analyzer. Code
+      # default off (extra LLM path); live here.
+      ASSIST_PROJECT_RECAP_ENABLED: "${ASSIST_PROJECT_RECAP_ENABLED:-true}"
       # §17.747 — on a detected pivot, let the impact analyzer propose REOPENING
       # already-done nodes the pivot destroyed (e.g. "delete VM 100 and recreate"
       # undoes the guest-OS install / passthrough on the old VM). Surface-and-ask:

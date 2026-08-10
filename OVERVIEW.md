@@ -22069,6 +22069,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.753 Feature — the cross-step "living project recap" (§17.679): a distilled, evolving whole-project state board, injected into the funnel + the pivot analyzer (2026-08-10)
+
+**Why.** The last deferred item from the §17.751/752 arc. Assist had two cross-step views and neither was an evolving *project state*: `assemble_job_digest` (§17.650) dumps the raw `output_text` of every done node (a static blob), and the per-step recap (§17.738/752) distills ONE node's transcript. So guidance/pivot on step N was blind to the ARC — what earlier steps decided, what remains, the project-wide constraints. §17.679 named this the missing "living whole-project DAG."
+
+**What.** A **project recap** — the whole-project analog of the per-step recap. `summarize_project_progress` (`_PROJECT_RECAP_SYSTEM`) distills the DAG's step statuses + a short preview of each DONE node's output + the operator's decisions/constraints + observed facts into a compact board: GOAL · DONE (phases) · IN PROGRESS · REMAINING · DECISIONS · CONSTRAINTS · SYSTEM — grounding ONLY in step statuses/ledgers, never inventing completion. `get_project_recap` (mirrors `get_step_recap`) caches it on `jobs.project_recap` (migration 059) and refreshes only when the count of DONE nodes grows past `jobs.project_recap_nodes` by `assist_project_recap_every` — so it costs ~one LLM call per completed step, cached across the many turns within a step.
+
+**Injection (funnel + pivot, the confirmed scope).** In the §17.751 funnel, `assemble_generation_memory` **prepends** `render_project_recap_block(project_recap)` to the job digest — so all 5 generation sites (guide/stream/fix/research/decision) lead with the distilled arc before the raw per-step outputs, with **zero new prompt params**. And `analyze_note_impact` (the note/pivot/divergence re-plan judge) gains a `project_recap_block` (a new `{project}` prompt slot) so it weighs a pivot against what's already built/decided, not just the pending list — all three callers thread it (`assess_note_impact` + `detect_reroute` via `_note_impact_project_block`; the divergence stager inline). Valves: `assist_project_recap_enabled` (+ `_every`/`_min_nodes`), code default off, `ASSIST_PROJECT_RECAP_ENABLED=true` in compose.
+
+**Verification.** New `test_assist_project_recap.py` (render/summarize carry goal+nodes+ledgers; `get_project_recap` disabled→"" / cache-when-not-grown / refresh-on-growth persisting the done-node watermark; **the funnel prepends the recap ahead of the raw digest**; the analyzer prompt carries the project block). **763 assist unit tests pass** (dev image, isolated container). **Deployed:** migration 059 applied at startup (`applied_count=1`, columns `project_recap`/`project_recap_nodes` present), orchestrator healthy, valve live. *Deploy note:* recreating the orchestrator needs BOTH compose files (`-f docker-compose.yml -f docker-compose.dev.yml`) — the dev override is what bind-mounts `app/` + `db/`; a bare `docker compose up -d` drops them and reverts to baked code + can't see new migrations.
+
+**Arc complete.** §17.751 (injection + next-action chokepoints) → §17.752 (ledger-aware recap + note-impact) → §17.753 (cross-step project recap). The "record-keeping + clear instructions" concern is now structural end-to-end.
+
+---
+
 ### §17.752 Integration — close the two §17.751 deferred gaps: the recap and the note-impact analyzer now ground in the durable ledgers, not just the node transcript / brief (2026-08-10)
 
 **Why.** §17.751 landed the injection funnel but explicitly deferred two record-keeping gaps; operator: *"I'd like the complete integration."* Both were the same shape — a memory consumer reading a NARROWER source than the ledgers that already hold the truth.

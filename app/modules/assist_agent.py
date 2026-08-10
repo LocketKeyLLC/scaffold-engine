@@ -669,10 +669,11 @@ class GenerationMemory:
     environment: dict
     verbosity: str
     operator_notes: list[dict]
-    job_digest: str
+    job_digest: str  # §17.753 — the distilled whole-project recap is prepended here
     history: list[dict]
     recap: str
     conversation: str
+    project_recap: str  # §17.753 — the cross-step "living project recap" (raw)
 
 
 async def assemble_generation_memory(
@@ -700,14 +701,22 @@ async def assemble_generation_memory(
     (the research/ask side-query). ``title`` overrides the recap heading when the
     caller has no ``ctx``.
     """
+    from app.modules import assist_guide
     environment = _environment_from_metadata(sess.get("metadata"))
     verbosity = _verbosity_from_metadata(sess.get("metadata"))
     operator_notes = _coerce_notes(sess.get("notes"))
     if digest_excludes is None:
         digest_excludes = {nk, *(ctx.upstream_outputs.keys() if ctx else ())}
-    job_digest = await _job_digest_for(
+    raw_digest = await _job_digest_for(
         db=db, job_id=str(sess["job_id"]), exclude_node_keys=digest_excludes,
     )
+    # §17.753 — lead the project-context section with the distilled whole-project
+    # recap (the arc: decisions, remaining, cross-step constraints) so step-N
+    # guidance/fix/research isn't limited to raw per-step outputs. Reuses the
+    # existing job_digest injection path — no new prompt params at the 5 sites.
+    project_recap = await get_project_recap(job_id=str(sess["job_id"]), db=db)
+    recap_block = assist_guide.render_project_recap_block(project_recap)
+    job_digest = f"{recap_block}\n\n{raw_digest}".strip() if recap_block else raw_digest
     history = await _history_or_transcript(
         history=history, session_id=session_id, db=db, exclude_tail=exclude_tail,
     )
@@ -719,6 +728,7 @@ async def assemble_generation_memory(
     return GenerationMemory(
         environment=environment, verbosity=verbosity, operator_notes=operator_notes,
         job_digest=job_digest, history=history, recap=recap, conversation=conversation,
+        project_recap=project_recap,
     )
 
 
@@ -1379,6 +1389,15 @@ def _note_impact_facts_block(metadata: Any) -> str:
         return ""
     from app.modules import assist_guide
     return assist_guide.render_facts_block(_environment_from_metadata(metadata))
+
+
+async def _note_impact_project_block(job_id: str, db) -> str:
+    """§17.753 — the distilled whole-project recap block for the note/pivot
+    analyzer, so it judges impact against the arc (what's already built/decided),
+    not just the pending list. "" when the project recap is disabled/empty."""
+    from app.modules import assist_guide
+    return assist_guide.render_project_recap_block(
+        await get_project_recap(job_id=job_id, db=db))
 
 
 async def get_environment(*, session_id: str, db) -> Optional[dict]:
@@ -2342,6 +2361,96 @@ async def get_step_recap(
         return recap
     except Exception as e:  # noqa: BLE001 — recap must never break the turn
         logger.debug("get_step_recap_failed session_id=%s err=%r", session_id, e)
+        return ""
+
+
+async def get_project_recap(*, job_id: str, db) -> str:
+    """§17.753 — the cross-step "living project recap" (§17.679): a distilled,
+    cached, EVOLVING whole-project state board (goal · done phases · in-progress ·
+    remaining · decisions · constraints · system facts), refreshed only when the
+    count of DONE nodes grows past the watermark since the last recap — so it costs
+    ~one LLM call per completed step and is cached across the many turns within a
+    step. Gated on ``assist_project_recap_enabled``; fail-soft → "" so every caller
+    (the §17.751 funnel, the note/pivot analyzer) can thread it unconditionally.
+
+    Unlike ``assemble_job_digest`` (§17.650, which dumps raw done-node outputs), this
+    is a distilled arc: what earlier steps DECIDED, what remains, and the
+    project-wide constraints/system facts — the piece step-N guidance/pivot was
+    blind to."""
+    from app.config import settings
+    from app.modules import assist_guide
+
+    if not settings.assist_project_recap_enabled:
+        return ""
+    try:
+        job = (await db.execute(
+            text("SELECT refined_brief, project_recap, project_recap_nodes "
+                 "FROM jobs WHERE id = :jid"),
+            {"jid": job_id},
+        )).mappings().first()
+        if not job:
+            return ""
+        nodes = (await db.execute(
+            text("""
+                SELECT node_key, title, status, output_text, execution_order
+                  FROM dag_nodes WHERE job_id = :jid
+                 ORDER BY execution_order NULLS LAST, node_key
+            """),
+            {"jid": job_id},
+        )).mappings().all()
+        if not nodes:
+            return ""
+        done_n = sum(1 for n in nodes if n["status"] == "done")
+        cached = (job.get("project_recap") or "").strip()
+        watermark = int(job.get("project_recap_nodes") or 0)
+        # Nothing meaningfully done yet, or no new completions since the last recap
+        # → reuse the cache (which may be "").
+        if done_n < int(settings.assist_project_recap_min_nodes):
+            return cached
+        if cached and done_n < watermark + int(settings.assist_project_recap_every):
+            return cached
+        # Distill the arc from step statuses + a short preview of each DONE output.
+        lines: list[str] = []
+        for n in nodes:
+            head = f"- {n['node_key']} ({n['status']}): {n['title'] or n['node_key']}"
+            if n["status"] == "done" and (n["output_text"] or "").strip():
+                head += f" — produced: {n['output_text'].strip()[:300]}"
+            lines.append(head)
+        nodes_block = "\n".join(lines)
+        # Cross-step ledgers live on the job's assist session (if any).
+        facts_block = notes_block = ""
+        srow = (await db.execute(
+            text("SELECT notes, metadata FROM assist_sessions WHERE job_id = :jid"),
+            {"jid": job_id},
+        )).mappings().first()
+        if srow:
+            facts_block = assist_guide.render_facts_block(
+                _environment_from_metadata(srow.get("metadata")))
+            notes_block = assist_guide.render_operator_notes_block(
+                _coerce_notes(srow.get("notes")))
+        brief = job.get("refined_brief") or {}
+        if isinstance(brief, str):
+            try:
+                brief = json.loads(brief)
+            except (ValueError, TypeError):
+                brief = {}
+        goal = (brief.get("description") or brief.get("title") or "") if isinstance(brief, dict) else ""
+        recap = await assist_guide.summarize_project_progress(
+            goal=goal, nodes_block=nodes_block,
+            facts_block=facts_block, notes_block=notes_block,
+        )
+        if not recap:
+            return cached
+        await db.execute(
+            text("UPDATE jobs SET project_recap = :r, project_recap_nodes = :n "
+                 "WHERE id = :jid"),
+            {"r": recap, "n": done_n, "jid": job_id},
+        )
+        await db.commit()
+        logger.info("assist_project_recap_refreshed job_id=%s done_nodes=%d", job_id, done_n)
+        return recap
+    except Exception as e:  # noqa: BLE001 — a recap must never break the turn
+        logger.debug("get_project_recap_failed job_id=%s err=%r", job_id, e)
         return ""
 
 
@@ -3337,6 +3446,7 @@ async def assess_note_impact(
         impact = await assist_replan.analyze_note_impact(
             db=db, job_id=job_id, note_text=note_text, note_kind=note_kind,
             facts_block=_note_impact_facts_block(sess.get("metadata")),  # §17.752
+            project_recap_block=await _note_impact_project_block(job_id, db),  # §17.753
         )
     except Exception as e:  # noqa: BLE001 — never break the note on analysis
         logger.warning("assess_note_impact_failed session_id=%s err=%r", session_id, e)
@@ -3422,6 +3532,7 @@ async def detect_reroute(
             # their stale "done" output stops leading the prompt as MANDATORY.
             include_done_reopen=settings.assist_pivot_reopen_enabled,
             facts_block=_note_impact_facts_block(sess.get("metadata")),  # §17.752
+            project_recap_block=await _note_impact_project_block(job_id, db),  # §17.753
         )
     except Exception as e:  # noqa: BLE001 — never trap the turn on analysis
         logger.warning("detect_reroute_failed session_id=%s err=%r", session_id, e)
