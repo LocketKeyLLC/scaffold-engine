@@ -202,7 +202,7 @@ has just told you a new {kind} that changes the situation:
 
   "{note}"
 
-{brief}Here are the steps that have NOT been done yet. Use the project goals \
+{facts}{brief}Here are the steps that have NOT been done yet. Use the project goals \
 above to understand what each step actually involves (the titles are terse):
 {nodes}
 
@@ -311,6 +311,7 @@ async def analyze_note_impact(
     *, db, job_id: str, note_text: str, note_kind: str,
     model_overrides: dict | None = None,
     include_done_reopen: bool = False,
+    facts_block: str = "",
 ) -> dict:
     """§17.677 — ask whether a newly-raised note invalidates any pending node's
     plan. Returns ``{"affected": [{node_key, current_assumption, proposed_change,
@@ -391,10 +392,18 @@ async def analyze_note_impact(
         if lines:
             brief = "\n".join(lines) + "\n\n"
 
+    # §17.752 — whether the note actually breaks a step often depends on the
+    # operator's REAL system (e.g. "no TPM" only invalidates a step that assumed
+    # one). Ground the analyzer in the observed facts ledger, not just the brief.
+    facts = ""
+    if (facts_block or "").strip():
+        facts = ("The operator's ACTUAL system (observed — judge impact against "
+                 "this reality, not a generic setup):\n" + facts_block.strip() + "\n\n")
     from app import model_router
     msg = _NOTE_IMPACT_PROMPT.format(
         kind=note_kind or "note",
         note=(note_text or "")[:2000],
+        facts=facts,
         brief=brief,
         nodes=nodes_block[:6000],
     )
@@ -808,11 +817,23 @@ async def stage_divergence_replan(
     if not settings.assist_divergence_replan_enabled:
         return None
     sess = (await db.execute(
-        text("SELECT status FROM assist_sessions WHERE id = :sid"),
+        text("SELECT status, metadata FROM assist_sessions WHERE id = :sid"),
         {"sid": session_id},
     )).mappings().first()
     if not sess or sess["status"] not in ("active", "paused"):
         return None
+    # §17.752 — ground the analyzer in the operator's observed system facts.
+    facts_block = ""
+    if settings.assist_note_impact_facts_aware:
+        from app.modules import assist_guide
+        md = sess.get("metadata")
+        if isinstance(md, str):
+            try:
+                md = json.loads(md)
+            except (ValueError, TypeError):
+                md = {}
+        env = (md or {}).get("environment") if isinstance(md, dict) else {}
+        facts_block = assist_guide.render_facts_block(env)
     # Frame the operator's real result (and why it diverged) as a decision note
     # about the true system state — the analyzer maps that onto the pending plan.
     note_text = (
@@ -824,7 +845,7 @@ async def stage_divergence_replan(
     try:
         impact = await analyze_note_impact(
             db=db, job_id=job_id, note_text=note_text, note_kind="decision",
-            model_overrides=model_overrides,
+            model_overrides=model_overrides, facts_block=facts_block,  # §17.752
         )
     except Exception as e:  # noqa: BLE001 — a flaky analyzer must never surface
         logger.warning("divergence_replan_analyze_failed session_id=%s err=%r", session_id, e)

@@ -692,6 +692,19 @@ def render_environment_block(environment: dict | None) -> str:
     return "\n\n".join(parts)
 
 
+def render_facts_block(environment: dict | None) -> str:
+    """§17.752 — just the durable observed facts (§17.709) as a compact block, for
+    prompts that ground on the operator's ACTUAL system state (the recap, the
+    note-impact analyzer) without the full environment/substitutions framing.
+    Returns "" when there are no facts so callers thread it unconditionally."""
+    facts = [str(f).strip() for f in ((environment or {}).get("facts") or []) if str(f).strip()]
+    if not facts:
+        return ""
+    return "Known facts about the operator's system (observed):\n" + "\n".join(
+        f"- {f}" for f in facts
+    )
+
+
 def render_operator_notes_block(notes: list[dict] | None) -> str:
     """§17.654 — the operator's captured notes & additions, threaded into every
     later step's guidance so the engine respects what they raised and stops
@@ -1825,8 +1838,16 @@ _STEP_RECAP_SYSTEM = (
     "CONTEXT: key state that's easy to lose — especially WHICH machine the next "
     "commands run on (host vs the VM/guest), IPs, filenames, and values already "
     "chosen.\n"
-    "Ground ONLY in the transcript; never invent progress. Be terse (a compact "
-    "status board, not prose). For OPEN and NEXT, describe blockers and "
+    "You may also be given the operator's recorded CONSTRAINTS/DECISIONS and "
+    "observed system FACTS (from earlier steps / the durable ledger). Fold a hard "
+    "limit or ruled-out approach into CONSTRAINTS, and durable system state (build "
+    "spec, versions, IPs, what already exists) into CONTEXT — even if this step's "
+    "transcript did not repeat it. But DONE/OPEN/NEXT still come ONLY from the "
+    "transcript: a stated constraint or a system fact is NOT completed work, so "
+    "never turn one into a DONE item or invent progress from it.\n"
+    "Ground in the transcript (plus those recorded constraints/facts); never invent "
+    "progress. Be terse (a compact status board, not prose). For OPEN and NEXT, "
+    "describe blockers and "
     "objectives in tool-neutral plain words — the exact shell commands live in "
     "the transcript, not here; do NOT copy command lines into the recap (that "
     "would wrongly anchor the next answer to the CLI when a GUI is easier). If "
@@ -1836,20 +1857,32 @@ _STEP_RECAP_SYSTEM = (
 
 async def summarize_step_progress(
     *, title: str, transcript: str, role: str = "model_general",
+    facts_block: str = "", notes_block: str = "",
 ) -> str:
     """§17.738 — a compact running recap of one step from its full transcript,
     so fix/guide/research stay on-thread over a long troubleshooting marathon
     (the 6-turn window loses it). Reasoning task → ``model_general``. Fail-soft
-    → "" so callers thread it unconditionally."""
+    → "" so callers thread it unconditionally.
+
+    §17.752 — ``facts_block``/``notes_block`` (the durable ledgers) let the recap
+    ground its CONSTRAINTS/CONTEXT in what the operator stated on EARLIER steps and
+    in observed system facts, not just this node's transcript; DONE/OPEN/NEXT stay
+    transcript-derived (see ``_STEP_RECAP_SYSTEM``)."""
     if not (transcript or "").strip():
         return ""
+    ledger = ""
+    if (notes_block or "").strip():
+        ledger += f"\nOperator's recorded constraints/decisions:\n{notes_block.strip()}\n"
+    if (facts_block or "").strip():
+        ledger += f"\n{facts_block.strip()}\n"
     try:
         resp = await chat_until_nonempty(
             model_router.chat,
             [
                 {"role": "system", "content": _STEP_RECAP_SYSTEM},
                 {"role": "user", "content": (
-                    f"Step goal: {title}\n\n"
+                    f"Step goal: {title}\n"
+                    f"{ledger}\n"
                     f"Transcript of work on this step (oldest first):\n{transcript[:12000]}\n\n"
                     "Write the recap."
                 )},

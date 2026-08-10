@@ -22069,6 +22069,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.752 Integration — close the two §17.751 deferred gaps: the recap and the note-impact analyzer now ground in the durable ledgers, not just the node transcript / brief (2026-08-10)
+
+**Why.** §17.751 landed the injection funnel but explicitly deferred two record-keeping gaps; operator: *"I'd like the complete integration."* Both were the same shape — a memory consumer reading a NARROWER source than the ledgers that already hold the truth.
+
+**Fix 1 — ledger-aware recap.** `get_step_recap`/`summarize_step_progress` were node-scoped + transcript-ONLY (the system prompt even said "Ground ONLY in the transcript"), so a constraint the operator stated on an EARLIER step (a note) or a distilled system fact (§17.709) never reached the recap's CONSTRAINTS/CONTEXT unless it was re-said in THIS node's transcript. `get_step_recap` now also fetches the session's operator notes + observed facts and threads them (`facts_block`/`notes_block`) into `summarize_step_progress`; `_STEP_RECAP_SYSTEM` folds a hard limit/ruled-out approach into CONSTRAINTS and durable system state into CONTEXT — while **DONE/OPEN/NEXT stay transcript-derived** (a stated constraint or a fact is not completed work, so it can't fabricate progress). Valve `assist_recap_ledger_aware` (default on; only fires when the recap already runs). Since the recap feeds every generation site via the §17.751 funnel, this lifts the whole subsystem's grounding at one point.
+
+**Fix 2 — facts-aware note-impact.** `analyze_note_impact` (the §17.677 note/pivot/divergence re-plan judge) grounded only in the brief's goals/constraints, so whether a note actually invalidates a pending step was judged against a GENERIC setup — but that usually depends on the operator's REAL system ("no TPM" only breaks a step that assumed one). It now takes a `facts_block` injected into the prompt ("judge impact against this reality, not a generic setup"); all three callers thread it — `assess_note_impact` + `detect_reroute` (via `_note_impact_facts_block`) and the divergence-replan stager (inline, avoiding an `assist_agent` import cycle). Valve `assist_note_impact_facts_aware` (default on). Shared `assist_guide.render_facts_block` renders the compact facts block for both fixes.
+
+**Verification.** New `test_assist_ledger_aware.py` (render_facts_block; the gate; the recap prompt carries facts+notes; the note-impact prompt grounds in facts / omits when absent) + updated `test_get_step_recap_refreshes_when_grown` (asserts both ledgers reach the recap). **756 assist unit tests pass** (dev image, isolated container). Still deferred (bigger, architectural): the cross-step living-DAG (§17.679) — the recap is now ledger-aware but still per-node in structure.
+
+---
+
 ### §17.751 Structural — the two cross-cutting concerns that kept regressing (context injection + next-action) were enforced per-path; make them chokepoints (2026-08-10)
 
 **Why.** Operator, after §17.750: *"I feel like this may be a bigger issue overall. Both proper record-keeping and clear instructions are vital to the engine's whole concept."* Correct. An audit of both axes (findings ledger below) showed: **capture** is chokepointed and sound (operator turns §17.710a, engine output §17.726, structured ledgers) — but **injection** and **next-action** were implemented in every handler independently, N sites each, so the log had been closing "the LAST memory-blind injection site" (§17.650/687/720/726/745) and the last dead-end (§17.638/741/749/750) one at a time. Same root the OVERVIEW already names 5×: *over-narrow gating — a cross-cutting rule enforced per-path misses the next path.* This makes them structural.

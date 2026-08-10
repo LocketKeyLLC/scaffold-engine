@@ -1011,18 +1011,26 @@ async def test_get_step_recap_refreshes_when_grown():
     db.execute = AsyncMock(side_effect=[
         _result({"progress_recap": "GOAL: stale", "progress_recap_turns": 4}),   # step row
         _result_all([{"role": "operator", "content": f"m{i}"} for i in range(20)]),  # 20 turns
+        # §17.752 — the ledger fetch (notes + metadata/facts) for a ledger-aware recap
+        _result({"notes": [{"kind": "constraint", "text": "only 2 NICs"}],
+                 "metadata": {"environment": {"facts": ["no TPM on this host"]}}}),
         _result(None),   # UPDATE recap
     ])
     db.commit = AsyncMock()
     with patch.object(_settings, "assist_step_recap_enabled", True), \
          patch.object(_settings, "assist_step_recap_every", 3), \
          patch.object(_settings, "assist_step_recap_min_turns", 4), \
+         patch.object(_settings, "assist_recap_ledger_aware", True), \
          patch("app.modules.assist_guide.summarize_step_progress",
                new=AsyncMock(return_value="GOAL: fresh recap")) as summ:
         out = await assist_agent.get_step_recap(
             session_id="s", node_key="ADD1", title="net", db=db)
     assert out == "GOAL: fresh recap"
     summ.assert_awaited_once()
+    # §17.752 — the durable ledgers (facts + operator constraints) reached the recap
+    kw = summ.await_args.kwargs
+    assert "no TPM on this host" in kw["facts_block"]
+    assert "only 2 NICs" in kw["notes_block"]
     # the refreshed recap + new watermark were written
     upd = [c for c in db.execute.await_args_list if "progress_recap = :r" in str(c.args[0])]
     assert upd and upd[0].args[1]["n"] == 20
