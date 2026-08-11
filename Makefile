@@ -1,6 +1,11 @@
 # Scaffold Engine — Developer Makefile
 # Run targets from project root: ~/scaffold-engine/
 
+# §17.762 — recipes use bash-isms (`set -o pipefail`, `[[ … ]]`); pin bash so they
+# don't break on hosts where /bin/sh is dash (e.g. Pop!_OS/Ubuntu). CI's /bin/sh is
+# already bash, so this only fixes local runs.
+SHELL := /bin/bash
+
 CONTAINER := scaffold-orchestrator
 COMPOSE   := docker compose
 API_KEY   ?= $(SCAFFOLD_API_KEY)
