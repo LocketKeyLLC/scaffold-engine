@@ -377,6 +377,11 @@ services:
       # instead of hardcoding a stale guess from the transcript. Code default off;
       # live here.
       ASSIST_GROUND_OR_ASK_ENABLED: "${ASSIST_GROUND_OR_ASK_ENABLED:-true}"
+      # §17.761 — reconnect orientation: /assist/start attaches a WHERE-YOU-ARE
+      # snapshot (title · progress · recently-done · current step · next + cached
+      # project recap) so picking a job back up in a fresh chat leads with context,
+      # not a raw step. Deterministic, no model call. Code default off; live here.
+      ASSIST_RECONNECT_ORIENTATION_ENABLED: "${ASSIST_RECONNECT_ORIENTATION_ENABLED:-true}"
       # §17.757 — cross-component fact sharing: a decomposed umbrella's components
       # share one host/network/storage, so the funnel folds sibling components'
       # observed facts into a later component's grounding (deduped, capped). Code

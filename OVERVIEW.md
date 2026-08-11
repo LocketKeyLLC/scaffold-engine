@@ -22069,6 +22069,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.761 Fix — reconnect orientation: picking a job back up in a fresh chat now leads with WHERE-YOU-ARE context, not a raw step dump (2026-08-11)
+
+**Report.** Operator, fresh chat, "can you please continue to assist me in setting up the DeFruscio HomeLab?" → "it launched me at T15, with no context and too many steps for natural language." Traced via OWUI's SQLite (the §17.748 lesson): the reconnect actually landed on the CORRECT step (**ADD2**, network config), but (1) the header `**Step 15 of 23**` — ADD2's ordinal position — collided visually with the node-key style and read as node `T15`; (2) the start path dumped straight into the step with NO project orientation — the §17.753 project recap was built but never surfaced on the reconnect entry path; (3) the session banner + step intro + collapsed detail blocks + full multi-phase walkthrough was a wall of text.
+
+**Fix.** `assist_agent.build_reconnect_orientation` — a deterministic WHERE-YOU-ARE snapshot (job title · `{done}/{total}` progress · recently-done steps · current step · what's next) plus the CACHED project recap (read-only, **no model call on the start path**). The `/assist/start` router attaches it as `orientation` for a real started session. The pipeline (`render_reconnect_orientation`) leads the reconnect with a `📍 Picking up: <job>` panel (recap collapsed in `<details>`) before the step, replacing the verbose "Assist session started…" banner. And `render_step`'s progress line changed from `**Step {n} of {total}**` (the ordinal that read as a node key) to `📊 **{done}/{total} steps done** · {tail}`. Valve `assist_reconnect_orientation_enabled`, `ASSIST_RECONNECT_ORIENTATION_ENABLED=true` in compose.
+
+**Verification.** Units `test_assist_reconnect_orientation.py` (disabled→None; the snapshot counts done+skipped, excludes current from upcoming, carries the cached recap; the pipeline panel renders progress/now/next + collapsed recap and has no bare "Step 15"). 1154 pipeline + reconnect tests green. **LIVE (real orchestrator, actual P40 job):** `/assist/start` returned the orientation — *"📍 Picking up: DeFruscio HomeLab — Proxmox P40 GPU Passthrough · 14 of 23 steps done · Recently: Attach P40 · Install guest OS · NAT/bridge · 👉 Now: Configure Ubuntu guest static IP via netplan · ⏭️ Then: NVIDIA driver · CUDA · fans"* + the cached project recap. Deployed via dev-override recreate + pipelines restart. This wires the §17.753 project context into the reconnect ENTRY path — the last place it wasn't.
+
+---
+
 ### §17.760 Fix — close the last wiring asymmetry: apply ground-or-ask to the /research (ask) answer too, so no operator-facing output guesses an unconfirmed value (2026-08-11)
 
 **Why.** A wiring audit (operator asked to confirm every subsystem is wired to every engine path) found the folded directives on the three walkthrough generators (guide/stream/fix) but NOT on the `/research` (ask) synthesis — the one operator-facing output missing ground-or-ask (§17.756). A research answer can hardcode an unconfirmed operator value (an SSH username, an IP) just like a walkthrough.

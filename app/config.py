@@ -916,6 +916,13 @@ class Settings(BaseSettings):
     # failure, falls back to sharing all facts (the §17.757 behavior). Flip off to
     # share all sibling facts. Default on when cross-component sharing is on.
     assist_cross_component_durable_only: bool = True
+    # §17.761 — reconnect orientation: on /assist/start (a fresh chat picking a job
+    # back up, or /assist <job>), attach a compact WHERE-YOU-ARE snapshot (title ·
+    # progress · recently-done · current step · what's next + the cached project
+    # recap) so the operator gets context instead of being dropped into a raw step.
+    # Deterministic + reads the CACHED project recap (no model call on the start
+    # path). Code default off; live via compose.
+    assist_reconnect_orientation_enabled: bool = False
     # §17.758 — screen-state grounding: a directive on guide/fix so a walkthrough
     # for an INTERACTIVE surface (OS installer, TUI, BIOS/boot menu, noVNC console,
     # web wizard) whose current screen isn't confirmed OPENS by asking what's on
