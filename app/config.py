@@ -908,6 +908,14 @@ class Settings(BaseSettings):
     # unaffected. Code default off; live via compose.
     assist_cross_component_facts_enabled: bool = False
     assist_cross_component_facts_cap: int = Field(default=40, ge=1, le=200)
+    # §17.758 — screen-state grounding: a directive on guide/fix so a walkthrough
+    # for an INTERACTIVE surface (OS installer, TUI, BIOS/boot menu, noVNC console,
+    # web wizard) whose current screen isn't confirmed OPENS by asking what's on
+    # screen and makes the first action conditional — instead of assuming a screen
+    # and sending keystrokes to the wrong place (the storage-screen assumption).
+    # Folded into generation (no extra LLM call); skipped for decision nodes. Code
+    # default off; live via compose.
+    assist_screen_grounding_enabled: bool = False
     # §17.741 — surface the running recap to the OPERATOR as a "📍 Where we are"
     # panel above each walkthrough (goal / done / open / next), so a first-timer
     # can always see the engine holding the thread on a long problem-solving
