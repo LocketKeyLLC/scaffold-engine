@@ -782,6 +782,82 @@ def _operator_reset_intent(notes: list[dict] | None) -> bool:
     return False
 
 
+_FACTS_SWEEP_SYSTEM = (
+    "You maintain a system-state ledger for a hands-on build. The operator has "
+    "just declared a RESET / REBUILD — they are erasing or starting over a part of "
+    "the system. Some recorded facts now describe the ABANDONED thing (the machine "
+    "being destroyed and its problems, config that was wiped, guest-OS state that "
+    "no longer exists) and must be RETRACTED so they stop misleading later steps. "
+    "OTHER facts are DURABLE and must be KEPT: physical hardware, the host / "
+    "hypervisor configuration, network and storage infrastructure that survives the "
+    "rebuild, and any fact about the NEW system being built. Call "
+    "report_superseded_facts with the indices of ONLY the superseded "
+    "(abandoned-system) facts. Be precise and conservative: when unsure whether a "
+    "fact survives the rebuild, KEEP it (do not retract). Never retract a fact "
+    "about the host, the network/bridge, storage, or the new build."
+)
+
+_REPORT_SUPERSEDED_TOOL = model_router.Tool(
+    name="report_superseded_facts",
+    description=(
+        "Report which recorded facts describe the ABANDONED system the operator's "
+        "reset/rebuild supersedes, so they can be retracted from the ledger."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "superseded_indices": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": (
+                    "The 0-based indices of facts that describe the abandoned "
+                    "system (empty if none are superseded)."
+                ),
+            },
+            "reason": {"type": "string", "description": "One short sentence."},
+        },
+        "required": ["superseded_indices"],
+    },
+)
+
+
+async def classify_superseded_facts(
+    *, note_text: str, facts: list[str], role: str = "model_general",
+) -> list[int]:
+    """§17.755 — given a reset/rebuild note and the numbered facts ledger, return
+    the indices of facts that describe the ABANDONED system (to retract). Durable
+    host/network/storage/new-build facts are kept. Fail-soft → [] (retract nothing)
+    so a flaky classifier never nukes the ledger."""
+    facts = [str(f).strip() for f in (facts or []) if str(f).strip()]
+    if not facts:
+        return []
+    numbered = "\n".join(f"{i}. {f}" for i, f in enumerate(facts))
+    try:
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": _FACTS_SWEEP_SYSTEM},
+                {"role": "user", "content": (
+                    f"The operator just declared a reset/rebuild:\n"
+                    f"\"{(note_text or '').strip()[:1500]}\"\n\n"
+                    f"Currently recorded system facts (numbered):\n{numbered[:9000]}\n\n"
+                    "Call report_superseded_facts with the indices of the "
+                    "abandoned-system facts."
+                )},
+            ],
+            tools=[_REPORT_SUPERSEDED_TOOL],
+            role=role,
+            temperature=0.0,
+            tool_choice="auto",
+            max_tokens=2048,   # thinking model reasons before the tool call
+        )
+    except Exception as exc:  # noqa: BLE001 — a flaky sweep must never break note-taking
+        logger.warning("assist_facts_sweep_classify_failed: %s", exc)
+        return []
+    args = read_tool_args(resp)
+    idxs = (args or {}).get("superseded_indices") or []
+    return sorted({i for i in idxs if isinstance(i, int) and 0 <= i < len(facts)})
+
+
 def render_session_memory(
     environment: dict | None, operator_notes: list[dict] | None = None,
     *, budget: int | None = None,
@@ -2187,6 +2263,30 @@ def apply_next_callout(system: str, *, is_decision: bool, enabled: bool) -> str:
     return system + _NEXT_CALLOUT_DIRECTIVE
 
 
+_GROUND_OR_ASK_DIRECTIVE = (
+    "\n\nGROUND OR ASK — never GUESS an operator-specific value. Any value tied to "
+    "THIS operator's system — a username, password, hostname, IP/MAC address, disk "
+    "or path, filename, SSH key, port, VM/host name — that you were NOT given in "
+    "the confirmed facts / operator environment above MUST be written as a "
+    "<SCREAMING_SNAKE_CASE> placeholder, never a concrete guess, and surfaced in the "
+    "walkthrough's values-to-provide / inputs section so the operator supplies it. "
+    "Do NOT lift such a value from the recent dialogue and present it as known: the "
+    "conversation may carry values from an ABANDONED earlier attempt (an old "
+    "username, an old IP) that are now WRONG — especially after a reset/rebuild. A "
+    "confident-looking wrong value is worse than a placeholder plus a quick question."
+)
+
+
+def apply_ground_or_ask(system: str, *, is_decision: bool, enabled: bool) -> str:
+    """§17.756 — append the ground-or-ask discipline so guidance emits a placeholder
+    and asks for any operator-specific value it wasn't actually given, instead of
+    hardcoding a stale guess pulled from the transcript (the `ai-defruscio` username
+    leak). No-op for decision nodes and when the valve is off."""
+    if not enabled or is_decision:
+        return system
+    return system + _GROUND_OR_ASK_DIRECTIVE
+
+
 # ── Draft an inserted step (§17.736 — turn a foundational gap into a step) ──
 
 _DRAFT_STEP_TOOL = model_router.Tool(
@@ -2852,6 +2952,10 @@ async def generate_guidance(
     system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
         system, enabled=settings.assist_problem_solving_enabled,
     )
+    system = apply_ground_or_ask(  # §17.756 — placeholder + ask, never guess a value
+        system, is_decision=is_decision,
+        enabled=settings.assist_ground_or_ask_enabled,
+    )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
@@ -2946,11 +3050,13 @@ async def generate_fix(
     resp = await chat_until_nonempty(
         model_router.chat,
         [
-            {"role": "system", "content": apply_problem_solving(  # §17.742
-                apply_next_callout(  # §17.741
-                    apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
-                    is_decision=False, enabled=settings.assist_next_callout_enabled),
-                enabled=settings.assist_problem_solving_enabled)},
+            {"role": "system", "content": apply_ground_or_ask(  # §17.756
+                apply_problem_solving(  # §17.742
+                    apply_next_callout(  # §17.741
+                        apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
+                        is_decision=False, enabled=settings.assist_next_callout_enabled),
+                    enabled=settings.assist_problem_solving_enabled),
+                is_decision=False, enabled=settings.assist_ground_or_ask_enabled)},
             {"role": "user", "content": user},
         ],
         {"role": role},
@@ -3155,6 +3261,10 @@ async def generate_guidance_stream(
     )
     system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
         system, enabled=settings.assist_problem_solving_enabled,
+    )
+    system = apply_ground_or_ask(  # §17.756 — placeholder + ask, never guess a value
+        system, is_decision=is_decision,
+        enabled=settings.assist_ground_or_ask_enabled,
     )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,

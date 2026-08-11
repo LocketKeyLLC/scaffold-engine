@@ -870,6 +870,34 @@ class Settings(BaseSettings):
     assist_project_recap_enabled: bool = False
     assist_project_recap_every: int = Field(default=1, ge=1, le=20)
     assist_project_recap_min_nodes: int = Field(default=1, ge=1, le=40)
+    # §17.754 — the progress-TRACKING agent (operator-directed). The recap/facts
+    # DESCRIBE state but never RECONCILE the session pointer with reality: an
+    # operator finishes a step without submitting it, or starts a sub-task the plan
+    # has no step for, and a help request gets answered against the stale step (the
+    # "it just repeated itself" failure). On a substantive help/how-to turn, this
+    # LLM agent reads where the operator ACTUALLY is against the DAG and returns an
+    # action — on_step / advance / add_step. `add_step` (a real uncovered sub-task)
+    # inserts a guided step (§17.736) and walks them through it instead of
+    # repeating. Guardrails: valve-gated, confidence-thresholded, fail-soft to
+    # on_step (never traps the turn or mutates the plan on a guess). Code default
+    # off; live via compose.
+    assist_progress_tracker_enabled: bool = False
+    assist_tracker_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    # §17.755 — on a reset/rebuild note (§17.714), auto-RETRACT the facts that
+    # describe the abandoned system (an LLM pass keeps durable host/network/storage/
+    # new-build facts). §17.714 only demoted them at render time, so they lingered
+    # and leaked. `max_frac` is a hard guardrail: never retract more than this
+    # fraction of the ledger in one sweep (a mis-firing model can't wipe it). Code
+    # default off; live via compose.
+    assist_reset_facts_sweep_enabled: bool = False
+    assist_reset_facts_sweep_max_frac: float = Field(default=0.9, ge=0.1, le=1.0)
+    # §17.756 — ground-or-ask: a prompt directive on guide/fix so any
+    # operator-specific value (username, IP, hostname, path, …) NOT in the confirmed
+    # facts is emitted as a <PLACEHOLDER> and listed under a `## Confirm these
+    # values` section — instead of hardcoding a stale guess lifted from the
+    # transcript (the `ai-defruscio` username leak). Folded into generation (no
+    # extra LLM call). Skipped for decision nodes. Code default off; live via compose.
+    assist_ground_or_ask_enabled: bool = False
     # §17.741 — surface the running recap to the OPERATOR as a "📍 Where we are"
     # panel above each walkthrough (goal / done / open / next), so a first-timer
     # can always see the engine holding the thread on a long problem-solving

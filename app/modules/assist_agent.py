@@ -3233,6 +3233,55 @@ async def list_friction(*, session_id: str, db) -> list[dict]:
 _NOTE_KINDS = ("note", "addition", "decision", "constraint", "preference")
 
 
+async def sweep_superseded_facts(*, session_id: str, note_text: str, db) -> dict:
+    """§17.755 — when an operator note declares a reset/rebuild (§17.714), RETRACT
+    the facts that describe the abandoned system so the append-only ledger stops
+    dragging dead state into every later step. §17.714 previously only DEMOTED the
+    superseded facts at render time — they lingered, ate the budget, and leaked
+    (e.g. the abandoned VM's guest username resurfacing in guidance). An LLM pass
+    (``classify_superseded_facts``) picks the abandoned-system facts; durable host /
+    network / storage / new-build facts are kept. Guardrails: valve-gated;
+    fail-soft → ``{retracted: []}``; and a hard cap so a mis-firing model can never
+    wipe most of the ledger. Returns the retracted facts for surfacing/logging."""
+    from app.config import settings
+    from app.modules import assist_guide
+
+    if not settings.assist_reset_facts_sweep_enabled:
+        return {"retracted": []}
+    try:
+        sess = (await db.execute(
+            text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).mappings().first()
+        env = _environment_from_metadata((sess or {}).get("metadata"))
+        facts = [str(f).strip() for f in (env.get("facts") or []) if str(f).strip()]
+        if len(facts) < 3:  # nothing meaningful to sweep
+            return {"retracted": []}
+        idxs = await assist_guide.classify_superseded_facts(
+            note_text=note_text, facts=facts)
+        retract = [facts[i] for i in idxs]
+        if not retract:
+            return {"retracted": []}
+        # Hard guardrail: a reset supersedes SOME facts, never (almost) all of them.
+        # If the model wants to retract >= the cap fraction, it has misfired — skip.
+        cap = max(1, int(len(facts) * settings.assist_reset_facts_sweep_max_frac))
+        if len(retract) > cap:
+            logger.warning(
+                "assist_facts_sweep_overbroad session_id=%s want=%d/%d cap=%d — skipped",
+                session_id, len(retract), len(facts), cap,
+            )
+            return {"retracted": [], "skipped": "overbroad"}
+        await set_environment(session_id=session_id, retract_facts=retract, db=db)
+        logger.info(
+            "assist_facts_sweep session_id=%s retracted=%d kept=%d",
+            session_id, len(retract), len(facts) - len(retract),
+        )
+        return {"retracted": retract}
+    except Exception as e:  # noqa: BLE001 — the sweep must never break note-taking
+        logger.warning("assist_facts_sweep_failed session_id=%s err=%r", session_id, e)
+        return {"retracted": []}
+
+
 async def record_note(
     *, session_id: str, text_: str, kind: str = "note",
     node_key: str | None = None, db,

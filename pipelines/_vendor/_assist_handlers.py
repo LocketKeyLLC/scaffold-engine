@@ -2084,6 +2084,32 @@ def reroute_check(pipe, session_id: str, msg: str) -> list | None:
     return None
 
 
+def _track_progress(
+    pipe, session_id: str, message: str, node_key: str | None,
+    history: list[dict] | None = None,
+) -> dict | None:
+    """§17.754 — consult the server-side progress-tracking agent. Blocking (one LLM
+    call, so gated by the caller). Returns the parsed ``{action, verdict, step?}``
+    dict, or None on any error so the caller falls through to normal handling."""
+    try:
+        r = _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/track",
+            json={"message": message, "node_key": node_key, "history": history or []},
+            headers=pipe._auth_headers(),
+            timeout=getattr(pipe.valves, "assist_guide_timeout", 180),
+        )
+    except requests.exceptions.RequestException as e:
+        pipe.logger.debug("assist track failed: %s", e)
+        return None
+    if r.status_code >= 400:
+        return None
+    try:
+        d = r.json()
+        return d if isinstance(d, dict) else None
+    except ValueError:
+        return None
+
+
 def assist_nl_turn(
     pipe, session_id: str, msg: str, *,
     node_key: str | None = None, chat_id: str | None = None,
@@ -2214,6 +2240,36 @@ def assist_nl_turn(
             and (_last_assistant_was_fix(history) or _looks_like_shell_error(msg))):
         intent = "fix"
         error_text = msg.strip()
+
+    # §17.754 — progress tracker. On a substantive help/how-to turn (ask/question/
+    # fix, not a shell paste), reconcile where the operator ACTUALLY is with the
+    # plan pointer BEFORE answering. If they've moved to a sub-task no step covers,
+    # the server inserts a guided step and we present it — instead of repeating the
+    # current step (the "I asked for network help and it just repeated itself" bug).
+    # Fail-soft: tracker says proceed / errors → fall through to normal handling.
+    if (intent in ("ask", "question", "fix")
+            and getattr(pipe.valves, "assist_progress_tracker", True)
+            and not _looks_like_shell_evidence(msg)
+            and _word_count(msg) >= getattr(pipe.valves, "assist_tracker_min_words", 5)):
+        _tnk = _recall_node_key(pipe, chat_id, node_key)
+        if _tnk:
+            track = _track_progress(pipe, session_id, msg, _tnk, history)
+            _taction = (track or {}).get("action")
+            if _taction == "added_step":
+                step = track.get("step") or {}
+                title = (step.get("title") or "a new step").strip()
+                yield (f"➕ It looks like you've moved past the current step onto "
+                       f"something the plan didn't cover — I've added **{title}** and "
+                       f"we'll do it now, then pick up where we were.\n\n")
+                yield from assist_next(pipe, session_id, chat_id=chat_id)
+                return
+            if _taction == "advanced":
+                # §17.754 (#2) — the tracker confirmed you've finished this step;
+                # the prior step was retired, so present the next one.
+                yield ("✅ Looks like you've finished that step — moving on to what's "
+                       "next.\n\n")
+                yield from assist_next(pipe, session_id, chat_id=chat_id)
+                return
 
     if intent == "advance":
         yield from assist_next(pipe, session_id, chat_id=chat_id); return
@@ -2759,13 +2815,21 @@ def assist_note_cmd(
     label = kind if kind and kind != "note" else "note"
     # §17.677 — a plan-affecting note may come back with a proposed plan fix.
     proposal = None
+    retracted = None
     try:
         d = r.json()
         if isinstance(d, dict):
             proposal = d.get("replan_proposal")
+            retracted = d.get("retracted_facts")
     except ValueError:
         proposal = None
     yield f"📌 Noted ({label}): {note_text.strip()}\n\n"
+    # §17.755 — a reset/rebuild note auto-cleared the abandoned system's facts.
+    if retracted:
+        n = len(retracted)
+        yield (f"🧹 Cleared **{n}** stale fact{'s' if n != 1 else ''} about the old "
+               f"system so they stop steering the guidance (durable host / network / "
+               f"storage facts kept).\n\n")
     affected = (proposal or {}).get("proposals") if isinstance(proposal, dict) else None
     if affected:
         # The note changes the plan — surface the re-plan instead of the step.
