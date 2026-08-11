@@ -255,12 +255,21 @@ async def assist_chatmap_delete(chat_id: str):
 @router.post("/assist/start")
 async def assist_start(body: AssistStartInput, db=Depends(get_db)):
     try:
-        return await assist_agent.start_assist_session(
+        result = await assist_agent.start_assist_session(
             job_id=body.job_id,
             handoff_policy=body.handoff_policy,
             replan_policy=body.replan_policy,
             db=db,
         )
+        # §17.761 — attach a WHERE-YOU-ARE orientation so the reconnect leads with
+        # project context, not a raw step. Only for a real started session.
+        if (isinstance(result, dict) and result.get("session_id")
+                and not result.get("assist_unavailable")):
+            orient = await assist_agent.build_reconnect_orientation(
+                session_id=result["session_id"], db=db)
+            if orient:
+                result["orientation"] = orient
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 

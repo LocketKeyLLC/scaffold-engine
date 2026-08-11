@@ -257,7 +257,10 @@ def render_step(step: dict) -> str:
     if total:
         remaining = total - done - 1
         tail = f"{remaining} to go" if remaining > 0 else "last step"
-        progress = f"**Step {done + 1} of {total}** · {tail}\n\n"
+        # §17.761 — "{done}/{total} done" not "Step {n} of {total}": the bare ordinal
+        # collided with the node-key style (a first-timer read "Step 15 of 23" as
+        # node `T15`). The step's own identity is shown in the subtitle below.
+        progress = f"📊 **{done}/{total} steps done** · {tail}\n\n"
     else:
         progress = ""
     return (
@@ -762,6 +765,36 @@ def dispatch_assist_sub(
 # ---------------------------------------------------------------------------
 
 
+def render_reconnect_orientation(orient: dict, sid: str, job_id: str) -> str:
+    """§17.761 — the WHERE-YOU-ARE panel shown when picking a job back up (a fresh
+    chat, `/assist <job>`), so the operator gets project context before the step
+    instead of being dropped into a raw step dump. Deterministic snapshot + the
+    cached project recap (collapsed)."""
+    title = (orient.get("job_title") or "this build").strip()
+    done_n = orient.get("done_n") or 0
+    total_n = orient.get("total_n") or 0
+    cur = (orient.get("current_title") or "").strip()
+    recent = [t for t in (orient.get("done_recent") or []) if t]
+    upcoming = [t for t in (orient.get("upcoming") or []) if t]
+    recap = (orient.get("project_recap") or "").strip()
+    lines = [f"📍 **Picking up: {title}**", ""]
+    if total_n:
+        lines.append(f"**{done_n} of {total_n} steps done.**")
+    if recent:
+        lines.append("✅ Recently: " + " · ".join(recent[-3:]))
+    if cur:
+        lines.append(f"👉 **Now:** {cur}")
+    if upcoming:
+        lines.append("⏭️ Then: " + " · ".join(upcoming))
+    block = "\n".join(lines)
+    if recap:
+        block += ("\n\n<details>\n<summary>📋 Where the whole project stands</summary>\n\n"
+                  f"{recap}\n</details>")
+    block += (f"\n\n_(session `{sid}` · `/assist fix <the error>` if you hit a snag · "
+              "`/assist env …` to set your OS/shell)_\n\n---\n\n")
+    return block
+
+
 def assist_start(
     pipe, job_id: str, *, chat_id: str | None = None,
 ) -> Generator[str, None, None]:
@@ -867,14 +900,21 @@ def assist_start(
             f"The prior autonomous deliverable is archived — still viewable with "
             f"`/results {resp_job_id}`.\n\n---\n\n"
         )
-    yield (
-        f"🤝 **Assist session started** — `{sid}`\n\n"
-        f"Job `{resp_job_id}` is now in `assisted_executing` ({pending} pending step(s)).\n\n"
-        f"💡 Tip: set your environment with `/assist env <OS, shell, tools>` "
-        f"(e.g. `/assist env Ubuntu 24.04, apt, bash`) so walkthroughs use concrete "
-        f"commands. Hit an error on any step? `/assist fix <the error>`.\n\n"
-        f"Fetching first step...\n\n---\n\n"
-    )
+    # §17.761 — lead with a WHERE-YOU-ARE orientation when the server supplies one
+    # (a reconnect/start), so the operator gets project context before the step
+    # instead of a raw step dump with no sense of the whole build.
+    orient = d.get("orientation") if isinstance(d, dict) else None
+    if orient:
+        yield render_reconnect_orientation(orient, sid, resp_job_id)
+    else:
+        yield (
+            f"🤝 **Assist session started** — `{sid}`\n\n"
+            f"Job `{resp_job_id}` is now in `assisted_executing` ({pending} pending step(s)).\n\n"
+            f"💡 Tip: set your environment with `/assist env <OS, shell, tools>` "
+            f"(e.g. `/assist env Ubuntu 24.04, apt, bash`) so walkthroughs use concrete "
+            f"commands. Hit an error on any step? `/assist fix <the error>`.\n\n"
+            f"Fetching first step...\n\n---\n\n"
+        )
     yield from assist_next(pipe, sid, chat_id=chat_id)
 
 

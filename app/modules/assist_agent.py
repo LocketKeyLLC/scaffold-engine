@@ -2556,6 +2556,56 @@ async def get_project_recap(*, job_id: str, db) -> str:
         return ""
 
 
+async def build_reconnect_orientation(*, session_id: str, db) -> dict | None:
+    """§17.761 — a compact WHERE-YOU-ARE orientation for the reconnect/start path:
+    when the operator picks a job back up (a fresh chat, `/assist <job>`), the
+    engine dropped them straight into a step with no sense of the whole project.
+    This returns a deterministic snapshot — job title, progress, recently-done
+    steps, the current step, and what's next — plus the CACHED §17.753 project
+    recap (read-only; NO model call on the start path). Valve-gated; fail-soft to
+    ``None`` (caller just omits the orientation)."""
+    from app.config import settings
+    if not settings.assist_reconnect_orientation_enabled:
+        return None
+    try:
+        sess = (await db.execute(
+            text("SELECT job_id, current_node_key FROM assist_sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).mappings().first()
+        if not sess:
+            return None
+        job_id = str(sess["job_id"])
+        job = (await db.execute(
+            text("SELECT title, project_recap FROM jobs WHERE id = :jid"),
+            {"jid": job_id},
+        )).mappings().first()
+        nodes = (await db.execute(
+            text("SELECT node_key, title, status FROM dag_nodes WHERE job_id = :jid "
+                 "ORDER BY execution_order NULLS LAST, node_key"),
+            {"jid": job_id},
+        )).mappings().all()
+        if not nodes:
+            return None
+        cur_key = sess["current_node_key"]
+        done = [n for n in nodes if n["status"] in ("done", "skipped")]
+        pending = [n for n in nodes if n["status"] == "pending"]
+        cur = next((n for n in nodes if n["node_key"] == cur_key), None)
+        upcoming = [n["title"] for n in pending if n["node_key"] != cur_key][:3]
+        return {
+            "job_title": (job or {}).get("title") or "this build",
+            "done_n": len(done),
+            "total_n": len(nodes),
+            "current_title": (cur or {}).get("title"),
+            "current_key": cur_key,
+            "done_recent": [n["title"] for n in done][-3:],
+            "upcoming": upcoming,
+            "project_recap": ((job or {}).get("project_recap") or "").strip() or None,
+        }
+    except Exception as e:  # noqa: BLE001 — orientation must never break start
+        logger.debug("build_reconnect_orientation_failed session_id=%s err=%r", session_id, e)
+        return None
+
+
 # ── Submit / commit human evidence ───────────────────────────────────────
 
 
