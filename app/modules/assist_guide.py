@@ -2287,6 +2287,34 @@ def apply_ground_or_ask(system: str, *, is_decision: bool, enabled: bool) -> str
     return system + _GROUND_OR_ASK_DIRECTIVE
 
 
+_SCREEN_GROUNDING_DIRECTIVE = (
+    "\n\nCONFIRM THE STARTING STATE — do NOT assume what is on screen. If this step "
+    "means navigating an INTERACTIVE surface (an OS installer, a TUI/menu, a "
+    "BIOS/boot menu, a noVNC/serial console, a web-UI wizard) and you cannot "
+    "confirm the operator's CURRENT screen from the confirmed facts / running "
+    "recap, do NOT assume which screen, prompt, or menu they are on — screens "
+    "change faster than the plan tracks, and a walkthrough that starts on the wrong "
+    "screen sends every keystroke to the wrong place. Instead OPEN by asking them "
+    "to tell you what is on screen right now (paste the prompt, or describe the "
+    "visible title / options), and make the FIRST action conditional on their "
+    "answer ('if you see X do…; if you see Y do…'). Give a straight-line sequence "
+    "of navigation steps only once the starting screen is confirmed. This does NOT "
+    "apply to an ordinary shell step: a command whose output you ask them to report "
+    "back is already self-confirming."
+)
+
+
+def apply_screen_grounding(system: str, *, is_decision: bool, enabled: bool) -> str:
+    """§17.758 — append the confirm-the-screen discipline so a walkthrough for an
+    interactive surface (installer / TUI / console / web wizard) whose current state
+    isn't confirmed OPENS by asking what's on screen, instead of assuming a screen
+    and sending keystrokes to the wrong place (the storage-screen assumption). No-op
+    for decision nodes and when the valve is off."""
+    if not enabled or is_decision:
+        return system
+    return system + _SCREEN_GROUNDING_DIRECTIVE
+
+
 # ── Draft an inserted step (§17.736 — turn a foundational gap into a step) ──
 
 _DRAFT_STEP_TOOL = model_router.Tool(
@@ -2956,6 +2984,10 @@ async def generate_guidance(
         system, is_decision=is_decision,
         enabled=settings.assist_ground_or_ask_enabled,
     )
+    system = apply_screen_grounding(  # §17.758 — confirm the on-screen state first
+        system, is_decision=is_decision,
+        enabled=settings.assist_screen_grounding_enabled,
+    )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
@@ -3050,13 +3082,15 @@ async def generate_fix(
     resp = await chat_until_nonempty(
         model_router.chat,
         [
-            {"role": "system", "content": apply_ground_or_ask(  # §17.756
-                apply_problem_solving(  # §17.742
-                    apply_next_callout(  # §17.741
-                        apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
-                        is_decision=False, enabled=settings.assist_next_callout_enabled),
-                    enabled=settings.assist_problem_solving_enabled),
-                is_decision=False, enabled=settings.assist_ground_or_ask_enabled)},
+            {"role": "system", "content": apply_screen_grounding(  # §17.758
+                apply_ground_or_ask(  # §17.756
+                    apply_problem_solving(  # §17.742
+                        apply_next_callout(  # §17.741
+                            apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
+                            is_decision=False, enabled=settings.assist_next_callout_enabled),
+                        enabled=settings.assist_problem_solving_enabled),
+                    is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
+                is_decision=False, enabled=settings.assist_screen_grounding_enabled)},
             {"role": "user", "content": user},
         ],
         {"role": role},
@@ -3265,6 +3299,10 @@ async def generate_guidance_stream(
     system = apply_ground_or_ask(  # §17.756 — placeholder + ask, never guess a value
         system, is_decision=is_decision,
         enabled=settings.assist_ground_or_ask_enabled,
+    )
+    system = apply_screen_grounding(  # §17.758 — confirm the on-screen state first
+        system, is_decision=is_decision,
+        enabled=settings.assist_screen_grounding_enabled,
     )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,

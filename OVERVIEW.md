@@ -22069,6 +22069,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.758 Feature — screen-state grounding: a walkthrough for an interactive surface confirms what's on screen before firing keystrokes, instead of assuming a screen (2026-08-11)
+
+**Why.** The storage-screen assumption: guidance for the Ubuntu installer opened "On the storage screen, highlight 'Use an entire disk'…" — but interactive state (an installer / TUI / boot menu / console) changes faster than the plan tracks, so if the operator is actually on a different screen, every keystroke goes to the wrong place. The §17.741 "👉 Do this next" already asks the operator to report AFTER an action; this adds a BEFORE-action state check for interactive steps.
+
+**Fix.** `apply_screen_grounding` — a directive appended to the guide/fix system prompt (the §17.741/742/756 folded-directive pattern, **no extra LLM call**): if the step means navigating an INTERACTIVE surface (OS installer, TUI/menu, BIOS/boot menu, noVNC/serial console, web-UI wizard) and the current screen can't be confirmed from the facts/recap, OPEN by asking the operator what's on screen (paste the prompt / describe the visible title/options) and make the first action CONDITIONAL — do not assume a screen. Explicitly carves out ordinary shell steps (a command whose output you ask them to report is already self-confirming). Wired into `generate_guidance` / `_stream` / `generate_fix` (skipped for decision nodes). Valve `assist_screen_grounding_enabled`, `ASSIST_SCREEN_GROUNDING_ENABLED=true` in compose.
+
+**Verification.** Units `test_assist_screen_grounding.py` (appends when enabled; no-op disabled / decision; composes after callout + ground-or-ask; carves out shell) + guidance regression green. **LIVE (real orchestrator + model, isolated scratch, cleaned):** an interactive "work through the Ubuntu Server installer in the noVNC console" step with NO screen confirmed in facts/recap → the walkthrough OPENED with `## 👉 Do this next — Tell me exactly what you see on the noVNC console right now (the title, any options, whether you can type or click). Then I'll give you the next steps.` and stated its assumptions as prerequisites rather than firing a keystroke sequence — and composed with §17.756 (`<HOSTNAME>` placeholder). Deployed via dev-override recreate.
+
+---
+
 ### §17.757 Feature — cross-component fact sharing: an umbrella's components share their observed facts (one host/network/storage) instead of starting blind (2026-08-11)
 
 **Why.** A decomposed umbrella project (the DeFruscio HomeLab: Proxmox install + P40 passthrough + Media Stack + Palworld) has 4 component jobs that all run on ONE physical host / network / storage — but facts (§17.709) are session-scoped, so when the operator starts Media Stack it's blind to everything the Proxmox/P40 components already learned (the hardware, the bridge, host NAT, Proxmox access). They'd re-discover it all.

@@ -382,6 +382,11 @@ services:
       # observed facts into a later component's grounding (deduped, capped). Code
       # default off; live here.
       ASSIST_CROSS_COMPONENT_FACTS_ENABLED: "${ASSIST_CROSS_COMPONENT_FACTS_ENABLED:-true}"
+      # §17.758 — screen-state grounding: guide/fix for an interactive surface
+      # (installer, TUI, BIOS/boot menu, noVNC console, web wizard) whose current
+      # screen isn't confirmed OPENS by asking what's on screen and makes the first
+      # action conditional, instead of assuming a screen. Code default off; live here.
+      ASSIST_SCREEN_GROUNDING_ENABLED: "${ASSIST_SCREEN_GROUNDING_ENABLED:-true}"
       # §17.747 — on a detected pivot, let the impact analyzer propose REOPENING
       # already-done nodes the pivot destroyed (e.g. "delete VM 100 and recreate"
       # undoes the guest-OS install / passthrough on the old VM). Surface-and-ask:
