@@ -202,7 +202,7 @@ has just told you a new {kind} that changes the situation:
 
   "{note}"
 
-{facts}{brief}Here are the steps that have NOT been done yet. Use the project goals \
+{project}{facts}{brief}Here are the steps that have NOT been done yet. Use the project goals \
 above to understand what each step actually involves (the titles are terse):
 {nodes}
 
@@ -312,6 +312,7 @@ async def analyze_note_impact(
     model_overrides: dict | None = None,
     include_done_reopen: bool = False,
     facts_block: str = "",
+    project_recap_block: str = "",
 ) -> dict:
     """§17.677 — ask whether a newly-raised note invalidates any pending node's
     plan. Returns ``{"affected": [{node_key, current_assumption, proposed_change,
@@ -399,10 +400,17 @@ async def analyze_note_impact(
     if (facts_block or "").strip():
         facts = ("The operator's ACTUAL system (observed — judge impact against "
                  "this reality, not a generic setup):\n" + facts_block.strip() + "\n\n")
+    # §17.753 — the distilled whole-project state so the analyzer judges impact
+    # against the ARC (what earlier steps decided / already built), not just the
+    # pending list — e.g. a pivot away from something already established.
+    project = ""
+    if (project_recap_block or "").strip():
+        project = project_recap_block.strip() + "\n\n"
     from app import model_router
     msg = _NOTE_IMPACT_PROMPT.format(
         kind=note_kind or "note",
         note=(note_text or "")[:2000],
+        project=project,
         facts=facts,
         brief=brief,
         nodes=nodes_block[:6000],
@@ -843,9 +851,14 @@ async def stage_divergence_replan(
     if reason:
         note_text += f"\n\n(This differs from that step's original plan: {reason})"
     try:
+        # §17.753 — ground the analyzer in the whole-project arc too.
+        from app.modules import assist_agent
+        project_recap_block = assist_guide.render_project_recap_block(
+            await assist_agent.get_project_recap(job_id=job_id, db=db))
         impact = await analyze_note_impact(
             db=db, job_id=job_id, note_text=note_text, note_kind="decision",
             model_overrides=model_overrides, facts_block=facts_block,  # §17.752
+            project_recap_block=project_recap_block,  # §17.753
         )
     except Exception as e:  # noqa: BLE001 — a flaky analyzer must never surface
         logger.warning("divergence_replan_analyze_failed session_id=%s err=%r", session_id, e)

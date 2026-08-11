@@ -1920,6 +1920,96 @@ def render_step_recap_block(recap: str | None) -> str:
     )
 
 
+# ── §17.753 — the cross-step "living project recap" (§17.679) ───────────────
+# The per-step recap above keeps ONE step coherent; the job digest (§17.650) dumps
+# raw done-node outputs. This distills a compact, EVOLVING whole-project state board
+# so guidance/pivot on step N reason with the arc — what earlier steps decided, what
+# remains, cross-step constraints — instead of a single-node view or a raw dump.
+
+_PROJECT_RECAP_SYSTEM = (
+    "You keep a running recap of a WHOLE multi-step build, so the assistant and the "
+    "operator never lose the arc across steps. You are given the project goal, the "
+    "list of plan steps with their status (done / in-progress / pending / skipped) "
+    "and a short summary of what each DONE step produced, plus the operator's "
+    "recorded decisions/constraints and observed system facts. Write a SHORT "
+    "whole-project state board with these labels, omitting any that are empty:\n"
+    "GOAL: one line — the overall deliverable.\n"
+    "DONE: what has been ACCOMPLISHED across steps, phase-level (not raw output) — "
+    "bullet fragments.\n"
+    "IN PROGRESS: the step(s) currently being worked, one fragment each.\n"
+    "REMAINING: what still lies ahead, terse — the shape of the rest, not every "
+    "step verbatim.\n"
+    "DECISIONS: choices already locked in that later steps must stay consistent "
+    "with (from the operator's decisions + what done steps established) — bullet "
+    "fragments.\n"
+    "CONSTRAINTS: hard limits that span the project (from the operator's stated "
+    "constraints / preferences / ruled-out approaches). One fragment each.\n"
+    "SYSTEM: durable facts about the operator's ACTUAL system (build spec, versions, "
+    "hosts/IPs, what already exists) — ground on these; never assume a fresh/empty "
+    "system.\n"
+    "Ground ONLY in the given step statuses, done-step summaries, and the operator's "
+    "decisions/constraints/facts; NEVER invent completion — a step is DONE only if "
+    "its status says so. Be terse (a status board, not prose). Stay tool-neutral: "
+    "describe WHAT each step achieved, not the specific commands. If almost nothing "
+    "has happened yet, a one-line GOAL is enough."
+)
+
+
+async def summarize_project_progress(
+    *, goal: str, nodes_block: str, facts_block: str = "", notes_block: str = "",
+    role: str = "model_general",
+) -> str:
+    """§17.753 — a compact running recap of the WHOLE project from its step
+    statuses + done-step summaries + the durable ledgers. Reasoning task →
+    ``model_general``. Fail-soft → "" so callers thread it unconditionally."""
+    if not (nodes_block or "").strip():
+        return ""
+    ledger = ""
+    if (notes_block or "").strip():
+        ledger += f"\nOperator's recorded decisions/constraints:\n{notes_block.strip()}\n"
+    if (facts_block or "").strip():
+        ledger += f"\n{facts_block.strip()}\n"
+    try:
+        resp = await chat_until_nonempty(
+            model_router.chat,
+            [
+                {"role": "system", "content": _PROJECT_RECAP_SYSTEM},
+                {"role": "user", "content": (
+                    f"Project goal: {goal or '(untitled)'}\n"
+                    f"{ledger}\n"
+                    f"Plan steps (status + what each DONE step produced):\n{nodes_block[:12000]}\n\n"
+                    "Write the whole-project state board."
+                )},
+            ],
+            {"role": role},
+            temperature=0.1,
+            max_tokens=2048,   # thinking model clears reasoning before the board
+            draws=2,
+            label="assist_project_recap",
+        )
+    except Exception as exc:  # noqa: BLE001 — a recap must never break the turn
+        logger.warning("assist_summarize_project_progress_failed: %s", exc)
+        return ""
+    if resp and resp.success:
+        return (resp.text or "").strip()[:2500]
+    return ""
+
+
+def render_project_recap_block(recap: str | None) -> str:
+    """§17.753 — the whole-project recap as a prompt block, prepended to the raw
+    job digest (§17.650) so every generation site leads with the distilled arc."""
+    r = (recap or "").strip()
+    if not r:
+        return ""
+    return (
+        "## Whole-project state (distilled — where this build stands ACROSS all "
+        "steps; ground on it for the arc: what earlier steps decided, what remains, "
+        "and the project-wide constraints/system facts. It complements the raw "
+        "per-step outputs below — trust it for the big picture and stay consistent "
+        "with the DECISIONS/CONSTRAINTS it lists).\n" + r
+    )
+
+
 # ── Operator-facing status panel + "do this next" callout (§17.741) ─────────
 # The §17.738 recap above already distills a compact GOAL/DONE/OPEN/NEXT/CONTEXT
 # status board — but only into the MODEL's prompt. These helpers turn it into a

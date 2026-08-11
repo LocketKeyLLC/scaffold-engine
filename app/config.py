@@ -857,6 +857,19 @@ class Settings(BaseSettings):
     # invalidates a pending step often depends on the operator's ACTUAL system
     # (e.g. "no TPM" only breaks a step if the plan assumed one). On by default.
     assist_note_impact_facts_aware: bool = True
+    # §17.753 — the cross-step "living project recap" (§17.679): a distilled,
+    # cached, EVOLVING whole-project state board (goal · done phases · in-progress ·
+    # remaining · decisions · constraints · system facts). The per-step recap keeps
+    # ONE step coherent and the job digest dumps raw done-node outputs; neither
+    # gives step-N guidance/pivot the ARC. Refreshed only when the DONE-node count
+    # grows by `assist_project_recap_every` (so ~one LLM call per completed step,
+    # cached across the many turns within a step); starts once `min_nodes` are done.
+    # Prepended to the job digest in the §17.751 funnel (so all 5 generation sites
+    # get it) and threaded into the note/pivot analyzer. Code default off (extra
+    # LLM path); live via compose.
+    assist_project_recap_enabled: bool = False
+    assist_project_recap_every: int = Field(default=1, ge=1, le=20)
+    assist_project_recap_min_nodes: int = Field(default=1, ge=1, le=40)
     # §17.741 — surface the running recap to the OPERATOR as a "📍 Where we are"
     # panel above each walkthrough (goal / done / open / next), so a first-timer
     # can always see the engine holding the thread on a long problem-solving
