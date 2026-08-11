@@ -413,10 +413,11 @@ def test_render_step_shows_progress_position():
         "depends_on": [], "base_prompt": "do it", "upstream_outputs": {},
         "step_counts": step_counts,
     })
-    # total = 10, done = 3 → "Step 4 of 10", and the position leads the title
-    assert "Step 4 of 10" in out
+    # §17.761 — total = 10, done = 3 → "3/10 steps done" (the bare "Step 4 of 10"
+    # ordinal collided with the node-key style), and the progress leads the title
+    assert "3/10 steps done" in out
     assert "6 to go" in out
-    assert out.index("Step 4 of 10") < out.index("Configure VLANs")
+    assert out.index("3/10 steps done") < out.index("Configure VLANs")
 
 
 @pytest.mark.smoke
@@ -425,9 +426,9 @@ def test_render_step_last_step_and_no_counts():
     last = _ah.render_step({
         "node_key": "T9", "title": "Document it", "tool": "LLM", "depends_on": [],
         "base_prompt": "x", "upstream_outputs": {},
-        "step_counts": {"committed": 4, "presented": 1},  # total 5, done 4 → step 5 of 5
+        "step_counts": {"committed": 4, "presented": 1},  # total 5, done 4 → last step
     })
-    assert "Step 5 of 5" in last
+    assert "4/5 steps done" in last  # §17.761 — was "Step 5 of 5"
     assert "last step" in last
     # no step_counts (older orchestrator) → no progress line, no crash
     none = _ah.render_step({
