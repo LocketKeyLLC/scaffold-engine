@@ -40,6 +40,7 @@ async def test_standalone_job_no_parent(monkeypatch):
 @pytest.mark.asyncio
 async def test_collects_and_dedups_sibling_facts(monkeypatch):
     monkeypatch.setattr(settings, "assist_cross_component_facts_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "assist_cross_component_durable_only", False, raising=False)
     monkeypatch.setattr(settings, "assist_cross_component_facts_cap", 40, raising=False)
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[
@@ -56,6 +57,7 @@ async def test_collects_and_dedups_sibling_facts(monkeypatch):
 @pytest.mark.asyncio
 async def test_cap_is_respected(monkeypatch):
     monkeypatch.setattr(settings, "assist_cross_component_facts_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "assist_cross_component_durable_only", False, raising=False)
     monkeypatch.setattr(settings, "assist_cross_component_facts_cap", 2, raising=False)
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[

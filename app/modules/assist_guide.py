@@ -848,13 +848,98 @@ async def classify_superseded_facts(
             role=role,
             temperature=0.0,
             tool_choice="auto",
-            max_tokens=2048,   # thinking model reasons before the tool call
+            # §17.583/727 — thinking model reasons before the tool call; a big
+            # numbered-facts ledger needs a generous budget or it returns empty args.
+            max_tokens=8192,
         )
     except Exception as exc:  # noqa: BLE001 — a flaky sweep must never break note-taking
         logger.warning("assist_facts_sweep_classify_failed: %s", exc)
         return []
     args = read_tool_args(resp)
     idxs = (args or {}).get("superseded_indices") or []
+    return sorted({i for i in idxs if isinstance(i, int) and 0 <= i < len(facts)})
+
+
+_DURABLE_FACTS_SYSTEM = (
+    "You maintain a SHARED infrastructure ledger for a multi-component build on ONE "
+    "physical system (e.g. a homelab: several VMs/services on one Proxmox host). "
+    "Given ONE component's observed facts, return the indices of facts that are "
+    "DURABLE, cross-cutting INFRASTRUCTURE that OTHER components on the same system "
+    "would reuse: physical hardware (CPU, RAM, disks, storage controllers, GPUs, "
+    "PCI devices), host network topology (bridges, physical NICs, subnets, "
+    "gateways, NAT, DNS, the host's own IP), storage (pools, volumes, filesystems, "
+    "datastores), and host access (hypervisor URL, how to log in, versions). "
+    "EXCLUDE: transient states (a link/device currently up or down, 'currently at "
+    "screen X', a boot loop, an in-progress error, a value being waited on), and "
+    "facts specific to ONE component's own workload (a particular VM's guest-OS "
+    "state, one service's internal config) that a sibling would not reuse. When "
+    "unsure whether a fact is durable SHARED infrastructure, EXCLUDE it — the goal "
+    "is a clean shared baseline, not completeness."
+)
+
+_REPORT_DURABLE_TOOL = model_router.Tool(
+    name="report_durable_facts",
+    description=(
+        "Report which of a component's facts are durable, cross-cutting "
+        "infrastructure that sibling components on the same physical system reuse."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "durable_indices": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": (
+                    "0-based indices of the durable shared-infrastructure facts "
+                    "(empty if none qualify)."
+                ),
+            },
+            "reason": {"type": "string", "description": "One short sentence."},
+        },
+        "required": ["durable_indices"],
+    },
+)
+
+
+async def classify_durable_facts(
+    *, facts: list[str], role: str = "model_general",
+) -> list[int] | None:
+    """§17.759 — given a component's facts, return the indices of the DURABLE,
+    cross-cutting infrastructure facts (shared host/network/storage/hardware) that
+    sibling components should inherit — excluding transient states and
+    component-specific detail. Returns ``None`` on a model/parse FAILURE (so the
+    caller falls back to sharing all facts, the §17.757 behavior) vs ``[]`` when
+    the model genuinely found no durable facts."""
+    facts = [str(f).strip() for f in (facts or []) if str(f).strip()]
+    if not facts:
+        return []
+    numbered = "\n".join(f"{i}. {f}" for i, f in enumerate(facts))
+    try:
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": _DURABLE_FACTS_SYSTEM},
+                {"role": "user", "content": (
+                    f"A component's observed system facts (numbered):\n{numbered[:9000]}\n\n"
+                    "Call report_durable_facts with the indices of the durable "
+                    "shared-infrastructure facts."
+                )},
+            ],
+            tools=[_REPORT_DURABLE_TOOL],
+            role=role,
+            temperature=0.0,
+            tool_choice="auto",
+            # §17.583/727 — a thinking model (model_general) reasons before the tool
+            # call; a big numbered-facts prompt needs a generous budget or it returns
+            # EMPTY tool args (observed: 40 facts at 2048 → no args → None).
+            max_tokens=8192,
+        )
+    except Exception as exc:  # noqa: BLE001 — never break sharing on a flaky classifier
+        logger.warning("assist_durable_facts_classify_failed: %s", exc)
+        return None
+    args = read_tool_args(resp)
+    if not args or "durable_indices" not in args:
+        return None
+    idxs = args.get("durable_indices") or []
     return sorted({i for i in idxs if isinstance(i, int) and 0 <= i < len(facts)})
 
 
