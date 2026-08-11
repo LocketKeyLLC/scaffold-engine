@@ -22069,6 +22069,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.759 Feature — durable-only cross-component sharing: siblings inherit a clean infrastructure baseline, not transient/component-specific noise (2026-08-11)
+
+**Why.** §17.757 shared ALL sibling facts (deduped, capped by session order), so Media Stack would inherit transient states ("nics DOWN", "vmbr0 UNKNOWN") and over-specific detail alongside the durable infra — and the cap filled by session order, not value.
+
+**Fix.** `assist_guide.classify_durable_facts` (LLM, `report_durable_facts` tool, model_general) tags a session's DURABLE cross-cutting infrastructure facts — hardware, host network topology, storage, host access — excluding transient states and one-component workload detail. `assist_agent._durable_facts_for_session` caches the durable subset in `metadata.environment.durable_facts` (+ `durable_facts_n` watermark), recomputed only when the fact count changes, so `_sibling_facts` filters to durable-only with **no classifier call at generation time** (cache hit). Fail-soft: a classifier failure returns ``None`` → share ALL facts (the §17.757 behavior), never empty. Valve `assist_cross_component_durable_only` (default on when cross-component sharing is on; flip off for §17.757 all-facts). **Also bumped both fact classifiers (`classify_durable_facts` + the §17.755 `classify_superseded_facts`) from 2048 → 8192 max_tokens** — a thinking model reasoning over a big numbered-facts ledger returned EMPTY tool args at 2048 (§17.583/727), silently falling back to sharing everything.
+
+**Verification.** Units `test_assist_durable_facts.py` (classify returns indices / None-on-failure / None-when-unparsed; cache-hit skips the classifier; cache-miss classifies + writes; **classifier failure falls back to all facts**; `_sibling_facts` routes through the durable subset) + the §17.757 aggregation tests pinned to `durable_only=False`. **LIVE (real orchestrator + model, on the DeFruscio umbrella):** the completed Proxmox component's **40** facts classified to **15 durable** — dropped the transients ("nics all DOWN", "vmbr0 UNKNOWN state"), NUMA topology, and redundant duplicate hardware phrasings; kept the shared baseline (host WiFi uplink, Proxmox web UI at `192.168.1.156:8006` + root, CPU, RAM, LSI SAS2308 controller, the 5.5TB disks). Cached, so later reads are LLM-free. Deployed via dev-override recreate.
+
+---
+
 ### §17.758 Feature — screen-state grounding: a walkthrough for an interactive surface confirms what's on screen before firing keystrokes, instead of assuming a screen (2026-08-11)
 
 **Why.** The storage-screen assumption: guidance for the Ubuntu installer opened "On the storage screen, highlight 'Use an entire disk'…" — but interactive state (an installer / TUI / boot menu / console) changes faster than the plan tracks, so if the operator is actually on a different screen, every keystroke goes to the wrong place. The §17.741 "👉 Do this next" already asks the operator to report AFTER an action; this adds a BEFORE-action state check for interactive steps.

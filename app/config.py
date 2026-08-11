@@ -908,6 +908,14 @@ class Settings(BaseSettings):
     # unaffected. Code default off; live via compose.
     assist_cross_component_facts_enabled: bool = False
     assist_cross_component_facts_cap: int = Field(default=40, ge=1, le=200)
+    # §17.759 — share only DURABLE cross-cutting infrastructure facts (hardware /
+    # host network / storage / access), not transient states ("nic DOWN") or
+    # component-specific detail. An LLM classifier tags each session's durable
+    # subset, CACHED in metadata.environment.durable_facts (refreshed when the fact
+    # count changes) so there's no classifier call at generation time. On classifier
+    # failure, falls back to sharing all facts (the §17.757 behavior). Flip off to
+    # share all sibling facts. Default on when cross-component sharing is on.
+    assist_cross_component_durable_only: bool = True
     # §17.758 — screen-state grounding: a directive on guide/fix so a walkthrough
     # for an INTERACTIVE surface (OS installer, TUI, BIOS/boot menu, noVNC console,
     # web wizard) whose current screen isn't confirmed OPENS by asking what's on

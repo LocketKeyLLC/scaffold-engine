@@ -1401,13 +1401,59 @@ def _note_impact_facts_block(metadata: Any) -> str:
     return assist_guide.render_facts_block(_environment_from_metadata(metadata))
 
 
+async def _durable_facts_for_session(*, session_id: str, metadata, db) -> list[str]:
+    """§17.759 — the DURABLE, cross-cutting infrastructure facts of a session
+    (shared host / network / storage / hardware), cached in
+    ``metadata.environment`` (``durable_facts`` + ``durable_facts_n`` watermark) and
+    recomputed only when the fact count changes — so cross-component sharing filters
+    to a clean shared baseline with NO classifier call at generation time (cache
+    hit). On a classifier FAILURE, falls back to ALL facts (the §17.757 behavior) so
+    sharing degrades gracefully rather than going empty."""
+    from app.modules import assist_guide
+    # Parse the RAW environment (not _environment_from_metadata, which strips the
+    # durable_facts cache keys) so the cache read works.
+    md = metadata
+    if isinstance(md, str):
+        try:
+            md = json.loads(md)
+        except (ValueError, TypeError):
+            md = {}
+    env = (md or {}).get("environment") if isinstance(md, dict) else {}
+    env = env if isinstance(env, dict) else {}
+    facts = [str(f).strip() for f in (env.get("facts") or []) if str(f).strip()]
+    if not facts:
+        return []
+    cached = env.get("durable_facts")
+    if isinstance(cached, list) and env.get("durable_facts_n") == len(facts):
+        return [str(f).strip() for f in cached if str(f).strip()]
+    idxs = await assist_guide.classify_durable_facts(facts=facts)
+    if idxs is None:            # classifier unavailable → share all (fail-soft)
+        return facts
+    durable = [facts[i] for i in idxs]
+    try:  # cache back (best-effort; sharing must not break on a cache write)
+        await db.execute(
+            text("UPDATE assist_sessions SET metadata = jsonb_set(jsonb_set("
+                 "COALESCE(metadata, '{}'::jsonb),"
+                 "'{environment,durable_facts}', CAST(:df AS jsonb), true),"
+                 "'{environment,durable_facts_n}', CAST(:n AS jsonb), true) "
+                 "WHERE id = :sid"),
+            {"df": json.dumps(durable), "n": json.dumps(len(facts)), "sid": session_id},
+        )
+        await db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("assist_durable_facts_cache_failed sid=%s err=%r", session_id, e)
+    return durable
+
+
 async def _sibling_facts(*, job_id: str, db) -> list[str]:
     """§17.757 — facts observed on OTHER components of the same umbrella project.
     A decomposed homelab shares one host / network / storage, so a durable fact a
     sibling component learned (host NAT, the bridge, the ZFS pool, hardware) is
     ground truth here too. Returns the sibling sessions' facts (same
     ``parent_job_id``, excluding this job), deduped case-insensitively and capped.
-    Empty for a standalone job (no parent) or when the valve is off. Fail-soft."""
+    §17.759 — with ``assist_cross_component_durable_only`` on, each sibling
+    contributes only its DURABLE infrastructure subset (cached), not transient or
+    component-specific noise. Empty for a standalone job or when the valve is off."""
     from app.config import settings
     if not settings.assist_cross_component_facts_enabled:
         return []
@@ -1418,19 +1464,25 @@ async def _sibling_facts(*, job_id: str, db) -> list[str]:
         if not parent:
             return []
         rows = (await db.execute(
-            text("SELECT s.metadata FROM assist_sessions s JOIN jobs j ON j.id = s.job_id "
+            text("SELECT s.id, s.metadata FROM assist_sessions s JOIN jobs j ON j.id = s.job_id "
                  "WHERE j.parent_job_id = :p AND s.job_id <> :jid"),
             {"p": str(parent), "jid": job_id},
         )).mappings().all()
     except Exception as e:  # noqa: BLE001 — sharing must never break the turn
         logger.debug("assist_sibling_facts_failed job_id=%s err=%r", job_id, e)
         return []
+    durable_only = settings.assist_cross_component_durable_only
     cap = int(settings.assist_cross_component_facts_cap)
     seen: set[str] = set()
     out: list[str] = []
     for r in rows:
-        env = _environment_from_metadata(r.get("metadata"))
-        for f in env.get("facts") or []:
+        if durable_only:
+            facts = await _durable_facts_for_session(
+                session_id=str(r["id"]), metadata=r.get("metadata"), db=db)
+        else:
+            facts = [str(f).strip()
+                     for f in (_environment_from_metadata(r.get("metadata")).get("facts") or [])]
+        for f in facts:
             f = str(f).strip()
             k = f.lower()
             if f and k not in seen:
