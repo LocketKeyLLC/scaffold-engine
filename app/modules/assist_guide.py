@@ -3541,9 +3541,11 @@ async def research_one(
         resp = await chat_until_nonempty(
             model_router.chat,
             [
-                {"role": "system", "content": apply_problem_solving(  # §17.742
-                    _RESEARCH_SYNTH_SYSTEM,
-                    enabled=settings.assist_problem_solving_enabled)},
+                {"role": "system", "content": apply_ground_or_ask(  # §17.760
+                    apply_problem_solving(  # §17.742
+                        _RESEARCH_SYNTH_SYSTEM,
+                        enabled=settings.assist_problem_solving_enabled),
+                    is_decision=False, enabled=settings.assist_ground_or_ask_enabled)},
                 {"role": "user", "content": (
                     f"{ctx_block}"
                     f"Question: {question}\n\n"

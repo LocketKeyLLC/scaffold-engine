@@ -31,3 +31,18 @@ def test_composes_after_other_directives():
     s = assist_guide.apply_next_callout(_BASE, is_decision=False, enabled=True)
     s = assist_guide.apply_ground_or_ask(s, is_decision=False, enabled=True)
     assert "Do this next" in s and "GROUND OR ASK" in s
+
+
+def test_every_operator_facing_generator_applies_ground_or_ask():
+    """§17.760 — ground-or-ask must reach EVERY operator-facing generation path,
+    including the /research (ask) answer, not just the walkthrough generators — a
+    research answer can hardcode an unconfirmed value too. Enforce structurally so
+    a new generation site can't skip it."""
+    import inspect
+    for fn in ("generate_guidance", "generate_guidance_stream", "generate_fix",
+               "research_one"):
+        src = inspect.getsource(getattr(assist_guide, fn))
+        assert "apply_ground_or_ask(" in src, (
+            f"{fn} does not apply ground-or-ask — it can hardcode an unconfirmed "
+            f"operator value (§17.760)"
+        )
