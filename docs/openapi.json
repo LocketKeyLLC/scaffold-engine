@@ -5142,6 +5142,62 @@
         ]
       }
     },
+    "/assist/{session_id}/track": {
+      "post": {
+        "description": "§17.754 — the progress-tracking agent. Reconcile the session pointer with\nwhere the operator actually is, and ACT to keep the plan in sync:\n\n- ``add_step`` (confident) — the operator raised a concrete sub-task no step\n  covers, so insert a guided step (§17.736) and return it for the caller to\n  present its walkthrough. This is the fix for \"I asked for help with X and it\n  repeated the current step.\"\n- ``advance`` / ``on_step`` — no mutation; the caller proceeds normally\n  (advance is a hint that the current step looks done).\n\nFail-soft: a disabled valve / flaky agent / low confidence all return\n``{action: 'proceed'}`` so the caller falls through to its normal handling.",
+        "operationId": "assist_track_assist__session_id__track_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistInterpretInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Track",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/{session_id}/turn": {
       "post": {
         "description": "§17.710a — record ONE raw turn to the append-only transcript. The pipeline\ncalls this first for every chat message so capture is unconditional (never\ngated on how the message later classifies). No-op unless the unified-memory\ncapture valve is on; always returns 200 (fail-soft) so it never blocks the\nconversation.",
