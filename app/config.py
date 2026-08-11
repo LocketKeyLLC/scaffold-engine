@@ -891,6 +891,13 @@ class Settings(BaseSettings):
     # default off; live via compose.
     assist_reset_facts_sweep_enabled: bool = False
     assist_reset_facts_sweep_max_frac: float = Field(default=0.9, ge=0.1, le=1.0)
+    # §17.756 — ground-or-ask: a prompt directive on guide/fix so any
+    # operator-specific value (username, IP, hostname, path, …) NOT in the confirmed
+    # facts is emitted as a <PLACEHOLDER> and listed under a `## Confirm these
+    # values` section — instead of hardcoding a stale guess lifted from the
+    # transcript (the `ai-defruscio` username leak). Folded into generation (no
+    # extra LLM call). Skipped for decision nodes. Code default off; live via compose.
+    assist_ground_or_ask_enabled: bool = False
     # §17.741 — surface the running recap to the OPERATOR as a "📍 Where we are"
     # panel above each walkthrough (goal / done / open / next), so a first-timer
     # can always see the engine holding the thread on a long problem-solving

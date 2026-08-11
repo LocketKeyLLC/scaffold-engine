@@ -372,6 +372,11 @@ services:
       # append-only ledger stops dragging dead state into later steps. Code default
       # off; live here.
       ASSIST_RESET_FACTS_SWEEP_ENABLED: "${ASSIST_RESET_FACTS_SWEEP_ENABLED:-true}"
+      # §17.756 — ground-or-ask: guide/fix emit a <PLACEHOLDER> + a "Confirm these
+      # values" section for any operator-specific value not in the confirmed facts,
+      # instead of hardcoding a stale guess from the transcript. Code default off;
+      # live here.
+      ASSIST_GROUND_OR_ASK_ENABLED: "${ASSIST_GROUND_OR_ASK_ENABLED:-true}"
       # §17.747 — on a detected pivot, let the impact analyzer propose REOPENING
       # already-done nodes the pivot destroyed (e.g. "delete VM 100 and recreate"
       # undoes the guest-OS install / passthrough on the old VM). Surface-and-ask:

@@ -2263,6 +2263,30 @@ def apply_next_callout(system: str, *, is_decision: bool, enabled: bool) -> str:
     return system + _NEXT_CALLOUT_DIRECTIVE
 
 
+_GROUND_OR_ASK_DIRECTIVE = (
+    "\n\nGROUND OR ASK — never GUESS an operator-specific value. Any value tied to "
+    "THIS operator's system — a username, password, hostname, IP/MAC address, disk "
+    "or path, filename, SSH key, port, VM/host name — that you were NOT given in "
+    "the confirmed facts / operator environment above MUST be written as a "
+    "<SCREAMING_SNAKE_CASE> placeholder, never a concrete guess, and surfaced in the "
+    "walkthrough's values-to-provide / inputs section so the operator supplies it. "
+    "Do NOT lift such a value from the recent dialogue and present it as known: the "
+    "conversation may carry values from an ABANDONED earlier attempt (an old "
+    "username, an old IP) that are now WRONG — especially after a reset/rebuild. A "
+    "confident-looking wrong value is worse than a placeholder plus a quick question."
+)
+
+
+def apply_ground_or_ask(system: str, *, is_decision: bool, enabled: bool) -> str:
+    """§17.756 — append the ground-or-ask discipline so guidance emits a placeholder
+    and asks for any operator-specific value it wasn't actually given, instead of
+    hardcoding a stale guess pulled from the transcript (the `ai-defruscio` username
+    leak). No-op for decision nodes and when the valve is off."""
+    if not enabled or is_decision:
+        return system
+    return system + _GROUND_OR_ASK_DIRECTIVE
+
+
 # ── Draft an inserted step (§17.736 — turn a foundational gap into a step) ──
 
 _DRAFT_STEP_TOOL = model_router.Tool(
@@ -2928,6 +2952,10 @@ async def generate_guidance(
     system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
         system, enabled=settings.assist_problem_solving_enabled,
     )
+    system = apply_ground_or_ask(  # §17.756 — placeholder + ask, never guess a value
+        system, is_decision=is_decision,
+        enabled=settings.assist_ground_or_ask_enabled,
+    )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
@@ -3022,11 +3050,13 @@ async def generate_fix(
     resp = await chat_until_nonempty(
         model_router.chat,
         [
-            {"role": "system", "content": apply_problem_solving(  # §17.742
-                apply_next_callout(  # §17.741
-                    apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
-                    is_decision=False, enabled=settings.assist_next_callout_enabled),
-                enabled=settings.assist_problem_solving_enabled)},
+            {"role": "system", "content": apply_ground_or_ask(  # §17.756
+                apply_problem_solving(  # §17.742
+                    apply_next_callout(  # §17.741
+                        apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
+                        is_decision=False, enabled=settings.assist_next_callout_enabled),
+                    enabled=settings.assist_problem_solving_enabled),
+                is_decision=False, enabled=settings.assist_ground_or_ask_enabled)},
             {"role": "user", "content": user},
         ],
         {"role": role},
@@ -3231,6 +3261,10 @@ async def generate_guidance_stream(
     )
     system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
         system, enabled=settings.assist_problem_solving_enabled,
+    )
+    system = apply_ground_or_ask(  # §17.756 — placeholder + ask, never guess a value
+        system, is_decision=is_decision,
+        enabled=settings.assist_ground_or_ask_enabled,
     )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,

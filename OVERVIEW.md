@@ -22069,6 +22069,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.756 Feature — ground-or-ask: guidance placeholders + asks for operator-specific values it wasn't given, instead of hardcoding a stale guess from the transcript (2026-08-11)
+
+**Why (#3 of the UX batch).** The `ai-defruscio` leak: after the VM reset, guidance hardcoded the ABANDONED VM's guest username into the login step — a value the engine never actually confirmed, lifted from the 36 transcript turns that still mentioned it. The reset-sweep (§17.755) cleans the FACTS ledger, but the transcript still carries stale values, so the generation model can still guess one as known.
+
+**Fix.** `apply_ground_or_ask` — a directive appended to the guide/fix system prompt (the §17.741/742 folded-directive pattern, **no extra LLM call**): any operator-specific value (username, password, hostname, IP/MAC, path, filename, key, port, VM/host name) NOT in the confirmed facts MUST be a `<SCREAMING_SNAKE_CASE>` placeholder surfaced in the walkthrough's inputs section, never a concrete guess — and explicitly "do NOT lift such a value from the recent dialogue; it may be from an ABANDONED attempt (old username/IP), especially after a reset." Wired into `generate_guidance`, `generate_guidance_stream`, and `generate_fix` (skipped for decision nodes). Research synthesis left alone (Q&A, not a command walkthrough). Valve `assist_ground_or_ask_enabled`, `ASSIST_GROUND_OR_ASK_ENABLED=true` in compose.
+
+**Verification.** Units `test_assist_ground_or_ask.py` (appends when enabled; no-op disabled / decision; composes after the other directives) + guidance-suite regression green. **LIVE (real orchestrator + model, isolated scratch session, cleaned):** seeded a transcript with a stale username `olduser99` and NO confirming fact, generated a login-heavy shell step → guidance did **not** hardcode `olduser99`, used `<USERNAME>` + `<SERVER_IP>` placeholders, said "log in with the username **you chose during installation**", and listed `<USERNAME>` under `## Inputs needed`. Deployed via dev-override recreate. This completes the operator's 3-item UX batch (#1 reset-sweep + #2 advance in §17.755; #3 here).
+
+---
+
 ### §17.755 Feature — keep the tracked state TRUE: auto-retract abandoned-system facts on a reset (#1), and wire the tracker's `advance` verdict to actually advance (#2) (2026-08-11)
 
 **Why.** Two follow-ups the operator prioritized after §17.754, both "keep the engine's state matching reality." **#1:** I had to hand-purge 27 dead facts this session; the append-only ledger never forgets the abandoned system on its own (§17.714 only DEMOTES superseded facts at render time — they linger, eat the budget, and leak, e.g. the old VM's guest username resurfacing). **#2:** the §17.754 tracker computed an `advance` verdict (current step done, next is an existing step) but the pipeline ignored it — only `add_step` acted.
