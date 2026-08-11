@@ -361,6 +361,17 @@ services:
       # every generation site and threaded into the note/pivot analyzer. Code
       # default off (extra LLM path); live here.
       ASSIST_PROJECT_RECAP_ENABLED: "${ASSIST_PROJECT_RECAP_ENABLED:-true}"
+      # §17.754 — the progress-TRACKING agent. On a substantive help/how-to turn it
+      # reconciles the session pointer with where the operator actually is; if they
+      # moved to a sub-task the plan has no step for, it inserts a guided step and
+      # walks them through it instead of repeating the current step. Fail-soft,
+      # confidence-gated. Code default off; live here.
+      ASSIST_PROGRESS_TRACKER_ENABLED: "${ASSIST_PROGRESS_TRACKER_ENABLED:-true}"
+      # §17.755 — on a reset/rebuild note, auto-retract the facts about the
+      # abandoned system (durable host/network/storage/new-build facts kept) so the
+      # append-only ledger stops dragging dead state into later steps. Code default
+      # off; live here.
+      ASSIST_RESET_FACTS_SWEEP_ENABLED: "${ASSIST_RESET_FACTS_SWEEP_ENABLED:-true}"
       # §17.747 — on a detected pivot, let the impact analyzer propose REOPENING
       # already-done nodes the pivot destroyed (e.g. "delete VM 100 and recreate"
       # undoes the guest-OS install / passthrough on the old VM). Surface-and-ask:

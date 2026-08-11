@@ -753,6 +753,15 @@ class Pipeline:
         # answer back to the current step. Shared `_next_step_footer` so the
         # phrasing is defined once. Flip off to restore the bare answer.
         assist_answer_tieback: bool = True
+        # §17.754 — the progress-tracking agent. On a substantive help/how-to turn
+        # (ask/question/fix, >= assist_tracker_min_words), consult the server-side
+        # tracker BEFORE answering: if the operator has moved to a sub-task the plan
+        # has no step for, it inserts a guided step and we present its walkthrough
+        # instead of repeating the current step (the "it just repeated itself" bug).
+        # Fail-soft: tracker says proceed / errors → normal handling. Adds one LLM
+        # call per qualifying turn, so it's gated + word-bounded. Flip off to disable.
+        assist_progress_tracker: bool = True
+        assist_tracker_min_words: int = 5
         # §17.537 — assist-aware chat routing. When a chat has an ACTIVE
         # assist session, plain (non-command) text is a conversational turn
         # ON that session — route it to the step guidance (refine=<text>)

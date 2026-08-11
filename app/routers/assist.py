@@ -829,6 +829,16 @@ async def assist_note(session_id: str, body: AssistNoteInput, db=Depends(get_db)
     out = {"recorded": True, "session_id": session_id, "note": note}
     if proposal:
         out["replan_proposal"] = proposal
+    # §17.755 — if THIS note declares a reset/rebuild (§17.714), retract the facts
+    # about the now-abandoned system so the ledger stops dragging dead state into
+    # later steps. Fail-soft; surfaces what was retracted so the operator sees it.
+    from app.modules import assist_guide
+    if assist_guide._operator_reset_intent([note]):
+        swept = await assist_agent.sweep_superseded_facts(
+            session_id=session_id, note_text=note["text"], db=db,
+        )
+        if swept.get("retracted"):
+            out["retracted_facts"] = swept["retracted"]
     return out
 
 
@@ -867,6 +877,91 @@ async def assist_reroute(session_id: str, body: AssistInterpretInput, db=Depends
     )
     return {"session_id": session_id, "has_impact": bool(proposal),
             "proposal": proposal}
+
+
+async def _retire_step_mirrored(*, db, job_id: str, session_id: str, node_key: str) -> None:
+    """§17.754 — mark a step terminal ('skipped') on BOTH dag_nodes and assist_steps
+    in one commit (mirror invariant §17.286), so the operator is not looped back to a
+    step they've already finished. 'skipped' is the safe terminal state (excluded from
+    output compilation) and records why."""
+    _note = ("Auto-retired by the progress tracker (§17.754): operator completed this "
+             "and moved on.")
+    await db.execute(
+        text("UPDATE dag_nodes SET status='skipped', "
+             "output_text=COALESCE(NULLIF(output_text,''), :n), "
+             "completed_at=NOW(), updated_at=NOW() "
+             "WHERE job_id=:jid AND node_key=:nk AND status NOT IN ('done','skipped')"),
+        {"n": _note, "jid": job_id, "nk": node_key},
+    )
+    await db.execute(
+        text("UPDATE assist_steps SET status='skipped', updated_at=NOW() "
+             "WHERE session_id=:sid AND node_key=:nk AND status NOT IN ('committed','skipped')"),
+        {"sid": session_id, "nk": node_key},
+    )
+    await db.commit()
+
+
+@router.post("/assist/{session_id}/track")
+async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(get_db)):
+    """§17.754 — the progress-tracking agent. Reconcile the session pointer with
+    where the operator actually is, and ACT to keep the plan in sync:
+
+    - ``add_step`` (confident) — the operator raised a concrete sub-task no step
+      covers, so insert a guided step (§17.736) and return it for the caller to
+      present its walkthrough. This is the fix for "I asked for help with X and it
+      repeated the current step."
+    - ``advance`` / ``on_step`` — no mutation; the caller proceeds normally
+      (advance is a hint that the current step looks done).
+
+    Fail-soft: a disabled valve / flaky agent / low confidence all return
+    ``{action: 'proceed'}`` so the caller falls through to its normal handling."""
+    from app.config import settings
+    from app.modules import assist_tracker
+
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    # Capture the step the operator is leaving BEFORE add_step repoints the session.
+    prior = (await db.execute(
+        text("SELECT job_id, current_node_key FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    verdict = await assist_tracker.assess_progress(
+        session_id=session_id, message=body.message, db=db,
+    )
+    out = {"session_id": session_id, "action": "proceed", "verdict": verdict}
+    v = verdict.get("verdict")
+    confident = float(verdict.get("confidence") or 0.0) >= settings.assist_tracker_confidence
+    prior_nk = (prior or {}).get("current_node_key")
+    job_id = str((prior or {}).get("job_id"))
+    if v == "add_step" and confident and (verdict.get("new_step_request") or "").strip():
+        try:
+            step = await assist_agent.add_step(
+                session_id=session_id, request=verdict["new_step_request"], db=db,
+            )
+            out["action"] = "added_step"
+            out["step"] = step
+            # §17.754 — the tracker judged the prior step already complete (the
+            # operator moved past it), so RETIRE it — else, after the new step, the
+            # plan would loop the operator back to a step they've finished.
+            if verdict.get("current_step_done") and prior_nk and prior_nk != (step or {}).get("node_key"):
+                await _retire_step_mirrored(
+                    db=db, job_id=job_id, session_id=session_id, node_key=prior_nk)
+                out["retired_prior_step"] = prior_nk
+        except ValueError as exc:
+            # A bad add (e.g. terminal session) must not 500 the tracker — fall
+            # back to normal handling.
+            out["action"] = "proceed"
+            out["add_error"] = str(exc)
+    elif v == "advance" and confident and verdict.get("current_step_done") and prior_nk:
+        # §17.754 (#2) — the tracker is confident the current step is DONE and the
+        # next work is an EXISTING pending step. Retire the current step (mirror
+        # §17.286) so the next claimable step advances; the caller presents it.
+        await _retire_step_mirrored(
+            db=db, job_id=job_id, session_id=session_id, node_key=prior_nk)
+        out["action"] = "advanced"
+        out["retired_prior_step"] = prior_nk
+    return out
 
 
 @router.get("/assist/{session_id}/replan")

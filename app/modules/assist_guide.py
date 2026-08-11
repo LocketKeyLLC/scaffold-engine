@@ -782,6 +782,82 @@ def _operator_reset_intent(notes: list[dict] | None) -> bool:
     return False
 
 
+_FACTS_SWEEP_SYSTEM = (
+    "You maintain a system-state ledger for a hands-on build. The operator has "
+    "just declared a RESET / REBUILD — they are erasing or starting over a part of "
+    "the system. Some recorded facts now describe the ABANDONED thing (the machine "
+    "being destroyed and its problems, config that was wiped, guest-OS state that "
+    "no longer exists) and must be RETRACTED so they stop misleading later steps. "
+    "OTHER facts are DURABLE and must be KEPT: physical hardware, the host / "
+    "hypervisor configuration, network and storage infrastructure that survives the "
+    "rebuild, and any fact about the NEW system being built. Call "
+    "report_superseded_facts with the indices of ONLY the superseded "
+    "(abandoned-system) facts. Be precise and conservative: when unsure whether a "
+    "fact survives the rebuild, KEEP it (do not retract). Never retract a fact "
+    "about the host, the network/bridge, storage, or the new build."
+)
+
+_REPORT_SUPERSEDED_TOOL = model_router.Tool(
+    name="report_superseded_facts",
+    description=(
+        "Report which recorded facts describe the ABANDONED system the operator's "
+        "reset/rebuild supersedes, so they can be retracted from the ledger."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "superseded_indices": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": (
+                    "The 0-based indices of facts that describe the abandoned "
+                    "system (empty if none are superseded)."
+                ),
+            },
+            "reason": {"type": "string", "description": "One short sentence."},
+        },
+        "required": ["superseded_indices"],
+    },
+)
+
+
+async def classify_superseded_facts(
+    *, note_text: str, facts: list[str], role: str = "model_general",
+) -> list[int]:
+    """§17.755 — given a reset/rebuild note and the numbered facts ledger, return
+    the indices of facts that describe the ABANDONED system (to retract). Durable
+    host/network/storage/new-build facts are kept. Fail-soft → [] (retract nothing)
+    so a flaky classifier never nukes the ledger."""
+    facts = [str(f).strip() for f in (facts or []) if str(f).strip()]
+    if not facts:
+        return []
+    numbered = "\n".join(f"{i}. {f}" for i, f in enumerate(facts))
+    try:
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": _FACTS_SWEEP_SYSTEM},
+                {"role": "user", "content": (
+                    f"The operator just declared a reset/rebuild:\n"
+                    f"\"{(note_text or '').strip()[:1500]}\"\n\n"
+                    f"Currently recorded system facts (numbered):\n{numbered[:9000]}\n\n"
+                    "Call report_superseded_facts with the indices of the "
+                    "abandoned-system facts."
+                )},
+            ],
+            tools=[_REPORT_SUPERSEDED_TOOL],
+            role=role,
+            temperature=0.0,
+            tool_choice="auto",
+            max_tokens=2048,   # thinking model reasons before the tool call
+        )
+    except Exception as exc:  # noqa: BLE001 — a flaky sweep must never break note-taking
+        logger.warning("assist_facts_sweep_classify_failed: %s", exc)
+        return []
+    args = read_tool_args(resp)
+    idxs = (args or {}).get("superseded_indices") or []
+    return sorted({i for i in idxs if isinstance(i, int) and 0 <= i < len(facts)})
+
+
 def render_session_memory(
     environment: dict | None, operator_notes: list[dict] | None = None,
     *, budget: int | None = None,
