@@ -377,6 +377,11 @@ services:
       # instead of hardcoding a stale guess from the transcript. Code default off;
       # live here.
       ASSIST_GROUND_OR_ASK_ENABLED: "${ASSIST_GROUND_OR_ASK_ENABLED:-true}"
+      # §17.757 — cross-component fact sharing: a decomposed umbrella's components
+      # share one host/network/storage, so the funnel folds sibling components'
+      # observed facts into a later component's grounding (deduped, capped). Code
+      # default off; live here.
+      ASSIST_CROSS_COMPONENT_FACTS_ENABLED: "${ASSIST_CROSS_COMPONENT_FACTS_ENABLED:-true}"
       # §17.747 — on a detected pivot, let the impact analyzer propose REOPENING
       # already-done nodes the pivot destroyed (e.g. "delete VM 100 and recreate"
       # undoes the guest-OS install / passthrough on the old VM). Surface-and-ask:

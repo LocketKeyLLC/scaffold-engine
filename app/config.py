@@ -898,6 +898,16 @@ class Settings(BaseSettings):
     # transcript (the `ai-defruscio` username leak). Folded into generation (no
     # extra LLM call). Skipped for decision nodes. Code default off; live via compose.
     assist_ground_or_ask_enabled: bool = False
+    # §17.757 — cross-component fact sharing. A decomposed umbrella project (e.g. a
+    # homelab: Proxmox + GPU + media stack + game server) has components that share
+    # ONE host / network / storage, but facts (§17.709) are session-scoped, so a
+    # later component starts blind to what an earlier one learned (host NAT, the
+    # bridge, the ZFS pool, hardware). When on, the §17.751 funnel folds the facts
+    # observed on SIBLING components (same `parent_job_id`) into the environment the
+    # generation grounds on — deduped and capped. Standalone (non-umbrella) jobs are
+    # unaffected. Code default off; live via compose.
+    assist_cross_component_facts_enabled: bool = False
+    assist_cross_component_facts_cap: int = Field(default=40, ge=1, le=200)
     # §17.741 — surface the running recap to the OPERATOR as a "📍 Where we are"
     # panel above each walkthrough (goal / done / open / next), so a first-timer
     # can always see the engine holding the thread on a long problem-solving

@@ -22069,6 +22069,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.757 Feature — cross-component fact sharing: an umbrella's components share their observed facts (one host/network/storage) instead of starting blind (2026-08-11)
+
+**Why.** A decomposed umbrella project (the DeFruscio HomeLab: Proxmox install + P40 passthrough + Media Stack + Palworld) has 4 component jobs that all run on ONE physical host / network / storage — but facts (§17.709) are session-scoped, so when the operator starts Media Stack it's blind to everything the Proxmox/P40 components already learned (the hardware, the bridge, host NAT, Proxmox access). They'd re-discover it all.
+
+**Fix.** `assist_agent._sibling_facts(job_id)` — for a component job (one with a `parent_job_id`), gathers the facts observed on its SIBLING components' sessions (same parent, excluding self), deduped case-insensitively and capped (`assist_cross_component_facts_cap`, default 40). The §17.751 funnel (`assemble_generation_memory`) folds them into the `environment` the generation grounds on, own facts first. No-op for a standalone job or when the valve is off. Fail-soft. Valve `assist_cross_component_facts_enabled`, `ASSIST_CROSS_COMPONENT_FACTS_ENABLED=true` in compose.
+
+**Verification.** Units `test_assist_cross_component_facts.py` (disabled→[]; standalone no-parent→[]; collects+dedups sibling facts; cap respected; the funnel merges sibling facts own-first, dup not repeated) + funnel guard green. **LIVE (real orchestrator, read-only on the DeFruscio umbrella):** `_sibling_facts` for the unstarted **Media Stack** and **Palworld** components each returned **40** inherited facts from the completed Proxmox component — the real hardware (2× Xeon E5-2695 v2, 125Gi RAM, LSI SAS2308, 5.5TB SAS disk), network, and Proxmox at `192.168.1.156:8006` with root access — so those components will start already grounded in the host. Deployed via dev-override recreate. Follow-up: the cap fills by session order (Proxmox's 40 facts filled it before the P40 component's), and a few shared facts are transient ("nics DOWN") — curating shared facts to DURABLE-only (a classifier like the §17.755 reset-sweep, or promoting durable facts to the umbrella) is the next refinement.
+
+---
+
 ### §17.756 Feature — ground-or-ask: guidance placeholders + asks for operator-specific values it wasn't given, instead of hardcoding a stale guess from the transcript (2026-08-11)
 
 **Why (#3 of the UX batch).** The `ai-defruscio` leak: after the VM reset, guidance hardcoded the ABANDONED VM's guest username into the login step — a value the engine never actually confirmed, lifted from the 36 transcript turns that still mentioned it. The reset-sweep (§17.755) cleans the FACTS ledger, but the transcript still carries stale values, so the generation model can still guess one as known.

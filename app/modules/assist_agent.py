@@ -703,6 +703,16 @@ async def assemble_generation_memory(
     """
     from app.modules import assist_guide
     environment = _environment_from_metadata(sess.get("metadata"))
+    # §17.757 — cross-component: fold in durable facts learned on SIBLING components
+    # of the same umbrella (shared host/network/storage) so a later component isn't
+    # blind to what an earlier one established. Deduped against this session's own
+    # facts; own facts lead. No-op for a standalone job or when the valve is off.
+    sib = await _sibling_facts(job_id=str(sess["job_id"]), db=db)
+    if sib:
+        own = list(environment.get("facts") or [])
+        ownk = {str(f).strip().lower() for f in own}
+        environment = {**environment,
+                       "facts": own + [f for f in sib if f.strip().lower() not in ownk]}
     verbosity = _verbosity_from_metadata(sess.get("metadata"))
     operator_notes = _coerce_notes(sess.get("notes"))
     if digest_excludes is None:
@@ -1389,6 +1399,46 @@ def _note_impact_facts_block(metadata: Any) -> str:
         return ""
     from app.modules import assist_guide
     return assist_guide.render_facts_block(_environment_from_metadata(metadata))
+
+
+async def _sibling_facts(*, job_id: str, db) -> list[str]:
+    """§17.757 — facts observed on OTHER components of the same umbrella project.
+    A decomposed homelab shares one host / network / storage, so a durable fact a
+    sibling component learned (host NAT, the bridge, the ZFS pool, hardware) is
+    ground truth here too. Returns the sibling sessions' facts (same
+    ``parent_job_id``, excluding this job), deduped case-insensitively and capped.
+    Empty for a standalone job (no parent) or when the valve is off. Fail-soft."""
+    from app.config import settings
+    if not settings.assist_cross_component_facts_enabled:
+        return []
+    try:
+        parent = (await db.execute(
+            text("SELECT parent_job_id FROM jobs WHERE id = :jid"), {"jid": job_id},
+        )).scalar()
+        if not parent:
+            return []
+        rows = (await db.execute(
+            text("SELECT s.metadata FROM assist_sessions s JOIN jobs j ON j.id = s.job_id "
+                 "WHERE j.parent_job_id = :p AND s.job_id <> :jid"),
+            {"p": str(parent), "jid": job_id},
+        )).mappings().all()
+    except Exception as e:  # noqa: BLE001 — sharing must never break the turn
+        logger.debug("assist_sibling_facts_failed job_id=%s err=%r", job_id, e)
+        return []
+    cap = int(settings.assist_cross_component_facts_cap)
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in rows:
+        env = _environment_from_metadata(r.get("metadata"))
+        for f in env.get("facts") or []:
+            f = str(f).strip()
+            k = f.lower()
+            if f and k not in seen:
+                seen.add(k)
+                out.append(f)
+                if len(out) >= cap:
+                    return out
+    return out
 
 
 async def _note_impact_project_block(job_id: str, db) -> str:
