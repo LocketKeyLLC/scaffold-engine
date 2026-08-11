@@ -22069,6 +22069,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.760 Fix — close the last wiring asymmetry: apply ground-or-ask to the /research (ask) answer too, so no operator-facing output guesses an unconfirmed value (2026-08-11)
+
+**Why.** A wiring audit (operator asked to confirm every subsystem is wired to every engine path) found the folded directives on the three walkthrough generators (guide/stream/fix) but NOT on the `/research` (ask) synthesis — the one operator-facing output missing ground-or-ask (§17.756). A research answer can hardcode an unconfirmed operator value (an SSH username, an IP) just like a walkthrough.
+
+**Fix.** Wrap `research_one`'s synthesis system prompt with `apply_ground_or_ask` (same valve `assist_ground_or_ask_enabled`), alongside the existing `apply_problem_solving`. New guard test `test_every_operator_facing_generator_applies_ground_or_ask` source-scans generate_guidance/_stream/generate_fix/**research_one** so a future generation site can't skip it. (Screen-grounding + next-callout stay walkthrough-only — a Q&A answer isn't a keystroke sequence; decision nodes keep the `is_decision` no-op.)
+
+**Verification.** Units +1 (the 4-site guard). **LIVE (real orchestrator + model, isolated scratch):** a `/research` question ("how do I SSH into my freshly installed server and update it?") with a stale username `olduser99` in the transcript → the answer did NOT hardcode `olduser99`; it used generic `username`/`server_ip` placeholders and told the operator to "replace `username` with the username you created during Ubuntu installation." Deployed via dev-override recreate. **Every operator-facing generation path is now symmetric on the never-guess rule.**
+
+---
+
 ### §17.759 Feature — durable-only cross-component sharing: siblings inherit a clean infrastructure baseline, not transient/component-specific noise (2026-08-11)
 
 **Why.** §17.757 shared ALL sibling facts (deduped, capped by session order), so Media Stack would inherit transient states ("nics DOWN", "vmbr0 UNKNOWN") and over-specific detail alongside the durable infra — and the cap filled by session order, not value.
