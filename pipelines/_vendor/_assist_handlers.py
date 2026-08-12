@@ -2268,42 +2268,17 @@ def assist_nl_turn(
     if is_collect and intent == "question" and not _looks_like_pivot(msg):
         intent = "submit"
 
-    # §17.693 — semantic pivot / re-plan detection. A `skip` or `question` here
-    # may be a pivot the classifier MIS-ROUTED: a reference to the operator's
-    # ACTUAL situation that invalidates PENDING steps ("I already have Proxmox
-    # installed, we only need to remove the old containers and start new") —
-    # lexically unremarkable, so no phrase gate catches it and a bare skip marches
-    # the plan on with now-irrelevant steps. Cheap regex first (obvious pivots);
-    # then a reliable impact check (the §17.677 analyzer) for substantive turns
-    # the regex missed. Either surfaces a re-plan instead of skipping/re-rendering.
-    if intent in ("skip", "question"):
-        if _looks_like_pivot(msg):
-            yield from assist_note_cmd(
-                pipe, session_id, msg.strip(), kind=_pivot_kind(msg), node_key=node_key,
-                chat_id=chat_id,
-            )
-            return
-        # §17.733/§17.763 — a genuine how-to question ("am i supposed to use the
-        # console?") OR an explicit request for help ("help me get this working",
-        # "I'm stuck on X") is NOT a plan pivot: route it to research BEFORE the
-        # fuzzy §17.693 impact check, which (LLM-based) over-eagerly reads it as a
-        # plan change and surfaces a spurious re-plan. Deterministic pivots already
-        # returned just above, so a real pivot still wins.
-        if intent == "question" and (
-            _looks_like_howto_question(msg) or _looks_like_help_request(msg)
-        ):
-            nk = _recall_node_key(pipe, chat_id, node_key)
-            yield from assist_research_cmd(
-                pipe, session_id, msg.strip(), node_key=nk, chat_id=chat_id,
-                history=history,
-            ); return
-        if _word_count(msg) >= getattr(pipe.valves, "assist_pivot_min_words", 6):
-            affected = reroute_check(pipe, session_id, msg)
-            if affected:
-                yield "🔀 Based on what you told me, this changes the plan.\n\n"
-                yield _render_replan_surface(affected)
-                return
-        # not a pivot → fall through to the normal skip / question handling below
+    # §17.679/§17.691 — deterministic PIVOT short-circuit. A clear pivot ("do X
+    # instead", "switch to Y") reshapes the plan; run it FIRST so it can't be read
+    # as an "advance" by the progress tracker below. The FUZZY §17.693 reroute and
+    # the §17.733/763 help→research routing run AFTER the tracker (further down) —
+    # see the §17.765 note there for why that ordering is load-bearing.
+    if intent in ("skip", "question") and _looks_like_pivot(msg):
+        yield from assist_note_cmd(
+            pipe, session_id, msg.strip(), kind=_pivot_kind(msg), node_key=node_key,
+            chat_id=chat_id,
+        )
+        return
 
     # §17.748/§17.749 — a shell-output paste that should be DIAGNOSED, not
     # submitted, in two cases: (a) §17.748 the operator is MID-FIX (the last
@@ -2351,6 +2326,31 @@ def assist_nl_turn(
                 yield ("✅ Looks like you've finished that step — moving on to what's "
                        "next.\n\n")
                 yield from assist_next(pipe, session_id, chat_id=chat_id)
+                return
+
+    # §17.733/§17.763/§17.765 — help→research + the fuzzy §17.693 re-plan, reached
+    # ONLY after the progress tracker (above) had its chance to ADVANCE. This
+    # ordering is load-bearing: on a long multi-part step (e.g. "Install guest OS")
+    # the operator interacts turn-after-turn via how-to/help questions; when this
+    # ran BEFORE the tracker, every such turn short-circuited to research and the
+    # step never advanced — the reported "not recognizing what to record / moving
+    # to the next steps". A real pivot already returned above (deterministic gate);
+    # a completion signal already advanced above (tracker). What's left here is a
+    # genuine on-step help/how-to question (→ research) or a fuzzy pivot (→ re-plan).
+    if intent in ("skip", "question"):
+        if intent == "question" and (
+            _looks_like_howto_question(msg) or _looks_like_help_request(msg)
+        ):
+            nk = _recall_node_key(pipe, chat_id, node_key)
+            yield from assist_research_cmd(
+                pipe, session_id, msg.strip(), node_key=nk, chat_id=chat_id,
+                history=history,
+            ); return
+        if _word_count(msg) >= getattr(pipe.valves, "assist_pivot_min_words", 6):
+            affected = reroute_check(pipe, session_id, msg)
+            if affected:
+                yield "🔀 Based on what you told me, this changes the plan.\n\n"
+                yield _render_replan_surface(affected)
                 return
 
     if intent == "advance":

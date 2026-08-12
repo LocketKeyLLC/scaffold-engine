@@ -62,9 +62,13 @@ def test_fast_classify_misses_go_to_classifier(msg):
 # ── assist_nl_turn routing ────────────────────────────────────────────────
 
 
-def _route(pipe, msg, *, intent_dict=None, recall_nk="T1"):
+def _route(pipe, msg, *, intent_dict=None, recall_nk="T1", track_action=None):
     """Drive assist_nl_turn with the classifier + handlers stubbed; return the
-    name of the handler that fired (via sentinel output)."""
+    name of the handler that fired (via sentinel output).
+
+    §17.765 — the progress tracker + fuzzy reroute make live HTTP calls; stub both
+    deterministically. `track_action` (None/"advanced"/"added_step") drives the
+    §17.754/§17.765 tracker so tests can assert it advances BEFORE help/research."""
     interp = MagicMock(return_value=intent_dict or {"intent": "question"})
     stubs = {
         "assist_next": "ADVANCE",
@@ -83,6 +87,13 @@ def _route(pipe, msg, *, intent_dict=None, recall_nk="T1"):
     }
     patchers = {name: MagicMock(side_effect=lambda *a, _s=s, **k: iter([_s]))
                 for name, s in stubs.items()}
+    track_ret = {"action": track_action} if track_action else {"action": "proceed"}
+    if track_action == "added_step":
+        track_ret["step"] = {"title": "Configure the network"}
+    # Non-generator collaborators (return values, not streamed sentinels), exposed
+    # through `patchers` so tests can assert call/no-call on them.
+    patchers["_track_progress"] = MagicMock(return_value=track_ret)
+    patchers["reroute_check"] = MagicMock(return_value=None)
     with patch.object(_ah, "assist_interpret", interp), \
          patch.object(_ah, "assist_recall", MagicMock(
              return_value={"last_node_key": recall_nk} if recall_nk else None)), \
@@ -164,21 +175,55 @@ def test_looks_like_help_request_negative(msg):
 
 @pytest.mark.smoke
 def test_help_request_routes_to_research_not_replan(pipe):
-    # The reported bug: a request for help, classified as `question`, was run
-    # through the §17.693 fuzzy reroute check and surfaced a spurious re-plan
-    # ("🔀 …Apply these plan changes?"). It must route to hands-on research and
-    # NEVER reach reroute_check. reroute_check is stubbed to a non-empty impact so
-    # that, if it were reached, the output would be the re-plan surface — not ASK.
-    with patch.object(_ah, "reroute_check",
-                      MagicMock(return_value=[{"node_key": "T2", "action": "revise"}])) as rr:
-        out, stubs, _ = _route(
-            pipe, "can you help me get the network bridge working here",
-            intent_dict={"intent": "question"},
-        )
+    # The §17.763 bug: a request for help, classified as `question`, was run
+    # through the §17.693 fuzzy reroute check and surfaced a spurious re-plan. It
+    # must route to hands-on research — and, when the tracker says "proceed"
+    # (still on the step), NEVER reach reroute_check.
+    out, stubs, _ = _route(
+        pipe, "can you help me get the network bridge working here",
+        intent_dict={"intent": "question"},
+    )
     assert "ASK" in out                          # routed to research/guidance
-    rr.assert_not_called()                       # never reached the fuzzy reroute
+    stubs["reroute_check"].assert_not_called()   # never reached the fuzzy reroute
     stubs["assist_research_cmd"].assert_called_once()
     stubs["assist_chat_turn"].assert_not_called()
+
+
+# §17.765 — on a long multi-part step, a help/how-to turn must let the progress
+# tracker ADVANCE first; only an on-step turn falls through to research. Before
+# this, help/how-to short-circuited to research and the step never advanced
+# ("not recognizing what to record / moving to the next steps").
+@pytest.mark.smoke
+def test_help_question_advances_when_tracker_says_done(pipe):
+    out, stubs, _ = _route(
+        pipe, "ok it is now asking me to remove the installation medium and reboot",
+        intent_dict={"intent": "question"}, track_action="advanced",
+    )
+    assert "ADVANCE" in out                      # tracker retired the step + moved on
+    stubs["assist_next"].assert_called_once()
+    stubs["assist_research_cmd"].assert_not_called()   # did NOT get stuck answering
+    stubs["reroute_check"].assert_not_called()
+
+
+@pytest.mark.smoke
+def test_help_question_inserts_step_when_tracker_adds_one(pipe):
+    out, stubs, _ = _route(
+        pipe, "how do I get the VM onto the network first, it has no internet",
+        intent_dict={"intent": "question"}, track_action="added_step",
+    )
+    assert "ADVANCE" in out                      # presents the newly-inserted step
+    stubs["assist_research_cmd"].assert_not_called()
+
+
+@pytest.mark.smoke
+def test_help_question_still_researches_when_on_step(pipe):
+    # Tracker says "proceed" (still on the step) → the help question is answered.
+    out, stubs, _ = _route(
+        pipe, "can you help me with the disk layout on this step",
+        intent_dict={"intent": "question"}, track_action=None,
+    )
+    assert "ASK" in out
+    stubs["assist_research_cmd"].assert_called_once()
 
 
 @pytest.mark.smoke
