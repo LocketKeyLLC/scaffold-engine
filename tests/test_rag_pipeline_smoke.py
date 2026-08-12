@@ -61,9 +61,9 @@ def _patch_pipeline(*, fake_collection, vector_hits: list[RagResult],
         patch("app.modules.rag_pipeline._embed_query",
               new=AsyncMock(return_value=[0.1] * 512)),
         patch("app.modules.rag_pipeline._vector_search",
-              new=AsyncMock(return_value=vector_hits)),
+              new=AsyncMock(return_value=(vector_hits, []))),   # §17.767 tuple
         patch("app.modules.rag_pipeline._keyword_search",
-              new=AsyncMock(return_value=keyword_hits)),
+              new=AsyncMock(return_value=(keyword_hits, []))),
         patch("app.modules.rag_pipeline._lookup_superseded",
               new=AsyncMock(return_value=set())),
     ]

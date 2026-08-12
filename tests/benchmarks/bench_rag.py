@@ -192,7 +192,8 @@ async def _run_one_query_decomposed(query: str, domain: str) -> dict | None:
     # by running each helper a second time — small extra cost but lets
     # us see which leg is the long pole when search_parallel_ms drifts.
     t_search = time.monotonic()
-    vector_results, keyword_results = await asyncio.gather(
+    # §17.767 — the legs now return (results, failed_domains); unpack for fusion.
+    (vector_results, _), (keyword_results, _) = await asyncio.gather(
         _vector_search(collection, query_embedding, TOP_K * 2, domain=domain),
         _keyword_search(collection, query, TOP_K * 2, domain=domain),
     )
