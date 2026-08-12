@@ -132,6 +132,55 @@ def test_question_intent_keeps_guidance(pipe):
     stubs["assist_chat_turn"].assert_called_once()
 
 
+# ── §17.763: a help request is not a plan pivot ───────────────────────────
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("msg", [
+    "can you help me get the network bridge working here",
+    "help me address the firewall rules on this step",
+    "I need help with the storage config",
+    "I'm stuck on connecting the VM to the internet",
+    "walk me through configuring the VLANs",
+    "I don't know how to set up the pool",
+    "I need assistance addressing this networking issue",
+    "not sure how to proceed with the interface",
+])
+def test_looks_like_help_request_positive(msg):
+    assert _ah._looks_like_help_request(msg)
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("msg", [
+    "I picked ZFS with two VLANs",              # a decision, not a plan pivot
+    "done, zero errors on the pool creation",   # a submit
+    "what does the third bullet mean",          # clarify-this-step question
+    "switch it all to Docker instead",          # a real pivot (caught upstream)
+    "",
+])
+def test_looks_like_help_request_negative(msg):
+    assert not _ah._looks_like_help_request(msg)
+
+
+@pytest.mark.smoke
+def test_help_request_routes_to_research_not_replan(pipe):
+    # The reported bug: a request for help, classified as `question`, was run
+    # through the §17.693 fuzzy reroute check and surfaced a spurious re-plan
+    # ("🔀 …Apply these plan changes?"). It must route to hands-on research and
+    # NEVER reach reroute_check. reroute_check is stubbed to a non-empty impact so
+    # that, if it were reached, the output would be the re-plan surface — not ASK.
+    with patch.object(_ah, "reroute_check",
+                      MagicMock(return_value=[{"node_key": "T2", "action": "revise"}])) as rr:
+        out, stubs, _ = _route(
+            pipe, "can you help me get the network bridge working here",
+            intent_dict={"intent": "question"},
+        )
+    assert "ASK" in out                          # routed to research/guidance
+    rr.assert_not_called()                       # never reached the fuzzy reroute
+    stubs["assist_research_cmd"].assert_called_once()
+    stubs["assist_chat_turn"].assert_not_called()
+
+
 @pytest.mark.smoke
 def test_finalize_and_pause(pipe):
     out, _, _ = _route(pipe, "show me the result")  # fast-path finalize

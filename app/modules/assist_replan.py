@@ -197,8 +197,45 @@ async def detect_divergence(
 # proposal the operator confirms. Mirrors the detect_divergence pattern:
 # native tool-call schema in code, model_verifier, fail-soft to no-op.
 
-_NOTE_IMPACT_PROMPT = """The operator is executing a build plan step-by-step and \
-has just told you a new {kind} that changes the situation:
+# §17.763 — the opening framing and the closing bias paragraph are parametrized
+# (``strict``) so the two callers can run this analyzer with OPPOSITE priors:
+#   • assess_note_impact (§17.677) — the operator EXPLICITLY recorded a
+#     constraint/decision/preference note, so err TOWARD flagging (liberal).
+#   • detect_reroute (§17.693) — a FUZZY reroute over a message the turn
+#     classifier merely couldn't confidently place (question/skip). Fed the
+#     liberal prompt, it hallucinated plan impact from a plain request for help
+#     and surfaced a spurious re-plan ("🔀 …Apply these plan changes?") — the
+#     reported "asked for help, it reverted to DAG planning" bug. That path now
+#     runs CONSERVATIVELY: flag only a concrete situation-fact that contradicts a
+#     specific step; a help/how-to/confusion message is NOT a plan change.
+_NOTE_IMPACT_OPENING = ("The operator is executing a build plan step-by-step and "
+                        "has just told you a new {kind} that changes the situation:")
+
+_REROUTE_OPENING = (
+    "The operator is executing a build plan step-by-step. They just sent the "
+    "message below. It MIGHT reshape the plan — but it might equally be a request "
+    "for help, a how-to question, confusion, or a comment about the CURRENT step. "
+    "Read it, decide which, and report ONLY genuine plan impact:")
+
+_NOTE_IMPACT_BIAS = (
+    "Err toward flagging: a borderline step the operator can dismiss is far better "
+    "than silently leaving a broken step in the plan. Only truly-unrelated steps "
+    "are left out. If genuinely nothing is affected, return an empty list. Call "
+    "record_plan_impact exactly once.")
+
+_REROUTE_BIAS = (
+    "Err toward LEAVING THE PLAN ALONE. Flag a step ONLY when the message states a "
+    "CONCRETE fact or constraint about the operator's REAL situation that directly "
+    "contradicts that step's assumption — e.g. 'I already have Proxmox installed' "
+    "against a step that reinstalls it, or 'this host has no second NIC' against a "
+    "step that assumes one. A request for HELP or a HOW-TO ('help me get the "
+    "bridge working', 'how do I configure X', 'I'm stuck on Y', 'can you walk me "
+    "through this'), an expression of confusion, a clarifying question, or anything "
+    "about how to DO the current step is NOT a plan change — return an empty list "
+    "for those. If the message does not clearly invalidate a SPECIFIC pending "
+    "step, return an empty list. Call record_plan_impact exactly once.")
+
+_NOTE_IMPACT_PROMPT = """{opening}
 
   "{note}"
 
@@ -214,10 +251,7 @@ location, or approach that a step relies on, that step IS affected.
 - action="revise" if the step must still happen but its approach/target/content \
 has to change to respect the {kind}. Say concretely what changes.
 
-Err toward flagging: a borderline step the operator can dismiss is far better \
-than silently leaving a broken step in the plan. Only truly-unrelated steps are \
-left out. If genuinely nothing is affected, return an empty list. Call \
-record_plan_impact exactly once."""
+{bias}"""
 
 
 # §17.747 — pivot-triggered done-node reopening. Appended to the note-impact
@@ -311,6 +345,7 @@ async def analyze_note_impact(
     *, db, job_id: str, note_text: str, note_kind: str,
     model_overrides: dict | None = None,
     include_done_reopen: bool = False,
+    strict: bool = False,
     facts_block: str = "",
     project_recap_block: str = "",
 ) -> dict:
@@ -407,8 +442,15 @@ async def analyze_note_impact(
     if (project_recap_block or "").strip():
         project = project_recap_block.strip() + "\n\n"
     from app import model_router
+    # §17.763 — strict (fuzzy-reroute) vs liberal (explicit-note) priors.
+    opening = (_REROUTE_OPENING if strict else _NOTE_IMPACT_OPENING).format(
+        kind=note_kind or "note",
+    )
+    bias = _REROUTE_BIAS if strict else _NOTE_IMPACT_BIAS
     msg = _NOTE_IMPACT_PROMPT.format(
         kind=note_kind or "note",
+        opening=opening,
+        bias=bias,
         note=(note_text or "")[:2000],
         project=project,
         facts=facts,

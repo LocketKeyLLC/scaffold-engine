@@ -61,6 +61,24 @@ async def test_reroute_stages_replan_when_steps_affected():
 
 
 @pytest.mark.asyncio
+async def test_reroute_analyzes_strictly(monkeypatch):
+    """§17.763 — the fuzzy reroute path runs the impact analyzer CONSERVATIVELY
+    (strict=True) so a plain request for help isn't read as a plan-changing
+    decision and surfaced as a spurious re-plan."""
+    monkeypatch.setattr(_settings, "assist_reroute_strict", True)
+    db = AsyncMock()
+    db.execute.return_value = _result(mappings_first={"job_id": "j1", "status": "active"})
+    az = AsyncMock(return_value={"affected": []})
+    with patch("app.modules.assist_replan.analyze_note_impact", new=az):
+        await assist_agent.detect_reroute(
+            session_id="s1",
+            message="can you help me get the network bridge working here",
+            db=db,
+        )
+    assert az.await_args.kwargs["strict"] is True
+
+
+@pytest.mark.asyncio
 async def test_reroute_dry_run_when_nothing_affected():
     db = AsyncMock()
     db.execute.return_value = _result(mappings_first={"job_id": "j1", "status": "active"})
