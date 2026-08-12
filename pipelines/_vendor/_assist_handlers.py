@@ -2265,7 +2265,14 @@ def assist_nl_turn(
     # one exception — it must reshape the PLAN, so it falls through to the
     # note→re-plan gate below (§17.679/§17.691). Genuine external-lookup
     # questions classify as `ask` (→ research) and never reach here.
-    if is_collect and intent == "question" and not _looks_like_pivot(msg):
+    # §17.768 — but a genuine HOW-TO / help request on a collect step ("how
+    # should I split the VLANs?", "help me weigh the options") is help-seeking,
+    # NOT the operator stating their choice: keep it a `question` so it reaches
+    # research (§17.733/763) instead of being recorded as decision evidence. A
+    # confirmation / refinement / concrete answer ("looks good", "make the port
+    # random", "3 vlans") matches neither gate and still flips to submit.
+    if (is_collect and intent == "question" and not _looks_like_pivot(msg)
+            and not (_looks_like_howto_question(msg) or _looks_like_help_request(msg))):
         intent = "submit"
 
     # §17.679/§17.691 — deterministic PIVOT short-circuit. A clear pivot ("do X
@@ -2298,13 +2305,17 @@ def assist_nl_turn(
         intent = "fix"
         error_text = msg.strip()
 
-    # §17.754 — progress tracker. On a substantive help/how-to turn (ask/question/
-    # fix, not a shell paste), reconcile where the operator ACTUALLY is with the
-    # plan pointer BEFORE answering. If they've moved to a sub-task no step covers,
-    # the server inserts a guided step and we present it — instead of repeating the
+    # §17.754 — progress tracker. On a substantive help/how-to turn (ask/question,
+    # not a shell paste), reconcile where the operator ACTUALLY is with the plan
+    # pointer BEFORE answering. If they've moved to a sub-task no step covers, the
+    # server inserts a guided step and we present it — instead of repeating the
     # current step (the "I asked for network help and it just repeated itself" bug).
     # Fail-soft: tracker says proceed / errors → fall through to normal handling.
-    if (intent in ("ask", "question", "fix")
+    # §17.768 — `fix` is EXCLUDED: an error report is NOT a completion signal, and
+    # the /track retire happens server-side, so a tracker misfire on a fix would
+    # advance PAST a broken step. A fix goes straight to the fix walkthrough, which
+    # already surfaces a foundational sub-task via §17.736 ("add a step for this").
+    if (intent in ("ask", "question")
             and getattr(pipe.valves, "assist_progress_tracker", True)
             and not _looks_like_shell_evidence(msg)
             and _word_count(msg) >= getattr(pipe.valves, "assist_tracker_min_words", 5)):

@@ -226,6 +226,45 @@ def test_help_question_still_researches_when_on_step(pipe):
     stubs["assist_research_cmd"].assert_called_once()
 
 
+# §17.768 — a HOW-TO on a collect (decision/gather) step is help-seeking, not the
+# operator stating their choice: it must reach research, not be recorded as
+# decision evidence via the §17.689 question→submit flip.
+@pytest.mark.smoke
+def test_collect_step_howto_goes_to_research_not_submit(pipe):
+    out, stubs, _ = _route(
+        pipe, "how should I split the VLANs for isolation on this step?",
+        intent_dict={"intent": "question", "is_decision": True},
+    )
+    assert "ASK" in out
+    stubs["assist_research_cmd"].assert_called_once()
+    stubs["assist_submit"].assert_not_called()      # NOT recorded as the decision
+
+
+@pytest.mark.smoke
+def test_collect_step_confirmation_still_submits(pipe):
+    # A confirmation on a collect step (not how-to/help) still flips to submit.
+    out, stubs, _ = _route(
+        pipe, "looks good, go with that layout",
+        intent_dict={"intent": "question", "is_decision": True},
+    )
+    assert "SUBMIT" in out
+    stubs["assist_submit"].assert_called_once()
+
+
+# §17.768 — a `fix`/error report must NOT run the progress tracker (the /track
+# retire is server-side, so a tracker misfire would advance PAST a broken step).
+@pytest.mark.smoke
+def test_fix_turn_does_not_run_tracker(pipe):
+    out, stubs, _ = _route(
+        pipe, "it failed with a permission denied error and I am not sure why",
+        intent_dict={"intent": "fix", "error_text": "permission denied"},
+        track_action="advanced",   # would advance IF the tracker were (wrongly) run
+    )
+    assert "FIX" in out
+    stubs["_track_progress"].assert_not_called()    # tracker skipped for fix
+    stubs["assist_next"].assert_not_called()        # did NOT advance past the error
+
+
 @pytest.mark.smoke
 def test_finalize_and_pause(pipe):
     out, _, _ = _route(pipe, "show me the result")  # fast-path finalize
