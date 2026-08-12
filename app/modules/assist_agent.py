@@ -3732,6 +3732,11 @@ async def detect_reroute(
             # config on the old VM). Let the analyzer propose reopening them so
             # their stale "done" output stops leading the prompt as MANDATORY.
             include_done_reopen=settings.assist_pivot_reopen_enabled,
+            # §17.763 — this is the FUZZY path (the classifier only weakly placed
+            # this message as question/skip). Analyze conservatively so a plain
+            # request for help isn't read as a plan-changing decision and surfaced
+            # as a spurious re-plan. The explicit-note path stays liberal.
+            strict=settings.assist_reroute_strict,
             facts_block=_note_impact_facts_block(sess.get("metadata")),  # §17.752
             project_recap_block=await _note_impact_project_block(job_id, db),  # §17.753
         )

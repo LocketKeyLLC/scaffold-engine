@@ -2076,6 +2076,45 @@ def _looks_like_howto_question(msg: str) -> bool:
     return bool(_HOWTO_QUESTION_RE.search(_normalize_punct(msg)))
 
 
+# §17.763 — an explicit request for HELP with the current task ("help me get the
+# bridge up", "I'm stuck on the network config", "can you walk me through this",
+# "I need assistance with addressing X"). The turn classifier sometimes reads
+# these as a bare `question`; they are NOT a plan pivot. Route them to hands-on
+# research/guidance BEFORE the §17.693 fuzzy reroute check — which, run on a help
+# request, over-eagerly hallucinated plan impact and surfaced a spurious re-plan
+# ("🔀 …Apply these plan changes?"): the reported "asked for help, it reverted to
+# DAG planning" bug. Deterministic pivots already returned above, so a help
+# request that ALSO states a real pivot ("switch it to X instead") still re-plans.
+# The server-side conservative reroute analyzer (§17.763, strict) is the semantic
+# backstop for help requests this narrow phrase-gate doesn't catch.
+_HELP_REQUEST_RE = re.compile(
+    r"\b(?:"
+    r"help\s+me\b|help\s+(?:with|out|addressing)\b|"
+    r"(?:can|could|would|will)\s+(?:you|u)\s+help\b|"
+    r"i\s+need\s+(?:some\s+|your\s+)?help\b|(?:i\s+)?need\s+(?:a\s+)?hand\b|"
+    r"give\s+me\s+a\s+hand\b|lend\s+me\s+a\s+hand\b|"
+    r"walk\s+me\s+through\b|guide\s+me\b|show\s+me\s+how\b|"
+    r"i'?m\s+stuck\b|i\s+am\s+stuck\b|(?:i'?m\s+)?stuck\s+(?:on|with|at)\b|"
+    r"having\s+(?:trouble|issues|a\s+hard\s+time|difficulty)\b|trouble\s+with\b|"
+    r"struggling\s+(?:with|to)\b|i\s+(?:don'?t|do\s+not)\s+know\s+how\b|"
+    r"not\s+sure\s+how\b|can'?t\s+(?:figure|work)\s+(?:this\s+|it\s+)?out\b|"
+    r"assist\s+me\b|need\s+(?:some\s+|your\s+)?assistance\b|"
+    r"(?:can|could)\s+you\s+(?:assist|walk)\b"
+    r")",
+    re.I,
+)
+
+
+def _looks_like_help_request(msg: str) -> bool:
+    """§17.763 — True when `msg` is an explicit request for hands-on help with the
+    current task (not a plan change). Deterministic; deliberately narrow so a
+    genuine pivot ('switch to X instead') — already caught upstream by
+    ``_looks_like_pivot`` — still wins."""
+    if not msg:
+        return False
+    return bool(_HELP_REQUEST_RE.search(_normalize_punct(msg)))
+
+
 # §17.736 — explicit "make this a proper step" requests. When the operator hits
 # a foundational task the plan never had a step for (get the VM connected to the
 # internet) and the §17.734 fix offered "add a step for this", or they just ask
@@ -2244,12 +2283,15 @@ def assist_nl_turn(
                 chat_id=chat_id,
             )
             return
-        # §17.733 — a genuine how-to question ("am i supposed to use the
-        # console?") is NOT a plan pivot: route it to research BEFORE the fuzzy
-        # §17.693 impact check, which (LLM-based) over-eagerly reads a how-to as
-        # a plan change and surfaces a spurious re-plan. Deterministic pivots
-        # already returned just above, so a real pivot still wins.
-        if intent == "question" and _looks_like_howto_question(msg):
+        # §17.733/§17.763 — a genuine how-to question ("am i supposed to use the
+        # console?") OR an explicit request for help ("help me get this working",
+        # "I'm stuck on X") is NOT a plan pivot: route it to research BEFORE the
+        # fuzzy §17.693 impact check, which (LLM-based) over-eagerly reads it as a
+        # plan change and surfaces a spurious re-plan. Deterministic pivots already
+        # returned just above, so a real pivot still wins.
+        if intent == "question" and (
+            _looks_like_howto_question(msg) or _looks_like_help_request(msg)
+        ):
             nk = _recall_node_key(pipe, chat_id, node_key)
             yield from assist_research_cmd(
                 pipe, session_id, msg.strip(), node_key=nk, chat_id=chat_id,

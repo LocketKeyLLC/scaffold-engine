@@ -983,6 +983,15 @@ class Settings(BaseSettings):
     # Code-default OFF (fresh installs / tests keep the pending-only behavior);
     # live via compose ASSIST_PIVOT_REOPEN_ENABLED=true.
     assist_pivot_reopen_enabled: bool = False
+    # §17.763 — the §17.693 fuzzy-reroute path (detect_reroute) runs the impact
+    # analyzer over a message the turn classifier only weakly placed
+    # (question/skip). With this on, that path analyzes CONSERVATIVELY: it flags a
+    # re-plan only when the message states a concrete situation-fact that
+    # contradicts a specific pending step — a plain request for help / a how-to /
+    # confusion is NOT treated as a plan change. The liberal err-toward-flagging
+    # bias stays on the EXPLICIT-note path (assess_note_impact). Fixes "asked for
+    # help, it reverted to DAG planning". Flip off to restore the old shared bias.
+    assist_reroute_strict: bool = True
     # §17.492 — deterministic scan of generated walkthroughs / fixes for
     # high-confidence destructive commands (rm -rf, dd, mkfs, DROP TABLE, force
     # push, …); matches are surfaced as a prominent "review before running"

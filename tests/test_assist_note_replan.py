@@ -75,6 +75,39 @@ class TestAnalyzeNoteImpact:
         assert kwargs["role"] == "model_general"
         assert assist_replan.RECORD_PLAN_IMPACT_TOOL in kwargs["tools"]
 
+    async def test_strict_uses_conservative_reroute_bias(self):
+        # §17.763 — the fuzzy-reroute path (strict=True) must prompt the analyzer
+        # to LEAVE THE PLAN ALONE unless a concrete fact contradicts a step, so a
+        # help request isn't hallucinated into a re-plan.
+        rows = [{"node_key": "T1", "title": "Install Proxmox", "description": None}]
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[_result(all_=rows), _result(first_=None)])
+        resp = _resp({"affected": []})
+        with patch("app.model_router.tool_call", AsyncMock(return_value=resp)) as tc:
+            await assist_replan.analyze_note_impact(
+                db=db, job_id=_JID, note_kind="decision", strict=True,
+                note_text="can you help me get the network bridge working",
+            )
+        prompt = tc.await_args.kwargs["messages"][0]["content"]
+        assert "LEAVING THE PLAN ALONE" in prompt              # conservative bias
+        assert "might equally be a request for help" in prompt  # reroute framing
+        assert "Err toward flagging" not in prompt             # NOT the liberal bias
+
+    async def test_liberal_default_uses_flagging_bias(self):
+        # §17.763 — the explicit-note path (default strict=False) keeps the liberal
+        # err-toward-flagging bias: the operator deliberately recorded a constraint.
+        rows = [{"node_key": "T1", "title": "Install Proxmox", "description": None}]
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[_result(all_=rows), _result(first_=None)])
+        resp = _resp({"affected": []})
+        with patch("app.model_router.tool_call", AsyncMock(return_value=resp)) as tc:
+            await assist_replan.analyze_note_impact(
+                db=db, job_id=_JID, note_text="no TPM available", note_kind="constraint",
+            )
+        prompt = tc.await_args.kwargs["messages"][0]["content"]
+        assert "Err toward flagging" in prompt                 # liberal bias
+        assert "LEAVING THE PLAN ALONE" not in prompt
+
     async def test_no_pending_nodes_short_circuits(self):
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[_result(all_=[])])
