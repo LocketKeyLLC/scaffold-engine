@@ -812,6 +812,16 @@ class Pipeline:
         # Off → the pre-§17.633 behavior (in-progress work is only reachable
         # from its original chat or via an explicit `/assist <job_id>`).
         assist_continuity_enabled: bool = True
+        # §17.764 — treat a request for hands-on HELP / a how-to on the current
+        # step as an assist CONTINUATION, so the §17.646 /work fallback binds the
+        # sole active session when OWUI delivers no chat_id AND the session marker
+        # isn't in the replayed history. Without this a help-framed message ("can
+        # you help me with this step? I'm stuck") had NO working recall path (the
+        # continuation gate is start-anchored and excludes help phrasing) and fell
+        # to the planner — the reported "it brought me to the DAG". Guarded on
+        # NOT-new-build so "help me set up a new cluster" still plans (§17.678).
+        # Off → the pre-§17.764 behavior (help requests need an explicit re-anchor).
+        assist_help_continuation_enabled: bool = True
         # §17.721 — a strong topic match must NOT silently hijack the chat onto
         # a DIFFERENT job while another session was active within this many
         # minutes (live: a topic-rich message reconnected to the Jellyfin
@@ -1310,7 +1320,22 @@ class Pipeline:
             return False
         if _assist.fast_classify_turn(msg):   # next/skip/pause/status/… verbs
             return True
-        return bool(self._ASSIST_CONT_RE.search(msg.strip()))
+        if self._ASSIST_CONT_RE.search(msg.strip()):
+            return True
+        # §17.764 — a request for hands-on HELP / a how-to on the current step is
+        # a continuation of the active session (the operator wants help finishing
+        # THIS step), not a new idea. This lets the §17.646 /work fallback bind the
+        # sole active session when neither chat_id nor the history marker is
+        # available. Guarded on NOT-new-build so a help-framed NEW build ("help me
+        # set up a proxmox cluster") still reaches the planner (§17.678) rather
+        # than binding an old session; and only when exactly one session is active
+        # (enforced downstream by _sole_active_session_via_work).
+        if (getattr(self.valves, "assist_help_continuation_enabled", True)
+                and (_assist._looks_like_help_request(msg)
+                     or _assist._looks_like_howto_question(msg))
+                and not self._looks_like_new_build_request(msg)):
+            return True
+        return False
 
     # §17.661 — a job-SCOPED top-level command: a workflow/delete verb PLUS an
     # explicit reference to a specific job or DAG node ("skip the failing step

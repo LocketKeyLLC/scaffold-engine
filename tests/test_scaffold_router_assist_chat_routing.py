@@ -397,6 +397,37 @@ class TestWorkFallbackResume:
     def test_new_ideas_not_treated_as_continuation(self, pipe, msg):
         assert pipe._looks_like_assist_continuation(msg) is False
 
+    # §17.764 — a help/how-to request on the current step is a continuation, so
+    # the /work fallback can bind the sole active session when OWUI sends no
+    # chat_id and no history marker (the "asked for help → dropped to the DAG" bug).
+    @pytest.mark.parametrize("msg", [
+        "can you help me with this step? I'm stuck",
+        "I'm stuck on how to configure it",
+        "walk me through this step",
+        "how do I do this part?",
+        "I need help finishing this",
+        "not sure how to proceed here",
+    ])
+    def test_help_requests_treated_as_continuation(self, pipe, msg):
+        assert pipe._looks_like_assist_continuation(msg) is True
+
+    # A help request framed as a NEW BUILD ("help me set up a cluster") must NOT
+    # bind an old session — the §17.678 new-build guard still wins.
+    @pytest.mark.parametrize("msg", [
+        "help me set up a new proxmox cluster",
+        "help me build a media server",
+        "can you set up a kubernetes lab for me",
+    ])
+    def test_help_framed_new_build_stays_planner(self, pipe, msg):
+        assert pipe._looks_like_assist_continuation(msg) is False
+
+    def test_help_continuation_valve_off_disables(self, pipe):
+        pipe.valves.assist_help_continuation_enabled = False
+        assert pipe._looks_like_assist_continuation(
+            "can you help me with this step? I'm stuck") is False
+        # the classic continuation phrases still work regardless of the valve
+        assert pipe._looks_like_assist_continuation("what's next") is True
+
     def _work(self, sessions):
         return {"jobs": [], "assist_sessions": sessions}
 
