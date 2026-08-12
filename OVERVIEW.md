@@ -22077,6 +22077,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.768 Hardening — three assist-dispatch ordering fixes from the §17.765 audit (same "greedy gate starves a later branch" class) (2026-08-12)
+
+Closes the Medium+low dispatch findings the §17.765 full-engine audit surfaced (pipeline-only; `_assist_handlers.py` + `scaffold_router.py`):
+
+1. **Collect-step how-to bypass.** The §17.689 flip `is_collect and question → submit` ran BEFORE the §17.733/763 how-to→research gate, so a genuine how-to on a decision/gather step ("how should I split the VLANs?") was recorded as decision evidence instead of getting a researched answer. Fix: exclude `_looks_like_howto_question`/`_looks_like_help_request` from the flip — a help-seeking turn stays `question` (→ research); a confirmation/refinement/answer still flips to submit.
+2. **Tracker advancing past a `fix`.** The §17.754 progress tracker ran for `fix` turns, and its retire is **server-side** (`/track`), so a tracker misfire on an error report would advance PAST the broken step. Fix: drop `fix` from the tracker gate (now `ask`/`question` only) — an error goes straight to the fix walkthrough, which already handles a revealed sub-task via §17.736.
+3. **Noise-guard in an active session.** The `<2`-char "didn't catch that" nudge fired on a yes/no reply ("y"/"n") even inside an active assist session. Fix: `and not active` — a 1-char answer routes to the assist turn.
+
+Also verified (non-issue, left as-is): `_looks_like_decision_confirm` is dead code, but harmless and fully subsumed by the collect-step flip — noted, not removed.
+
+**Verification.** +3 units (`test_assist_nl_turns.py`): collect-step how-to → research not submit; collect-step confirmation still submits; `fix` turn → tracker not run + no advance. Affected pipeline suites (nl-turns / progress-tracker / decision-deliberation / welcome / chat-routing) **234 passed**. Pipelines restarted. All three are additive-safety (a starvable path re-routed to the correct handler); no state-advancing action changed.
+
+---
+
 ### §17.767 Fix — RAG retrieval no longer reports a partition FAILURE as an empty result (silent-degradation, Phases 1–2) (2026-08-12)
 
 **How found.** The §17.765 full-engine audit's research/RAG reviewer flagged that the retrieval read path collapses distinct failure modes into an indistinguishable `status:"ok", result_count:0`, so the engine can't tell "nothing matched" from "the search broke." Verified in code.

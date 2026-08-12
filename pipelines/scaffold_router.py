@@ -1885,7 +1885,11 @@ class Pipeline:
         # purpose: a brand-new chat may not have history yet, and the
         # welcome preamble above already gives the operator orientation.
         last_user = msg.strip() if msg else ""
-        if len(last_user) < 2 and not self._is_first_turn(messages):
+        # §17.768 — active-session-aware: a 1-char reply ("y"/"n") to a yes/no
+        # inside an ACTIVE assist session is a real answer, not noise — let it
+        # route to the assist turn below instead of getting the triage nudge.
+        if (len(last_user) < 2 and not self._is_first_turn(messages)
+                and not active):
             yield (
                 "I didn't catch that — could you describe what you're "
                 "trying to build or change? A sentence or two is enough."
