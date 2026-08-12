@@ -970,6 +970,21 @@ async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(g
             db=db, job_id=job_id, session_id=session_id, node_key=prior_nk)
         out["action"] = "advanced"
         out["retired_prior_step"] = prior_nk
+        # §17.766 — retiring the step via the tracker must be able to FINALIZE the
+        # session, exactly as a submit does (_maybe_finalize_session is otherwise
+        # ONLY reached from submit_step). Without this, retiring the LAST
+        # non-terminal step left the session 'active' with no claimable step and
+        # the job never reached 'completed' (deliverable never compiled) — a
+        # permanent stuck-at-completion that §17.765 (tracker-advance now reachable
+        # from a how-to/help turn) made easy to hit. Idempotent: no-ops unless
+        # every step is now terminal. On finalize, tell the caller so it renders
+        # the completion instead of a confusing "no step ready".
+        await assist_agent._maybe_finalize_session(session_id=session_id, db=db)
+        if (await assist_agent.get_session(session_id=session_id, db=db) or {}).get(
+            "status"
+        ) == "completed":
+            out["action"] = "finalized"
+            out["session_finalized"] = True
     return out
 
 
