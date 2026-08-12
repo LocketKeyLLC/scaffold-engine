@@ -39,7 +39,7 @@ def _make_vector_results(items):
 def _patch_rag_deps(
     collection_ok=True, embed_ok=True, vector_results=None,
     keyword_results=None, rerank_passthrough=True,
-    superseded_ids=None,
+    superseded_ids=None, vec_failed=None, kw_failed=None,
 ):
     """Build the standard dependency patches for query_rag tests.
 
@@ -91,8 +91,9 @@ def _patch_rag_deps(
     return {
         "_get_client": MagicMock(return_value=mock_collection),
         "_embed_query": AsyncMock(return_value=embedding),
-        "_vector_search": AsyncMock(return_value=vector_results),
-        "_keyword_search": AsyncMock(return_value=keyword_results),
+        # §17.767 — the search legs now return (results, failed_domains).
+        "_vector_search": AsyncMock(return_value=(vector_results, vec_failed or [])),
+        "_keyword_search": AsyncMock(return_value=(keyword_results, kw_failed or [])),
         "_rerank": rerank_mock,
         "_lookup_superseded": AsyncMock(side_effect=mock_superseded),
         "async_session": MagicMock(return_value=mock_session),
@@ -154,14 +155,94 @@ class TestQueryRagHappyPath:
             "skipped_rerank", "below_threshold", "fell_back_to_top3",
             # §17.253 — effective reranker knobs surfaced in metadata
             "rerank_max_candidates", "rerank_doc_truncate",
+            # §17.767 — partition-failure surfacing
+            "partitions_failed", "degraded",
         ]:
             assert key in md, f"Missing metadata key: {key}"
         assert md["reranker_backend"] == "mock"
         assert md["warnings"] == []
+        # §17.767 — the no-harm guard: on the happy path these are inert.
+        assert md["partitions_failed"] == []
+        assert md["degraded"] is False
         # §17.253 — metadata values are resolved ints (not None even when
         # no override was passed)
         assert isinstance(md["rerank_max_candidates"], int)
         assert isinstance(md["rerank_doc_truncate"], int)
+
+
+# ===========================================================================
+# §17.767 — partition-failure surfacing (silent-degradation fix, Phase 1)
+# ===========================================================================
+
+@pytest.mark.smoke
+class TestPartitionFailureSurfacing:
+    """A per-partition Milvus failure must be distinguishable from a true-empty
+    result: metadata carries `partitions_failed`; `degraded` flags a failure that
+    coincided with zero results (the '0 may be a lie' case)."""
+
+    def test_partial_failure_surfaces_but_keeps_results(self):
+        # One partition raised on the vector leg, but keyword results still came
+        # back → partitions_failed populated, warning present, NOT degraded.
+        kw = _make_vector_results([
+            {"content": "Result K", "title": "Doc K", "entry_id": "k1",
+             "keyword_score": 0.9},
+        ])
+        with _PatchStack(_patch_rag_deps(
+            vector_results=[], keyword_results=kw, vec_failed=["eng"],
+        )):
+            from app.modules.rag_pipeline import query_rag
+            result = _run(query_rag("q", domain=None, confidence_threshold=0.0))
+        md = result["metadata"]
+        assert md["partitions_failed"] == ["eng"]
+        assert "partition_search_failed" in md["warnings"]
+        assert md["degraded"] is False          # we still returned results
+        assert result["status"] == "ok"         # status contract unchanged
+
+    def test_total_failure_zero_results_is_degraded(self):
+        # Both legs lost the searched partition AND zero results → degraded=True
+        # so the caller knows the empty result is suspect, not real absence.
+        with _PatchStack(_patch_rag_deps(
+            vector_results=[], keyword_results=[],
+            vec_failed=["eng"], kw_failed=["eng"],
+        )):
+            from app.modules.rag_pipeline import query_rag
+            result = _run(query_rag("q", domain=None, confidence_threshold=0.0))
+        md = result["metadata"]
+        assert md["partitions_failed"] == ["eng"]
+        assert md["degraded"] is True
+        assert "partition_search_failed" in md["warnings"]
+        assert result["status"] == "ok"         # additive — no status break
+
+    def test_failed_domains_unioned_and_sorted(self):
+        with _PatchStack(_patch_rag_deps(
+            vector_results=[], keyword_results=[],
+            vec_failed=["rag", "eng"], kw_failed=["eng", "llm"],
+        )):
+            from app.modules.rag_pipeline import query_rag
+            result = _run(query_rag("q", domain=None, confidence_threshold=0.0))
+        assert result["metadata"]["partitions_failed"] == ["eng", "llm", "rag"]
+
+
+@pytest.mark.smoke
+class TestEmbedDimGuard:
+    """§17.767 Phase 2 — a short query embedding (embedder misconfig) must fail
+    LOUD (embed-failure path) instead of silently yielding 0 results."""
+
+    def test_short_embedding_treated_as_failure(self):
+        import app.utils.embedding as emb
+        from app.modules.rag_pipeline import _embed_query
+        with patch.object(emb, "embed_query",
+                          new=AsyncMock(return_value=[0.1] * 100)):  # < 512
+            out = _run(_embed_query("q"))
+        assert out is None                       # → query_rag's status='error' path
+
+    def test_full_dim_embedding_passes_through(self):
+        import app.utils.embedding as emb
+        from app.modules.rag_pipeline import _embed_query
+        vec = [0.1] * 512
+        with patch.object(emb, "embed_query", new=AsyncMock(return_value=vec)):
+            out = _run(_embed_query("q"))
+        assert out == vec                        # happy path unchanged
 
 
 # ===========================================================================
