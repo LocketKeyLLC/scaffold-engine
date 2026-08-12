@@ -22077,6 +22077,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.769 Fix — RAG silent-degradation Phases 3–4: validate explicit domain + surface "degraded" to callers (2026-08-12)
+
+Completes the §17.765-audit silent-degradation work (§17.767 was Phases 1–2).
+
+**Phase 3 — validate an explicit `domain`.** Retrieval fans out only over `VALID_DOMAINS` and ingest writes the partition-key value verbatim, so an explicit unknown domain (`{"domain":"foobar"}`) silently STRANDED data in a partition no search ever queries. Fix: a shared `_domain_or_422` field-validator on `ResearchInput.domain` + `RagInput.domain` (lazy `VALID_DOMAINS` import → no schemas↔config cycle) rejects an unknown domain with a clean **422**; `None` (auto-detect) stays valid. Defensive backstop in `ingest_entries`: any domain outside `VALID_DOMAINS` that bypasses the schema is coerced to `eng` + logged, so data can never strand. SDK vendored copy synced (byte-equal gate); OpenAPI snapshot unchanged (a validator adds no JSON-schema constraint — confirmed via `openapi-check`).
+
+**Phase 4 — surface "degraded" instead of silent empty.** The §17.767 `metadata.degraded`/`partitions_failed` signal is now acted on where retrieval results are used: (a) `execution_agent._rag_context` (autonomous grounding) adds `partitions_failed`/`degraded` to the `milvus_retrieval` structured log and emits a loud `rag_grounding_degraded` warning, so a node grounded on nothing because Milvus hiccuped is diagnosable, not silently "no context"; (b) the `/rag` command renderer (`_render_rag_results`) shows **"⚠️ Retrieval degraded … may be INCOMPLETE, not a real absence"** for a degraded empty result (instead of the misleading "nothing ingested → /research" nudge), and an informational partial-failure note when some results returned.
+
+**Safety.** Phase 4 is additive (a log line + a conditional banner); Phase 3's only behavior change is that a previously-broken input (silently stranding data) now gets a clean 422 (or is coerced at ingest). **Verified:** +9 units (schema: unknown-domain 422 / valid / None across both models; render: degraded-empty banner ≠ "no matches", partial-failure note keeps results); Phase-3 suite **87 passed**, render suite **118 passed**. **LIVE:** `POST /rag {"domain":"foobar"}` → 422; `"eng"` → 200; no-domain → 200 happy path (`degraded:false`). Orchestrator + pipelines restarted.
+
+---
+
 ### §17.768 Hardening — three assist-dispatch ordering fixes from the §17.765 audit (same "greedy gate starves a later branch" class) (2026-08-12)
 
 Closes the Medium+low dispatch findings the §17.765 full-engine audit surfaced (pipeline-only; `_assist_handlers.py` + `scaffold_router.py`):

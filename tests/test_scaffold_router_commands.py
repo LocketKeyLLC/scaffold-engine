@@ -136,6 +136,34 @@ class TestHandleCommand:
         assert "No matches" in result
         assert "obscure query" in result
 
+    @patch("scaffold_router._HTTP_SESSION.post")
+    def test_rag_degraded_empty_is_not_no_matches(self, mock_post, pipe):
+        # §17.769 (Phase 4) — an empty result caused by a partition FAILURE must
+        # not read as "nothing ingested"; it warns the retrieval was degraded.
+        mock_post.return_value = _make_response(200, {
+            "results": [],
+            "metadata": {"degraded": True, "partitions_failed": ["eng", "rag"]},
+        })
+        result = pipe._handle_command("/rag proxmox stuff")
+        assert "degraded" in result.lower()
+        assert "eng" in result and "rag" in result
+        assert "No matches" not in result
+        assert "Nothing ingested" not in result
+
+    @patch("scaffold_router._HTTP_SESSION.post")
+    def test_rag_partial_failure_note_with_results(self, mock_post, pipe):
+        # §17.769 — results came back but a partition failed → informational note,
+        # and the results are still rendered.
+        mock_post.return_value = _make_response(200, {
+            "results": [{"text": "hit body here", "source_type": "tech_docs",
+                         "confidence_score": 0.9}],
+            "metadata": {"degraded": False, "partitions_failed": ["llm"]},
+        })
+        result = pipe._handle_command("/rag q")
+        assert "may be incomplete" in result.lower()
+        assert "llm" in result
+        assert "hit body here" in result
+
     @patch("scaffold_router._HTTP_SESSION.get")
     def test_skip_bare_lists_candidates(self, mock_get, pipe):
         """§17.215 E1 — bare ``/skip <job_id>`` fetches status and

@@ -5983,7 +5983,23 @@ class Pipeline:
             return self._fmt(r)
 
         results = data.get("results")
+        # §17.769 (Phase 4) — the retrieval degradation signal (partition search
+        # failures). Surfaced so a broken search is never rendered as "nothing here".
+        _md = data.get("metadata") or {}
+        _pf = _md.get("partitions_failed") or []
         if not isinstance(results, list) or not results:
+            # §17.769 — a DEGRADED empty result means the search BROKE, not that
+            # the KB is empty; don't send the operator to `/research` to "ingest"
+            # something that may already be there. Point at the real cause.
+            if _md.get("degraded") or _pf:
+                return (
+                    f"⚠️ **Retrieval degraded** for `{query}` — "
+                    f"{len(_pf)} knowledge-base partition(s) failed"
+                    + (f" ({', '.join(_pf)})" if _pf else "")
+                    + ", so this empty result may be INCOMPLETE, not a real "
+                    "absence. Try again in a moment; if it persists, check the "
+                    "services with `/health`."
+                )
             # Empty hit list: explicit message + escalation path rather than a
             # dead end (§17.444 / A3) — nothing in the KB means the user should
             # be pointed at the one command that can fix that.
@@ -5999,6 +6015,13 @@ class Pipeline:
             return self._fmt(r)
 
         lines = [f"**RAG results for `{query}`** ({len(results)} hit(s)):\n"]
+        # §17.769 (Phase 4) — partial-failure note: some results came back, but a
+        # partition failed, so the set may be incomplete. Non-fatal, informational.
+        if _pf:
+            lines.append(
+                f"⚠️ _Note: {len(_pf)} partition(s) failed ({', '.join(_pf)}); "
+                "these results may be incomplete._\n"
+            )
         # §17.444 (Phase A / A3) — surface retrieval uncertainty the pipeline
         # already computes but the renderer used to drop. A top-N fallback below
         # the confidence threshold, or an RRF-only ranking when the reranker is

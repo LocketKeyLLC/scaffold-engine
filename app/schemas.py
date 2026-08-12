@@ -456,12 +456,31 @@ class ExecutionResult(BaseModel):
 # Research Agent
 # ---------------------------------------------------------------------------
 
+def _domain_or_422(v: str | None) -> str | None:
+    """§17.769 (Phase 3) — reject an explicit unknown domain. Retrieval fans out
+    only over VALID_DOMAINS, and ingest writes the partition-key value verbatim,
+    so an unvalidated domain silently STRANDS data in a partition no search ever
+    queries. Fail fast with a clear 422 instead. ``None`` (auto-detect) is allowed.
+    Imported lazily to avoid any schemas→config import-cycle risk."""
+    if v is None:
+        return v
+    from app.config import VALID_DOMAINS
+    if v not in VALID_DOMAINS:
+        raise ValueError(f"domain must be one of {sorted(VALID_DOMAINS)}")
+    return v
+
+
 class ResearchInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     topic: str = Field(max_length=MAX_QUERY_LEN)
     depth: ResearchDepth = "medium"
     domain: str | None = None
     model_overrides: dict | None = None
+
+    @field_validator("domain")
+    @classmethod
+    def _validate_domain(cls, v: str | None) -> str | None:
+        return _domain_or_422(v)
 
 
 class ResearchReplyInput(BaseModel):
@@ -570,6 +589,11 @@ class RagInput(BaseModel):
         if not v:
             raise ValueError("query must be non-empty")
         return v
+
+    @field_validator("domain")
+    @classmethod
+    def _validate_domain(cls, v: str | None) -> str | None:
+        return _domain_or_422(v)   # §17.769 (Phase 3)
 
 
 class GtInput(BaseModel):

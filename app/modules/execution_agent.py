@@ -892,8 +892,22 @@ async def _milvus_search(query: str, node_key: str = "?", domain: str | None = N
                 results_returned=len(results),
                 total_chars_injected=total_chars,
                 reranker_used=metadata.get("reranked", False),
+                # §17.769 (Phase 4) — partition-failure visibility on the
+                # autonomous grounding path.
+                partitions_failed=metadata.get("partitions_failed") or [],
+                degraded=bool(metadata.get("degraded")),
             ),
         )
+        # §17.769 (Phase 4) — a DEGRADED retrieval (partition(s) failed AND 0
+        # results) is not real absence; log it LOUD so a node grounded on nothing
+        # because Milvus hiccuped is diagnosable, not silently "no context found".
+        if metadata.get("degraded"):
+            logger.warning(
+                "rag_grounding_degraded node_key=%s: %d partition(s) failed (%s) "
+                "with 0 results — grounding may be INCOMPLETE, not a true absence",
+                node_key, len(metadata.get("partitions_failed") or []),
+                ",".join(metadata.get("partitions_failed") or []),
+            )
 
         # Structured rerank log (if reranking was used)
         if metadata.get("reranked", False):
