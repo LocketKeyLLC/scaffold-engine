@@ -1189,6 +1189,17 @@ async def ingest_entries(
         return stats
     if domain == "":
         raise ValueError('domain="" is not allowed for ingest')
+    # §17.769 (Phase 3 backstop) — a domain outside VALID_DOMAINS lands data in a
+    # partition-key value no all-partition search ever queries (silently stranded).
+    # The schema validators reject it at the API; coerce+warn here too so any path
+    # that bypasses the schema can't strand data. "eng" is the safe default member.
+    from app.config import VALID_DOMAINS
+    if domain not in VALID_DOMAINS:
+        logger.warning(
+            "ingest_entries: unknown domain %r not in VALID_DOMAINS %s — coercing "
+            "to 'eng' to avoid stranding data", domain, sorted(VALID_DOMAINS),
+        )
+        domain = "eng"
 
     loop = asyncio.get_running_loop()
     collection = await loop.run_in_executor(None, _get_client)
