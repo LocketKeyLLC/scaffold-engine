@@ -199,9 +199,28 @@ def _iter_search_domains(
 async def _embed_query(
     query: str, *, query_intent: str = "general",
 ) -> list[float] | None:
-    """Embed query — delegates to app.utils.embedding.embed_query."""
+    """Embed query — delegates to app.utils.embedding.embed_query.
+
+    §17.767 (Phase 2) — fail LOUD on a dimension mismatch. MRL truncation
+    (`truncate_and_normalize`) slices to the first `embedding_dim` values with no
+    padding, so an embedder producing FEWER than `embedding_dim` dims yields a
+    short vector that Milvus then silently rejects inside the per-partition search
+    (→ 0 results, status 'ok'). Detect it here and return None so `query_rag`
+    takes its existing embed-failure path (status='error') instead of a misleading
+    empty success. The production embedder is 768-d (slices cleanly ≥ 512), so
+    this never fires on the current config — it only converts a future silent-fail
+    into a loud, correct error.
+    """
     from app.utils.embedding import embed_query as _public_embed_query
-    return await _public_embed_query(query, query_intent=query_intent)
+    vec = await _public_embed_query(query, query_intent=query_intent)
+    if vec is not None and len(vec) < settings.embedding_dim:
+        logger.error(
+            "embed_dim_mismatch: query embedding has %d dims, expected %d "
+            "(embedder misconfigured?) — treating as embed failure",
+            len(vec), settings.embedding_dim,
+        )
+        return None
+    return vec
 
 
 async def _embed_content(content: str) -> list[float] | None:
@@ -281,7 +300,7 @@ async def _vector_search(
     domain: str | None = None,
     *,
     domain_hint: str | None = None,
-) -> list[RagResult]:
+) -> tuple[list[RagResult], list[str]]:
     """ANN search in Milvus (off event loop).
 
     Fans out one search per partition when domain is None. Under partition-key
@@ -293,13 +312,15 @@ async def _vector_search(
     """
     domains = _iter_search_domains(domain, hint=domain_hint)
 
-    def _search_one(d: str) -> list[RagResult]:
+    def _search_one(d: str) -> tuple[list[RagResult], str | None]:
         # §17.542 — one partition per executor thread so the fan-out runs
         # concurrently (vector+keyword legs already prove same-Collection
         # concurrent search is safe; this is more of the same). Per-domain
         # try/except isolates a failing partition without aborting the rest.
+        # §17.767 — return the domain name when the search RAISED (not just an
+        # empty hit list) so query_rag can flag degraded/partial retrieval.
         if collection is None:
-            return []
+            return [], None
         hits: list[RagResult] = []
         try:
             search_kwargs: dict[str, Any] = dict(
@@ -335,18 +356,22 @@ async def _vector_search(
                 ))
         except Exception as e:
             logger.warning("Vector search failed (domain=%s): %s", d, e)
-        return hits
+            return hits, d
+        return hits, None
 
     if collection is None:
-        return []
+        return [], []
     loop = asyncio.get_running_loop()
     per_domain = await asyncio.gather(
         *[loop.run_in_executor(None, _search_one, d) for d in domains]
     )
-    # Merge across partitions: sort by score desc, keep top_k
-    all_hits = [h for hits in per_domain for h in hits]
+    # Merge across partitions: sort by score desc, keep top_k. §17.767 — collect
+    # partitions whose search RAISED so query_rag distinguishes a true-empty
+    # result from a degraded (partial/total-failure) one.
+    all_hits = [h for hits, _ in per_domain for h in hits]
+    failed = [d for _, d in per_domain if d is not None]
     all_hits.sort(key=lambda r: r.vector_score, reverse=True)
-    return all_hits[:top_k]
+    return all_hits[:top_k], failed
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +404,7 @@ async def _keyword_search(
     domain: str | None = None,
     *,
     domain_hint: str | None = None,
-) -> list[RagResult]:
+) -> tuple[list[RagResult], list[str]]:
     """Dispatch the hybrid keyword leg: Milvus BM25 sparse search when enabled
     AND the collection is migrated (has the sparse field), else the substring
     LIKE scan. Both return RagResult lists with keyword_score set; the score
@@ -405,7 +430,7 @@ async def _bm25_search(
     domain: str | None = None,
     *,
     domain_hint: str | None = None,
-) -> list[RagResult]:
+) -> tuple[list[RagResult], list[str]]:
     """Milvus 2.5 native BM25 sparse search (off event loop).
 
     Queries the ``sparse_bm25`` field with the RAW query text — Milvus
@@ -416,13 +441,14 @@ async def _bm25_search(
     from app.utils.milvus_utils import BM25_SPARSE_FIELD
 
     if not (query or "").strip():
-        return []
+        return [], []
     domains = _iter_search_domains(domain, hint=domain_hint)
 
-    def _search_one(d: str) -> list[RagResult]:
+    def _search_one(d: str) -> tuple[list[RagResult], str | None]:
         # §17.542 — per-partition executor fan-out (see _vector_search).
+        # §17.767 — signal a RAISED partition (see _vector_search).
         if collection is None:
-            return []
+            return [], None
         hits: list[RagResult] = []
         try:
             results = collection.search(
@@ -457,17 +483,19 @@ async def _bm25_search(
                 ))
         except Exception as e:
             logger.warning("BM25 search failed (domain=%s): %s", d, e)
-        return hits
+            return hits, d
+        return hits, None
 
     if collection is None:
-        return []
+        return [], []
     loop = asyncio.get_running_loop()
     per_domain = await asyncio.gather(
         *[loop.run_in_executor(None, _search_one, d) for d in domains]
     )
-    all_hits = [h for hits in per_domain for h in hits]
+    all_hits = [h for hits, _ in per_domain for h in hits]
+    failed = [d for _, d in per_domain if d is not None]
     all_hits.sort(key=lambda r: r.keyword_score, reverse=True)
-    return all_hits[:top_k]
+    return all_hits[:top_k], failed
 
 
 async def _keyword_search_like(
@@ -477,7 +505,7 @@ async def _keyword_search_like(
     domain: str | None = None,
     *,
     domain_hint: str | None = None,
-) -> list[RagResult]:
+) -> tuple[list[RagResult], list[str]]:
     """Keyword search via substring LIKE scan (off event loop) — the pre-§17.431
     fallback used when BM25 is disabled or the collection isn't migrated.
 
@@ -492,7 +520,7 @@ async def _keyword_search_like(
     tokens = _KEYWORD_TERM_RE.findall(query.lower())
     words = [t for t in tokens if len(t) >= 3 and t not in _STOPWORDS]
     if not words:
-        return []
+        return [], []
 
     conditions: list[str] = []
     for word in words[:KEYWORD_MAX_TERMS]:
@@ -502,10 +530,11 @@ async def _keyword_search_like(
 
     domains = _iter_search_domains(domain, hint=domain_hint)
 
-    def _search_one(d: str) -> list[RagResult]:
+    def _search_one(d: str) -> tuple[list[RagResult], str | None]:
         # §17.542 — per-partition executor fan-out (see _vector_search).
+        # §17.767 — signal a RAISED partition (see _vector_search).
         if collection is None:
-            return []
+            return [], None
         hits: list[RagResult] = []
         expr = f'domain == "{_escape_literal(d)}" and ({keyword_expr})'
         try:
@@ -541,17 +570,19 @@ async def _keyword_search_like(
                 ))
         except Exception as e:
             logger.warning("Keyword search failed (domain=%s): %s", d, e)
-        return hits
+            return hits, d
+        return hits, None
 
     if collection is None:
-        return []
+        return [], []
     loop = asyncio.get_running_loop()
     per_domain = await asyncio.gather(
         *[loop.run_in_executor(None, _search_one, d) for d in domains]
     )
-    all_hits = [h for hits in per_domain for h in hits]
+    all_hits = [h for hits, _ in per_domain for h in hits]
+    failed = [d for _, d in per_domain if d is not None]
     all_hits.sort(key=lambda r: r.keyword_score, reverse=True)
-    return all_hits[:top_k]
+    return all_hits[:top_k], failed
 
 
 # ---------------------------------------------------------------------------
@@ -854,7 +885,7 @@ async def query_rag(
             "metadata": {"warnings": ["embed_failed"], "reranker_backend": None},
         }
 
-    vector_results, keyword_results = await asyncio.gather(
+    (vector_results, vec_failed), (keyword_results, kw_failed) = await asyncio.gather(
         _vector_search(
             collection, query_embedding, top_k * 2,
             domain=domain, domain_hint=domain_hint,
@@ -864,6 +895,13 @@ async def query_rag(
             domain=domain, domain_hint=domain_hint,
         ),
     )
+    # §17.767 — partitions whose search RAISED (not just returned empty).
+    # Surfaced in metadata so callers can distinguish a true-empty result from a
+    # degraded (partial/total-failure) one instead of reading 0 results as
+    # "nothing exists". Additive: empty on the happy path.
+    partitions_failed = sorted(set(vec_failed) | set(kw_failed))
+    if partitions_failed:
+        warnings.append("partition_search_failed")
 
     logger.info(
         "search_executed: vector_hits=%d keyword_hits=%d query='%s'",
@@ -999,6 +1037,11 @@ async def query_rag(
             "skipped_rerank": skipped_rerank or skip_rerank,
             "reranker_backend": backend,
             "warnings": warnings,
+            # §17.767 — partitions that RAISED during search (always present; []
+            # on success). `degraded` = a suspect empty result: a failure
+            # coincided with zero results, so 0 may be a failure, not real absence.
+            "partitions_failed": partitions_failed,
+            "degraded": bool(partitions_failed) and len(result_dicts) == 0,
             "latency_ms": latency_ms,
             # §17.253 — surface the EFFECTIVE reranker knobs used for
             # this call so an operator passing a per-request override
