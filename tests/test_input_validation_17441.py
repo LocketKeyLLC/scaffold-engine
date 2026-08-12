@@ -113,3 +113,33 @@ def test_caps_are_generous_enough_for_real_input():
     # idea and a paragraph-length research topic must still validate.
     IdeaInput(idea="word " * 5000)          # ~25k chars < 50k
     ResearchInput(topic="background. " * 500)  # ~6k chars < 10k
+
+
+# ── §17.769 (Phase 3): explicit domain validated against VALID_DOMAINS ──────────
+
+@pytest.mark.parametrize("model,base", [
+    (RagInput, {"query": "x"}),
+    (ResearchInput, {"topic": "x"}),
+])
+def test_unknown_domain_rejected(model, base):
+    # An explicit domain outside VALID_DOMAINS ingests/searches a partition-key
+    # value no all-partition search ever queries → data stranded. Reject it (422).
+    with pytest.raises(ValidationError):
+        model(**base, domain="foobar")
+
+
+@pytest.mark.parametrize("model,base", [
+    (RagInput, {"query": "x"}),
+    (ResearchInput, {"topic": "x"}),
+])
+def test_valid_domain_accepted(model, base):
+    assert model(**base, domain="eng").domain == "eng"
+
+
+@pytest.mark.parametrize("model,base", [
+    (RagInput, {"query": "x"}),
+    (ResearchInput, {"topic": "x"}),
+])
+def test_none_domain_accepted(model, base):
+    # None = auto-detect; must stay valid (the default).
+    assert model(**base).domain is None
