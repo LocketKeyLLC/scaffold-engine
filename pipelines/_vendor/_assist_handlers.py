@@ -2320,6 +2320,14 @@ def assist_nl_turn(
                        f"we'll do it now, then pick up where we were.\n\n")
                 yield from assist_next(pipe, session_id, chat_id=chat_id)
                 return
+            if _taction == "finalized":
+                # §17.766 — that was the LAST step; retiring it finalized the whole
+                # session (deliverable compiled). Show the completion + result
+                # instead of calling assist_next (which would say "no step ready").
+                yield ("🎉 That was the last step — you've completed the whole plan! "
+                       "Here's what you built:\n\n")
+                yield from assist_done(pipe, session_id, chat_id=chat_id)
+                return
             if _taction == "advanced":
                 # §17.754 (#2) — the tracker confirmed you've finished this step;
                 # the prior step was retired, so present the next one.
