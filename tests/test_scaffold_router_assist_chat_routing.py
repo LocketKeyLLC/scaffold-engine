@@ -441,13 +441,18 @@ class TestWorkFallbackResume:
         with patch.object(pipe, "_fetch_work", return_value=self._work([])):
             assert pipe._sole_active_session_via_work() is None
 
-    def test_multiple_active_returns_none(self, pipe):
+    def test_multiple_active_returns_most_recent(self, pipe):
+        # §17.770c — with >1 active session and no chat_id, bind the MOST RECENTLY
+        # active (by last_activity_at) rather than dropping to the planner.
         sessions = [
-            {"session_id": "s-1", "status": "active", "current_node_key": "T1"},
-            {"session_id": "s-2", "status": "active", "current_node_key": "T2"},
+            {"session_id": "s-1", "status": "active", "current_node_key": "T1",
+             "last_activity_at": "2026-08-12T09:00:00Z"},
+            {"session_id": "s-2", "status": "active", "current_node_key": "T2",
+             "last_activity_at": "2026-08-12T18:30:00Z"},  # more recent
         ]
         with patch.object(pipe, "_fetch_work", return_value=self._work(sessions)):
-            assert pipe._sole_active_session_via_work() is None
+            got = pipe._sole_active_session_via_work()
+        assert got == {"session_id": "s-2", "last_node_key": "T2", "status": "active"}
 
     def test_continuation_no_marker_resumes_sole_session(self, pipe):
         """The fix: no chat_id, no marker in history, a "done" turn — resume the
@@ -473,23 +478,72 @@ class TestWorkFallbackResume:
         assert args[0] == "s-9"
         assert kwargs["node_key"] == "T2"
 
-    def test_new_idea_no_marker_does_not_hijack_sole_session(self, pipe):
-        """A genuinely new idea (not a continuation) must NOT be swallowed by the
-        active session — it goes to the planner, and /work is never consulted."""
-        msgs = [
-            {"role": "user", "content": "build a hardened homelab on a Supermicro server"},
-        ]
+    def test_explicit_new_project_does_not_hijack_sole_session(self, pipe):
+        """§17.770b — an EXPLICIT new-project signal ("start a new project…") must
+        NOT be swallowed by the active session — it goes to the planner, and /work
+        is never consulted. (A bare "build X" without a novelty marker now sticks
+        to the session by design — see test_build_verb_continuation_stays_sticky.)"""
+        m = "let's start a new project: a hardened homelab on a Supermicro server"
+        assert pipe._looks_like_starts_new_project(m) is True
         with patch.object(pipe, "_assist_recall", return_value=None), \
              patch.object(pipe, "_fetch_work") as work, \
              patch.object(pipe, "_reconnect_in_progress", return_value=None), \
              patch.object(pipe, "_in_progress_banner", return_value=""), \
              patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
              patch.object(pipe, "_assist_nl_turn") as guide:
-            out = "".join(pipe.pipe(
-                "build a hardened homelab on a Supermicro server", "model-id", msgs, NO_CID_BODY))
+            out = "".join(pipe.pipe(m, "model-id", [{"role": "user", "content": m}], NO_CID_BODY))
         assert "TRIAGE_OUTPUT" in out
         guide.assert_not_called()
         work.assert_not_called()  # gated out before the /work call
+
+    def test_build_verb_continuation_stays_sticky(self, pipe):
+        """§17.770b — the closed gap: a message that OPENS with a build/config verb
+        ("configure the static IP", "install the driver") is how the operator
+        narrates the step they're CONTINUING — it must stick to the sole active
+        session, NOT be misread as a new build and dropped to the planner."""
+        for m in ("configure the static IP on the bridge now",
+                  "install the nvidia driver in the guest",
+                  "set up the network for the VM"):
+            # broad guard WOULD misfire; the strict new-project guard does not.
+            assert pipe._looks_like_new_build_request(m) is True   # (the old gate)
+            assert pipe._looks_like_starts_new_project(m) is False  # (the new gate)
+            sessions = [{"session_id": "s-9", "status": "active", "current_node_key": "T13"}]
+            with patch.object(pipe, "_assist_recall", return_value=None), \
+                 patch.object(pipe, "_fetch_work", return_value=self._work(sessions)), \
+                 patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+                 patch.object(pipe, "_in_progress_banner", return_value=""), \
+                 patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
+                 patch.object(pipe, "_assist_nl_turn",
+                              side_effect=lambda *a, **k: iter(["GUIDE_OUTPUT"])) as guide:
+                out = "".join(pipe.pipe(m, "model-id", [{"role": "user", "content": m}], NO_CID_BODY))
+            assert "GUIDE_OUTPUT" in out and "TRIAGE_OUTPUT" not in out, m
+            triage.assert_not_called()
+            assert guide.call_args[0][0] == "s-9"
+
+    def test_status_question_resumes_sole_session_no_phrase_match(self, pipe):
+        """§17.770 — the durable fix. The reported live failure: a status+question
+        that matches NO continuation phrase ("i'm logged in via ssh, are these the
+        commands?") fell through to the planner ("reverted to the DAG"). With one
+        active session and no chat_id/marker, ANY non-new-build message now binds
+        it — the gate no longer depends on guessing the operator's phrasing."""
+        msg = ("i'm currently logged in through the PVE Shell and connected via ssh "
+               "to the VM are these commands that i should use?")
+        # NOT a recognized continuation phrase (the old gate) and NOT a new build.
+        assert pipe._looks_like_assist_continuation(msg) is False
+        assert pipe._looks_like_new_build_request(msg) is False
+        sessions = [{"session_id": "s-9", "status": "active", "current_node_key": "T13"}]
+        with patch.object(pipe, "_assist_recall", return_value=None), \
+             patch.object(pipe, "_fetch_work", return_value=self._work(sessions)), \
+             patch.object(pipe, "_reconnect_in_progress", return_value=None), \
+             patch.object(pipe, "_in_progress_banner", return_value=""), \
+             patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT") as triage, \
+             patch.object(pipe, "_assist_nl_turn",
+                          side_effect=lambda *a, **k: iter(["GUIDE_OUTPUT"])) as guide:
+            out = "".join(pipe.pipe(msg, "model-id",
+                                    [{"role": "user", "content": msg}], NO_CID_BODY))
+        assert "GUIDE_OUTPUT" in out and "TRIAGE_OUTPUT" not in out
+        triage.assert_not_called()
+        assert guide.call_args[0][0] == "s-9"      # bound the sole active session
 
 
 # ---------------------------------------------------------------------------
