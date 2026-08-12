@@ -1910,16 +1910,28 @@ class Pipeline:
         # pipe, so the history marker is the load-bearing signal). Either way
         # the routing decision no longer depends on OWUI's metadata/header quirks.
         # (`cid` + `active` were resolved once, above the pick-list follow-up.)
-        # §17.646 — DB-derived fallback. Both paths above can fail even mid-
-        # session: OWUI delivers no chat_id AND, on a long transcript, truncates
-        # the "Assist session started — <id>" marker out of the history window it
-        # sends — so a plain "done" / "next" / pasted output could no longer find
-        # the session and fell through to the planner (completion lost, the step
-        # never advanced). If this message reads as an assist continuation AND
-        # exactly one assist session is active, resume it via /work (no chat_id,
-        # no history needed). Gated on the continuation signal so a genuinely new
-        # idea still reaches the planner untouched.
-        if not active and self._looks_like_assist_continuation(msg):
+        # §17.646/§17.770 — DB-derived SOLE-ACTIVE-SESSION binding. OWUI delivers
+        # no chat_id AND, on a long transcript, truncates the "Assist session
+        # started — <id>" marker out of the replayed history — so NEITHER recall
+        # path fires and a plain message drops to the planner ("it reverted to the
+        # DAG"). §17.646 first gated this on `_looks_like_assist_continuation`
+        # (specific phrases: done/next/help/…), then §17.764 widened the phrase
+        # list — but real operator wording kept MISSING it ("i'm logged in via ssh,
+        # are these the commands?" is a status+question that matches no phrase),
+        # so it kept falling through. §17.770 stops the phrase whack-a-mole and
+        # INVERTS the gate: when EXACTLY ONE assist session is active (the
+        # unambiguous case — `_sole_active_session_via_work` returns None for 0 or
+        # >1, which then falls to the §17.633 multi-job continuity path) and this
+        # does NOT EXPLICITLY announce a new project, the session is sticky —
+        # plain text continues it. §17.770b — the gate uses the STRICT
+        # `_looks_like_starts_new_project` (novelty markers only), NOT the broad
+        # `_looks_like_new_build_request`: the broad guard opens on any build/config
+        # verb, but "configure the static IP" / "install the driver" are exactly how
+        # the operator narrates the step they're CONTINUING, so using it here just
+        # re-created the bug. Only "a new X / brand new / from scratch / start a new
+        # project" escapes to the planner; a distinct new build otherwise uses /go.
+        if (not active
+                and not self._looks_like_starts_new_project(msg)):
             active = self._sole_active_session_via_work()
         if active:
             # §17.661 — job-scoped top-level command carve-out. A message that
@@ -2619,6 +2631,36 @@ class Pipeline:
         continuing existing work. Deterministic (no LLM)."""
         return bool(msg) and bool(self._NEW_BUILD_RE.search(msg))
 
+    # §17.770b — a STRICTER new-work signal for the sole-active STICKY gate. The
+    # broad _NEW_BUILD_RE opens on any creation/config verb (build/configure/
+    # install/set up/…) — but those are exactly how an operator narrates a step
+    # they're CONTINUING ("configure the static IP", "install the nvidia driver"
+    # — literally the names of their next steps), so using it to send text to the
+    # planner re-created the "reverted to the DAG" bug. This matches ONLY an
+    # EXPLICIT new-project signal (novelty words), so a bare action verb keeps the
+    # session; only "a new X / brand new / from scratch / start a new project /
+    # another build" escapes to the planner. To start unrelated new work while a
+    # session is active, the operator says "new" or uses a slash command (/go).
+    _STARTS_NEW_PROJECT_RE = re.compile(
+        r"\bbrand[\s-]?new\b"
+        r"|\bfrom\s+scratch\b"
+        r"|\bnew\s+(?:project|build|job|app|application|tool|script|service|"
+        r"website|site|idea|thing|deliverable)\b"
+        r"|\b(?:another|a\s+different|a\s+separate|a\s+second)\s+"
+        r"(?:project|build|job|app|homelab|server|thing|deliverable)\b"
+        r"|\b(?:start|begin|kick\s*off)\s+(?:a\s+|another\s+)?new\b"
+        r"|\blet['’]?s\s+start\s+(?:a\s+)?(?:new\b|over\b)"
+        r"|\bstart\s+over\s+with\s+(?:a\s+)?new\b"
+        r"|\bswitch(?:ing)?\s+to\s+(?:a\s+)?(?:whole\s+)?new\s+(?:project|build)\b",
+        re.IGNORECASE,
+    )
+
+    def _looks_like_starts_new_project(self, msg: str) -> bool:
+        """§17.770b — True only when `msg` EXPLICITLY announces a new/distinct
+        project (novelty marker), not merely uses a build/config verb. Used to
+        decide whether a message escapes the sticky sole-active session."""
+        return bool(msg) and bool(self._STARTS_NEW_PROJECT_RE.search(msg))
+
     def _reconnect_in_progress(self, msg: str, chat_id: str | None):
         """§17.633 — reconnect a chat with no bound session to IN-PROGRESS assist
         work started elsewhere. Returns a generator (resume stream / pick-list)
@@ -2862,10 +2904,15 @@ class Pipeline:
             return None
 
     def _sole_active_session_via_work(self) -> dict | None:
-        """§17.646 — the single active assist session from /work (DB-derived, no
-        chat_id / no history marker), or None when there are zero or more than
-        one. Returns the same `{session_id, last_node_key, status}` shape as the
-        other resolvers so the routing fork stays signal-agnostic."""
+        """§17.646/§17.770c — the active assist session to resume from /work
+        (DB-derived, no chat_id / no history marker). Returns None ONLY when ZERO
+        are active. With exactly one active, returns it; with MORE THAN ONE, returns
+        the MOST RECENTLY ACTIVE (by `last_activity_at`) — the best signal available
+        without a chat_id — instead of giving up and dropping the operator's message
+        to the planner (that was the "reverted to the DAG" bug for a multi-session
+        operator). The bound session's job + step are echoed in the reply, so a
+        wrong guess is visible and recoverable (`/assist <id>`). Same
+        `{session_id, last_node_key, status}` shape as the other resolvers."""
         work = self._fetch_work()
         if not work:
             return None
@@ -2874,8 +2921,16 @@ class Pipeline:
             s for s in (work.get("assist_sessions") or [])
             if isinstance(s, dict) and s.get("status") == "active" and s.get("session_id")
         ]
-        if len(active) != 1:
+        if not active:
             return None
+        if len(active) > 1:
+            # §17.770c — disambiguate by recency (last_activity_at is an ISO
+            # timestamp; lexicographic sort is chronological; missing sorts last).
+            active.sort(key=lambda s: s.get("last_activity_at") or "", reverse=True)
+            self.logger.info(
+                "assist_routing work-fallback: %d active sessions — binding most "
+                "recent %s", len(active), active[0].get("session_id"),
+            )
         s = active[0]
         self.logger.info(
             "assist_routing work-fallback session=%s node=%s",
