@@ -2434,7 +2434,22 @@ _PROBLEM_SOLVING_FRAMING = (
     "known, either (a) put a quick DISCOVERY step FIRST — list it (`pvesm list "
     "local --content iso`, `lsblk`, `ip a`) and use the REAL result — or (b) write "
     "it as a clearly-marked <PLACEHOLDER> and tell them exactly what to substitute. "
-    "For a one-shot command that fails on a wrong value, prefer discover-then-use."
+    "For a one-shot command that fails on a wrong value, prefer discover-then-use.\n"
+    "7. ADDRESS EVERYTHING THE OPERATOR RAISED — do NOT tunnel-vision on the error. "
+    "If their message contains more than one thing — a numbered list, or a question "
+    "/ observation ALONGSIDE an error (e.g. 'my prompt now shows just `$` instead of "
+    "`user$`' sitting next to a failed command) — acknowledge and answer EACH point, "
+    "however briefly, THEN give the fix / next step. A one-line answer to the side "
+    "question ('the bare `$` is just your shell prompt style — cosmetic, not the "
+    "cause of the error') is far better than silently ignoring it. Never drop a "
+    "point they took the time to raise.\n"
+    "8. STAY SCOPED TO THIS STEP AND THEIR ASK. Answer THIS step and what they "
+    "actually asked. Do NOT volunteer unrelated pending project goals or tack on "
+    "'by the way, X is still pending' reminders (e.g. surfacing Tesla-P40 fan-curve "
+    "tuning inside a software-install answer). The project context / recap is there "
+    "to GROUND your answer accurately, not to pull in tangents. Only raise another "
+    "goal if the operator asks about the overall plan, or it directly blocks or is "
+    "required by this step."
 )
 
 
@@ -2447,14 +2462,18 @@ def apply_problem_solving(system: str, *, enabled: bool) -> str:
 
 
 _NEXT_CALLOUT_DIRECTIVE = (
-    "\n\nLEAD WITH THE ACTION: Begin your reply with a section titled exactly "
-    "`## 👉 Do this next` containing ONLY the single most immediate action the "
-    "operator should take right now — one command (in a fenced code block) or "
-    "one concrete step, copy-paste ready — plus a one-line 'then tell me what "
-    "it shows'. Keep it to a few lines. THEN continue with the full walkthrough "
-    "using the section headings defined above. Put nothing before the `## 👉 Do "
-    "this next` section, and do not invent a concrete value for it that the "
-    "task/context/research did not give you (use a <PLACEHOLDER> as elsewhere)."
+    "\n\nLEAD WITH THE ACTION — make it impossible to miss. Begin your reply with a "
+    "section titled exactly `## 👉 Do this next` containing ONLY the single most "
+    "immediate action the operator should take right now: a bold one-line imperative "
+    "(e.g. **Run this now:**) immediately followed by the exact command in its OWN "
+    "fenced code block (```), then a one-line 'then tell me what it shows'. Keep this "
+    "section to a few lines and put NOTHING before it. THEN continue with the full "
+    "walkthrough using the section headings defined above. Throughout, keep the "
+    "instructions PRESENT and scannable: every command or exact text to type goes in "
+    "its own fenced code block on its own line — never buried inside a paragraph — "
+    "and number a multi-step sequence so the operator follows one action at a time. "
+    "Do not invent a concrete value the task/context/research did not give you (use "
+    "a <PLACEHOLDER> as elsewhere)."
 )
 
 

@@ -1192,8 +1192,12 @@ def assist_submit(
     # operator keeps moving instead of re-reading the finished one. assist_next
     # re-remembers the freshly-claimed node_key, superseding the next_nk hint
     # stashed above.
+    # §17.771 (post-verify) — a prominent transition so the NEXT action stands out
+    # after the recording notes (facts/learned/etc.), instead of the walkthrough
+    # blending into them. The next step's own `## 👉 Do this next` callout leads
+    # right after this banner.
     if auto_advance:
-        yield "\n\n---\n\n"
+        yield "\n\n---\n\n## ⏭️ Next step — do this now\n\n"
         yield from assist_next(pipe, session_id, chat_id=chat_id)
 
 

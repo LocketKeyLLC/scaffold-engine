@@ -178,3 +178,33 @@ def test_decide_prompt_routes_completion_to_submit_not_advance():
     assert "Do NOT use advance for a completion" in extra
     # the old buggy wording (completion → advance) must be gone
     assert "with no error) → advance" not in extra
+
+
+@pytest.mark.asyncio
+async def test_decide_retries_once_on_transient_no_tool_call():
+    """§17.771 (post-verify) — a transient no-tool-call is retried once instead of
+    dropping straight to the cascade."""
+    p_ctx, p_kind, p_mem = _patch_ctx_and_memory()
+    no_tools = MagicMock(); no_tools.success = True; no_tools.tool_calls = []
+    good = _model_resp({"action": "ask", "confidence": "high", "rationale": "r",
+                        "query": "q"})
+    tc = AsyncMock(side_effect=[no_tools, good])
+    with p_ctx, p_kind, p_mem, \
+         patch("app.modules.assist_decide.model_router.tool_call", new=tc):
+        r = await assist_decide.decide_turn(
+            session_id="S1", message="help", db=_db_with_session())
+    assert r["action"] == "ask" and r["unavailable"] is False
+    assert tc.await_count == 2  # retried once, succeeded on the second
+
+
+@pytest.mark.asyncio
+async def test_decide_gives_up_after_two_no_tool_calls():
+    p_ctx, p_kind, p_mem = _patch_ctx_and_memory()
+    no_tools = MagicMock(); no_tools.success = True; no_tools.tool_calls = []
+    tc = AsyncMock(side_effect=[no_tools, no_tools])
+    with p_ctx, p_kind, p_mem, \
+         patch("app.modules.assist_decide.model_router.tool_call", new=tc):
+        r = await assist_decide.decide_turn(
+            session_id="S1", message="x", db=_db_with_session())
+    assert r["unavailable"] is True and r["rationale"] == "no_tool_call"
+    assert tc.await_count == 2  # one retry, then cascade fallback
