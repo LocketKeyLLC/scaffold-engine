@@ -712,6 +712,13 @@ class Settings(BaseSettings):
     # pre-§17.626 guide behavior).
     assist_nl_turns_enabled: bool = True
     assist_classify_model_role: str = "model_general"
+    # §17.771 (deferred, now done) — render-path decision suggestion validation.
+    # On a DECISION step's first view, guarantee the walkthrough carries a
+    # "## My suggestion" lean (parity with the now-decisive commit path); if the
+    # model dropped it, generate just that block from the options it produced and
+    # append it. Code default OFF so tests + fresh installs keep the legacy path
+    # (and never fire the follow-up call); live-on via compose. Fail-soft.
+    assist_decision_suggestion_enforce: bool = False
     # §17.771 (Phase 1) — the unified assist decision (`assist_decide.decide_turn`):
     # ONE context-rich call that replaces the fragmented classifier + phrase-gates
     # + track + reroute. Default OFF. When on, Phase 1 runs it in SHADOW (the live
