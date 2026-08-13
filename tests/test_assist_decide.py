@@ -166,3 +166,15 @@ async def test_fire_shadow_is_noop_when_valve_off():
             session_id="S1", message="x", node_key="T3", history=[],
             classifier_intent="question")
     mk.assert_not_called()
+
+
+def test_decide_prompt_routes_completion_to_submit_not_advance():
+    """§17.771 (live-verify fix) — a completion report must route to SUBMIT
+    (records evidence + marks done + advances), NOT advance (which maps to
+    assist_next and neither records nor retires the step, so it re-presents the
+    same step — the re-present loop found in live verification)."""
+    extra = assist_decide._DECIDE_EXTRA
+    assert "with no error → submit" in extra
+    assert "Do NOT use advance for a completion" in extra
+    # the old buggy wording (completion → advance) must be gone
+    assert "with no error) → advance" not in extra
