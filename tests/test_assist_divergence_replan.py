@@ -58,10 +58,17 @@ async def _stage(db, **over):
 class TestStageDivergenceReplan:
     async def test_happy_path_stages_divergence_tagged_proposal(self):
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[
-            _result(first_={"status": "active"}),  # session status
-            _result(),                             # metadata UPDATE
-        ])
+
+        # Query-dispatching mock (robust to call-count: §17.753 get_project_recap
+        # and other reads run between the session lookup and the UPDATE).
+        async def _exec(sql, params=None):
+            s = str(sql)
+            if "assist_sessions" in s and "SELECT" in s:
+                return _result(first_={"status": "active", "metadata": {}})
+            if "SELECT" in s:
+                return _result(all_=[], first_=None)
+            return _result()  # UPDATE
+        db.execute = AsyncMock(side_effect=_exec)
         db.commit = AsyncMock()
         with patch.object(settings, "assist_divergence_replan_enabled", True), \
              patch.object(assist_replan, "analyze_note_impact",

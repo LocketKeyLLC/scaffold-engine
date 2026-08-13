@@ -1185,6 +1185,18 @@ async def classify_session_turn(
     res["title"] = ctx.title
     res["is_decision"] = is_decision
     res["is_collect"] = kind is not None
+    # §17.771 (Phase 1) — SHADOW: run the unified decision on this real turn and
+    # log how it compares to the classifier the pipeline actually uses. Fire-and-
+    # forget with its own DB session; no-op unless the valve is on; never blocks
+    # or alters the live turn.
+    try:
+        from app.modules import assist_decide
+        assist_decide.fire_shadow_decision(
+            session_id=session_id, message=message, node_key=nk,
+            history=history, classifier_intent=res.get("intent") or "question",
+        )
+    except Exception:  # shadow must never surface into the live turn
+        logger.debug("assist shadow fire skipped", exc_info=True)
     return res
 
 
@@ -2769,6 +2781,24 @@ async def run_step_decision(
         digest_excludes={node_key}, title=row["title"] or node_key,
     )
     from app.modules import assist_guide
+    # §17.771 (Phase 3) — evidence-backed commit for a DECISION: research the
+    # operator's ACTUAL system so the recommendation is current + system-specific
+    # instead of drawn from stale model memory (the audit's "commit path has zero
+    # fresh research" gap). Gather steps just collect operator input — no research.
+    # Fail-soft, bounded by assist_guide_max_research_queries (0 → skip).
+    research_block = ""
+    if kind == "decision" and settings.assist_guide_max_research_queries > 0:
+        try:
+            sources = await assist_guide._research_prepass(
+                task_text=task_prompt, tool="LLM",
+                role=settings.assist_guide_model_role,
+                max_queries=settings.assist_guide_max_research_queries,
+                node_key=node_key, domain=None,
+                environment_block=assist_guide.render_environment_block(mem.environment),
+            )
+            research_block = assist_guide._render_research_block(sources)
+        except Exception as exc:  # research must never trap the commit
+            logger.warning("assist_decision_research_failed node=%s err=%r", node_key, exc)
     res = await assist_guide.deliberate_decision(
         title=row["title"] or node_key,
         task_prompt=task_prompt,
@@ -2778,6 +2808,7 @@ async def run_step_decision(
         conversation=mem.conversation,
         latest_message=message,
         kind=kind,
+        research_block=research_block,
     )
     status = res.get("status")
     if status == "needs_input" and (res.get("message") or "").strip():
@@ -3664,12 +3695,31 @@ async def assess_note_impact(
 async def _stage_replan_proposal(
     *, session_id: str, note_text: str, note_kind: str,
     affected: list, db,
-) -> dict:
+) -> dict | None:
     """§17.677/§17.693 — stash a pending_replan proposal on the session for the
     operator to confirm. Read-modify-write merge so other metadata keys survive;
     one pending proposal at a time (a fresh one overwrites any unresolved prior).
+
+    §17.771 (Phase 4) — thrash-suppression: returns ``None`` WITHOUT staging when
+    the operator already DISMISSED a proposal with this same signature. Pre-fix a
+    discard cleared the pending key but left no memory, so the next matching turn
+    re-surfaced the identical "Apply these plan changes?" — the "I said no, stop
+    asking" loop the audit flagged. Covers both the message/pivot path
+    (detect_reroute) and the explicit-note path (assess_note_impact), which both
+    stage through here.
     """
     from datetime import datetime, timezone
+    sig = _replan_signature(note_text, affected)
+    meta_row = (await db.execute(
+        text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if sig in _discarded_replans_from_metadata(meta_row.get("metadata") if meta_row else None):
+        logger.info(
+            "assist_replan_suppressed session_id=%s (operator already dismissed) sig=%r",
+            session_id, sig[:60],
+        )
+        return None
     proposal = {
         "note_text": note_text,
         "note_kind": note_kind,
@@ -3773,6 +3823,30 @@ def _pending_replan_from_metadata(metadata: Any) -> dict | None:
     return pr if isinstance(pr, dict) else None
 
 
+def _discarded_replans_from_metadata(metadata: Any) -> list[str]:
+    """§17.771 (Phase 4) — signatures of re-plan proposals the operator already
+    DISMISSED, so a matching one is not re-staged next turn (thrash-suppression)."""
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (ValueError, TypeError):
+            metadata = {}
+    dl = (metadata or {}).get("discarded_replans") if isinstance(metadata, dict) else None
+    return [s for s in dl if isinstance(s, str)] if isinstance(dl, list) else []
+
+
+def _replan_signature(note_text: str, affected: list) -> str:
+    """§17.771 (Phase 4) — a stable fingerprint of a re-plan proposal: the
+    normalized trigger text + the sorted set of affected node_keys. Two proposals
+    with the same signature are "the same suggestion" for dedup purposes."""
+    keys = sorted({
+        str((a or {}).get("node_key", "")).strip()
+        for a in (affected or []) if isinstance(a, dict)
+    } - {""})
+    norm = " ".join((note_text or "").lower().split())[:80]
+    return f"{norm}|{','.join(keys)}"
+
+
 async def get_pending_replan(*, session_id: str, db) -> dict | None:
     """§17.677 — the session's un-resolved note-replan proposal, or None."""
     row = (await db.execute(
@@ -3830,6 +3904,25 @@ async def apply_pending_replan(
         summary = {"applied": True, **result}
     else:
         summary = {"applied": False, "discarded": True}
+        # §17.771 (Phase 4) — remember this dismissal so `_stage_replan_proposal`
+        # doesn't re-surface the identical proposal next turn. Signature = trigger
+        # text + affected node_keys; capped FIFO so the ledger can't grow unbounded.
+        sig = _replan_signature(
+            pending.get("note_text") or "", pending.get("proposals") or [],
+        )
+        discarded = _discarded_replans_from_metadata(sess.get("metadata"))
+        if sig not in discarded:
+            discarded = (discarded + [sig])[-20:]
+            await db.execute(
+                text("""
+                    UPDATE assist_sessions
+                       SET metadata = COALESCE(metadata, '{}'::jsonb)
+                             || CAST(:patch AS jsonb)
+                     WHERE id = :sid
+                """),
+                {"sid": session_id,
+                 "patch": json.dumps({"discarded_replans": discarded})},
+            )
 
     # Clear the pending proposal regardless of outcome (apply commits inside
     # apply_note_replan; the key-removal is a separate committed statement).

@@ -2189,6 +2189,107 @@ def _track_progress(
         return None
 
 
+def _decide_call(pipe, session_id: str, msg: str, node_key, history) -> dict | None:
+    """§17.771 (Phase 2) — POST /assist/{sid}/decide → the unified Decision, or
+    None on 404 (server valve off) / error. Fail-soft: any hiccup returns None so
+    the caller falls through to the deterministic cascade (the safety net)."""
+    try:
+        r = _ss(pipe).post(
+            f"{pipe.valves.orchestrator_url}/assist/{session_id}/decide",
+            json={"message": msg, "node_key": node_key, "history": history or []},
+            headers=pipe._auth_headers(),
+            timeout=getattr(pipe.valves, "assist_unified_decision_timeout", 60),
+        )
+        if r.status_code < 400:
+            d = r.json()
+            if isinstance(d, dict) and d.get("action"):
+                return d
+    except (requests.exceptions.RequestException, ValueError) as e:
+        pipe.logger.debug("assist decide call failed: %s", e)
+    return None
+
+
+def _dispatch_decision(
+    pipe, session_id: str, decision: dict, *, msg: str, node_key, chat_id, history,
+):
+    """§17.771 (Phase 2) — route a turn on the unified Decision: one action → one
+    handler, mirroring the cascade's terminal switch. A plan-affecting decision
+    (action=note, or plan_impact=reshape) takes the note→surface-and-ask re-plan
+    path; everything else dispatches its action. (Phase 4 threads surface/
+    divergence more fully off `plan_impact`.)"""
+    action = (decision.get("action") or "question").strip()
+    impact = (decision.get("plan_impact") or "none").strip()
+    nk = _recall_node_key(pipe, chat_id, node_key)
+
+    # Plan-affecting → surface-and-ask re-plan (server assess_note_impact).
+    if action == "note" or impact == "reshape":
+        kind = decision.get("note_kind") or ("decision" if impact == "reshape" else "note")
+        yield from assist_note_cmd(
+            pipe, session_id, (decision.get("note_text") or msg).strip(),
+            kind=kind, node_key=nk, chat_id=chat_id,
+        ); return
+    if action == "advance":
+        yield from assist_next(pipe, session_id, chat_id=chat_id); return
+    if action == "skip":
+        if not nk:
+            yield ("Which step should I skip? Say _\"next\"_ to pull up the "
+                   "current one first."); return
+        yield from assist_skip(pipe, session_id, nk, chat_id=chat_id); return
+    if action == "submit":
+        if not nk:
+            yield from assist_next(pipe, session_id, chat_id=chat_id); return
+        ev = (decision.get("evidence") or msg).strip() or "Operator confirmed this step is complete."
+        yield ("_🤔 Working through this step…_\n\n" if decision.get("is_decision")
+               else "_📝 Recording what you did for this step…_\n\n")
+        yield from assist_submit(
+            pipe, session_id, nk, ev, chat_id=chat_id, history=history,
+        ); return
+    if action == "fix":
+        yield "_🔧 Sounds like something went wrong — let me help…_\n\n"
+        yield from assist_fix_cmd(
+            pipe, session_id, (decision.get("error_text") or msg), node_key=nk,
+            chat_id=chat_id, history=history,
+        ); return
+    if action == "ask":
+        yield from assist_research_cmd(
+            pipe, session_id, (decision.get("query") or msg).strip(), node_key=nk,
+            chat_id=chat_id, history=history,
+        ); return
+    if action == "add_step":
+        yield from assist_add_step_cmd(
+            pipe, session_id, msg.strip(), node_key=nk, chat_id=chat_id,
+        ); return
+    if action == "handoff":
+        if not nk:
+            yield ("Which step should I take? Say _\"next\"_ first, then _\"you "
+                   "do this one\"_."); return
+        yield from assist_handoff(pipe, session_id, nk, _handoff_mode_from_message(msg))
+        return
+    if action == "finalize":
+        yield from assist_done(pipe, session_id, chat_id=chat_id); return
+    if action == "pause":
+        yield from assist_simple_post(pipe, session_id, "pause"); return
+    if action == "status":
+        yield from assist_status(pipe, session_id); return
+    if action == "explain_plan":
+        yield from assist_plan(pipe, session_id, chat_id=chat_id); return
+    if action == "set_env":
+        subs = dict(re.findall(r"([A-Za-z_]\w*)=(\S+)", msg))
+        profile = re.sub(r"[A-Za-z_]\w*=\S+", "", msg).strip(" ,\t") or None
+        yield from assist_env_cmd(
+            pipe, session_id, profile=profile, substitutions=subs or None,
+            chat_id=chat_id,
+        ); return
+    if action == "set_verbosity":
+        yield from assist_env_cmd(
+            pipe, session_id, verbosity=_verbosity_from_message(msg), chat_id=chat_id,
+        ); return
+    # question (default) — re-render / clarify the current step.
+    yield from assist_chat_turn(
+        pipe, session_id, msg, node_key=node_key, chat_id=chat_id, history=history,
+    )
+
+
 def assist_nl_turn(
     pipe, session_id: str, msg: str, *,
     node_key: str | None = None, chat_id: str | None = None,
@@ -2223,6 +2324,31 @@ def assist_nl_turn(
     intent = fast_classify_turn(msg)
     evidence, error_text, query, note_text, note_kind = "", "", "", "", "note"
     is_collect = False
+    # §17.771 (Phase 2) — the UNIFIED decision. For anything the free fast-verb
+    # match didn't already resolve, ONE context-rich /decide call routes the whole
+    # turn, replacing the classifier + phrase-gate cascade below. A usable decision
+    # (available, confidence >= medium) dispatches and returns; a LOW-confidence or
+    # unavailable decision falls through to the deterministic cascade — the safety
+    # net the operator chose to keep. Gated on the pipe valve (the /decide endpoint
+    # independently enforces the server valve, returning 404 → None → fall-through).
+    if intent is None and getattr(pipe.valves, "assist_unified_decision_enabled", False):
+        decision = _decide_call(pipe, session_id, msg, node_key, history)
+        if (decision and not decision.get("unavailable")
+                and (decision.get("confidence") or "low") in ("medium", "high")):
+            pipe.logger.info(
+                "assist_unified_dispatch session=%s action=%s conf=%s impact=%s",
+                session_id, decision.get("action"), decision.get("confidence"),
+                decision.get("plan_impact"),
+            )
+            yield from _dispatch_decision(
+                pipe, session_id, decision, msg=msg, node_key=node_key,
+                chat_id=chat_id, history=history,
+            )
+            return
+        pipe.logger.info(
+            "assist_unified_fallthrough session=%s reason=%r — using cascade",
+            session_id, (decision or {}).get("rationale") or "no-decision",
+        )
     # §17.705 — deterministic pre-empt: a pasted shell transcript IS the operator
     # reporting this step's result. Recognize it BEFORE the (unreliable) LLM
     # classifier so it is always recorded as evidence — and so the submit path

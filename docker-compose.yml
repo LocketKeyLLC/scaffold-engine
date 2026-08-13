@@ -339,6 +339,13 @@ services:
       # overrides a false block. Code defaults stay off (legacy + tests).
       ASSIST_BLOCK_ON_FAILED_VERIFY: "${ASSIST_BLOCK_ON_FAILED_VERIFY:-true}"
       ASSIST_BLOCK_ON_INCOMPLETE_VERIFY: "${ASSIST_BLOCK_ON_INCOMPLETE_VERIFY:-true}"
+      # §17.771 (Phase 2) — the unified assist decision as LIVE authority. One
+      # /decide call routes each turn; a low-confidence/unavailable decision falls
+      # through to the deterministic cascade (retained safety net). Code default
+      # off (tests + fresh installs use the cascade); live here. PAIR VALVE:
+      # pipelines/scaffold_router/valves.json → assist_unified_decision_enabled
+      # (both must be on). Also enables the §17.771 Phase-1 shadow on fall-through.
+      ASSIST_UNIFIED_DECISION_ENABLED: "${ASSIST_UNIFIED_DECISION_ENABLED:-true}"
       # §17.738 — running per-step progress recap so long troubleshooting steps
       # stay coherent (the 6-turn window loses the thread). Injected into
       # fix/guide/research from the full node transcript; cached, refreshed

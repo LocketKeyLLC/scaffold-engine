@@ -792,6 +792,18 @@ class Pipeline:
         # "skip" / short clarifications stay below the bar (no extra LLM call).
         assist_pivot_min_words: int = 6
 
+        # §17.771 (Phase 2) — dispatch on the UNIFIED decision (server /decide)
+        # instead of the classifier + phrase-gate cascade. When on (AND the server
+        # valve `assist_unified_decision_enabled` is on), `assist_nl_turn` calls
+        # /decide first; a usable decision (available, confidence >= medium) routes
+        # the whole turn and the cascade is skipped. A LOW-confidence or unavailable
+        # decision FALLS THROUGH to the deterministic cascade — the safety net the
+        # operator chose to keep. Off → the pre-§17.771 cascade only. Fast verbs
+        # (next/skip/pause) are still matched deterministically and never pay the
+        # decision call.
+        assist_unified_decision_enabled: bool = False
+        assist_unified_decision_timeout: int = 60
+
         # §17.748 — when the operator pastes shell output while MID-FIX (the last
         # assistant turn was a Troubleshooting fix that asked them to run a
         # diagnostic and report back), treat it as a diagnostic REPLY that

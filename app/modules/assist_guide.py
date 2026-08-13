@@ -474,20 +474,37 @@ def _is_useful_grounding(body: str) -> bool:
 
 async def _detect_unknowns(
     *, task_text: str, tool: str, role: str, max_queries: int,
+    environment_block: str = "",
 ) -> list[str]:
-    """Ask the model which facts a human would need to confirm. Fail-soft."""
+    """Ask the model which facts a human would need to confirm. Fail-soft.
+
+    §17.771 (Phase 3) — when the operator's observed system (`environment_block`
+    = profile + §17.709 facts ledger) is given, the queries are grounded in THEIR
+    box (their GPU model, OS version, board) instead of generic lookups. This is
+    what makes a decision step's researched options system-SPECIFIC rather than a
+    textbook list — the sharpest tailoring gap the §17.771 audit found (the option
+    research pre-pass was environment-blind while the render prompt only narrated
+    facts after the fact)."""
     if max_queries <= 0:
         return []
+    env = (environment_block or "").strip()
+    env_line = (
+        "\nThe operator's ACTUAL system (ground every query in THIS — ask about "
+        f"their real hardware / OS / installed versions, not generic ones):\n{env}\n"
+        if env else ""
+    )
     try:
         resp = await model_router.tool_call(
             [
                 {"role": "system", "content": (
                     "You help a human prepare to execute a task. List only "
                     "lookups that genuinely matter for correctness; prefer an "
-                    "empty list over speculative queries."
+                    "empty list over speculative queries. When the operator's "
+                    "system is given, make each query SPECIFIC to it (their exact "
+                    "GPU/board/OS version) rather than generic."
                 )},
                 {"role": "user", "content": (
-                    f"Task tool: {tool}\n\nTask:\n{task_text}\n\n"
+                    f"Task tool: {tool}\n{env_line}\nTask:\n{task_text}\n\n"
                     f"Call flag_unknowns with up to {max_queries} search "
                     f"queries (or an empty list)."
                 )},
@@ -614,9 +631,11 @@ async def _confirm_query(
 async def _research_prepass(
     *, task_text: str, tool: str, role: str, max_queries: int,
     node_key: str, domain: Optional[str], deep: bool = False,
+    environment_block: str = "",
 ) -> list[dict]:
     queries = await _detect_unknowns(
         task_text=task_text, tool=tool, role=role, max_queries=max_queries,
+        environment_block=environment_block,
     )
     if not queries:
         return []
@@ -1401,10 +1420,11 @@ Choose the outcome:
 
 - status="resolved" when the operator's choices now fully determine the concrete deliverable, OR the operator has CONFIRMED a proposal you made (e.g. "looks good", "yes", "go with that", "that works"). Emit `decision_record` = the COMPLETE concrete artifact, assembled from what the operator chose — every row/field the task asks for, self-contained, ready for later steps to build from.
 
-- status="needs_input" when more is needed to make the deliverable concrete. In `message`, PROPOSE a specific, ready-to-use default that reflects the operator's choices so far (real, usable values — take concrete values from the operator environment when given; use a clearly-labeled <PLACEHOLDER> ONLY for something only the operator can supply, e.g. their exact ISP-facing IP). End with one short line inviting them to confirm or say what to change. If a FOUNDATIONAL choice is still open, ask THAT (offer the real options) — do NOT fabricate past a choice the operator has not made.
+- status="needs_input" when more is needed to make the deliverable concrete. In `message`, make a DECISIVE recommendation: lead with the ONE option you recommend and the single main reason it fits THIS operator's system and goal, then PROPOSE the specific, ready-to-use default that reflects it (real, usable values — take concrete values from the operator environment when given; use a clearly-labeled <PLACEHOLDER> ONLY for something only the operator can supply, e.g. their exact ISP-facing IP). Do not dump a neutral menu of equal options and ask them to pick — commit to a recommendation and let them override it. Frame it as your recommendation, not a settled fact ("I'd go with X — reason. Sound good, or change it?"). If a FOUNDATIONAL choice is still open, recommend one (with the real alternatives named) — do NOT fabricate past a choice the operator has not made.
 
 Rules:
 - Resolve as soon as the operator confirms — never force an extra round once they've said yes.
+- When a Research section is present, GROUND the recommendation and any versions/package names/flags in it — prefer its current, system-specific facts over anything from memory (§17.729 currency). Do NOT copy the research depth into the message; the operator needs the recommendation, not the sources.
 - Do NOT pre-assume a count, topology, or set the operator has not agreed to.
 - GROUND on the observed system facts + project context above. NEVER assume the system is fresh, empty, or new: if the facts describe an EXISTING system, decide for THAT system; if a needed detail was not captured or a check was inconclusive (a command errored / returned empty), treat it as UNKNOWN and ask — do NOT invent a "fresh install" assumption to fill the gap. EXCEPTION (§17.714): if the session memory says the operator has CHANGED DIRECTION / chosen to reinstall or rebuild, follow THAT decision — a fresh start is then what they asked for, not an assumption; treat the earlier "observed facts" as describing the abandoned system.
 - Never invent values the operator must own (real public IPs, ISP specifics) — use sensible, clearly-labeled defaults they can change.
@@ -1450,6 +1470,7 @@ async def deliberate_decision(
     conversation: Optional[str] = None,
     latest_message: str,
     kind: str = "decision",
+    research_block: str = "",
 ) -> dict:
     """§17.689/§17.690 — one turn of a COLLECT step's deliberation.
 
@@ -1477,6 +1498,11 @@ async def deliberate_decision(
         parts.append(job_digest.strip())
     # §17.710b — unified session memory (or legacy env + notes) per the valve.
     parts.extend(_render_memory_or_legacy(environment, operator_notes))
+    # §17.771 (Phase 3) — evidence-backed commit: current, system-specific facts
+    # so the recommendation isn't drawn from stale model memory (the audit's
+    # "commit path has zero fresh research" gap). Decision kind only; "" no-ops.
+    if research_block and research_block.strip():
+        parts.append(research_block.strip())
     if conversation and conversation.strip():
         parts.append(conversation.strip())
     parts.append(f"## Operator's latest message\n{(latest_message or '').strip()}")
@@ -3053,6 +3079,11 @@ async def generate_guidance(
             max_queries=settings.assist_guide_max_research_queries,
             node_key=node_key,
             domain=domain,
+            # §17.771 (Phase 3) — ground the option research in the operator's
+            # actual system so a DECISION step's options are system-specific, not
+            # a generic textbook list. render_environment_block folds in the
+            # §17.709 facts ledger; "" when unknown (fail-soft, generic queries).
+            environment_block=render_environment_block(environment),
         )
 
     system = apply_verbosity(
