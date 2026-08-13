@@ -274,6 +274,7 @@ Use these section headings, in order, and omit any that don't apply:
 
 Hard rules:
 - Present ONE decision. Do not resolve it, and do not bundle sub-decisions into this turn.
+- ALWAYS include the ## My suggestion section with a clear lean and the one main reason — never lay out the options and stop without a recommendation. It stays a suggestion they can reject, but you must make one.
 - Never write past-tense narration ("Decided…", "Picked…"). The operator decides.
 - Never invent concrete values (IPs, IDs, subnets, hostnames, versions) the operator has not given — use placeholders or clearly-labeled examples, and say the operator sets the real ones.
 - If a confirmed-research block is provided, use it SILENTLY for accuracy only (real current options, correct names/versions) — do NOT reproduce its depth or background; the reader needs the choice framed, not a research dump.
@@ -342,6 +343,99 @@ _GUIDE_DECISION_TRAILER = (
     "do NOT bundle sub-decisions. Follow the output structure and hard rules in "
     "your system instructions exactly."
 )
+
+# §17.771 (deferred, now done) — render-path suggestion validation. A DECISION
+# step's first-view walkthrough MUST carry a recommendation; the audit found the
+# model can silently drop the "## My suggestion" section with nothing catching it
+# (the commit path is now decisive; this makes the render path so too). Present
+# = a suggestion/recommendation heading OR a clear lean phrase; absent → enforce.
+_SUGGESTION_HEADING_RE = re.compile(
+    r"(?im)^\s{0,3}#{1,6}\s*(?:my\s+)?(?:suggestion|recommendation)\b"
+)
+_SUGGESTION_LEAN_RE = re.compile(
+    r"(?i)\b(?:i'?d\s+(?:lean|go\s+with|recommend|suggest|pick|choose)|"
+    r"my\s+recommendation\b|i\s+(?:recommend|suggest)\b|i'?d\s+go\b)"
+)
+
+
+def _has_decision_suggestion(text: str) -> bool:
+    """True when a decision walkthrough already carries a recommendation — a
+    ``## My suggestion``/``## Recommendation`` heading OR a clear lean phrase."""
+    t = text or ""
+    return bool(_SUGGESTION_HEADING_RE.search(t) or _SUGGESTION_LEAN_RE.search(t))
+
+
+_DECISION_SUGGESTION_SYSTEM = (
+    "You are a hands-on co-pilot. The operator is on a DECISION step and you were "
+    "shown the options already laid out for them. Recommend exactly ONE of those "
+    "options and the single main reason it fits THIS operator's system and goal. "
+    "It is a suggestion they can reject — decisive, but their call. Pick from the "
+    "options given; do not invent a new one. Call recommend_option once."
+)
+
+_DECISION_SUGGESTION_TOOL = model_router.Tool(
+    name="recommend_option",
+    description=(
+        "Recommend ONE of the options presented for the operator's decision, with "
+        "the single main reason it fits their situation."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "leaning": {
+                "type": "string",
+                "description": "Short label of the recommended option (one of those shown).",
+            },
+            "why": {
+                "type": "string",
+                "description": "The ONE main reason it fits, tailored to their system/goal.",
+            },
+        },
+        "required": ["leaning", "why"],
+    },
+)
+
+
+async def _generate_decision_suggestion(
+    *, title: str, task_prompt: str, options_text: str,
+    environment: Optional[dict], role: str,
+) -> str:
+    """Generate ONLY the ``## My suggestion`` block for a decision whose
+    walkthrough omitted it, tailored to the options already produced + the
+    operator's system. Returns the markdown block, or "" on any failure (the
+    caller then ships the un-enforced walkthrough — fail-soft)."""
+    env = render_environment_block(environment)
+    user = (
+        f"Decision: {title}\n\nWhat to decide:\n{(task_prompt or '')[:1000]}\n\n"
+        + (f"{env.strip()}\n\n" if env.strip() else "")
+        + f"The options presented to the operator:\n{(options_text or '')[:2000]}\n\n"
+        "Recommend ONE of these and the single main reason. Call recommend_option."
+    )
+    try:
+        resp = await model_router.tool_call(
+            [
+                {"role": "system", "content": _DECISION_SUGGESTION_SYSTEM},
+                {"role": "user", "content": user},
+            ],
+            [_DECISION_SUGGESTION_TOOL],
+            role=role,
+            temperature=0.2,
+            max_tokens=256,
+            tool_choice="auto",
+        )
+    except Exception as exc:  # never block the walkthrough on the follow-up call
+        logger.warning("assist_decision_suggestion_failed: %s", exc)
+        return ""
+    if not resp.success or not resp.tool_calls:
+        return ""
+    args = resp.tool_calls[0].arguments or {}
+    leaning = (args.get("leaning") or "").strip()
+    if not leaning:
+        return ""
+    why = (args.get("why") or "").strip().rstrip(". ").strip()
+    if why:
+        return f"## My suggestion\nI'd lean **{leaning}** — {why}. But it's your call."
+    return f"## My suggestion\nI'd lean **{leaning}** — but it's your call."
 
 # §17.674 — the pivot `ask`/research answer was RELAYING sources, not helping the
 # operator ACT. A live homelab test: the operator pivoted mid-step to ask how to
@@ -3124,12 +3218,30 @@ async def generate_guidance(
     )
 
     text_out = (resp.text or "").strip() if (resp and resp.success) else ""
+    # §17.771 (deferred, now done) — render-path suggestion validation: on a
+    # DECISION step, guarantee a recommendation. If the model laid out options but
+    # dropped the "## My suggestion" lean, generate just that block from the
+    # options it produced and append it. Only on a miss; fail-soft (append is ""
+    # → ship the un-enforced walkthrough). Off by default (tests/fresh installs).
+    suggestion_enforced = False
+    if (is_decision and text_out
+            and settings.assist_decision_suggestion_enforce
+            and not _has_decision_suggestion(text_out)):
+        block = await _generate_decision_suggestion(
+            title=ctx.title, task_prompt=ctx.base_prompt, options_text=text_out,
+            environment=environment, role=role,
+        )
+        if block:
+            text_out = f"{text_out}\n\n{block}"
+            suggestion_enforced = True
+            logger.info("assist_decision_suggestion_enforced node_key=%s", node_key)
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
         "model": getattr(resp, "model", "") if resp else "",
         "tool": ctx.tool,
         "research_sources": [{"query": s["query"], "kind": s["kind"]} for s in sources],
         "refine_hint": refine_hint,
+        "suggestion_enforced": suggestion_enforced,
         "status": status,
         "generated_at": _utcnow_iso(),
         # §17.492 — destructive-command safety gate.
