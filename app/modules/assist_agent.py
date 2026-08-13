@@ -797,7 +797,7 @@ async def generate_step_guidance(
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
     # §17.654 — decision nodes get the one-choice-at-a-time, suggest-don't-decide
     # prompt.
-    is_decision = (node_row.get("node_type") or "").lower() == "decision"
+    is_decision = is_decision_node(node_row.get("node_type"))
     # §17.751 — single-funnel session memory (env+facts · whole-project digest ·
     # notes · dialogue+transcript fallback · step recap) so this site can't drift
     # memory-blind. Digest excludes this step + its direct parents (already in
@@ -896,7 +896,7 @@ async def generate_step_guidance_stream(
         research = settings.assist_guide_research
 
     node_row, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=nk)
-    is_decision = (node_row.get("node_type") or "").lower() == "decision"  # §17.654
+    is_decision = is_decision_node(node_row.get("node_type"))  # §17.654
     # §17.751 — single-funnel session memory (see assemble_generation_memory).
     mem = await assemble_generation_memory(
         session_id=session_id, nk=nk, sess=sess, db=db, ctx=ctx,
@@ -2655,7 +2655,7 @@ async def verify_submit_outcome(
         environment=_environment_from_metadata(row["metadata"]),
         # §17.688 — a decision node is judged on the CHOICE, not the downstream
         # concrete artifact (its task text names a table/config later steps apply).
-        is_decision=(row.get("node_type") or "").lower() == "decision",
+        is_decision=is_decision_node(row.get("node_type")),
     )
 
 
@@ -2672,12 +2672,22 @@ _GATHER_TASK_RE = re.compile(
 )
 
 
+def is_decision_node(node_type: str | None) -> bool:
+    """§17.771 (deferred, now done) — the SINGLE source of truth for "is this a
+    decision node". This was a bare ``(node_type or "").lower() == "decision"``
+    repeated at ~5 sites; a typo/case-slip at any one silently downgraded a
+    decision to the committal noncode guide path (which "states the recommended
+    choice, do not leave it hanging" — the opposite posture). Route every
+    assist-side check through here so the literal lives in ONE place."""
+    return (node_type or "").strip().lower() == "decision"
+
+
 def _collect_step_kind(node_type: str | None, task_prompt: str) -> Optional[str]:
     """§17.689/§17.690 — classify a step as a COLLECT step whose deliverable the
     operator supplies across one or more turns. Returns ``'decision'`` (a choice
     / concrete artifact), ``'gather'`` (specific requested information), or
     ``None`` (not a collect step — commit normally)."""
-    if (node_type or "").lower() == "decision":
+    if is_decision_node(node_type):
         return "decision"
     if _GATHER_TASK_RE.search(task_prompt or ""):
         return "gather"
@@ -3090,7 +3100,7 @@ async def _maybe_replan(
         policy=policy,
         # §17.688 — a decision node's concise choice is not divergence from its
         # concrete-artifact task text (that artifact is applied by later steps).
-        is_decision=(node["node_type"] or "").lower() == "decision",
+        is_decision=is_decision_node(node["node_type"]),
     )
 
 

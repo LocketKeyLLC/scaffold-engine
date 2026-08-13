@@ -182,3 +182,39 @@ class TestTakeDivergenceNotice:
         out = await assist_agent._take_divergence_notice(session_id=_SID, db=db)
         assert out is None
         assert len(db.execute.await_args_list) == 1
+
+
+# ── §17.771 (deferred) — divergence-path thrash-suppression ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_discarded_divergence_proposal_is_suppressed():
+    """A divergence proposal the operator already DISMISSED is not re-staged —
+    stage_divergence_replan writes pending_replan directly, so it needs the same
+    guard as the message path. Patch the signature to a fixed value and seed the
+    session's discarded ledger with it."""
+    async def _exec(sql, params=None):
+        s = str(sql)
+        if "assist_sessions" in s and "SELECT" in s:
+            return _result(first_={"status": "active",
+                                   "metadata": {"discarded_replans": ["SIG"]}})
+        if "SELECT" in s:
+            return _result(all_=[], first_=None)
+        return _result()  # any UPDATE (should NOT happen when suppressed)
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=_exec)
+    db.commit = AsyncMock()
+    with patch.object(settings, "assist_divergence_replan_enabled", True), \
+         patch.object(assist_replan, "analyze_note_impact",
+                      AsyncMock(return_value={"affected": _AFFECTED})), \
+         patch.object(assist_agent, "_replan_signature", return_value="SIG"):
+        out = await _stage(db)
+    assert out is None  # suppressed
+    # no pending_replan UPDATE was written
+    wrote_replan = any(
+        isinstance(getattr(c, "args", None), tuple) and len(c.args) > 1
+        and isinstance(c.args[1], dict) and "pending_replan" in str(c.args[1])
+        for c in db.execute.await_args_list
+    )
+    assert not wrote_replan

@@ -913,6 +913,19 @@ async def stage_divergence_replan(
     affected = impact.get("affected") or []
     if not affected:
         return None
+    # §17.771 (deferred, now done) — divergence-path thrash-suppression: if the
+    # operator already DISMISSED an equivalent proposal, don't re-stage it (parity
+    # with _stage_replan_proposal on the message path — this path writes
+    # pending_replan directly, so it needs the same guard). Same signature; the
+    # discard ledger is shared (apply_pending_replan records ANY discarded proposal).
+    from app.modules import assist_agent
+    sig = assist_agent._replan_signature(note_text, affected)
+    if sig in assist_agent._discarded_replans_from_metadata(sess.get("metadata")):
+        logger.info(
+            "divergence_replan_suppressed session_id=%s (operator already dismissed)",
+            session_id,
+        )
+        return None
     proposal = {
         "note_text": note_text,
         "note_kind": "divergence",

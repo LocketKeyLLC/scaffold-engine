@@ -96,3 +96,20 @@ def test_dispatch_reshape_overrides_to_note_path(pipe):
             chat_id="c1", history=[]))
     assert note.called and not ask.called
     assert "<note>" in out
+
+
+def test_surface_dispatches_action_then_appends_heads_up(pipe):
+    """plan_impact=surface dispatches the action normally, THEN appends a gentle
+    re-plan nudge (no hijack — that's reshape's job)."""
+    decision = {"action": "ask", "query": "q", "confidence": "high",
+                "plan_impact": "surface"}
+    with patch.object(_vendor, "_recall_node_key", return_value="T3"), \
+         patch.object(_vendor, "assist_research_cmd",
+                      return_value=["<ask>"]) as ask, \
+         patch.object(_vendor, "assist_note_cmd", return_value=["<note>"]) as note:
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="I only have 2 NICs",
+            node_key="T3", chat_id="c1", history=[]))
+    assert ask.called and not note.called   # action ran, no re-plan hijack
+    assert "<ask>" in out
+    assert "Heads-up" in out and "re-plan" in out  # gentle nudge appended
