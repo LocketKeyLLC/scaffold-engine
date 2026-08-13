@@ -450,6 +450,23 @@ async def assist_interpret(session_id: str, body: AssistInterpretInput, db=Depen
     )
 
 
+@router.post("/assist/{session_id}/decide")
+async def assist_decide_turn(session_id: str, body: AssistInterpretInput, db=Depends(get_db)):
+    """§17.771 (Phase 1) — the UNIFIED assist decision: one context-rich call that
+    subsumes classify + progress-tracker + reroute, returning a full Decision
+    {action, evidence/error_text/query/note_*, plan_impact, suggestion,
+    confidence, rationale}. Gated by `assist_unified_decision_enabled` (default
+    off; Phase 1 uses it only in shadow). Fail-soft: returns a low-confidence
+    `question` decision on any hiccup so the caller can fall back to the cascade."""
+    if not settings.assist_unified_decision_enabled:
+        raise HTTPException(status_code=404, detail="unified decision disabled")
+    from app.modules import assist_decide
+    return await assist_decide.decide_turn(
+        session_id=session_id, message=body.message, node_key=body.node_key,
+        history=body.history, db=db,
+    )
+
+
 @router.put("/assist/{session_id}/env")
 async def assist_set_env(session_id: str, body: AssistEnvInput, db=Depends(get_db)):
     """Set the operator's environment so walkthroughs use concrete commands."""

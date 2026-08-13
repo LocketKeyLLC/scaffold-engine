@@ -152,6 +152,7 @@ async def detect_divergence(
     """
     # Defer the model_router import; it pulls heavy http client state.
     from app import model_router
+    from app.config import settings
     template = _DIVERGENCE_PROMPT_DECISION if is_decision else _DIVERGENCE_PROMPT
     msg = template.format(
         title=title or "(untitled)",
@@ -159,16 +160,20 @@ async def detect_divergence(
         evidence=(evidence or "")[:4000],
     )
     try:
-        # §17.89 Pattern 3 — dispatch via role= so MODEL_VERIFIER_PROVIDER is
-        # honored. model_overrides flow through provider_for_role's overrides
-        # arg so a per-request {model_verifier: <name>} still wins over the
-        # default settings.model_verifier value.
+        # §17.89 Pattern 3 — dispatch via role= so the role's PROVIDER is honored.
+        # model_overrides flow through provider_for_role's overrides arg so a
+        # per-request {<role>: <name>} still wins over the default settings value.
+        # §17.771 (Phase 0) — role is now settings-driven (default model_general,
+        # was hardcoded model_verifier/kimi). max_tokens bumped 200→400: the
+        # verdict itself is tiny, but deepseek's tool-call framing needs a little
+        # more headroom than kimi's to avoid a truncated call → unparsed → silent
+        # under-react.
         resp = await model_router.tool_call(
             messages=[{"role": "user", "content": msg}],
             tools=[RECORD_DIVERGENCE_TOOL],
-            role="model_verifier",
+            role=settings.assist_divergence_model_role,
             overrides=model_overrides,
-            max_tokens=200,
+            max_tokens=400,
         )
     except Exception as e:
         logger.warning("divergence_detector_failed: %s", e)

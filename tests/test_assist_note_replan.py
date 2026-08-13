@@ -308,10 +308,17 @@ class TestAssessNoteImpact:
 
     async def test_affected_stores_proposal_and_returns_it(self):
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[
-            _result(first_={"job_id": _JID, "status": "active"}),  # session lookup
-            _result(),                                              # metadata UPDATE
-        ])
+
+        # Query-dispatching mock (robust to call-count: §17.753 get_project_recap
+        # reads + the §17.771 suppression metadata SELECT run before the UPDATE).
+        async def _exec(sql, params=None):
+            s = str(sql)
+            if "assist_sessions" in s and "SELECT" in s:
+                return _result(first_={"job_id": _JID, "status": "active", "metadata": {}})
+            if "SELECT" in s:
+                return _result(all_=[], first_=None)
+            return _result()  # UPDATE (last one embeds pending_replan)
+        db.execute = AsyncMock(side_effect=_exec)
         db.commit = AsyncMock()
         affected = [{"node_key": "T1", "action": "revise",
                      "current_assumption": "a", "proposed_change": "b"}]
@@ -368,10 +375,15 @@ class TestApplyPendingReplan:
     async def test_discard_clears_without_replan(self):
         meta = {"pending_replan": {"proposals": [{"node_key": "T1", "action": "revise"}]}}
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[
-            _result(first_={"job_id": _JID, "metadata": meta}),
-            _result(),
-        ])
+
+        # §17.771 (Phase 4) — discard now records a suppression signature (one
+        # extra UPDATE) before clearing pending_replan; dispatch by query so the
+        # mock is robust to the extra call.
+        async def _exec(sql, params=None):
+            if "SELECT" in str(sql):
+                return _result(first_={"job_id": _JID, "metadata": meta})
+            return _result()  # discarded_replans UPDATE + clear UPDATE
+        db.execute = AsyncMock(side_effect=_exec)
         db.commit = AsyncMock()
         with patch.object(assist_replan, "apply_note_replan", AsyncMock()) as ap:
             out = await assist_agent.apply_pending_replan(

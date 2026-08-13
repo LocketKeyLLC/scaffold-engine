@@ -4162,6 +4162,62 @@
         ]
       }
     },
+    "/assist/{session_id}/decide": {
+      "post": {
+        "description": "§17.771 (Phase 1) — the UNIFIED assist decision: one context-rich call that\nsubsumes classify + progress-tracker + reroute, returning a full Decision\n{action, evidence/error_text/query/note_*, plan_impact, suggestion,\nconfidence, rationale}. Gated by `assist_unified_decision_enabled` (default\noff; Phase 1 uses it only in shadow). Fail-soft: returns a low-confidence\n`question` decision on any hiccup so the caller can fall back to the cascade.",
+        "operationId": "assist_decide_turn_assist__session_id__decide_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistInterpretInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Decide Turn",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/{session_id}/env": {
       "get": {
         "operationId": "assist_get_env_assist__session_id__env_get",

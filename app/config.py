@@ -701,11 +701,31 @@ class Settings(BaseSettings):
     # talking, not by /assist subcommands (the subcommands remain as aliases).
     # A single cheap tool_call per substantive message (obvious verbs like
     # "next"/"skip" are matched deterministically in the pipeline with no LLM).
-    # Uses the verifier model (kimi) — reliable native tool-calling, already
-    # loaded — rather than the slow thinking model. Fail-soft: on any classify
-    # error the turn falls back to 'question' (the pre-§17.626 guide behavior).
+    # §17.771 (Phase 0) — moved OFF the verifier (kimi) to model_general
+    # (deepseek-v4-pro). kimi reliably false-negatives on assist semantics: the
+    # §17.677 note-impact analyzer was already forced onto model_general for the
+    # same reason, and this classifier's weakness is precisely what the ~8
+    # compensating phrase gates in the pipeline exist to patch. model_general
+    # does clean native tool-calling on this stack (proven by analyze_note_impact
+    # / the §17.632 A/B). Reversible: set ASSIST_CLASSIFY_MODEL_ROLE=model_verifier.
+    # Fail-soft: on any classify error the turn falls back to 'question' (the
+    # pre-§17.626 guide behavior).
     assist_nl_turns_enabled: bool = True
-    assist_classify_model_role: str = "model_verifier"
+    assist_classify_model_role: str = "model_general"
+    # §17.771 (Phase 1) — the unified assist decision (`assist_decide.decide_turn`):
+    # ONE context-rich call that replaces the fragmented classifier + phrase-gates
+    # + track + reroute. Default OFF. When on, Phase 1 runs it in SHADOW (the live
+    # pipeline is unchanged; `classify_session_turn` fires it fire-and-forget and
+    # logs the Decision-vs-classifier comparison to the friction log). Phase 2
+    # flips the pipeline to dispatch on the Decision, keeping the cascade as the
+    # low-confidence/error fallback.
+    assist_unified_decision_enabled: bool = False
+    assist_decide_model_role: str = "model_general"
+    # §17.771 (Phase 0) — the SUBMIT-path divergence verifier (detect_divergence).
+    # Was hardcoded to model_verifier (kimi), whose false-negatives fail SILENT
+    # here (no divergence flag, no proposal → under-react). Same lesson as the
+    # classifier above and §17.677. Reversible: ASSIST_DIVERGENCE_MODEL_ROLE=...
+    assist_divergence_model_role: str = "model_general"
     assist_guide_max_tokens: int = Field(default=8192, ge=512, le=16384)
     assist_guide_max_research_queries: int = Field(default=3, ge=0, le=8)
     # §17.487 — Tier 1 "close the loop". On /assist submit, judge whether the
