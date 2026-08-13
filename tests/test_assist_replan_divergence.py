@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.config import settings
 from app.modules import assist_replan
 from app.providers.base import ToolCall
 
@@ -166,7 +167,12 @@ class TestDispatchPath:
                 title="t", prompt="p", evidence="e",
             )
         kwargs = mock_tc.await_args.kwargs
-        assert kwargs.get("role") == "model_verifier"
+        # §17.771 (Phase 0) — the role is now settings-driven (was hardcoded
+        # "model_verifier"/kimi; default flipped to model_general because kimi
+        # false-negates on assist semantics). Track the setting so a future
+        # re-tune doesn't re-break this; the point of the test is dispatch via
+        # role=, NOT model=.
+        assert kwargs.get("role") == settings.assist_divergence_model_role
         assert "model" not in kwargs
 
     async def test_model_overrides_flow_through_to_provider(self):
