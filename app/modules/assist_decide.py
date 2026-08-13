@@ -377,8 +377,13 @@ def fire_shadow_decision(
 ) -> None:
     """Fire-and-forget: run the unified decision on a real turn and log how it
     compares to the classifier the pipeline actually used. No-op unless the
-    valve is on. Never raises into the live turn."""
-    if not settings.assist_unified_decision_enabled:
+    dedicated shadow valve is on. Never raises into the live turn.
+
+    §17.771 (post-verify) — gated on `assist_shadow_decision_enabled` (its OWN
+    valve, default off), NOT the authority valve: once the unified decision is
+    live authority the shadow is redundant and must not write diagnostic friction
+    notes into real operator sessions."""
+    if not settings.assist_shadow_decision_enabled:
         return
     task = asyncio.create_task(
         _shadow_decide_and_log(

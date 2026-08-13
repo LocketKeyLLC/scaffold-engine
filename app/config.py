@@ -728,6 +728,14 @@ class Settings(BaseSettings):
     # low-confidence/error fallback.
     assist_unified_decision_enabled: bool = False
     assist_decide_model_role: str = "model_general"
+    # §17.771 (post-verify) — the Phase-1 SHADOW logger, now DECOUPLED from the
+    # authority valve above. Once the unified decision is the live authority, the
+    # shadow's data-gathering purpose is done: it just fires a redundant
+    # model_general call on fall-through turns and writes a diagnostic
+    # `[shadow §17.771]` note to the operator's friction log. Gate it on its OWN
+    # valve (default OFF) so authority can be on without the shadow touching live
+    # sessions; flip on only for a fresh shadow-comparison study.
+    assist_shadow_decision_enabled: bool = False
     # §17.771 (Phase 0) — the SUBMIT-path divergence verifier (detect_divergence).
     # Was hardcoded to model_verifier (kimi), whose false-negatives fail SILENT
     # here (no divergence flag, no proposal → under-react). Same lesson as the
