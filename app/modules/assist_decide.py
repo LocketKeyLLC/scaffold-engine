@@ -305,23 +305,42 @@ async def decide_turn(
     parts.append(f"\nOperator's message:\n{(message or '')[:2000]}")
     user = "\n".join(parts)
 
-    try:
-        resp = await model_router.tool_call(
-            [
-                {"role": "system", "content": _decide_system(is_decision)},
-                {"role": "user", "content": user},
-            ],
-            [_RECORD_DECISION_TOOL],
-            role=settings.assist_decide_model_role,
-            temperature=0.0,
-            max_tokens=768,
-            tool_choice="auto",
+    messages = [
+        {"role": "system", "content": _decide_system(is_decision)},
+        {"role": "user", "content": user},
+    ]
+    # §17.771 (post-verify) — retry once on a transient no-tool-call. Live logs on
+    # the P40 session showed occasional `no_tool_call` fallthroughs to the cascade
+    # on large-context turns (deepseek intermittently returns success but no tool
+    # call); it emits one cleanly on a retry. One extra attempt keeps those turns
+    # on the unified decision instead of dropping to the phrase-gate cascade.
+    resp = None
+    for attempt in range(2):
+        try:
+            resp = await model_router.tool_call(
+                messages, [_RECORD_DECISION_TOOL],
+                role=settings.assist_decide_model_role,
+                temperature=0.0, max_tokens=768, tool_choice="auto",
+            )
+        except Exception as exc:
+            logger.warning(
+                "decide_turn_model_failed session=%s attempt=%d err=%r",
+                session_id, attempt, exc,
+            )
+            resp = None
+            continue
+        if resp.success and resp.tool_calls:
+            break  # got a clean tool call
+        logger.info(
+            "decide_turn_no_tool_call session=%s attempt=%d (retrying)"
+            if attempt == 0 else
+            "decide_turn_no_tool_call session=%s attempt=%d (giving up → cascade)",
+            session_id, attempt,
         )
-    except Exception as exc:
-        logger.warning("decide_turn_model_failed session=%s err=%r", session_id, exc)
+
+    if resp is None:
         return {**_fallback_decision("model_error"), "node_key": nk,
                 "title": ctx.title, "is_decision": is_decision, "signals": signals}
-
     if not resp.success or not resp.tool_calls:
         return {**_fallback_decision("no_tool_call"), "node_key": nk,
                 "title": ctx.title, "is_decision": is_decision, "signals": signals}

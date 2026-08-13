@@ -1878,3 +1878,18 @@ def test_apply_problem_solving_noop_when_disabled():
 
 def test_step_recap_system_prompt_carries_constraints_label():
     assert "CONSTRAINTS:" in assist_guide._STEP_RECAP_SYSTEM
+
+
+def test_problem_solving_framing_has_multipoint_and_scope_principles():
+    """§17.771 (post-verify) — address every point raised (not just the error) +
+    stay scoped to the step (no tangential project-goal reminders)."""
+    f = assist_guide._PROBLEM_SOLVING_FRAMING
+    assert "ADDRESS EVERYTHING THE OPERATOR RAISED" in f
+    assert "STAY SCOPED TO THIS STEP" in f
+    assert "fan-curve" in f  # the concrete anti-example
+
+
+def test_next_callout_leads_with_bold_action_in_code_block():
+    d = assist_guide._NEXT_CALLOUT_DIRECTIVE
+    assert "impossible to miss" in d
+    assert "own fenced code block" in d
