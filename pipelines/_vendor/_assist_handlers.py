@@ -2228,6 +2228,26 @@ def _dispatch_decision(
             pipe, session_id, (decision.get("note_text") or msg).strip(),
             kind=kind, node_key=nk, chat_id=chat_id,
         ); return
+    yield from _emit_decision_action(
+        pipe, session_id, decision, action=action, msg=msg, nk=nk,
+        node_key=node_key, chat_id=chat_id, history=history,
+    )
+    # §17.771 (deferred, now done) — plan_impact=surface: dispatch the action
+    # normally, THEN a gentle heads-up. reshape is the hard path (hijacks to
+    # re-plan, above); surface stays anti-thrash so a stated fact never hijacks
+    # the turn — it just invites the operator to ask for a re-plan if they want.
+    if impact == "surface":
+        yield ("\n\n\U0001F4CC _Heads-up: what you just told me might affect a "
+               "later step. Say **\"re-plan\"** if you'd like me to adjust the "
+               "plan._")
+
+
+def _emit_decision_action(
+    pipe, session_id: str, decision: dict, *, action: str, msg: str, nk,
+    node_key, chat_id, history,
+):
+    """§17.771 — the action -> handler branches, extracted so plan_impact=
+    surface can append a footer AFTER the action runs (the branches return)."""
     if action == "advance":
         yield from assist_next(pipe, session_id, chat_id=chat_id); return
     if action == "skip":
