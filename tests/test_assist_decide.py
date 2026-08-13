@@ -160,7 +160,7 @@ async def test_decide_turn_unsteppable_session_is_unavailable():
 @pytest.mark.asyncio
 async def test_fire_shadow_is_noop_when_valve_off():
     from app.config import settings
-    with patch.object(settings, "assist_unified_decision_enabled", False), \
+    with patch.object(settings, "assist_shadow_decision_enabled", False), \
          patch("app.modules.assist_decide.asyncio.create_task") as mk:
         assist_decide.fire_shadow_decision(
             session_id="S1", message="x", node_key="T3", history=[],
