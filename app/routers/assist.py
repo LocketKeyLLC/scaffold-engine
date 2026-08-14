@@ -662,6 +662,13 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
                 # context; surface it so the re-submit's guidance stays anchored.
                 "execution_context": captured_ctx,
             }
+    # §17.771 — a goal-met-via-alternative commit: the step succeeded but via a
+    # different method than the plan named, because a hardware/software constraint
+    # ruled the named one out. The endpoint runs a dedicated constraint-adaptation
+    # after commit (record the constraint + re-plan the pending steps that assumed
+    # otherwise), so the plain divergence re-plan inside submit_step is suppressed.
+    _via_alt = bool(verdict) and bool(verdict.get("goal_met_via_alternative")) \
+        and bool((verdict.get("constraint") or "").strip())
     try:
         result = await assist_agent.submit_step(
             session_id=session_id,
@@ -677,10 +684,25 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
             # divergence.
             verdict_failed=(bool(verdict)
                             and verdict.get("outcome") in ("failed", "incomplete")),
+            skip_divergence_replan=_via_alt,
             db=db,
         )
         if verdict is not None and isinstance(result, dict):
             result["success_verdict"] = verdict
+        # §17.771 — ADAPT THE PLAN TO REALITY on a goal-met-via-alternative commit:
+        # record the constraint durably + re-plan the pending steps that assumed
+        # the impossible method. Fail-soft; surfaced via result['adaptation'].
+        if (_via_alt and isinstance(result, dict)
+                and result.get("status") == "committed"):
+            try:
+                adaptation = await assist_agent.adapt_step_to_constraint(
+                    session_id=session_id, node_key=body.node_key,
+                    constraint=verdict.get("constraint", ""), db=db,
+                )
+                if adaptation:
+                    result["adaptation"] = adaptation
+            except Exception:  # never fail a commit on the adaptation step
+                logger.warning("assist_adapt_constraint_failed", exc_info=True)
         # §17.689 — surface the deliberation confirmation so the pipeline can
         # show what was recorded alongside the commit.
         if decision_message and isinstance(result, dict):

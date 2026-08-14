@@ -1164,6 +1164,21 @@ def assist_submit(
     elif (outcome == "unclear" and verdict.get("reason")
           and verdict["reason"] != "verification unavailable"):
         msg += f"\n\n_Couldn't confirm success: {verdict['reason']}_"
+    # §17.771 — ADAPT THE PLAN: this step was done via a valid alternative because
+    # a constraint ruled out the planned method. Surface the adaptation prominently
+    # (recorded the constraint + flagged any downstream steps that assumed
+    # otherwise) so the operator sees the plan matched to reality, not waved through.
+    adaptation = d.get("adaptation") or {}
+    if adaptation.get("constraint"):
+        n_aff = len(adaptation.get("affected") or [])
+        msg += (
+            f"\n\n🔧 **Adapted the plan:** {adaptation['constraint']}\n"
+            "Recorded as a constraint so every later step honors it"
+        )
+        msg += (
+            f" — and **{n_aff} later step(s)** assumed otherwise; I'll ask before "
+            "changing them.\n" if n_aff else ".\n"
+        )
     # §17.490 — concrete values learned from this step's evidence; surfaced so
     # the operator sees later steps will use them instead of placeholders.
     learned = d.get("learned_substitutions") or {}

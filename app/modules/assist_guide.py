@@ -1319,6 +1319,27 @@ _JUDGE_OUTCOME_TOOL = model_router.Tool(
             "reason": {"type": "string", "description": "One sentence, citing the signal."},
             "suggestion": {"type": "string",
                            "description": "If failed/incomplete: the concrete next move to finish the step."},
+            "goal_met_via_alternative": {
+                "type": "boolean",
+                "description": (
+                    "True ONLY when outcome='succeeded' AND the operator met the "
+                    "step's GOAL via a DIFFERENT method than the task literally "
+                    "named, because a hardware/software CONSTRAINT made the named "
+                    "method impossible (e.g. the board's chip locks PWM to "
+                    "automatic, so manual fan curves aren't possible, but "
+                    "automatic control keeps temps safe). False for a "
+                    "straightforward success done the planned way."),
+            },
+            "constraint": {
+                "type": "string",
+                "description": (
+                    "If goal_met_via_alternative: the specific constraint that "
+                    "ruled out the named method AND how the goal was met instead, "
+                    "as one durable sentence the plan should carry forward (e.g. "
+                    "'This board's NCT7904D locks pwm_enable to automatic, so "
+                    "manual fan curves aren't possible; fan control is automatic "
+                    "only and holds temps in range'). Empty otherwise."),
+            },
         },
         "required": ["outcome", "reason"],
     },
@@ -1473,11 +1494,16 @@ async def verify_step_success(
         grounded_by = "sandbox+model"
         if outcome == "succeeded":
             reason = (reason + " (code executed cleanly in the sandbox)").strip()
+    # §17.771 — the constraint-adaptation signal (only meaningful on 'succeeded').
+    via_alt = bool(args.get("goal_met_via_alternative")) and outcome == "succeeded"
+    constraint = (args.get("constraint") or "").strip() if via_alt else ""
     return {
         "outcome": outcome,
         "reason": reason,
         "suggestion": (args.get("suggestion") or "").strip(),
         "grounded_by": grounded_by,
+        "goal_met_via_alternative": via_alt and bool(constraint),
+        "constraint": constraint,
     }
 
 
