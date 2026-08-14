@@ -34,8 +34,9 @@ logger = logging.getLogger("scaffold.node_editor")
 EDITABLE_FIELDS = {
     "title", "description", "prompt_template", "tool",
     "depends_on", "assigned_model", "is_deliverable",
+    "tool_config",  # §17.772 — an MCP node's {server, tool, args}
 }
-INVALIDATING_FIELDS = {"prompt_template", "tool", "depends_on"}
+INVALIDATING_FIELDS = {"prompt_template", "tool", "depends_on", "tool_config"}
 _TERMINAL = ("done", "failed", "skipped")
 
 
@@ -236,12 +237,17 @@ async def edit_node(
         "title": "title", "description": "description",
         "prompt_template": "prompt_template", "tool": "tool",
         "assigned_model": "assigned_model", "is_deliverable": "is_deliverable",
-        "depends_on": "depends_on",
+        "depends_on": "depends_on", "tool_config": "tool_config",
     }
     for k, v in updates.items():
         col = col_map[k]
-        set_parts.append(f"{col} = :{k}")
-        params[k] = v
+        if k == "tool_config":
+            # JSONB column — bind the JSON text and cast (§17.772).
+            set_parts.append(f"{col} = CAST(:{k} AS jsonb)")
+            params[k] = json.dumps(v) if v is not None else None
+        else:
+            set_parts.append(f"{col} = :{k}")
+            params[k] = v
     await db.execute(
         text(
             f"UPDATE dag_nodes SET {', '.join(set_parts)}, updated_at = now() "
@@ -306,9 +312,9 @@ async def insert_node(
             "INSERT INTO dag_nodes "
             "(job_id, node_key, title, description, node_type, status, "
             " depends_on, tool, prompt_template, assigned_model, "
-            " execution_order, is_deliverable) "
+            " execution_order, is_deliverable, tool_config) "
             "VALUES (:j, :nk, :title, :descr, :ntype, 'pending', :deps, :tool, "
-            "        :prompt, :model, :order, :deliv)"
+            "        :prompt, :model, :order, :deliv, CAST(:tcfg AS jsonb))"
         ),
         {
             "j": job_id, "nk": node_key, "title": title,
@@ -319,6 +325,8 @@ async def insert_node(
             "model": spec.get("assigned_model"),
             "order": new_order,
             "deliv": bool(spec.get("is_deliverable", False)),
+            "tcfg": json.dumps(spec["tool_config"])
+            if spec.get("tool_config") is not None else None,
         },
     )
     # Re-number so order is contiguous (defensive if prior gaps existed).

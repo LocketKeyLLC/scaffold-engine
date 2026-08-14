@@ -382,6 +382,51 @@ Return ONLY the JSON object. No preamble, no markdown."""
 # Sprint W.3 — Validator-driven retry loop
 # ---------------------------------------------------------------------------
 
+async def _build_mcp_catalog_block() -> str:
+    """§17.772 — a best-effort planner-facing catalog of registered MCP tools.
+
+    Returns ``""`` when the MCP consumer is disabled, no servers are registered,
+    or *anything* goes wrong (an unreachable server must never block DAG
+    generation). When non-empty, it advertises the ``MCP`` tool and the concrete
+    server/tool names the planner may target, so the LLM only proposes MCP nodes
+    that can actually run."""
+    if not settings.mcp_tool_enabled:
+        return ""
+    try:
+        from app.database import async_session
+        from app.modules import mcp_client, mcp_registry
+
+        async with async_session() as db:
+            servers = await mcp_registry.list_servers(db)  # enabled only
+        if not servers:
+            return ""
+        lines: list[str] = []
+        for spec in servers:
+            try:
+                tools = await mcp_client.list_tools(spec)
+            except Exception:  # noqa: BLE001 — skip an unreachable server
+                continue
+            if not tools:
+                continue
+            names = ", ".join(t["name"] for t in tools[:20] if t.get("name"))
+            if names:
+                lines.append(f"  - server \"{spec.name}\": {names}")
+        if not lines:
+            return ""
+        return (
+            "ADDITIONAL TOOL — MCP (external Model Context Protocol servers):\n"
+            "You MAY set \"tool\": \"MCP\" for a step whose outcome is best "
+            "produced by calling one of the registered external tools below. When "
+            "you do, ALSO add \"tool_config\": {\"server\": <name>, \"tool\": "
+            "<tool name>, \"args\": {<tool arguments>}}. An arg string may "
+            "reference an upstream node's output as \"${upstream.T<n>}\". Use MCP "
+            "ONLY when a listed tool clearly fits the step; otherwise use the "
+            "normal tools. Registered MCP tools:\n" + "\n".join(lines) + "\n\n"
+        )
+    except Exception:  # noqa: BLE001 — never let MCP discovery break planning
+        return ""
+
+
 async def _generate_dag_json(
     prompt: str, route_kwargs: dict, *, draws: int = 3,
 ) -> tuple:
@@ -960,6 +1005,10 @@ async def _generate_dag_with_validator(
     except Exception:
         _exemplar_block = ""
 
+    # §17.772 — advertise registered MCP tools to the planner (best-effort,
+    # flag-gated; "" when disabled / no servers / any error).
+    _mcp_block = await _build_mcp_catalog_block()
+
     for attempt in range(1, max_attempts + 1):
         prompt_body = DAG_PROMPT.format(
             brief=json.dumps(brief_data, indent=2),
@@ -968,6 +1017,8 @@ async def _generate_dag_with_validator(
         prompt = (corrections_block + "\n\n" + prompt_body) if corrections_block else prompt_body
         if _exemplar_block:
             prompt = _exemplar_block + prompt
+        if _mcp_block:
+            prompt = _mcp_block + prompt
 
         # §17.463 — retry-on-empty around the generator call (thinking-model
         # empty-content guard). 8192-token headroom + up to 3 re-draws.
@@ -1466,12 +1517,12 @@ async def generate_dag(
                         (job_id, node_key, title, node_type, status,
                          depends_on, assigned_model, prompt_template,
                          execution_order, tool, domain, is_output_node,
-                         is_deliverable)
+                         is_deliverable, tool_config)
                     VALUES
                         (:job_id, :node_key, :title, :node_type, 'pending',
                          :depends_on, :assigned_model, :prompt_template,
                          :execution_order, :tool, :domain, :is_output_node,
-                         :is_deliverable)
+                         :is_deliverable, CAST(:tool_config AS jsonb))
                 """),
                 {
                     "job_id": uid,
@@ -1486,6 +1537,11 @@ async def generate_dag(
                     "domain": task.get("domain"),
                     "is_output_node": task["id"] in leaf_keys,
                     "is_deliverable": bool(task.get("is_deliverable", False)),
+                    # §17.772 — an MCP node carries {server, tool, args}; the
+                    # generator emits it as task["tool_config"] when it selects
+                    # the MCP tool. Non-MCP nodes leave it NULL.
+                    "tool_config": json.dumps(task["tool_config"])
+                    if task.get("tool_config") is not None else None,
                 },
             )
 
@@ -1678,6 +1734,13 @@ def _normalize_tasks(tasks: list[dict]) -> tuple[list[dict], list[str], list[str
             logger.warning(msg)
             warnings.append(msg)
             task["tool"] = "LLM"
+        # §17.772 — carry an MCP node's tool_config ({server, tool, args})
+        # through the dict rebuild. Only meaningful for the MCP tool; dropped
+        # otherwise so non-MCP rows stay NULL.
+        if task["tool"].lower() == "mcp":
+            cfg = raw.get("tool_config")
+            if isinstance(cfg, dict):
+                task["tool_config"] = cfg
         raw_model = str(raw.get("assigned_model", "")).strip()
         if raw_model and raw_model.lower() not in ("none", "null", ""):
             task["assigned_model"] = raw_model
