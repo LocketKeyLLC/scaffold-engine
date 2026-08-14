@@ -1067,7 +1067,12 @@ def assist_submit(
             msg += f"Next: {v['suggestion']}\n\n"
         msg += (
             "Finish the step and paste the result, or `/assist fix <the error>` "
-            "if you're stuck. If it really is done, `/assist skip` to move on."
+            "if you're stuck. If the step's named method isn't possible on your "
+            "hardware but you've met the goal another way, say so in your result "
+            "(e.g. \"manual PWM isn't supported on my board, but automatic control "
+            "holds temps in range\") and resubmit — I judge the step on its GOAL, "
+            "not the exact method, so a valid alternative counts as done. Or "
+            "`/assist skip` to set it aside."
         )
         yield msg; return
     # §17.487 — hard-block path: the success-check judged this a failure and
