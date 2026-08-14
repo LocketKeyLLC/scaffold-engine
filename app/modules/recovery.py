@@ -325,6 +325,7 @@ _REAPER_REASON_PATTERNS: tuple[tuple[str, str], ...] = (
     ("Pause expired before user reply",     "reaper_paused_research_expired"),
     ("Job timed out after",                 "reaper_execution_timeout"),
     ("client_disconnect",                   "phase2_client_disconnect"),
+    ("crash_resume_budget_exhausted",       "crash_resume_budget"),
 )
 
 
@@ -461,6 +462,24 @@ REAPER_REASON_ACTIONS: dict[str, list[dict[str, Any]]] = {
                 "the start — the prior session is unrecoverable."
             ),
             "node_specific": False,
+        },
+    ],
+    # §17.774 — crash-resume gave up: the job was orphaned by a process crash
+    # and relaunched at startup, but repeated restarts made no new progress
+    # (a node likely keeps killing the process). Job sits in `failed`; the
+    # offending node is the retry target — done nodes are preserved.
+    "crash_resume_budget": [
+        {
+            "action": "retry_node",
+            "command": "/exec retry {job_id} {node_key}",
+            "endpoint": "/exec/retry",
+            "method": "POST",
+            "description": (
+                "Auto-resume gave up after repeated crashes with no progress — "
+                "a node likely keeps killing the process. Inspect it, then retry "
+                "the offending node (completed nodes are preserved)."
+            ),
+            "node_specific": True,
         },
     ],
     # Phase 2 client disconnect (Round 7 fix). Job sits in `failed` with

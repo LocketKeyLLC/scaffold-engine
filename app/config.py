@@ -1228,6 +1228,25 @@ class Settings(BaseSettings):
     # a high max_inflight on slow hardware (this host's STALE_THRESHOLD=1560).
     parallel_execution_enabled: bool = Field(default=True)
     parallel_execution_max_inflight: int = Field(default=2, ge=1, le=16)
+    # §17.774 — automatic crash-resume of orphaned mid-execution jobs.
+    # After a process crash the lifespan sweep resets the interrupted node
+    # 'running'->'pending' but the parent job stays 'running' and nothing
+    # re-launches it, so a 45-min run stalls until the 26h reaper fails it and
+    # the operator hand-fires /exec retry. With this ON, a startup pass
+    # (app/modules/execution_resume.py) re-drives execute_all_nodes for every
+    # such job, resuming at the reset node and reusing all already-'done'
+    # outputs. Idempotent (the executor skips done nodes) and bounded by the
+    # crash-loop guard below, so default ON is safe; set false to disable the
+    # auto-resume and fall back to the manual /exec retry flow.
+    execution_resume_on_startup_enabled: bool = Field(default=True)
+    # Crash-loop guard: a job whose restart makes ZERO new 'done' nodes has its
+    # resume_attempts counter incremented; once it exceeds this cap the job is
+    # marked 'failed' (error_summary 'crash_resume_budget_exhausted') instead of
+    # restart-storming. A restart that DOES make progress resets the counter, so
+    # this only trips on a genuinely poisonous node (e.g. one that OOM-kills the
+    # process). Default 3 tolerates transient crashes while still surfacing a
+    # stuck node within a few boots.
+    execution_max_resume_attempts: int = Field(default=3, ge=1, le=10)
     # §17.442 — bound concurrent ideation requests (/ideas + /ideate). Unlike
     # execution, ideation had NO cap: the §17.441 stress test fired 6 concurrent
     # /ideate and all 6 hit the cloud at once (latency 33→81 s). The cap queues
