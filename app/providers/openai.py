@@ -46,6 +46,33 @@ from app.providers.base import (
 logger = logging.getLogger("scaffold.providers.openai")
 
 
+def _apply_openai_response_format(payload: dict[str, Any], response_schema: Any) -> None:
+    """§17.773 — set OpenAI's ``response_format`` from a response schema.
+
+    A JSON Schema ``dict`` becomes a ``json_schema`` response format (constrain to
+    that shape, ``strict=false``). The literal string ``"json"`` maps to the older
+    ``json_object`` mode (any valid JSON). ``None`` / falsy is a no-op.
+    """
+    if not response_schema:
+        return
+    if isinstance(response_schema, str):
+        payload["response_format"] = {"type": "json_object"}
+    elif isinstance(response_schema, dict):
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "scaffold_response",
+                "schema": response_schema,
+                "strict": False,
+            },
+        }
+    else:  # pragma: no cover — defensive; callers pass dict|str|None
+        logger.warning(
+            "openai_response_format_ignored: unexpected response_schema type=%s",
+            type(response_schema).__name__,
+        )
+
+
 class OpenAIProvider(LLMProvider):
     """OpenAI-compatible backend."""
 
@@ -53,6 +80,7 @@ class OpenAIProvider(LLMProvider):
     supports_chat = True
     supports_embeddings = True
     supports_streaming = True
+    supports_structured_outputs = True  # §17.773 — response_format json_schema
     supports_native_tools = True
 
     # ------------------------------------------------------------------
@@ -114,11 +142,18 @@ class OpenAIProvider(LLMProvider):
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        # §17.773 — grammar-constrained decoding: translate the provider-agnostic
+        # ``response_schema`` into OpenAI's ``response_format`` json_schema. strict
+        # is False because the schemas threaded here aren't guaranteed to satisfy
+        # OpenAI's strict-mode requirements (every object needs
+        # additionalProperties:false and all-required); strict=false still
+        # constrains to schema-shaped JSON without 400-ing on a lenient schema.
+        _apply_openai_response_format(payload, opts.get("response_schema"))
         # Pass through any caller extras (response_format, top_p, …) that the
         # OpenAI API understands. ``fallback`` is Ollama-specific and is
-        # ignored here on purpose.
+        # ignored here on purpose; ``response_schema`` is handled above.
         for k, v in opts.items():
-            if k in {"fallback"}:
+            if k in {"fallback", "response_schema"}:
                 continue
             payload[k] = v
 

@@ -409,6 +409,29 @@ class Settings(BaseSettings):
     anthropic_prompt_caching: bool = True
     openai_organization: str = ""
 
+    # §17.773 — grammar-constrained decoding (structured outputs). When a caller
+    # passes ``response_schema=`` to model_router.generate/chat (or uses
+    # ``generate_json``), the JSON Schema is threaded to the backend's native
+    # constraint (Ollama ``format``, OpenAI ``response_format`` json_schema,
+    # Anthropic ``output_config.format``) so the model emits schema-valid JSON at
+    # decode time instead of relying on post-hoc json_repair.
+    #
+    # The master valve is PROVIDER-AWARE (gated in model_router via each
+    # provider's ``supports_structured_outputs`` flag): when ON, the constraint is
+    # applied ONLY to backends that actually enforce it — OpenAI and Anthropic —
+    # and silently dropped for others (cloud-proxied Ollama ignores it, per the
+    # §17.773 live smoke), which then fall back to the json_repair path exactly as
+    # before. So turning this on is safe: it "applies only when it bites."
+    # Default OFF (conservative + no OpenAI/Anthropic key smoke yet); flip on once
+    # a role is bound to OpenAI/Anthropic. When OFF the schema is dropped and
+    # behavior is byte-identical to the pre-§17.773 path.
+    structured_outputs_enabled: bool = Field(default=False)
+    # §17.773 — opt-in override to ALSO apply the constraint on Ollama. Default
+    # OFF because the cloud proxy ignores ``format`` (live smoke); flip ON only in
+    # a deployment whose Ollama roles run LOCAL models (llama.cpp enforces GBNF
+    # grammars). No-op unless ``structured_outputs_enabled`` is also ON.
+    structured_outputs_ollama_enabled: bool = Field(default=False)
+
     # Timeouts (seconds)
     cloud_timeout: int = Field(default=3600, ge=1, le=86400)
     local_timeout: int = Field(default=1800, ge=1, le=86400)

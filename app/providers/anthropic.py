@@ -69,6 +69,33 @@ _DEFAULT_MAX_TOKENS = 4096
 _NO_SAMPLING_MODEL_PREFIXES = ("claude-opus-4-7",)
 
 
+def _apply_anthropic_output_config(payload: dict[str, Any], response_schema: Any) -> None:
+    """§17.773 — set Anthropic's ``output_config.format`` from a response schema.
+
+    A JSON Schema ``dict`` becomes a ``json_schema`` format (structured outputs).
+    The literal string ``"json"`` has no direct Anthropic equivalent — Anthropic
+    has no bare json-object mode — so it is ignored (the caller falls back to the
+    llm_parsing repair path). ``None`` / falsy is a no-op. If the caller already
+    set ``output_config`` explicitly, that wins and this is a no-op.
+    """
+    if not response_schema or "output_config" in payload:
+        return
+    if isinstance(response_schema, dict):
+        payload["output_config"] = {
+            "format": {"type": "json_schema", "schema": response_schema},
+        }
+    elif isinstance(response_schema, str):
+        logger.info(
+            "anthropic_output_config_skipped: 'json' mode has no Anthropic "
+            "equivalent; relying on parse fallback",
+        )
+    else:  # pragma: no cover — defensive; callers pass dict|str|None
+        logger.warning(
+            "anthropic_output_config_ignored: unexpected response_schema type=%s",
+            type(response_schema).__name__,
+        )
+
+
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude backend."""
 
@@ -77,6 +104,7 @@ class AnthropicProvider(LLMProvider):
     supports_embeddings = False  # Anthropic has no embeddings endpoint
     supports_streaming = True
     supports_native_tools = True
+    supports_structured_outputs = True  # §17.773 — output_config.format json_schema
 
     # ------------------------------------------------------------------
     # Helpers
@@ -194,10 +222,21 @@ class AnthropicProvider(LLMProvider):
                 payload["system"] = system
         if not self._strips_sampling(model):
             payload["temperature"] = temperature
+        # §17.773 — grammar-constrained decoding: translate the provider-agnostic
+        # ``response_schema`` into Anthropic's structured-outputs
+        # ``output_config.format`` (the ``output_format`` parameter is deprecated).
+        # NOTE: Anthropic enforces the schema — every object must carry
+        # ``additionalProperties: false`` with all keys required, or the request
+        # 400s. Callers targeting the Anthropic backend must pass a compliant
+        # schema; the default-off valve keeps this off the hot path until then.
+        _apply_anthropic_output_config(payload, opts.get("response_schema"))
         # Pass through caller extras (thinking, output_config, tools,
-        # tool_choice, top_p, ...). Drop ``fallback`` (Ollama-specific) and
-        # anything we already placed.
-        reserved = {"fallback", "stream", "model", "messages", "max_tokens", "system", "temperature"}
+        # tool_choice, top_p, ...). Drop ``fallback`` (Ollama-specific),
+        # ``response_schema`` (handled above), and anything we already placed.
+        reserved = {
+            "fallback", "stream", "model", "messages", "max_tokens",
+            "system", "temperature", "response_schema",
+        }
         for k, v in opts.items():
             if k in reserved:
                 continue
