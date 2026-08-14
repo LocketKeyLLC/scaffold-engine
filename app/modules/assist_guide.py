@@ -1303,7 +1303,9 @@ _JUDGE_OUTCOME_TOOL = model_router.Tool(
         "the OS' but the evidence only downloads the installer ISO or sits at the "
         "boot/installer menu; 'Install the driver' but the evidence is the same "
         "download / a boot screen. Use this when the goal is affirmatively NOT "
-        "reached yet.\n"
+        "reached yet — NOT for a valid alternative that DOES meet the goal when a "
+        "hardware/software constraint rules out the literally-named method (that "
+        "is 'succeeded').\n"
         "- 'unclear': you genuinely can't tell. \n"
         "Be conservative about 'incomplete' and 'failed': if the deliverable "
         "MIGHT be present, or you can't tell, use 'unclear' (not 'incomplete'). "
@@ -1317,6 +1319,27 @@ _JUDGE_OUTCOME_TOOL = model_router.Tool(
             "reason": {"type": "string", "description": "One sentence, citing the signal."},
             "suggestion": {"type": "string",
                            "description": "If failed/incomplete: the concrete next move to finish the step."},
+            "goal_met_via_alternative": {
+                "type": "boolean",
+                "description": (
+                    "True ONLY when outcome='succeeded' AND the operator met the "
+                    "step's GOAL via a DIFFERENT method than the task literally "
+                    "named, because a hardware/software CONSTRAINT made the named "
+                    "method impossible (e.g. the board's chip locks PWM to "
+                    "automatic, so manual fan curves aren't possible, but "
+                    "automatic control keeps temps safe). False for a "
+                    "straightforward success done the planned way."),
+            },
+            "constraint": {
+                "type": "string",
+                "description": (
+                    "If goal_met_via_alternative: the specific constraint that "
+                    "ruled out the named method AND how the goal was met instead, "
+                    "as one durable sentence the plan should carry forward (e.g. "
+                    "'This board's NCT7904D locks pwm_enable to automatic, so "
+                    "manual fan curves aren't possible; fan control is automatic "
+                    "only and holds temps in range'). Empty otherwise."),
+            },
         },
         "required": ["outcome", "reason"],
     },
@@ -1412,14 +1435,27 @@ async def verify_step_success(
     else:
         system = (
             "You verify whether a human operator's step achieved ITS GOAL, from "
-            "the output they pasted. Judge against the step's Task title — not "
-            "merely 'is there an error'. §17.731: if the evidence shows only "
-            "SETUP or an earlier phase (e.g. the installer downloaded / the boot "
-            "menu shown, but the OS not actually installed), the step is "
-            "'incomplete', not 'succeeded'. Stay conservative: 'failed' only on a "
-            "clear failure signal; 'incomplete' only when the deliverable is "
-            "affirmatively NOT reached yet; 'unclear' when you genuinely can't "
-            "tell (do NOT guess 'incomplete' out of caution)."
+            "the output they pasted. Judge against the step's Task title and its "
+            "underlying GOAL — not a literal method checklist, and not merely 'is "
+            "there an error'. §17.731: if the evidence shows only SETUP or an "
+            "earlier phase (e.g. the installer downloaded / the boot menu shown, "
+            "but the OS not actually installed), the step is 'incomplete', not "
+            "'succeeded'.\n"
+            "§17.771 — CREDIT A VALID ALTERNATIVE: return 'succeeded' when the "
+            "evidence shows the step's GOAL is met, EVEN IF via a different method "
+            "than the task literally names — ESPECIALLY when the evidence also "
+            "shows the operator hit a genuine hardware/software CONSTRAINT that "
+            "makes the named method impossible (e.g. the task says 'manual PWM fan "
+            "control via fancontrol' but the board's sensor chip locks PWM to "
+            "automatic, and the evidence shows temperatures held safe under load). "
+            "Do NOT return 'incomplete' merely because the exact named tool/method "
+            "wasn't used, when the outcome the step exists for is demonstrably "
+            "achieved. 'incomplete' is for when the GOAL ITSELF is not yet reached, "
+            "NOT for a valid alternative path to the same goal.\n"
+            "Stay conservative: 'failed' only on a clear failure signal; "
+            "'incomplete' only when the goal is affirmatively NOT reached yet; "
+            "'unclear' when you genuinely can't tell (do NOT guess 'incomplete' out "
+            "of caution)."
         )
         user = (
             f"Task (this step's goal): {title}\n\n{task_prompt}\n\n"
@@ -1458,11 +1494,16 @@ async def verify_step_success(
         grounded_by = "sandbox+model"
         if outcome == "succeeded":
             reason = (reason + " (code executed cleanly in the sandbox)").strip()
+    # §17.771 — the constraint-adaptation signal (only meaningful on 'succeeded').
+    via_alt = bool(args.get("goal_met_via_alternative")) and outcome == "succeeded"
+    constraint = (args.get("constraint") or "").strip() if via_alt else ""
     return {
         "outcome": outcome,
         "reason": reason,
         "suggestion": (args.get("suggestion") or "").strip(),
         "grounded_by": grounded_by,
+        "goal_met_via_alternative": via_alt and bool(constraint),
+        "constraint": constraint,
     }
 
 
@@ -2449,7 +2490,21 @@ _PROBLEM_SOLVING_FRAMING = (
     "tuning inside a software-install answer). The project context / recap is there "
     "to GROUND your answer accurately, not to pull in tangents. Only raise another "
     "goal if the operator asks about the overall plan, or it directly blocks or is "
-    "required by this step."
+    "required by this step.\n"
+    "9. WHEN THE LITERAL APPROACH IS BLOCKED BY A HARD CONSTRAINT BUT THE GOAL IS "
+    "MET, ACCEPT IT AND MOVE ON. If the operator has shown the step's named method "
+    "is impossible on THEIR system — a chip / board / driver / firmware / OS "
+    "limitation they have hit and confirmed (e.g. the sensor chip locks PWM to "
+    "automatic so manual fan curves can't be set) — AND the step's underlying GOAL "
+    "is achieved another way (e.g. automatic fan control holds temperatures safe "
+    "under load), treat the step as DONE: say so plainly ('your NCT7904D can't do "
+    "manual PWM, but automatic control is keeping the P40 in range — that meets "
+    "the goal of this step, so we're done here'), and move to the next step. Do "
+    "NOT keep proposing variants of the ruled-out method, and do NOT hold the step "
+    "open waiting for a deliverable the hardware cannot produce. The GOAL is what "
+    "matters, not the specific tool the plan happened to name. If the operator "
+    "keeps asking 'how do we proceed' / 'what's next' after a good-enough outcome, "
+    "that is your signal to CONFIRM completion and advance, not to loop."
 )
 
 

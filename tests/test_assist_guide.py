@@ -1893,3 +1893,20 @@ def test_next_callout_leads_with_bold_action_in_code_block():
     d = assist_guide._NEXT_CALLOUT_DIRECTIVE
     assert "impossible to miss" in d
     assert "own fenced code block" in d
+
+
+def test_verifier_credits_goal_met_via_valid_alternative():
+    """§17.771 (stuck-step fix) — the success verifier judges the GOAL, crediting a
+    valid alternative when a hardware constraint rules out the literal method
+    (the NCT7904D manual-PWM lockout that stuck the P40 fan step)."""
+    assert "CREDIT A VALID ALTERNATIVE" in assist_guide._JUDGE_OUTCOME_TOOL.description \
+        or "valid alternative" in assist_guide._JUDGE_OUTCOME_TOOL.description
+    # the non-decision system prompt is built inside verify_step_success; guard the
+    # tool description carries the "not the literal method" credit
+    assert "valid alternative" in assist_guide._JUDGE_OUTCOME_TOOL.description
+
+
+def test_problem_solving_has_accept_goal_met_alternative_principle():
+    f = assist_guide._PROBLEM_SOLVING_FRAMING
+    assert "WHEN THE LITERAL APPROACH IS BLOCKED BY A HARD CONSTRAINT" in f
+    assert "ACCEPT IT AND MOVE ON" in f

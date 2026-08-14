@@ -2854,6 +2854,7 @@ async def submit_step(
     action: str = "submit",
     friction_note: str | None = None,
     verdict_failed: bool = False,
+    skip_divergence_replan: bool = False,
     db,
 ) -> dict:
     """Record human evidence for one step. Mirrors to `dag_nodes.output_text`.
@@ -3015,7 +3016,12 @@ async def submit_step(
     # meet the task's intent" and proposing to drop later steps is exactly the
     # confusing behavior the operator kept hitting.
     replan_result = None
-    if action == "submit" and not verdict_failed:
+    # §17.771 — skip the divergence re-plan when the endpoint will run the
+    # dedicated constraint-adaptation instead (a goal-met-via-alternative commit):
+    # the two would stage conflicting proposals (divergence says "your output
+    # differs from the plan", adaptation says "the plan's method was impossible —
+    # here's the revision"). The adaptation path is the deliberate, reliable one.
+    if action == "submit" and not verdict_failed and not skip_divergence_replan:
         replan_result = await _maybe_replan(
             session_id=session_id, job_id=job_id,
             node_key=node_key, evidence=evidence, db=db,
@@ -3102,6 +3108,71 @@ async def _maybe_replan(
         # concrete-artifact task text (that artifact is applied by later steps).
         is_decision=is_decision_node(node["node_type"]),
     )
+
+
+async def adapt_step_to_constraint(
+    *, session_id: str, node_key: str, constraint: str, db,
+) -> dict | None:
+    """§17.771 — a step committed via a valid ALTERNATIVE because a hardware/
+    software constraint ruled out the planned method. ADAPT THE PLAN TO REALITY
+    (not just wave the step through):
+
+    1. Record the constraint as a durable ``constraint`` note so it feeds forward
+       into EVERY later step's guidance (via the memory funnel) — no downstream
+       step re-proposes the ruled-out method, and later generation grounds on the
+       real capability of this system.
+    2. Run the note-impact analyzer over the PENDING steps that ASSUMED the
+       impossible method, and stage a surface-and-ask re-plan for any it finds
+       (revise/drop) so the plan matches reality instead of lying about it.
+
+    Returns ``{constraint, affected}`` for the caller to surface, or None when
+    there's nothing to adapt. Fail-soft throughout — never breaks the commit.
+    """
+    from app.config import settings
+    constraint = (constraint or "").strip()
+    if not constraint:
+        return None
+    sess = (await db.execute(
+        text("SELECT job_id, status, metadata FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess or sess["status"] not in ("active", "paused"):
+        return None
+    job_id = str(sess["job_id"])
+    # (1) durable constraint note — propagates to every later step's guidance.
+    try:
+        await record_note(
+            session_id=session_id, text_=constraint, kind="constraint",
+            node_key=node_key, db=db,
+        )
+    except Exception as e:  # noqa: BLE001 — adaptation must never break the commit
+        logger.warning("adapt_constraint_note_failed session_id=%s err=%r", session_id, e)
+    out = {"constraint": constraint, "affected": []}
+    # (2) revise the PENDING steps that assumed the ruled-out method.
+    if not settings.assist_note_replan_enabled:
+        return out
+    from app.modules import assist_replan
+    try:
+        impact = await assist_replan.analyze_note_impact(
+            db=db, job_id=job_id, note_text=constraint, note_kind="constraint",
+            strict=False,  # an explicit, confirmed constraint — flag borderline steps
+            facts_block=_note_impact_facts_block(sess.get("metadata")),
+            project_recap_block=await _note_impact_project_block(job_id, db),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("adapt_constraint_analyze_failed session_id=%s err=%r", session_id, e)
+        return out
+    affected = impact.get("affected") or []
+    if affected:
+        try:
+            await _stage_replan_proposal(
+                session_id=session_id, note_text=constraint,
+                note_kind="constraint", affected=affected, db=db,
+            )
+            out["affected"] = affected
+        except Exception as e:  # noqa: BLE001
+            logger.warning("adapt_constraint_stage_failed session_id=%s err=%r", session_id, e)
+    return out
 
 
 async def _next_pending_node_key(*, session_id: str, db) -> Optional[str]:
