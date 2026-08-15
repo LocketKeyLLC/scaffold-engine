@@ -215,3 +215,139 @@ async def test_route_plain_message_delegates_to_classifier():
         gen = await dispatch.route([{"role": "user", "content": "what can you do"}])
         out = await _drain(gen)
     assert "drive the engine" in out
+
+
+# ===========================================================================
+# §17.791 (Phase 3a) — conversational triage + /go synthesis.
+# ===========================================================================
+from app.native_chat import triage  # noqa: E402
+from app.providers.base import ModelResponse  # noqa: E402
+
+
+@pytest.mark.smoke
+def test_strip_think_closed_and_open():
+    assert triage._strip_think("<think>reasoning</think>\nHello") == "Hello"
+    assert triage._strip_think("<thinking>partial and truncated") == ""
+    assert triage._strip_think("no tags here") == "no tags here"
+
+
+@pytest.mark.smoke
+def test_window_pins_user_turns():
+    turns = [
+        {"role": "user", "content": "u1 fact"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2 fact"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+        {"role": "assistant", "content": "a3"},
+    ]
+    out = triage._window(turns, 2)
+    # last 2 turns kept + every earlier user turn pinned
+    assert out[-2:] == turns[-2:]
+    contents = [m["content"] for m in out]
+    assert "u1 fact" in contents and "u2 fact" in contents
+    assert "a1" not in contents  # earlier assistant block dropped
+
+
+@pytest.mark.smoke
+def test_turns_drops_system():
+    turns = triage._turns([
+        {"role": "system", "content": "client sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "yo"},
+    ])
+    assert [m["role"] for m in turns] == ["user", "assistant"]
+
+
+@pytest.mark.smoke
+async def test_run_triage_strips_think_and_yields():
+    resp = ModelResponse(text="<think>plan</think>\n**Scope so far:**\nA CLI tool.", success=True)
+    with patch("app.model_router.chat", AsyncMock(return_value=resp)):
+        out = await _drain(triage.run_triage([{"role": "user", "content": "build a CLI"}]))
+    assert "Scope so far" in out and "plan" not in out
+
+
+@pytest.mark.smoke
+async def test_run_triage_empty_nudges():
+    resp = ModelResponse(text="<think>only thinking</think>", success=True)
+    with patch("app.model_router.chat", AsyncMock(return_value=resp)):
+        out = await _drain(triage.run_triage([{"role": "user", "content": "build a CLI"}]))
+    assert "couldn't reach the planner" in out.lower()
+
+
+@pytest.mark.smoke
+async def test_synthesize_returns_brief():
+    resp = ModelResponse(text="Build a CLI that converts screenshots to a searchable PDF.", success=True)
+    with patch("app.model_router.chat", AsyncMock(return_value=resp)):
+        text, fb = await triage.synthesize([{"role": "user", "content": "screenshots to pdf"}])
+    assert fb is False and "Build a CLI" in text
+
+
+@pytest.mark.smoke
+async def test_synthesize_falls_back_to_user_messages():
+    resp = ModelResponse(text="", success=False, error="down")
+    with patch("app.model_router.chat", AsyncMock(return_value=resp)):
+        text, fb = await triage.synthesize([
+            {"role": "user", "content": "a screenshots tool"},
+            {"role": "assistant", "content": "**Scope...**"},
+            {"role": "user", "content": "on pop os"},
+        ])
+    assert fb is True and text == "a screenshots tool on pop os"
+
+
+@pytest.mark.smoke
+async def test_run_go_submits_and_renders_brief():
+    ideate = {"job_id": "abcd1234-5678-90ab-cdef-000000000000",
+              "status": "awaiting_confirmation",
+              "refined_brief": "Build a searchable-PDF CLI on Pop!_OS.",
+              "feasibility": {"feasible": True, "summary": "Straightforward with Tesseract."}}
+    with patch("app.native_chat.triage.synthesize", AsyncMock(return_value=("Build X", False))), \
+         patch("app.native_chat.engine_client.request_json", AsyncMock(return_value=(200, ideate))):
+        out = await _drain(triage.run_go([{"role": "user", "content": "/go"}]))
+    assert "Launch brief" in out and "searchable-PDF CLI" in out
+    assert "Straightforward with Tesseract" in out and "/confirm abcd1234" in out
+
+
+@pytest.mark.smoke
+async def test_run_go_nothing_to_synthesize():
+    with patch("app.native_chat.triage.synthesize", AsyncMock(return_value=("", False))):
+        out = await _drain(triage.run_go([{"role": "user", "content": "/go"}]))
+    assert "Nothing to synthesize" in out
+
+
+@pytest.mark.smoke
+async def test_route_go_delegates_to_run_go():
+    async def _fake_go(_msgs):
+        yield "GO_CALLED"
+    with patch("app.native_chat.triage.run_go", _fake_go):
+        gen = await dispatch.route([{"role": "user", "content": "/go build it"}])
+        assert await _drain(gen) == "GO_CALLED"
+
+
+@pytest.mark.smoke
+async def test_route_plain_message_falls_through_to_triage():
+    async def _fake_triage(_msgs):
+        yield "TRIAGE_CALLED"
+    with patch("app.modules.command_guide.classify_command",
+               AsyncMock(return_value=_classify(intent="none", confidence="low"))), \
+         patch("app.native_chat.triage.run_triage", _fake_triage):
+        gen = await dispatch.route([{"role": "user", "content": "build me a thing"}])
+        assert await _drain(gen) == "TRIAGE_CALLED"
+
+
+@pytest.mark.smoke
+async def test_run_go_renders_structured_brief_dict():
+    """/ideate returns refined_brief as a structured dict — render prose, not repr."""
+    ideate = {"job_id": "afa6c127-0000-0000-0000-000000000000",
+              "status": "awaiting_confirmation",
+              "refined_brief": {"title": "PNG-to-PDF CLI",
+                                "description": "Build a Python CLI that OCRs screenshots into a searchable PDF.",
+                                "goals": ["ocr", "pdf"]},
+              "feasibility": {"feasible": True, "summary": "Doable in an evening."}}
+    with patch("app.native_chat.triage.synthesize", AsyncMock(return_value=("x", False))), \
+         patch("app.native_chat.engine_client.request_json", AsyncMock(return_value=(200, ideate))):
+        out = await _drain(triage.run_go([{"role": "user", "content": "/go"}]))
+    assert "**PNG-to-PDF CLI**" in out
+    assert "OCRs screenshots into a searchable PDF" in out
+    assert "'goals'" not in out and "{" not in out  # no raw dict repr
+    assert "/confirm afa6c127" in out

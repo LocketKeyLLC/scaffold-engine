@@ -36,6 +36,7 @@ ROLE_FIELDS = frozenset({
     "model_cloud_heavy",
     "model_cloud_alt",
     "model_fallback",
+    "model_triage",  # §17.791 — native conversational triage + /go synthesis
 })
 
 # §17.483 — roles whose model can be re-pointed at runtime. The embedder and
@@ -377,6 +378,15 @@ class Settings(BaseSettings):
     model_verifier_provider: ProviderName = "ollama"
     model_research_extract_provider: ProviderName = "ollama"
     model_coder_provider: ProviderName = "ollama"
+    # §17.791 — native triage/synthesis model (mirrors the OWUI pipeline's live
+    # triage_model). A thinking model; the native path strips <think> and uses a
+    # generous max_tokens so it doesn't return empty-after-strip.
+    model_triage: str = "qwen3.5:397b-cloud"
+    model_triage_provider: ProviderName = "ollama"
+    # §17.791 — triage history window (turns). Pins every user turn (facts) +
+    # the last N turns to bound CPU-only thinking-model latency. Mirror of the
+    # pipeline valve triage_history_window.
+    triage_history_window: int = Field(default=8, ge=1, le=100)
     model_router_provider: ProviderName = "ollama"
     model_fallback_provider: ProviderName = "ollama"
     model_cloud_heavy_provider: ProviderName = "ollama"
