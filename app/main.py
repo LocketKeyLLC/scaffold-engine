@@ -678,6 +678,15 @@ if settings.mcp_server_enabled:
         ),
     )
 
+# §17.788 — native OpenAI-compatible surface at /v1 (POST /v1/chat/completions,
+# GET /v1/models). Mounted as a sub-app so it bypasses the global X-API-Key
+# dependency and carries its own Bearer-or-X-API-Key guard (require_openai_key).
+# Gated on native_openai_enabled (default off) — the OWUI pipeline path is
+# unchanged while off. See docs/native_openai_surface_plan.md.
+if settings.native_openai_enabled:
+    from app.routers.openai_compat import openai_app  # noqa: E402
+    app.mount("/v1", openai_app)
+
 
 @app.get("/", dependencies=[], include_in_schema=False)
 async def web_root_redirect():

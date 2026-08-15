@@ -1364,6 +1364,19 @@ class Settings(BaseSettings):
     # Idle TTL (seconds) for a cached client session before it is torn down.
     mcp_session_ttl: float = Field(default=300.0, ge=10.0, le=3600.0)
 
+    # §17.788 — native OpenAI-compatible surface. When True, the orchestrator
+    # mounts an OpenAI chat-protocol sub-app at /v1 (POST /v1/chat/completions +
+    # GET /v1/models), so any OpenAI client (OWUI as an OpenAI connection, the
+    # /ui SPA chat, external SDKs) drives the engine directly and the OWUI
+    # pipeline adapter becomes optional. Mounted as a sub-app so it bypasses the
+    # global X-API-Key dependency and carries its own Bearer-or-X-API-Key guard
+    # (require_openai_key). Default off — the pipeline path is unchanged while
+    # off. Phase 0 is a passthrough to model_general; triage/NL routing land in
+    # later phases (see docs/native_openai_surface_plan.md).
+    native_openai_enabled: bool = Field(default=False)
+    # Advertised model id on GET /v1/models and the default routed persona.
+    native_openai_model_id: str = Field(default="scaffold-engine")
+
     # §17.624 — hands-on assist gate. When True (default), the autonomous
     # executor inspects a freshly-generated DAG before running it: if the
     # majority of nodes are non-autonomously-executable (Shell steps while

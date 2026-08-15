@@ -80,3 +80,54 @@ async def require_api_key(
             detail="Invalid or missing API key",
         )
     return key
+
+
+# §17.788 — auth for the native OpenAI surface (/v1/*). OpenAI clients send the
+# key as ``Authorization: Bearer <key>``, not ``X-API-Key``; the /v1 sub-app is
+# mounted (bypassing the global require_api_key dependency), so it carries this
+# guard instead. Accepts EITHER a Bearer token or X-API-Key against the same
+# SCAFFOLD_API_KEY — the /ui SPA already sends X-API-Key, external OpenAI clients
+# send Bearer. The 401 is raised as an OpenAI-shaped envelope by the /v1 sub-app's
+# exception handler (openai_compat.py), which stock OpenAI SDKs expect.
+_authorization_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+
+def _bearer_token(raw: str | None) -> str | None:
+    """Extract the token from an ``Authorization: Bearer <token>`` value.
+
+    Tolerant of the ``Bearer `` prefix (case-insensitive) and of a bare token.
+    Returns None for an empty/malformed header.
+    """
+    if not raw:
+        return None
+    parts = raw.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip() or None
+    return raw.strip() or None
+
+
+async def require_openai_key(
+    bearer: str | None = Security(_authorization_header),
+    x_api_key: str | None = Security(api_key_header),
+) -> str:
+    """Validate the caller for the native OpenAI surface.
+
+    Accepts ``Authorization: Bearer <SCAFFOLD_API_KEY>`` OR ``X-API-Key`` against
+    the same key. Returns the matched key on success; raises 401 on failure (the
+    /v1 sub-app formats it as an OpenAI ``{"error": {...}}`` envelope).
+    """
+    if settings.scaffold_auth_disabled:
+        return ""
+
+    candidate = _bearer_token(bearer) or x_api_key
+    try:
+        ok = candidate is not None and secrets.compare_digest(candidate, _RAW_KEY)
+    except TypeError:
+        # §17.596 — non-ASCII header bytes make compare_digest raise; treat as fail.
+        ok = False
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key",
+        )
+    return candidate
