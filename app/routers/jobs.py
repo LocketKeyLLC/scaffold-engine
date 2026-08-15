@@ -16,6 +16,7 @@ Routes:
   PATCH  /jobs/{job_id}/synthesis       — set_job_synthesis_override (Management)
   PATCH  /jobs/{job_id}/budget          — set_job_budget (Management) [§17.777]
 """
+import json
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -37,6 +38,7 @@ from app.schemas import (
     JobBudgetStatus,
     JobCostsBreakdownItem,
     JobCostsResponse,
+    JobDetailResponse,
     JobListResponse,
     JobRenameInput,
     JobSummary,
@@ -256,6 +258,73 @@ async def list_jobs(
         for r in rows.fetchall()
     ]
     return JobListResponse(jobs=jobs, total=total, limit=limit, offset=offset)
+
+
+def _json_obj(v):
+    """Normalize a JSONB column to a dict/None. A raw ``text()`` read can
+    surface JSONB as a Python dict (codec registered) or a JSON string
+    (no type info), so coerce defensively — matches dag_generator's
+    ``json.loads(research_data)`` and ``mcp_node.parse_tool_config``."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except (ValueError, TypeError):
+            return None
+    return v if isinstance(v, dict) else None
+
+
+@router.get("/jobs/{job_id}", response_model=JobDetailResponse, tags=["Management"])
+async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
+    """Single-job detail incl. the Phase-1 refined brief + feasibility.
+
+    Backs the /ui approval gate (renders ``refined_brief`` + ``feasibility``
+    before Approve), and the output/compare views (``deliverable_kind``,
+    ``has_compiled_output``). Feasibility is read from
+    ``jobs.research_data.feasibility`` where Phase 1 stashes it
+    (``ideation_workflow.analyze_and_confirm``); ``refined_brief`` from its
+    dedicated column. 404 on a missing job, 422 on a malformed UUID."""
+    try:
+        UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    row = (await db.execute(
+        text("""
+            SELECT j.id, j.title, j.status, j.input_text,
+                   j.refined_brief, j.research_data, j.deliverable_kind,
+                   (j.compiled_output IS NOT NULL) AS has_compiled_output,
+                   j.created_at, j.updated_at, j.completed_at,
+                   j.parent_job_id, j.component_index, j.metadata,
+                   (SELECT COUNT(*) FROM dag_nodes WHERE job_id = j.id) AS node_count
+            FROM jobs j
+            WHERE j.id = :id
+        """),
+        {"id": job_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+
+    research = _json_obj(row["research_data"]) or {}
+    feasibility = research.get("feasibility") if isinstance(research, dict) else None
+    return JobDetailResponse(
+        id=str(row["id"]),
+        title=row["title"] or "",
+        status=row["status"],
+        input_text=row["input_text"],
+        refined_brief=_json_obj(row["refined_brief"]),
+        feasibility=feasibility if isinstance(feasibility, dict) else None,
+        deliverable_kind=row["deliverable_kind"],
+        has_compiled_output=bool(row["has_compiled_output"]),
+        node_count=row["node_count"] or 0,
+        created_at=row["created_at"].isoformat(),
+        updated_at=row["updated_at"].isoformat(),
+        completed_at=row["completed_at"].isoformat() if row["completed_at"] else None,
+        parent_job_id=str(row["parent_job_id"]) if row["parent_job_id"] else None,
+        component_index=row["component_index"],
+        metadata=_json_obj(row["metadata"]),
+    )
 
 
 @router.delete("/jobs/{job_id}", response_model=DeleteResponse, tags=["Management"])

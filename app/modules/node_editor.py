@@ -66,6 +66,60 @@ async def _load_nodes(db: AsyncSession, job_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def list_nodes(job_id: str, db: AsyncSession) -> dict:
+    """Full editable node list for the /ui plan editor.
+
+    Returns every column ``PATCH /nodes/{job_id}/{node_key}`` accepts plus
+    ``edit_version`` (the optimistic-lock token the editor round-trips) and
+    ``status``/``execution_order``. Distinct from ``execution_handler.node_outputs``
+    (output bodies, no versions/prompt) and ``GET /dag/{id}`` (topology only) —
+    those omit ``edit_version`` and the editable payload, so the editor could
+    neither pre-fill the form nor PATCH with a correct ``expected_version``.
+
+    On a malformed/missing job returns the standard ``{"error", "http_status"}``
+    dict the ``nodes`` router maps to an HTTPException. ``tool_config`` (JSONB)
+    is normalized to a dict/None since a raw ``text()`` read can surface it as a
+    JSON string (see ``mcp_node.parse_tool_config``)."""
+    from uuid import UUID
+    try:
+        UUID(str(job_id))
+    except (ValueError, TypeError):
+        return {"error": "Invalid job_id format", "http_status": 400}
+    job = (await db.execute(
+        text("SELECT status FROM jobs WHERE id = :j"), {"j": job_id},
+    )).mappings().first()
+    if not job:
+        return {"error": f"Job {job_id} not found", "http_status": 404}
+    rows = (await db.execute(
+        text(
+            "SELECT node_key, title, description, status, depends_on, "
+            "       execution_order, edit_version, prompt_template, "
+            "       assigned_model, tool, "
+            "       COALESCE(is_deliverable, FALSE) AS is_deliverable, tool_config "
+            "FROM dag_nodes WHERE job_id = :j "
+            "ORDER BY execution_order, node_key"
+        ),
+        {"j": job_id},
+    )).mappings().all()
+    nodes = []
+    for r in rows:
+        n = dict(r)
+        tc = n.get("tool_config")
+        if isinstance(tc, str):
+            try:
+                tc = json.loads(tc)
+            except (ValueError, TypeError):
+                tc = None
+        n["tool_config"] = tc
+        n["depends_on"] = list(n.get("depends_on") or [])
+        nodes.append(n)
+    return {
+        "job_id": str(job_id),
+        "job_status": job["status"],
+        "nodes": nodes,
+    }
+
+
 def _transitive_downstream(nodes: list[dict], node_key: str) -> set[str]:
     """Keys that transitively depend on ``node_key`` (excludes it)."""
     rev: dict[str, set[str]] = {}
