@@ -27,3 +27,6 @@ retrieval_report.json
 # Pipeline valves: live file gets rewritten to {} by upstream main.py on missing-file
 # startup; we track the template instead and let the bootstrap helper copy it on first run.
 pipelines/*/valves.json
+
+# Stray local pip/tooling cache dir at the repo root — never tracked.
+.cache/
