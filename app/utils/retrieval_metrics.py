@@ -66,3 +66,65 @@ def ndcg_at_k(rels: list[bool], k: int) -> float:
         return 0.0
     idcg = sum(1.0 / math.log2(i + 2) for i in range(n_rel))
     return dcg / idcg if idcg > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# §17.794 — RAGAS context precision / recall (retrieval-label, no LLM judge)
+#
+# RAGAS (arXiv 2309.15217) defines context precision and context recall over
+# the LLM's own relevance/attribution judgements. We compute the SAME formulas
+# over the deterministic title-substring relevance the goldens already carry
+# (see the module docstring's input contract) — no LLM, no nondeterminism, so
+# they gate in CI exactly like hit@k / nDCG@k above. The LLM-judge third pillar,
+# faithfulness, lives in app/modules/faithfulness.py (it needs a generated
+# ANSWER, which these ranking metrics do not); the live gate pairs all three.
+# ---------------------------------------------------------------------------
+
+
+def context_precision(rels: list[bool]) -> float:
+    """RAGAS Context Precision@K over the ranked retrieved list.
+
+    ``CP@K = (Σ_k Precision@k · v_k) / (total relevant retrieved)`` where
+    ``Precision@k`` is the precision of the top-k prefix and ``v_k`` is 1 iff
+    the item at rank k is relevant — i.e. Average Precision. It rewards
+    packing relevant items at the TOP of the list: a run of relevant docs at
+    ranks 1..m scores 1.0, the same docs scattered lower scores less.
+
+    Note the boundary cases this shares with the ranking family: with exactly
+    one relevant item at rank r this collapses to ``1/r`` (== reciprocal_rank);
+    the metric only diverges from MRR when a query has MULTIPLE relevant docs
+    in the retrieved list (which the substring goldens do produce — e.g. a
+    query whose label matches several near-duplicate entries). Returns 0.0 when
+    nothing relevant was retrieved.
+    """
+    total_relevant = sum(1 for r in rels if r)
+    if total_relevant == 0:
+        return 0.0
+    hits = 0
+    weighted = 0.0
+    for i, r in enumerate(rels):
+        if r:
+            hits += 1
+            weighted += hits / (i + 1)  # precision@(i+1) at this relevant hit
+    return weighted / total_relevant
+
+
+def context_recall(rels: list[bool], n_relevant: int) -> float:
+    """RAGAS (non-LLM) Context Recall — fraction of ground-truth relevant
+    items that made it into the retrieved list.
+
+    ``recall = min(1, |relevant retrieved| / n_relevant)``. ``n_relevant`` is
+    the caller-supplied ground-truth count (the goldens do not maintain a
+    full-corpus qrel set — see the module docstring). The ``min`` caps the
+    ratio at 1.0 so a query whose label matches more near-duplicate rows than
+    the labelled target count cannot exceed perfect recall.
+
+    Boundary: with ``n_relevant == 1`` (the common single-target golden) this
+    collapses to "was any relevant doc retrieved" (== ``hit_at_k`` over the
+    whole list). It only carries information beyond hit@k when a query enumerates
+    multiple distinct relevant targets. Returns 0.0 for ``n_relevant <= 0``.
+    """
+    if n_relevant <= 0:
+        return 0.0
+    retrieved_relevant = sum(1 for r in rels if r)
+    return min(1.0, retrieved_relevant / n_relevant)

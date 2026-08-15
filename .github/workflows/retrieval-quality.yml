@@ -5,9 +5,11 @@ on:
     paths:
       - 'app/modules/rag_pipeline.py'
       - 'app/rerankers.py'
+      - 'app/utils/retrieval_metrics.py'
       - 'scripts/score_retrieval.py'
       - 'tests/fixtures/golden_set.json'
       - 'tests/test_score_retrieval.py'
+      - 'tests/test_retrieval_metrics.py'
       - 'tests/test_rag_pipeline_smoke.py'
       # §17.432 — self-trigger so edits to this workflow re-run it (its own
       # fix can't be proven otherwise; the paths above don't include it).
@@ -40,15 +42,21 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements-ci.txt
 
-      # Sprint X.14 — runs two layers cheaply (no Milvus / Ollama / cross-encoder):
-      #   - test_score_retrieval.py: scoring math (recall@k, MRR)
+      # Sprint X.14 — runs layers cheaply (no Milvus / Ollama / cross-encoder):
+      #   - test_retrieval_metrics.py: RAGAS + ranking metric math
+      #     (hit@k, MRR, nDCG@k, context precision/recall — §17.430/§17.794)
+      #   - test_score_retrieval.py: scoring harness math (title-substring shape)
       #   - test_rag_pipeline_smoke.py: 3-query orchestration smoke
       #     (RRF fusion, dedup, threshold-skip path)
+      # NOTE: the metric MATH is the authoritative blocking gate — it also runs
+      # in the `-m smoke` ci-smoke job (ci.yml). This workflow is the (non-
+      # blocking) retrieval report; the live RAGAS floors + faithfulness run in
+      # tests/integration/test_retrieval_eval.py locally (need Milvus + Ollama).
       - name: Run scoring + smoke tests
         env:
           SCAFFOLD_API_KEY: "test-key-for-ci"
           PYTHONPATH: "."
-        run: pytest tests/test_score_retrieval.py tests/test_rag_pipeline_smoke.py -v
+        run: pytest tests/test_retrieval_metrics.py tests/test_score_retrieval.py tests/test_rag_pipeline_smoke.py -v
 
       - name: Upload report if present
         if: always()
