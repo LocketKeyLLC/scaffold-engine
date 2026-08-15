@@ -47,7 +47,7 @@ function renderPicker(container) {
           icon: "▶",
           title: "Nothing to watch yet",
           body: "Once a job has an approved plan and starts executing, its live run streams here node by node.",
-          action: { label: "＋ New idea", href: "/web/new" },
+          action: { label: "＋ New idea", href: "#/new" },
         }));
         return;
       }

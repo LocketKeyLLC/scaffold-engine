@@ -46,7 +46,7 @@ export function errorPanel(err, retry) {
  * Full-card empty state with an optional call-to-action.
  * opts: { icon, title, body, small, action }.
  * action: { label, href?, onClick?, primary?, newTab? } — an <a> when href is
- * given (a CTA out to e.g. /web/new), otherwise a <button>. Defaults to primary.
+ * given (a CTA to e.g. #/new), otherwise a <button>. Defaults to primary.
  */
 export function emptyState({ icon, title, body, small = false, action } = {}) {
   const kids = [];

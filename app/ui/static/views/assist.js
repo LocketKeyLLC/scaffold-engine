@@ -65,7 +65,7 @@ function renderPicker(container) {
           icon: "✦",
           title: "No assist sessions",
           body: "Park a job as a plan (status: awaiting_assist) to drive it step-by-step here with the assistant.",
-          action: { label: "＋ New idea", href: "/web/new" },
+          action: { label: "＋ New idea", href: "#/new" },
         }));
         return;
       }

@@ -22059,6 +22059,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.784 Feature — native in-SPA "New idea" compose view: idea creation without leaving `/ui` (2026-08-15)
+
+**Why.** Follow-on to the §17.780–783 sweep. §17.782 gave the empty states and welcome card real CTAs, but with no native compose view in the SPA they linked **out** to the legacy HTMX `/web/new` form — a jarring full-page context switch out of the operator app just to start a job. This closes that gap so the whole create → approve → watch → collect loop lives in `/ui`.
+
+**What.** New `views/compose.js` (route `/new`, `VIEWS.new → lazy("compose")`): a textarea + domain `<select>` (mirrors `app/web/routes.py::_ALLOWED_DOMAINS` — `prompt/rag/llm/spec/eng/eng_design` + auto-detect; no API exposes that list) that POSTs `{idea, domain|null}` to **`/ideate/start`** — the same async Phase-1 kickoff the web form uses (returns a `job_id` in ms, refinement runs server-side). On success it toasts and `router.navigate("/")` to the dashboard, where the `refining` job shows under Active work immediately and the Approve action appears once it reaches `awaiting_confirmation`; on error it re-enables and toasts the detail. Empty-idea guard is inline; ⌘/Ctrl+Enter submits. Wired everywhere: a "＋ New idea" **sidebar nav item** (first, `NAV`), a **Ctrl-K palette** command, and the **six §17.782 CTAs** (`output`/`approvals`/`theater`/`dag`/`assist` empties + the dashboard welcome card) all re-pointed from `/web/new` → `#/new`. Still pure vanilla + CSS, no deps, CSP-clean; `/web/*` remains as the fallback.
+
+**Verification. LIVE (headless Chromium):** reached via the sidebar nav item → renders (`h1`, textarea, select, `hash=#/new`); empty submit shows the inline "Describe your idea first."; a **stubbed** `/ideate/start` proved the exact request body `{"idea":"…","domain":"eng"}` and the success handoff (navigates to `#/`, "Idea submitted — refining now" toast); then a **real** end-to-end submit against the live endpoint returned `200 {job_id, status:"refining"}` and landed on the dashboard — and the created job was **cancelled** afterward (`refining → cancelled`, verified in the response) so no refinement compute was wasted. Served via the dev bind-mount, no restart.
+
+---
+
 ### §17.783 Improvement — operator SPA mobile read views: off-canvas nav drawer, stacked multi-column grids, no horizontal overflow (Phase 4) (2026-08-15)
 
 **Why.** Phase 4 (final) of the UI foundations sweep. The SPA had **zero** responsive design — `app.css` carried only a `prefers-color-scheme` query, no width breakpoints. `.shell` was a hard 2-column grid (`220px` sidebar + content) that never collapsed, and the interaction-heavy surfaces were fixed multi-column grids (`theater-grid 300px 1fr`, `chat-grid 1fr 320px`, `compare-grid/compare-picker 1fr 1fr`, `diff-grid 1fr 1fr`, `runner-grid 1fr 140px 180px auto`, `brief-field 150px 1fr`) that overflowed a phone viewport. On mobile the sidebar ate ~60% of a 375px screen with no way to dismiss it. Per the sweep's framing this is about **read** views — consuming dashboards/outputs/runs on a phone — not full mobile editing.

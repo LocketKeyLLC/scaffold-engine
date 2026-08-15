@@ -74,7 +74,7 @@ function renderList(container) {
           icon: "✓",
           title: "All caught up",
           body: "No jobs are waiting for a go/no-go. New ideas that need approval before running land here.",
-          action: { label: "＋ New idea", href: "/web/new" },
+          action: { label: "＋ New idea", href: "#/new" },
         }));
         return;
       }

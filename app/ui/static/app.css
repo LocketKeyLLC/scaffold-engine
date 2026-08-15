@@ -368,6 +368,14 @@ select.input:focus-visible,
 .md-pre { background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; overflow-x: auto; }
 .md-pre code { background: none; padding: 0; }
 
+/* ── Compose (New idea) ───────────────────────────────────────────── */
+.compose-card { max-width: 720px; display: flex; flex-direction: column; gap: var(--sp-1); }
+.compose-label { font-size: var(--fs-2xs); text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-faint); margin-top: var(--sp-3); }
+.compose-idea { resize: vertical; min-height: 180px; font-family: var(--sans); line-height: 1.5; }
+.compose-hint { font-size: var(--fs-xs); margin-top: var(--sp-1); }
+.compose-actions { gap: var(--sp-3); margin-top: var(--sp-4); }
+.compose-status { color: var(--warn); font-size: var(--fs-sm); }
+
 /* ── Dashboard ────────────────────────────────────────────────────── */
 .loading-block { display: flex; align-items: center; gap: 10px; padding: 40px; color: var(--text-dim); }
 .stat.clickable { cursor: pointer; transition: border-color var(--dur-fast); }

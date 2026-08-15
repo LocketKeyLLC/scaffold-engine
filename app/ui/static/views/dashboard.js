@@ -151,7 +151,7 @@ export default function dashboard(container) {
       el(
         "div",
         { class: "welcome-actions row" },
-        el("a", { class: "btn btn-primary", href: "/web/new", text: "＋ Create your first idea" }),
+        el("a", { class: "btn btn-primary", href: "#/new", text: "＋ Create your first idea" }),
         el("button", {
           class: "btn btn-ghost btn-sm",
           text: "Dismiss",

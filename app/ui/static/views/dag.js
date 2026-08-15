@@ -153,7 +153,7 @@ function renderPicker(container) {
           icon: "⬡",
           title: "No DAGs yet",
           body: "Approve a plan for a job and its dependency graph appears here, ready to inspect and pan.",
-          action: { label: "＋ New idea", href: "/web/new" },
+          action: { label: "＋ New idea", href: "#/new" },
         }));
         return;
       }

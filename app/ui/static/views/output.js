@@ -36,7 +36,7 @@ function renderPicker(container) {
           icon: "▤",
           title: "No outputs yet",
           body: "Finished jobs and their compiled deliverables show up here. Start something to see its output.",
-          action: { label: "＋ New idea", href: "/web/new" },
+          action: { label: "＋ New idea", href: "#/new" },
         }));
         return;
       }
