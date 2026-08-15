@@ -501,7 +501,16 @@ class ScheduleCreate(BaseModel):
     cron_expression: str  # e.g. "0 9 * * 1" = Mondays at 09:00 in `timezone`
     depth: ResearchDepth = "medium"
     timezone: str = "UTC"  # IANA tz name, e.g. "America/New_York"
+    # §17.797 — optional ingest-domain override for the recurring run. None =
+    # auto-detect (the pre-existing behavior). Required to feed partitions the
+    # classifier never routes to on its own — notably eng_design (§17.796).
+    domain: str | None = None
     model_overrides: dict | None = None
+
+    @field_validator("domain")
+    @classmethod
+    def _validate_domain(cls, v: str | None) -> str | None:
+        return _domain_or_422(v)
 
 
 class ScheduleResponse(BaseModel):
@@ -510,6 +519,7 @@ class ScheduleResponse(BaseModel):
     depth: str
     cron_expression: str
     timezone: str = "UTC"
+    domain: str | None = None  # §17.797 — ingest-domain override (None = auto-detect)
     enabled: bool
     last_run_at: datetime | None = None
     last_status: str | None = None

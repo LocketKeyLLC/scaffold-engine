@@ -24,8 +24,8 @@ class TestSchedulerLifecycle:
         from app import scheduler as sched_mod
 
         fake_rows = [
-            {"id": 1, "topic": "k8s news", "depth": "medium", "cron_expression": "0 9 * * 1", "timezone": "UTC"},
-            {"id": 2, "topic": "rust release notes", "depth": "shallow", "cron_expression": "0 12 * * *", "timezone": "America/New_York"},
+            {"id": 1, "topic": "k8s news", "depth": "medium", "cron_expression": "0 9 * * 1", "timezone": "UTC", "domain": None},
+            {"id": 2, "topic": "rust release notes", "depth": "shallow", "cron_expression": "0 12 * * *", "timezone": "America/New_York", "domain": "eng_design"},
         ]
         mock_session = MagicMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
@@ -241,6 +241,58 @@ class TestExecuteResearchJob:
         params = call[0][1] if len(call[0]) > 1 else call[1]
         assert params.get("jid") == "abc-123"
         assert params.get("st") == "success"
+
+
+    @pytest.mark.asyncio
+    async def test_domain_pinned_into_run_research(self):
+        """§17.797 — a scheduled job's domain override reaches run_research so
+        the ingest lands in that partition (e.g. eng_design, §17.796)."""
+        from app import scheduler as sched_mod
+
+        captured = {}
+
+        async def capture(*args, **kwargs):
+            captured.update(kwargs)
+            yield 'event: research_complete\ndata: {"summary": "done"}\n\n'
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock()
+        mock_session.commit = AsyncMock()
+        sched_mod._scheduler = None
+
+        with patch.object(sched_mod, "async_session", return_value=mock_session), \
+             patch("app.modules.research_agent.run_research", side_effect=capture):
+            await sched_mod._execute_research_job(7, "github:foo/bar", "shallow", "eng_design")
+
+        assert captured.get("domain") == "eng_design"
+
+
+    @pytest.mark.asyncio
+    async def test_domain_defaults_none_for_legacy_3arg_jobs(self):
+        """§17.797 — APScheduler jobs persisted before this change bind with only
+        3 args; the domain default keeps them working (auto-detect, domain=None)."""
+        from app import scheduler as sched_mod
+
+        captured = {}
+
+        async def capture(*args, **kwargs):
+            captured.update(kwargs)
+            yield 'event: research_complete\ndata: {"summary": "done"}\n\n'
+
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock()
+        mock_session.commit = AsyncMock()
+        sched_mod._scheduler = None
+
+        with patch.object(sched_mod, "async_session", return_value=mock_session), \
+             patch("app.modules.research_agent.run_research", side_effect=capture):
+            await sched_mod._execute_research_job(8, "topic", "shallow")  # legacy 3-arg call
+
+        assert "domain" in captured and captured["domain"] is None
 
 
     @pytest.mark.asyncio
