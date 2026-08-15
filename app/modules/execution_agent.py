@@ -949,6 +949,7 @@ async def execute_next_node(
     skip_verify: bool = False,
     model_overrides: dict | None = None,
     preclaimed_node: dict | None = None,
+    token_q: "asyncio.Queue[str] | None" = None,
 ) -> dict:
     """Execute the next pending node in the DAG.
 
@@ -967,6 +968,14 @@ async def execute_next_node(
     finalization via a no-preclaim call. The all-done autocomplete at the end
     of the per-node body is idempotent (UPDATE ... WHERE status!='completed'),
     so concurrent workers finishing the last node race safely.
+
+    §17.776 — ``token_q``: when the caller passes an ``asyncio.Queue`` AND
+    ``settings.node_token_streaming_enabled`` is on, the LLM generation phase
+    streams content deltas (via ``model_router.stream_chat``) and pushes one
+    pre-formatted ``node_token`` SSE frame per chunk onto the queue; the caller
+    (``execute_all_nodes``) drains it into its output stream. None (every path
+    that doesn't opt in) → the existing non-stream generation, byte-identical.
+    Best-of-N nodes never stream (they generate N candidates and pick one).
     """
     # ---- Phase 1 (fast session): validate + claim next node ----
     async with async_session() as db:
@@ -1500,11 +1509,72 @@ async def execute_next_node(
                 raise RuntimeError(resp.error or "Model returned failure")
             return resp.text.strip()
 
+        async def _run_inference_streaming():
+            # §17.776 — token-streaming variant of _run_inference. Streams
+            # content deltas via model_router.stream_chat and pushes one
+            # pre-formatted `node_token` SSE frame per chunk onto token_q; the
+            # caller drains it into the live SSE stream. Mirrors the assist-guide
+            # streamed-walkthrough pattern (§17.493): stream for UX, then fall
+            # back through the non-stream chat_until_nonempty when the stream
+            # yielded nothing — that preserves BOTH the §17.465 empty-guard AND
+            # cost tracking (stream_chat does not _record_call; chat does). A
+            # mid-stream provider error is swallowed here so the empty-guard
+            # fallback re-runs the draw on the recorded path.
+            system_prompt = _system_for_tool(tool)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": exec_prompt},
+            ]
+            chunks: list[str] = []
+            try:
+                async for delta in model_router.stream_chat(
+                    messages,
+                    role=exec_role,
+                    overrides=exec_overrides,
+                    temperature=0.7,
+                    max_tokens=settings.node_generation_max_tokens,
+                ):
+                    if delta:
+                        chunks.append(delta)
+                        await token_q.put(_sse_event("node_token", {
+                            "job_id": job_id, "node_key": node_key, "delta": delta,
+                        }))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — fall back to recorded path
+                logger.warning(
+                    "node_token_stream_failed: node=%s error=%s (falling back to chat)",
+                    node_key, exc,
+                )
+            text_out = "".join(chunks).strip()
+            if not text_out:
+                resp = await chat_until_nonempty(
+                    model_router.chat,
+                    messages,
+                    {"role": exec_role, "overrides": exec_overrides},
+                    temperature=0.7,
+                    max_tokens=settings.node_generation_max_tokens,
+                    draws=settings.node_generation_max_draws,
+                    label=f"node-exec-stream-fallback {node_key}",
+                )
+                if not resp.success:
+                    raise RuntimeError(resp.error or "Model returned failure")
+                text_out = resp.text.strip()
+            return text_out
+
+        _stream_eligible = (
+            settings.node_token_streaming_enabled and token_q is not None
+        )
         if _best_of_n_eligible:
             # §17.578 — generate N candidates, keep the best-grounded one.
+            # (No token streaming: N parallel candidates would interleave.)
             output = await asyncio.wait_for(
                 _best_of_n_inference(_run_inference, _upstream_block, node_key),
                 timeout=settings.node_timeout_seconds,
+            )
+        elif _stream_eligible:
+            output = await asyncio.wait_for(
+                _run_inference_streaming(), timeout=settings.node_timeout_seconds
             )
         else:
             output = await asyncio.wait_for(_run_inference(), timeout=settings.node_timeout_seconds)
@@ -2374,8 +2444,19 @@ async def execute_all_nodes(
 
             hb_task = asyncio.create_task(_heartbeat_producer())
             ka_task = asyncio.create_task(_keepalive_loop())  # §17.261
+            # §17.776 — reuse keepalive_queue as the token sink: it already
+            # carries pre-formatted SSE strings drained by the beat loop below,
+            # so node_token frames interleave with keepalives on one queue and
+            # flush the moment the drain's get() unblocks. token_q=None when the
+            # valve is off → execute_next_node takes the non-stream path,
+            # byte-identical to pre-§17.776.
+            _token_sink = (
+                keepalive_queue if settings.node_token_streaming_enabled else None
+            )
             exec_task = asyncio.create_task(
-                execute_next_node(job_id, model_overrides=model_overrides)
+                execute_next_node(
+                    job_id, model_overrides=model_overrides, token_q=_token_sink,
+                )
             )
             try:
                 while not exec_task.done():

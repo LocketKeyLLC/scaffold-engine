@@ -1096,6 +1096,17 @@ class Settings(BaseSettings):
     # draw almost always lands non-empty. Cheaper than a full node retry
     # (re-optimize + re-verify) and it does not consume a retry_count slot.
     node_generation_max_draws: int = Field(default=3, ge=1, le=5)
+    # §17.776 — stream per-node LLM content deltas to the SSE consumer as
+    # `node_token` events, so the operator sees output as it generates instead
+    # of waiting for the full `node_done`. Default OFF: the streaming path uses
+    # model_router.stream_chat, which (unlike chat) does NOT _record_call token
+    # usage mid-stream — so a fully-streamed node isn't cost-tracked. The
+    # empty-guard fallback (§17.465) still runs through the non-stream chat and
+    # IS recorded. Opt in per-host when live-token UX matters more than exact
+    # per-node cost attribution. Only the serial execute path streams tokens
+    # today; the parallel-frontier path is unaffected when this is on (its
+    # per-node deltas are a deferred follow-up).
+    node_token_streaming_enabled: bool = Field(default=False)
     max_upstream_chars: int = Field(default=8000, ge=100, le=200000)
     # §17.477 (Phase 3) — when over max_upstream_chars, allocate each upstream
     # node's surviving char budget by (verifier confidence × length) instead of
