@@ -552,6 +552,15 @@ class Settings(BaseSettings):
     # behaviour. faithfulness_model_role picks which role scores it.
     faithfulness_check_enabled: bool = False
     faithfulness_model_role: str = "model_verifier"
+    # §17.798 — citation faithfulness (per-citation ATTRIBUTION). Where B1
+    # faithfulness scores a claim against the whole context blob, this checks
+    # whether each inline `[n]` citation's SPECIFIC source supports the sentence
+    # it's attached to (ALCE citation precision). Extends the same black-box /
+    # fail-soft lineage as faithfulness + CoVe; wired into the eval gate
+    # (score_retrieval.py --citation-faithfulness + the live gate test).
+    # Default-OFF; one LLM judge-call per scored answer.
+    citation_faithfulness_check_enabled: bool = False
+    citation_faithfulness_model_role: str = "model_verifier"
     # §17.662 — after a research run, surface a small set of user-tailored
     # decision OPTIONS ("branch out into choices that suit the user's needs")
     # when the topic is decision-shaped. ONLY-WHEN-APPLICABLE: the model returns

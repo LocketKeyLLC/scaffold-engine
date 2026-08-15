@@ -85,6 +85,11 @@ class QueryResult:
     # context. Populated only with --faithfulness (LLM call per query); None
     # otherwise, and None on a scorer miss (fail-soft, see faithfulness.py).
     faithfulness: float | None = None
+    # §17.798 — citation faithfulness (per-citation ATTRIBUTION). Generate a
+    # CITE-AWARE answer over numbered sources, then score whether each `[n]`
+    # cites a source that actually supports it. Only with --citation-faithfulness;
+    # None otherwise and None on a scorer miss (fail-soft).
+    citation_faithfulness: float | None = None
 
 
 def _relevance_vector(expected_substrs: list[str], titles: list[str]) -> list[bool]:
@@ -150,7 +155,50 @@ async def _score_faithfulness(query: str, rows: list[dict]) -> float | None:
     return scored["score"] if scored else None
 
 
-async def score_query(item: dict, top_k: int = 10, faithfulness: bool = False) -> QueryResult:
+def _build_numbered_sources(rows: list[dict], k: int = _FAITHFULNESS_TOP_K) -> list[str]:
+    """Top-k retrieved contents as a 1-indexed source list (source [n] = [n-1])."""
+    out = []
+    for r in rows[:k]:
+        title = (r.get("title") or "").strip()
+        content = (r.get("content") or "").strip()
+        if content:
+            out.append(f"{title}\n{content}" if title else content)
+    return out
+
+
+async def _score_citation_faithfulness(query: str, rows: list[dict]) -> float | None:
+    """§17.798 — generate a CITE-AWARE answer over numbered sources, then score
+    per-citation attribution. Fail-soft (None at any empty/miss step)."""
+    from app import model_router
+    from app.modules.citation_faithfulness import (
+        CITE_ANSWER_SYSTEM,
+        score_citation_faithfulness,
+    )
+
+    sources = _build_numbered_sources(rows)
+    if not sources:
+        return None
+    numbered = "\n\n".join(f"[{i}] {s}" for i, s in enumerate(sources, start=1))
+    resp = await model_router.generate(
+        prompt=f"Question: {query}\n\nSOURCES:\n{numbered}",
+        role="model_general",
+        system=CITE_ANSWER_SYSTEM,
+        temperature=0.0,
+        max_tokens=512,
+    )
+    answer = (getattr(resp, "text", "") or "").strip()
+    if not answer:
+        return None
+    scored = await score_citation_faithfulness(answer, sources)
+    return scored["score"] if scored else None
+
+
+async def score_query(
+    item: dict,
+    top_k: int = 10,
+    faithfulness: bool = False,
+    citation_faithfulness: bool = False,
+) -> QueryResult:
     query = item["query"]
     expected_titles = item.get("expected_titles_contain", [])
     expected_ids = item.get("expected_entry_ids", [])
@@ -163,6 +211,7 @@ async def score_query(item: dict, top_k: int = 10, faithfulness: bool = False) -
     rels = _relevance_vector(expected_titles, retrieved_titles)
     n_rel = _n_relevant(item)
     faith = await _score_faithfulness(query, rows) if faithfulness else None
+    cite_faith = await _score_citation_faithfulness(query, rows) if citation_faithfulness else None
 
     return QueryResult(
         query=query,
@@ -178,18 +227,31 @@ async def score_query(item: dict, top_k: int = 10, faithfulness: bool = False) -
         context_recall=context_recall(rels, n_rel),
         n_relevant=n_rel,
         faithfulness=faith,
+        citation_faithfulness=cite_faith,
     )
 
 
-async def run(golden_path: Path, output_path: Path, faithfulness: bool = False) -> dict:
+async def run(
+    golden_path: Path,
+    output_path: Path,
+    faithfulness: bool = False,
+    citation_faithfulness: bool = False,
+) -> dict:
     init_clients()
     golden = json.loads(golden_path.read_text())["pairs"]
-    results = [await score_query(item, faithfulness=faithfulness) for item in golden]
+    results = [
+        await score_query(
+            item, faithfulness=faithfulness, citation_faithfulness=citation_faithfulness
+        )
+        for item in golden
+    ]
     n = len(results)
 
     # §17.794 — faithfulness is fail-soft (None on a scorer miss); average only
     # over the queries that actually scored so a few misses don't skew it.
     faith_scored = [r.faithfulness for r in results if r.faithfulness is not None]
+    # §17.798 — same fail-soft averaging for citation faithfulness.
+    cite_scored = [r.citation_faithfulness for r in results if r.citation_faithfulness is not None]
 
     summary = {
         "schema": "title_substring_v1",
@@ -203,6 +265,9 @@ async def run(golden_path: Path, output_path: Path, faithfulness: bool = False) 
         "mean_context_recall": mean(r.context_recall for r in results) if n else 0.0,
         "mean_faithfulness": mean(faith_scored) if faith_scored else None,
         "faithfulness_scored": len(faith_scored),
+        # §17.798 — RAGAS-adjacent citation (attribution) faithfulness
+        "mean_citation_faithfulness": mean(cite_scored) if cite_scored else None,
+        "citation_faithfulness_scored": len(cite_scored),
         "per_query": [asdict(r) for r in results],
     }
 
@@ -225,6 +290,11 @@ def _print_report(summary: dict) -> None:
         print(f"Faithfulness:         {mf:.3f}  (RAGAS, n={summary['faithfulness_scored']})")
     else:
         print(f"Faithfulness:         n/a  (pass --faithfulness to score)")
+    mcf = summary.get("mean_citation_faithfulness")
+    if mcf is not None:
+        print(f"Citation faithfulness:{mcf:.3f}  (attribution, §17.798, n={summary['citation_faithfulness_scored']})")
+    else:
+        print(f"Citation faithfulness:n/a  (pass --citation-faithfulness to score)")
     print(f"Exact-id coverage:    {summary['exact_id_coverage']:.1%}  (archival — see §17.229)")
     print("=" * 60)
     misses = [r for r in summary["per_query"] if not r["title_hit_at_10"]]
@@ -245,13 +315,25 @@ def main() -> int:
         "answer from the retrieved context, then judge its groundedness). "
         "Off by default — the deterministic metrics stay cheap.",
     )
+    parser.add_argument(
+        "--citation-faithfulness",
+        action="store_true",
+        help="Also score citation (attribution) faithfulness (§17.798: generate "
+        "a CITE-AWARE answer over numbered sources, then judge whether each "
+        "[n] cites a source that actually supports it). LLM calls per query; "
+        "off by default.",
+    )
     args = parser.parse_args()
 
     if not args.golden.exists():
         print(f"ERROR: golden set not found at {args.golden}", file=sys.stderr)
         return 1
 
-    summary = asyncio.run(run(args.golden, args.output, faithfulness=args.faithfulness))
+    summary = asyncio.run(run(
+        args.golden, args.output,
+        faithfulness=args.faithfulness,
+        citation_faithfulness=args.citation_faithfulness,
+    ))
     _print_report(summary)
     print(f"\nFull report: {args.output}")
     return 0

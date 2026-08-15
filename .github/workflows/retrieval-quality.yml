@@ -11,6 +11,9 @@ on:
       - 'tests/test_score_retrieval.py'
       - 'tests/test_retrieval_metrics.py'
       - 'tests/test_rag_pipeline_smoke.py'
+      # §17.798 — citation-faithfulness parser (pure, no services)
+      - 'app/modules/citation_faithfulness.py'
+      - 'tests/test_citation_faithfulness_17798.py'
       # §17.432 — self-trigger so edits to this workflow re-run it (its own
       # fix can't be proven otherwise; the paths above don't include it).
       - '.github/workflows/retrieval-quality.yml'
@@ -56,7 +59,7 @@ jobs:
         env:
           SCAFFOLD_API_KEY: "test-key-for-ci"
           PYTHONPATH: "."
-        run: pytest tests/test_retrieval_metrics.py tests/test_score_retrieval.py tests/test_rag_pipeline_smoke.py -v
+        run: pytest tests/test_retrieval_metrics.py tests/test_score_retrieval.py tests/test_rag_pipeline_smoke.py tests/test_citation_faithfulness_17798.py -v
 
       - name: Upload report if present
         if: always()
