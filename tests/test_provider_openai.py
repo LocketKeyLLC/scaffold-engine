@@ -18,7 +18,12 @@ from app.providers.base import (
     Tool,
     ToolCall,
 )
-from app.providers.openai import OpenAIProvider
+from app.providers.openai import (
+    OpenAIProvider,
+    _apply_model_params,
+    _is_reasoning_model,
+    _schema_is_strict_ready,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -663,3 +668,131 @@ async def test_tool_call_extracts_openai_error_on_non_200(fake_client):
     assert resp.success is False
     assert "rate_limit_exceeded" in resp.error
     assert resp.tool_calls == []
+
+
+# ===========================================================================
+# §17.789 — provider bump: reasoning-model params, strict structured outputs,
+# streamed usage/refusal.
+# ===========================================================================
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("model,expected", [
+    ("o1", True), ("o1-mini", True), ("o1-2024-12-17", True),
+    ("o3", True), ("o3-mini", True), ("o4-mini", True),
+    ("gpt-5", True), ("gpt-5-mini", True), ("openai/gpt-5", True),
+    ("gpt-4o", False), ("gpt-4o-mini", False), ("gpt-4", False),
+    ("deepseek-v4-pro:cloud", False), ("", False),
+])
+def test_is_reasoning_model(model, expected):
+    assert _is_reasoning_model(model) is expected
+
+
+@pytest.mark.smoke
+def test_apply_model_params_reasoning_uses_completion_tokens_no_temperature():
+    p: dict = {}
+    _apply_model_params(p, "o3-mini", temperature=0.7, max_tokens=1234)
+    assert p["max_completion_tokens"] == 1234
+    assert "max_tokens" not in p
+    assert "temperature" not in p
+
+
+@pytest.mark.smoke
+def test_apply_model_params_standard_uses_legacy_pair():
+    p: dict = {}
+    _apply_model_params(p, "gpt-4o-mini", temperature=0.3, max_tokens=999)
+    assert p["max_tokens"] == 999
+    assert p["temperature"] == 0.3
+    assert "max_completion_tokens" not in p
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("schema,ready", [
+    ({"type": "object", "properties": {"a": {"type": "string"}},
+      "required": ["a"], "additionalProperties": False}, True),
+    # missing additionalProperties:false
+    ({"type": "object", "properties": {"a": {"type": "string"}},
+      "required": ["a"]}, False),
+    # required != all keys
+    ({"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+      "required": ["a"], "additionalProperties": False}, False),
+    # nested non-strict object
+    ({"type": "object", "properties": {"a": {"type": "object", "properties": {"x": {}}}},
+      "required": ["a"], "additionalProperties": False}, False),
+    # array of strict objects
+    ({"type": "object", "additionalProperties": False, "required": ["items"],
+      "properties": {"items": {"type": "array", "items": {
+          "type": "object", "additionalProperties": False,
+          "required": ["n"], "properties": {"n": {"type": "integer"}}}}}}, True),
+    # leaf / non-object
+    ({"type": "string"}, True),
+])
+def test_schema_is_strict_ready(schema, ready):
+    assert _schema_is_strict_ready(schema) is ready
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_reasoning_model_payload(fake_client):
+    """A reasoning model sends max_completion_tokens and omits max_tokens/temperature."""
+    fake_client.post.return_value = _resp(200, {
+        "model": "o3-mini",
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    })
+    p = OpenAIProvider()
+    await p.chat_completion("o3-mini", [{"role": "user", "content": "x"}],
+                            temperature=0.7, max_tokens=500)
+    payload = fake_client.post.call_args.kwargs["json"]
+    assert payload["max_completion_tokens"] == 500
+    assert "max_tokens" not in payload
+    assert "temperature" not in payload
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_standard_model_payload_unchanged(fake_client):
+    """Regression: a standard model keeps the legacy max_tokens + temperature."""
+    fake_client.post.return_value = _resp(200, {
+        "model": "gpt-4o-mini",
+        "choices": [{"message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    })
+    p = OpenAIProvider()
+    await p.chat_completion("gpt-4o-mini", [{"role": "user", "content": "x"}],
+                            temperature=0.5, max_tokens=321)
+    payload = fake_client.post.call_args.kwargs["json"]
+    assert payload["max_tokens"] == 321
+    assert payload["temperature"] == 0.5
+    assert "max_completion_tokens" not in payload
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_requests_usage_and_skips_usage_chunk(fake_client):
+    """stream_options.include_usage is sent; the terminal usage chunk (no
+    choices) is skipped without error, content still streams."""
+    captured = {}
+
+    def _recording_stream(*args, **kwargs):
+        captured["json"] = kwargs.get("json")
+        return _FakeStreamCtx(_FakeStreamResp(200, lines=[
+            'data: {"choices": [{"delta": {"content": "hi"}}]}',
+            'data: {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 1}}',
+            'data: [DONE]',
+        ]))
+
+    fake_client.stream = _recording_stream
+    p = OpenAIProvider()
+    chunks = [c async for c in p.stream_chat("gpt-4o-mini", [{"role": "user", "content": "x"}])]
+    assert chunks == ["hi"]
+    assert captured["json"]["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_surfaces_refusal_as_text(fake_client):
+    """A safety refusal delta is surfaced as visible text, not an empty stream."""
+    fake_client.stream = _fake_stream(lines=[
+        'data: {"choices": [{"delta": {"refusal": "I cannot help with that."}}]}',
+        'data: [DONE]',
+    ])
+    p = OpenAIProvider()
+    chunks = [c async for c in p.stream_chat("gpt-4o-mini", [{"role": "user", "content": "x"}])]
+    assert chunks == ["I cannot help with that."]
