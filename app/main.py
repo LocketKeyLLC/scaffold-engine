@@ -341,6 +341,30 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("model_overrides_hook_failed: err=%s", exc)
 
+    # §17.774 — Automatic crash-resume of jobs orphaned mid-execution. Must run
+    # AFTER migrations (needs the 061 resume counters) and AFTER the node sweep
+    # + model-overrides replay above (so a resumed job's node is 'pending' again
+    # and global per-role overrides are live before its drain starts). The
+    # startup sweep resets the interrupted node 'running'->'pending' but leaves
+    # the parent job 'running'; this re-launches execute_all_nodes for it,
+    # resuming at that node and reusing every already-'done' output. Bounded by
+    # the crash-loop guard; gated by execution_resume_on_startup_enabled
+    # (default on). Fail-soft — a hiccup here must not block startup.
+    try:
+        from app.modules.execution_resume import resume_orphaned_executions
+        resume_result = await resume_orphaned_executions()
+        if resume_result["skipped"]:
+            logger.info("crash_resume_skipped: reason=%s", resume_result["reason"])
+        elif resume_result["resumed"] or resume_result["budget_failed"]:
+            logger.info(
+                "crash_resume_startup: candidates=%d resumed=%d budget_failed=%d",
+                resume_result["candidates"],
+                len(resume_result["resumed"]),
+                len(resume_result["budget_failed"]),
+            )
+    except Exception as exc:
+        logger.warning("crash_resume_hook_failed: err=%s", exc)
+
     # §17.135 — Embedder-identity drift detection. Must run AFTER the
     # migration runner (we need the cache_metadata table) but BEFORE any
     # path that exercises the embedder. Fail-soft: a DB hiccup logs but
