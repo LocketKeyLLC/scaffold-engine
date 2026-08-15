@@ -121,7 +121,8 @@ def test_list_models_advertises_scaffold_engine(client):
 def test_chat_completion_non_stream(client):
     fake = ModelResponse(text="Hello world", success=True,
                          tokens_prompt=5, tokens_completion=2)
-    with patch("app.model_router.chat", AsyncMock(return_value=fake)):
+    with patch("app.native_chat.route", AsyncMock(return_value=None)), \
+         patch("app.model_router.chat", AsyncMock(return_value=fake)):
         r = client.post("/chat/completions", json={
             "model": "scaffold-engine",
             "messages": [{"role": "user", "content": "hi"}],
@@ -138,7 +139,8 @@ def test_chat_completion_non_stream(client):
 @pytest.mark.smoke
 def test_chat_completion_generation_failure_is_openai_error(client):
     fake = ModelResponse(text="", success=False, error="backend down")
-    with patch("app.model_router.chat", AsyncMock(return_value=fake)):
+    with patch("app.native_chat.route", AsyncMock(return_value=None)), \
+         patch("app.model_router.chat", AsyncMock(return_value=fake)):
         r = client.post("/chat/completions", json={
             "model": "scaffold-engine",
             "messages": [{"role": "user", "content": "hi"}],
@@ -155,7 +157,8 @@ def test_chat_completion_stream(client):
         for piece in ["Hel", "lo"]:
             yield piece
 
-    with patch("app.model_router.stream_chat", _fake_stream):
+    with patch("app.native_chat.route", AsyncMock(return_value=None)), \
+         patch("app.model_router.stream_chat", _fake_stream):
         r = client.post("/chat/completions", json={
             "model": "scaffold-engine",
             "messages": [{"role": "user", "content": "hi"}],
