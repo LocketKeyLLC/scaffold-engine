@@ -22059,6 +22059,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.795 Re-baseline `golden_set_corpus.json` against the live KB (corpus-2.0) (2026-08-15)
+
+The corpus-1.0 yardstick (built 2026-06-18 against a 1314-entry snapshot) scored **13.6% coverage** on the live KB — a pure snapshot mismatch, not a retrieval regression, confirmed via the §17.794 scoring harness. The corpus reshaped heavily since: **2997 entries now, but distributed eng=2618, rag=363, prompt=14, llm=1, spec=1, eng_design=0.** The 8086/DOS/EDA/llm targets corpus-1.0 labelled are simply gone.
+
+- **Operational findings (surfaced by the re-baseline, worth noting):** the **`llm` partition collapsed to 1 entry** (all 4 old llm queries returned the same lone "Quantization for LLMs" doc → llm-domain retrieval is effectively dead) and **`eng_design` emptied to 0** (all 5 EDA queries returned nothing — consistent with a `compose down` corpus wipe where only `eng`/`rag` were repopulated via `/research`). `eng` ballooned 801→2618 with homelab/Proxmox/networking ingests + Wikipedia topic dumps.
+- **`tests/fixtures/golden_set_corpus.json` (corpus-2.0)** — 22 pairs rewritten to target titles that EXIST now (homelab GPU-passthrough / OPNsense / Jellyfin / HP-V1910 / Palworld / ZFS / VFIO, the stable Wikipedia dumps, + the seeded rag/llm/prompt/spec anchors). `eng_design` dropped (empty). Every pair verified through the real `query_rag` and each substring match confirmed to hit the *intended* title (zero false positives). Case-insensitive AND-substrings (§17.230) caught the re-ingested lowercased title variants (e.g. `v1910-cli-vlan-configuration`). `measured_baseline` recorded in-fixture.
+- **Measured corpus-2.0 baseline (KB 2997):** coverage@5/@10 **1.000**, mean title-MRR **0.831**, RAGAS context precision **0.810**, context recall **1.000**. Coverage is 100% by design; MRR/precision < 1.0 is deliberate ranking headroom (several homelab targets sit behind near-duplicate siblings), so the yardstick can detect both regressions and improvements — a flat 1.000 would be blind to the latter.
+- **Scope:** `golden_set_corpus.json` is the manual before/after yardstick (run via `scripts/score_retrieval.py`), not consumed by any gated test — a pure fixture refresh, no code/CI impact.
+
+---
+
 ### §17.794 RAGAS metrics — context precision/recall (deterministic) + faithfulness (LLM) atop the retrieval goldens, CI-gated (2026-08-15)
 
 Completes the RAGAS triad the retrieval eval had been missing. §17.430 deliberately shipped only the deterministic ranking metrics (hit@k/MRR/nDCG@k) and *rejected* RAGAS-as-LLM-judge for retrieval; this adds the two RAGAS metrics that ARE deterministic given the goldens' labels (context precision/recall) as pure functions, and wires the already-existing LLM faithfulness (§17.448) as the third pillar behind a generate step — so all three run over the retrieval goldens.

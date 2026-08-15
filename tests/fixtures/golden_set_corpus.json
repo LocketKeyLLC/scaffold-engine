@@ -1,33 +1,41 @@
 {
-  "version": "corpus-1.0",
-  "note": "Corpus-matched golden set built 2026-06-18 against the live toon_v2 (1314 entries: eng=801, llm=369, rag=52, eng_design=38, prompt=21, spec=1). Unlike golden_set.json (whose expected_entry_ids point at pre-§17.63 content the corpus no longer holds — §17.211/§17.229, floored at 0%), every pair here targets a title that EXISTS in the current corpus. expected_titles_contain is a case-insensitive AND of substrings (§17.230 matching). Domains assigned so each target sits in the queried partition. Purpose: a non-zero before/after yardstick for retrieval changes (e.g. BM25 cutover).",
+  "version": "corpus-2.0",
+  "note": "Re-baselined 2026-08-15 against the live toon_v2 (2997 entries: eng=2618, rag=363, prompt=14, llm=1, spec=1, eng_design=0). Supersedes corpus-1.0 (built 2026-06-18 against a 1314-entry snapshot whose 8086/DOS/EDA/llm targets the corpus no longer holds — corpus-1.0 scored 13.6% coverage on 2026-08-15, a pure snapshot mismatch, not a retrieval regression). The corpus reshaped heavily via /research: eng ballooned with homelab/Proxmox/networking ingests + Wikipedia topic dumps; the llm partition collapsed to 1 entry and eng_design emptied to 0 (likely a compose-down wipe, only eng/rag repopulated). Every pair here targets a title that EXISTS in the current corpus and is verified to retrieve in the top-10 via scripts/score_retrieval.py. expected_titles_contain is a case-insensitive AND of substrings (§17.230 matching) — robust to the re-ingested lowercased title variants observed (e.g. 'v1910-cli-vlan-configuration'); expected_entry_ids left empty (non-deterministic across re-ingestion, §17.211/§17.229). Domains assigned so each target sits in the queried partition. eng_design omitted (empty partition). Purpose: a non-zero before/after yardstick for retrieval changes (e.g. BM25 cutover).",
+  "measured_baseline": {
+    "ts": "2026-08-15",
+    "kb_size": 2997,
+    "harness": "scripts/score_retrieval.py (§17.230 title-substring + §17.794 RAGAS ctx precision/recall)",
+    "metrics": {
+      "coverage_at_5": 1.0,
+      "coverage_at_10": 1.0,
+      "mean_title_mrr": 0.831,
+      "context_precision": 0.81,
+      "context_recall": 1.0
+    },
+    "note": "100% coverage by design (every pair verified present); MRR/precision < 1.0 because several homelab targets rank behind near-duplicate siblings (many OPNsense/Proxmox/Palworld/Plex-passthrough variants) — intentional ranking headroom so the yardstick can detect both regressions (coverage/rank drops) and improvements (rank climbs)."
+  },
   "pairs": [
-    {"query": "How does the 8086 compute a physical address from a segment register and offset?", "domain": "eng", "expected_titles_contain": ["8086", "Physical Address Calculation"], "expected_entry_ids": []},
-    {"query": "What does the DOS interrupt 21h do and how is it called?", "domain": "eng", "expected_titles_contain": ["interrupt 21"], "expected_entry_ids": []},
-    {"query": "How do I read a keystroke using the BIOS keyboard services?", "domain": "eng", "expected_titles_contain": ["keyboard", "services"], "expected_entry_ids": []},
-    {"query": "What is a BIOS interrupt call?", "domain": "eng", "expected_titles_contain": ["BIOS interrupt call"], "expected_entry_ids": []},
-    {"query": "How do you detect concept drift in a machine learning model?", "domain": "eng", "expected_titles_contain": ["concept drift"], "expected_entry_ids": []},
-    {"query": "What are best practices for memory architecture?", "domain": "eng", "expected_titles_contain": ["Memory Architecture", "Best Practices"], "expected_entry_ids": []},
-    {"query": "What are the core principles of instruction set architecture design?", "domain": "eng", "expected_titles_contain": ["ISA Design Principles"], "expected_entry_ids": []},
-    {"query": "Give an overview of the 8086 microprocessor architecture.", "domain": "eng", "expected_titles_contain": ["8086 Microprocessor Architecture"], "expected_entry_ids": []},
-
-    {"query": "How do I safely cross clock domains using a synchronizer?", "domain": "eng_design", "expected_titles_contain": ["synchronizer", "clock-domain"], "expected_entry_ids": []},
-    {"query": "Design a carry-lookahead adder.", "domain": "eng_design", "expected_titles_contain": ["Carry-lookahead adder"], "expected_entry_ids": []},
-    {"query": "How do I build a Sallen-Key low-pass filter?", "domain": "eng_design", "expected_titles_contain": ["Sallen-Key", "low-pass"], "expected_entry_ids": []},
-    {"query": "What is a Moore-style finite state machine?", "domain": "eng_design", "expected_titles_contain": ["Moore", "finite state machine"], "expected_entry_ids": []},
-    {"query": "How does an asynchronous FIFO for clock-domain crossing work?", "domain": "eng_design", "expected_titles_contain": ["Asynchronous FIFO"], "expected_entry_ids": []},
-
+    {"query": "How do I pass through an NVIDIA GPU to a Plex container?", "domain": "eng", "expected_titles_contain": ["NVIDIA", "Passthrough", "Plex"], "expected_entry_ids": []},
+    {"query": "How do I set up OPNsense high availability on Proxmox with CARP?", "domain": "eng", "expected_titles_contain": ["OPNsense", "HA", "CARP"], "expected_entry_ids": []},
+    {"query": "How do I enable Jellyfin hardware transcoding with an iGPU?", "domain": "eng", "expected_titles_contain": ["Jellyfin", "Transcoding", "iGPU"], "expected_entry_ids": []},
+    {"query": "How do I configure VLANs on an HP V1910 switch via the CLI?", "domain": "eng", "expected_titles_contain": ["V1910", "VLAN", "CLI"], "expected_entry_ids": []},
+    {"query": "How do I run a Palworld game server in a Proxmox container?", "domain": "eng", "expected_titles_contain": ["Palworld", "Proxmox", "Container"], "expected_entry_ids": []},
+    {"query": "How do I add a ZFS log device (SLOG) to my rpool?", "domain": "eng", "expected_titles_contain": ["zfs", "rpool"], "expected_entry_ids": []},
+    {"query": "What VPN is recommended for secure home lab access?", "domain": "eng", "expected_titles_contain": ["Tailscale", "Secure", "Home Lab"], "expected_entry_ids": []},
+    {"query": "Does the Intel N5105 support QuickSync for transcoding?", "domain": "eng", "expected_titles_contain": ["N5105", "QuickSync"], "expected_entry_ids": []},
+    {"query": "Can I pass through a Tesla P40 for AI inference?", "domain": "eng", "expected_titles_contain": ["Tesla-P40", "inference"], "expected_entry_ids": []},
+    {"query": "How do I enable VT-d for passthrough in a Supermicro BIOS?", "domain": "eng", "expected_titles_contain": ["VT-d", "Supermicro"], "expected_entry_ids": []},
+    {"query": "How do I fix a double NAT problem with OPNsense?", "domain": "eng", "expected_titles_contain": ["OPNsense", "Double-NAT"], "expected_entry_ids": []},
+    {"query": "How do I make a Proxmox bridge VLAN-aware?", "domain": "eng", "expected_titles_contain": ["Proxmox", "VLAN-aware", "bridge"], "expected_entry_ids": []},
+    {"query": "What is an AAA server used for in access control?", "domain": "eng", "expected_titles_contain": ["AAA", "Access Control"], "expected_entry_ids": []},
+    {"query": "Which VFIO kernel modules are required for GPU passthrough?", "domain": "eng", "expected_titles_contain": ["VFIO", "modules"], "expected_entry_ids": []},
+    {"query": "What are common software design patterns?", "domain": "eng", "expected_titles_contain": ["design pattern"], "expected_entry_ids": []},
+    {"query": "Explain the principles of test-driven development.", "domain": "eng", "expected_titles_contain": ["Test-driven development"], "expected_entry_ids": []},
+    {"query": "What is a vector database and how does it work?", "domain": "eng", "expected_titles_contain": ["Vector database"], "expected_entry_ids": []},
     {"query": "How do I do hybrid search combining BM25 and dense vectors with RRF?", "domain": "rag", "expected_titles_contain": ["Hybrid retrieval", "BM25"], "expected_entry_ids": []},
-    {"query": "How do I find the nearest neighbor of a sparse vector?", "domain": "rag", "expected_titles_contain": ["nearest neighbor", "sparse vector"], "expected_entry_ids": []},
-    {"query": "What is the difference between hashing and indexing?", "domain": "rag", "expected_titles_contain": ["hashing", "indexing"], "expected_entry_ids": []},
-
-    {"query": "How is hallucination evaluated in retrieval-augmented generation pipelines?", "domain": "llm", "expected_titles_contain": ["Hallucination Evaluation", "RAG"], "expected_entry_ids": []},
-    {"query": "How do I fine-tune the DPR retriever inside a RAG architecture?", "domain": "llm", "expected_titles_contain": ["Fine-tune", "DPR retriever"], "expected_entry_ids": []},
-    {"query": "How do I add millions of embeddings to a Faiss index?", "domain": "llm", "expected_titles_contain": ["embeddings", "Faiss Index"], "expected_entry_ids": []},
-    {"query": "How does the JavaScript Function.prototype.apply method work?", "domain": "llm", "expected_titles_contain": ["Function.prototype.apply"], "expected_entry_ids": []},
-
-    {"query": "Describe the LLM function-calling tool-use request and response loop.", "domain": "prompt", "expected_titles_contain": ["function-calling", "request/response loop"], "expected_entry_ids": []},
-
+    {"query": "How does int8/int4 quantization shrink an LLM's size?", "domain": "llm", "expected_titles_contain": ["Quantization", "int8"], "expected_entry_ids": []},
+    {"query": "What is chain-of-thought prompting?", "domain": "prompt", "expected_titles_contain": ["Chain-of-thought", "prompt engineering"], "expected_entry_ids": []},
+    {"query": "When should a welcome email be triggered in an onboarding sequence?", "domain": "prompt", "expected_titles_contain": ["welcome", "email"], "expected_entry_ids": []},
     {"query": "What is the TOON v2 entry format specification?", "domain": "spec", "expected_titles_contain": ["TOON v2", "entry format specification"], "expected_entry_ids": []}
   ]
 }
