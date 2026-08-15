@@ -22059,6 +22059,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.785 Improvement — composer deep-links to the approval detail, which now waits+polls through Phase 1 instead of dead-ending (2026-08-15)
+
+**Why.** §17.784's composer landed on the dashboard after submit because the approval **detail** view couldn't handle a job that wasn't yet `awaiting_confirmation`: its `load()` ran once and, for any other status, rendered a misleading "This job is no longer awaiting approval (status: refining)" and stopped — so a fresh `refining` job deep-linked there looked broken and never updated. Landing straight on the approval gate is the better flow (that's where the operator acts next), but only if the detail view tolerates the pre-approval window.
+
+**What.** `approvals.js::renderDetail` now branches on three status classes: `awaiting_confirmation` → the brief + Approve/Reject (unchanged); **`PRE_APPROVAL` (`pending`/`refining`) → a live "Refining your idea…" waiting card** (spinner + original-request preview + a Reject escape hatch) that **polls `/jobs/{id}` every 4 s and auto-renders the brief the moment it becomes approvable** (rendered once via a `waitingShown` guard so the spinner doesn't flicker per poll; `startWaitPoll`/`stopWaitPoll` reuse the existing `pollTimer`, cleared on teardown); everything else (`researching`/`executing`/`completed`/…) → the reworded "moved past the approval gate" card with onward links. `compose.js` now captures the returned `job_id` and `router.navigate(\`/approvals/${jobId}\`)` (falls back to `/` if none).
+
+**Verification. LIVE (headless Chromium):** (1) deterministic — stubbed `/jobs/{id}` to return `refining` then `awaiting_confirmation`: the page first showed the waiting spinner + message with no Approve button, and after one 4 s poll **auto-rendered** the Original request / Refined brief / Feasibility cards with the Approve button and no spinner. (2) real — submitted from the composer → landed on `#/approvals/<jobId>` with the waiting spinner live; the created job was then **cancelled** for cleanup (`awaiting_confirmation → cancelled`, per the response). Screenshots of both states captured.
+
+---
+
 ### §17.784 Feature — native in-SPA "New idea" compose view: idea creation without leaving `/ui` (2026-08-15)
 
 **Why.** Follow-on to the §17.780–783 sweep. §17.782 gave the empty states and welcome card real CTAs, but with no native compose view in the SPA they linked **out** to the legacy HTMX `/web/new` form — a jarring full-page context switch out of the operator app just to start a job. This closes that gap so the whole create → approve → watch → collect loop lives in `/ui`.

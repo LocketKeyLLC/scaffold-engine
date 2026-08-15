@@ -42,9 +42,13 @@ export default function compose(container) {
     const label = submit.textContent;
     submit.textContent = "Submitting…";
     try {
-      await api.post("/ideate/start", { idea: text, domain: domain.value || null });
-      toast("Idea submitted — refining now. It’ll appear under Active work.", "ok");
-      router.navigate("/"); // dashboard; refining jobs are visible immediately
+      const res = await api.post("/ideate/start", { idea: text, domain: domain.value || null });
+      const jobId = res && res.job_id;
+      toast("Idea submitted — refining now. Approve it here when it’s ready.", "ok");
+      // Deep-link to the approval detail: it shows a live "refining…" state and
+      // polls until the feasibility assessment is ready to approve. Fall back to
+      // the dashboard if no id came back.
+      router.navigate(jobId ? `/approvals/${jobId}` : "/");
     } catch (e) {
       busy = false;
       submit.disabled = false;

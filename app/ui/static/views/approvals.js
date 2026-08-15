@@ -7,6 +7,11 @@ import * as router from "../router.js";
 import { el, mount, shortId, timeAgo, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
 
+// Phase 1 in flight — feasibility not ready for approval yet (e.g. a job just
+// submitted from the composer). The detail view waits + polls through these
+// rather than dead-ending.
+const PRE_APPROVAL = new Set(["pending", "refining"]);
+
 // ── Render an arbitrary refined_brief / feasibility record safely ────────
 function renderValue(v) {
   if (v == null || v === "") return el("span", { class: "dim", text: "—" });
@@ -130,38 +135,81 @@ function renderDetail(container, jobId) {
   const approveBtn = el("button", { class: "btn btn-primary", text: "✓ Approve — research & plan", onClick: () => approve() });
   const rejectBtn = el("button", { class: "btn btn-danger", text: "✕ Reject (cancel)", onClick: () => reject() });
 
+  let waitingShown = false; // dedupe re-renders while polling the waiting state
+
+  function startWaitPoll() {
+    if (pollTimer) return;
+    pollTimer = setInterval(load, 4000);
+  }
+  function stopWaitPoll() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
   async function load() {
     try {
       const job = await api.get(`/jobs/${jobId}`);
       if (disposed) return;
-      if (job.status !== "awaiting_confirmation") {
-        // Already moved on — show status and route the operator onward.
+      const st = job.status;
+
+      if (st === "awaiting_confirmation") {
+        stopWaitPoll();
+        waitingShown = false;
         mount(
           outlet,
-          el(
-            "div",
-            { class: "card card-pad" },
-            el("div", { class: "row" }, statusBadge(job.status), el("h2", { class: "approval-title", text: job.title || "(untitled)" })),
-            el("p", { class: "dim", text: `This job is no longer awaiting approval (status: ${job.status}).` }),
-            el(
-              "div",
-              { class: "drawer-actions" },
-              (job.node_count || 0) > 0 ? el("a", { class: "btn btn-sm btn-primary", href: `#/plan/${jobId}`, text: "Open plan editor" }) : null,
-              job.has_compiled_output ? el("a", { class: "btn btn-sm", href: `#/output/${jobId}`, text: "View output" }) : null,
-              el("a", { class: "btn btn-sm btn-ghost", href: `#/dag/${jobId}`, text: "View DAG" })
-            )
-          )
+          el("div", { class: "row" }, statusBadge(st), el("h2", { class: "approval-title", text: job.title || "(untitled)" }), job.deliverable_kind ? el("span", { class: "tag", text: job.deliverable_kind }) : null),
+          job.input_text ? el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Original request" }), el("div", { class: "md", html: mdToHtml(job.input_text) })) : null,
+          el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Refined brief" }), renderRecord(job.refined_brief)),
+          el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Feasibility" }), renderRecord(job.feasibility)),
+          progress,
+          el("div", { class: "drawer-actions approval-actions" }, approveBtn, rejectBtn)
         );
         return;
       }
+
+      if (PRE_APPROVAL.has(st)) {
+        // Feasibility not ready yet — live waiting state; keep polling until it
+        // becomes approvable (or the operator cancels). Rendered once to avoid a
+        // spinner flicker on every poll.
+        if (!waitingShown) {
+          mount(
+            outlet,
+            el("div", { class: "row" }, statusBadge(st), el("h2", { class: "approval-title", text: job.title || "(untitled)" })),
+            el(
+              "div",
+              { class: "approval-progress" },
+              el("span", { class: "spin" }),
+              el("span", { class: "progress-msg", text: "Refining your idea — the feasibility assessment will appear here for approval (usually 1–9 min)." })
+            ),
+            job.input_text ? el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Original request" }), el("div", { class: "md", html: mdToHtml(job.input_text) })) : null,
+            el("div", { class: "drawer-actions" }, rejectBtn)
+          );
+          waitingShown = true;
+        }
+        startWaitPoll();
+        return;
+      }
+
+      // Past the approval gate already (researching/planning/executing/…).
+      stopWaitPoll();
+      waitingShown = false;
       mount(
         outlet,
-        el("div", { class: "row" }, statusBadge(job.status), el("h2", { class: "approval-title", text: job.title || "(untitled)" }), job.deliverable_kind ? el("span", { class: "tag", text: job.deliverable_kind }) : null),
-        job.input_text ? el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Original request" }), el("div", { class: "md", html: mdToHtml(job.input_text) })) : null,
-        el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Refined brief" }), renderRecord(job.refined_brief)),
-        el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Feasibility" }), renderRecord(job.feasibility)),
-        progress,
-        el("div", { class: "drawer-actions approval-actions" }, approveBtn, rejectBtn)
+        el(
+          "div",
+          { class: "card card-pad" },
+          el("div", { class: "row" }, statusBadge(st), el("h2", { class: "approval-title", text: job.title || "(untitled)" })),
+          el("p", { class: "dim", text: `This job has moved past the approval gate (status: ${st}).` }),
+          el(
+            "div",
+            { class: "drawer-actions" },
+            (job.node_count || 0) > 0 ? el("a", { class: "btn btn-sm btn-primary", href: `#/plan/${jobId}`, text: "Open plan editor" }) : null,
+            job.has_compiled_output ? el("a", { class: "btn btn-sm", href: `#/output/${jobId}`, text: "View output" }) : null,
+            el("a", { class: "btn btn-sm btn-ghost", href: `#/dag/${jobId}`, text: "View DAG" })
+          )
+        )
       );
     } catch (e) {
       if (!disposed) mount(outlet, errorPanel(e, () => load()));
