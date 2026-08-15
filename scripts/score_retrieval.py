@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.modules.rag_pipeline import query_rag
 from app.utils.http_clients import init_clients
+from app.utils.retrieval_metrics import context_precision, context_recall
 
 
 # ---------------------------------------------------------------------------
@@ -74,9 +75,82 @@ class QueryResult:
     title_hit_at_10: bool
     title_mrr: float
     exact_id_hit: bool
+    # §17.794 — RAGAS context precision / recall over the title-substring
+    # relevance (deterministic; no LLM). ``n_relevant`` is the labelled
+    # ground-truth target count for this query.
+    context_precision: float
+    context_recall: float
+    n_relevant: int
+    # §17.794 — RAGAS faithfulness of a generated answer against the retrieved
+    # context. Populated only with --faithfulness (LLM call per query); None
+    # otherwise, and None on a scorer miss (fail-soft, see faithfulness.py).
+    faithfulness: float | None = None
 
 
-async def score_query(item: dict, top_k: int = 10) -> QueryResult:
+def _relevance_vector(expected_substrs: list[str], titles: list[str]) -> list[bool]:
+    """Per-retrieved-title binary relevance (title contains ALL substrings)."""
+    return [_title_matches(t, expected_substrs) for t in titles]
+
+
+def _n_relevant(item: dict) -> int:
+    """Ground-truth relevant-target count for context recall's denominator.
+
+    Uses the number of labelled ``expected_entry_ids`` when present (multi-doc
+    queries carry 2-3), else 1 for a single-target golden. The corpus goldens
+    (§17.230) leave ``expected_entry_ids`` empty, so those default to 1 — where
+    context recall reduces to hit-any (documented in retrieval_metrics.py).
+    """
+    return max(1, len(item.get("expected_entry_ids", []) or []))
+
+
+_ANSWER_SYSTEM = (
+    "You are a precise technical assistant. Answer the question using ONLY the "
+    "provided context. Be concise (2-4 sentences). If the context does not "
+    "cover the question, say so rather than inventing an answer."
+)
+_FAITHFULNESS_CONTEXT_CHARS = 6_000
+_FAITHFULNESS_TOP_K = 5
+
+
+def _build_context(rows: list[dict], k: int = _FAITHFULNESS_TOP_K) -> str:
+    """Join the top-k retrieved contents into a single context block."""
+    chunks = []
+    for r in rows[:k]:
+        title = (r.get("title") or "").strip()
+        content = (r.get("content") or "").strip()
+        if content:
+            chunks.append(f"[{title}]\n{content}" if title else content)
+    return "\n\n".join(chunks)[:_FAITHFULNESS_CONTEXT_CHARS]
+
+
+async def _score_faithfulness(query: str, rows: list[dict]) -> float | None:
+    """query_rag context → generate an answer → RAGAS faithfulness of it.
+
+    Fail-soft: any empty/None at either step yields None (unscored), mirroring
+    faithfulness.py's contract so a scorer miss never crashes the run.
+    """
+    # Local imports: only the --faithfulness path pulls in the LLM stack.
+    from app import model_router
+    from app.modules.faithfulness import score_faithfulness
+
+    context = _build_context(rows)
+    if not context:
+        return None
+    resp = await model_router.generate(
+        prompt=f"Question: {query}\n\nContext:\n{context}",
+        role="model_general",
+        system=_ANSWER_SYSTEM,
+        temperature=0.0,
+        max_tokens=512,
+    )
+    answer = (getattr(resp, "text", "") or "").strip()
+    if not answer:
+        return None
+    scored = await score_faithfulness(answer, context)
+    return scored["score"] if scored else None
+
+
+async def score_query(item: dict, top_k: int = 10, faithfulness: bool = False) -> QueryResult:
     query = item["query"]
     expected_titles = item.get("expected_titles_contain", [])
     expected_ids = item.get("expected_entry_ids", [])
@@ -85,6 +159,10 @@ async def score_query(item: dict, top_k: int = 10) -> QueryResult:
     rows = results.get("results", [])
     retrieved_titles = [r.get("title", "") for r in rows]
     retrieved_ids = [r.get("entry_id", "") for r in rows]
+
+    rels = _relevance_vector(expected_titles, retrieved_titles)
+    n_rel = _n_relevant(item)
+    faith = await _score_faithfulness(query, rows) if faithfulness else None
 
     return QueryResult(
         query=query,
@@ -96,14 +174,22 @@ async def score_query(item: dict, top_k: int = 10) -> QueryResult:
         title_hit_at_10=_title_hit_at_k(expected_titles, retrieved_titles, 10),
         title_mrr=_title_mrr(expected_titles, retrieved_titles),
         exact_id_hit=bool(set(expected_ids) & set(retrieved_ids)),
+        context_precision=context_precision(rels),
+        context_recall=context_recall(rels, n_rel),
+        n_relevant=n_rel,
+        faithfulness=faith,
     )
 
 
-async def run(golden_path: Path, output_path: Path) -> dict:
+async def run(golden_path: Path, output_path: Path, faithfulness: bool = False) -> dict:
     init_clients()
     golden = json.loads(golden_path.read_text())["pairs"]
-    results = [await score_query(item) for item in golden]
+    results = [await score_query(item, faithfulness=faithfulness) for item in golden]
     n = len(results)
+
+    # §17.794 — faithfulness is fail-soft (None on a scorer miss); average only
+    # over the queries that actually scored so a few misses don't skew it.
+    faith_scored = [r.faithfulness for r in results if r.faithfulness is not None]
 
     summary = {
         "schema": "title_substring_v1",
@@ -112,6 +198,11 @@ async def run(golden_path: Path, output_path: Path) -> dict:
         "coverage_at_10": sum(1 for r in results if r.title_hit_at_10) / n if n else 0.0,
         "mean_title_mrr": mean(r.title_mrr for r in results) if n else 0.0,
         "exact_id_coverage": sum(1 for r in results if r.exact_id_hit) / n if n else 0.0,
+        # §17.794 — RAGAS metrics
+        "mean_context_precision": mean(r.context_precision for r in results) if n else 0.0,
+        "mean_context_recall": mean(r.context_recall for r in results) if n else 0.0,
+        "mean_faithfulness": mean(faith_scored) if faith_scored else None,
+        "faithfulness_scored": len(faith_scored),
         "per_query": [asdict(r) for r in results],
     }
 
@@ -127,6 +218,13 @@ def _print_report(summary: dict) -> None:
     print(f"Coverage @5:          {summary['coverage_at_5']:.1%}")
     print(f"Coverage @10:         {summary['coverage_at_10']:.1%}")
     print(f"Mean MRR (title):     {summary['mean_title_mrr']:.3f}")
+    print(f"Context precision:    {summary['mean_context_precision']:.3f}  (RAGAS, §17.794)")
+    print(f"Context recall:       {summary['mean_context_recall']:.3f}  (RAGAS, §17.794)")
+    mf = summary.get("mean_faithfulness")
+    if mf is not None:
+        print(f"Faithfulness:         {mf:.3f}  (RAGAS, n={summary['faithfulness_scored']})")
+    else:
+        print(f"Faithfulness:         n/a  (pass --faithfulness to score)")
     print(f"Exact-id coverage:    {summary['exact_id_coverage']:.1%}  (archival — see §17.229)")
     print("=" * 60)
     misses = [r for r in summary["per_query"] if not r["title_hit_at_10"]]
@@ -140,13 +238,20 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--golden", default="tests/fixtures/golden_set.json", type=Path)
     parser.add_argument("--output", default="retrieval_report.json", type=Path)
+    parser.add_argument(
+        "--faithfulness",
+        action="store_true",
+        help="Also score RAGAS faithfulness (LLM call per query: generate an "
+        "answer from the retrieved context, then judge its groundedness). "
+        "Off by default — the deterministic metrics stay cheap.",
+    )
     args = parser.parse_args()
 
     if not args.golden.exists():
         print(f"ERROR: golden set not found at {args.golden}", file=sys.stderr)
         return 1
 
-    summary = asyncio.run(run(args.golden, args.output))
+    summary = asyncio.run(run(args.golden, args.output, faithfulness=args.faithfulness))
     _print_report(summary)
     print(f"\nFull report: {args.output}")
     return 0

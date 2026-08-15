@@ -134,3 +134,42 @@ class TestScoreQuery:
             })
         assert r.exact_id_hit is True
         assert r.title_hit_at_5 is False  # AND of Kahn+algorithm not in title
+
+    @pytest.mark.asyncio
+    async def test_context_precision_recall_populated(self):
+        # §17.794 — two label-matching entries at ranks 1 and 3 of 4 retrieved.
+        # rels = [T, F, T, F]; context precision = (1/1 + 2/3)/2 = 0.8333.
+        # n_relevant defaults to len(expected_entry_ids)=1 → recall caps at 1.0.
+        mock = {"results": [
+            {"entry_id": "e1", "title": "Kahn's algorithm A"},
+            {"entry_id": "e2", "title": "unrelated"},
+            {"entry_id": "e3", "title": "Kahn's algorithm B"},
+            {"entry_id": "e4", "title": "unrelated"},
+        ]}
+        with patch("scripts.score_retrieval.query_rag", AsyncMock(return_value=mock)):
+            r = await score_query({
+                "query": "q",
+                "expected_titles_contain": ["Kahn", "algorithm"],
+                "expected_entry_ids": ["x"],
+            })
+        assert r.context_precision == pytest.approx((1.0 + 2.0 / 3.0) / 2.0)
+        assert r.context_recall == pytest.approx(1.0)
+        assert r.n_relevant == 1
+        assert r.faithfulness is None  # not requested → unscored
+
+    @pytest.mark.asyncio
+    async def test_context_recall_multi_target_denominator(self):
+        # §17.794 — 3 labelled targets (expected_entry_ids), one label-matching
+        # doc retrieved → recall = 1/3.
+        mock = {"results": [
+            {"entry_id": "e1", "title": "Bitnami Milvus chart"},
+            {"entry_id": "e2", "title": "unrelated"},
+        ]}
+        with patch("scripts.score_retrieval.query_rag", AsyncMock(return_value=mock)):
+            r = await score_query({
+                "query": "q",
+                "expected_titles_contain": ["bitnami", "milvus"],
+                "expected_entry_ids": ["a", "b", "c"],
+            })
+        assert r.n_relevant == 3
+        assert r.context_recall == pytest.approx(1.0 / 3.0)
