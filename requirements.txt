@@ -10,6 +10,21 @@ starlette==1.3.1
 # payloads. No optional deps pulled in.
 jsonschema==4.26.0
 httpx==0.28.1
+# §17.772 — Model Context Protocol. Powers BOTH sides of the integration:
+# (a) exposing the engine as an MCP server (streamable-HTTP mount at /mcp +
+# a stdio entrypoint), and (b) consuming external MCP servers' tools as DAG
+# nodes (tool='MCP'). mcp 2.0 ships its own httpx2/httpcore2 stack (coexists
+# with our httpx 0.28.1 — different top-level package names), plus
+# sse-starlette for the HTTP transport and PyJWT for auth helpers. The SDK
+# and its wire-transport deps must move in lockstep, so they are pinned
+# together (same discipline as the opentelemetry block below).
+mcp==2.0.0
+mcp-types==2.0.0
+sse-starlette==3.4.8
+httpx2==2.10.0
+httpcore2==2.10.0
+PyJWT==2.13.0
+truststore==0.10.4
 json_repair==0.61.7
 pydantic==2.13.4
 pydantic-settings==2.14.2

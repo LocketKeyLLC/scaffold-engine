@@ -21,7 +21,7 @@ _logger = logging.getLogger("scaffold.config")
 # ---------------------------------------------------------------------------
 VALID_TASK_TYPES = frozenset({"research", "decision", "action", "validation", "output"})
 VALID_STRATEGIES = frozenset({"sequential", "parallel", "hybrid", "conditional"})
-VALID_TOOLS = frozenset({"LLM", "CodeGen", "SearXNG", "Milvus", "Shell"})
+VALID_TOOLS = frozenset({"LLM", "CodeGen", "SearXNG", "Milvus", "Shell", "MCP"})
 VALID_DOMAINS = frozenset({"prompt", "rag", "eng", "eng_design", "llm", "spec", "code", "qa"})
 
 # get_model() allowlist — prevents arbitrary attribute access via role string
@@ -408,6 +408,29 @@ class Settings(BaseSettings):
     anthropic_version: str = "2023-06-01"
     anthropic_prompt_caching: bool = True
     openai_organization: str = ""
+
+    # §17.773 — grammar-constrained decoding (structured outputs). When a caller
+    # passes ``response_schema=`` to model_router.generate/chat (or uses
+    # ``generate_json``), the JSON Schema is threaded to the backend's native
+    # constraint (Ollama ``format``, OpenAI ``response_format`` json_schema,
+    # Anthropic ``output_config.format``) so the model emits schema-valid JSON at
+    # decode time instead of relying on post-hoc json_repair.
+    #
+    # The master valve is PROVIDER-AWARE (gated in model_router via each
+    # provider's ``supports_structured_outputs`` flag): when ON, the constraint is
+    # applied ONLY to backends that actually enforce it — OpenAI and Anthropic —
+    # and silently dropped for others (cloud-proxied Ollama ignores it, per the
+    # §17.773 live smoke), which then fall back to the json_repair path exactly as
+    # before. So turning this on is safe: it "applies only when it bites."
+    # Default OFF (conservative + no OpenAI/Anthropic key smoke yet); flip on once
+    # a role is bound to OpenAI/Anthropic. When OFF the schema is dropped and
+    # behavior is byte-identical to the pre-§17.773 path.
+    structured_outputs_enabled: bool = Field(default=False)
+    # §17.773 — opt-in override to ALSO apply the constraint on Ollama. Default
+    # OFF because the cloud proxy ignores ``format`` (live smoke); flip ON only in
+    # a deployment whose Ollama roles run LOCAL models (llama.cpp enforces GBNF
+    # grammars). No-op unless ``structured_outputs_enabled`` is also ON.
+    structured_outputs_ollama_enabled: bool = Field(default=False)
 
     # Timeouts (seconds)
     cloud_timeout: int = Field(default=3600, ge=1, le=86400)
@@ -1250,6 +1273,33 @@ class Settings(BaseSettings):
     # flipping the flag without an implementation fails loudly rather than
     # silently downgrading.
     shell_tool_enabled: bool = Field(default=False)
+
+    # §17.772 — Model Context Protocol (MCP) integration. Two independent,
+    # default-OFF gates (mirrors shell_tool_enabled: flipping a flag without
+    # the backend wired fails loudly rather than silently degrading).
+    #
+    # CONSUMER side — when True, DAG nodes tagged tool='MCP' connect to a
+    # registered external MCP server and invoke one of its tools during
+    # execution (execute_next_node). When False, an MCP node is classified
+    # non-executable (parked by the hands-on-assist gate), never fabricated.
+    mcp_tool_enabled: bool = Field(default=False)
+    # PRODUCER side — when True, the orchestrator exposes its own capabilities
+    # as MCP tools over a streamable-HTTP transport mounted at /mcp (X-API-Key
+    # gated). The `python -m app.mcp_server` stdio entrypoint is always
+    # available regardless of this flag (separate process, exec-gated).
+    mcp_server_enabled: bool = Field(default=False)
+    # Seed registry of consumable MCP servers, merged UNDER the mcp_servers DB
+    # table (a DB row overrides a config entry with the same name). JSON array,
+    # e.g. [{"name":"github","transport":"streamable_http",
+    #        "endpoint":"http://host:9000/mcp","headers":{"Authorization":"..."},
+    #        "enabled":true}] or a stdio server
+    #       {"name":"fs","transport":"stdio","command":"npx","args":["-y","..."]}.
+    mcp_servers_config: str = Field(default="[]")
+    # Per-call ceiling (seconds) for an outbound MCP tool invocation and for
+    # tool-list introspection — bounds a hung external server.
+    mcp_call_timeout: float = Field(default=60.0, ge=1.0, le=600.0)
+    # Idle TTL (seconds) for a cached client session before it is torn down.
+    mcp_session_ttl: float = Field(default=300.0, ge=10.0, le=3600.0)
 
     # §17.624 — hands-on assist gate. When True (default), the autonomous
     # executor inspects a freshly-generated DAG before running it: if the

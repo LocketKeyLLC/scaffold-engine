@@ -30,7 +30,7 @@ import httpx
 
 from app.config import settings
 from app.providers.base import ModelResponse, Tool, ToolCall  # noqa: F401 — public re-export
-from app.utils.llm_parsing import parse_json_object
+from app.utils.llm_parsing import parse_json_array, parse_json_object
 from app.utils.tool_call_args import read_tool_args
 
 logger = logging.getLogger("scaffold.router")
@@ -487,6 +487,37 @@ def _format_provider_error(resp: ModelResponse, role: str) -> str:
     return f"[role={role} provider={provider}] {base}{hint}"
 
 
+def _effective_response_schema(
+    response_schema: dict | str | None,
+    provider,
+) -> dict | str | None:
+    """§17.773 — PROVIDER-AWARE valve gate for grammar-constrained decoding.
+
+    Returns ``response_schema`` only when BOTH the master valve
+    (``structured_outputs_enabled``) is on AND ``provider`` actually enforces the
+    constraint; otherwise ``None`` so the dispatch path drops it and falls back to
+    the json_repair parse — byte-identical to the pre-§17.773 behavior for that
+    call. This is the single chokepoint; providers trust that a non-None schema
+    means "the operator enabled this AND you enforce it".
+
+    Enforcement is read from ``provider.supports_structured_outputs``
+    (True for OpenAI/Anthropic). Ollama is False by default because the
+    cloud-proxied models this engine runs ignore ``format`` (live smoke), but a
+    local-model deployment re-enables it via ``structured_outputs_ollama_enabled``
+    — so turning the master valve on applies the constraint ONLY where it bites.
+    """
+    if not response_schema or not settings.structured_outputs_enabled:
+        return None
+    supported = getattr(provider, "supports_structured_outputs", False)
+    if (
+        not supported
+        and getattr(provider, "name", "") == "ollama"
+        and settings.structured_outputs_ollama_enabled
+    ):
+        supported = True
+    return response_schema if supported else None
+
+
 async def generate(
     prompt: str,
     model: str | None = None,
@@ -498,6 +529,7 @@ async def generate(
     max_tokens: int = 4096,
     fallback: str | None = None,
     think: bool | None = None,
+    response_schema: dict | str | None = None,
 ) -> ModelResponse:
     """Generate text. ``role=`` routes via the provider abstraction.
 
@@ -509,15 +541,24 @@ async def generate(
     the whole num_predict budget goes to the answer (the ``thinking`` field is
     discarded on this path anyway). ``None`` leaves the model default untouched.
     Only the Ollama provider honors it; other providers ignore it via ``**opts``.
+
+    §17.773 — ``response_schema`` (a JSON Schema ``dict`` or the string ``"json"``)
+    requests grammar-constrained decoding: the backend constrains generation to
+    schema-valid JSON so callers don't need post-hoc json_repair. Applied only
+    when ``settings.structured_outputs_enabled`` is on AND the resolved provider
+    enforces it (OpenAI/Anthropic; Ollama via ``structured_outputs_ollama_enabled``)
+    — otherwise dropped, byte-identical to the legacy path. See
+    ``_effective_response_schema``.
     """
     _reject_role_model_collision(role, model)
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
+        schema = _effective_response_schema(response_schema, provider)
         resp = await _retry_provider_call(
             lambda: provider.generate(
                 resolved_model, prompt,
                 system=system, temperature=temperature, max_tokens=max_tokens,
-                fallback=fallback, think=think,
+                fallback=fallback, think=think, response_schema=schema,
             ),
             model=resolved_model,
         )
@@ -525,6 +566,9 @@ async def generate(
             resp.error = _format_provider_error(resp, role)
         return await _record_call(resp)
 
+    # Legacy direct path is always Ollama — gate against the ollama provider.
+    from app.providers import get_provider
+    schema = _effective_response_schema(response_schema, get_provider("ollama"))
     model = model or settings.model_general
     payload: dict[str, Any] = {
         "model": model,
@@ -536,8 +580,50 @@ async def generate(
         payload["system"] = system
     if think is not None:
         payload["think"] = think
+    if schema:
+        payload["format"] = schema
     resp = await _dispatch_with_retry("/api/generate", payload, model, fallback)
     return await _record_call(resp)
+
+
+async def generate_json(
+    prompt: str,
+    schema: dict,
+    *,
+    model: str | None = None,
+    role: str | None = None,
+    overrides: dict | None = None,
+    system: str | None = None,
+    temperature: float = 0.7,
+    max_tokens: int = 4096,
+    fallback: str | None = None,
+    think: bool | None = None,
+    as_array: bool = False,
+) -> tuple[Any, ModelResponse]:
+    """§17.773 — generate JSON with grammar-constrained decoding, then parse.
+
+    The single entry point that replaces the ``generate(...) + parse_json_object``
+    pattern at call sites. It requests constrained decoding for ``schema`` (gated
+    by ``settings.structured_outputs_enabled``) and parses the result through the
+    shared ``llm_parsing`` chain — ``json.loads`` first, then the json_repair
+    fallback. That fallback is why nothing regresses when the valve is off or a
+    model ignores the grammar: the output still parses when it can.
+
+    Returns ``(parsed, resp)``. ``parsed`` is the ``dict`` (or ``list`` when
+    ``as_array=True``) or ``None`` on empty/unparseable output; ``resp`` is the
+    full :class:`ModelResponse` so callers keep telemetry, error text, and the
+    redraw-on-empty signal they had with the two-call pattern.
+    """
+    resp = await generate(
+        prompt, model=model, role=role, overrides=overrides,
+        system=system, temperature=temperature, max_tokens=max_tokens,
+        fallback=fallback, think=think, response_schema=schema,
+    )
+    if not resp.success:
+        return None, resp
+    text = resp.text or ""
+    parsed = parse_json_array(text) if as_array else parse_json_object(text)
+    return parsed, resp
 
 
 async def chat(
@@ -549,16 +635,23 @@ async def chat(
     temperature: float = 0.7,
     max_tokens: int = 4096,
     fallback: str | None = None,
+    response_schema: dict | str | None = None,
 ) -> ModelResponse:
-    """Chat completion. ``role=`` routes via the provider abstraction."""
+    """Chat completion. ``role=`` routes via the provider abstraction.
+
+    §17.773 — ``response_schema`` requests grammar-constrained decoding; see
+    ``generate`` for semantics. Provider-aware gate: applied only when the master
+    valve is on AND the resolved provider enforces schemas.
+    """
     _reject_role_model_collision(role, model)
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
+        schema = _effective_response_schema(response_schema, provider)
         resp = await _retry_provider_call(
             lambda: provider.chat_completion(
                 resolved_model, messages,
                 temperature=temperature, max_tokens=max_tokens,
-                fallback=fallback,
+                fallback=fallback, response_schema=schema,
             ),
             model=resolved_model,
         )
@@ -566,6 +659,9 @@ async def chat(
             resp.error = _format_provider_error(resp, role)
         return await _record_call(resp)
 
+    # Legacy direct path is always Ollama — gate against the ollama provider.
+    from app.providers import get_provider
+    schema = _effective_response_schema(response_schema, get_provider("ollama"))
     model = model or settings.model_general
     payload: dict[str, Any] = {
         "model": model,
@@ -573,6 +669,8 @@ async def chat(
         "stream": False,
         "options": {"temperature": temperature, "num_predict": max_tokens},
     }
+    if schema:
+        payload["format"] = schema
     resp = await _dispatch_with_retry("/api/chat", payload, model, fallback)
     return await _record_call(resp)
 

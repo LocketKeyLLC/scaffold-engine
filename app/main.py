@@ -461,7 +461,18 @@ async def lifespan(app: FastAPI):
         init_tracing(app)
     except Exception as exc:
         logger.warning('event="otel_init_top_level_failed" error=%s', exc)
-    yield
+
+    # §17.772 — when the MCP producer is enabled, the Streamable-HTTP session
+    # manager backing the /mcp mount must run for the app's lifetime. Entered
+    # here (not in a mounted sub-app's own lifespan, which Starlette does not
+    # run for mounts) so tool calls have a live session manager.
+    if settings.mcp_server_enabled:
+        from app.mcp_server import session_manager_context
+        async with session_manager_context():
+            logger.info("mcp_server_mounted: /mcp streamable-http session manager running")
+            yield
+    else:
+        yield
 
     # Shutdown
     _cleanup_task.cancel()
@@ -584,6 +595,7 @@ from app.routers.rag import router as rag_router  # noqa: E402
 from app.routers.nodes import router as nodes_router  # noqa: E402 — §17.478
 from app.routers.artifacts import router as artifacts_router  # noqa: E402 — §17.565
 from app.routers.route import router as route_router  # noqa: E402 — §17.628
+from app.routers.mcp import router as mcp_router  # noqa: E402 — §17.772
 app.include_router(workflow_router)
 app.include_router(research_router)
 app.include_router(jobs_router)
@@ -594,6 +606,7 @@ app.include_router(rag_router)
 app.include_router(nodes_router)
 app.include_router(artifacts_router)
 app.include_router(route_router)
+app.include_router(mcp_router)  # §17.772 — MCP server registry + introspection
 
 
 # Sprint X.26 — Prometheus exposition. No auth (Prometheus scrapers
@@ -617,6 +630,21 @@ async def metrics_endpoint(request: Request):
 from app.web.routes import router as web_router  # noqa: E402
 app.include_router(web_router, dependencies=[])
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+# §17.772 — expose the engine as an MCP server over Streamable HTTP at /mcp,
+# guarded by X-API-Key (a mounted sub-app bypasses the global auth dependency,
+# so the guard reinstates it). Gated on mcp_server_enabled; the session manager
+# is run in the lifespan above. The stdio transport (`python -m app.mcp_server`)
+# is independent of this mount.
+if settings.mcp_server_enabled:
+    from app.mcp_server import ApiKeyASGIGuard, streamable_http_app  # noqa: E402
+    app.mount(
+        "/mcp",
+        ApiKeyASGIGuard(
+            streamable_http_app(),
+            settings.scaffold_api_key.get_secret_value(),
+        ),
+    )
 
 
 @app.get("/", dependencies=[], include_in_schema=False)

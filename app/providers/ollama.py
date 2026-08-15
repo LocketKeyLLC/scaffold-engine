@@ -38,6 +38,25 @@ from app.providers.base import (
 logger = logging.getLogger("scaffold.providers.ollama")
 
 
+def _apply_ollama_format(payload: dict[str, Any], response_schema: Any) -> None:
+    """§17.773 — set Ollama's ``format`` from a provider-agnostic response schema.
+
+    ``response_schema`` is a JSON Schema ``dict`` (constrain to that shape) or the
+    literal string ``"json"`` (constrain to any valid JSON). ``None`` / falsy is a
+    no-op so unconstrained callers are unchanged. The value is passed to Ollama
+    verbatim — Ollama's ``format`` field accepts exactly these two shapes.
+    """
+    if not response_schema:
+        return
+    if isinstance(response_schema, (dict, str)):
+        payload["format"] = response_schema
+    else:  # pragma: no cover — defensive; callers pass dict|str|None
+        logger.warning(
+            "ollama_format_ignored: unexpected response_schema type=%s",
+            type(response_schema).__name__,
+        )
+
+
 class OllamaProvider(LLMProvider):
     """Local-or-bridge Ollama backend. Delegates to ``app.model_router``."""
 
@@ -50,6 +69,12 @@ class OllamaProvider(LLMProvider):
     # this flag advertises the provider's capability — mismatched models
     # will simply ignore the tools field and respond with text.
     supports_native_tools = True
+    # §17.773 — False: /api/generate accepts a `format` schema, but the
+    # CLOUD-proxied models this engine runs (kimi/deepseek/glm/qwen3.5) silently
+    # ignore it (live smoke — constrained output == baseline, both fenced). Local
+    # Ollama honors GBNF grammars, so a local-model deployment opts back in via
+    # the `structured_outputs_ollama_enabled` valve rather than flipping this flag.
+    supports_structured_outputs = False
 
     async def chat_completion(
         self,
@@ -69,6 +94,11 @@ class OllamaProvider(LLMProvider):
             "stream": False,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
+        # §17.773 — grammar-constrained decoding. A JSON Schema in ``format``
+        # makes Ollama constrain generation to schema-valid JSON (llama.cpp GBNF
+        # for local models; cloud-proxied models vary — hence the default-off
+        # valve upstream). Absent → unconstrained, as before.
+        _apply_ollama_format(payload, opts.get("response_schema"))
         return await model_router._dispatch_with_retry(
             "/api/chat", payload, model, fallback,
         )
@@ -102,6 +132,9 @@ class OllamaProvider(LLMProvider):
         think = opts.get("think")
         if think is not None:
             payload["think"] = think
+        # §17.773 — see chat_completion. Ollama accepts a JSON Schema in ``format``
+        # on /api/generate as well.
+        _apply_ollama_format(payload, opts.get("response_schema"))
         return await model_router._dispatch_with_retry(
             "/api/generate", payload, model, fallback,
         )

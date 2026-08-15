@@ -140,6 +140,16 @@ class LLMProvider(ABC):
     supports_embeddings: bool = False
     supports_streaming: bool = True
     supports_native_tools: bool = False
+    # §17.773 — does this backend ENFORCE a JSON Schema passed via
+    # ``response_schema`` (grammar-constrained decoding), such that the model is
+    # guaranteed to emit schema-valid JSON? True for OpenAI/Anthropic (server-side
+    # structured outputs). False for Ollama: the ``format`` param is API-accepted
+    # but the *cloud-proxied* models this engine uses silently ignore it (live
+    # smoke, §17.773) — local Ollama honors it, so it's re-enabled per-deployment
+    # via the ``structured_outputs_ollama_enabled`` valve rather than this static
+    # flag. The model_router gate reads this so a provider-aware master valve
+    # applies the constraint only where it actually bites.
+    supports_structured_outputs: bool = False
 
     # ------------------------------------------------------------------
     # Required async methods

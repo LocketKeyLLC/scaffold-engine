@@ -304,6 +304,17 @@ services:
       TOKENIZERS_PARALLELISM: "false"
       SCAFFOLD_API_KEY: "${SCAFFOLD_API_KEY:?SCAFFOLD_API_KEY is required (or set SCAFFOLD_AUTH_DISABLED=1)}"
       SCAFFOLD_AUTH_DISABLED: "${SCAFFOLD_AUTH_DISABLED:-0}"
+      # §17.772 — Model Context Protocol. Two default-OFF gates (code defaults
+      # stay False so tests + fresh installs are unaffected). MCP_TOOL_ENABLED
+      # lets DAG nodes call registered external MCP servers (tool='MCP');
+      # MCP_SERVER_ENABLED mounts the engine's own capabilities as MCP tools at
+      # /mcp (X-API-Key gated). The stdio producer (`docker exec -i
+      # scaffold-orchestrator python -m app.mcp_server`) is always available
+      # regardless of the server flag. MCP_SERVERS_CONFIG seeds consumable
+      # servers (a JSON array), merged UNDER the mcp_servers DB table.
+      MCP_TOOL_ENABLED: "${MCP_TOOL_ENABLED:-false}"
+      MCP_SERVER_ENABLED: "${MCP_SERVER_ENABLED:-false}"
+      MCP_SERVERS_CONFIG: "${MCP_SERVERS_CONFIG:-[]}"
       SCHEDULER_ENABLED: "true"
       SCHEDULER_TIMEZONE: "UTC"
       # §17.702 — learning flywheel: ingest a completed project's deliverable as

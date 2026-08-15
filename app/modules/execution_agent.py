@@ -185,6 +185,11 @@ def _node_is_nonexecutable(tool: str | None) -> bool:
         return True
     if t == "shell" and not settings.shell_tool_enabled:
         return True
+    # §17.772 — an MCP node with the consumer disabled cannot make its external
+    # call, so autonomously "running" it only emits a skip note. Count it toward
+    # the hands-on gate so an MCP-heavy DAG parks for /assist instead.
+    if t == "mcp" and not settings.mcp_tool_enabled:
+        return True
     return False
 
 
@@ -413,7 +418,7 @@ async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
             WHERE id = :id AND status = 'pending'
             RETURNING id, node_key, title, node_type, depends_on,
                       assigned_model, prompt_template, execution_order, tool, domain,
-                      retry_count, last_verification_reason
+                      tool_config, retry_count, last_verification_reason
         """),
         {"id": str(target["id"])},
     )
@@ -456,7 +461,7 @@ async def _claim_ready_nodes(
             )
             RETURNING id, node_key, title, node_type, depends_on,
                       assigned_model, prompt_template, execution_order, tool, domain,
-                      retry_count, last_verification_reason
+                      tool_config, retry_count, last_verification_reason
         """),
         {"jid": job_id, "lim": limit},
     )
@@ -1290,6 +1295,44 @@ async def execute_next_node(
                     "retry once the DAG is healthy."
                 ),
             }
+
+        # ── MCP: §17.772 external-tool seam ──
+        # A tool='MCP' node makes a deterministic call to a registered external
+        # MCP server — no LLM generation, no verifier — so it short-circuits
+        # here like the human-review skip, but AFTER the upstream fetch so its
+        # args can template from upstream outputs. When the consumer is disabled
+        # we emit a labeled skip rather than fabricate a result (the hands-on
+        # gate parks MCP-heavy DAGs; a lone MCP node in an otherwise-autonomous
+        # DAG lands here).
+        if tool_lower == "mcp":
+            if not settings.mcp_tool_enabled:
+                skip_msg = "Skipped: MCP tool execution disabled (mcp_tool_enabled=false)"
+                await db.execute(
+                    text(
+                        "UPDATE dag_nodes SET status = 'done', output_text = :o, "
+                        "completed_at = NOW() WHERE id = :nid"
+                    ),
+                    {"o": skip_msg, "nid": str(node_id)},
+                )
+                await db.commit()
+                await _log_execution(db, job_id, str(node_id), "info", "MCP node skipped (disabled)")
+                return {
+                    "status": "done", "node_key": node_key, "title": title,
+                    "output": skip_msg, "passed": True, "verified": True,
+                    "reason": "MCP disabled — skipped", "confidence": 1.0,
+                    "model_used": "none (mcp disabled)", "tool": tool,
+                }
+            from app.modules.mcp_node import execute_mcp_node
+            mcp_result = await execute_mcp_node(
+                db, node=node, upstream_outputs=upstream_outputs, brief=brief, job_id=job_id,
+            )
+            _lvl = "info" if mcp_result.get("status") == "done" else "error"
+            await _log_execution(
+                db, job_id, str(node_id), _lvl,
+                f"MCP dispatch: {mcp_result.get('reason', '')}",
+            )
+            logger.info("tool_dispatch: MCP node=%s status=%s", node_key, mcp_result.get("status"))
+            return mcp_result
 
         node_snapshot = {
             "node_key": node_key,

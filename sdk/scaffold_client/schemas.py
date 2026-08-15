@@ -138,6 +138,9 @@ class DagNodeBase(BaseModel):
     execution_order: int | None = None
     tool: str | None = None
     domain: str | None = None
+    # §17.772 — generic per-node config blob. For a tool='MCP' node this
+    # carries {"server", "tool", "args"} identifying the external MCP call.
+    tool_config: dict | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     is_output_node: bool = False
     # §17.475 — model-asserted final-deliverable marker. Primary signal for
@@ -156,6 +159,8 @@ class DagNodeUpdate(BaseModel):
     output_text: str | None = None
     output_artifact_id: UUID | None = None
     retry_count: int | None = None
+    tool: str | None = None
+    tool_config: dict | None = None  # §17.772 — edit an MCP node's target/args
 
 
 class DagNodeRead(DagNodeBase):
