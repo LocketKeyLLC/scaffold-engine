@@ -43,6 +43,19 @@ def _valid_uuid(job_id: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid job_id format")
 
 
+@router.get("/nodes/{job_id}")
+async def node_list(job_id: str, db: AsyncSession = Depends(get_db)):
+    """Full editable node list for the /ui plan editor.
+
+    Returns ``{job_id, job_status, nodes:[{node_key, title, description, status,
+    depends_on, execution_order, edit_version, prompt_template, assigned_model,
+    tool, is_deliverable, tool_config}]}`` — exactly the columns the PATCH
+    surface accepts, plus ``edit_version`` for the optimistic-lock round-trip.
+    """
+    _valid_uuid(job_id)
+    return _dispatch(await node_editor.list_nodes(job_id, db))
+
+
 @router.patch("/nodes/{job_id}/{node_key}")
 async def node_edit(
     job_id: str, node_key: str, body: NodeEditInput,

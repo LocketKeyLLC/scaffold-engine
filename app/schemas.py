@@ -881,6 +881,31 @@ class JobListResponse(BaseModel):
     offset: int
 
 
+class JobDetailResponse(BaseModel):
+    """Response for GET /jobs/{job_id} — single-job detail.
+
+    Surfaces the Phase-1 ``refined_brief`` + ``feasibility`` (stashed in
+    ``jobs.research_data.feasibility``) so the /ui approval gate can render the
+    review, plus ``deliverable_kind`` and a ``has_compiled_output`` flag the
+    output/compare views key off. Distinct from ``JobSummary`` (list rows, no
+    brief) — this is the detail read the list endpoint intentionally omits."""
+    id: str
+    title: str
+    status: str
+    input_text: str | None = None
+    refined_brief: dict | None = None
+    feasibility: dict | None = None
+    deliverable_kind: str | None = None
+    has_compiled_output: bool = False
+    node_count: int = 0
+    created_at: str
+    updated_at: str
+    completed_at: str | None = None
+    parent_job_id: str | None = None
+    component_index: int | None = None
+    metadata: dict | None = None
+
+
 class ResearchSessionRenameInput(BaseModel):
     topic: str
 

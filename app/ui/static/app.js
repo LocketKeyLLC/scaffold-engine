@@ -3,11 +3,15 @@ import { el, mount } from "./util.js";
 import * as api from "./api.js";
 import * as router from "./router.js";
 import { placeholder } from "./views/placeholder.js";
+import { mountCommandPalette } from "./command_palette.js";
 
 const NAV = [
   { id: "dashboard", path: "/", label: "Dashboard", icon: "◈" },
+  { id: "approvals", path: "/approvals", label: "Approvals", icon: "⏻" },
   { id: "dag", path: "/dag", label: "DAG Canvas", icon: "⬡" },
   { id: "theater", path: "/theater", label: "Execution", icon: "▶" },
+  { id: "output", path: "/output", label: "Outputs", icon: "▤" },
+  { id: "compare", path: "/compare", label: "Compare", icon: "⇄" },
   { id: "research", path: "/research", label: "Research", icon: "◎" },
   { id: "assist", path: "/assist", label: "Assistant", icon: "✦" },
 ];
@@ -123,6 +127,7 @@ function buildChrome() {
   );
 
   mount(root, el("div", { class: "shell" }, sidebar, outlet));
+  mountCommandPalette(); // idempotent; overlay lives on document.body
   startHealthPolling(healthDot, healthText);
 }
 
@@ -133,9 +138,14 @@ function highlightNav(path) {
   });
 }
 
+// Detail routes without their own nav item map onto the sidebar item that owns
+// their flow, so the sidebar highlights sensibly while on them.
+const NAV_ALIAS = { plan: "approvals" };
+
 function topSegment(path) {
   const seg = path.split("/").filter(Boolean)[0];
   if (!seg) return "dashboard";
+  if (NAV_ALIAS[seg]) return NAV_ALIAS[seg];
   return NAV.some((n) => n.id === seg) ? seg : "dashboard";
 }
 
@@ -181,8 +191,12 @@ function lazy(name, title) {
 }
 const VIEWS = {
   dashboard: lazy("dashboard", "Dashboard"),
+  approvals: lazy("approvals", "Approval Gate"),
   dag: lazy("dag", "DAG Canvas"),
+  plan: lazy("plan", "Plan Editor"),
   theater: lazy("theater", "Execution Theater"),
+  output: lazy("output", "Output"),
+  compare: lazy("compare", "Compare Jobs"),
   research: lazy("research", "Research Explorer"),
   assist: lazy("assist", "Assistant"),
 };
@@ -194,10 +208,18 @@ async function loadAndRender(name, params, path) {
 
 function registerRoutes() {
   router.route("/", (p) => loadAndRender("dashboard", p, router.currentPath()));
+  router.route("/approvals", (p) => loadAndRender("approvals", p, router.currentPath()));
+  router.route("/approvals/:jobId", (p) => loadAndRender("approvals", p, router.currentPath()));
   router.route("/dag", (p) => loadAndRender("dag", p, router.currentPath()));
   router.route("/dag/:jobId", (p) => loadAndRender("dag", p, router.currentPath()));
+  router.route("/plan/:jobId", (p) => loadAndRender("plan", p, router.currentPath()));
   router.route("/theater", (p) => loadAndRender("theater", p, router.currentPath()));
   router.route("/theater/:jobId", (p) => loadAndRender("theater", p, router.currentPath()));
+  router.route("/output", (p) => loadAndRender("output", p, router.currentPath()));
+  router.route("/output/:jobId", (p) => loadAndRender("output", p, router.currentPath()));
+  router.route("/compare", (p) => loadAndRender("compare", p, router.currentPath()));
+  router.route("/compare/:jobA/:jobB", (p) => loadAndRender("compare", p, router.currentPath()));
+  router.route("/compare/:jobA", (p) => loadAndRender("compare", p, router.currentPath()));
   router.route("/research", (p) => loadAndRender("research", p, router.currentPath()));
   router.route("/research/:sessionId", (p) => loadAndRender("research", p, router.currentPath()));
   router.route("/assist", (p) => loadAndRender("assist", p, router.currentPath()));

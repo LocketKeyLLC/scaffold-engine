@@ -31,10 +31,12 @@ function jobLinks(job) {
   const links = [];
   const sid = assistSessionFromActions(job.next_actions);
   if (sid) links.push({ label: "Assistant", href: `#/assist/${sid}` });
+  if (job.status === "awaiting_confirmation") links.push({ label: "Approve", href: `#/approvals/${job.id}` });
   if ((job.node_count || 0) > 0) {
     links.push({ label: "DAG", href: `#/dag/${job.id}` });
     links.push({ label: "Execution", href: `#/theater/${job.id}` });
   }
+  if (job.status === "completed") links.push({ label: "Output", href: `#/output/${job.id}` });
   return links;
 }
 
@@ -64,9 +66,10 @@ function workCard(job) {
 }
 
 function recentRow(job) {
+  const recentHref = job.status === "completed" ? `#/output/${job.id}` : (job.node_count || 0) > 0 ? `#/dag/${job.id}` : "";
   const tr = el(
     "tr",
-    { dataset: { href: (job.node_count || 0) > 0 ? `#/dag/${job.id}` : "" } },
+    { dataset: { href: recentHref } },
     el("td", {}, statusBadge(job.status)),
     el("td", { class: "recent-title" }, job.title || "(untitled)"),
     el("td", { class: "mono", text: String(job.node_count ?? "—") }),

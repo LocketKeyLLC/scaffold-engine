@@ -2097,6 +2097,141 @@
         "title": "JobCostsResponse",
         "type": "object"
       },
+      "JobDetailResponse": {
+        "description": "Response for GET /jobs/{job_id} — single-job detail.\n\nSurfaces the Phase-1 ``refined_brief`` + ``feasibility`` (stashed in\n``jobs.research_data.feasibility``) so the /ui approval gate can render the\nreview, plus ``deliverable_kind`` and a ``has_compiled_output`` flag the\noutput/compare views key off. Distinct from ``JobSummary`` (list rows, no\nbrief) — this is the detail read the list endpoint intentionally omits.",
+        "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "component_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Component Index"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "deliverable_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deliverable Kind"
+          },
+          "feasibility": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feasibility"
+          },
+          "has_compiled_output": {
+            "default": false,
+            "title": "Has Compiled Output",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "input_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Text"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "node_count": {
+            "default": 0,
+            "title": "Node Count",
+            "type": "integer"
+          },
+          "parent_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Job Id"
+          },
+          "refined_brief": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refined Brief"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "JobDetailResponse",
+        "type": "object"
+      },
       "JobListResponse": {
         "properties": {
           "jobs": {
@@ -6975,6 +7110,52 @@
           "Management"
         ]
       },
+      "get": {
+        "description": "Single-job detail incl. the Phase-1 refined brief + feasibility.\n\nBacks the /ui approval gate (renders ``refined_brief`` + ``feasibility``\nbefore Approve), and the output/compare views (``deliverable_kind``,\n``has_compiled_output``). Feasibility is read from\n``jobs.research_data.feasibility`` where Phase 1 stashes it\n(``ideation_workflow.analyze_and_confirm``); ``refined_brief`` from its\ndedicated column. 404 on a missing job, 422 on a malformed UUID.",
+        "operationId": "get_job_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Job",
+        "tags": [
+          "Management"
+        ]
+      },
       "patch": {
         "description": "Rename a job (set title).",
         "operationId": "rename_job_jobs__job_id__patch",
@@ -7716,6 +7897,47 @@
       }
     },
     "/nodes/{job_id}": {
+      "get": {
+        "description": "Full editable node list for the /ui plan editor.\n\nReturns ``{job_id, job_status, nodes:[{node_key, title, description, status,\ndepends_on, execution_order, edit_version, prompt_template, assigned_model,\ntool, is_deliverable, tool_config}]}`` — exactly the columns the PATCH\nsurface accepts, plus ``edit_version`` for the optimistic-lock round-trip.",
+        "operationId": "node_list_nodes__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Node List"
+      },
       "post": {
         "operationId": "node_insert_nodes__job_id__post",
         "parameters": [
