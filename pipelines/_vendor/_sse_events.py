@@ -38,6 +38,11 @@ NODE_START = "node_start"
 NODE_DONE = "node_done"
 NODE_RETRY = "node_retry"
 NODE_FAILED = "node_failed"
+# §17.776 — per-node content delta during generation (valve
+# node_token_streaming_enabled, default off). One NODE_TOKEN per stream_chat
+# chunk carrying {job_id, node_key, delta}; the terminal output still arrives
+# in NODE_DONE, so a consumer that ignores NODE_TOKEN renders unchanged.
+NODE_TOKEN = "node_token"
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +155,7 @@ QUEUED = "queued"
 
 ALL_EVENT_NAMES = frozenset({
     # execution
-    NODE_START, NODE_DONE, NODE_RETRY, NODE_FAILED,
+    NODE_START, NODE_DONE, NODE_RETRY, NODE_FAILED, NODE_TOKEN,
     # assist
     ASSIST_HANDOFF_STARTED, ASSIST_HANDOFF_DONE, ASSIST_HANDOFF_NOOP,
     ASSIST_GUIDE_DELTA, ASSIST_GUIDE_DONE,
