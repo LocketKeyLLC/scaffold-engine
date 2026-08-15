@@ -102,12 +102,14 @@ def _async_iter_factory(events: list):
 
 @pytest.mark.smoke
 class TestWebRootRedirect:
-    """GET / should redirect to the web UI's jobs list."""
+    """GET / should redirect to the standalone operator SPA at /ui/."""
 
-    def test_root_redirects_to_jobs(self, client):
+    def test_root_redirects_to_ui(self, client):
         resp = client.get("/")
         assert resp.status_code == 302
-        assert resp.headers["location"] == "/web/jobs"
+        # Repointed from /web/jobs to the SPA (§17.778); the legacy HTMX
+        # UI still lives at /web/*.
+        assert resp.headers["location"] == "/ui/"
 
 
 @pytest.mark.smoke

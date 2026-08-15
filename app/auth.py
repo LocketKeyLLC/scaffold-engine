@@ -40,7 +40,12 @@ _AUTH_EXEMPT_PATHS = frozenset({"/health", "/", settings.metrics_path})
 # Client carries the API key for the loopback HTTP call to the actual
 # orchestrator endpoints, so end-to-end auth is preserved — only the
 # browser-facing layer is exempt.
-_AUTH_EXEMPT_PREFIXES = ("/web/", "/static/")
+#
+# ``/ui/*`` is the standalone operator SPA (no-build static assets). Only
+# the asset-serving layer is exempt — the SPA itself sends X-API-Key on
+# every API call (it reads it from browser localStorage), so the API
+# surface behind it stays fully gated, same guarantee as the /web loopback.
+_AUTH_EXEMPT_PREFIXES = ("/web/", "/static/", "/ui/")
 
 
 async def require_api_key(

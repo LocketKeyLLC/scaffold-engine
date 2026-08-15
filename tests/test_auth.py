@@ -142,6 +142,10 @@ async def test_explicit_auth_disabled_returns_empty(_api_key_unset):
     "/static/",             # bare prefix
     "/static/css/app.css",  # nested
     "/static/js/bundle.min.js",
+    "/ui/",                 # §17.778 — standalone operator SPA (bare prefix)
+    "/ui/index.html",       # SPA entry
+    "/ui/static/app.js",    # SPA asset (nested)
+    "/ui/static/views/dag.js",
 ])
 async def test_exempt_prefix_paths_bypass_without_key(_api_key_set, path):
     """Every path under /web/ and /static/ must bypass auth WITHOUT a key.

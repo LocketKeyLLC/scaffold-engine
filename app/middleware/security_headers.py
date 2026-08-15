@@ -1,7 +1,9 @@
 """§17.97 — security response headers for HTML-serving routes.
 
 Adds a Content-Security-Policy header to every response on
-``/web/*`` and ``/research/pdf`` (the two HTML-serving prefixes).
+``/web/*``, ``/research/pdf``, and ``/ui*`` (the HTML-serving prefixes;
+``/ui`` is the standalone operator SPA — all-external JS/CSS, no inline,
+so ``script-src 'self'``/``style-src 'self'`` pass without a nonce).
 Non-HTML responses (JSON API, SSE streams, /metrics, /health) are
 left alone — CSP only meaningfully constrains how a BROWSER renders
 a response, so attaching it to API responses is noise.
@@ -41,7 +43,7 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 
-_HTML_PREFIXES = ("/web/", "/research/pdf")
+_HTML_PREFIXES = ("/web/", "/research/pdf", "/ui")
 
 # §17.460 — per-request CSP nonce carried in a ContextVar. Set in dispatch
 # BEFORE call_next, so anyio copies it into the endpoint's task context and the
