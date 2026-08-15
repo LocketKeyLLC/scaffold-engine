@@ -40,6 +40,12 @@ services:
       # parallel tests (test_*_parallel.py + the integration claim test)
       # enable it explicitly at runtime, so dev coverage of both paths is intact.
       PARALLEL_EXECUTION_ENABLED: "false"
+      # §17.776: enable per-node token streaming in dev so node_token SSE frames
+      # stream live during /execute/all. Default OFF in config.py (a fully
+      # streamed node isn't cost-tracked); flipped ON here for the serial path
+      # this host runs. Streaming only kicks in on the serial executor, which is
+      # exactly what PARALLEL_EXECUTION_ENABLED=false above selects.
+      NODE_TOKEN_STREAMING_ENABLED: "true"
     # Dev-only mounts. All :ro so the container view cannot mutate host
     # source. These shadow the image's baked-in copies with the working
     # tree so edits pick up live without a rebuild — the live-reload
