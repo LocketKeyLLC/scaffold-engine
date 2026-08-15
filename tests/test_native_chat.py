@@ -351,3 +351,94 @@ async def test_run_go_renders_structured_brief_dict():
     assert "OCRs screenshots into a searchable PDF" in out
     assert "'goals'" not in out and "{" not in out  # no raw dict repr
     assert "/confirm afa6c127" in out
+
+
+# ===========================================================================
+# §17.792 (Phase 3b) — /confirm auto-chain (Phase 2 → DAG → execute).
+# ===========================================================================
+from app.native_chat import autochain  # noqa: E402
+
+
+def _sse_gen(events):
+    async def _g(*_a, **_k):
+        for e in events:
+            yield e
+    return _g
+
+
+@pytest.mark.smoke
+def test_translate_exec_event():
+    assert autochain._translate_exec_event("node_token", {"delta": "abc"}) == "abc"
+    assert "▶ T1" in autochain._translate_exec_event("node_start", {"title": "T1"})
+    assert "✓ T1" in autochain._translate_exec_event("node_done", {"title": "T1"})
+    assert "✗ T1" in autochain._translate_exec_event("node_failed", {"title": "T1", "error": "boom"})
+    assert "Build complete" in autochain._translate_exec_event("pipeline_complete", {"passed": 2, "total_nodes": 3})
+    assert autochain._translate_exec_event("dag_generated", {}) is None  # ignored
+    assert autochain._translate_exec_event("heartbeat", {}) is None
+
+
+@pytest.mark.smoke
+async def test_run_confirm_full_chain():
+    events = [
+        ("node_start", {"title": "Scaffold"}),
+        ("node_token", {"delta": "print('hi')"}),
+        ("node_done", {"title": "Scaffold"}),
+        ("pipeline_complete", {"passed": 1, "total_nodes": 1}),
+    ]
+    with patch("app.native_chat.nl_commands._resolve_job", AsyncMock(return_value=("jid-uuid", "My CLI"))), \
+         patch("app.native_chat.engine_client.request_json",
+               AsyncMock(side_effect=[(200, {"status": "planning"}), (200, {"task_count": 1})])), \
+         patch("app.native_chat.engine_client.stream_sse", _sse_gen(events)), \
+         patch("app.native_chat.engine_client.get_json",
+               AsyncMock(return_value=(200, {"compiled_output": "FINAL CODE"}))):
+        out = await _drain(autochain.run_confirm("my cli"))
+    assert "Building **My CLI**" in out
+    assert "Context compiled" in out
+    assert "Planned 1 steps" in out
+    assert "print('hi')" in out          # node_token streamed live
+    assert "Build complete" in out
+    assert "FINAL CODE" in out           # compiled deliverable appended
+
+
+@pytest.mark.smoke
+async def test_run_confirm_phase2_failure_stops():
+    with patch("app.native_chat.nl_commands._resolve_job", AsyncMock(return_value=("jid", "T"))), \
+         patch("app.native_chat.engine_client.request_json",
+               AsyncMock(return_value=(500, {"detail": "research boom"}))):
+        out = await _drain(autochain.run_confirm("t"))
+    assert "Phase 2 failed" in out and "research boom" in out
+    assert "Planned" not in out          # never reached DAG
+
+
+@pytest.mark.smoke
+async def test_run_confirm_job_not_found():
+    with patch("app.native_chat.nl_commands._resolve_job", AsyncMock(return_value=None)):
+        out = await _drain(autochain.run_confirm("nope"))
+    assert "couldn't find" in out.lower()
+
+
+@pytest.mark.smoke
+async def test_run_execute_skips_phases():
+    events = [("node_done", {"title": "X"}), ("pipeline_complete", {"passed": 1, "total_nodes": 1})]
+    with patch("app.native_chat.nl_commands._resolve_job", AsyncMock(return_value=("jid", "T"))), \
+         patch("app.native_chat.engine_client.stream_sse", _sse_gen(events)), \
+         patch("app.native_chat.engine_client.get_json",
+               AsyncMock(return_value=(200, {"compiled_output": "OUT"}))):
+        out = await _drain(autochain.run_execute("t"))
+    assert "Executing **T**" in out and "Build complete" in out and "OUT" in out
+
+
+@pytest.mark.smoke
+async def test_route_confirm_and_execute_delegate():
+    async def _fake_confirm(ref):
+        yield f"CONFIRM:{ref}"
+
+    async def _fake_execute(ref):
+        yield f"EXECUTE:{ref}"
+
+    with patch("app.native_chat.autochain.run_confirm", _fake_confirm), \
+         patch("app.native_chat.autochain.run_execute", _fake_execute):
+        g1 = await dispatch.route([{"role": "user", "content": "/confirm afa6c127"}])
+        g2 = await dispatch.route([{"role": "user", "content": "/execute deadbeef"}])
+        assert await _drain(g1) == "CONFIRM:afa6c127"
+        assert await _drain(g2) == "EXECUTE:deadbeef"

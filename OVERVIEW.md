@@ -22059,6 +22059,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.792 Feature — native OpenAI surface Phase 3b: the `/confirm` build auto-chain (2026-08-15)
+
+**Why.** Phase 3a landed a job at `awaiting_confirmation`. This completes the arc: `/confirm <job>` drives the whole pipeline in-process and streams it as chat — Phase 2 (research → ingest → compile) → DAG generation → execution → the compiled deliverable — so the full talk → scope → `/go` → `/confirm` → running build loop lives natively on `/v1`, matching the OWUI pipeline.
+
+**What.** New `app/native_chat/autochain.py`; `dispatch.route` gains `/confirm` + `/execute` (via a `_slash` verb+argument parser).
+- **Heartbeat around the blocking phases** — `/ideate/confirm` (Phase 2, minutes) and `/dag` are blocking JSON endpoints (not SSE), so `_blocking_with_ticks` runs each as a task and emits a `… <label> (Ns)` status tick every 15 s while awaiting, so the OpenAI stream never goes silent for minutes (the pipeline's `_post_with_keepalive` role).
+- **Execution relay** — `/execute/all` (SSE) is translated to chat text by `_translate_exec_event`: `node_token` deltas stream the **live generation**, node lifecycle events become concise status lines (`▶`/`✓`/`↻`/`✗`), and `pipeline_complete`/`blocked`/`budget_exhausted`/`execution_failed` are terminal. The compiled deliverable is then fetched from `/exec/status` and appended.
+- **`/execute <job>`** runs just the execution stage for a job that already has a DAG. Job refs are resolved from an id prefix (the `/go` render's `/confirm <id8>`) via `_resolve_job`.
+
+**Verification. Unit (+12, §17.792):** `test_native_chat.py` — `_translate_exec_event` mapping (token/start/done/failed/complete + ignored events); `run_confirm` full chain (resolve → Phase 2 → DAG → execute SSE → compiled output, asserting the header, tick-free fast path, planned-steps count, streamed `node_token`, build-complete line, and the appended deliverable); Phase-2 failure stops before DAG; job-not-found; `run_execute` skips the phases; `route` delegates `/confirm` + `/execute`. Full footprint **174 passed**. **LIVE** (real `/v1/chat/completions`, `stream:true`, background): `/confirm afa6c127` on the Phase-3a job streamed the entire build — `🚀 Building` → `📚 Researching` with a `… researching (15s)` heartbeat tick → `✓ Context compiled` → `🧩 Planning` (ticks) → `✓ Planned 13 steps` → per-node `▶`/`✓` interleaved with **live `node_token` code generation** (30,374 content chars, terminating in `[DONE]`). The job ended **`blocked`** (its "Write unit tests" node failed verification → 2 downstream blocked — a genuine execution outcome, not a chain defect), and the chain faithfully relayed it: `✗ Write unit tests` → `⚠️ blocked: No executable nodes — 2 blocked by failed upstream` → `---` + the compiled deliverable (a runnable argparse OCR-to-PDF CLI). Phase 3 (triage + synth + auto-chain) is complete; the engine now speaks OpenAI natively with full pipeline parity. Next: Phase 4 (client wiring — OWUI-as-connection, `/ui` SPA chat — behind the master valve) — see `docs/native_openai_surface_plan.md`.
+
+---
+
 ### §17.791 Feature — native OpenAI surface Phase 3a: conversational triage + `/go` synthesis (2026-08-15)
 
 **Why.** Phase 2 routed *commands* natively but fell back to a raw `model_general` passthrough for anything else. This ports the OWUI pipeline's **scoping loop** into the engine so a plain message on `/v1/chat/completions` gets the same 4-section Scope/Options/Gaps/My-pick triage, and `/go` synthesizes the transcript into a launch brief and submits it to Phase 1 — full triage parity, natively. (The `/confirm` auto-chain that turns that job into a running build is Phase 3b.)

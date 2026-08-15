@@ -13,9 +13,9 @@ from __future__ import annotations
 import re
 from typing import Any, AsyncIterator
 
-from app.native_chat import confirm_cards, nl_commands, triage
+from app.native_chat import autochain, confirm_cards, nl_commands, triage
 
-_SLASH_RE = re.compile(r"^\s*/(\w+)\b", re.S)
+_SLASH_RE = re.compile(r"^\s*/(\w+)\b[ \t]*(.*)", re.S)
 
 
 def _last_user_text(messages: list[dict[str, Any]]) -> str:
@@ -31,9 +31,12 @@ def _looks_like_owui_task(text: str) -> bool:
     return "### Task:" in text
 
 
-def _slash_verb(text: str) -> str | None:
+def _slash(text: str) -> tuple[str, str] | None:
+    """Return ``(verb, argument)`` for a leading slash command, else None."""
     m = _SLASH_RE.match(text or "")
-    return m.group(1).lower() if m else None
+    if not m:
+        return None
+    return m.group(1).lower(), (m.group(2) or "").strip()
 
 
 async def _say(text: str) -> AsyncIterator[str]:
@@ -51,11 +54,18 @@ async def route(messages: list[dict[str, Any]]) -> AsyncIterator[str] | None:
     if not user_text.strip() or _looks_like_owui_task(user_text):
         return None
 
-    # (0) Slash commands. /go|/run synthesize + submit Phase 1 (§17.791); the
-    # /confirm auto-chain is Phase 3b — other slashes fall through for now.
-    verb = _slash_verb(user_text)
-    if verb in ("go", "run"):
-        return triage.run_go(messages)
+    # (0) Slash commands. /go|/run synthesize + submit Phase 1 (§17.791);
+    # /confirm|/execute drive the build auto-chain (§17.792). Other slashes fall
+    # through to NL/triage for now.
+    slash = _slash(user_text)
+    if slash:
+        verb, arg = slash
+        if verb in ("go", "run"):
+            return triage.run_go(messages)
+        if verb == "confirm":
+            return autochain.run_confirm(arg)
+        if verb == "execute":
+            return autochain.run_execute(arg)
 
     # (a) Pending confirm-card follow-up — affirmative commits, negative cancels,
     # anything else re-classifies.
