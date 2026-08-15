@@ -5,7 +5,7 @@
 import * as api from "../api.js";
 import * as router from "../router.js";
 import { el, mount, shortId, timeAgo, mdToHtml } from "../util.js";
-import { statusBadge, loading, errorPanel, toast } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
 
 // ── Render an arbitrary refined_brief / feasibility record safely ────────
 function renderValue(v) {
@@ -70,7 +70,12 @@ function renderList(container) {
       if (disposed) return;
       const jobs = res.jobs || [];
       if (!jobs.length) {
-        mount(outlet, el("div", { class: "card empty-state" }, el("div", { class: "empty-icon", text: "✓" }), el("p", { text: "Nothing awaiting approval." })));
+        mount(outlet, emptyState({
+          icon: "✓",
+          title: "All caught up",
+          body: "No jobs are waiting for a go/no-go. New ideas that need approval before running land here.",
+          action: { label: "＋ New idea", href: "/web/new" },
+        }));
         return;
       }
       mount(

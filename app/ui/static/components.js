@@ -42,6 +42,33 @@ export function errorPanel(err, retry) {
   );
 }
 
+/**
+ * Full-card empty state with an optional call-to-action.
+ * opts: { icon, title, body, small, action }.
+ * action: { label, href?, onClick?, primary?, newTab? } — an <a> when href is
+ * given (a CTA out to e.g. /web/new), otherwise a <button>. Defaults to primary.
+ */
+export function emptyState({ icon, title, body, small = false, action } = {}) {
+  const kids = [];
+  if (icon) kids.push(el("div", { class: "empty-icon", text: icon }));
+  if (title) kids.push(el("div", { class: "empty-title", text: title }));
+  if (body) kids.push(el("p", { class: "empty-body", text: body }));
+  if (action) {
+    const cls = "btn " + (action.primary === false ? "btn-ghost" : "btn-primary");
+    kids.push(
+      action.href
+        ? el("a", {
+            class: cls,
+            href: action.href,
+            text: action.label,
+            ...(action.newTab ? { target: "_blank", rel: "noopener" } : {}),
+          })
+        : el("button", { class: cls, text: action.label, onClick: action.onClick })
+    );
+  }
+  return el("div", { class: "card empty-state" + (small ? " small" : "") }, ...kids);
+}
+
 const TOAST_ICON = { err: "⚠", ok: "✓", "": "ℹ" };
 const TOAST_MAX = 4; // cap the stack so a burst can't cover the screen
 let toastHost = null;

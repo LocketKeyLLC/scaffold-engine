@@ -22059,6 +22059,16 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.782 Improvement — operator SPA empty states + first-run onboarding: a shared emptyState() with CTAs across six views, plus a 3-step welcome card (Phase 3) (2026-08-15)
+
+**Why.** Phase 3 of the UI foundations sweep. The SPA had ~12 empty states but they were ad-hoc (`el("div",{class:"card empty-state"}, el("div",{class:"empty-icon"…}), el("p",{text:"No jobs yet."}))` open-coded per view), inconsistent (some a bare `<p>`, some a full card), and — the real gap — **terminal**: every one was a dead-end with no next action. A first-time operator landing on an empty install saw zeroed tiles and "No jobs yet" with no hint of how to start.
+
+**What.** Added a shared `components.js::emptyState({ icon, title, body, small, action })`; `action` renders a CTA — an `<a>` when `href` is given (the create CTAs link **out to the legacy `/web/new`** form, per the sweep's "no in-SPA compose view yet" decision), otherwise a `<button>` with an `onClick` (Research's CTA focuses+scrolls the runner input via its in-scope closure ref). Replaced the open-coded full-card empties in **six views** — `output` (×2), `approvals`, `theater`, `dag`, `assist`, `research` — each now a titled empty with a "＋ New idea" CTA (or job-specific copy where creation isn't the next step). New **first-run onboarding** in `dashboard.js`: when `status.total_jobs === 0` and a `localStorage` `scaffold_onboarded` flag is unset, the dashboard renders a `welcomeCard()` (logo, 3 numbered steps — create idea → approve plan → watch it run — a primary "Create your first idea" CTA to `/web/new`, and a Dismiss that sets the flag and re-renders) instead of zeroed tiles. CSS: `.empty-title`/`.empty-body` + `.welcome-*` on the §17.780 tokens. Pure additive; no new deps, CSP-clean.
+
+**Verification. LIVE (headless Chromium, real view code via route-stubbed API):** stubbed `/status`→`total_jobs:0` + `/work`→`[]` → dashboard renders the welcome card (asserted from live DOM: title, **3** steps, CTA `href=/web/new`; screenshot). Stubbed the completed-jobs list empty → `/output` renders `emptyState` with title "No outputs yet", a body, and CTA `a.btn-primary[href="/web/new"]` text "＋ New idea" (screenshot). Full **route sweep** of all 8 nav destinations against real data: every view mounts, **zero** placeholder fallbacks, **zero** `failed to load view` / pageerror console messages — so all six edited modules parse and run. CSS brace-balanced (360/360). Served via the dev bind-mount, no restart.
+
+---
+
 ### §17.781 Improvement — operator SPA toast/error surface hardening: aria-live announcements, dismiss + icons, stack cap, and a global unhandled-error backstop (Phase 2) (2026-08-15)
 
 **Why.** Phase 2 of the UI foundations sweep (after §17.780). The SPA's `toast()` and `errorPanel()` were already wired at ~40 call sites — good coverage — but the toast itself was thin: no dismiss control (auto-dismiss only), no icon/kind affordance beyond a border color, no screen-reader announcement (silent to AT), and no stack cap (a burst of failures could paper the viewport). Worse, an error that escaped a view's own try/catch — a thrown render error, an unhandled promise rejection from a fire-and-forget call — vanished into the console with no user-visible signal at all.

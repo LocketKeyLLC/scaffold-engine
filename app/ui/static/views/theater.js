@@ -5,7 +5,7 @@
 // absent we simply show each node's full output on node_done.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, mdToHtml, fmtNum } from "../util.js";
-import { statusBadge, loading, errorPanel } from "../components.js";
+import { statusBadge, loading, errorPanel, emptyState } from "../components.js";
 
 const TERMINAL = new Set(["pipeline_complete", "execution_failed", "error", "budget_exhausted", "awaiting_assist"]);
 
@@ -43,7 +43,12 @@ function renderPicker(container) {
       if (disposed) return;
       const jobs = (res.jobs || []).filter((j) => (j.node_count || 0) > 0);
       if (!jobs.length) {
-        mount(outlet, el("div", { class: "card empty-state" }, el("div", { class: "empty-icon", text: "▶" }), el("p", { text: "No runnable jobs (none have a DAG yet)." })));
+        mount(outlet, emptyState({
+          icon: "▶",
+          title: "Nothing to watch yet",
+          body: "Once a job has an approved plan and starts executing, its live run streams here node by node.",
+          action: { label: "＋ New idea", href: "/web/new" },
+        }));
         return;
       }
       mount(
