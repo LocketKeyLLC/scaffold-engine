@@ -106,6 +106,11 @@ BLOCKED = "blocked"
 # §17.624 — the hands-on assist gate parked the job as a plan (predominantly
 # Shell/human DAG) instead of auto-executing it; a literal _sse("awaiting_assist"…).
 AWAITING_ASSIST = "awaiting_assist"
+# §17.777 — per-job token/cost budget cap reached; the executor hard-stops the
+# job ('failed', error_summary 'cost_budget_exhausted') before the next node.
+# Emitted as a literal _sse("budget_exhausted", …) in both the serial and
+# parallel drivers.
+BUDGET_EXHAUSTED = "budget_exhausted"
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +173,7 @@ ALL_EVENT_NAMES = frozenset({
     EXTRACTOR_FALLBACK, QUALITY_GATE_FILTERED, CONTRADICTIONS_DETECTED,
     AWAITING_REPLY, PIPELINE_COMPLETE,
     # DAG / job-terminal
-    DAG_GENERATED, EXECUTION_FAILED, BLOCKED, AWAITING_ASSIST,
+    DAG_GENERATED, EXECUTION_FAILED, BLOCKED, AWAITING_ASSIST, BUDGET_EXHAUSTED,
     # design
     STAGE_START, STAGE_DONE, STAGE_ERROR, CANCELLED,
     # consumer-synthesized

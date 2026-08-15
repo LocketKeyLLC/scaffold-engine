@@ -68,6 +68,7 @@ from app.modules.prompt_assembly import (  # noqa: F401  re-exported for callers
 from app.modules.artifacts import persist_job_artifacts  # §17.565
 from app.modules.rag_pipeline import query_rag
 from app.utils.cost_tracking import current_job_id, current_node_id
+from app.modules.cost_budget import enforce_job_budget  # §17.777
 from app.utils.llm_retry import chat_until_nonempty  # §17.465
 
 logger = logging.getLogger(__name__)
@@ -984,6 +985,18 @@ async def execute_next_node(
             return {"status": "error", "message": f"Job {job_id} not found"}
         if job["status"] not in ("running", "executing", "planning"):
             return {"status": "error", "message": f"Job status is '{job['status']}' — not executable"}
+
+        # §17.777 — hard per-job budget gate. Before claiming/building/running
+        # the next node, check the running spend (tokens + USD, tallied by
+        # Sprint J.3 into llm_call_logs) against the job's cap. Over budget →
+        # the job is flipped to 'failed' (error_summary 'cost_budget_exhausted')
+        # and we return a terminal dict the driver turns into a budget_exhausted
+        # SSE frame. No-op unless settings.cost_budget_enforcement_enabled and a
+        # cap is set; fail-open on any telemetry read error. Runs for both the
+        # serial and parallel (preclaimed) paths since both reach Phase 1.
+        _budget_stop = await enforce_job_budget(db, job_id)
+        if _budget_stop is not None:
+            return _budget_stop
 
         # §17.568 — parallel path passes an already-claimed node; serial path
         # (preclaimed_node None) claims here, byte-identical to before.
@@ -2166,6 +2179,13 @@ async def _run_parallel_frontier(
                         "model_used": res.get("model_used"),
                         "retries_exhausted": not _retried,
                     })
+            elif status == "budget_exhausted":
+                # §17.777 — a worker hit the per-job budget gate; the job is
+                # already flipped to 'failed'. Surface the terminal frame and
+                # stop refilling. The finally block cancels inflight workers.
+                res["nodes_completed"] = len(node_results)
+                yield _sse("budget_exhausted", res)
+                return
             else:
                 # skipped / unexpected per-node status — record, keep going.
                 node_results.append(res)
@@ -2210,6 +2230,8 @@ async def execute_all_nodes(
         execution_cancelled — abnormal exit via client disconnect (best-effort, #2)
         error               — fatal error, pipeline halted
         blocked             — no actionable nodes, dependencies not satisfied
+        budget_exhausted    — §17.777 per-job token/cost budget cap reached;
+                              job hard-stopped ('failed') before the next node
         awaiting_assist     — §17.624 hands-on gate parked the job as a plan
                               (predominantly Shell/human DAG); run /assist
     """
@@ -2498,8 +2520,8 @@ async def execute_all_nodes(
                 yield _sse("pipeline_complete", summary)
                 return
 
-            # -- terminal: fatal error or blocked --
-            if status in ("error", "blocked"):
+            # -- terminal: fatal error, blocked, or budget-exhausted (§17.777) --
+            if status in ("error", "blocked", "budget_exhausted"):
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
                 result["nodes_completed"] = len(node_results)
                 result["duration_ms"] = elapsed_ms
