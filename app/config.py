@@ -1278,6 +1278,19 @@ class Settings(BaseSettings):
     # Anthropic providers, or seeded :cloud tags); otherwise cost stays $0 and
     # the token cap is the effective lever.
     cost_budget_default_max_usd: float = Field(default=0.0, ge=0.0)
+    # §17.786 — full request/response trace capture. Sprint J.3's llm_call_logs
+    # records only the METRICS of each LLM call (tokens/latency/cost); this valve
+    # additionally captures the CONTENT — prompt or serialized messages, system,
+    # sampling params, response text, tool calls, error — into the `llm_traces`
+    # table (JOINs 1:1 to llm_call_logs on job_id/node_id). Default OFF because
+    # storing full prompts/responses has storage + PII implications; flip on to
+    # debug a run or build a replay corpus. Fire-and-forget: a trace-write
+    # failure never breaks the LLM call path (mirrors record_llm_call).
+    trace_capture_enabled: bool = Field(default=False)
+    # Per-field truncation cap for captured content (system/request/response).
+    # Bounds a single trace row so a runaway prompt/response can't bloat the
+    # table; the truncated text is suffixed with a "…[+N chars]" marker.
+    trace_capture_max_chars: int = Field(default=8000, ge=256, le=1_000_000)
     # §17.442 — bound concurrent ideation requests (/ideas + /ideate). Unlike
     # execution, ideation had NO cap: the §17.441 stress test fired 6 concurrent
     # /ideate and all 6 hit the cloud at once (latency 33→81 s). The cap queues
