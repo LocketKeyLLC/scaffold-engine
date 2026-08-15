@@ -14,6 +14,7 @@ Routes:
   PATCH  /jobs/{job_id}                 — rename_job (Management)
   GET    /jobs/{job_id}/costs           — get_job_costs_endpoint (Management)
   PATCH  /jobs/{job_id}/synthesis       — set_job_synthesis_override (Management)
+  PATCH  /jobs/{job_id}/budget          — set_job_budget (Management) [§17.777]
 """
 from datetime import datetime, timezone
 from uuid import UUID
@@ -31,6 +32,9 @@ from app.schemas import (
     CancelJobResult,
     DeleteResponse,
     JOB_STATUSES,
+    JobBudgetInput,
+    JobBudgetResponse,
+    JobBudgetStatus,
     JobCostsBreakdownItem,
     JobCostsResponse,
     JobListResponse,
@@ -327,6 +331,17 @@ async def get_job_costs_endpoint(
 
     from app.modules.cost_rollup import get_job_costs
     payload = await get_job_costs(job_id, db)
+
+    # §17.777 — attach the resolved budget (caps + remaining) so operators see
+    # the cap next to the spend on every poll. Fail-open: a read error leaves
+    # budget None rather than 500ing the costs endpoint.
+    budget_block = None
+    try:
+        from app.modules.cost_budget import get_budget_status, status_to_dict
+        budget_block = JobBudgetStatus(**status_to_dict(await get_budget_status(job_id, db)))
+    except Exception:
+        budget_block = None
+
     return JobCostsResponse(
         job_id=payload["job_id"],
         total_cost_usd=payload["total_cost_usd"],
@@ -335,6 +350,7 @@ async def get_job_costs_endpoint(
         total_latency_ms=payload["total_latency_ms"],
         call_count=payload["call_count"],
         by_provider=[JobCostsBreakdownItem(**row) for row in payload["by_provider"]],
+        budget=budget_block,
     )
 
 
@@ -377,4 +393,80 @@ async def set_job_synthesis_override(
     return JobSynthesisOverrideResponse(
         job_id=str(row.id),
         override=row.compile_synthesis_override,
+    )
+
+
+@router.patch(
+    "/jobs/{job_id}/budget",
+    response_model=JobBudgetResponse,
+    tags=["Management"],
+)
+async def set_job_budget(
+    job_id: str,
+    body: JobBudgetInput,
+    db: AsyncSession = Depends(get_db),
+):
+    """§17.777 — set per-job token / cost budget overrides.
+
+    Body fields are optional and independent per axis:
+
+      - ``{"token_budget": 500000}`` — cap total tokens for this job.
+      - ``{"cost_budget_usd": 2.5}`` — cap USD spend for this job.
+      - ``0`` on an axis — unlimited on that axis.
+      - ``null`` on an axis — clear the override so the axis inherits the
+        settings default (``cost_budget_default_max_*``).
+      - *omitting* an axis — leave it unchanged (keyed off ``model_fields_set``).
+
+    Enforcement itself is gated by ``settings.cost_budget_enforcement_enabled``
+    (default off) and applied at the node boundary by ``execute_next_node``;
+    set the budget BEFORE ``/execute/all`` for it to bound the run. The
+    response echoes the stored overrides plus the resolved status (effective
+    caps + current spend + remaining).
+    """
+    try:
+        UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    # Only touch axes the caller actually sent (model_fields_set), so a
+    # partial body doesn't clobber the other axis. Both null and a number are
+    # meaningful — absence is not.
+    sets: dict[str, object] = {}
+    if "token_budget" in body.model_fields_set:
+        sets["token_budget"] = body.token_budget
+    if "cost_budget_usd" in body.model_fields_set:
+        sets["cost_budget_usd"] = body.cost_budget_usd
+
+    if sets:
+        assignments = ", ".join(f"{col} = :{col}" for col in sets)
+        params = {**sets, "id": job_id}
+        r = await db.execute(
+            text(
+                f"UPDATE jobs SET {assignments}, updated_at = NOW() "
+                f"WHERE id = :id RETURNING id"
+            ),
+            params,
+        )
+        if r.fetchone() is None:
+            raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+        await db.commit()
+    else:
+        # No-op body — still 404 a missing job so the response is honest.
+        exists = await db.execute(text("SELECT id FROM jobs WHERE id = :id"), {"id": job_id})
+        if exists.fetchone() is None:
+            raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+
+    # Read back the stored overrides + resolved status for the response.
+    row = (await db.execute(
+        text("SELECT token_budget, cost_budget_usd FROM jobs WHERE id = :id"),
+        {"id": job_id},
+    )).mappings().first()
+
+    from app.modules.cost_budget import get_budget_status, status_to_dict
+    status = JobBudgetStatus(**status_to_dict(await get_budget_status(job_id, db)))
+    return JobBudgetResponse(
+        job_id=job_id,
+        token_budget=(int(row["token_budget"]) if row and row["token_budget"] is not None else None),
+        cost_budget_usd=(float(row["cost_budget_usd"]) if row and row["cost_budget_usd"] is not None else None),
+        status=status,
     )

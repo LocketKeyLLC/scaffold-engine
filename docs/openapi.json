@@ -1793,6 +1793,153 @@
         "title": "IdeaInput",
         "type": "object"
       },
+      "JobBudgetInput": {
+        "description": "§17.777 — set per-job token/cost budget overrides.\n\nEach field is optional with no default so the caller declares intent per\naxis: a value sets the cap (``0`` = unlimited on that axis), ``null``\nclears the override so the axis inherits the settings default, and\n*omitting* the field from the JSON body leaves that axis unchanged (the\nendpoint keys off ``model_fields_set``).",
+        "properties": {
+          "cost_budget_usd": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Budget Usd"
+          },
+          "token_budget": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Budget"
+          }
+        },
+        "title": "JobBudgetInput",
+        "type": "object"
+      },
+      "JobBudgetResponse": {
+        "properties": {
+          "cost_budget_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Budget Usd"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobBudgetStatus"
+          },
+          "token_budget": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Budget"
+          }
+        },
+        "required": [
+          "job_id",
+          "token_budget",
+          "cost_budget_usd",
+          "status"
+        ],
+        "title": "JobBudgetResponse",
+        "type": "object"
+      },
+      "JobBudgetStatus": {
+        "description": "§17.777 — resolved per-job budget caps + current spend.\n\n``max_*`` are the *effective* caps after folding the per-job override\nover the settings default; ``0`` = unlimited on that axis. ``*_remaining``\nis ``null`` on an unlimited axis. ``exceeded`` / ``limit`` report whether a\nbounded axis has been reached (``limit`` names it: ``\"tokens\"`` | ``\"cost\"``).\n``enforcement_enabled`` echoes the master valve — the numbers are reported\nregardless, but only *act* (hard-stop) when the valve is on.",
+        "properties": {
+          "cost_remaining_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Remaining Usd"
+          },
+          "enforcement_enabled": {
+            "title": "Enforcement Enabled",
+            "type": "boolean"
+          },
+          "exceeded": {
+            "title": "Exceeded",
+            "type": "boolean"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "max_cost_usd": {
+            "title": "Max Cost Usd",
+            "type": "number"
+          },
+          "max_tokens": {
+            "title": "Max Tokens",
+            "type": "integer"
+          },
+          "spent_cost_usd": {
+            "title": "Spent Cost Usd",
+            "type": "number"
+          },
+          "spent_tokens": {
+            "title": "Spent Tokens",
+            "type": "integer"
+          },
+          "tokens_remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens Remaining"
+          }
+        },
+        "required": [
+          "enforcement_enabled",
+          "max_tokens",
+          "max_cost_usd",
+          "spent_tokens",
+          "spent_cost_usd",
+          "tokens_remaining",
+          "cost_remaining_usd",
+          "exceeded",
+          "limit"
+        ],
+        "title": "JobBudgetStatus",
+        "type": "object"
+      },
       "JobCostsBreakdownItem": {
         "description": "Sprint J.3.b — one row of the per-(provider, model) cost breakdown.",
         "properties": {
@@ -1879,6 +2026,16 @@
       "JobCostsResponse": {
         "description": "Sprint J.3.b — aggregate cost + latency for one job, with breakdown.\n\n``by_provider`` is sorted descending by cost_usd then calls so the\nbiggest spend lines surface first. ``call_count``/``total_*`` are\njob-wide totals across all (provider, model) combinations.\n\n§17.90 added ``by_kind`` — same shape, grouped by ``call_kind``.\nUseful for splitting compile-time synthesis spend from execution\nspend (W.7 follow-up).\n\n§17.284 added ``data_source`` (``\"ok\"`` | ``\"error\"``). The rollup\nfails open on transient DB errors and returns the zero-shape rather\nthan 500ing — pre-§17.284 that was indistinguishable from a real\nempty rollup. ``\"error\"`` here means at least one of the three\ncomponent queries (totals / by_provider / by_kind) raised; operators\nshould re-poll or check logs before trusting the numbers.",
         "properties": {
+          "budget": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobBudgetStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "by_kind": {
             "default": [],
             "items": {
@@ -6918,6 +7075,64 @@
           }
         ],
         "summary": "List Job Artifacts"
+      }
+    },
+    "/jobs/{job_id}/budget": {
+      "patch": {
+        "description": "§17.777 — set per-job token / cost budget overrides.\n\nBody fields are optional and independent per axis:\n\n  - ``{\"token_budget\": 500000}`` — cap total tokens for this job.\n  - ``{\"cost_budget_usd\": 2.5}`` — cap USD spend for this job.\n  - ``0`` on an axis — unlimited on that axis.\n  - ``null`` on an axis — clear the override so the axis inherits the\n    settings default (``cost_budget_default_max_*``).\n  - *omitting* an axis — leave it unchanged (keyed off ``model_fields_set``).\n\nEnforcement itself is gated by ``settings.cost_budget_enforcement_enabled``\n(default off) and applied at the node boundary by ``execute_next_node``;\nset the budget BEFORE ``/execute/all`` for it to bound the run. The\nresponse echoes the stored overrides plus the resolved status (effective\ncaps + current spend + remaining).",
+        "operationId": "set_job_budget_jobs__job_id__budget_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobBudgetInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobBudgetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Set Job Budget",
+        "tags": [
+          "Management"
+        ]
       }
     },
     "/jobs/{job_id}/cancel": {

@@ -744,6 +744,27 @@ class JobCostsKindItem(BaseModel):
     latency_ms: int
 
 
+class JobBudgetStatus(BaseModel):
+    """§17.777 — resolved per-job budget caps + current spend.
+
+    ``max_*`` are the *effective* caps after folding the per-job override
+    over the settings default; ``0`` = unlimited on that axis. ``*_remaining``
+    is ``null`` on an unlimited axis. ``exceeded`` / ``limit`` report whether a
+    bounded axis has been reached (``limit`` names it: ``"tokens"`` | ``"cost"``).
+    ``enforcement_enabled`` echoes the master valve — the numbers are reported
+    regardless, but only *act* (hard-stop) when the valve is on.
+    """
+    enforcement_enabled: bool
+    max_tokens: int
+    max_cost_usd: float
+    spent_tokens: int
+    spent_cost_usd: float
+    tokens_remaining: int | None
+    cost_remaining_usd: float | None
+    exceeded: bool
+    limit: str | None
+
+
 class JobCostsResponse(BaseModel):
     """Sprint J.3.b — aggregate cost + latency for one job, with breakdown.
 
@@ -771,6 +792,10 @@ class JobCostsResponse(BaseModel):
     by_provider: list[JobCostsBreakdownItem]
     by_kind: list[JobCostsKindItem] = []
     data_source: Literal["ok", "error"] = "ok"
+    # §17.777 — resolved budget caps + remaining for this job. None only if the
+    # budget read failed; otherwise present so operators see the cap alongside
+    # spend on every /jobs/{id}/costs poll.
+    budget: JobBudgetStatus | None = None
 
 
 class JobSynthesisOverrideInput(BaseModel):
@@ -788,6 +813,26 @@ class JobSynthesisOverrideInput(BaseModel):
 class JobSynthesisOverrideResponse(BaseModel):
     job_id: str
     override: bool | None
+
+
+class JobBudgetInput(BaseModel):
+    """§17.777 — set per-job token/cost budget overrides.
+
+    Each field is optional with no default so the caller declares intent per
+    axis: a value sets the cap (``0`` = unlimited on that axis), ``null``
+    clears the override so the axis inherits the settings default, and
+    *omitting* the field from the JSON body leaves that axis unchanged (the
+    endpoint keys off ``model_fields_set``).
+    """
+    token_budget: int | None = Field(default=None, ge=0)
+    cost_budget_usd: float | None = Field(default=None, ge=0.0)
+
+
+class JobBudgetResponse(BaseModel):
+    job_id: str
+    token_budget: int | None
+    cost_budget_usd: float | None
+    status: JobBudgetStatus
 
 
 class ErrorLogResolveInput(BaseModel):

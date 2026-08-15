@@ -1258,6 +1258,26 @@ class Settings(BaseSettings):
     # process). Default 3 tolerates transient crashes while still surfacing a
     # stuck node within a few boots.
     execution_max_resume_attempts: int = Field(default=3, ge=1, le=10)
+    # §17.777 — hard per-job cost/token budgets. Sprint J.3 already tallies
+    # every LLM call (tokens + USD) into llm_call_logs tagged by job; this
+    # valve turns that tally into an ENFORCED cap. When ON, execute_next_node
+    # checks the running spend before each node and hard-stops a job that has
+    # exceeded EITHER its token or USD budget (job -> 'failed',
+    # error_summary 'cost_budget_exhausted'). Default OFF: no behavior change
+    # until an operator opts in. Per-job overrides live on jobs.token_budget /
+    # jobs.cost_budget_usd (NULL = inherit the two defaults below).
+    cost_budget_enforcement_enabled: bool = Field(default=False)
+    # Default token cap applied to every job when its jobs.token_budget is
+    # NULL. Total tokens = prompt + completion, summed across all LLM calls.
+    # 0 = unlimited (the default) — a token cap only bites once set > 0 (here
+    # or per-job). Meaningful even on the all-Ollama deployment where USD is $0
+    # because model_costs has no rows for the local/:cloud tags.
+    cost_budget_default_max_tokens: int = Field(default=0, ge=0)
+    # Default USD cap applied when jobs.cost_budget_usd is NULL. 0 = unlimited.
+    # Only bites when the job's models are priced in model_costs (OpenAI /
+    # Anthropic providers, or seeded :cloud tags); otherwise cost stays $0 and
+    # the token cap is the effective lever.
+    cost_budget_default_max_usd: float = Field(default=0.0, ge=0.0)
     # §17.442 — bound concurrent ideation requests (/ideas + /ideate). Unlike
     # execution, ideation had NO cap: the §17.441 stress test fired 6 concurrent
     # /ideate and all 6 hit the cloud at once (latency 33→81 s). The cap queues
