@@ -8,6 +8,7 @@ import { el, mount, shortId, debounce } from "./util.js";
 
 const NAV_COMMANDS = [
   { label: "New idea", path: "/new" },
+  { label: "Chat", path: "/chat" },
   { label: "Dashboard", path: "/" },
   { label: "DAG Canvas", path: "/dag" },
   { label: "Execution Theater", path: "/theater" },

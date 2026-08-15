@@ -223,6 +223,37 @@ confirm card and commit on the next affirmative turn. Reuse `command_guide.class
 - **Schema snapshots** — new endpoints need `make sync-schemas` + `make openapi-snapshot`; the
   `ci-tier-0` pre-push hook gates static parity.
 
+## 6b. Wiring OWUI as an OpenAI connection (Phase 4, optional)
+
+The native `/ui` chat view (§17.793) is the primary native client and needs no OWUI.
+To *additionally* let OWUI drive the engine directly (as an OpenAI model alongside the
+existing pipeline), add the engine's `/v1` as an OpenAI connection — a one-time
+OWUI-admin config, non-destructive to the pipeline:
+
+- **Via env** (compose `open-webui` service): append to the existing connection lists —
+  `OPENAI_API_BASE_URLS=…;http://scaffold-orchestrator:8000/v1` and the matching
+  `OPENAI_API_KEYS=…;${SCAFFOLD_API_KEY}` (semicolon-separated, index-aligned). Requires
+  `NATIVE_OPENAI_ENABLED=true` on the orchestrator. Recreate `open-webui`.
+- **Via admin UI:** Settings → Connections → add an OpenAI connection, base URL
+  `http://scaffold-orchestrator:8000/v1`, key = `SCAFFOLD_API_KEY`.
+
+OWUI then calls `GET /v1/models` (sees `scaffold-engine`) and routes chat to
+`POST /v1/chat/completions` — the same surface verified in Phase 0. Verify in-browser
+(mint a JWT from `WEBUI_SECRET_KEY`; the `scaffold-engine` model appears in the picker
+and a chat message streams the engine's dispatch). Not wired automatically to avoid
+disrupting the live OWUI + pipeline setup.
+
+## Status (2026-08-15)
+
+- **Phase 0** §17.788 ✓ — `/v1/chat/completions` + `/v1/models`, auth-isolated sub-app
+- **Phase 1** §17.789 ✓ — outbound provider bump (raw httpx kept; reasoning params, strict schema, streamed usage/refusal)
+- **Phase 2** §17.790 ✓ — NL routing + confirm-cards (in-process ASGI client)
+- **Phase 3a** §17.791 ✓ — conversational triage + `/go` synthesis (`model_triage` role)
+- **Phase 3b** §17.792 ✓ — `/confirm` build auto-chain (research → DAG → execute, streamed)
+- **Phase 4** §17.793 ✓ — native `/ui` chat view; OWUI-as-connection documented above
+
+All behind the default-off `native_openai_enabled` valve; the OWUI pipeline remains the fallback.
+
 ## 7. Open sub-decisions for the owner
 - **P1:** keep raw-httpx (recommended) or pin the official `openai` SDK?
 - **P0/P4:** advertise one model (`scaffold-engine`) or also `scaffold-engine-direct`?

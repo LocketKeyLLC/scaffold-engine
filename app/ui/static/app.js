@@ -25,6 +25,7 @@ window.addEventListener("error", (e) => { if (e.error) surfaceError(e.error); })
 
 const NAV = [
   { id: "new", path: "/new", label: "New idea", icon: "＋" },
+  { id: "chat", path: "/chat", label: "Chat", icon: "💬" },
   { id: "dashboard", path: "/", label: "Dashboard", icon: "◈" },
   { id: "approvals", path: "/approvals", label: "Approvals", icon: "⏻" },
   { id: "dag", path: "/dag", label: "DAG Canvas", icon: "⬡" },
@@ -245,6 +246,7 @@ function lazy(name, title) {
 }
 const VIEWS = {
   new: lazy("compose", "New idea"),
+  chat: lazy("chat", "Chat"),
   dashboard: lazy("dashboard", "Dashboard"),
   approvals: lazy("approvals", "Approval Gate"),
   dag: lazy("dag", "DAG Canvas"),
@@ -264,6 +266,7 @@ async function loadAndRender(name, params, path) {
 function registerRoutes() {
   router.route("/", (p) => loadAndRender("dashboard", p, router.currentPath()));
   router.route("/new", (p) => loadAndRender("new", p, router.currentPath()));
+  router.route("/chat", (p) => loadAndRender("chat", p, router.currentPath()));
   router.route("/approvals", (p) => loadAndRender("approvals", p, router.currentPath()));
   router.route("/approvals/:jobId", (p) => loadAndRender("approvals", p, router.currentPath()));
   router.route("/dag", (p) => loadAndRender("dag", p, router.currentPath()));
