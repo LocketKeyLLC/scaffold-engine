@@ -4,6 +4,24 @@ import * as api from "./api.js";
 import * as router from "./router.js";
 import { placeholder } from "./views/placeholder.js";
 import { mountCommandPalette } from "./command_palette.js";
+import { toast } from "./components.js";
+
+// ── Global error surface ──────────────────────────────────────────────
+// A backstop so anything that escapes a view's own try/catch becomes a
+// visible toast instead of vanishing into the console. Deduped (a render
+// loop can't spam) and quiet for benign fetch-abort-on-navigation.
+let _lastErr = { msg: "", at: 0 };
+function surfaceError(err) {
+  if (err && err.name === "AbortError") return;
+  const raw = err?.detail || err?.message || (typeof err === "string" ? err : "Unexpected error");
+  const msg = String(raw);
+  const now = Date.now();
+  if (msg === _lastErr.msg && now - _lastErr.at < 4000) return;
+  _lastErr = { msg, at: now };
+  toast(msg.length > 160 ? msg.slice(0, 157) + "…" : msg, "err");
+}
+window.addEventListener("unhandledrejection", (e) => surfaceError(e.reason));
+window.addEventListener("error", (e) => { if (e.error) surfaceError(e.error); });
 
 const NAV = [
   { id: "dashboard", path: "/", label: "Dashboard", icon: "◈" },

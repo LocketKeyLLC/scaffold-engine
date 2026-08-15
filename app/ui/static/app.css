@@ -319,10 +319,42 @@ select.input:focus-visible,
 .spacer { flex: 1; }
 .spin { display: inline-block; width: 15px; height: 15px; border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.toast-host { position: fixed; bottom: 20px; right: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
-.toast { padding: 10px 16px; border-radius: var(--radius-sm); background: var(--bg-elev-2); border: 1px solid var(--border-strong); box-shadow: var(--shadow); font-size: 13px; }
+.toast-host { position: fixed; bottom: 20px; right: 20px; display: flex; flex-direction: column; gap: var(--sp-2); z-index: 50; max-width: min(360px, calc(100vw - 32px)); }
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: 10px 12px 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow);
+  font-size: var(--fs-sm);
+  animation: toast-in var(--dur-med) var(--ease);
+}
+.toast.leaving { animation: toast-out var(--dur-med) var(--ease) forwards; }
+.toast-ico { flex-shrink: 0; line-height: 1.5; }
+.toast-msg { flex: 1; min-width: 0; word-break: break-word; }
+.toast-x {
+  flex-shrink: 0;
+  font: inherit;
+  font-size: var(--fs-xs);
+  line-height: 1;
+  padding: 2px 4px;
+  margin: -2px -2px -2px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  border-radius: 4px;
+}
+.toast-x:hover { color: var(--text); background: var(--bg-inset); }
 .toast.err { border-color: var(--err); color: var(--err); }
+.toast.err .toast-x { color: var(--err); }
 .toast.ok { border-color: var(--ok); }
+.toast.ok .toast-ico { color: var(--ok); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
 
 .md :is(h1, h2, h3) { margin: 14px 0 6px; }
 .md p { margin: 8px 0; }
