@@ -22059,6 +22059,17 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.796 KNOWN GAP — the `eng_design` partition cannot self-repopulate (structural) (2026-08-15)
+
+Documenting a structural retrieval gap surfaced by the §17.795 re-baseline: the **`eng_design` partition is empty (0 rows) and will not refill through normal use.** Verified live on the 2026-08-15 corpus (2997 entries: eng=2618, rag=363, prompt=14, llm=1, spec=1, **eng_design=0**).
+
+- **Why it's empty:** the whole `toon_v2` collection was wiped on 2026-07-14 (the documented `docker compose down` failure mode — down/up orphans the segments despite the persistent volume; use `restart`, never `down`). Every partition came back empty; only `eng`/`rag` repopulated because those are what `/research` traffic + the domain classifier produce.
+- **Why it *can't* auto-recover (the structural part):** `eng_design` has **no classifier route**. `idea_refinement.py` sets `LLM_SELECTABLE_DOMAINS = ALLOWED_DOMAINS - {"eng_design"}` (§17.515) — the refinement LLM is *forbidden* from ever auto-selecting it. Per the §17.329/§17.330 eng↔eng_design split, `eng_design` (circuit/EDA content) is **explicit-override-only** by design, to keep software-eng content from bleeding into the circuits partition. So no amount of `/research` on plain topics will land there; it only fills via a deliberate `domain=eng_design` write. (Contrast `llm`, which *has* a route but stayed near-empty simply because the operator's research topics all classify as `eng` — see §17.795.)
+- **How to populate it (all require an explicit domain override):** `POST /research` with `domain=eng_design`; `/ideate` with an `eng_design` domain override (`idea_refinement.ALLOWED_DOMAINS` accepts it, §17.330); the research PDF-upload form (`/research/pdf`, which offers `eng_design`); or the sim/topology path (`sim/topology_select.py` `DEFAULT_DOMAIN="eng_design"`). It will **not** self-heal.
+- **Coverage impact:** the retrieval yardstick `golden_set_corpus.json` (corpus-2.0, §17.795) omits `eng_design` (nothing to target), and the live gate `tests/integration/test_retrieval_eval.py` has no `eng_design` query — so **no test currently guards circuit/EDA retrieval**. If that content matters, `eng_design` must be deliberately seeded and kept alive (a seed script or a scheduled `domain=eng_design` research job), and a golden pair added once it holds content.
+
+---
+
 ### §17.795 Re-baseline `golden_set_corpus.json` against the live KB (corpus-2.0) (2026-08-15)
 
 The corpus-1.0 yardstick (built 2026-06-18 against a 1314-entry snapshot) scored **13.6% coverage** on the live KB — a pure snapshot mismatch, not a retrieval regression, confirmed via the §17.794 scoring harness. The corpus reshaped heavily since: **2997 entries now, but distributed eng=2618, rag=363, prompt=14, llm=1, spec=1, eng_design=0.** The 8086/DOS/EDA/llm targets corpus-1.0 labelled are simply gone.
