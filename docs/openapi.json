@@ -3442,6 +3442,17 @@
             "title": "Depth",
             "type": "string"
           },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
           "model_overrides": {
             "anyOf": [
               {
@@ -3486,6 +3497,17 @@
           "depth": {
             "title": "Depth",
             "type": "string"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
           },
           "enabled": {
             "title": "Enabled",

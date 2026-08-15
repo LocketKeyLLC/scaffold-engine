@@ -77,7 +77,7 @@ _VALID_BODY = {
 }
 
 
-def _row_for_insert(*, id_=1):
+def _row_for_insert(*, id_=1, domain=None):
     """Build a SQLAlchemy mappings().first() shape for the schedule INSERT RETURNING."""
     created = _dt.datetime(2026, 5, 24, 10, 0, 0)
     return {
@@ -86,6 +86,7 @@ def _row_for_insert(*, id_=1):
         "depth": _VALID_BODY["depth"],
         "cron_expression": _VALID_BODY["cron_expression"],
         "timezone": _VALID_BODY["timezone"],
+        "domain": domain,  # §17.797
         "enabled": True,
         "last_run_at": None,
         "last_status": None,
@@ -119,6 +120,31 @@ def test_create_schedule_happy_path(client, mock_db, patch_models_ok):
     mock_db.commit.assert_awaited_once()
     mock_db.rollback.assert_not_awaited()
     m_add.assert_awaited_once()
+
+
+def test_create_schedule_with_domain_override(client, mock_db, patch_models_ok):
+    """§17.797 — a valid domain flows to the INSERT + into add_schedule + the response."""
+    res = MagicMock()
+    res.mappings.return_value.first.return_value = _row_for_insert(domain="eng_design")
+    mock_db.execute = AsyncMock(return_value=res)
+
+    with patch("app.scheduler.add_schedule", new_callable=AsyncMock, return_value=None) as m_add:
+        r = client.post("/schedule", json={**_VALID_BODY, "domain": "eng_design"})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["domain"] == "eng_design"
+    # domain is threaded to add_schedule as the trailing positional arg
+    assert m_add.await_args.args[-1] == "eng_design"
+    # and it reached the INSERT params
+    insert_params = mock_db.execute.await_args.args[1]
+    assert insert_params["domain"] == "eng_design"
+
+
+def test_create_schedule_rejects_invalid_domain(client, mock_db):
+    """§17.797 — an unknown domain is a 422 (from _domain_or_422) before any DB call."""
+    r = client.post("/schedule", json={**_VALID_BODY, "domain": "not_a_partition"})
+    assert r.status_code == 422
+    mock_db.execute.assert_not_awaited()
 
 
 @pytest.mark.parametrize("bad_cron", [

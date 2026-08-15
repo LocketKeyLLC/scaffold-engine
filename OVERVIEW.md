@@ -22059,6 +22059,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.797 Domain-aware scheduled research — `/schedule` can now pin an ingest partition (feeds `eng_design`) (2026-08-15)
+
+Closes the automation half of the §17.796 gap: scheduled research can now target a specific partition. Until now `app/scheduler.py` called `run_research(..., domain=None)` (hardcoded), `scheduled_jobs` had no `domain` column, and `_detect_domain` only ever yields `{llm, rag, eng}` — so a scheduled job could **never** feed `eng_design` (or reliably `llm`). Now a schedule carries an optional, validated `domain` override end-to-end.
+
+- **`db/migrations/064_scheduled_jobs_domain.sql`** *(new)* — `ALTER TABLE scheduled_jobs ADD COLUMN IF NOT EXISTS domain TEXT` (single-statement, per the runner's prepared-statement path). NULL = auto-detect (unchanged behavior). Numbered 064 to dodge the in-flight `063_llm_traces` on the unmerged §17.786 branch.
+- **`app/schemas.py`** — `ScheduleCreate` gains `domain: str | None` with the same `_domain_or_422` validator as `ResearchInput` (unknown domain → 422, so data can't strand in an unqueried partition); `ScheduleResponse` echoes it. OpenAPI snapshot + vendored SDK schema regenerated (`make openapi-snapshot` + `sync-schemas`).
+- **`app/routers/schedule.py`** — INSERT/RETURNING + list SELECT carry `domain`; `add_schedule` receives it.
+- **`app/scheduler.py`** — `domain` threads through `_add_job` (into the APScheduler `args`), `add_schedule`, `_rehydrate`, `delete_schedule`, and `_execute_research_job` → `run_research(domain=…)`. Kept as a trailing `Optional[str] = None` arg so APScheduler jobs **persisted before this change** (3-arg `args`) still bind and default to auto-detect — no jobstore migration needed.
+- **Tests** — +4: router accepts/validates/rejects `domain` and threads it to `add_schedule`; scheduler pins `domain` into `run_research` and defaults `None` for legacy 3-arg jobs. `test_scheduler`'s rehydrate fixture updated for the new column. Full schedule/scheduler suite **76 passed**; `make ci-tier-0` green (incl. `lint-migrations` single-statement check).
+- **Live:** created schedule id=10 — `github:cocotb/cocotb`, `domain=eng_design`, weekly (Mon 06:00 UTC). Verified the persisted APScheduler job args are `(10, 'github:cocotb/cocotb', 'shallow', 'eng_design')`, so at fire time it ingests EDA docs into the `eng_design` partition. GitHub-mode chosen over topic-mode deliberately — topic-mode `/research` pollutes via SearXNG (the llm-repopulation lesson this session: ~41% on-topic vs ~97% for GitHub-mode curated docs).
+
+---
+
 ### §17.796 KNOWN GAP — the `eng_design` partition cannot self-repopulate (structural) (2026-08-15)
 
 Documenting a structural retrieval gap surfaced by the §17.795 re-baseline: the **`eng_design` partition is empty (0 rows) and will not refill through normal use.** Verified live on the 2026-08-15 corpus (2997 entries: eng=2618, rag=363, prompt=14, llm=1, spec=1, **eng_design=0**).

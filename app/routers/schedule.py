@@ -35,12 +35,13 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
     await _require_valid_models(body.model_overrides)
 
     result = await db.execute(text("""
-        INSERT INTO scheduled_jobs (topic, depth, cron_expression, timezone, enabled)
-        VALUES (:topic, :depth, :cron, :tz, TRUE)
-        RETURNING id, topic, depth, cron_expression, timezone, enabled,
+        INSERT INTO scheduled_jobs (topic, depth, cron_expression, timezone, domain, enabled)
+        VALUES (:topic, :depth, :cron, :tz, :domain, TRUE)
+        RETURNING id, topic, depth, cron_expression, timezone, domain, enabled,
                   last_run_at, last_status, last_job_id, next_run_at,
                   run_count, failure_count, created_at
-    """), {"topic": body.topic, "depth": body.depth, "cron": body.cron_expression, "tz": body.timezone})
+    """), {"topic": body.topic, "depth": body.depth, "cron": body.cron_expression,
+           "tz": body.timezone, "domain": body.domain})
     row = result.mappings().first()
 
     # APScheduler registration + next_run_at UPDATE both run in this same
@@ -56,7 +57,7 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
     try:
         next_run = await add_schedule(
             db, row["id"], row["topic"], row["depth"],
-            row["cron_expression"], row["timezone"],
+            row["cron_expression"], row["timezone"], row["domain"],
         )
         await db.commit()
     except Exception as exc:
@@ -85,7 +86,7 @@ async def list_schedules(
         text("SELECT COUNT(*) FROM scheduled_jobs")
     )).scalar() or 0
     rows = (await db.execute(text("""
-        SELECT id, topic, depth, cron_expression, timezone, enabled,
+        SELECT id, topic, depth, cron_expression, timezone, domain, enabled,
                last_run_at, last_status, last_job_id, next_run_at,
                run_count, failure_count, created_at
         FROM scheduled_jobs

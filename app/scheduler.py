@@ -238,13 +238,14 @@ async def _rehydrate() -> None:
     """
     async with async_session() as db:
         rows = (await db.execute(text(
-            "SELECT id, topic, depth, cron_expression, timezone "
+            "SELECT id, topic, depth, cron_expression, timezone, domain "
             "FROM scheduled_jobs WHERE enabled = TRUE"
         ))).mappings().all()
     ok = skipped = 0
     for r in rows:
         try:
-            _add_job(r["id"], r["topic"], r["depth"], r["cron_expression"], r["timezone"])
+            _add_job(r["id"], r["topic"], r["depth"], r["cron_expression"],
+                     r["timezone"], r["domain"])
             ok += 1
         except Exception as exc:
             skipped += 1
@@ -315,15 +316,22 @@ def _add_job(
     depth: str,
     cron_expr: str,
     tz: str,
+    domain: Optional[str] = None,
 ) -> None:
-    """Register an APScheduler job. Timezone threads through per-schedule (#8)."""
+    """Register an APScheduler job. Timezone threads through per-schedule (#8).
+
+    §17.797 — ``domain`` is passed as a job arg so the recurring run can pin its
+    ingest partition (``None`` = auto-detect, the pre-§17.797 behavior). Kept
+    last with a default so APScheduler jobs persisted before this change (3-arg
+    ``args``) still bind to ``_execute_research_job`` on rehydrate.
+    """
     if _scheduler is None:
         raise RuntimeError("Scheduler not initialized; cannot add job")
     _scheduler.add_job(
         _execute_research_job,
         trigger=CronTrigger.from_crontab(cron_expr, timezone=tz),
         id=f"schedule_{schedule_id}",
-        args=[schedule_id, topic, depth],
+        args=[schedule_id, topic, depth, domain],
         replace_existing=True,
         misfire_grace_time=settings.scheduler_misfire_grace_time,
     )
@@ -336,6 +344,7 @@ async def add_schedule(
     depth: str,
     cron_expr: str,
     tz: str = "UTC",
+    domain: Optional[str] = None,
 ) -> Optional[datetime]:
     """Register a new schedule and write next_run_at in the caller's session.
 
@@ -352,7 +361,7 @@ async def add_schedule(
         logger.warning('event="add_schedule_skipped" reason="scheduler_disabled"')
         return None
 
-    _add_job(schedule_id, topic, depth, cron_expr, tz)
+    _add_job(schedule_id, topic, depth, cron_expr, tz, domain)
     try:
         job = _scheduler.get_job(f"schedule_{schedule_id}")
         next_run = job.next_run_time if job else None  # tz-aware datetime → TIMESTAMPTZ
@@ -389,7 +398,7 @@ async def delete_schedule(db, schedule_id: int) -> bool:
     is responsible for committing ``db``.
     """
     result = await db.execute(text(
-        "SELECT topic, depth, cron_expression, timezone "
+        "SELECT topic, depth, cron_expression, timezone, domain "
         "FROM scheduled_jobs WHERE id = :id"
     ), {"id": schedule_id})
     row = result.mappings().first()
@@ -413,7 +422,7 @@ async def delete_schedule(db, schedule_id: int) -> bool:
             try:
                 _add_job(
                     schedule_id, row["topic"], row["depth"],
-                    row["cron_expression"], row["timezone"],
+                    row["cron_expression"], row["timezone"], row["domain"],
                 )
             except Exception as readd_exc:
                 logger.error(
@@ -562,11 +571,15 @@ async def _execute_model_ab_job(schedule_id: int, topic: str, depth: str) -> Non
             logger.exception('event="model_ab_result_write_failed" schedule_id=%s', schedule_id)
 
 
-async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> None:
+async def _execute_research_job(
+    schedule_id: int, topic: str, depth: str, domain: Optional[str] = None,
+) -> None:
     """APScheduler entrypoint. Runs research with timeout, captures real session_id (#79),
     converts epoch next_run_time → TIMESTAMPTZ correctly (#7), enforces timeout (#80).
 
-    §17.578 — a ``model_ab:<task>`` topic routes to the scheduled re-A/B job instead."""
+    §17.578 — a ``model_ab:<task>`` topic routes to the scheduled re-A/B job instead.
+    §17.797 — ``domain`` pins the ingest partition (``None`` = auto-detect). Defaulted
+    so APScheduler jobs persisted before this change (3-arg ``args``) still bind."""
     if topic.startswith("model_ab:"):
         await _execute_model_ab_job(schedule_id, topic, depth)
         return
@@ -578,7 +591,7 @@ async def _execute_research_job(schedule_id: int, topic: str, depth: str) -> Non
 
     async def _consume() -> None:
         nonlocal session_id
-        async for event in run_research(topic=topic, depth=depth, domain=None):
+        async for event in run_research(topic=topic, depth=depth, domain=domain):
             # run_research yields SSE-formatted strings or dicts; capture session_id
             # from the first event that carries it. Keep logic defensive — format may vary.
             if session_id is None:
