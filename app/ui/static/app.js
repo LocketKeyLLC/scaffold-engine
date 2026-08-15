@@ -144,7 +144,42 @@ function buildChrome() {
     )
   );
 
-  mount(root, el("div", { class: "shell" }, sidebar, outlet));
+  // ── Mobile chrome: hamburger + off-canvas slide-over ────────────────
+  // On wide screens the sidebar is a static grid column and these are
+  // display:none (CSS). At ≤820px the sidebar becomes a fixed drawer that
+  // this scrim/hamburger open and close.
+  function openNav() {
+    sidebar.classList.add("open");
+    scrim.classList.remove("hidden");
+    hamburger.setAttribute("aria-expanded", "true");
+  }
+  function closeNav() {
+    sidebar.classList.remove("open");
+    scrim.classList.add("hidden");
+    hamburger.setAttribute("aria-expanded", "false");
+  }
+  const scrim = el("div", { class: "scrim hidden", onClick: closeNav });
+  const hamburger = el("button", {
+    class: "hamburger",
+    "aria-label": "Open navigation",
+    "aria-expanded": "false",
+    text: "☰",
+    onClick: openNav,
+  });
+  const topbar = el(
+    "div",
+    { class: "mobile-topbar" },
+    hamburger,
+    el("span", { class: "brand-logo", text: "🧬" }),
+    el("span", { class: "brand-name", text: "Scaffold" })
+  );
+  // Tapping a destination navigates → close the drawer; Escape closes too.
+  navLinks.forEach((a) => a.addEventListener("click", closeNav));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeNav();
+  });
+
+  mount(root, el("div", { class: "shell" }, topbar, sidebar, scrim, outlet));
   mountCommandPalette(); // idempotent; overlay lives on document.body
   startHealthPolling(healthDot, healthText);
 }
