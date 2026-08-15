@@ -23,6 +23,7 @@ a fail-open fallback (query raised). Mirrors the same flag added to
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -392,5 +393,115 @@ async def recent_jobs_costs(
         "count": len(jobs),
         "total_cost_usd": round(sum(j["cost_usd"] for j in jobs), 6),
         "jobs": jobs,
+        "data_source": data_source,
+    }
+
+
+# ── 5. Per-job LLM traces (§17.787) ──────────────────────────────────
+
+_JOB_TRACES_SQL = """
+    SELECT
+        id, node_id, call_kind, request_kind, provider, model,
+        system_prompt, request_content, response_content, tool_calls,
+        temperature, max_tokens, prompt_tokens, completion_tokens,
+        latency_ms, success, error, created_at
+    FROM llm_traces
+    WHERE job_id = CAST(:job_id AS UUID)
+      AND (CAST(:kind_filter AS TEXT) IS NULL
+           OR request_kind = CAST(:kind_filter AS TEXT))
+    ORDER BY id ASC
+    LIMIT :limit OFFSET :offset
+"""
+
+
+def _coerce_tool_calls(value: Any) -> Any:
+    """JSONB comes back decoded (list/dict) under the asyncpg dialect, but a
+    raw ``text()`` read can hand back a JSON string on some paths — normalize
+    both to a Python object so the wire shape is always structured, not a
+    double-encoded string. Anything unparseable passes through untouched."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+async def get_job_traces(
+    *,
+    job_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    kind: str | None = None,
+    db,
+) -> dict[str, Any]:
+    """Full request/response content of a job's LLM calls, in call order.
+
+    Reads ``llm_traces`` (the §17.786 content sink) for one job, oldest
+    first (``id ASC``) so a reader follows the run as it happened. Optional
+    ``kind`` filters to one ``request_kind`` (generate | chat | tool_call |
+    embed). ``limit``/``offset`` paginate.
+
+    Rows exist only for calls made while ``trace_capture_enabled`` was on, so
+    ``capture_enabled`` echoes the current valve to disambiguate a genuinely
+    trace-free job from one where capture was never turned on. Fail-open:
+    empty list + ``data_source='error'`` on any DB error (e.g. a test env
+    without the 063 migration), never a 500.
+    """
+    data_source = "ok"
+    try:
+        rows = await db.execute(
+            text(_JOB_TRACES_SQL),
+            {"job_id": job_id, "kind_filter": kind, "limit": limit, "offset": offset},
+        )
+        records = rows.mappings().all()
+    except Exception as exc:
+        logger.debug(
+            "get_job_traces_failed: job=%s kind=%s err=%s (returning empty)",
+            job_id, kind, exc,
+        )
+        records = []
+        data_source = "error"
+
+    traces = [
+        {
+            "id": int(r["id"]),
+            "node_id": str(r["node_id"]) if r["node_id"] else None,
+            "call_kind": r["call_kind"],
+            "request_kind": r["request_kind"],
+            "provider": r["provider"],
+            "model": r["model"],
+            "system_prompt": r["system_prompt"],
+            "request_content": r["request_content"],
+            "response_content": r["response_content"],
+            "tool_calls": _coerce_tool_calls(r["tool_calls"]),
+            "temperature": float(r["temperature"]) if r["temperature"] is not None else None,
+            "max_tokens": int(r["max_tokens"]) if r["max_tokens"] is not None else None,
+            "prompt_tokens": int(r["prompt_tokens"]) if r["prompt_tokens"] is not None else None,
+            "completion_tokens": (
+                int(r["completion_tokens"]) if r["completion_tokens"] is not None else None
+            ),
+            "latency_ms": int(r["latency_ms"] or 0),
+            "success": bool(r["success"]),
+            "error": r["error"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in records
+    ]
+
+    capture_enabled = False
+    try:
+        from app.config import settings
+        capture_enabled = bool(settings.trace_capture_enabled)
+    except Exception:
+        capture_enabled = False
+
+    return {
+        "job_id": job_id,
+        "count": len(traces),
+        "limit": limit,
+        "offset": offset,
+        "capture_enabled": capture_enabled,
+        "traces": traces,
         "data_source": data_source,
     }

@@ -798,6 +798,63 @@ class JobCostsResponse(BaseModel):
     budget: JobBudgetStatus | None = None
 
 
+class LlmTraceItem(BaseModel):
+    """§17.787 — one ``llm_traces`` row: the full request/response content of a
+    single LLM call, surfaced for debugging or replaying a run.
+
+    Companion to ``JobCostsBreakdownItem`` (metrics): where that carries
+    tokens/cost, this carries the actual bytes we sent and got back. Content
+    fields (``system_prompt``/``request_content``/``response_content``/
+    ``error``) are truncated at *write* time to ``settings.trace_capture_max_
+    chars``; an over-length value ends in ``…[+N chars]`` so a reader knows the
+    trace is partial. They're ``None`` when the field was empty at call time.
+    ``tool_calls`` is the decoded JSON array the model emitted (or ``None``).
+    Rows exist only for calls made while ``trace_capture_enabled`` was on.
+    """
+    id: int
+    node_id: str | None = None
+    call_kind: str | None = None
+    request_kind: str
+    provider: str
+    model: str
+    system_prompt: str | None = None
+    request_content: str | None = None
+    response_content: str | None = None
+    tool_calls: Any | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    latency_ms: int = 0
+    success: bool = True
+    error: str | None = None
+    created_at: str | None = None
+
+
+class JobTracesResponse(BaseModel):
+    """§17.787 — a job's LLM traces in call order, paginated.
+
+    ``traces`` is ordered oldest-first (the order the calls happened) so a
+    reader follows the run top-to-bottom. ``count`` is the number of rows in
+    *this page* (bounded by ``limit``), not the job total. ``capture_enabled``
+    echoes the ``trace_capture_enabled`` valve so an empty ``traces`` can be
+    read correctly: capture-off means "no content was ever recorded", not
+    "this job made no LLM calls".
+
+    ``data_source`` (``"ok"`` | ``"error"``) mirrors the rest of the
+    observability surface — the reader fails open on a DB error (e.g. a test
+    env without the 063 migration) and returns the empty shape rather than
+    500ing; ``"error"`` flags that the zeros are a fallback, not real emptiness.
+    """
+    job_id: str
+    count: int
+    limit: int
+    offset: int
+    capture_enabled: bool
+    traces: list[LlmTraceItem] = []
+    data_source: Literal["ok", "error"] = "ok"
+
+
 class JobSynthesisOverrideInput(BaseModel):
     """Sprint X.6 — per-job opt-in for the W.7 LLM synthesis pass.
 

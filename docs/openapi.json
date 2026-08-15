@@ -2393,6 +2393,226 @@
         "title": "JobSynthesisOverrideResponse",
         "type": "object"
       },
+      "JobTracesResponse": {
+        "description": "§17.787 — a job's LLM traces in call order, paginated.\n\n``traces`` is ordered oldest-first (the order the calls happened) so a\nreader follows the run top-to-bottom. ``count`` is the number of rows in\n*this page* (bounded by ``limit``), not the job total. ``capture_enabled``\nechoes the ``trace_capture_enabled`` valve so an empty ``traces`` can be\nread correctly: capture-off means \"no content was ever recorded\", not\n\"this job made no LLM calls\".\n\n``data_source`` (``\"ok\"`` | ``\"error\"``) mirrors the rest of the\nobservability surface — the reader fails open on a DB error (e.g. a test\nenv without the 063 migration) and returns the empty shape rather than\n500ing; ``\"error\"`` flags that the zeros are a fallback, not real emptiness.",
+        "properties": {
+          "capture_enabled": {
+            "title": "Capture Enabled",
+            "type": "boolean"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "data_source": {
+            "default": "ok",
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Data Source",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "traces": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/LlmTraceItem"
+            },
+            "title": "Traces",
+            "type": "array"
+          }
+        },
+        "required": [
+          "job_id",
+          "count",
+          "limit",
+          "offset",
+          "capture_enabled"
+        ],
+        "title": "JobTracesResponse",
+        "type": "object"
+      },
+      "LlmTraceItem": {
+        "description": "§17.787 — one ``llm_traces`` row: the full request/response content of a\nsingle LLM call, surfaced for debugging or replaying a run.\n\nCompanion to ``JobCostsBreakdownItem`` (metrics): where that carries\ntokens/cost, this carries the actual bytes we sent and got back. Content\nfields (``system_prompt``/``request_content``/``response_content``/\n``error``) are truncated at *write* time to ``settings.trace_capture_max_\nchars``; an over-length value ends in ``…[+N chars]`` so a reader knows the\ntrace is partial. They're ``None`` when the field was empty at call time.\n``tool_calls`` is the decoded JSON array the model emitted (or ``None``).\nRows exist only for calls made while ``trace_capture_enabled`` was on.",
+        "properties": {
+          "call_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Call Kind"
+          },
+          "completion_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Tokens"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "latency_ms": {
+            "default": 0,
+            "title": "Latency Ms",
+            "type": "integer"
+          },
+          "max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Tokens"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Id"
+          },
+          "prompt_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Tokens"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "request_content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Content"
+          },
+          "request_kind": {
+            "title": "Request Kind",
+            "type": "string"
+          },
+          "response_content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Content"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          },
+          "system_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Prompt"
+          },
+          "temperature": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temperature"
+          },
+          "tool_calls": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Calls"
+          }
+        },
+        "required": [
+          "id",
+          "request_kind",
+          "provider",
+          "model"
+        ],
+        "title": "LlmTraceItem",
+        "type": "object"
+      },
       "LogsResponse": {
         "properties": {
           "compiled_output": {
@@ -10116,6 +10336,100 @@
         "summary": "Post Size Device",
         "tags": [
           "Specs"
+        ]
+      }
+    },
+    "/trace/{job_id}": {
+      "get": {
+        "description": "§17.787 — full request/response content of a job's LLM calls.\n\nSurfaces the ``llm_traces`` content sink (§17.786) for one job in call\norder (oldest first) so a run can be debugged or replayed: each row is\nthe prompt/messages + system + sampling params we sent and the response\ntext + tool calls + error we got back, keyed to the same ``call_kind`` /\n``node_id`` as the ``llm_call_logs`` metrics row.\n\nContent exists only for calls made while the default-OFF\n``trace_capture_enabled`` valve was on; ``capture_enabled`` in the\nresponse echoes the current valve so an empty result reads correctly\n(capture-off vs. no-calls). 422 on a non-UUID ``job_id``; fail-open on a\nDB error (empty shape + ``data_source='error'``), never 500.",
+        "operationId": "job_traces_endpoint_trace__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max trace rows returned (default 50).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Max trace rows returned (default 50).",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Rows to skip, for paging through a long run.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Rows to skip, for paging through a long run.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Filter to one request_kind: generate | chat | tool_call | embed.",
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to one request_kind: generate | chat | tool_call | embed.",
+              "title": "Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobTracesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Job Traces Endpoint",
+        "tags": [
+          "Observability",
+          "Observability"
         ]
       }
     },

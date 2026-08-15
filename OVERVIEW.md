@@ -22059,6 +22059,21 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.787 Feature — trace surfacing: `GET /trace/{job_id}` + `scaffold jobs traces` CLI + `client.jobs.traces()` SDK method (2026-08-15)
+
+**Why.** §17.786 built the `llm_traces` content sink but nothing *read* it — you had to `psql` the table by hand to see what a run actually sent the model. This adds the read surface across all three layers (API / CLI / SDK), so a trace-captured run is inspectable the same way costs are (`GET /jobs/{id}/costs` → `scaffold jobs status --costs` → `client.jobs.costs()`).
+
+**What.** A per-job, call-order reader over `llm_traces`, mirroring the observability rollup surface.
+- **Reader** `observability_rollups.get_job_traces(job_id, limit, offset, kind, db)`: selects a job's traces `ORDER BY id ASC` (call order, so a reader follows the run top-to-bottom), optional `request_kind` filter, `limit`/`offset` pagination. Maps each row (UUID `node_id`→str, NUMERIC `temperature`→float, JSONB `tool_calls` normalized via `_coerce_tool_calls` — decoded object under the asyncpg dialect, but `json.loads`'d defensively if a raw string slips through). Echoes the `trace_capture_enabled` valve as `capture_enabled` so an empty result reads correctly (capture-off vs. no-calls). Same fail-open contract as its siblings: DB error → empty shape + `data_source='error'`, never 500.
+- **Endpoint** `GET /trace/{job_id}` in `app/routers/observability.py` (no prefix, so a top-level path), `response_model=JobTracesResponse`. 422 on non-UUID `job_id`; query params `limit` (1–500), `offset` (≥0), `kind`.
+- **Schemas** `LlmTraceItem` + `JobTracesResponse` in `app/schemas.py`, vendored byte-equal to the SDK via `make sync-schemas`.
+- **SDK** `client.jobs.traces(job_id, *, limit, offset, kind)` (sync + async) — content sibling of `.costs()`, drops `None` params.
+- **CLI** `scaffold jobs traces <job_id>` — `--kind`/`--limit`/`--offset`/`--full`/`--json`. Human view prints a per-call header (`#id  kind  provider/model  [ok|ERR]  kind=…  Nms`) with one-line content previews (`_preview` collapses whitespace, caps 200 chars); `--full` prints whole fields, `--json` the raw payload. Empty + capture-off surfaces a hint to enable the valve rather than reading as "no calls".
+
+**Verification. Unit (+11):** `test_observability_rollups.py` (+8) — row mapping in call order, JSON-string `tool_calls` decode, `kind`/pagination params thread to the query, capture-off flag on empty, fail-open on DB error; endpoint returns payload / rejects non-UUID (422) / rejects `limit>500` (422). SDK (+3, sync+async): default params drop `kind`, `kind`+pagination thread through, path is `/trace/{id}`. CLI (+2): renders rows + threads `--kind`; capture-off empty prints the valve hint. Full suites green: `test_observability_rollups` 30, SDK typed-methods 66, CLI commands 115; `ci-tier-0` static-parity gates all green (schema byte-equal, SDK-schema-parity, SSE/next-actions vendor, migration lint). **LIVE** (orchestrator restarted — no hot-reload): `GET /trace/{real_job}` → 200 with the correct empty shape (`capture_enabled:false`, valve default-off); non-UUID → 422; then two rows inserted into real Postgres (one with JSONB `tool_calls`, NUMERIC `temperature`) round-tripped through the live endpoint — returned in `id ASC` order with `tool_calls` decoded to a Python structure (not a string) and `temperature` as a float, exercising the real asyncpg read path the mocked-DB tests can't. Test rows cleaned up (0 remaining). `docs/openapi.json` regenerated (`/trace/{job_id}` present).
+
+---
+
 ### §17.786 Feature — LLM trace capture: full request/response content into `llm_traces`, gated by a default-OFF valve (2026-08-15)
 
 **Why.** Sprint J.3's `llm_call_logs` records the *metrics* of every LLM call (tokens, latency, USD cost) tagged by job/node — enough for cost rollups but deliberately content-free. It can't answer the question that matters when a node produces garbage, a prompt regresses, or a run needs replaying: *what did we actually send the model, and what did it say back?* There was no content sink.

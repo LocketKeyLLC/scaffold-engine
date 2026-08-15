@@ -384,3 +384,113 @@ class TestObservabilityEndpoints:
         assert r.status_code == 200
         body = r.json()
         assert body["window_minutes"] == 1440  # value comes from helper, not query
+
+
+# ---------------------------------------------------------------------------
+# get_job_traces (§17.787)
+# ---------------------------------------------------------------------------
+
+
+def _trace_row(**over):
+    """A minimal llm_traces mappings() row; override any field."""
+    base = {
+        "id": 1, "node_id": uuid4(), "call_kind": "synthesis",
+        "request_kind": "chat", "provider": "openai", "model": "gpt-4o",
+        "system_prompt": "you are helpful", "request_content": '[{"role":"user"}]',
+        "response_content": "hi there", "tool_calls": None,
+        "temperature": 0.7, "max_tokens": 512,
+        "prompt_tokens": 100, "completion_tokens": 20,
+        "latency_ms": 1234, "success": True, "error": None,
+        "created_at": datetime(2026, 8, 15, tzinfo=timezone.utc),
+    }
+    base.update(over)
+    return base
+
+
+@pytest.mark.smoke
+class TestGetJobTraces:
+    async def test_maps_rows_in_call_order(self):
+        from app.modules.observability_rollups import get_job_traces
+        job_id = str(uuid4())
+        db = _mock_db_rows([_trace_row(id=1), _trace_row(id=2, success=False,
+                                                          error="boom")])
+        with patch("app.config.settings") as s:
+            s.trace_capture_enabled = True
+            out = await get_job_traces(job_id=job_id, db=db)
+        assert out["data_source"] == "ok"
+        assert out["job_id"] == job_id
+        assert out["count"] == 2
+        assert out["capture_enabled"] is True
+        assert [t["id"] for t in out["traces"]] == [1, 2]
+        assert out["traces"][0]["temperature"] == 0.7
+        assert out["traces"][1]["success"] is False
+        assert out["traces"][1]["error"] == "boom"
+
+    async def test_tool_calls_json_string_is_decoded(self):
+        """A JSONB value handed back as a raw string is normalized to a list."""
+        from app.modules.observability_rollups import get_job_traces
+        db = _mock_db_rows([_trace_row(
+            tool_calls='[{"id":"c1","name":"search","arguments":{"q":"x"}}]')])
+        with patch("app.config.settings") as s:
+            s.trace_capture_enabled = True
+            out = await get_job_traces(job_id=str(uuid4()), db=db)
+        tc = out["traces"][0]["tool_calls"]
+        assert isinstance(tc, list) and tc[0]["name"] == "search"
+
+    async def test_kind_filter_threads_to_query(self):
+        from app.modules.observability_rollups import get_job_traces
+        db = _mock_db_rows([])
+        with patch("app.config.settings") as s:
+            s.trace_capture_enabled = False
+            await get_job_traces(job_id=str(uuid4()), kind="tool_call",
+                                 limit=10, offset=5, db=db)
+        _, kwargs = db.execute.call_args
+        params = db.execute.call_args[0][1]
+        assert params["kind_filter"] == "tool_call"
+        assert params["limit"] == 10 and params["offset"] == 5
+
+    async def test_capture_off_flag_surfaces_on_empty(self):
+        from app.modules.observability_rollups import get_job_traces
+        db = _mock_db_rows([])
+        with patch("app.config.settings") as s:
+            s.trace_capture_enabled = False
+            out = await get_job_traces(job_id=str(uuid4()), db=db)
+        assert out["count"] == 0
+        assert out["capture_enabled"] is False
+
+    async def test_fail_open_on_db_error(self):
+        from app.modules.observability_rollups import get_job_traces
+        db = _mock_db_raises(RuntimeError("no such table: llm_traces"))
+        with patch("app.config.settings") as s:
+            s.trace_capture_enabled = True
+            out = await get_job_traces(job_id=str(uuid4()), db=db)
+        assert out["data_source"] == "error"
+        assert out["traces"] == []
+
+
+@pytest.mark.smoke
+class TestJobTracesEndpoint:
+    def test_returns_payload(self, client):
+        job_id = str(uuid4())
+        with patch("app.routers.observability.observability_rollups.get_job_traces",
+                   new=AsyncMock(return_value={
+                       "job_id": job_id, "count": 1, "limit": 50, "offset": 0,
+                       "capture_enabled": True,
+                       "traces": [{"id": 1, "request_kind": "chat",
+                                   "provider": "openai", "model": "gpt-4o",
+                                   "response_content": "hi"}],
+                       "data_source": "ok",
+                   })):
+            r = client.get(f"/trace/{job_id}?kind=chat&limit=50")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] == 1
+        assert body["traces"][0]["response_content"] == "hi"
+
+    def test_rejects_non_uuid(self, client):
+        r = client.get("/trace/not-a-uuid")
+        assert r.status_code == 422
+
+    def test_rejects_limit_above_cap(self, client):
+        r = client.get(f"/trace/{uuid4()}?limit=99999")
+        assert r.status_code == 422

@@ -644,6 +644,112 @@ def _render_cost_rollup(status_data: dict, costs_data: dict | None) -> None:
             )
 
 
+JOBS_TRACES_EPILOG = """
+\b
+Examples:
+  scaffold jobs traces <job_id>
+  scaffold jobs traces <job_id> --kind chat --limit 20
+  scaffold jobs traces <job_id> --full
+  scaffold jobs traces <job_id> --json | jq '.traces[].response_content'
+
+Traces carry the full prompt/response CONTENT of each LLM call (the
+metrics live under `jobs status --costs`). They exist only for calls made
+while the orchestrator's `trace_capture_enabled` valve was on — an empty
+list with `capture: off` means capture was never enabled, not that the
+job made no calls. Default view previews each field; --full prints it whole.
+"""
+
+
+def _preview(value, width: int = 200) -> str:
+    """One-line preview of a trace content field for the human view: collapse
+    newlines, cap width. Full content is available via --full or --json."""
+    if value is None:
+        return "—"
+    text = " ".join(str(value).split())
+    return text if len(text) <= width else text[:width] + " […]"
+
+
+@jobs.command("traces", help="Show the LLM request/response traces for a job.",
+              epilog=JOBS_TRACES_EPILOG)
+@click.argument("job_id")
+@click.option("--limit", default=50, type=int, show_default=True,
+              help="Max trace rows (1–500).")
+@click.option("--offset", default=0, type=int, show_default=True,
+              help="Rows to skip, for paging a long run.")
+@click.option("--kind", "kind_filter", default=None,
+              help="Filter to one request_kind: generate | chat | tool_call | embed.")
+@click.option("--full", "show_full", is_flag=True,
+              help="Print full content of each field instead of a one-line preview.")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
+@click.pass_context
+def jobs_traces(
+    ctx: click.Context,
+    job_id: str,
+    limit: int,
+    offset: int,
+    kind_filter: str | None,
+    show_full: bool,
+    as_json: bool,
+) -> None:
+    cfg = ctx.obj["cfg"]
+    params = {"limit": limit, "offset": offset}
+    if kind_filter:
+        params["kind"] = kind_filter
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            data = c.get("/trace/" + job_id, params=params)
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+
+    if not isinstance(data, dict):
+        click.echo(_json.dumps(data, indent=2))
+        return
+
+    if data.get("data_source") == "error":
+        click.echo("⚠ trace query failed; results may be incomplete")
+
+    traces = data.get("traces") or []
+    capture = "on" if data.get("capture_enabled") else "off"
+    click.echo(f"job_id:  {data.get('job_id', job_id)}")
+    click.echo(f"capture: {capture}")
+    click.echo(f"traces:  {len(traces)} (limit={data.get('limit', limit)} "
+               f"offset={data.get('offset', offset)})")
+
+    if not traces:
+        if capture == "off":
+            _hint("trace capture is off — enable the `trace_capture_enabled` "
+                  "valve to record content on future runs.")
+        else:
+            _hint("no traces recorded for this job in this page/kind window.")
+        return
+
+    for t in traces:
+        click.echo()
+        status = "ok" if t.get("success") else "ERR"
+        header = (f"#{t.get('id')}  {t.get('request_kind')}"
+                  f"  {t.get('provider')}/{t.get('model')}  [{status}]")
+        if (ck := t.get("call_kind")):
+            header += f"  kind={ck}"
+        latency = t.get("latency_ms")
+        if latency is not None:
+            header += f"  {latency}ms"
+        click.echo(header)
+        render = (lambda v: str(v) if v is not None else "—") if show_full else _preview
+        if t.get("system_prompt"):
+            click.echo(f"  system:   {render(t['system_prompt'])}")
+        click.echo(f"  request:  {render(t.get('request_content'))}")
+        click.echo(f"  response: {render(t.get('response_content'))}")
+        if t.get("tool_calls"):
+            click.echo(f"  tools:    {_json.dumps(t['tool_calls'])}")
+        if t.get("error"):
+            click.secho(f"  error:    {render(t['error'])}", fg="red")
+
+
 # ---------------------------------------------------------------------------
 # project — convenience wrappers (Sprint U.4)
 # Higher-level commands that combine multiple endpoint calls and resolve
