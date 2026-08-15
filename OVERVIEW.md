@@ -22110,6 +22110,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.775 — doc fix: reconcile the parallel-frontier "default OFF" comments with the `parallel_execution_enabled=True` code default (2026-08-14)
+
+**Why.** Verifying whether independent DAG branches run concurrently surfaced a stale-comment trap. The parallel-frontier executor `_run_parallel_frontier` (§17.568) *does* run the dep-satisfied ready frontier concurrently — genuine branch-level concurrency, semaphore-bounded by `parallel_execution_max_inflight` (default 2), not just intra-module fan-out — but via `asyncio.create_task` + `asyncio.Semaphore` + a results `Queue` with a `finally` that cancels inflight workers (**not** `asyncio.TaskGroup`; there is no `TaskGroup` anywhere in `app/`). Two comments in `execution_agent.py` (the docstring at the executor and the dispatch site in `execute_all_nodes`) still described it as a "PROTOTYPE … valve, default OFF", but `config.py` actually sets `parallel_execution_enabled: bool = Field(default=True)`. The valve reads OFF **only** because this host pins `PARALLEL_EXECUTION_ENABLED=false` in `docker-compose.dev.yml` (confirmed live: `docker exec scaffold-orchestrator printenv` → `false`; the running orchestrator therefore takes the **serial** `execute_all_nodes` loop — one node at a time, no branch concurrency). The trap: a prod `docker compose up -d` with no dev override would boot from the baked image and the `True` code default would silently enable the parallel path, while the "default OFF" comments told any auditor the opposite.
+
+**Fix — comments only, no behavior change.** Both comments now state the valve's **code default is ON** and that this host pins it OFF via the compose override, and the "PROTOTYPE" framing is dropped (the path is the intended default, not a prototype). No config, dispatch, or executor logic changed. Nothing to exercise at runtime — a docstring/comment edit has no observable surface, so no test was run beyond confirming the two edits landed; the live valve state was read directly from the container (`parallel_execution_enabled = False`) to source the corrected wording.
+
+---
+
 ### §17.772 — Model Context Protocol integration: engine-as-MCP-server + MCP tools as a DAG node type (2026-08-14)
 
 **What.** Two-sided MCP support, built on the official `mcp==2.0.0` SDK (added to `requirements*.txt`; note 2.0 restructured the API — `MCPServer` replaces `FastMCP`, `CallToolResult.is_error` is snake_case, the high-level `mcp.client.Client` accepts a URL / an in-memory `MCPServer` / a custom transport). Both sides are **default-OFF** (mirrors the `shell_tool_enabled` opt-in); code defaults `False`, runtime-enabled from `.env` via new compose gates `MCP_TOOL_ENABLED` / `MCP_SERVER_ENABLED` / `MCP_SERVERS_CONFIG`.

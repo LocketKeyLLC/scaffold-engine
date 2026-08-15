@@ -1952,7 +1952,9 @@ async def _run_parallel_frontier(
     t0: float,
     retry_budget: int,
 ) -> AsyncGenerator[str, None]:
-    """§17.568 — PROTOTYPE parallel-frontier executor (valve-gated).
+    """§17.568 — parallel-frontier executor (valve `parallel_execution_enabled`,
+    code default ON; pinned OFF on this host — see the dispatch in
+    ``execute_all_nodes``).
 
     Runs the ready frontier (dep-satisfied pending nodes) concurrently, bounded
     by ``parallel_execution_max_inflight``. The LOOP atomically claims nodes
@@ -2308,8 +2310,10 @@ async def execute_all_nodes(
                 yield _sse("awaiting_assist", parked)
                 return
 
-        # §17.568 — PROTOTYPE parallel-frontier path (valve, default OFF).
-        # When off, the serial loop below runs unchanged (byte-identical). The
+        # §17.568 — parallel-frontier path (valve `parallel_execution_enabled`,
+        # code default ON; this host pins it OFF via PARALLEL_EXECUTION_ENABLED
+        # in docker-compose.dev.yml). When off, the serial loop below runs
+        # unchanged (byte-identical). The
         # branch shares this function's outer try/except/finally (slot release +
         # cleanup); _run_parallel_frontier cancels its own inflight workers.
         if settings.parallel_execution_enabled:
