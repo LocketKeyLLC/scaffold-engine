@@ -1,0 +1,240 @@
+// Scaffold Engine operator SPA — bootstrap, chrome, auth gate, view lifecycle.
+import { el, mount } from "./util.js";
+import * as api from "./api.js";
+import * as router from "./router.js";
+import { placeholder } from "./views/placeholder.js";
+
+const NAV = [
+  { id: "dashboard", path: "/", label: "Dashboard", icon: "◈" },
+  { id: "dag", path: "/dag", label: "DAG Canvas", icon: "⬡" },
+  { id: "theater", path: "/theater", label: "Execution", icon: "▶" },
+  { id: "research", path: "/research", label: "Research", icon: "◎" },
+  { id: "assist", path: "/assist", label: "Assistant", icon: "✦" },
+];
+
+const root = document.getElementById("root");
+let outlet = null; // the content container the active view renders into
+let cleanup = () => {}; // teardown hook returned by the active view
+
+// ── Auth / connect gate ───────────────────────────────────────────────
+function connectGate(message) {
+  const input = el("input", {
+    type: "password",
+    class: "input",
+    placeholder: "X-API-Key",
+    value: api.getKey(),
+    autocomplete: "off",
+  });
+  const status = el("div", { class: "gate-status" }, message || "");
+  const btn = el("button", { class: "btn btn-primary", text: "Connect" });
+
+  async function submit() {
+    const key = input.value.trim();
+    if (!key) {
+      status.textContent = "Enter your API key.";
+      return;
+    }
+    api.setKey(key);
+    btn.disabled = true;
+    status.textContent = "Verifying…";
+    try {
+      const ok = await api.validateKey();
+      if (ok) {
+        boot();
+      } else {
+        api.setKey("");
+        status.textContent = "Invalid API key (401). Check the value and retry.";
+        btn.disabled = false;
+      }
+    } catch (e) {
+      status.textContent = `Cannot reach orchestrator: ${e.message}`;
+      btn.disabled = false;
+    }
+  }
+
+  btn.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submit();
+  });
+
+  mount(
+    root,
+    el(
+      "div",
+      { class: "gate" },
+      el(
+        "div",
+        { class: "gate-card card" },
+        el("div", { class: "gate-logo", text: "🧬" }),
+        el("h1", { class: "gate-title", text: "Scaffold Engine" }),
+        el("p", { class: "gate-sub", text: "Connect to the orchestrator" }),
+        input,
+        btn,
+        status,
+        el("p", {
+          class: "gate-hint",
+          text: "The key is stored in this browser only and sent as X-API-Key on each request.",
+        })
+      )
+    )
+  );
+  input.focus();
+}
+
+// ── App chrome (sidebar + topbar + content outlet) ────────────────────
+function buildChrome() {
+  outlet = el("main", { class: "content", id: "outlet" });
+
+  const navLinks = NAV.map((n) =>
+    el(
+      "a",
+      { class: "nav-link", href: "#" + n.path, dataset: { nav: n.id } },
+      el("span", { class: "nav-icon", text: n.icon }),
+      el("span", { class: "nav-label", text: n.label })
+    )
+  );
+
+  const healthDot = el("span", { class: "health-dot", dataset: { state: "unknown" } });
+  const healthText = el("span", { class: "health-text", text: "checking…" });
+
+  const sidebar = el(
+    "aside",
+    { class: "sidebar" },
+    el(
+      "div",
+      { class: "brand" },
+      el("span", { class: "brand-logo", text: "🧬" }),
+      el("span", { class: "brand-name", text: "Scaffold" })
+    ),
+    el("nav", { class: "nav" }, ...navLinks),
+    el(
+      "div",
+      { class: "sidebar-foot" },
+      el("div", { class: "health" }, healthDot, healthText),
+      el("button", {
+        class: "btn btn-ghost btn-sm",
+        text: "Disconnect",
+        onClick: () => {
+          api.setKey("");
+          location.reload();
+        },
+      })
+    )
+  );
+
+  mount(root, el("div", { class: "shell" }, sidebar, outlet));
+  startHealthPolling(healthDot, healthText);
+}
+
+function highlightNav(path) {
+  const active = topSegment(path);
+  document.querySelectorAll(".nav-link").forEach((a) => {
+    a.classList.toggle("active", a.dataset.nav === active);
+  });
+}
+
+function topSegment(path) {
+  const seg = path.split("/").filter(Boolean)[0];
+  if (!seg) return "dashboard";
+  return NAV.some((n) => n.id === seg) ? seg : "dashboard";
+}
+
+async function startHealthPolling(dot, text) {
+  async function tick() {
+    try {
+      const h = await api.health();
+      const up = h.status === "ok" || h.status === "healthy" || h.status === "up";
+      dot.dataset.state = up ? "up" : "degraded";
+      text.textContent = up ? "orchestrator up" : `status: ${h.status}`;
+    } catch {
+      dot.dataset.state = "down";
+      text.textContent = "unreachable";
+    }
+  }
+  await tick();
+  setInterval(tick, 15000);
+}
+
+// ── View lifecycle ────────────────────────────────────────────────────
+function renderView(viewFn, params, path) {
+  try {
+    cleanup();
+  } catch {
+    /* ignore */
+  }
+  cleanup = () => {};
+  highlightNav(path);
+  outlet.scrollTop = 0;
+  const ret = viewFn(outlet, params);
+  if (typeof ret === "function") cleanup = ret;
+}
+
+// Lazy view loader — each view is its own ES module, imported on first use.
+// A failed import (parse/runtime error) must be LOUD, not silently swallowed
+// into a placeholder — that once masked a real syntax error for a whole phase.
+function lazy(name, title) {
+  return () =>
+    import(`./views/${name}.js`).catch((e) => {
+      console.error(`[ui] failed to load view "${name}":`, e);
+      return { default: placeholder(title, `Failed to load: ${e.message}`) };
+    });
+}
+const VIEWS = {
+  dashboard: lazy("dashboard", "Dashboard"),
+  dag: lazy("dag", "DAG Canvas"),
+  theater: lazy("theater", "Execution Theater"),
+  research: lazy("research", "Research Explorer"),
+  assist: lazy("assist", "Assistant"),
+};
+
+async function loadAndRender(name, params, path) {
+  const mod = await VIEWS[name]();
+  renderView(mod.default, params, path);
+}
+
+function registerRoutes() {
+  router.route("/", (p) => loadAndRender("dashboard", p, router.currentPath()));
+  router.route("/dag", (p) => loadAndRender("dag", p, router.currentPath()));
+  router.route("/dag/:jobId", (p) => loadAndRender("dag", p, router.currentPath()));
+  router.route("/theater", (p) => loadAndRender("theater", p, router.currentPath()));
+  router.route("/theater/:jobId", (p) => loadAndRender("theater", p, router.currentPath()));
+  router.route("/research", (p) => loadAndRender("research", p, router.currentPath()));
+  router.route("/research/:sessionId", (p) => loadAndRender("research", p, router.currentPath()));
+  router.route("/assist", (p) => loadAndRender("assist", p, router.currentPath()));
+  router.route("/assist/:sessionId", (p) => loadAndRender("assist", p, router.currentPath()));
+  router.setNotFound(() => loadAndRender("dashboard", {}, "/"));
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────
+let started = false;
+async function boot() {
+  buildChrome();
+  if (!started) {
+    registerRoutes();
+    router.start();
+    started = true;
+  } else {
+    // chrome was rebuilt (e.g. after gate); re-dispatch current route
+    const path = router.currentPath();
+    const seg = topSegment(path);
+    loadAndRender(seg, router.getCurrent()?.params || {}, path);
+  }
+}
+
+async function main() {
+  if (!api.hasKey()) {
+    connectGate();
+    return;
+  }
+  // Have a key — verify it before showing the app.
+  try {
+    const ok = await api.validateKey();
+    if (ok) boot();
+    else connectGate("Stored key was rejected (401). Re-enter it.");
+  } catch (e) {
+    // Orchestrator unreachable — offer the gate with the error.
+    connectGate(`Cannot reach orchestrator: ${e.message}`);
+  }
+}
+
+main();

@@ -1,0 +1,76 @@
+// Reusable UI components shared across views.
+import { el } from "./util.js";
+
+/** Status pill. Adds `st-<status>` for the color mapping in app.css. */
+export function statusBadge(status) {
+  const s = status || "unknown";
+  return el("span", { class: `badge st-${s}`, text: s.replace(/_/g, " ") });
+}
+
+/** A labelled stat tile. `opts.accent` sets a color class; `opts.onClick` makes it clickable. */
+export function statTile(label, value, opts = {}) {
+  const val = el("div", { class: "stat-val", text: String(value) });
+  if (opts.accent) val.classList.add(`accent-${opts.accent}`);
+  const tile = el(
+    "div",
+    {
+      class: "card stat" + (opts.onClick ? " clickable" : ""),
+      title: opts.title || "",
+    },
+    val,
+    el("div", { class: "stat-label", text: label })
+  );
+  if (opts.onClick) tile.addEventListener("click", opts.onClick);
+  return tile;
+}
+
+/** Centered loading spinner block. */
+export function loading(text = "Loading…") {
+  return el("div", { class: "loading-block" }, el("span", { class: "spin" }), el("span", { class: "dim", text }));
+}
+
+/** Error panel. */
+export function errorPanel(err, retry) {
+  const detail = err?.detail || err?.message || String(err);
+  const status = err?.status ? ` (HTTP ${err.status})` : "";
+  return el(
+    "div",
+    { class: "card empty-state" },
+    el("div", { class: "empty-icon", text: "⚠️" }),
+    el("p", { text: `${detail}${status}` }),
+    retry ? el("button", { class: "btn btn-sm", text: "Retry", onClick: retry }) : null
+  );
+}
+
+let toastHost = null;
+export function toast(msg, kind = "") {
+  if (!toastHost) {
+    toastHost = el("div", { class: "toast-host" });
+    document.body.append(toastHost);
+  }
+  const t = el("div", { class: `toast ${kind}`, text: msg });
+  toastHost.append(t);
+  setTimeout(() => {
+    t.style && (t.style.opacity = "0");
+    setTimeout(() => t.remove(), 300);
+  }, 3200);
+}
+
+/** Extract an assist session id from a job's next_actions (endpoint /assist/<id>/...). */
+export function assistSessionFromActions(actions) {
+  for (const a of actions || []) {
+    const m = /\/assist\/([0-9a-f-]{36})/i.exec(a.endpoint || a.command || "");
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/** A small link-styled button for row/card actions. */
+export function actionLink(label, href, opts = {}) {
+  return el("a", {
+    class: "btn btn-sm" + (opts.primary ? " btn-primary" : " btn-ghost"),
+    href,
+    text: label,
+    ...(opts.title ? { title: opts.title } : {}),
+  });
+}

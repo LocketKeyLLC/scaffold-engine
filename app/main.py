@@ -655,6 +655,14 @@ from app.web.routes import router as web_router  # noqa: E402
 app.include_router(web_router, dependencies=[])
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
+# Standalone operator SPA (no-build vanilla ES modules). Auth-bypassed at the
+# browser layer (see app/auth.py _AUTH_EXEMPT_PREFIXES) so a browser can load
+# the static assets keyless; the SPA itself carries X-API-Key (from
+# localStorage) on every API call, so the orchestrator API stays gated. CSP
+# still covers it via /ui in security_headers._HTML_PREFIXES. html=True serves
+# index.html at /ui/ and falls back to it for client-routed paths.
+app.mount("/ui", StaticFiles(directory="app/ui", html=True), name="ui")
+
 # §17.772 — expose the engine as an MCP server over Streamable HTTP at /mcp,
 # guarded by X-API-Key (a mounted sub-app bypasses the global auth dependency,
 # so the guard reinstates it). Gated on mcp_server_enabled; the session manager
@@ -673,12 +681,14 @@ if settings.mcp_server_enabled:
 
 @app.get("/", dependencies=[], include_in_schema=False)
 async def web_root_redirect():
-    """Sprint J.2.a — redirect ``GET /`` to the web UI's jobs list.
+    """Redirect ``GET /`` to the standalone operator SPA at ``/ui/``.
 
-    Excluded from OpenAPI (``include_in_schema=False``) because it's a
-    convenience landing for browsers, not a stable API contract.
+    (Was ``/web/jobs`` before the SPA landed; the legacy HTMX UI still
+    lives at ``/web/*``.) Excluded from OpenAPI
+    (``include_in_schema=False``) because it's a convenience landing for
+    browsers, not a stable API contract.
     """
-    return RedirectResponse(url="/web/jobs", status_code=302)
+    return RedirectResponse(url="/ui/", status_code=302)
 
 
 # Note: request-id binding + X-Request-ID header are handled by RequestIdMiddleware

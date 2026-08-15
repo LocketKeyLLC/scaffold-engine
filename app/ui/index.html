@@ -1,0 +1,16 @@
+<!--
+  Scaffold Engine — standalone operator SPA (no-build, vanilla ES modules).
+  Served as static files from /ui (StaticFiles mount, app/main.py). All JS/CSS
+  is external — the strict CSP (script-src 'self') forbids inline <script>.
+  API calls carry X-API-Key from localStorage; only these static assets are
+  auth-exempt (see app/auth.py _AUTH_EXEMPT_PREFIXES).
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scaffold Engine</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧬</text></svg>">
+<link rel="stylesheet" href="/ui/static/app.css">
+<div id="root">
+  <div class="boot">Loading Scaffold Engine…</div>
+</div>
+<script type="module" src="/ui/static/app.js"></script>
