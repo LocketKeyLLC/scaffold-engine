@@ -125,10 +125,10 @@ bench-check-pipeline: _ensure_dev ## Gate: fail if bench_pipeline total_pipeline
 # skip on schema_version 1.0 rows; activate once two 1.1+ runs land.
 bench-check: bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline ## Gate: run every bench-check; skips gates whose JSONL file is missing or sparse
 
-rebaseline: _ensure_dev ## §17.354 — Quarterly perf re-baseline. Runs bench-rag + bench-embed + bench-pipeline + bench-check in sequence. ~20-45 min wall-clock depending on hardware. See docs/rebaseline-runbook.md.
+rebaseline: _ensure_dev ## §17.354 — Quarterly perf re-baseline. Runs bench-rag + bench-embed + bench-pipeline + bench-check in sequence. ~20-45 min wall-clock depending on hardware. See internal/rebaseline-runbook.md.
 	@set -euo pipefail; \
 	printf '\033[1;36m== §17.354 quarterly perf re-baseline ==\033[0m\n'; \
-	printf '\033[2m(see docs/rebaseline-runbook.md for what to do on regression)\033[0m\n'; \
+	printf '\033[2m(see internal/rebaseline-runbook.md for what to do on regression)\033[0m\n'; \
 	t_start=$$(date +%s); \
 	printf '\n\033[1;36m-- step 1/4: bench-rag (component, ~10 min) --\033[0m\n'; \
 	$(MAKE) bench-rag; \
@@ -141,7 +141,7 @@ rebaseline: _ensure_dev ## §17.354 — Quarterly perf re-baseline. Runs bench-r
 	t_end=$$(date +%s); \
 	printf '\n\033[1;32m✓ rebaseline complete in %d min %d s\033[0m\n' $$(( (t_end - t_start) / 60 )) $$(( (t_end - t_start) % 60 )); \
 	printf '\033[2mNext steps: review the new rows in tests/benchmarks/{results,bench_rag_results,bench_embed_results}.jsonl;\033[0m\n'; \
-	printf '\033[2mif bench-check flagged a regression, see docs/rebaseline-runbook.md \"On regression\".\033[0m\n'
+	printf '\033[2mif bench-check flagged a regression, see internal/rebaseline-runbook.md \"On regression\".\033[0m\n'
 
 ci-smoke: ## Cloud-CI smoke tests — host pytest on `-m smoke`, no docker, no live services. Used by .github/workflows/ci.yml.
 	# §17.177 — SCAFFOLD_PREWARM_RERANKER=false skips the lifespan

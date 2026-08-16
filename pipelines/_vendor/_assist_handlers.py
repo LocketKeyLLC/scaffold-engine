@@ -34,7 +34,6 @@ import base64
 import json
 import queue as _q
 import re
-import sys
 import threading as _th
 import time
 from datetime import datetime, timezone
@@ -1257,7 +1256,7 @@ def assist_skip(
         msg += (f"Moving on to `{next_nk}`…" if auto_advance
                 else f"Next: `{next_nk}`.")
     else:
-        msg += f"All steps terminal — run `/assist done`."
+        msg += "All steps terminal — run `/assist done`."
     # §17.286 — mirror invariant divergence (skip path). assist_steps
     # was flipped to 'skipped' but dag_nodes was already terminal.
     if d.get("mirror_divergence"):

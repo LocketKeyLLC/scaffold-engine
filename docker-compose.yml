@@ -151,13 +151,16 @@ services:
     # via the bridge (`http://searxng:8080`).
     ports:
       - "127.0.0.1:8888:8080"
-    # 977 is the searxng user baked into the upstream image and matches
-    # the existing host /home/aedefruscio/searxng/settings.yml ownership.
+    # 977 is the searxng user baked into the upstream image; the host
+    # config dir (settings.yml) must be owned by uid/gid 977 to be readable.
     user: "977:977"
     volumes:
       # :ro — searxng never writes its own config. The previous rw mount
       # left settings.yml host-rewritable from inside the container.
-      - /home/aedefruscio/searxng:/etc/searxng:ro
+      # Point SEARXNG_CONFIG_DIR (in .env) at a host dir holding your
+      # searxng settings.yml; create it before first `compose up` so Docker
+      # doesn't auto-mkdir a root-owned dir the searxng user can't read.
+      - ${SEARXNG_CONFIG_DIR:-./searxng}:/etc/searxng:ro
       # Named cache volume so the upstream image's `VOLUME /var/cache/searxng`
       # instruction doesn't auto-create a new anonymous volume on every
       # `compose up`. Cache content is non-essential (runtime query cache)

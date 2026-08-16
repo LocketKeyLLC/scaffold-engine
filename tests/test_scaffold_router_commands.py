@@ -1483,7 +1483,7 @@ class TestAssistChatMemory:
                              "message": "step T1 is pending"}},
         )
 
-        msg = f"/assist submit\n```\nsome evidence\n```"
+        msg = "/assist submit\n```\nsome evidence\n```"
         out = "".join(pipe.pipe(msg, "m", [], self._body_with_chat("chat-D")))
         assert "claim it first" in out.lower() or "claim" in out.lower()
         assert "/assist next" in out

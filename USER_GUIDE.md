@@ -719,4 +719,4 @@ docker logs --tail 200 -f scaffold-orchestrator | jq -r '"\(.timestamp) [\(.leve
 
 ---
 
-*This guide covers user-facing scenarios and commands. For architecture, every module's public function, the database schema, configuration reference, the TOON data format, the logging event catalog, known issues, and sprint history, see [OVERVIEW.md](./OVERVIEW.md).*
+*This guide covers user-facing scenarios and commands. For architecture, every module's public function, the database schema, configuration reference, the TOON data format, the logging event catalog, known issues, and a glossary, see [OVERVIEW.md](./OVERVIEW.md).*

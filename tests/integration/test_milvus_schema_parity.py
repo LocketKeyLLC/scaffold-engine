@@ -142,7 +142,7 @@ def test_scan_finds_known_call_sites():
     )
     # The largest known call site (rag_pipeline.py, multi-line literal)
     assert "modules/rag_pipeline.py" in paths_found, (
-        f"scanner missed modules/rag_pipeline.py"
+        "scanner missed modules/rag_pipeline.py"
     )
 
     # The §17.319 fix specifically renamed "content" → "canonical_text"

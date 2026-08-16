@@ -289,12 +289,12 @@ def _print_report(summary: dict) -> None:
     if mf is not None:
         print(f"Faithfulness:         {mf:.3f}  (RAGAS, n={summary['faithfulness_scored']})")
     else:
-        print(f"Faithfulness:         n/a  (pass --faithfulness to score)")
+        print("Faithfulness:         n/a  (pass --faithfulness to score)")
     mcf = summary.get("mean_citation_faithfulness")
     if mcf is not None:
         print(f"Citation faithfulness:{mcf:.3f}  (attribution, §17.798, n={summary['citation_faithfulness_scored']})")
     else:
-        print(f"Citation faithfulness:n/a  (pass --citation-faithfulness to score)")
+        print("Citation faithfulness:n/a  (pass --citation-faithfulness to score)")
     print(f"Exact-id coverage:    {summary['exact_id_coverage']:.1%}  (archival — see §17.229)")
     print("=" * 60)
     misses = [r for r in summary["per_query"] if not r["title_hit_at_10"]]

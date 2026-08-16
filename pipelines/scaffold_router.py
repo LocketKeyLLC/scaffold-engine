@@ -4025,13 +4025,13 @@ class Pipeline:
                         yield fallback
                         yield self._render_completion_next_block(job_id, failed_nodes)
                     else:
-                        yield f"✅ All steps completed."
+                        yield "✅ All steps completed."
                         yield self._render_completion_next_block(job_id, failed_nodes)
                 else:
-                    yield f"✅ All steps completed."
+                    yield "✅ All steps completed."
                     yield self._render_completion_next_block(job_id, failed_nodes)
             except Exception:
-                yield f"✅ All steps completed."
+                yield "✅ All steps completed."
                 yield self._render_completion_next_block(job_id, failed_nodes)
 
     # §17.304 — post-execution Next-block. Mirrors §17.303's /idea
@@ -4728,7 +4728,7 @@ class Pipeline:
             return
         if match and ambiguous and cands:
             yield self._render_job_disambiguation(
-                cands, "rename", f"/jobs rename", suffix=f" {new_name}",
+                cands, "rename", "/jobs rename", suffix=f" {new_name}",
             )
             return
         yield (
@@ -4874,7 +4874,7 @@ class Pipeline:
             )
             return
         if match and ambiguous and cands:
-            yield self._render_job_disambiguation(cands, f"delete", slash)
+            yield self._render_job_disambiguation(cands, "delete", slash)
             return
         yield (
             f"I couldn't find a {noun} matching “{ref}” to delete. Try "
@@ -6553,7 +6553,7 @@ class Pipeline:
             )
 
         lines = [
-            f"Usage: `/skip <job_id> <node_key>`\n",
+            "Usage: `/skip <job_id> <node_key>`\n",
             f"Candidate nodes for job `{job_id}`:\n",
         ]
         for status_key in ("failed", "blocked", "pending"):
@@ -6792,7 +6792,7 @@ class Pipeline:
                 return head + actions_block
             return (
                 head
-                + f"\n\n_No next steps suggested yet — re-run "
+                + "\n\n_No next steps suggested yet — re-run "
                 + f"`/results {job_id}` after the next node completes._"
             )
 

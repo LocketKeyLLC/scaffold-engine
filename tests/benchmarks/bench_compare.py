@@ -128,7 +128,7 @@ def print_comparison(records: list):
         if regressions:
             print(f"\n  ⚠️  REGRESSIONS DETECTED: {', '.join(regressions)}")
         else:
-            print(f"\n  ✅ No significant regressions.")
+            print("\n  ✅ No significant regressions.")
 
 
 def main():

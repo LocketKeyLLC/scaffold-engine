@@ -250,7 +250,7 @@ async def test_aiter_assist_handoff_yields_events_and_sends_body():
 
 async def test_aiter_assist_handoff_propagates_409():
     """A non-active session should bubble up as the SDK's typed error."""
-    from scaffold_client import OrchestratorError, ScaffoldError
+    from scaffold_client import ScaffoldError
 
     def handler(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(

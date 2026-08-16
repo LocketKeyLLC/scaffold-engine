@@ -14,10 +14,10 @@
 #   systemctl status scaffold-host-oom-watcher
 #   journalctl -u scaffold-host-oom-watcher -f
 #
-# Adjust User= / WorkingDirectory= / ExecStart= for any deploy where
-# the operator user is not "aedefruscio" or the repo lives elsewhere.
-# Repo path is the post-§17.214 NVMe canonical (~/scaffold-engine), NOT
-# the pre-§17.214 /mnt/adamssd/... path. Update accordingly.
+# Set User= / WorkingDirectory= / ExecStart= to match your deploy: the
+# operator user that owns the repo and the absolute path to your
+# scaffold-engine checkout. The placeholders below assume a user named
+# "youruser" with the repo at /home/youruser/scaffold-engine.
 
 [Unit]
 Description=Scaffold Engine host kernel-OOM event watcher
@@ -30,13 +30,13 @@ Requires=docker.service systemd-journald.service
 
 [Service]
 Type=simple
-User=aedefruscio
+User=youruser
 # `docker` for the `docker exec scaffold-orchestrator` alert emit; no
 # `systemd-journal` group needed because `journalctl -k` reads kernel
 # messages from /dev/kmsg, which is world-readable for reads.
 Group=docker
-WorkingDirectory=/home/aedefruscio/scaffold-engine
-ExecStart=/usr/bin/python3 /home/aedefruscio/scaffold-engine/scripts/host_oom_watcher.py
+WorkingDirectory=/home/youruser/scaffold-engine
+ExecStart=/usr/bin/python3 /home/youruser/scaffold-engine/scripts/host_oom_watcher.py
 Restart=always
 RestartSec=5s
 StandardOutput=journal

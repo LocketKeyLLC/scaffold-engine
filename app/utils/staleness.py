@@ -15,7 +15,7 @@ import logging
 import time
 
 from app.utils.milvus_utils import get_client
-from app.config import settings, TTL_POLICY, DEFAULT_TTL_SECONDS
+from app.config import TTL_POLICY, DEFAULT_TTL_SECONDS
 
 logger = logging.getLogger("scaffold.staleness")
 

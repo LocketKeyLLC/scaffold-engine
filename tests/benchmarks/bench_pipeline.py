@@ -635,17 +635,17 @@ def run_benchmark():
         # §17.353 — confirmation row is new; pre-1.1 records lack it
         # so guard with .get(...).
         conf = (pipeline_results.get("confirmation") or {}).get("duration_s")
-        print(f"\n    Pipeline breakdown:")
+        print("\n    Pipeline breakdown:")
         print(f"      Idea submission (/ideate):          {pipeline_results['idea_submission']['duration_s']}s")
         if conf is not None:
             print(f"      Confirmation (/ideate/confirm):     {conf}s")
         print(f"      DAG generation (/dag):              {pipeline_results['dag_generation']['duration_s']}s")
         print(f"      Execution (/execute/all):           {pipeline_results['execution']['duration_s']}s")
-        print(f"      ───────────────────────────────────────────")
+        print("      ───────────────────────────────────────────")
         print(f"      Total pipeline:                     {pipeline_results['total_pipeline_s']}s")
 
     if raw_results and isinstance(raw_results[0], dict) and "eval_tps" in raw_results[0]:
-        print(f"\n    Raw inference:")
+        print("\n    Raw inference:")
         for r in raw_results:
             print(f"      {r['model']}: {r['eval_tps']} tok/s gen, "
                   f"{r['prompt_eval_tps']} tok/s prompt, "

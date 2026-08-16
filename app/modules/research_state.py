@@ -14,7 +14,6 @@ from typing import AsyncGenerator
 from sqlalchemy import text
 
 from app.config import settings
-from app.database import async_session
 
 logger = logging.getLogger("scaffold.research.state")
 

@@ -9,11 +9,9 @@
 # operator runs the actual /score_retrieval calibration locally and fills
 # in the real numbers before marking the PR ready.
 #
-# Crontab entry (8am UTC = 4am EST/EDT, 1st of Jan/Apr/Jul/Oct):
-#   0 8 1 1,4,7,10 *  /home/aedefruscio/scaffold-engine/scripts/quarterly_calibration_pr.sh >> /tmp/quarterly_calibration.log 2>&1
-# §17.357 — path corrected post-§17.214 NVMe migration. The /mnt/adamssd
-# path is gone (AM8180 enclosure demoted to cold-backup-only). cron has
-# no ~ expansion contract — must be absolute. Next fire: 2026-07-01
+# Crontab entry (8am UTC = 4am EST/EDT, 1st of Jan/Apr/Jul/Oct). cron has
+# no ~ expansion, so the path must be absolute — point it at your checkout:
+#   0 8 1 1,4,7,10 *  /path/to/scaffold-engine/scripts/quarterly_calibration_pr.sh >> /tmp/quarterly_calibration.log 2>&1
 # 08:00 UTC (verified via `crontab -l`).
 #
 # Run manually any time to test:
@@ -209,7 +207,7 @@ Tier-2 audit-tail item **#14** (quarterly re-baseline cadence). This is a draft 
 - [ ] Run \`make rebaseline\` (§17.354 — runs bench-rag + bench-embed + bench-pipeline + bench-check)
 - [ ] Run \`python3 scripts/score_retrieval.py --golden tests/fixtures/golden_set.json\` for the 20-query golden_set against \`/rag\`
 - [ ] Compare metrics against the prior baseline; flag any drift > 5pt
-- [ ] If recall has dropped, investigate per-query MISSes against \`tests/fixtures/golden_set.json\` (see docs/rebaseline-runbook.md "On regression")
+- [ ] If recall has dropped, investigate per-query MISSes against \`tests/fixtures/golden_set.json\` (see internal/rebaseline-runbook.md "On regression")
 - [ ] Update the placeholder \`rebaseline\` block in \`tests/fixtures/golden_set.json\` with real numbers
 - [ ] If a query has drifted to MISS, decide: regenerate the golden_set entry or accept as legitimate drift
 - [ ] Update \`OVERVIEW.md §18\`'s retrieval-quality baseline table with the new row

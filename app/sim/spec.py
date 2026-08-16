@@ -34,7 +34,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import jsonschema
 from jsonschema import Draft202012Validator
 
 logger = logging.getLogger("scaffold")

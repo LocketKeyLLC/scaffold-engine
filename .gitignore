@@ -16,6 +16,10 @@ tests/fixtures/kb_entries.txt
 retrieval_report.json
 .backups/
 
+# Operator-internal notes kept out of the public tree (audit ledgers,
+# host-specific runbooks, internal roadmaps).
+internal/
+
 # Local backups containing secrets
 .env.*
 !.env.example
@@ -27,3 +31,6 @@ retrieval_report.json
 # Pipeline valves: live file gets rewritten to {} by upstream main.py on missing-file
 # startup; we track the template instead and let the bootstrap helper copy it on first run.
 pipelines/*/valves.json
+
+# Tool/build cache (root-owned, not project state)
+.cache/

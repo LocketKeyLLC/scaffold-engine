@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from app.database import get_db
 from app.modules.recovery import next_actions_for
-from app.schemas import JOB_STATUSES, JobStatus
+from app.schemas import JobStatus
 from app.web.routes import phase_label_for
 
 logger = logging.getLogger("scaffold.routers.status")

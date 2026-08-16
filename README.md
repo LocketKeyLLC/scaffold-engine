@@ -13,7 +13,7 @@ This README is a **complete from-zero walkthrough**: every command, what it does
 For details beyond setup-and-first-run, read:
 
 - **[USER_GUIDE.md](./USER_GUIDE.md)** — every command, organized by what you're trying to do (start a project, do research, run a manual walkthrough, schedule something recurring, …).
-- **[OVERVIEW.md](./OVERVIEW.md)** — comprehensive technical reference. Architecture, every module, every public function, the full database schema, configuration, the TOON data format, the logging catalog, known issues, sprint history, and a glossary.
+- **[OVERVIEW.md](./OVERVIEW.md)** — comprehensive technical reference. Architecture, every module, every public function, the full database schema, configuration, the TOON data format, the logging catalog, known issues, performance benchmarks, and a glossary.
 - **[CHANGELOG.md](./CHANGELOG.md)** — release-level history. **[CONTRIBUTING.md](./CONTRIBUTING.md)** — dev setup and PR ground rules. **[SECURITY.md](./SECURITY.md)** — how to report vulnerabilities.
 
 ---
@@ -80,7 +80,7 @@ ollama pull qwen3:4b qwen2.5:7b qwen2.5-coder:7b nomic-embed-text qwen3.5:latest
 
 This downloads the five default local models. Each is 1–8 GB except `nomic-embed-text` (~270 MB); on a typical home connection plan for ~10 minutes total. Ollama caches them in `~/.ollama/models`.
 
-> **Embedder note:** the embedder is `nomic-embed-text` (137M params, 768-dim native, MRL-truncated to 512 to match Milvus). Earlier docs and pre-§17.81 deploys referenced `qwen3-embedding:8b`; that model wedges deterministically on Ollama 0.17.5 + this host's `--ollama-engine` path (OVERVIEW §17.81/82) and is no longer used. If you pulled it under prior instructions you can safely `ollama rm qwen3-embedding:8b`.
+> **Embedder note:** the embedder is `nomic-embed-text` (137M params, 768-dim native, MRL-truncated to 512 to match Milvus). The embedding dimension is locked at 512, so the embedder is configured once at install and is not swapped per-request; changing it later means re-embedding the corpus (see USER_GUIDE.md "Embedder portability").
 
 > **What can go wrong:**
 > - "model not found" → Ollama isn't running. Start it: `ollama serve` (foreground) or check the systemd unit on Linux.
@@ -93,7 +93,7 @@ This downloads the five default local models. Each is 1–8 GB except `nomic-emb
 docker compose up -d
 ```
 
-This starts seven containers: orchestrator, Postgres, Milvus, Redis, SearXNG, Open WebUI, and the OWUI pipelines. First time takes ~3 minutes (image downloads + initial DB migration). Subsequent starts are ~15 seconds.
+This starts ten containers: orchestrator, Postgres, Milvus, Redis, SearXNG, Open WebUI, the OWUI pipelines, and three simulation sidecars (ngspice, verilator, symbiyosys — see [Optional surfaces](#optional-surfaces)). First time takes ~3 minutes (image downloads + initial DB migration). Subsequent starts are ~15 seconds.
 
 > **What you'll see:** `docker compose` prints a green checkmark per container as each becomes healthy. If any go red, check `docker compose logs <name>` for that container.
 
@@ -103,7 +103,7 @@ This starts seven containers: orchestrator, Postgres, Milvus, Redis, SearXNG, Op
 make doctor
 ```
 
-This runs an end-to-end audit. §17.205 — the script opens with a 9-section banner listing every check that's about to run (`.env`, Docker network + volumes, Containers, Orchestrator `/health`, Ollama, OpenAI provider, API key sync across .env/container/bashrc/valves.json, Auth posture, Schema migrations) so you know what's being probed before output starts scrolling. Expected output is the banner followed by a short list of subsystem checks, all `PASS`. The script also confirms your `.env` API key matches what the running containers are using and warns if they've drifted. Pass `--explain` (or run `make doctor-explain`) for a one-line description under each section.
+This runs an end-to-end audit. The script opens with a 9-section banner listing every check that's about to run (`.env`, Docker network + volumes, Containers, Orchestrator `/health`, Ollama, OpenAI provider, API key sync across .env/container/bashrc/valves.json, Auth posture, Schema migrations) so you know what's being probed before output starts scrolling. Expected output is the banner followed by a short list of subsystem checks, all `PASS`. The script also confirms your `.env` API key matches what the running containers are using and warns if they've drifted. Pass `--explain` (or run `make doctor-explain`) for a one-line description under each section.
 
 ```bash
 curl -H "X-API-Key: $SCAFFOLD_API_KEY" http://localhost:8000/health
@@ -159,7 +159,7 @@ Check progress at any time with:
 > **Don't memorize IDs.** `/here`, `/next`, and `/resume` all work off the most recent job, so you rarely need to paste a UUID.
 
 > **What can go wrong on your first run:**
-> - Phase 2 (research) can take 10–25 minutes on CPU. The chat shows a visible "⏳ Phase 2 — researching + ingesting… (Xm YYs elapsed)" marker every ~2 minutes (§17.173). For sub-step detail, tail the orchestrator (`docker logs -f scaffold-orchestrator`) — it logs each SearXNG query, distillation batch, and Milvus ingest as it happens.
+> - Phase 2 (research) can take 10–25 minutes on CPU. The chat shows a visible "⏳ Phase 2 — researching + ingesting… (Xm YYs elapsed)" marker every ~2 minutes. For sub-step detail, tail the orchestrator (`docker logs -f scaffold-orchestrator`) — it logs each SearXNG query, distillation batch, and Milvus ingest as it happens.
 > - If the system says `awaiting_confirmation` and won't move forward, you skipped step 6 (the `/confirm` command).
 > - If a DAG node fails after three auto-retries, it goes to `blocked`. Run `/results <job_id>` for a copy-pasteable retry or skip command.
 
@@ -181,7 +181,7 @@ Once the stack is running, these are the commands you'll use most often:
 | Re-run health audit | `make doctor` | Full pre-flight, with explanations. |
 | Show all targets | `make help` | Self-documenting Makefile; every target has a one-line description. |
 
-Bash completion for `make` targets (§17.204): `source scripts/make-completion.bash` to enable `make st<TAB>` → `status` / `status-raw` for the current shell, or append the `source` line to `~/.bashrc` for it to stick across sessions.
+Bash completion for `make` targets: `source scripts/make-completion.bash` to enable `make st<TAB>` → `status` / `status-raw` for the current shell, or append the `source` line to `~/.bashrc` for it to stick across sessions.
 
 Open WebUI is for chat-driven workflows. The Python SDK and `scaffold` CLI exist for programmatic access — see [USER_GUIDE.md](./USER_GUIDE.md) for examples of both.
 
@@ -239,7 +239,7 @@ scaffold-engine/
 ├── docker-compose.yml      production runtime (no tests, no Makefile in image)
 ├── docker-compose.dev.yml  dev override (mounts tests, Makefile, docs)
 ├── Dockerfile              multi-stage: builder → runtime → dev
-└── docs/openapi.json       v1.1.0 API contract (machine-readable)
+└── docs/openapi.json       v1.2.0 API contract (machine-readable)
 ```
 
 ---
@@ -248,7 +248,7 @@ scaffold-engine/
 
 The default `docker compose up -d` brings up everything below — there's no opt-in step beyond a healthy stack. Listed here so you know what you have:
 
-- **Prometheus `/metrics`** (no auth). Set `METRICS_ENABLED=true` in `.env` (default on). The orchestrator emits counters/gauges for LLM calls (by provider/model/success), HTTP request RED metrics (by method/path/status), alert fire and suppression rates (by kind/severity), jobs by status, executor concurrency in-flight vs cap, and quarterly-calibration cron health. Sample scrape: `curl http://localhost:8000/metrics`. See [`docs/observability.md`](docs/observability.md) for the full metric inventory, recommended scrape config, and a 5-rule starter alert-rule pack (§17.193).
+- **Prometheus `/metrics`** (no auth). Set `METRICS_ENABLED=true` in `.env` (default on). The orchestrator emits counters/gauges for LLM calls (by provider/model/success), HTTP request RED metrics (by method/path/status), alert fire and suppression rates (by kind/severity), jobs by status, executor concurrency in-flight vs cap, and quarterly-calibration cron health. Sample scrape: `curl http://localhost:8000/metrics`. See [`docs/observability.md`](docs/observability.md) for the full metric inventory, recommended scrape config, and a 5-rule starter alert-rule pack.
 - **Simulation sidecars.** Three FastAPI services at `127.0.0.1:8001-8003` for hardware-design tasks: `scaffold-ngspice` (analog SPICE), `scaffold-verilator` (digital SystemVerilog), `scaffold-symbiyosys` (formal verification). The orchestrator invokes them via the `ai-network` bridge; they isolate untrusted simulator input from the orchestrator's process tree. Each has its own `/health`; the orchestrator's `/health` aggregates them. If you don't run hardware-design workflows you can comment out the three `scaffold-*` services in `docker-compose.yml` without losing other functionality.
 - **Native web UI.** `http://localhost:8000/web/jobs` is a server-rendered HTML browser for jobs, ideate/confirm forms, and live SSE-streamed execution progress. Auth-bypassed on the loopback bind, since `localhost:8000` is the operator's box.
 
@@ -256,8 +256,10 @@ The default `docker compose up -d` brings up everything below — there's no opt
 
 ## Status
 
-Active solo development. Latest release: v1.1.0 (2026-08-05) — see [CHANGELOG.md](./CHANGELOG.md). API contract pinned at v1.1.0 (`docs/openapi.json`). The audit-flagged work queue (10 items) is closed in code; see OVERVIEW §16. For the current test-suite counts and any known failures, see OVERVIEW §14.1 — that section is updated each sprint; the README intentionally does not duplicate the number.
+Actively developed. Latest release: v1.2.0 (2026-08-16) — see [CHANGELOG.md](./CHANGELOG.md). API contract pinned at v1.2.0 (`docs/openapi.json`). For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
 
 ## License
 
-[Business Source License 1.1](./LICENSE). Free for personal, internal, research, and evaluation use; offering scaffold-engine (or a product substantially derived from it) to third parties commercially requires a license from LocketKey LLC — see **[COMMERCIAL.md](./COMMERCIAL.md)** for what's free, what needs a license, and how to get one. Each version converts to Apache 2.0 on its Change Date.
+The **server** (this repository root — `app/`, `pipelines/`, `db/`, `docker/`, and the deployment tooling) is source-available under the [Business Source License 1.1](./LICENSE). Free for personal, internal, research, and evaluation use; offering scaffold-engine (or a product substantially derived from it) to third parties commercially requires a license from LocketKey LLC — see **[COMMERCIAL.md](./COMMERCIAL.md)** for what's free, what needs a license, and how to get one. Each version converts to Apache 2.0 on its Change Date.
+
+The **client SDK** ([`sdk/`](./sdk/LICENSE)) and **CLI** ([`cli/`](./cli/LICENSE)) are separately licensed under **Apache-2.0**, so you can build and distribute integrations against the orchestrator's API freely without a commercial license.

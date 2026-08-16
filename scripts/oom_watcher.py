@@ -34,7 +34,7 @@ import logging
 import subprocess
 import sys
 import time
-from typing import Any, Iterable, Optional
+from typing import Iterable, Optional
 
 DEFAULT_PROJECT = "scaffold-engine"
 DEFAULT_ORCHESTRATOR = "scaffold-orchestrator"

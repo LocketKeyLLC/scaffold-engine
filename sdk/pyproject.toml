@@ -31,7 +31,7 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/AEDeFruscio/scaffold-engine"
+Homepage = "https://github.com/LocketKeyLLC/scaffold-engine"
 
 [tool.setuptools]
 packages = ["scaffold_client"]

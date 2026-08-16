@@ -1,3 +1,40 @@
+[project]
+name = "scaffold-engine"
+version = "1.2.0"
+description = "Self-hosted DAG orchestration engine for multi-step LLM workflows."
+requires-python = ">=3.11"
+# The server (this repository root) is source-available under the Business
+# Source License 1.1 — see ./LICENSE. The client SDK (sdk/) and CLI (cli/)
+# are separately licensed under Apache-2.0; see sdk/LICENSE and cli/LICENSE.
+license = { text = "BUSL-1.1" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["internal", ".backups", ".venv-ci", "docs/toon"]
+
+[tool.ruff.lint]
+# Correctness-focused baseline: pyflakes (unused imports/vars, undefined
+# names, bad f-strings), runtime syntax errors, and invalid escape
+# sequences. Stylistic rules (import sorting, PEP 604 unions, blind-except)
+# are intentionally deferred to keep this baseline green; enable them
+# incrementally rather than in one churny sweep.
+select = ["F", "E9", "W605"]
+# F841 (assigned-but-unused locals) is deferred: a few live sites read like
+# possible bug-hints (a value computed then dropped) rather than dead code,
+# so they warrant individual review instead of a blanket auto-delete.
+ignore = ["F841"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test modules use `from module import *` fixtures heavily and freely
+# import-for-availability; enforcing pyflakes there is churn without payoff.
+"tests/**" = ["F403", "F405", "F401", "F811", "F841"]
+# Package __init__ files re-export names for the public import surface.
+"**/__init__.py" = ["F401"]
+# scaffold_router imports two helpers, uses them during bootstrap, then
+# `del`s them; ruff's flow analysis misreads the post-`del` refs as undefined.
+"pipelines/scaffold_router.py" = ["F821"]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]

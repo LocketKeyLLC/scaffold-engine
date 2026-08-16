@@ -379,12 +379,27 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
     ))
 
+    print()
+    print("Per-partition stats:")
+    totals = {"scanned": 0, "reembedded": 0, "skipped_empty": 0, "errors": 0}
+    for d, s in stats.items():
+        print(f"  {d:<6}  scanned={s['scanned']:>6}  "
+              f"reembedded={s['reembedded']:>6}  "
+              f"skipped_empty={s['skipped_empty']:>4}  errors={s['errors']:>3}")
+        for k in totals:
+            totals[k] += s[k]
+    print(f"  {'TOTAL':<6}  scanned={totals['scanned']:>6}  "
+          f"reembedded={totals['reembedded']:>6}  "
+          f"skipped_empty={totals['skipped_empty']:>4}  "
+          f"errors={totals['errors']:>3}")
+
     # §17.155 follow-up #2 — record the new embedder identity in
     # cache_metadata so the next lifespan boot sees outcome='unchanged'
     # instead of firing a spurious cache.embedder_drift CRITICAL alert.
     # Mirrors the upsert pattern in app/utils/embedder_drift.py. Only
     # runs on a live (non-dry-run) reindex with no errors — a partial
-    # rewrite must not advance the recorded identity.
+    # rewrite must not advance the recorded identity. Must run after the
+    # per-partition loop above computes `totals`.
     if not args.dry_run and not totals["errors"]:
         new_id = args.new_embedder or settings.model_embedder_id
         try:
@@ -401,25 +416,11 @@ def main(argv: list[str] | None = None) -> int:
                 new_id, exc,
             )
 
-    print()
-    print("Per-partition stats:")
-    totals = {"scanned": 0, "reembedded": 0, "skipped_empty": 0, "errors": 0}
-    for d, s in stats.items():
-        print(f"  {d:<6}  scanned={s['scanned']:>6}  "
-              f"reembedded={s['reembedded']:>6}  "
-              f"skipped_empty={s['skipped_empty']:>4}  errors={s['errors']:>3}")
-        for k in totals:
-            totals[k] += s[k]
-    print(f"  {'TOTAL':<6}  scanned={totals['scanned']:>6}  "
-          f"reembedded={totals['reembedded']:>6}  "
-          f"skipped_empty={totals['skipped_empty']:>4}  "
-          f"errors={totals['errors']:>3}")
-
     if args.dry_run:
-        print(f"\nDry run complete. Re-run without --dry-run to apply.")
+        print("\nDry run complete. Re-run without --dry-run to apply.")
     else:
-        print(f"\nReindex complete. Update MODEL_EMBEDDER_PIPELINE in .env "
-              f"and `make restart` to switch the live embedder.")
+        print("\nReindex complete. Update MODEL_EMBEDDER_PIPELINE in .env "
+              "and `make restart` to switch the live embedder.")
 
     return 1 if totals["errors"] else 0
 

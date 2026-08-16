@@ -26,7 +26,7 @@ async def run_research_hf_mode(
     """HF-mode: fetch model_card / dataset_card / paper_abstract / space
     metadata, ingest with §17.104 provenance pinned to HF revision SHA.
     """
-    from app.utils.hf_ingest import fetch_hf, HFNotFoundError, HFRateLimitError
+    from app.utils.hf_ingest import fetch_hf
     from app.modules.provenance import build_provenance
     from app.utils.fetch_cache import get_fetch_cache
     from app.utils.markdown_chunker import split_markdown_by_kind

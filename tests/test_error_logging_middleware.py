@@ -204,7 +204,7 @@ def test_persistence_failure_logs_full_context_to_journald(app_with_endpoints, c
 class TestRedactSecrets:
     def test_empty_input_passes_through(self):
         assert _redact_secrets("") == ""
-        assert _redact_secrets(None) is None  # noqa: type-check intentional
+        assert _redact_secrets(None) is None  # passing None is intentional here
 
     def test_no_secrets_pass_through_unchanged(self):
         msg = "ValueError: expected int, got str"

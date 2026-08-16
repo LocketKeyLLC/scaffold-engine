@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import json as _json
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # `Path` is imported function-locally at call sites to keep module import
+    # light; this makes the string annotations (`"Path | None"`) resolvable to
+    # type checkers and linters without adding a runtime import.
+    from pathlib import Path
 
 import click
 
@@ -2091,11 +2097,11 @@ def _remove_pipeline_valve(valves_path: "Path", key: str) -> str:
     valve falls back to the template default on next pipeline restart.
     """
     if not valves_path.is_file():
-        return f"pipeline valves file missing — no change"
+        return "pipeline valves file missing — no change"
     try:
         data = _json.loads(valves_path.read_text())
     except Exception:
-        return f"pipeline valves file unreadable — no change"
+        return "pipeline valves file unreadable — no change"
     if not isinstance(data, dict) or key not in data:
         return f"pipeline valve {key!r} not set — no change"
     prev = data.pop(key)

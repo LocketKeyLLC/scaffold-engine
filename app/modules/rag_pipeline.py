@@ -34,7 +34,7 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any, TYPE_CHECKING
 
 from pymilvus import MilvusClient

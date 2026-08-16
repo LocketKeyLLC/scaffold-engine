@@ -1,7 +1,6 @@
 """Config discovery — flag > env > user toml > walked .env > default."""
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 

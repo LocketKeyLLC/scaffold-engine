@@ -9,8 +9,9 @@
 #   systemctl status scaffold-oom-watcher
 #   journalctl -u scaffold-oom-watcher -f
 #
-# Adjust User= / WorkingDirectory= / ExecStart= for any deploy where
-# the operator user is not "aedefruscio" or the repo lives elsewhere.
+# Set User= / WorkingDirectory= / ExecStart= to match your deploy: the
+# operator user that owns the repo and your scaffold-engine checkout path.
+# The placeholder below assumes a user named "youruser".
 
 [Unit]
 Description=Scaffold Engine OOM event watcher
@@ -23,7 +24,7 @@ Requires=docker.service
 
 [Service]
 Type=simple
-User=aedefruscio
+User=youruser
 Group=docker
 WorkingDirectory=/mnt/adamssd/scaffold-engine
 ExecStart=/usr/bin/python3 /mnt/adamssd/scaffold-engine/scripts/oom_watcher.py

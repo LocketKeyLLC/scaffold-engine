@@ -21,10 +21,8 @@ Error recovery cascade (per spec):
 import asyncio
 import json
 import logging
-import re
 import time
 from typing import AsyncGenerator, Literal
-from uuid import UUID
 
 try:
     from json_repair import repair_json
@@ -32,19 +30,18 @@ except ImportError:  # pragma: no cover
     repair_json = None
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
 from app import model_router
 from app.config import settings, get_model
 from app.modules.execution_compile import _compile_output, compute_deliverable_kind  # re-exported for test patches
 from app.modules.execution_verify import (
-    VERIFY_SYSTEM, _verify_output,  # re-exported for test patches
+    _verify_output,  # re-exported for test patches
     _verify_codegen_output,  # §17.429 — stricter CodeGen verifier
     extract_brief_goal,
     collect_upstream_code,
     _is_validation_llm_node,
-    check_validation_citations,
     check_validation_citation_coverage,
 )
 from app.modules.execution_codegen_gate import (

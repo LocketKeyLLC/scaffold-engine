@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import click
 from click.testing import CliRunner
-import pytest
 
 from scaffold_cli.main import _render_cost_rollup
 
