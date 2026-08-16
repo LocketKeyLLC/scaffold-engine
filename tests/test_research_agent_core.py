@@ -108,7 +108,7 @@ class TestSearchQueries:
             mock_settings.research_searxng_delay = 0
             mock_settings.research_searxng_concurrency = 3
             mock_settings.research_recency_query_boost = False
-            mock_settings.research_max_urls_per_iteration = 20
+            mock_settings.research_max_urls_for_depth.return_value = 30
             from app.modules.research_agent import _search_queries, ResearchState
 
             state = ResearchState(topic="test")
@@ -139,7 +139,7 @@ class TestSearchQueries:
             mock_settings.research_searxng_delay = 0
             mock_settings.research_searxng_concurrency = 3
             mock_settings.research_recency_query_boost = False
-            mock_settings.research_max_urls_per_iteration = 20
+            mock_settings.research_max_urls_for_depth.return_value = 30
             from app.modules.research_agent import _search_queries, ResearchState
 
             state = ResearchState(topic="test")
@@ -163,7 +163,7 @@ class TestSearchQueries:
             mock_settings.research_searxng_delay = 0
             mock_settings.research_searxng_concurrency = 3
             mock_settings.research_recency_query_boost = False
-            mock_settings.research_max_urls_per_iteration = 20
+            mock_settings.research_max_urls_for_depth.return_value = 30
             from app.modules.research_agent import _search_queries, ResearchState
 
             state = ResearchState(topic="test")

@@ -298,11 +298,18 @@ services:
       GITHUB_MAX_FILES: "50"
       # §17.801 — bound the research fetch/extract fan-out. The semaphore in
       # _fetch_and_extract spans the fetch AND the trafilatura/lxml parse, so
-      # this caps peak memory during topic-mode research (which fetches up to
-      # research_max_urls_per_iteration pages, 5 MB each). Lowered from the old
-      # code default of 5 after the §17.800 mid-run cgroup memory-kill on this
-      # 6 GB host. Raise it on a roomier host; lower it if research still spikes.
+      # this caps peak MEMORY during topic-mode research (each page ≤ 5 MB).
+      # Lowered from the old code default of 5 after the §17.800 mid-run cgroup
+      # memory-kill on this 6 GB host. Raise it on a roomier host; lower if it
+      # still spikes.
       RESEARCH_FETCH_CONCURRENCY: "${RESEARCH_FETCH_CONCURRENCY:-3}"
+      # §17.802 — per-iteration URL cap, depth-scaled (was a flat 100). Bounds
+      # total fetch VOLUME/cost per iteration (not peak memory — that's the
+      # concurrency knob above). Lean shallow base, increasing degrees for deeper
+      # runs. Tune per host appetite for research breadth vs cost.
+      RESEARCH_MAX_URLS_SHALLOW: "${RESEARCH_MAX_URLS_SHALLOW:-30}"
+      RESEARCH_MAX_URLS_MEDIUM: "${RESEARCH_MAX_URLS_MEDIUM:-60}"
+      RESEARCH_MAX_URLS_DEEP: "${RESEARCH_MAX_URLS_DEEP:-90}"
       HF_HOME: /code/.cache/huggingface
       MAX_RETRIES: "3"
       HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
