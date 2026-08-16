@@ -140,7 +140,7 @@ _RATE_LIMIT_RE = re.compile(
 _FOOTER_COMMANDS: frozenset = frozenset({"/results", "/cost", "/logs", "/rag"})
 
 KNOWN_SUBCOMMANDS: dict = {
-    "/model": ("list", "available", "set", "reset", "probe", "test", "help"),
+    "/model": ("list", "available", "set", "reset", "probe", "proposals", "apply", "test", "help"),
     "/jobs": ("list", "find", "rename", "delete", "help"),
     # U.8.D — `run-now` was advertised here but never had an orchestrator
     # endpoint or a chat handler. Removed; see audit follow-ups.
@@ -5346,6 +5346,8 @@ class Pipeline:
             return "👍 Cancelled — the reaper did not run."
         if intent == "gt_extract":
             return "👍 Cancelled — no ground truths were extracted."
+        if intent == "model_proposal_apply":
+            return "👍 Cancelled — no model was swapped."
         return "👍 Okay, cancelled — nothing was changed."
 
     def _execute_nl_action(
@@ -5403,6 +5405,11 @@ class Pipeline:
         # §17.658 — ground-truth extraction (SearXNG + LLM), gated by its card.
         if intent == "gt_extract":
             yield from self._execute_gt_extract((slots.get("topic") or "").strip())
+            return
+        # §17.803 — role→model swap. The confirm card was the human gate; apply
+        # the persisted override now (the accept endpoint runs set_override).
+        if intent == "model_proposal_apply":
+            yield self._apply_model_proposal(slots)
             return
         # §17.630 — destructive: fire the underlying delete WITH its confirm
         # token (the NL confirm card was the human gate).
@@ -7051,8 +7058,10 @@ class Pipeline:
         if sub == "set":       return self._model_set(parts)
         if sub == "reset":     return self._model_reset()
         if sub == "probe":     return self._model_probe()
+        if sub == "proposals": return self._model_proposals()      # §17.803
+        if sub == "apply":     return self._model_apply_card(parts)  # §17.803
         if sub == "help":      return self._model_help()
-        close = difflib.get_close_matches(sub, ("list", "available", "set", "reset", "probe", "help"), n=2, cutoff=0.6)
+        close = difflib.get_close_matches(sub, ("list", "available", "set", "reset", "probe", "proposals", "apply", "help"), n=2, cutoff=0.6)
         hint = ""
         if close:
             hint = "\n\nClosest matches:\n" + "\n".join(f"  - `/model {c}`" for c in close)
@@ -7148,10 +7157,131 @@ class Pipeline:
 | `/model set <role> <model>` | Assign a model to a role |
 | `/model reset` | Reset all roles to defaults |
 | `/model probe` | Probe embedder dimension (must equal 512) |
+| `/model proposals` | Show staged role→model swap proposals |
+| `/model apply <role>` | Review a staged swap as a confirm card |
 | `/model help` | Show this message |
 
 **Roles:** general, verifier, coder, embedder, reranker, router, fallback, cloud_alt
 **Example:** `/model set general qwen3:8b`"""
+
+    # ------------------------------------------------------------------
+    # §17.803 — role→model swap proposals (staged by the learning job)
+    # ------------------------------------------------------------------
+
+    def _fetch_open_proposals(self) -> tuple:
+        """GET the orchestrator's open proposals. Returns ``(proposals, error)``
+        where ``error`` is None on success or a user-facing string on failure."""
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/models/proposals",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+            if r.status_code >= 400:
+                return [], f"Couldn't fetch proposals (HTTP {r.status_code})."
+            return (r.json().get("proposals") or []), None
+        except requests.exceptions.RequestException as e:
+            return [], f"Couldn't reach the orchestrator: {e}"
+        except ValueError:
+            return [], "Malformed response fetching proposals."
+
+    def _model_proposals(self) -> str:
+        """Read-only list of staged role→model swap proposals."""
+        proposals, err = self._fetch_open_proposals()
+        if err:
+            return err
+        if not proposals:
+            return (
+                "**No open model-role proposals.**\n\n"
+                "The learning job stages one when a candidate model beats the "
+                "incumbent on the goldens. It's off by default "
+                "(`MODEL_ROLE_LEARNING_ENABLED`)."
+            )
+        lines = [
+            "**Staged model-role proposals**", "",
+            "| Role | Incumbent → Candidate | Golden | Pass rate | Speedup |",
+            "|---|---|---|---|---|",
+        ]
+        for p in proposals:
+            role_label = (p.get("role") or "").replace("model_", "")
+            lines.append(
+                f"| `{role_label}` | `{p.get('incumbent_model')}` → "
+                f"`{p.get('candidate_model')}` | {p.get('task')} | "
+                f"{p.get('incumbent_rate')}→{p.get('candidate_rate')} | "
+                f"{p.get('speedup')}× |"
+            )
+        lines += [
+            "",
+            "_Reply e.g. `/model apply coder` to review a swap as a confirm "
+            "card. Nothing is applied until you confirm._",
+        ]
+        return "\n".join(lines)
+
+    def _confirm_model_proposal(self, p: dict) -> str:
+        """Render a §17.629 confirm card for one staged swap. Reply *go* fires
+        ``model_proposal_apply`` in ``_execute_nl_action`` → POST accept."""
+        role = p.get("role", "")
+        role_label = role.replace("model_", "")
+        summary = (
+            f"🔀 **Swap the `{role_label}` model?**\n\n"
+            f"- **From (incumbent):** `{p.get('incumbent_model')}`\n"
+            f"- **To (candidate):** `{p.get('candidate_model')}`\n"
+            f"- **Evidence:** golden `{p.get('task')}` — pass rate "
+            f"{p.get('incumbent_rate')}→{p.get('candidate_rate')}, "
+            f"{p.get('speedup')}× faster\n"
+            f"- **Applies via:** a persistent role override (survives restart; "
+            f"nothing else changes)"
+        )
+        return self._render_nl_confirm(
+            "model_proposal_apply",
+            {"id": p.get("id"), "role": role, "candidate": p.get("candidate_model")},
+            summary,
+        )
+
+    def _model_apply_card(self, parts: list) -> str:
+        """`/model apply <role>` → the confirm card for that role's open proposal."""
+        if len(parts) < 3:
+            return "Usage: `/model apply <role>`  (see `/model proposals`)"
+        role_input = parts[2].lower()
+        role_key = role_input if role_input.startswith("model_") else f"model_{role_input}"
+        proposals, err = self._fetch_open_proposals()
+        if err:
+            return err
+        match = next((p for p in proposals if p.get("role") == role_key), None)
+        if match is None:
+            return (
+                f"No open proposal for role `{role_input}`. "
+                f"Run `/model proposals` to see what's staged."
+            )
+        return self._confirm_model_proposal(match)
+
+    def _apply_model_proposal(self, slots: dict) -> str:
+        """POST the accept endpoint for a confirmed swap (fired from the card)."""
+        pid = slots.get("id")
+        role_label = (slots.get("role") or "").replace("model_", "")
+        try:
+            r = _HTTP_SESSION.post(
+                f"{self.valves.orchestrator_url}/models/proposals/{pid}/accept",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            return f"⚠️ Couldn't reach the orchestrator to apply: {e}"
+        if r.status_code == 404:
+            return (
+                "⚠️ That proposal is no longer open — it may have been applied, "
+                "dismissed, or superseded by a newer one."
+            )
+        if r.status_code >= 400:
+            return f"⚠️ Apply failed (HTTP {r.status_code})."
+        try:
+            d = r.json()
+        except ValueError:
+            d = {}
+        return (
+            f"✅ Applied — `{role_label}` now uses `{d.get('model')}` "
+            f"(persistent override; survives restart)."
+        )
 
     # ------------------------------------------------------------------
     # /schedule command system (#8.9)

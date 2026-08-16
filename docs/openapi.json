@@ -7918,6 +7918,135 @@
         ]
       }
     },
+    "/models/proposals": {
+      "get": {
+        "description": "Open role→model swap proposals awaiting review, newest first.",
+        "operationId": "list_proposals_endpoint_models_proposals_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Proposals Endpoint Models Proposals Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Proposals Endpoint",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/models/proposals/{proposal_id}/accept": {
+      "post": {
+        "description": "Apply a staged swap (set_override) and mark the proposal accepted.\n\n404 if the proposal is missing or no longer open (already accepted/\ndismissed/superseded) — a stale confirm card must not silently re-apply.",
+        "operationId": "accept_proposal_endpoint_models_proposals__proposal_id__accept_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "proposal_id",
+            "required": true,
+            "schema": {
+              "title": "Proposal Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Accept Proposal Endpoint Models Proposals  Proposal Id  Accept Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Accept Proposal Endpoint",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/models/proposals/{proposal_id}/dismiss": {
+      "post": {
+        "description": "Dismiss a staged proposal without applying it.",
+        "operationId": "dismiss_proposal_endpoint_models_proposals__proposal_id__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "proposal_id",
+            "required": true,
+            "schema": {
+              "title": "Proposal Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Dismiss Proposal Endpoint Models Proposals  Proposal Id  Dismiss Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Dismiss Proposal Endpoint",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
     "/nodes/{job_id}": {
       "get": {
         "description": "Full editable node list for the /ui plan editor.\n\nReturns ``{job_id, job_status, nodes:[{node_key, title, description, status,\ndepends_on, execution_order, edit_version, prompt_template, assigned_model,\ntool, is_deliverable, tool_config}]}`` — exactly the columns the PATCH\nsurface accepts, plus ``edit_version`` for the optimistic-lock round-trip.",

@@ -1466,6 +1466,25 @@ class Settings(BaseSettings):
     calibration_watchdog_interval_seconds: int = Field(default=900, ge=60, le=86400)
     calibration_grace_minutes: int = Field(default=120, ge=10, le=1440)
 
+    # §17.803 — role→model learning: a periodic golden re-A/B that STAGES swap
+    # proposals (model_role_proposals) for human review as confirm cards. It
+    # runs run_model_ab_task per role (real LLM calls), so it is default OFF and
+    # scoped to the three roles with a golden task (coder/verifier/extract).
+    # Nothing auto-swaps — accepting a proposal is what applies the override.
+    model_role_learning_enabled: bool = False
+    # Weekly by default (the goldens don't move often and each cycle costs LLM
+    # calls). Range floor is one hour so a misconfig can't hammer the models.
+    model_role_learning_interval_seconds: int = Field(
+        default=7 * 86400, ge=3600, le=90 * 86400
+    )
+    # Repeats per (model, golden) trial — averages out per-call variance.
+    model_role_learning_repeat: int = Field(default=3, ge=1, le=10)
+    # Per-role EXTRA candidate model tags to A/B against the incumbent. A role
+    # with no candidates is skipped (the incumbent alone can't be compared).
+    # JSON-parseable env:
+    #   MODEL_ROLE_LEARNING_CANDIDATES='{"model_coder":["kimi-k2.7-code:cloud","qwen3.5:397b-cloud"]}'
+    model_role_learning_candidates: dict[str, list[str]] = Field(default_factory=dict)
+
     otel_enabled: bool = False
     otel_service_name: str = "scaffold-engine"
     otel_otlp_endpoint: str = ""           # http://otel-collector:4318/v1/traces

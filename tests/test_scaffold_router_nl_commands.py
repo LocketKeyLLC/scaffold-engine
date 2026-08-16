@@ -512,6 +512,72 @@ class TestPipeConfirmFlow:
 
 
 # ===========================================================================
+# §17.803 — role→model swap proposals (staged by the learning job)
+# ===========================================================================
+
+
+@pytest.mark.smoke
+class TestModelProposals:
+    _PROP = {
+        "id": 7, "role": "model_coder", "task": "codegen",
+        "incumbent_model": "inc:cloud", "candidate_model": "cand:cloud",
+        "incumbent_rate": 0.8, "candidate_rate": 1.0, "speedup": 2.0,
+    }
+
+    def test_proposals_list_read_only(self, pipe):
+        body = {"proposals": [self._PROP], "count": 1}
+        with patch.object(_mod._HTTP_SESSION, "get",
+                          return_value=_make_response(200, body)):
+            out = pipe._handle_model("/model proposals")
+        assert "cand:cloud" in out and "coder" in out
+        assert "NL_CONFIRM:" not in out            # listing never carries a marker
+
+    def test_proposals_empty(self, pipe):
+        with patch.object(_mod._HTTP_SESSION, "get",
+                          return_value=_make_response(200, {"proposals": [], "count": 0})):
+            out = pipe._handle_model("/model proposals")
+        assert "No open model-role proposals" in out
+
+    def test_apply_renders_confirm_card(self, pipe):
+        with patch.object(_mod._HTTP_SESSION, "get",
+                          return_value=_make_response(200, {"proposals": [self._PROP]})):
+            card = pipe._handle_model("/model apply coder")
+        assert "NL_CONFIRM:" in card               # a confirm card, not an apply
+        pend = pipe._extract_pending_nl_confirm(
+            [{"role": "assistant", "content": card}, {"role": "user", "content": "go"}])
+        assert pend["intent"] == "model_proposal_apply"
+        assert pend["slots"] == {"id": 7, "role": "model_coder", "candidate": "cand:cloud"}
+
+    def test_apply_unknown_role_no_card(self, pipe):
+        with patch.object(_mod._HTTP_SESSION, "get",
+                          return_value=_make_response(200, {"proposals": [self._PROP]})):
+            out = pipe._handle_model("/model apply verifier")
+        assert "No open proposal" in out and "NL_CONFIRM:" not in out
+
+    def test_execute_apply_posts_accept(self, pipe):
+        pend = {"intent": "model_proposal_apply",
+                "slots": {"id": 7, "role": "model_coder", "candidate": "cand:cloud"}}
+        body = {"id": 7, "role": "model_coder", "model": "cand:cloud", "applied": True}
+        with patch.object(_mod._HTTP_SESSION, "post",
+                          return_value=_make_response(200, body)) as post:
+            out = "".join(pipe._execute_nl_action(pend))
+        assert "Applied" in out and "cand:cloud" in out
+        assert post.call_args[0][0].endswith("/models/proposals/7/accept")
+
+    def test_execute_apply_stale_404(self, pipe):
+        pend = {"intent": "model_proposal_apply",
+                "slots": {"id": 7, "role": "model_coder", "candidate": "cand:cloud"}}
+        with patch.object(_mod._HTTP_SESSION, "post",
+                          return_value=_make_response(404, {"detail": "gone"})):
+            out = "".join(pipe._execute_nl_action(pend))
+        assert "no longer open" in out
+
+    def test_cancelled_message(self, pipe):
+        msg = pipe._render_confirm_cancelled({"intent": "model_proposal_apply", "slots": {}})
+        assert "no model was swapped" in msg
+
+
+# ===========================================================================
 # §17.630 — Phase 3: destructive intents (always confirmed)
 # ===========================================================================
 
