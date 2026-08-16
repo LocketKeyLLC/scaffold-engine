@@ -22059,6 +22059,14 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.804 Wire the §17.803 role→model-learning settings into docker-compose + enable it live (2026-08-16)
+
+Follow-up to §17.803, which added the `model_role_learning_*` settings to `app/config.py` but not to `docker-compose.yml` — so the feature had no deployment knob (every other flag, e.g. `CITATION_FAITHFULNESS_CHECK_ENABLED`/`MCP_*`, is surfaced there). Adds `MODEL_ROLE_LEARNING_ENABLED: "${MODEL_ROLE_LEARNING_ENABLED:-false}"` and `MODEL_ROLE_LEARNING_CANDIDATES: '${MODEL_ROLE_LEARNING_CANDIDATES:-{}}'` beside the scheduler flags (single-quoted so the per-role candidate JSON from `.env` survives YAML; `{}` default ⇒ inert until candidates are named). Code default stays OFF; only `.env` turns it on.
+
+**Live enablement + first cycle (operator host, `.env` is local/uncommitted).** Enabled with candidates `model_verifier→qwen3.5:397b-cloud`, `model_research_extract→glm-5.2:cloud`; the weekly scheduled job registered (`model_role_learning_registered interval_s=604800 roles=3`). One manual cycle staged **1 proposal** — `model_research_extract` glm-5.1→**glm-5.2** (equal pass rate 1.0/1.0, **1.9× faster**) — accepted via the confirm-card path (persisted `model_overrides` row, replays on restart). Notable: the `model_coder` candidate `qwen3-coder-next:cloud` was **retired (HTTP 410 Gone)** — `/api/tags` listed it stale (the §17.632 "check liveness on *generate*") — and the harness's 0-errors gate correctly disqualified it (fail-soft, no bad proposal), confirming the guard on live data. `docker compose config` dry-run verified the JSON-in-YAML interpolation before the recreate.
+
+---
+
 ### §17.803 Role→model learning — periodic golden re-A/B stages swap proposals as confirm cards (nothing auto-swaps) (2026-08-15)
 
 **What.** A closed governance loop over the model-role assignments. On an interval (scheduler, **default OFF**), a new job re-runs the objective per-role golden A/B (`scripts/model_ab.run_model_ab_task` — the SAME deterministic scoring the runtime uses) for each switchable role that has a golden task, and when a candidate model beats the incumbent **clean** (≥ pass rate, zero errors, strictly faster) it **stages** an `open` proposal in a new `model_role_proposals` table. The operator reviews it as a §17.629 confirm card in chat (`/model proposals` → `/model apply <role>` → reply *go*) and only then is the swap applied — through the existing durable override path (`model_overrides.set_override`). **Nothing auto-swaps**; a proposal is a suggestion until an explicit human confirm.

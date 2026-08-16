@@ -331,6 +331,14 @@ services:
       MCP_SERVERS_CONFIG: "${MCP_SERVERS_CONFIG:-[]}"
       SCHEDULER_ENABLED: "true"
       SCHEDULER_TIMEZONE: "UTC"
+      # §17.803 — role→model learning: a periodic golden re-A/B that stages
+      # swap proposals (model_role_proposals) for review as confirm cards.
+      # Code default OFF (governance job, costs LLM calls); enable + set the
+      # per-role candidate model tags from .env. Empty candidates (the default)
+      # ⇒ the cycle skips every role, so enabling alone is inert until the
+      # operator names candidates. Nothing auto-swaps.
+      MODEL_ROLE_LEARNING_ENABLED: "${MODEL_ROLE_LEARNING_ENABLED:-false}"
+      MODEL_ROLE_LEARNING_CANDIDATES: '${MODEL_ROLE_LEARNING_CANDIDATES:-{}}'
       # §17.702 — learning flywheel: ingest a completed project's deliverable as
       # a retrievable RAG exemplar so future related builds get it as a few-shot.
       # Default-on here; EXEMPLAR_MIN_GROUNDING (0.85) still gates quality, and
