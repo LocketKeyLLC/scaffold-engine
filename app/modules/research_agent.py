@@ -1026,6 +1026,82 @@ def _attach_sources_block(summary: str, state: "ResearchState") -> str:
     return f"{summary}\n\n**Sources** ({len(srcs)}):\n{lines}{more}"
 
 
+# §17.799 — cite-aware summary. When citation_faithfulness_check_enabled is on,
+# the summary is generated over NUMBERED sources with a prompt that asks for
+# inline [n] markers, then scored per-citation (does source [n] actually support
+# the sentence it's attached to?). Default path (flag off) is byte-unchanged.
+# Bounded so the numbered body fits the summary prompt budget and the model can
+# realistically cite each source.
+_CITE_SUMMARY_MAX_SOURCES = 10
+_CITE_SUMMARY_SRC_CHARS = 500
+_CITE_SUMMARY_SYSTEM = (
+    "You are a research summarizer. Write a concise, well-structured summary of "
+    "the NUMBERED sources provided. After each sentence, cite the source "
+    "number(s) that support it in square brackets, e.g. 'Vectors are normalized "
+    "[2].' Cite ONLY sources that actually support the sentence — never invent a "
+    "citation or cite a number not in the list. Base every statement on the "
+    "sources; do not add outside knowledge."
+)
+
+
+def _build_numbered_summary_sources(state: "ResearchState") -> list[dict]:
+    """Ordered, confidence-ranked, deduped-by-URL sources WITH content, for
+    cite-aware summary generation + scoring. The list index defines the ``[n]``
+    numbering (source ``[1]`` == ``result[0]``); ``text`` is the citeable content.
+    """
+    by_url: dict[str, dict] = {}
+    for e in state.all_entries:
+        url = (e.get("source") or "").strip()
+        content = (e.get("content") or "").strip()
+        if not url or not content:
+            continue
+        conf = e.get("confidence_score")
+        conf = float(conf) if isinstance(conf, (int, float)) else 0.0
+        existing = by_url.get(url)
+        if existing is None or conf > existing["confidence_score"]:
+            by_url[url] = {
+                "url": url,
+                "source_type": e.get("source_type") or "unknown",
+                "confidence_score": round(conf, 2),
+                "text": content[:_CITE_SUMMARY_SRC_CHARS],
+            }
+    ranked = sorted(by_url.values(), key=lambda s: s["confidence_score"], reverse=True)
+    return ranked[:_CITE_SUMMARY_MAX_SOURCES]
+
+
+def _build_cite_summary_prompt_body(sources: list[dict]) -> str:
+    """Render numbered sources as ``[1] <text>`` blocks under the char budget."""
+    out: list[str] = []
+    used = 0
+    for i, s in enumerate(sources, start=1):
+        line = f"[{i}] {s['text']}"
+        if used + len(line) + 2 > _SUMMARY_PROMPT_BUDGET_CHARS:
+            break
+        out.append(line)
+        used += len(line) + 2
+    return "\n\n".join(out)
+
+
+async def _maybe_score_citation_faithfulness(
+    summary_text: str, sources: list[dict], overrides: dict | None,
+) -> dict | None:
+    """§17.799 — gate + run the per-citation attribution check on the cite-aware
+    summary. Default-off, fail-soft (→ None on disable/no-sources/error)."""
+    if not settings.citation_faithfulness_check_enabled or not sources:
+        return None
+    try:
+        from app.modules.citation_faithfulness import score_citation_faithfulness
+        return await score_citation_faithfulness(
+            summary_text,
+            [s.get("text", "") for s in sources],  # 1-indexed to match the [n] prompt
+            role=settings.citation_faithfulness_model_role,
+            overrides=overrides,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("citation_faithfulness_wire_error: %s", exc)
+        return None
+
+
 async def _maybe_score_faithfulness(
     summary_text: str, state: "ResearchState", overrides: dict | None,
 ) -> dict | None:
@@ -1084,6 +1160,14 @@ def _finalize_summary_text(summary_text: str, state: "ResearchState") -> str:
         out += (
             f"\n\n_Faithfulness: {f['score']:.2f} — "
             f"{f['supported']}/{f['total']} summary claims grounded in the collected sources._"
+        )
+    cf = getattr(state, "citation_faithfulness", None)
+    if cf:
+        out += (
+            f"\n\n_Citation faithfulness: {cf['score']:.2f} — "
+            f"{cf['supported']}/{cf['total']} inline citations supported by their cited source"
+            + (f" ({cf['dangling']} dangling)" if cf.get("dangling") else "")
+            + "._"
         )
     return out
 
@@ -1213,11 +1297,29 @@ async def _generate_summary(
     both produce a partial summary; the LLM call path always reaches
     finalize_session within bounded wall time).
     """
-    prompt = (
-        f"Summarize the research collected on: {state.topic}\n\n"
-        f"Total entries: {len(state.all_entries)}\n\n"
-        + _build_summary_prompt_body(state)
+    # §17.799 — cite-aware mode: generate over NUMBERED sources with a prompt that
+    # asks for inline [n] markers, so the per-citation check below has citations to
+    # score. Falls back to the normal un-attributed summary if there are no usable
+    # numbered sources. Flag off → default path, byte-unchanged.
+    cite_sources: list[dict] = (
+        _build_numbered_summary_sources(state)
+        if settings.citation_faithfulness_check_enabled else []
     )
+    cite_mode = bool(cite_sources)
+    if cite_mode:
+        system = _CITE_SUMMARY_SYSTEM
+        prompt = (
+            f"Summarize the research collected on: {state.topic}\n\n"
+            f"Numbered sources ({len(cite_sources)}):\n\n"
+            + _build_cite_summary_prompt_body(cite_sources)
+        )
+    else:
+        system = SUMMARY_SYSTEM_V1
+        prompt = (
+            f"Summarize the research collected on: {state.topic}\n\n"
+            f"Total entries: {len(state.all_entries)}\n\n"
+            + _build_summary_prompt_body(state)
+        )
 
     def _fallback() -> str:
         return _attach_sources_block(
@@ -1235,7 +1337,7 @@ async def _generate_summary(
         try:
             resp = await asyncio.wait_for(
                 model_router.generate(
-                    prompt, role=role, overrides=overrides, system=SUMMARY_SYSTEM_V1,
+                    prompt, role=role, overrides=overrides, system=system,
                     temperature=0.3, max_tokens=_SUMMARY_MAX_TOKENS,
                 ),
                 timeout=_SUMMARY_PROMPT_TIMEOUT_S,
@@ -1268,6 +1370,13 @@ async def _generate_summary(
     state.faithfulness = await _maybe_score_faithfulness(
         summary_text, state, overrides,
     )
+    # §17.799 — per-citation ATTRIBUTION score of the cite-aware summary against
+    # the SPECIFIC source each [n] cites (default-off; None in the normal path
+    # since it carries no citations). Scored on the delivered (post-CoVe) text.
+    if cite_mode:
+        state.citation_faithfulness = await _maybe_score_citation_faithfulness(
+            summary_text, cite_sources, overrides,
+        )
     finalized = _finalize_summary_text(summary_text, state)
     # §17.662 — branch out into user-tailored options when the topic is
     # decision-shaped (only-when-applicable → None for factual topics). Appended
@@ -1316,6 +1425,9 @@ def _build_research_complete_payload(
         "faithfulness": getattr(state, "faithfulness", None),
         # §17.452 (CoVe) — whether the summary was revised by Chain-of-Verification.
         "cove": getattr(state, "cove", None),
+        # §17.799 — per-citation attribution score (None unless the cite-aware
+        # summary path ran). Structured for programmatic readers.
+        "citation_faithfulness": getattr(state, "citation_faithfulness", None),
         # §17.662 — user-tailored decision options (None when the topic isn't
         # decision-shaped). Structured for programmatic readers; also rendered
         # into the summary text as a "🔀 Your options" block.

@@ -73,6 +73,12 @@ class ResearchState:
     # §17.452 (Phase C) — CoVe revision metadata ({changed, questions}) stamped
     # by _generate_summary when the check is enabled. None = not run.
     cove: dict | None = None
+    # §17.799 — per-citation ATTRIBUTION score of the (cite-aware) summary vs the
+    # SPECIFIC source each inline [n] marker cites (app.modules.citation_faithfulness).
+    # Stamped by _generate_summary when citation_faithfulness_check_enabled. Shape:
+    # {score, supported, total, cited, dangling, unsupported_citations}. None = not
+    # scored. Surfaced on the research_complete payload + summary block.
+    citation_faithfulness: dict | None = None
     # §17.662 — user-tailored decision options ("branches") surfaced from the
     # research, stamped by _generate_summary when the topic is decision-shaped.
     # None = not run / not applicable (a straightforward factual topic gets NO
