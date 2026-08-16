@@ -323,6 +323,13 @@ services:
       # both are overridable from .env.
       EXEMPLAR_INGEST_ENABLED: "${EXEMPLAR_INGEST_ENABLED:-true}"
       EXEMPLAR_MIN_GROUNDING: "${EXEMPLAR_MIN_GROUNDING:-0.85}"
+      # §17.799 — citation-faithfulness: generate the research summary with
+      # inline [n] citations over numbered sources, then score whether each
+      # citation's cited source actually supports the sentence. Code default
+      # False (tests + fresh installs exercise the un-attributed summary);
+      # enabled at runtime here. Adds one LLM judge call per research summary.
+      # Overridable from .env.
+      CITATION_FAITHFULNESS_CHECK_ENABLED: "${CITATION_FAITHFULNESS_CHECK_ENABLED:-true}"
       # §17.710d — unified session memory. Enabled at RUNTIME here (code defaults
       # stay False so tests + fresh installs exercise the legacy path). Master +
       # capture (Stage A) + inject (Stage B) on; grounding (Stage C) stays
