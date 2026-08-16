@@ -182,6 +182,57 @@ async def _score_verifier(golden: dict, resp: Any) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# routing task (§17.805) — route_command intent classification, verdict-match.
+# Scores model_router / model_general (and the fallback capability proxy). Same
+# tool + system prompt the LIVE top-level router uses (command_guide), so the
+# A/B reflects real classification behavior.
+# ---------------------------------------------------------------------------
+
+def score_routing(args: dict | None, expected: str) -> dict:
+    """Pure scoring: a parsed route_command tool-args dict + the golden's
+    known-correct intent → ``passed`` iff the model's intent matches. A model
+    that emits no parseable tool call (native miss / coax-fail) scores
+    ``passed=False`` with verdict ``none`` — exactly how command_guide.
+    classify_command fail-softs to ``intent='none'``. Import-light for tests."""
+    if not args or not args.get("intent"):
+        return {"passed": False, "verdict": "none", "expected": expected,
+                "metric": "intent_match", "metric_value": "none"}
+    intent = args["intent"]
+    return {"passed": intent == expected, "verdict": intent,
+            "expected": expected, "metric": "intent_match",
+            "metric_value": intent}
+
+
+async def _dispatch_routing(model: str, golden: dict, *, temperature: float,
+                            max_tokens: int) -> Any:
+    # Mirror command_guide.classify_command: same _ROUTE_SYSTEM + _ROUTE_TOOL,
+    # same "Operator's message:\n…\n\nCall route_command." user shape, temp 0.0
+    # (the prod router is deterministic). The harness temperature arg is ignored
+    # on purpose so the A/B reflects the real routing call.
+    from app import model_router
+    from app.modules.command_guide import _ROUTE_SYSTEM, _ROUTE_TOOL
+    user = (
+        "Operator's message:\n"
+        f"{golden['message'][:2000]}\n\n"
+        "Call route_command."
+    )
+    return await model_router.tool_call(
+        messages=[
+            {"role": "system", "content": _ROUTE_SYSTEM},
+            {"role": "user", "content": user},
+        ],
+        tools=[_ROUTE_TOOL],
+        model=model, temperature=0.0, max_tokens=max_tokens,
+        tool_choice="auto",
+    )
+
+
+async def _score_routing(golden: dict, resp: Any) -> dict:
+    from app.utils.tool_call_args import read_tool_args
+    return score_routing(read_tool_args(resp), golden["expected_intent"])
+
+
+# ---------------------------------------------------------------------------
 # task registry
 # ---------------------------------------------------------------------------
 
@@ -200,6 +251,8 @@ TASKS: dict[str, Task] = {
                        _dispatch_extraction, _score_extraction),
     "verifier": Task("verifier", _FIXTURES / "verifier_goldens.json",
                      _dispatch_verifier, _score_verifier),
+    "routing": Task("routing", _FIXTURES / "routing_goldens.json",
+                    _dispatch_routing, _score_routing),
 }
 
 

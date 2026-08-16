@@ -1,0 +1,65 @@
+{
+  "_comment": "§17.805 — intent-match goldens for the model_ab.py 'routing' task. Each golden is an operator message with an unambiguous known-correct intent from command_guide.COMMAND_INTENTS, scored exactly like the live top-level router (command_guide.classify_command → route_command tool-call). Two 'none' cases pin the 'default to none' discipline: an off-topic message and a multi-step BUILD deliverable (which belongs to the planner, not a single command). A good model_router / model_general candidate matches expected_intent on all of them. See scripts/model_ab.py _dispatch_routing / score_routing.",
+  "goldens": [
+    {
+      "id": "status-active-jobs",
+      "message": "show me my active jobs",
+      "expected_intent": "status"
+    },
+    {
+      "id": "jobs-find-milvus",
+      "message": "search my jobs for the one about milvus",
+      "expected_intent": "jobs_find"
+    },
+    {
+      "id": "rag-query-zfs",
+      "message": "what does the knowledge base say about zfs tuning",
+      "expected_intent": "rag_query"
+    },
+    {
+      "id": "research-topic-k8s",
+      "message": "research kubernetes operators in depth",
+      "expected_intent": "research_topic"
+    },
+    {
+      "id": "schedule-add-ai-news",
+      "message": "schedule a daily research run on AI safety news",
+      "expected_intent": "schedule_add"
+    },
+    {
+      "id": "model-set-coder",
+      "message": "set the coder model to kimi-k2.7-code:cloud",
+      "expected_intent": "model_set"
+    },
+    {
+      "id": "jobs-delete-id",
+      "message": "delete the job with id 7f3a",
+      "expected_intent": "jobs_delete"
+    },
+    {
+      "id": "logs-last-job",
+      "message": "show the execution logs for my last job",
+      "expected_intent": "logs"
+    },
+    {
+      "id": "cost-tokens",
+      "message": "how much did that job cost in tokens",
+      "expected_intent": "cost"
+    },
+    {
+      "id": "cancel-running",
+      "message": "cancel the currently running job",
+      "expected_intent": "cancel_job"
+    },
+    {
+      "id": "none-weather",
+      "message": "what's the weather in Tokyo right now",
+      "expected_intent": "none"
+    },
+    {
+      "id": "none-build-deliverable",
+      "message": "build me a complete web app with user authentication and a postgres database",
+      "expected_intent": "none"
+    }
+  ]
+}

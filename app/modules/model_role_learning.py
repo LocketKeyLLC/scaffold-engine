@@ -37,12 +37,26 @@ from app.modules.model_overrides import set_override
 
 logger = logging.getLogger("scaffold.model_role_learning")
 
-# Which switchable role each model_ab golden task scores. These are the only
-# roles with an objective quality signal today (scripts/model_ab.TASKS).
+# Which model_ab golden task scores each switchable role (§17.805 — all 8 now
+# covered). Three roles have a clean, role-specific objective signal
+# (codegen/verifier/extraction). The `routing` task (route_command intent-match)
+# scores the two classification-shaped roles (router, general — general's real
+# STRUCTURED job is classification; this does NOT measure its open-ended
+# synthesis quality, which needs an LLM judge). The remaining three are
+# substitute/availability roles with no distinct skill, so they map to a
+# capability PROXY task — their proposals are lower-signal and the human confirm
+# card remains the gate. model_fallback is a LOCAL resilience role: A/B it only
+# against LOCAL candidates (a :cloud winner would break offline fallback — the
+# cycle warns, see run_learning_cycle).
 ROLE_TASKS: dict[str, str] = {
     "model_coder": "codegen",
     "model_verifier": "verifier",
     "model_research_extract": "extraction",
+    "model_router": "routing",           # real job: route_command classification
+    "model_general": "routing",          # real structured job: assist_classify/decide
+    "model_cloud_heavy": "codegen",      # proxy: escalation = hard-node capability
+    "model_cloud_alt": "codegen",        # proxy: alternate heavy-cloud capability
+    "model_fallback": "routing",         # proxy: light capability; LOCAL candidates only
 }
 
 
@@ -187,6 +201,18 @@ async def run_learning_cycle(db) -> dict:
         if role not in SWITCHABLE_ROLE_FIELDS:      # defensive; ROLE_TASKS is curated
             continue
         extras = [c.strip() for c in (candidates_cfg.get(role) or []) if c and c.strip()]
+        # §17.805 — model_fallback is a LOCAL offline-resilience role; a cloud
+        # winner would defeat its purpose. Warn (don't block — the confirm card
+        # is the gate and the operator may have a reason), so a resilience-
+        # breaking swap can never slip in silently.
+        if role == "model_fallback":
+            cloud = [c for c in extras if ":cloud" in c]
+            if cloud:
+                logger.warning(
+                    'event="model_role_learning_fallback_cloud_candidate" '
+                    'role=model_fallback candidates=%s '
+                    'note="a cloud winner breaks offline resilience"', cloud,
+                )
         incumbent = get_model(role)
         models = [incumbent] + [c for c in extras if c != incumbent]
         if len(models) < 2:

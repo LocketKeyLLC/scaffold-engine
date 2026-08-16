@@ -7,6 +7,7 @@ golden scoring itself is covered by ``test_model_ab.py``.
 """
 from __future__ import annotations
 
+import logging
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -224,6 +225,37 @@ async def test_accept_missing_returns_none(monkeypatch):
     with patch.object(mrl, "set_override", AsyncMock()) as mock_set:
         assert await mrl.accept_proposal(999, db) is None
     mock_set.assert_not_awaited()
+
+
+@pytest.mark.smoke
+def test_role_tasks_cover_all_switchable():
+    # §17.805 — every switchable role now maps to a real model_ab task.
+    from app.config import SWITCHABLE_ROLE_FIELDS
+    from scripts.model_ab import TASKS
+    assert set(mrl.ROLE_TASKS) == set(SWITCHABLE_ROLE_FIELDS)
+    assert all(t in TASKS for t in mrl.ROLE_TASKS.values())
+
+
+@pytest.mark.smoke
+async def test_fallback_cloud_candidate_warns(monkeypatch, caplog):
+    # §17.805 — a :cloud candidate for the LOCAL fallback role must WARN (but not
+    # block; the confirm card is the gate). Incumbent holds here → nothing staged.
+    monkeypatch.setattr(mrl.settings, "model_role_learning_candidates",
+                        {"model_fallback": ["glm-5.2:cloud"]})
+    monkeypatch.setattr(mrl.settings, "model_role_learning_repeat", 1)
+    monkeypatch.setattr(mrl.settings, "scheduler_job_timeout", 60)
+    monkeypatch.setattr(mrl, "get_model", lambda role: "qwen3.5:latest")
+    # candidate slower → incumbent holds → no proposal (isolates the warn).
+    summary = _summary(**{"qwen3.5:latest": (2, 2, 0, 4.0), "glm-5.2:cloud": (2, 2, 0, 9.0)})
+    fake_ab = SimpleNamespace(run_model_ab_task=AsyncMock(return_value={"summary": summary}))
+    fake_http = SimpleNamespace(init_clients=MagicMock())
+    db = AsyncMock()
+    with patch.dict(sys.modules, {"scripts.model_ab": fake_ab,
+                                  "app.utils.http_clients": fake_http}), \
+            caplog.at_level(logging.WARNING, logger="scaffold.model_role_learning"):
+        out = await mrl.run_learning_cycle(db)
+    assert any("fallback_cloud_candidate" in r.getMessage() for r in caplog.records)
+    assert out["staged"] == []
 
 
 @pytest.mark.smoke
