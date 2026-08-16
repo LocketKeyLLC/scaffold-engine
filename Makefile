@@ -15,7 +15,7 @@ API_KEY   ?= $(SCAFFOLD_API_KEY)
 COVERAGE_MIN ?= 77
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
+.PHONY: _ensure_dev test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -38,8 +38,13 @@ _ensure_dev:
 		until docker ps --filter name=^$(CONTAINER)$$ --format '{{.Status}}' | grep -qE 'healthy|Up'; do sleep 2; done; \
 	fi
 
-test: _ensure_dev ## Run all tests in dev image (~1340 passing, ~8 skipped post-§17.63)
-	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v
+test: _ensure_dev ## Core suite in dev image, MINUS the pipeline lane (those need --noconftest — see test-pipelines). Run test-all for both.
+	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v --ignore-glob='*/test_scaffold_router_*'
+
+test-pipelines: _ensure_dev ## §17.807 — OWUI pipeline tests (test_scaffold_router_*) with --noconftest (tests/conftest.py eager-loads app, shadowing the pipeline mocks)
+	docker exec $(CONTAINER) sh -c 'cd /code && pytest tests/test_scaffold_router_*.py --noconftest --timeout=30 -v'
+
+test-all: test test-pipelines ## §17.807 — run BOTH lanes: core suite + pipeline --noconftest lane (the full picture)
 
 coverage: _ensure_dev ## §17.553/554 — app/ unit coverage in dev image; gates at COVERAGE_MIN% (default 77). Excludes validate/integration, so I/O-heavy modules under-report.
 	# COVERAGE_FILE under /tmp: /code is root-owned in the dev image but tests
