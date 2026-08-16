@@ -82,6 +82,15 @@ _FAITHFULNESS_CONTEXT_K = 5
 _FAITHFULNESS_CONTEXT_CHARS = 6_000
 _FLOOR_MEAN_FAITHFULNESS = 0.60
 
+# §17.798 — citation (attribution) faithfulness. Stricter than RAGAS
+# faithfulness: generate a CITE-AWARE answer over the numbered retrieved
+# sources, then judge whether each inline [n] cites a source that actually
+# supports the sentence (ALCE citation precision). Same fail-soft posture as
+# the faithfulness gate — asserted only over queries that scored; skipped
+# entirely if the judge (or the cite-aware generation) yields nothing.
+_CITATION_SUBSET = 3
+_FLOOR_MEAN_CITATION_FAITHFULNESS = 0.55
+
 _ANSWER_SYSTEM = (
     "You are a precise technical assistant. Answer the question using ONLY the "
     "provided context. Be concise (2-4 sentences). If the context does not "
@@ -209,4 +218,86 @@ async def test_faithfulness_gate():
     print(f"  MEAN faithfulness={m_faith:.3f} over n={len(scores)}\n")
     assert m_faith >= _FLOOR_MEAN_FAITHFULNESS, (
         f"mean faithfulness {m_faith:.3f} < floor {_FLOOR_MEAN_FAITHFULNESS}{report}"
+    )
+
+
+def _build_numbered_sources(rows: list[dict], k: int = _FAITHFULNESS_CONTEXT_K) -> list[str]:
+    """Top-k retrieved contents as a 1-indexed source list (source [n] = [n-1])."""
+    out = []
+    for r in rows[:k]:
+        content = (r.get("content") or "").strip()
+        if content:
+            title = (r.get("title") or "").strip()
+            out.append(f"{title}\n{content}" if title else content)
+    return out
+
+
+async def _citation_faithfulness_for(query: str, rows: list[dict]) -> float | None:
+    """§17.798 — cite-aware generation over numbered sources → per-citation
+    attribution score. Fail-soft (None at any empty/miss step)."""
+    from app.modules.citation_faithfulness import (
+        CITE_ANSWER_SYSTEM,
+        score_citation_faithfulness,
+    )
+
+    sources = _build_numbered_sources(rows)
+    if not sources:
+        return None
+    numbered = "\n\n".join(f"[{i}] {s}" for i, s in enumerate(sources, start=1))
+    resp = await model_router.generate(
+        prompt=f"Question: {query}\n\nSOURCES:\n{numbered}",
+        role="model_general",
+        system=CITE_ANSWER_SYSTEM,
+        temperature=0.0,
+        max_tokens=512,
+    )
+    answer = (getattr(resp, "text", "") or "").strip()
+    if not answer:
+        return None
+    scored = await score_citation_faithfulness(answer, sources)
+    return scored["score"] if scored else None
+
+
+@pytest.mark.timeout(900)
+async def test_citation_faithfulness_gate():
+    """§17.798 — per-citation ATTRIBUTION faithfulness of a cite-aware answer.
+
+    Stricter than test_faithfulness_gate: instead of "is the answer grounded in
+    the context blob?", it asks "does each inline [n] cite a source that actually
+    supports that sentence?" Adds one cite-aware generate + one judge call per
+    query, on a small subset. Fail-soft: floor asserted only over queries that
+    scored; if the cite-aware generation produces no citations or the judge
+    misses on all of them, the sub-check skips rather than red-flagging a healthy
+    pipeline. Local/dev only (needs Milvus + live models).
+    """
+    skip_if_milvus_empty()
+
+    scores: list[float] = []
+    rows: list[str] = []
+    for query, domain, _substrs in EVAL_GOLDENS[:_CITATION_SUBSET]:
+        result = await query_rag(query, domain=domain, top_k=_TOP_K)
+        score = await _citation_faithfulness_for(query, result["results"])
+        rows.append(
+            f"  {domain:10s} citation_faithfulness="
+            f"{score if score is None else f'{score:.3f}'}  {query[:44]!r}"
+        )
+        if score is not None:
+            scores.append(score)
+
+    report = (
+        f"\n§17.798 citation-faithfulness gate (subset={_CITATION_SUBSET}):\n"
+        + "\n".join(rows) + "\n"
+    )
+    print(report)
+
+    if not scores:
+        pytest.skip(
+            "citation judge / cite-aware generation scored no queries — "
+            "retrieval gate unaffected"
+        )
+    m_cite = mean(scores)
+    print(f"  MEAN citation_faithfulness={m_cite:.3f} over n={len(scores)}\n")
+    assert m_cite >= _FLOOR_MEAN_CITATION_FAITHFULNESS, (
+        f"mean citation_faithfulness {m_cite:.3f} < floor "
+        f"{_FLOOR_MEAN_CITATION_FAITHFULNESS}{report}"
     )
