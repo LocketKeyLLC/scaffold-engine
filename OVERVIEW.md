@@ -22059,6 +22059,27 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.806 Role→model learning — live rollout, full cloud-catalog vetting, first governance cycle + human decisions (2026-08-16)
+
+The operational companion to §17.803–805 (which shipped the code). This entry records the live deployment, the model vetting behind it, and the human accept/dismiss/hold decisions — i.e. the *state the engine is actually running in* now, not just the mechanism.
+
+**Enablement.** Turned on via `.env` (`MODEL_ROLE_LEARNING_ENABLED=true` + `MODEL_ROLE_LEARNING_CANDIDATES`) using the §17.804 compose knobs; recreated the orchestrator (dev override) → the weekly scheduler job registered (`model_role_learning_registered interval_s=604800`).
+
+**Full cloud-catalog vet.** Probed **all 12** registry cloud models on `/generate` (the `/api/tags` list is stale — it still shows retired models): **10 LIVE, 2 RETIRED** (`qwen3-coder-next` 410 @2026-07-15, `qwen3-vl:235b-instruct` 410 @2026-06-16 — see [[ollama-cloud-model-deprecation]]). Capability-tested all 10 live via `model_ab` across codegen/verifier/extraction/routing. **Key finding: extraction (DISTILL tool-call) is the hard differentiator** — only `minimax-m3`, `nemotron-3-super`, and the glm-5.x family pass; `kimi-k2.6` + both `gpt-oss` score **0/2**. `glm-5.2` is the fastest strong model on routing (12/12 @1.7s) and codegen (24/24 @2.5s); `minimax-m3` is perfect on all 4; `gpt-oss:120b` is fast+strong except extraction. **`model_fallback` is NOT practically learnable on this CPU-only host** — local tool-calling (`qwen2.5:7b`) times out >120s per routing call — so it's left unconfigured on the local `qwen3.5:latest` safety net.
+
+**Candidates configured** (fastest-strong single per role, `.env`, operator-local): `coder→glm-5.2`, `verifier→qwen3.5:397b`, `research_extract→minimax-m3`, `router/general/cloud_heavy/cloud_alt→glm-5.2`.
+
+**First full cycle** (`repeat=3`, ~30 min, 7 roles, overrides-loaded so incumbents are correct): staged **5 proposals**, all → `glm-5.2` at equal-or-better quality — router (3.15×), cloud_heavy (rate 0.92→1.00, ~12× — a slow qwen3.5 draw), cloud_alt (7.67×), coder (1.15×), general (1.01×). **`verifier` and `research_extract` held** (incumbents kimi / glm-5.2 beat their challengers) — evidence the `select_winner` gate isn't rubber-stamping.
+
+**Human decisions (the confirm-card gate — nothing auto-swapped):**
+- **ACCEPTED** `router`, `cloud_heavy`, `cloud_alt` → glm-5.2 (equal quality, large speedups; low risk — cloud_heavy escalation is default-off) + the earlier `research_extract` → glm-5.2.
+- **DISMISSED** `general` → glm-5.2 — the win was only 1% *routing* speed, but general's real value is **synthesis** (ideation/compile), which the `routing` proxy task cannot measure; §17.632 chose `deepseek-v4-pro` for exactly that.
+- **HELD** `coder` → glm-5.2 (open) — coder is faithfulness-sensitive (§17.575 `main()`-omission risk) and the codegen goldens are small; a 15% speed win doesn't justify swapping the proven `kimi`.
+
+**Resulting live overrides** (`model_overrides` table — the source of truth): `router`/`cloud_heavy`/`cloud_alt`/`research_extract` → **glm-5.2:cloud**. Untouched (env default): `coder`=kimi-k2.7-code, `verifier`=kimi-k2.7-code, `general`=deepseek-v4-pro, `fallback`=qwen3.5:latest (local). **Restart-survival verified** — a plain `docker restart` re-applied all 4 via the lifespan `load_overrides_into_settings` hook (`model_overrides_applied_at_startup: count=4`), and the roles resolve to glm-5.2 in the server process; untouched roles keep env defaults. (Caveat re-confirmed: a standalone `docker exec` never runs the lifespan hook, so it shows env defaults regardless of what's persisted — always check via the server, not an ad-hoc exec.)
+
+---
+
 ### §17.805 Golden tasks for the remaining 5 switchable roles — all 8 now learnable (2026-08-16)
 
 Extends §17.803 coverage. The learning job can only A/B a role that has an objective golden task in `scripts/model_ab.py`; that was 3 of 8 switchable roles (`coder`→codegen, `verifier`→verifier, `research_extract`→extraction). The other five — `router`, `general`, `cloud_heavy`, `cloud_alt`, `fallback` — were skipped. Reality shaped the design: only two roles have a *clean* objective signal (classification), and three are substitute/availability roles, so this adds **one genuinely new task** and maps the substitutes to **capability proxies** with loud caveats — rather than fabricating five equal goldens.
