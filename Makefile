@@ -15,7 +15,7 @@ API_KEY   ?= $(SCAFFOLD_API_KEY)
 COVERAGE_MIN ?= 77
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit
+.PHONY: _ensure_dev test test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -193,8 +193,18 @@ doctor: ## Health audit: probe every dep + verify key sync + cold-backup mount g
 doctor-explain: ## Same as doctor, but with a one-liner per check explaining what it verifies
 	@bash scripts/doctor.sh --explain
 
-init: ## Provider/model wizard: pick per-role provider + collect API keys, update .env
+init: ## Provider/model wizard: user-mode + compute profile + per-role provider + keys, update .env
 	@bash scripts/init.sh
+
+key-add: ## §17.807 Mint a scoped API key (multi-user). Usage: make key-add LABEL="alice laptop" [OWNER=alice]
+	@if [ -z "$(LABEL)" ]; then echo 'usage: make key-add LABEL="..." [OWNER=...]'; exit 2; fi
+	@docker exec $(CONTAINER) python scripts/keyctl.py add --label "$(LABEL)" $(if $(OWNER),--owner "$(OWNER)")
+
+key-list: ## §17.807 List scoped API keys. Usage: make key-list [ALL=1]
+	@docker exec $(CONTAINER) python scripts/keyctl.py list $(if $(ALL),--all)
+
+key-revoke: ## §17.807 Revoke a scoped API key. Usage: make key-revoke ID=3  (or LABEL="alice laptop")
+	@docker exec $(CONTAINER) python scripts/keyctl.py revoke $(if $(ID),--id $(ID)) $(if $(LABEL),--label "$(LABEL)")
 
 hooks-install: ## §17.393 — Activate repo git hooks (sets core.hooksPath=.githooks). Run once per clone. Pre-push then runs `make ci-tier-0`.
 	@git config core.hooksPath .githooks

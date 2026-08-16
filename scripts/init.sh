@@ -61,6 +61,80 @@ else
     warn "Ollama not detected. You can still configure roles for openai-only use."
 fi
 
+# ---- access model: single- vs multi-user (§17.807) ------------------
+# Single-user (default): the master SCAFFOLD_API_KEY is the only credential.
+# Multi-user: sets MULTI_USER_ENABLED=true — on next restart migration 066
+# creates the api_keys table and auth ALSO accepts named scoped keys minted
+# with `make key-add`. The master key stays valid as the admin key either way,
+# so choosing multi-user never locks you out.
+hdr "Access model"
+EXISTING_MULTI="$(grep -E '^MULTI_USER_ENABLED=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"' || true)"
+DEFAULT_MULTI="${EXISTING_MULTI:-false}"
+say "  ${C_INFO}single${C_RST} — one shared master API key (default)"
+say "  ${C_INFO}multi${C_RST}  — master key + revocable named keys (make key-add / key-list / key-revoke)"
+if [[ "$DEFAULT_MULTI" == "true" ]]; then
+    printf '  Access model [multi]: '
+else
+    printf '  Access model [single]: '
+fi
+read -r ACCESS_CHOICE
+if [[ -z "$ACCESS_CHOICE" ]]; then
+    MULTI_USER="$DEFAULT_MULTI"
+else
+    case "$ACCESS_CHOICE" in
+        multi|multi-user|multiuser) MULTI_USER="true" ;;
+        single|single-user|singleuser) MULTI_USER="false" ;;
+        *) warn "Unknown choice '$ACCESS_CHOICE' — keeping '${DEFAULT_MULTI}'"; MULTI_USER="$DEFAULT_MULTI" ;;
+    esac
+fi
+if [[ "$MULTI_USER" == "true" ]]; then
+    ok "Multi-user enabled — mint keys with 'make key-add LABEL=\"...\"' after restart."
+else
+    ok "Single-user (master key only)."
+fi
+
+# ---- compute profile: CPU-local vs GPU/cloud vLLM (§17.807) ----------
+# cpu-local (default): every role runs on local Ollama — the all-local stack.
+# gpu-cloud: route the 7 generation/reasoning roles through an OpenAI-compatible
+# endpoint (a vLLM preset via OPENAI_BASE_URL — also LocalAI / api.openai.com).
+# The embedder stays local Ollama (nomic-embed-text, 512d locked to Milvus) and
+# the reranker is always the local CrossEncoder — so no embedding-dim risk.
+hdr "Compute profile"
+say "  ${C_INFO}cpu-local${C_RST} — all roles on local Ollama (default)"
+say "  ${C_INFO}gpu-cloud${C_RST} — generation roles → vLLM / OpenAI-compatible endpoint; embedder stays local"
+printf '  Compute profile [cpu-local]: '
+read -r COMPUTE_CHOICE
+COMPUTE_CHOICE="${COMPUTE_CHOICE:-cpu-local}"
+case "$COMPUTE_CHOICE" in
+    cpu-local|cpu|local) COMPUTE_PROFILE="cpu-local" ;;
+    gpu-cloud|gpu|cloud|vllm) COMPUTE_PROFILE="gpu-cloud" ;;
+    *) warn "Unknown profile '$COMPUTE_CHOICE' — keeping 'cpu-local'"; COMPUTE_PROFILE="cpu-local" ;;
+esac
+
+# Collect the vLLM / OpenAI-compatible endpoint up front for the gpu-cloud
+# preset so the per-role loop below can default the generation roles to openai.
+PRESET_OPENAI_CREDS=0
+OPENAI_KEY=""
+OPENAI_URL_OVERRIDE=""
+if [[ "$COMPUTE_PROFILE" == "gpu-cloud" ]]; then
+    ok "GPU/cloud — generation roles will default to 'openai' (vLLM preset)."
+    EXISTING_URL="$(grep -E '^OPENAI_BASE_URL=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"' || true)"
+    # vLLM's OpenAI server is commonly http://<host>:8000/v1 on the bridge gateway.
+    DEFAULT_URL="${EXISTING_URL:-http://172.18.0.1:8000/v1}"
+    printf '  vLLM / OpenAI base URL [%s]: ' "$DEFAULT_URL"
+    read -r OPENAI_URL_OVERRIDE
+    OPENAI_URL_OVERRIDE="${OPENAI_URL_OVERRIDE:-$DEFAULT_URL}"
+
+    EXISTING_KEY="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
+    # A self-hosted vLLM server usually ignores the key; a sentinel keeps the
+    # OpenAI client happy. api.openai.com needs a real sk-... here.
+    DEFAULT_KEY="${EXISTING_KEY:-EMPTY}"
+    printf '  API key [%s, press Enter to keep]: ' "${DEFAULT_KEY:0:8}"
+    read -r OPENAI_KEY
+    OPENAI_KEY="${OPENAI_KEY:-$DEFAULT_KEY}"
+    PRESET_OPENAI_CREDS=1
+fi
+
 # ---- per-role provider prompts --------------------------------------
 echo
 say "For each role, choose a provider: ${C_INFO}ollama${C_RST} (local) or ${C_INFO}openai${C_RST} (cloud or any OpenAI-compatible endpoint)."
@@ -90,17 +164,29 @@ ROLE_DESCS=(
 )
 ROLE_PROVIDERS=()
 
+if [[ "$COMPUTE_PROFILE" == "gpu-cloud" ]]; then
+    info "gpu-cloud preset: generation roles default to 'openai', embedder stays 'ollama'. Override any role below."
+    echo
+fi
+
 USES_OPENAI=0
 for i in "${!ROLE_NAMES[@]}"; do
     role="${ROLE_NAMES[$i]}"
     desc="${ROLE_DESCS[$i]}"
+    # Per-role default from the compute preset: gpu-cloud flips the 7
+    # generation roles to openai; the embedder is config-locked to local Ollama
+    # (512d → Milvus), so it always defaults to ollama.
+    role_default="ollama"
+    if [[ "$COMPUTE_PROFILE" == "gpu-cloud" && "$role" != "model_embedder_pipeline" ]]; then
+        role_default="openai"
+    fi
     printf '  %s%s%s — %s\n' "$C_INFO" "$role" "$C_RST" "$desc"
-    printf '  Provider [ollama]: '
+    printf '  Provider [%s]: ' "$role_default"
     read -r choice
-    choice="${choice:-ollama}"
+    choice="${choice:-$role_default}"
     case "$choice" in
         ollama|openai) ;;
-        *) warn "Unknown provider '$choice' — keeping 'ollama'"; choice="ollama" ;;
+        *) warn "Unknown provider '$choice' — keeping '${role_default}'"; choice="$role_default" ;;
     esac
     ROLE_PROVIDERS[$i]="$choice"
     [[ "$choice" == "openai" ]] && USES_OPENAI=1
@@ -108,10 +194,10 @@ for i in "${!ROLE_NAMES[@]}"; do
 done
 
 # ---- OpenAI key collection (only if any role chose openai) ----------
-OPENAI_KEY=""
-OPENAI_URL_OVERRIDE=""
-
-if [[ $USES_OPENAI -eq 1 ]]; then
+# The gpu-cloud preset already collected the endpoint + key above
+# (PRESET_OPENAI_CREDS=1); only prompt here when a role was manually flipped to
+# openai under the cpu-local profile and no creds were captured yet.
+if [[ $USES_OPENAI -eq 1 && $PRESET_OPENAI_CREDS -eq 0 ]]; then
     hdr "OpenAI"
     EXISTING_KEY="$(grep -E '^OPENAI_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2- || true)"
     if [[ -n "$EXISTING_KEY" ]]; then
@@ -141,7 +227,7 @@ fi
 hdr "Writing .env"
 
 # Collect every key we manage so we filter them in one pass.
-MANAGED_KEYS=("OPENAI_API_KEY" "OPENAI_BASE_URL")
+MANAGED_KEYS=("OPENAI_API_KEY" "OPENAI_BASE_URL" "MULTI_USER_ENABLED")
 for role in "${ROLE_NAMES[@]}"; do
     var="$(echo "${role}" | tr '[:lower:]' '[:upper:]')_PROVIDER"
     MANAGED_KEYS+=("$var")
@@ -155,6 +241,9 @@ TMP_ENV="${ENV_FILE}.tmp"
 grep -vE "$EXCLUDE_PATTERN" "$ENV_FILE" > "$TMP_ENV" || true
 
 {
+    echo ""
+    echo "# ---------- Access model (managed by scripts/init.sh) ----------"
+    echo "MULTI_USER_ENABLED=${MULTI_USER}"
     echo ""
     echo "# ---------- Per-role provider routing (managed by scripts/init.sh) ----------"
     for i in "${!ROLE_NAMES[@]}"; do
@@ -175,6 +264,7 @@ mv "$TMP_ENV" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
 # Echo what was written (mask the key)
+info "MULTI_USER_ENABLED=${MULTI_USER}"
 for i in "${!ROLE_NAMES[@]}"; do
     role="${ROLE_NAMES[$i]}"
     provider="${ROLE_PROVIDERS[$i]}"
@@ -192,10 +282,24 @@ ok ".env updated"
 hdr "Next steps"
 cat <<NEXT
 
-  ${C_INFO}make restart${C_RST}   # reload orchestrator + pipelines with the new env
-  ${C_INFO}make doctor${C_RST}    # verify keys, providers, reachability
+  # These settings live in .env, which the orchestrator loads via env_file.
+  # 'make restart' does NOT reload env_file — you must RECREATE the container:
+  ${C_INFO}docker compose up -d scaffold-orchestrator${C_RST}          # prod image
+  ${C_INFO}make dev-up${C_RST}                                          # dev image (keeps mounts)
+  ${C_INFO}make doctor${C_RST}                                          # verify keys, providers, reachability
 
 If you flipped any role away from ollama and removed Ollama models that
 the new providers will replace, re-run 'make doctor' first to catch any
 stranded references.
 NEXT
+
+if [[ "$MULTI_USER" == "true" ]]; then
+    cat <<MULTINEXT
+
+  Multi-user is on. After the recreate above (migration 066 creates api_keys):
+  ${C_INFO}make key-add LABEL="alice laptop"${C_RST}   # mint a scoped key (shown once)
+  ${C_INFO}make key-list${C_RST}                        # list live keys
+  ${C_INFO}make key-revoke ID=<n>${C_RST}               # revoke one
+  The master SCAFFOLD_API_KEY still works as the admin key.
+MULTINEXT
+fi
