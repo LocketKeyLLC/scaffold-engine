@@ -22059,6 +22059,20 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.805 Golden tasks for the remaining 5 switchable roles — all 8 now learnable (2026-08-16)
+
+Extends §17.803 coverage. The learning job can only A/B a role that has an objective golden task in `scripts/model_ab.py`; that was 3 of 8 switchable roles (`coder`→codegen, `verifier`→verifier, `research_extract`→extraction). The other five — `router`, `general`, `cloud_heavy`, `cloud_alt`, `fallback` — were skipped. Reality shaped the design: only two roles have a *clean* objective signal (classification), and three are substitute/availability roles, so this adds **one genuinely new task** and maps the substitutes to **capability proxies** with loud caveats — rather than fabricating five equal goldens.
+
+- **New `routing` task** (`scripts/model_ab.py`) — `route_command` intent-classification, verdict-match. Mirrors the `verifier` task and reuses the LIVE top-level router's `command_guide._ROUTE_SYSTEM` + `_ROUTE_TOOL` and the exact `classify_command` user shape, so the A/B reflects real routing. Pure `score_routing(args, expected)` (intent-match, fail-closed to `none` on a tool-call miss) + `_dispatch_routing`/`_score_routing`; goldens `tests/fixtures/routing_goldens.json` (12 unambiguous message→intent pairs incl. two `none` discipline cases — off-topic + a multi-step BUILD deliverable that belongs to the planner). A test enforces every `expected_intent ∈ COMMAND_INTENTS`.
+- **ROLE_TASKS now covers all 8** (`app/modules/model_role_learning.py`): `router`→routing (its real job) and `general`→routing (its real *structured* job — `assist_classify`/`assist_decide` resolve to `model_general`; this scores classification accuracy, NOT open-ended synthesis, which needs an LLM judge — out of scope). `cloud_heavy`/`cloud_alt`→codegen (proxy: escalation/alternate heavy-cloud capability). `fallback`→routing (proxy: light capability). A coverage test asserts `set(ROLE_TASKS) == SWITCHABLE_ROLE_FIELDS`.
+- **Fallback resilience guard** — `model_fallback` is a LOCAL offline-resilience role; `run_learning_cycle` now WARNs (`event="model_role_learning_fallback_cloud_candidate"`) on any `:cloud` candidate for it (a cloud winner would break offline fallback). Non-blocking — the confirm card is still the gate — but never silent.
+
+**Caveats (operator chose all 5 after an explicit warning):** general's task measures classification, not synthesis; heavy/alt/fallback tasks are capability *proxies* (lower-signal proposals; the confirm card gates); fallback should be A/B'd against LOCAL candidates only.
+
+**Verification.** Unit +10 (routing score match/mismatch/no-toolcall/empty ×4, task-registered, goldens-valid-intents, dispatch-uses-route-tool; ROLE_TASKS coverage; fallback-cloud warn) — all green, no regression in the existing model_ab / model_role_learning suites (47 passed). **LIVE routing A/B** (`qwen3.5:397b-cloud` vs `glm-5.2:cloud`, the router incumbent + a candidate): both **12/12 intent-match, 0 errors** (qwen3.5 4.3s vs glm-5.2 1.7s) — the task produces a real, parseable classification signal; a `model_router → glm-5.2` proposal would stage on equal quality + 2.5× speed. The goldens are deliberately unambiguous (both strong models score 12/12; a weaker/local model differentiates on misses, not just speed).
+
+---
+
 ### §17.804 Wire the §17.803 role→model-learning settings into docker-compose + enable it live (2026-08-16)
 
 Follow-up to §17.803, which added the `model_role_learning_*` settings to `app/config.py` but not to `docker-compose.yml` — so the feature had no deployment knob (every other flag, e.g. `CITATION_FAITHFULNESS_CHECK_ENABLED`/`MCP_*`, is surfaced there). Adds `MODEL_ROLE_LEARNING_ENABLED: "${MODEL_ROLE_LEARNING_ENABLED:-false}"` and `MODEL_ROLE_LEARNING_CANDIDATES: '${MODEL_ROLE_LEARNING_CANDIDATES:-{}}'` beside the scheduler flags (single-quoted so the per-role candidate JSON from `.env` survives YAML; `{}` default ⇒ inert until candidates are named). Code default stays OFF; only `.env` turns it on.

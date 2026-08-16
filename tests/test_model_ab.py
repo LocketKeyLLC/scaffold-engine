@@ -8,7 +8,8 @@ from __future__ import annotations
 import pytest
 
 from scripts.model_ab import (
-    _avg, _summarize, score_codegen, score_extraction, score_verifier, TASKS,
+    _avg, _summarize, score_codegen, score_extraction, score_routing,
+    score_verifier, TASKS,
 )
 
 
@@ -249,3 +250,71 @@ def test_score_verifier_missing_pass_key_fails_closed():
 def test_verifier_task_registered():
     assert "verifier" in TASKS
     assert TASKS["verifier"].default_goldens.name == "verifier_goldens.json"
+
+
+# §17.805 — routing task (route_command intent-match)
+
+def test_score_routing_match():
+    s = score_routing({"intent": "status"}, "status")
+    assert s["passed"] is True and s["verdict"] == "status"
+    assert s["metric"] == "intent_match" and s["metric_value"] == "status"
+
+
+def test_score_routing_mismatch_fails():
+    # model routed to 'none', golden expected 'status' → intent-match miss
+    s = score_routing({"intent": "none"}, "status")
+    assert s["passed"] is False and s["verdict"] == "none" and s["expected"] == "status"
+
+
+def test_score_routing_no_toolcall_fails_closed():
+    # read_tool_args returns None on a tool-call miss → fail-closed, verdict none
+    s = score_routing(None, "status")
+    assert s["passed"] is False and s["verdict"] == "none"
+
+
+def test_score_routing_empty_intent_fails_closed():
+    s = score_routing({"intent": ""}, "status")
+    assert s["passed"] is False and s["verdict"] == "none"
+
+
+def test_routing_task_registered():
+    assert "routing" in TASKS
+    assert TASKS["routing"].default_goldens.name == "routing_goldens.json"
+
+
+def test_routing_goldens_valid_intents():
+    # every golden's expected_intent must be a real router intent, else the
+    # task can never pass (and the golden is a silent typo).
+    from scripts.model_ab import _load_goldens
+    from app.modules.command_guide import COMMAND_INTENTS
+    goldens = _load_goldens(TASKS["routing"].default_goldens)
+    assert len(goldens) >= 10
+    assert all(g["expected_intent"] in COMMAND_INTENTS for g in goldens)
+
+
+async def test_dispatch_routing_uses_route_tool_and_scores(monkeypatch):
+    # _dispatch_routing must call model_router.tool_call with the live route_command
+    # tool at temp 0.0; _score_routing then intent-matches. Mock the model call.
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from scripts import model_ab
+    fake_resp = SimpleNamespace(success=True,
+                                tool_calls=[SimpleNamespace(arguments={"intent": "status"})])
+    captured = {}
+
+    async def _fake_tool_call(messages, tools, **kw):
+        captured["tool_name"] = tools[0].name
+        captured["temperature"] = kw.get("temperature")
+        captured["model"] = kw.get("model")
+        return fake_resp
+
+    import app.model_router as mr
+    monkeypatch.setattr(mr, "tool_call", AsyncMock(side_effect=_fake_tool_call))
+    golden = {"message": "show me my active jobs", "expected_intent": "status"}
+    resp = await model_ab._dispatch_routing(
+        "qwen3.5:397b-cloud", golden, temperature=0.2, max_tokens=512)
+    s = await model_ab._score_routing(golden, resp)
+    assert captured["tool_name"] == "route_command"
+    assert captured["temperature"] == 0.0        # harness temp ignored, prod is deterministic
+    assert captured["model"] == "qwen3.5:397b-cloud"
+    assert s["passed"] is True and s["verdict"] == "status"
