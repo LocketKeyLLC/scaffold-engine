@@ -669,7 +669,8 @@ async def _search_queries(
                     "facet": facet,
                 })
 
-    return all_results[:settings.research_max_urls_per_iteration]
+    # §17.802 — depth-scaled cap: shallow stays lean, deeper runs get more breadth.
+    return all_results[:settings.research_max_urls_for_depth(state.depth)]
 
 
 async def _extract_entries(

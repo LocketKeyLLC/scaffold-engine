@@ -141,6 +141,15 @@ class Settings(BaseSettings):
         )
         return self.database_url.replace(prefix, "postgresql+psycopg2://", 1)
 
+    def research_max_urls_for_depth(self, depth: str) -> int:
+        """§17.802 — depth-scaled per-iteration URL cap (shallow < medium < deep).
+        Unknown/unset depth falls back to the medium tier."""
+        return {
+            "shallow": self.research_max_urls_shallow,
+            "medium": self.research_max_urls_medium,
+            "deep": self.research_max_urls_deep,
+        }.get(depth, self.research_max_urls_medium)
+
     # Scheduler
     scheduler_enabled: bool = True
     scheduler_timezone: str = "UTC"
@@ -495,7 +504,14 @@ class Settings(BaseSettings):
     research_max_queries: int = Field(default=40, ge=1, le=50)
     ideation_max_queries: int = Field(default=15, ge=1, le=50)
     ideation_max_distill_results: int = Field(default=15, ge=1, le=200)
-    research_max_urls_per_iteration: int = Field(default=100, ge=1, le=200)
+    # §17.802 — per-iteration URL fetch cap, DEPTH-SCALED (was a flat 100).
+    # Governs total fetch VOLUME per iteration (breadth / cost / wall-time); peak
+    # memory is bounded separately by research_fetch_concurrency (§17.801). Lean
+    # shallow base with increasing degrees for deeper runs. Overridable via
+    # RESEARCH_MAX_URLS_{SHALLOW,MEDIUM,DEEP}. Resolve with research_max_urls_for_depth().
+    research_max_urls_shallow: int = Field(default=30, ge=1, le=200)
+    research_max_urls_medium: int = Field(default=60, ge=1, le=200)
+    research_max_urls_deep: int = Field(default=90, ge=1, le=200)
     research_searxng_delay: float = Field(default=1.5, ge=0.0, le=60.0)
     # §17.549 — soft recency: append the current year to search queries that
     # don't already name one, biasing SearXNG toward fresh results without a

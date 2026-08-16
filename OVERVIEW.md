@@ -22059,6 +22059,19 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.802 Tighten `research_max_urls_per_iteration` 100 → depth-scaled 30/60/90 (2026-08-15)
+
+Companion to §17.801. That bounded peak *memory* (fetch/extract concurrency); this bounds total fetch *volume* per iteration — the flat cap of **100** URLs/iteration meant a single iteration could pull up to 100 pages (cost + wall-time, and a secondary memory margin). Tightened to a lean shallow base with **increasing degrees for deeper runs**, so shallow research stays cheap while deep runs keep their breadth.
+
+- **`app/config.py`** — replaced the flat `research_max_urls_per_iteration: 100` with three depth-scaled fields (`research_max_urls_shallow=30`, `_medium=60`, `_deep=90`) + a `research_max_urls_for_depth(depth)` resolver (unknown/unset depth → the medium tier, so it never crashes on a bad value).
+- **`app/modules/research_agent.py`** — `_search_queries` now caps with `settings.research_max_urls_for_depth(state.depth)` instead of the flat field (`state` is already in scope at the cap site).
+- **`docker-compose.yml`** — surfaced as `RESEARCH_MAX_URLS_{SHALLOW,MEDIUM,DEEP}` (defaults 30/60/90) for host tuning; fixed the §17.801 comment that referenced the now-removed flat field name.
+- **Tests** — +4 (`test_research_max_urls_depth_17802.py`): default values, per-depth mapping, unknown→medium fallback (incl. `None`), and override honoring the increasing-degrees invariant. Updated the 3 `_search_queries` tests in `test_research_agent_core.py` (they mock `settings` wholesale) to stub the resolver. 24 passed.
+- **Live:** recreated the orchestrator (dev override) — `research_max_urls_for_depth('shallow'/'medium'/'deep') = 30/60/90` confirmed in the running process.
+- **Note:** memory is *not* governed by this cap (that's §17.801's concurrency knob); this is a breadth/cost lever. The two are independent — concurrency caps how many pages are in flight at once, this caps how many pages an iteration fetches in total.
+
+---
+
 ### §17.801 Bound the research fetch/extract concurrency — mitigate the §17.800 topic-mode memory-kill (2026-08-15)
 
 Follow-up to the §17.800 gotcha: topic-mode `/research` crashed the 6 GB orchestrator during the fetch/extract fan-out. `_fetch_and_extract` already gates the fan-out with `asyncio.Semaphore(research_fetch_concurrency)`, and — the key detail — that semaphore is held across **both** the HTTP fetch **and** the in-thread `trafilatura.extract` (an lxml parse whose in-RAM tree runs many× the raw HTML). So peak fetch memory ≈ `concurrency × (research_max_url_bytes + parse overhead)`; at the old default of **5 × 5 MB** pages (and `research_max_urls_per_iteration=100` feeding the fan-out) that peak was enough to trip the cgroup memory-kill mid-run.
