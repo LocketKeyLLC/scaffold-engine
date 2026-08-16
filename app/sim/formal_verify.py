@@ -55,6 +55,7 @@ from app.config import settings
 from app.utils.llm_retry import chat_until_nonempty
 from app.sim.device_sizing import (
     CandidateIndexError,
+    TopologySelectionNotFoundError,
     _candidate_to_dict,
     _fetch_topology_selection,
 )

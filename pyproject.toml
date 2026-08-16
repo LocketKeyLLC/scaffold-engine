@@ -20,10 +20,14 @@ extend-exclude = ["internal", ".backups", ".venv-ci", "docs/toon"]
 # are intentionally deferred to keep this baseline green; enable them
 # incrementally rather than in one churny sweep.
 select = ["F", "E9", "W605"]
+# F401 (unused-import) is deferred, NOT auto-fixed: this codebase deliberately
+# re-exports names through modules (e.g. `app.modules.research_agent` re-exports
+# extractor/state helpers "for test patches and existing call sites"), and
+# ruff's F401 removal strips those re-exports and breaks them. Enforce/enable
+# only with per-module review, never a blanket --fix.
 # F841 (assigned-but-unused locals) is deferred: a few live sites read like
-# possible bug-hints (a value computed then dropped) rather than dead code,
-# so they warrant individual review instead of a blanket auto-delete.
-ignore = ["F841"]
+# possible bug-hints (a value computed then dropped) rather than dead code.
+ignore = ["F401", "F841"]
 
 [tool.ruff.lint.per-file-ignores]
 # Test modules use `from module import *` fixtures heavily and freely

@@ -43,6 +43,7 @@ from app import model_router
 from app.config import settings
 from app.utils.llm_retry import chat_until_nonempty
 from app.sim.spec import (
+    SCHEMA,
     SCHEMA_VERSION,
     spec_sha256,
     validate_spec,

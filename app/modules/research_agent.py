@@ -31,6 +31,7 @@ import trafilatura
 
 from app import model_router
 from app.config import settings, get_model
+from app.database import async_session
 from app.modules.rag_pipeline import ingest_entries
 from app.providers.base import ModelResponse, Tool
 # noqa: F401 — re-exported so research_extractors._fetch_url_bounded reaches it
@@ -42,13 +43,18 @@ from app.utils.tool_call_args import read_tool_args
 # Re-exports for test patches and existing call sites — keeps
 # `app.modules.research_agent.X` working after the 2026-05-05 split.
 from app.modules.research_extractors import (
+    DEFAULT_SOURCE_SCORE,
     _EXTRACT_BATCH_FULL_PAGE,
     _EXTRACT_BATCH_SNIPPET,
+    SEARXNG_CACHE_TTL_SECONDS,
     _chunk_text,
     _detect_domain,
     _engines_for_category,
     _extract_page_title,
     _extract_pdf_text,
+    _extract_pdfplumber,
+    _extract_pypdf,
+    _extract_threshold,
     _fetch_url_bounded,
     _is_arxiv_ref,
     _is_github_ref,
@@ -71,13 +77,17 @@ from app.modules.research_extractors import (
     _robots_allowed,
     _score_source,
     _searxng_cache_get,
+    _searxng_cache_key,
     _searxng_cache_set,
     SEARXNG_FALLBACK_ENGINES,
 )
 from app.modules.research_state import (
+    HEARTBEAT_INTERVAL_SECONDS,
+    SNAPSHOT_SCHEMA_VERSION,
     ResearchState,
     _atomic_claim_for_resume,
     _await_with_heartbeat,
+    _build_snapshot,
     _finalize_session,
     _guard_and_create_session,
     _load_session_for_resume,

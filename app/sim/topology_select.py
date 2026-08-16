@@ -46,6 +46,7 @@ from app.utils.llm_retry import chat_until_nonempty
 from app.modules.rag_pipeline import query_rag
 from app.sim.spec_store import (
     SpecNotConfirmedError,
+    SpecNotFoundError,
     require_confirmed_spec,
 )
 from app.utils.llm_parsing import parse_json_object

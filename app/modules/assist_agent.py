@@ -23,7 +23,7 @@ import json
 import logging
 import re
 import uuid as _uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional
 
 from sqlalchemy import text
@@ -3738,6 +3738,7 @@ async def assess_note_impact(
     confirm, else ``None``. Fail-soft: any error leaves the note recorded and
     returns ``None`` — the impact pass must never break note-taking.
     """
+    from datetime import datetime, timezone
 
     from app.config import settings
     from app.modules import assist_replan

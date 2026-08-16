@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.schemas import JobStatus
 
 logger = logging.getLogger("scaffold.recovery")
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 
 from app import model_router
+from app.config import settings
 from app.utils.embedding_cache import get_cache, truncate_and_normalize
 
 logger = logging.getLogger(__name__)

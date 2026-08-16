@@ -19,6 +19,7 @@ at scrape time rather than mirrored on every acquire/release.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from prometheus_client import (
     CONTENT_TYPE_LATEST,

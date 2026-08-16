@@ -36,7 +36,7 @@ from app.modules.gt_extractor import (
     push_to_github as gt_push_to_github,
     search_searxng,
 )
-from app.modules.idea_refinement import refine_idea
+from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.rag_pipeline import ingest_entries
 from app.providers.base import Tool
 from app.utils.job_utils import fail_job as _fail_job
