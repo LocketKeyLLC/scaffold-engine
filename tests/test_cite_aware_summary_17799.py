@@ -73,9 +73,13 @@ def test_finalize_no_citation_note_when_unscored():
 # ───────────────────── scorer gate ─────────────────────
 
 @pytest.mark.asyncio
-async def test_maybe_score_off_by_default():
+async def test_maybe_score_off_by_default(monkeypatch):
     srcs = RA._build_numbered_summary_sources(_state_with_entries())
-    # settings.citation_faithfulness_check_enabled defaults False
+    # Code default is False, but `make test` runs INSIDE the live orchestrator,
+    # whose compose env sets CITATION_FAITHFULNESS_CHECK_ENABLED=true (§17.798–800
+    # "ON in live compose"). Force the default explicitly so the test is hermetic
+    # (mirrors the sibling test_maybe_score_runs_when_enabled, which forces True).
+    monkeypatch.setattr(RA.settings, "citation_faithfulness_check_enabled", False)
     assert await RA._maybe_score_citation_faithfulness("s [1].", srcs, None) is None
 
 
@@ -113,6 +117,9 @@ def test_payload_citation_faithfulness_none_when_unscored():
 async def test_generate_summary_default_path_uses_v1_prompt_no_citation_score(monkeypatch):
     """Flag OFF → normal SUMMARY_SYSTEM_V1 path; citation_faithfulness stays None."""
     state = _state_with_entries()
+    # Force the code default off — the live-compose env has the valve ON, so a
+    # bare test would take the cite-aware path and stamp a score (§17.807 baseline).
+    monkeypatch.setattr(RA.settings, "citation_faithfulness_check_enabled", False)
     monkeypatch.setattr(RA, "_generate_options", AsyncMock(return_value=None))
     captured = {}
 

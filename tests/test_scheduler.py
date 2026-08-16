@@ -34,7 +34,13 @@ class TestSchedulerLifecycle:
         mock_result.mappings.return_value.all.return_value = fake_rows
         mock_session.execute = AsyncMock(return_value=mock_result)
 
+        # §17.803 added a conditional weekly x_model_role_learning job, gated on
+        # settings.model_role_learning_enabled. That valve is ON in this host's
+        # live compose (§17.806 rollout) and `make test` runs inside that
+        # container, so a bare test registers a 5th job. Force it off to hold the
+        # deterministic 2-user + 2-observability = 4 shape this test asserts.
         with patch.object(sched_mod, "async_session", return_value=mock_session), \
+             patch.object(sched_mod.settings, "model_role_learning_enabled", False), \
              patch("app.scheduler.AsyncIOScheduler") as mock_sched_cls:
             mock_scheduler = MagicMock()
             mock_sched_cls.return_value = mock_scheduler
