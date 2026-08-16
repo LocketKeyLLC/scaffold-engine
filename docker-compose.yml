@@ -296,6 +296,13 @@ services:
       MODEL_RERANKER: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_MAX_FILES: "50"
+      # §17.801 — bound the research fetch/extract fan-out. The semaphore in
+      # _fetch_and_extract spans the fetch AND the trafilatura/lxml parse, so
+      # this caps peak memory during topic-mode research (which fetches up to
+      # research_max_urls_per_iteration pages, 5 MB each). Lowered from the old
+      # code default of 5 after the §17.800 mid-run cgroup memory-kill on this
+      # 6 GB host. Raise it on a roomier host; lower it if research still spikes.
+      RESEARCH_FETCH_CONCURRENCY: "${RESEARCH_FETCH_CONCURRENCY:-3}"
       HF_HOME: /code/.cache/huggingface
       MAX_RETRIES: "3"
       HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"

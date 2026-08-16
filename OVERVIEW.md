@@ -22059,6 +22059,18 @@ Deep review of `sdk/scaffold_client/` (the 6 hand-written core modules: `errors`
 
 ---
 
+### §17.801 Bound the research fetch/extract concurrency — mitigate the §17.800 topic-mode memory-kill (2026-08-15)
+
+Follow-up to the §17.800 gotcha: topic-mode `/research` crashed the 6 GB orchestrator during the fetch/extract fan-out. `_fetch_and_extract` already gates the fan-out with `asyncio.Semaphore(research_fetch_concurrency)`, and — the key detail — that semaphore is held across **both** the HTTP fetch **and** the in-thread `trafilatura.extract` (an lxml parse whose in-RAM tree runs many× the raw HTML). So peak fetch memory ≈ `concurrency × (research_max_url_bytes + parse overhead)`; at the old default of **5 × 5 MB** pages (and `research_max_urls_per_iteration=100` feeding the fan-out) that peak was enough to trip the cgroup memory-kill mid-run.
+
+- **`app/config.py`** — `research_fetch_concurrency` default **5 → 3** (~40 % lower peak, useful parallelism retained). Comment ties it to the §17.800 signature.
+- **`docker-compose.yml`** — surfaced as a tunable `RESEARCH_FETCH_CONCURRENCY: "${RESEARCH_FETCH_CONCURRENCY:-3}"` in the orchestrator env, with a note to raise on a roomier host / lower if it still spikes.
+- **Tests** — +2 (`test_research_fetch_concurrency_17801.py`): a fake fetch tracks peak in-flight jobs and asserts `_fetch_and_extract` never exceeds the bound (concurrency=3 → peak ≤ 3 with real overlap; concurrency=1 → strictly serial). Regression guard so a future refactor that loosens the semaphore re-surfaces as a red test, not an OOM.
+- **Honest scope:** this is the correct **memory lever** (the direct thing asked for) and lowers peak fetch/extract RAM deterministically, but the original crash was n=1 with the cgroup `exit 0` / `OOMKilled=false` signature — not a captured RSS profile — so it's a mitigation, not a proven root-cause fix. Other peak contributors remain untouched (the 5 MB per-URL cap; `research_max_urls_per_iteration=100`; the reranker singleton), noted for follow-up if topic-mode still spikes.
+- **Live:** recreated the orchestrator (dev override) — `settings.research_fetch_concurrency = 3` confirmed in the running process.
+
+---
+
 ### §17.800 Enabled citation-faithfulness in the live orchestrator + verified via a real `/research` run (2026-08-15)
 
 Turned the §17.799 flag ON in the running system and verified it end-to-end through the real pipeline (not just the isolated `_generate_summary` demo).

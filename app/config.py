@@ -543,7 +543,14 @@ class Settings(BaseSettings):
     # Research agent — fetch caps & concurrency
     research_max_url_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
     research_max_pdf_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=500 * 1024 * 1024)
-    research_fetch_concurrency: int = Field(default=5, ge=1, le=100)
+    # §17.801 — lowered 5 → 3. `_fetch_and_extract` holds this semaphore across
+    # BOTH the HTTP fetch AND the trafilatura/lxml parse (whose in-RAM tree runs
+    # many× the raw HTML), so peak fetch memory ≈ concurrency × (research_max_url_bytes
+    # + parse overhead). At 5 × 5 MB pages the topic-mode fan-out spiked the 6 GB
+    # orchestrator into a cgroup memory-kill mid-run (§17.800: exit 0 / OOMKilled
+    # false / SSE severed / session orphaned). 3 cuts the peak ~40% while keeping
+    # useful parallelism; overridable via RESEARCH_FETCH_CONCURRENCY.
+    research_fetch_concurrency: int = Field(default=3, ge=1, le=100)
     research_fetch_timeout: int = Field(default=15, ge=1, le=300)
     research_url_fetch_timeout: int = Field(default=30, ge=1, le=300)
     # §17.448 (Phase B / B1) — RAGAS-inspired faithfulness scoring of research
