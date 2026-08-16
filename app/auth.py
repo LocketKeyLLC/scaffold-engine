@@ -5,20 +5,27 @@ from fastapi import Request, Security, HTTPException, status
 from fastapi.security import APIKeyHeader
 
 from app.config import settings
+from app.database import async_session
+from app.modules.api_keys import verify_key
 
 _logger = logging.getLogger(__name__)
 
 _RAW_KEY = settings.scaffold_api_key.get_secret_value()
 
 if not _RAW_KEY:
-    if not settings.scaffold_auth_disabled:
+    # §17.807 — multi-user installs MAY run without a master key (auth then
+    # rests entirely on minted scoped keys), so an empty master is only fatal
+    # when neither the explicit opt-out nor multi-user mode is in force.
+    if not settings.scaffold_auth_disabled and not settings.multi_user_enabled:
         raise RuntimeError(
-            "SCAFFOLD_API_KEY is empty. Set it, or set SCAFFOLD_AUTH_DISABLED=1 "
-            "to run without authentication (NOT recommended outside local dev)."
+            "SCAFFOLD_API_KEY is empty. Set it, set MULTI_USER_ENABLED=true and "
+            "mint scoped keys (make key-add), or set SCAFFOLD_AUTH_DISABLED=1 to "
+            "run without authentication (NOT recommended outside local dev)."
         )
-    _logger.warning(
-        "SCAFFOLD_AUTH_DISABLED=1 — API authentication is OFF. Do not run this way in prod."
-    )
+    if settings.scaffold_auth_disabled:
+        _logger.warning(
+            "SCAFFOLD_AUTH_DISABLED=1 — API authentication is OFF. Do not run this way in prod."
+        )
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -70,13 +77,34 @@ async def require_api_key(
     # the unresolved-errors watchdog at threshold=1) instead of the intended
     # 401 — the same failure class §17.441 fixed for RecursionError. Treat the
     # TypeError as a failed comparison.
+    #
+    # Master key is checked first (constant-time) and, on match, authenticates
+    # as the admin/bootstrap key regardless of mode. The ``_RAW_KEY`` guard
+    # prevents an empty master (allowed in multi-user mode) from matching an
+    # empty/omitted header via compare_digest("", "").
     try:
-        ok = key is not None and secrets.compare_digest(key, _RAW_KEY)
+        is_admin = bool(_RAW_KEY) and key is not None and secrets.compare_digest(key, _RAW_KEY)
     except TypeError:
-        ok = False
-    if not ok:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key",
-        )
-    return key
+        is_admin = False
+    if is_admin:
+        return key
+
+    # §17.807 — multi-user mode: a presented key that isn't the master may still
+    # be a live scoped key (api_keys, mig 066), matched by SHA-256 digest. The
+    # DB is consulted only here (non-admin key + multi-user on), so single-user
+    # installs keep the pure in-memory compare above with no per-request query.
+    if settings.multi_user_enabled and key:
+        try:
+            async with async_session() as session:
+                if await verify_key(session, key):
+                    return key
+        except TypeError:
+            # Non-ASCII header byte reaches hashlib as-is (utf-8 encodable), so
+            # this is unreachable in practice; kept symmetric with the master
+            # path so a lookup fault still degrades to a clean 401, not a 500.
+            pass
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing API key",
+    )

@@ -117,6 +117,14 @@ class Settings(BaseSettings):
     # Auth
     scaffold_api_key: SecretStr = SecretStr("")
     scaffold_auth_disabled: bool = False
+    # §17.807 — install-time multi-user option (set by the `make init` wizard).
+    # When True, X-API-Key auth accepts, in addition to the master
+    # scaffold_api_key (which stays valid as the admin key), any live named key
+    # in the api_keys table (mig 066), matched by SHA-256 digest. When False
+    # (default, single-user) the master key is the only accepted credential and
+    # the api_keys table is never consulted. Keys are minted/revoked with
+    # `make key-add` / `make key-revoke` (scripts/keyctl.py).
+    multi_user_enabled: bool = False
 
     # Sprint J.2 — native web UI loopback (HTTP-loopback so the SDK gets
     # dogfooded as the second consumer after CLI). Override via env when

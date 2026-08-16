@@ -192,6 +192,89 @@ async def test_exempt_prefix_does_not_validate_key_when_present(_api_key_set):
     assert result == "", "exempt prefix must bypass even when a wrong key is supplied"
 
 
+# ===========================================================================
+# §17.807 — multi-user scoped keys (MULTI_USER_ENABLED)
+# ===========================================================================
+#
+# When multi_user_enabled is True, auth accepts the master key (admin) OR any
+# live scoped key from the api_keys table, matched by SHA-256 digest. The DB is
+# consulted ONLY for a non-master key, and ONLY when the mode is on — single-
+# user installs keep the pure in-memory compare with no per-request query.
+
+
+def _fake_session_factory():
+    """A stand-in for app.database.async_session — an async-context-manager
+    factory that yields a throwaway session object (never actually queried,
+    because verify_key is mocked)."""
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=MagicMock())
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=cm)
+
+
+@pytest.mark.smoke
+async def test_multiuser_master_key_still_admin(_api_key_set, monkeypatch):
+    """Master key authenticates as admin in multi-user mode WITHOUT a DB hit."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
+    verify = AsyncMock(return_value=False)
+    monkeypatch.setattr(_api_key_set, "verify_key", verify)
+    monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
+
+    result = await _api_key_set.require_api_key(_mk_request("/dag/abc"), key="testkey123")
+    assert result == "testkey123"
+    verify.assert_not_awaited()  # admin path short-circuits before the DB
+
+
+@pytest.mark.smoke
+async def test_multiuser_live_scoped_key_accepted(_api_key_set, monkeypatch):
+    """A non-master key that verify_key confirms as live is accepted."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
+    verify = AsyncMock(return_value=True)
+    monkeypatch.setattr(_api_key_set, "verify_key", verify)
+    monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
+
+    result = await _api_key_set.require_api_key(
+        _mk_request("/dag/abc"), key="sk-scaffold-somelivekey",
+    )
+    assert result == "sk-scaffold-somelivekey"
+    verify.assert_awaited_once()
+
+
+@pytest.mark.smoke
+async def test_multiuser_revoked_or_unknown_key_401(_api_key_set, monkeypatch):
+    """A non-master key that verify_key rejects (revoked/unknown) → 401."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
+    verify = AsyncMock(return_value=False)
+    monkeypatch.setattr(_api_key_set, "verify_key", verify)
+    monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _api_key_set.require_api_key(
+            _mk_request("/dag/abc"), key="sk-scaffold-revoked",
+        )
+    assert exc_info.value.status_code == 401
+    verify.assert_awaited_once()
+
+
+@pytest.mark.smoke
+async def test_singleuser_does_not_consult_db(_api_key_set, monkeypatch):
+    """With multi_user_enabled False (default), a non-master key is rejected
+    WITHOUT ever touching the DB — the scoped-key lookup is gated on the mode."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
+    verify = AsyncMock(return_value=True)  # would pass if consulted — it must not be
+    monkeypatch.setattr(_api_key_set, "verify_key", verify)
+    monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _api_key_set.require_api_key(_mk_request("/dag/abc"), key="sk-scaffold-live")
+    assert exc_info.value.status_code == 401
+    verify.assert_not_awaited()
+
+
 @pytest.mark.smoke
 async def test_exempt_prefixes_set_shape_is_loadable(_api_key_set):
     """Sanity: the constant is iterable as a tuple of strings, every
