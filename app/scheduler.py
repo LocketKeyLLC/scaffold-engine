@@ -122,6 +122,28 @@ def _register_observability_jobs() -> None:
             settings.calibration_grace_minutes,
         )
 
+    # §17.803 — role→model learning: periodic golden re-A/B that stages swap
+    # proposals for human review. Same in-memory / non-`schedule_` id pattern as
+    # the two jobs above so _reconcile_orphans()/_rehydrate() leave it alone.
+    if settings.model_role_learning_enabled:
+        from app.modules import model_role_learning as _mrl
+        _scheduler.add_job(
+            _mrl.tick,
+            trigger=IntervalTrigger(
+                seconds=settings.model_role_learning_interval_seconds,
+            ),
+            id="x_model_role_learning",
+            jobstore="memory",
+            replace_existing=True,
+            misfire_grace_time=settings.scheduler_misfire_grace_time,
+        )
+        logger.info(
+            'event="model_role_learning_registered" interval_s=%d repeat=%d roles=%d',
+            settings.model_role_learning_interval_seconds,
+            settings.model_role_learning_repeat,
+            len(_mrl.ROLE_TASKS),
+        )
+
 
 async def shutdown_scheduler() -> None:
     """Graceful shutdown with an explicit async drain of in-flight jobs.
@@ -464,31 +486,26 @@ async def remove_schedule(schedule_id: int) -> None:
 
 def _log_model_ab_recommendation(task_name: str, models: list[str], summary: dict) -> None:
     """§17.578 — emit a recommendation when a candidate beats the incumbent
-    (models[0]) clean: equal-or-better pass rate, zero errors, and faster."""
-    def _rate(m: str) -> float:
-        s = summary.get(m, {})
-        scored = s.get("trials", 0) - s.get("errors", 0)
-        return (s.get("passed", 0) / scored) if scored else 0.0
+    (models[0]) clean: equal-or-better pass rate, zero errors, and faster.
 
-    def _wall(m: str) -> float:
-        ws = summary.get(m, {}).get("wall_s", [])
-        return (sum(ws) / len(ws)) if ws else 0.0
-
-    incumbent = models[0]
-    inc_rate, inc_wall = _rate(incumbent), _wall(incumbent)
-    best = max(models, key=lambda m: (_rate(m), -_wall(m)))
-    if (best != incumbent and summary.get(best, {}).get("errors", 0) == 0
-            and _rate(best) >= inc_rate and _wall(best) < inc_wall and inc_wall > 0):
+    §17.803 — the decision rule now lives in ``model_role_learning.select_winner``
+    (shared with the staged-proposal governance job); this stays a log-only sink.
+    """
+    from app.modules.model_role_learning import select_winner, _rate
+    decision = select_winner(models, summary)
+    if decision is not None:
         logger.warning(
             'event="model_ab_recommend" task=%s incumbent=%s candidate=%s '
             'incumbent_rate=%.2f candidate_rate=%.2f speedup=%.2fx',
-            task_name, incumbent, best, inc_rate, _rate(best),
-            inc_wall / _wall(best) if _wall(best) else 0.0,
+            task_name, decision["incumbent"], decision["candidate"],
+            decision["incumbent_rate"], decision["candidate_rate"],
+            decision["speedup"],
         )
     else:
+        incumbent = models[0] if models else "?"
         logger.info(
             'event="model_ab_no_change" task=%s incumbent=%s rate=%.2f',
-            task_name, incumbent, inc_rate,
+            task_name, incumbent, _rate(summary, incumbent),
         )
 
 
