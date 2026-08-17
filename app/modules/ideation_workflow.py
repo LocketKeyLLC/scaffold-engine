@@ -252,6 +252,7 @@ async def analyze_and_confirm(
     domain: str | None = None,
     model_overrides: dict | None = None,
     job_id: str | None = None,
+    owner: str | None = None,
 ) -> dict:
     """Phase 1: refine an idea, assess feasibility, halt at ``awaiting_confirmation``.
 
@@ -281,6 +282,7 @@ async def analyze_and_confirm(
         model_overrides=model_overrides,
         target_status="awaiting_confirmation",
         job_id=job_id,
+        owner=owner,
     )
     if refine_result["status"] == "failed":
         logger.warning(

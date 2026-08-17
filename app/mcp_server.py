@@ -300,6 +300,13 @@ class ApiKeyASGIGuard:
     so the engine's global ``require_api_key`` gate does not cover ``/mcp``.
     This wrapper reinstates it: HTTP requests must carry the matching
     ``X-API-Key`` header (constant-time compared). Non-HTTP scopes pass through.
+
+    §17.810 — ADMIN-ONLY BY DESIGN under multi-user. Compares only against the
+    master key, so scoped keys get 401. The MCP SDK does not thread a request
+    principal into tool handlers, and the tool SQL (list_jobs / job_results /
+    research_sessions) is unscoped; admitting scoped keys here would expose every
+    user's jobs. MCP is therefore an admin/operator surface — per-user access is
+    via the direct JSON API + /ui SPA, which resolve and enforce a Principal.
     """
 
     def __init__(self, app, api_key: str):

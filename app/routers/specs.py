@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.authz import Principal, assert_visible_by_query, get_principal
 from app.database import get_db
 from fastapi.responses import PlainTextResponse
 
@@ -63,7 +64,37 @@ from app.sim.spec_store import (
 )
 from app.sim.topology_select import select_topologies
 
-router = APIRouter(tags=["Specs"], prefix="/specs")
+# §17.810 — a spec has no owner column; it derives from its parent job
+# (specs.job_id → jobs.owner). This router-level dependency gates every
+# ``/specs/{spec_id}/*`` route in one place: a non-admin who doesn't own the
+# parent job gets a 404, identical to a missing spec. The ``/specs/pending``
+# list has no spec_id path param → this no-ops there and scopes its own query.
+async def _require_spec_visible(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+) -> None:
+    if principal.is_admin:
+        return
+    sid = request.path_params.get("spec_id")
+    if not sid:
+        return
+    try:
+        uuid.UUID(str(sid))
+    except (ValueError, AttributeError, TypeError):
+        return  # malformed id → let the handler's own 404 path fire
+    await assert_visible_by_query(
+        db, principal,
+        "SELECT j.owner FROM specs s JOIN jobs j ON j.id = s.job_id WHERE s.id = :sid",
+        {"sid": str(sid)},
+        detail=f"spec {sid} not found",
+    )
+
+
+router = APIRouter(
+    tags=["Specs"], prefix="/specs",
+    dependencies=[Depends(_require_spec_visible)],
+)
 
 # Source of truth for confirmed_by when the auth context is the
 # anonymous API key. Hoisted so the integration tests can assert
@@ -126,14 +157,20 @@ async def get_pending(
     job_id: uuid.UUID | None = None,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ) -> SpecPendingListResponse:
     """List specs awaiting operator confirmation, oldest first.
 
     Optional ``job_id`` query parameter scopes the list to a specific
     job; without it the list is global across the deployment. UI
     layers use this to render a "needs your attention" panel.
+
+    §17.810 — a non-admin sees only specs whose parent job they own.
     """
-    rows = await list_pending_confirmations(db, job_id=job_id, limit=limit)
+    rows = await list_pending_confirmations(
+        db, job_id=job_id, limit=limit,
+        owner=None if principal.is_admin else principal.identity,
+    )
     items = [_to_read(r) for r in rows]
     return SpecPendingListResponse(pending=items, count=len(items))
 

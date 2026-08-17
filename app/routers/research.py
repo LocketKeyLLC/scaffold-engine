@@ -23,6 +23,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
+from app.authz import (
+    Principal,
+    assert_visible,
+    get_principal,
+    owner_filter,
+)
 from app.config import settings
 from app.database import async_session, get_db
 from app.modules.research_agent import run_research, run_research_pdf, resume_research
@@ -53,7 +59,11 @@ templates.env.globals["csp_nonce"] = _current_csp_nonce
 
 
 @router.post("/research", tags=["Research"])
-async def research_endpoint(body: ResearchInput, request: Request):
+async def research_endpoint(
+    body: ResearchInput,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+):
     """Autonomous research: decompose topic → search → extract → ingest → iterate.
 
     Wrapped in ``_sse_with_disconnect_watch`` so that client disconnect
@@ -61,11 +71,13 @@ async def research_endpoint(body: ResearchInput, request: Request):
     allowing the lifecycle wrapper to finalize the session as ``cancelled``.
     """
     await _require_valid_models(body.model_overrides)
+    # §17.810 — stamp the creating principal as the session owner.
     source = run_research(
         topic=body.topic,
         depth=body.depth,
         domain=body.domain,
         model_overrides=body.model_overrides,
+        owner=principal.identity,
     )
     return StreamingResponse(
         _sse_with_disconnect_watch(request, source),
@@ -75,9 +87,21 @@ async def research_endpoint(body: ResearchInput, request: Request):
 
 
 @router.post("/research/reply", tags=["Research"])
-async def research_reply_endpoint(body: ResearchReplyInput, request: Request):
+async def research_reply_endpoint(
+    body: ResearchReplyInput,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+):
     """Resume a paused research session with the user's clarification reply."""
     await _require_valid_models(body.model_overrides)
+    # §17.810 — only the session owner (or admin) may resume it. Own a
+    # short-lived session for the check so no connection is held across the SSE.
+    async with async_session() as _s:
+        await assert_visible(
+            _s, principal, body.session_id,
+            table="research_sessions",
+            detail=f"research_session not found: {body.session_id}",
+        )
     source = resume_research(
         session_id=body.session_id,
         user_reply=body.reply,
@@ -95,6 +119,7 @@ async def research_verify_endpoint(
     session_id: str,
     recheck: bool = Query(False, description="If true, HEAD-request each entry's source_url to surface upstream reachability state."),
     compare_hash: bool = Query(False, description="If true (§17.126), GET each URL and SHA256-compare against the stored raw_upstream_hash. Implies recheck=true."),
+    principal: Principal = Depends(get_principal),
 ):
     """Session-scoped provenance audit (§17.114 + §17.121).
 
@@ -120,6 +145,12 @@ async def research_verify_endpoint(
         raise HTTPException(status_code=400, detail=f"Invalid session_id (must be UUID): {session_id!r}")
 
     async with async_session() as db_session:
+        # §17.810 — ownership gate before disclosing another user's provenance.
+        await assert_visible(
+            db_session, principal, session_id,
+            table="research_sessions",
+            detail=f"research_session not found: {session_id}",
+        )
         return await verify_session(
             db_session, session_id,
             recheck_upstream=recheck,
@@ -133,6 +164,7 @@ async def research_pdf_endpoint(
     file: UploadFile = File(...),
     extractor: str = Query("auto", pattern="^(auto|pypdf|plumber)$"),
     domain: str | None = Query(None),
+    principal: Principal = Depends(get_principal),
 ):
     """PDF ingestion: upload PDF → extract → ingest → stream SSE."""
     # UploadFile.filename is str | None per Starlette; multipart uploads
@@ -175,6 +207,7 @@ async def research_pdf_endpoint(
         extractor=extractor,
         domain=domain,
         model_overrides=None,
+        owner=principal.identity,
     )
     return StreamingResponse(
         _sse_with_disconnect_watch(request, source),
@@ -196,6 +229,7 @@ async def list_research_sessions(
     limit: int = 25,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     """Paginated research session list with optional status + topic search."""
     if limit < 1 or limit > 100:
@@ -213,9 +247,15 @@ async def list_research_sessions(
     if q:
         where_clauses.append("topic ILIKE :q")
         params["q"] = f"%{q.strip()}%"
-    # SAFE: where_clauses contain only bind-parameter placeholders (:status, :q);
-    # all user values flow through `params` dict. Do not interpolate user input
-    # into where_clauses directly without enum/whitelist validation first.
+    # §17.810 — non-admin sees only their own sessions; admin sees all.
+    owner_clause, owner_params = owner_filter(principal, column="owner")
+    if owner_clause:
+        where_clauses.append(owner_clause.removeprefix(" AND "))
+        params.update(owner_params)
+    # SAFE: where_clauses contain only bind-parameter placeholders (:status, :q,
+    # :principal_owner); all user values flow through `params` dict. Do not
+    # interpolate user input into where_clauses directly without enum/whitelist
+    # validation first.
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     total_row = await db.execute(text(f"SELECT COUNT(*) FROM research_sessions {where_sql}"), params)
@@ -250,7 +290,11 @@ async def list_research_sessions(
 
 
 @router.delete("/research/sessions/{session_id}", response_model=DeleteResponse, tags=["Management"])
-async def delete_research_session(session_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_research_session(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Hard-delete a research session. Note: KB entries already in Milvus are NOT
     removed; this only drops the session metadata + state snapshot."""
     try:
@@ -258,8 +302,12 @@ async def delete_research_session(session_id: str, db: AsyncSession = Depends(ge
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="session_id must be a valid UUID")
 
-    r = await db.execute(text("DELETE FROM research_sessions WHERE id = :id RETURNING id"),
-                          {"id": session_id})
+    # §17.810 — owner predicate: a non-owner deletes zero rows → 404.
+    owner_clause, owner_params = owner_filter(principal, column="owner")
+    r = await db.execute(
+        text(f"DELETE FROM research_sessions WHERE id = :id{owner_clause} RETURNING id"),
+        {"id": session_id, **owner_params},
+    )
     if r.fetchone() is None:
         raise HTTPException(status_code=404, detail=f"research_session not found: {session_id}")
     await db.commit()
@@ -267,19 +315,26 @@ async def delete_research_session(session_id: str, db: AsyncSession = Depends(ge
 
 
 @router.patch("/research/sessions/{session_id}", response_model=ResearchSessionSummary, tags=["Management"])
-async def rename_research_session(session_id: str, body: ResearchSessionRenameInput, db: AsyncSession = Depends(get_db)):
+async def rename_research_session(
+    session_id: str,
+    body: ResearchSessionRenameInput,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Rename a research session (set topic)."""
     try:
         UUID(session_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="session_id must be a valid UUID")
 
-    r = await db.execute(text("""
+    # §17.810 — owner predicate: a non-owner updates zero rows → 404.
+    owner_clause, owner_params = owner_filter(principal, column="owner")
+    r = await db.execute(text(f"""
         UPDATE research_sessions SET topic = :topic, updated_at = NOW()
-        WHERE id = :id
+        WHERE id = :id{owner_clause}
         RETURNING id, topic, status, depth, domain, iterations_completed,
                   total_entries_ingested, coverage_pct, created_at, updated_at
-    """), {"id": session_id, "topic": body.topic})
+    """), {"id": session_id, "topic": body.topic, **owner_params})
     row = r.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail=f"research_session not found: {session_id}")

@@ -477,16 +477,22 @@ async def create_and_run_decomposition(
     *,
     components: list[dict],
     model_overrides: dict | None = None,
+    owner: str | None = None,
 ) -> dict:
     """Insert the umbrella + one child per component, then spawn each child's
-    pipeline. Returns the umbrella id and the child roll-up immediately."""
+    pipeline. Returns the umbrella id and the child roll-up immediately.
+
+    §17.810 — the whole tree (umbrella + every component) is stamped with the
+    same ``owner`` as the caller, so a user sees their decomposition and all its
+    children, and nobody else's.
+    """
     umbrella_id = (await db.execute(
         text("""
-            INSERT INTO jobs (title, input_text, status, job_type)
-            VALUES (:title, :input_text, 'aggregating', 'umbrella')
+            INSERT INTO jobs (title, input_text, status, job_type, owner)
+            VALUES (:title, :input_text, 'aggregating', 'umbrella', :owner)
             RETURNING id
         """),
-        {"title": _truncate_title(idea_text), "input_text": idea_text},
+        {"title": _truncate_title(idea_text), "input_text": idea_text, "owner": owner},
     )).scalar_one()
 
     children: list[dict] = []
@@ -494,9 +500,9 @@ async def create_and_run_decomposition(
         child_id = (await db.execute(
             text("""
                 INSERT INTO jobs
-                    (title, input_text, status, job_type, parent_job_id, component_index, metadata)
+                    (title, input_text, status, job_type, parent_job_id, component_index, metadata, owner)
                 VALUES
-                    (:title, :input_text, 'refining', 'component', :parent, :idx, :meta)
+                    (:title, :input_text, 'refining', 'component', :parent, :idx, :meta, :owner)
                 RETURNING id
             """),
             {
@@ -508,6 +514,7 @@ async def create_and_run_decomposition(
                     "label": comp["label"],
                     "domain": comp.get("domain", "eng"),
                 }}),
+                "owner": owner,
             },
         )).scalar_one()
         children.append({

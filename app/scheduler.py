@@ -606,9 +606,25 @@ async def _execute_research_job(
     session_id: Optional[str] = None
     status = "success"
 
+    # §17.810 — attribute each spawned research session to whoever created the
+    # schedule, so a non-admin owner can see their scheduled runs. Owner is read
+    # from the row (not threaded through the persisted APScheduler args, which
+    # would break backward-compat with jobs enqueued before this column). Fail
+    # open to None (unowned / admin-only) on any read error — never block a run.
+    owner: Optional[str] = None
+    try:
+        async with async_session() as _s:
+            _row = (await _s.execute(
+                text("SELECT owner FROM scheduled_jobs WHERE id = :id"),
+                {"id": schedule_id},
+            )).first()
+            owner = _row[0] if _row else None
+    except Exception:
+        logger.warning('event="schedule_owner_lookup_failed" schedule_id=%s', schedule_id)
+
     async def _consume() -> None:
         nonlocal session_id
-        async for event in run_research(topic=topic, depth=depth, domain=domain):
+        async for event in run_research(topic=topic, depth=depth, domain=domain, owner=owner):
             # run_research yields SSE-formatted strings or dicts; capture session_id
             # from the first event that carries it. Keep logic defensive — format may vary.
             if session_id is None:

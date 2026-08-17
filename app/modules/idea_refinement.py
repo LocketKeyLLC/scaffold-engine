@@ -198,6 +198,7 @@ async def create_ideation_job(
     idea_text: str,
     db: AsyncSession,
     domain: str | None = None,
+    owner: str | None = None,
 ) -> str:
     """§17.454 — Insert the job row in ``refining`` and return its id immediately,
     BEFORE the 100-547s Phase 1 LLM pass runs.
@@ -214,11 +215,11 @@ async def create_ideation_job(
         )
     result = await db.execute(
         text("""
-            INSERT INTO jobs (title, input_text, status)
-            VALUES (:title, :input_text, 'refining')
+            INSERT INTO jobs (title, input_text, status, owner)
+            VALUES (:title, :input_text, 'refining', :owner)
             RETURNING id
         """),
-        {"title": _truncate_title(idea_text), "input_text": idea_text},
+        {"title": _truncate_title(idea_text), "input_text": idea_text, "owner": owner},
     )
     job_id = result.scalar_one()
     await db.commit()
@@ -234,6 +235,7 @@ async def refine_idea(
     model_overrides: dict | None = None,
     target_status: str = "awaiting_confirmation",
     job_id: str | None = None,
+    owner: str | None = None,
 ) -> dict:
     """Refine raw idea text into a structured brief and persist as a job.
 
@@ -255,11 +257,11 @@ async def refine_idea(
     if job_id is None:
         result = await db.execute(
             text("""
-                INSERT INTO jobs (title, input_text, status)
-                VALUES (:title, :input_text, 'refining')
+                INSERT INTO jobs (title, input_text, status, owner)
+                VALUES (:title, :input_text, 'refining', :owner)
                 RETURNING id
             """),
-            {"title": _truncate_title(idea_text), "input_text": idea_text},
+            {"title": _truncate_title(idea_text), "input_text": idea_text, "owner": owner},
         )
         job_id = result.scalar_one()
         await db.commit()

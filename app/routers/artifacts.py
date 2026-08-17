@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
+from app.authz import Principal, assert_visible, get_principal
 from app.database import get_db
 from app.schemas import ArtifactListResponse, ArtifactRead
 
@@ -46,10 +47,14 @@ def _require_uuid(raw: str, field: str) -> str:
 
 @router.get("/jobs/{job_id}/artifacts")
 async def list_job_artifacts(
-    job_id: str, db=Depends(get_db),
+    job_id: str,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ) -> ArtifactListResponse:
     """List a job's artifacts (job-level deliverable first, then per-node)."""
     job_id = _require_uuid(job_id, "job_id")
+    # §17.810 — only the owning principal (or admin) may list a job's artifacts.
+    await assert_visible(db, principal, job_id, detail="Job not found")
     rows = (await db.execute(
         text(
             f"SELECT {_ARTIFACT_LIST_COLS} FROM artifacts "
@@ -65,7 +70,9 @@ async def list_job_artifacts(
 
 @router.get("/artifacts/{artifact_id}")
 async def get_artifact(
-    artifact_id: str, db=Depends(get_db),
+    artifact_id: str,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ) -> ArtifactRead:
     """Fetch a single artifact, including its full content."""
     artifact_id = _require_uuid(artifact_id, "artifact_id")
@@ -75,4 +82,7 @@ async def get_artifact(
     )).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    # §17.810 — gate on the owning job. A non-owner gets the same 404 as a
+    # missing artifact (assert_visible with the artifact's job_id).
+    await assert_visible(db, principal, str(row["job_id"]), detail="Artifact not found")
     return ArtifactRead.model_validate(dict(row))

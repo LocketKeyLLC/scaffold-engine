@@ -214,41 +214,47 @@ def _fake_session_factory():
 
 @pytest.mark.smoke
 async def test_multiuser_master_key_still_admin(_api_key_set, monkeypatch):
-    """Master key authenticates as admin in multi-user mode WITHOUT a DB hit."""
+    """Master key authenticates as admin in multi-user mode WITHOUT a DB hit,
+    and attaches the admin Principal to request.state (§17.810)."""
     import app.config
     monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
-    verify = AsyncMock(return_value=False)
-    monkeypatch.setattr(_api_key_set, "verify_key", verify)
+    resolve = AsyncMock(return_value=None)
+    monkeypatch.setattr(_api_key_set, "resolve_key", resolve)
     monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
 
-    result = await _api_key_set.require_api_key(_mk_request("/dag/abc"), key="testkey123")
+    req = _mk_request("/dag/abc")
+    result = await _api_key_set.require_api_key(req, key="testkey123")
     assert result == "testkey123"
-    verify.assert_not_awaited()  # admin path short-circuits before the DB
+    resolve.assert_not_awaited()  # admin path short-circuits before the DB
+    assert req.state.principal.is_admin  # §17.810 — admin principal attached
 
 
 @pytest.mark.smoke
 async def test_multiuser_live_scoped_key_accepted(_api_key_set, monkeypatch):
-    """A non-master key that verify_key confirms as live is accepted."""
+    """A non-master key that resolve_key confirms as live is accepted, and its
+    Principal (identity from owner tag, role from row) is attached (§17.810)."""
     import app.config
     monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
-    verify = AsyncMock(return_value=True)
-    monkeypatch.setattr(_api_key_set, "verify_key", verify)
+    resolve = AsyncMock(return_value={"id": 7, "owner": "alice", "role": "user"})
+    monkeypatch.setattr(_api_key_set, "resolve_key", resolve)
     monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
 
-    result = await _api_key_set.require_api_key(
-        _mk_request("/dag/abc"), key="sk-scaffold-somelivekey",
-    )
+    req = _mk_request("/dag/abc")
+    result = await _api_key_set.require_api_key(req, key="sk-scaffold-somelivekey")
     assert result == "sk-scaffold-somelivekey"
-    verify.assert_awaited_once()
+    resolve.assert_awaited_once()
+    assert req.state.principal.identity == "alice"
+    assert req.state.principal.role == "user"
+    assert not req.state.principal.is_admin
 
 
 @pytest.mark.smoke
 async def test_multiuser_revoked_or_unknown_key_401(_api_key_set, monkeypatch):
-    """A non-master key that verify_key rejects (revoked/unknown) → 401."""
+    """A non-master key that resolve_key rejects (revoked/unknown) → 401."""
     import app.config
     monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
-    verify = AsyncMock(return_value=False)
-    monkeypatch.setattr(_api_key_set, "verify_key", verify)
+    resolve = AsyncMock(return_value=None)
+    monkeypatch.setattr(_api_key_set, "resolve_key", resolve)
     monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
 
     with pytest.raises(HTTPException) as exc_info:
@@ -256,7 +262,7 @@ async def test_multiuser_revoked_or_unknown_key_401(_api_key_set, monkeypatch):
             _mk_request("/dag/abc"), key="sk-scaffold-revoked",
         )
     assert exc_info.value.status_code == 401
-    verify.assert_awaited_once()
+    resolve.assert_awaited_once()
 
 
 @pytest.mark.smoke
@@ -265,14 +271,14 @@ async def test_singleuser_does_not_consult_db(_api_key_set, monkeypatch):
     WITHOUT ever touching the DB — the scoped-key lookup is gated on the mode."""
     import app.config
     monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
-    verify = AsyncMock(return_value=True)  # would pass if consulted — it must not be
-    monkeypatch.setattr(_api_key_set, "verify_key", verify)
+    resolve = AsyncMock(return_value={"id": 1, "owner": "x", "role": "user"})  # must not be consulted
+    monkeypatch.setattr(_api_key_set, "resolve_key", resolve)
     monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
 
     with pytest.raises(HTTPException) as exc_info:
         await _api_key_set.require_api_key(_mk_request("/dag/abc"), key="sk-scaffold-live")
     assert exc_info.value.status_code == 401
-    verify.assert_not_awaited()
+    resolve.assert_not_awaited()
 # §17.788 — require_openai_key: the native /v1 surface accepts a Bearer token
 # (what OpenAI clients send) OR X-API-Key, against the same SCAFFOLD_API_KEY.
 # ===========================================================================

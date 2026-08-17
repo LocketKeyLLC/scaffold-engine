@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from app.authz import Principal, get_principal, owner_filter
 from app.database import get_db
 from app.modules.recovery import next_actions_for
 from app.schemas import JOB_STATUSES, JobStatus
@@ -150,11 +151,20 @@ async def get_status(
     limit: int = Query(default=20, ge=1, le=100),
     status_filter: Optional[JobStatus] = Query(default=None, alias="status"),
     db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ) -> StatusResponse:
-    """Return job status counts and recent jobs."""
+    """Return job status counts and recent jobs.
+
+    §17.810 — counts and the recent-jobs list are scoped to the caller's own
+    jobs for a non-admin principal; admin (and single-user) sees everything.
+    """
+    # §17.810 — owner predicate reused across both queries below.
+    _oc, _op = owner_filter(principal, column="owner")
+    _count_where = f"WHERE {_oc.removeprefix(' AND ')}" if _oc else ""
     # 1. Status counts
     count_result = await db.execute(
-        text("SELECT status, COUNT(*) AS cnt FROM jobs GROUP BY status")
+        text(f"SELECT status, COUNT(*) AS cnt FROM jobs {_count_where} GROUP BY status"),
+        _op,
     )
     counts = {row.status: row.cnt for row in count_result}
     valid_keys = set(StatusCounts.model_fields.keys())
@@ -181,9 +191,18 @@ async def get_status(
         ) s ON TRUE
     """
     params: dict = {"limit": limit}
+    _recent_where = []
     if status_filter:
-        query += " WHERE j.status = :status_filter"
+        _recent_where.append("j.status = :status_filter")
         params["status_filter"] = status_filter
+    # §17.810 — scope recent jobs to the caller (owner_filter's " AND " prefix
+    # stripped so it can start the WHERE).
+    _oc2, _op2 = owner_filter(principal, column="j.owner")
+    if _oc2:
+        _recent_where.append(_oc2.removeprefix(" AND "))
+        params.update(_op2)
+    if _recent_where:
+        query += " WHERE " + " AND ".join(_recent_where)
     query += " ORDER BY j.updated_at DESC LIMIT :limit"
 
     jobs_result = await db.execute(text(query), params)
@@ -217,7 +236,10 @@ async def get_status(
 
 
 @router.get("/work")
-async def get_work(db=Depends(get_db)) -> WorkResponse:
+async def get_work(
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+) -> WorkResponse:
     """List the user's active (non-terminal) work in one response.
 
     Single-user "you-are-here" primitive backing the pipeline's /here,
@@ -227,9 +249,11 @@ async def get_work(db=Depends(get_db)) -> WorkResponse:
     Replaces the per-replica, chat-scoped recall the pipeline relied on
     (OWUI doesn't reliably deliver chat_id).
     """
+    # §17.810 — owner predicate reused for both the job and session queries.
+    _oc, _op = owner_filter(principal, column="j.owner")
     # 1. Non-terminal jobs, newest first, with node counts + recovery actions.
     job_rows = await db.execute(
-        text("""
+        text(f"""
             SELECT j.id, j.title, j.status, j.job_type, j.error_summary,
                    j.updated_at, COALESCE(n.node_count, 0) AS node_count,
                    s.id AS session_id
@@ -239,7 +263,7 @@ async def get_work(db=Depends(get_db)) -> WorkResponse:
                 FROM dag_nodes GROUP BY job_id
             ) n ON n.job_id = j.id
             -- §17.599 — the active assist session (if any) so assisted_* jobs'
-            -- {session_id} recovery links resolve to the real session id, not
+            -- {{session_id}} recovery links resolve to the real session id, not
             -- the job id (they differ; the job-id link 404s).
             LEFT JOIN LATERAL (
                 SELECT id FROM assist_sessions
@@ -247,9 +271,10 @@ async def get_work(db=Depends(get_db)) -> WorkResponse:
                 ORDER BY last_activity_at DESC
                 LIMIT 1
             ) s ON TRUE
-            WHERE j.status NOT IN ('completed', 'failed', 'cancelled')
+            WHERE j.status NOT IN ('completed', 'failed', 'cancelled'){_oc}
             ORDER BY j.updated_at DESC
         """),
+        _op,
     )
     jobs = [
         WorkJob(
@@ -268,16 +293,17 @@ async def get_work(db=Depends(get_db)) -> WorkResponse:
         for row in job_rows
     ]
 
-    # 2. Active/paused assist sessions, joined to the job title.
+    # 2. Active/paused assist sessions, joined to the job title (owner-scoped).
     sess_rows = await db.execute(
-        text("""
+        text(f"""
             SELECT s.id, s.job_id, s.status, s.current_node_key,
                    s.last_activity_at, j.title
             FROM assist_sessions s
             JOIN jobs j ON j.id = s.job_id
-            WHERE s.status IN ('active', 'paused')
+            WHERE s.status IN ('active', 'paused'){_oc}
             ORDER BY s.last_activity_at DESC
         """),
+        _op,
     )
     sessions = [
         WorkAssistSession(
@@ -314,15 +340,19 @@ async def get_logs(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ) -> LogsResponse:
     """Return per-node execution history for a job (paginated)."""
     job_id = _require_uuid(job_id, field="job_id")
 
+    # §17.810 — owner predicate folded into the existence probe so a non-owner
+    # gets the same "Job not found" as a missing job.
+    _oc, _op = owner_filter(principal, column="owner")
     # 1. Verify job exists, get status + (optional) compiled output
     job_result = await db.execute(
-        text("SELECT status, compiled_output, deliverable_kind "
-             "FROM jobs WHERE id = :job_id"),
-        {"job_id": job_id},
+        text(f"SELECT status, compiled_output, deliverable_kind "
+             f"FROM jobs WHERE id = :job_id{_oc}"),
+        {"job_id": job_id, **_op},
     )
     job_row = job_result.first()
     if not job_row:

@@ -9,6 +9,16 @@ hitting ``localhost:8000/web/jobs`` works without sending headers.
 The embedded ``scaffold_client.Client`` carries the API key for the
 loopback HTTP call.
 
+§17.810 — MULTI-USER LIMITATION. This console has NO per-browser identity
+(no cookie / session / login) and the loopback carries the **master** key, so
+every ``/web`` request resolves to the admin principal and sees ALL users'
+jobs. It is therefore an **operator/admin console**, not a per-user surface.
+In a multi-user deployment (``MULTI_USER_ENABLED=true``) it MUST be
+network-restricted (bind to localhost / put it behind an authenticating
+reverse proxy) — per-user access is via the direct JSON API and the ``/ui``
+SPA, both of which send ``X-API-Key`` and resolve+enforce a Principal
+(``app/authz.py``). Building a browser login here is future work.
+
 The Client is module-level cached to avoid re-instantiating its
 ``httpx.Client`` per request. Tests substitute it via dependency
 injection (``app.dependency_overrides[get_sdk_client] = ...``) so
