@@ -109,6 +109,14 @@ async def test_async_jobs_status(aclient):
     assert args == ("GET", "/exec/status/abc")
 
 
+async def test_async_jobs_traces(aclient):
+    with patch.object(aclient, "request", AsyncMock(return_value={"traces": []})) as m:
+        await aclient.jobs.traces("abc", kind="chat", limit=5)
+    args, kwargs = _last_call(m)
+    assert args == ("GET", "/trace/abc")
+    assert kwargs["params"] == {"limit": 5, "offset": 0, "kind": "chat"}
+
+
 async def test_async_jobs_update(aclient):
     with patch.object(aclient, "request", AsyncMock(return_value={})) as m:
         await aclient.jobs.update("abc", title="renamed")

@@ -180,6 +180,24 @@ def test_jobs_status(client):
     assert args == ("GET", "/exec/status/abc")
 
 
+def test_jobs_traces_default_params(client):
+    with patch.object(client._http, "request",
+                      return_value=_resp(200, {"traces": []})) as m:
+        client.jobs.traces("abc")
+    args, kwargs = _last_call(m)
+    assert args == ("GET", "/trace/abc")
+    assert kwargs["params"] == {"limit": 50, "offset": 0}  # kind dropped (None)
+
+
+def test_jobs_traces_kind_filter_threads(client):
+    with patch.object(client._http, "request",
+                      return_value=_resp(200, {"traces": []})) as m:
+        client.jobs.traces("abc", kind="chat", limit=10, offset=20)
+    args, kwargs = _last_call(m)
+    assert args == ("GET", "/trace/abc")
+    assert kwargs["params"] == {"limit": 10, "offset": 20, "kind": "chat"}
+
+
 def test_jobs_delete(client):
     with patch.object(client._http, "request", return_value=_resp(200, {"deleted": True})) as m:
         client.jobs.delete("abc")

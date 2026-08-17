@@ -36,6 +36,7 @@ ROLE_FIELDS = frozenset({
     "model_cloud_heavy",
     "model_cloud_alt",
     "model_fallback",
+    "model_triage",  # §17.791 — native conversational triage + /go synthesis
 })
 
 # §17.483 — roles whose model can be re-pointed at runtime. The embedder and
@@ -394,6 +395,15 @@ class Settings(BaseSettings):
     model_verifier_provider: ProviderName = "ollama"
     model_research_extract_provider: ProviderName = "ollama"
     model_coder_provider: ProviderName = "ollama"
+    # §17.791 — native triage/synthesis model (mirrors the OWUI pipeline's live
+    # triage_model). A thinking model; the native path strips <think> and uses a
+    # generous max_tokens so it doesn't return empty-after-strip.
+    model_triage: str = "qwen3.5:397b-cloud"
+    model_triage_provider: ProviderName = "ollama"
+    # §17.791 — triage history window (turns). Pins every user turn (facts) +
+    # the last N turns to bound CPU-only thinking-model latency. Mirror of the
+    # pipeline valve triage_history_window.
+    triage_history_window: int = Field(default=8, ge=1, le=100)
     model_router_provider: ProviderName = "ollama"
     model_fallback_provider: ProviderName = "ollama"
     model_cloud_heavy_provider: ProviderName = "ollama"
@@ -1326,6 +1336,19 @@ class Settings(BaseSettings):
     # Anthropic providers, or seeded :cloud tags); otherwise cost stays $0 and
     # the token cap is the effective lever.
     cost_budget_default_max_usd: float = Field(default=0.0, ge=0.0)
+    # §17.786 — full request/response trace capture. Sprint J.3's llm_call_logs
+    # records only the METRICS of each LLM call (tokens/latency/cost); this valve
+    # additionally captures the CONTENT — prompt or serialized messages, system,
+    # sampling params, response text, tool calls, error — into the `llm_traces`
+    # table (JOINs 1:1 to llm_call_logs on job_id/node_id). Default OFF because
+    # storing full prompts/responses has storage + PII implications; flip on to
+    # debug a run or build a replay corpus. Fire-and-forget: a trace-write
+    # failure never breaks the LLM call path (mirrors record_llm_call).
+    trace_capture_enabled: bool = Field(default=False)
+    # Per-field truncation cap for captured content (system/request/response).
+    # Bounds a single trace row so a runaway prompt/response can't bloat the
+    # table; the truncated text is suffixed with a "…[+N chars]" marker.
+    trace_capture_max_chars: int = Field(default=8000, ge=256, le=1_000_000)
     # §17.442 — bound concurrent ideation requests (/ideas + /ideate). Unlike
     # execution, ideation had NO cap: the §17.441 stress test fired 6 concurrent
     # /ideate and all 6 hit the cloud at once (latency 33→81 s). The cap queues
@@ -1398,6 +1421,19 @@ class Settings(BaseSettings):
     mcp_call_timeout: float = Field(default=60.0, ge=1.0, le=600.0)
     # Idle TTL (seconds) for a cached client session before it is torn down.
     mcp_session_ttl: float = Field(default=300.0, ge=10.0, le=3600.0)
+
+    # §17.788 — native OpenAI-compatible surface. When True, the orchestrator
+    # mounts an OpenAI chat-protocol sub-app at /v1 (POST /v1/chat/completions +
+    # GET /v1/models), so any OpenAI client (OWUI as an OpenAI connection, the
+    # /ui SPA chat, external SDKs) drives the engine directly and the OWUI
+    # pipeline adapter becomes optional. Mounted as a sub-app so it bypasses the
+    # global X-API-Key dependency and carries its own Bearer-or-X-API-Key guard
+    # (require_openai_key). Default off — the pipeline path is unchanged while
+    # off. Phase 0 is a passthrough to model_general; triage/NL routing land in
+    # later phases (see docs/native_openai_surface_plan.md).
+    native_openai_enabled: bool = Field(default=False)
+    # Advertised model id on GET /v1/models and the default routed persona.
+    native_openai_model_id: str = Field(default="scaffold-engine")
 
     # §17.624 — hands-on assist gate. When True (default), the autonomous
     # executor inspects a freshly-generated DAG before running it: if the

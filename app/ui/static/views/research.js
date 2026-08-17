@@ -3,7 +3,7 @@
 // pause/reply channel (POST /research/reply). Reuses the fetch SSE reader.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, fmtNum, mdToHtml } from "../util.js";
-import { statusBadge, loading, errorPanel, toast } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
 
 const RESEARCH_ICON = {
   research_started: "◎",
@@ -253,7 +253,15 @@ export default function research(container, params) {
       if (disposed) return;
       const sessions = res.sessions || [];
       if (!sessions.length) {
-        mount(listOutlet, el("div", { class: "card empty-state small" }, el("p", { text: "No research sessions yet. Run one above." })));
+        mount(listOutlet, emptyState({
+          icon: "◎",
+          title: "No research yet",
+          body: "Research a topic, URL, GitHub repo, or OpenAPI spec — sessions you run appear here.",
+          action: {
+            label: "Start research",
+            onClick: () => { topicInput.focus(); topicInput.scrollIntoView({ block: "center" }); },
+          },
+        }));
         return;
       }
       mount(

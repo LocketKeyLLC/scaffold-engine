@@ -67,6 +67,32 @@ class JobsResource:
         """
         return self._client.request("GET", f"/jobs/{job_id}/costs")
 
+    def traces(
+        self,
+        job_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        kind: str | None = None,
+    ) -> dict[str, Any]:
+        """``GET /trace/{job_id}`` — full request/response content of a job's
+        LLM calls, in call order (oldest first). §17.787.
+
+        The content sibling of :meth:`costs`: where ``costs`` returns tokens
+        and USD, this returns the actual prompt/messages + system + sampling
+        params sent and the response text + tool calls + error returned — the
+        material for debugging or replaying a run. ``kind`` filters to one
+        ``request_kind`` (``generate`` | ``chat`` | ``tool_call`` | ``embed``);
+        ``limit``/``offset`` page through a long run.
+
+        Rows exist only for calls made while the orchestrator's default-OFF
+        ``trace_capture_enabled`` valve was on — the response's
+        ``capture_enabled`` echoes that valve so an empty ``traces`` list can
+        be read correctly (capture-off vs. no LLM calls).
+        """
+        params = _drop_none({"limit": limit, "offset": offset, "kind": kind})
+        return self._client.request("GET", f"/trace/{job_id}", params=params)
+
     def set_synthesis_override(
         self, job_id: str, override: bool | None,
     ) -> dict[str, Any]:

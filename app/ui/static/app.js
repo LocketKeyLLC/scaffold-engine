@@ -4,8 +4,28 @@ import * as api from "./api.js";
 import * as router from "./router.js";
 import { placeholder } from "./views/placeholder.js";
 import { mountCommandPalette } from "./command_palette.js";
+import { toast } from "./components.js";
+
+// ── Global error surface ──────────────────────────────────────────────
+// A backstop so anything that escapes a view's own try/catch becomes a
+// visible toast instead of vanishing into the console. Deduped (a render
+// loop can't spam) and quiet for benign fetch-abort-on-navigation.
+let _lastErr = { msg: "", at: 0 };
+function surfaceError(err) {
+  if (err && err.name === "AbortError") return;
+  const raw = err?.detail || err?.message || (typeof err === "string" ? err : "Unexpected error");
+  const msg = String(raw);
+  const now = Date.now();
+  if (msg === _lastErr.msg && now - _lastErr.at < 4000) return;
+  _lastErr = { msg, at: now };
+  toast(msg.length > 160 ? msg.slice(0, 157) + "…" : msg, "err");
+}
+window.addEventListener("unhandledrejection", (e) => surfaceError(e.reason));
+window.addEventListener("error", (e) => { if (e.error) surfaceError(e.error); });
 
 const NAV = [
+  { id: "new", path: "/new", label: "New idea", icon: "＋" },
+  { id: "chat", path: "/chat", label: "Chat", icon: "💬" },
   { id: "dashboard", path: "/", label: "Dashboard", icon: "◈" },
   { id: "approvals", path: "/approvals", label: "Approvals", icon: "⏻" },
   { id: "dag", path: "/dag", label: "DAG Canvas", icon: "⬡" },
@@ -126,7 +146,42 @@ function buildChrome() {
     )
   );
 
-  mount(root, el("div", { class: "shell" }, sidebar, outlet));
+  // ── Mobile chrome: hamburger + off-canvas slide-over ────────────────
+  // On wide screens the sidebar is a static grid column and these are
+  // display:none (CSS). At ≤820px the sidebar becomes a fixed drawer that
+  // this scrim/hamburger open and close.
+  function openNav() {
+    sidebar.classList.add("open");
+    scrim.classList.remove("hidden");
+    hamburger.setAttribute("aria-expanded", "true");
+  }
+  function closeNav() {
+    sidebar.classList.remove("open");
+    scrim.classList.add("hidden");
+    hamburger.setAttribute("aria-expanded", "false");
+  }
+  const scrim = el("div", { class: "scrim hidden", onClick: closeNav });
+  const hamburger = el("button", {
+    class: "hamburger",
+    "aria-label": "Open navigation",
+    "aria-expanded": "false",
+    text: "☰",
+    onClick: openNav,
+  });
+  const topbar = el(
+    "div",
+    { class: "mobile-topbar" },
+    hamburger,
+    el("span", { class: "brand-logo", text: "🧬" }),
+    el("span", { class: "brand-name", text: "Scaffold" })
+  );
+  // Tapping a destination navigates → close the drawer; Escape closes too.
+  navLinks.forEach((a) => a.addEventListener("click", closeNav));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeNav();
+  });
+
+  mount(root, el("div", { class: "shell" }, topbar, sidebar, scrim, outlet));
   mountCommandPalette(); // idempotent; overlay lives on document.body
   startHealthPolling(healthDot, healthText);
 }
@@ -190,6 +245,8 @@ function lazy(name, title) {
     });
 }
 const VIEWS = {
+  new: lazy("compose", "New idea"),
+  chat: lazy("chat", "Chat"),
   dashboard: lazy("dashboard", "Dashboard"),
   approvals: lazy("approvals", "Approval Gate"),
   dag: lazy("dag", "DAG Canvas"),
@@ -208,6 +265,8 @@ async function loadAndRender(name, params, path) {
 
 function registerRoutes() {
   router.route("/", (p) => loadAndRender("dashboard", p, router.currentPath()));
+  router.route("/new", (p) => loadAndRender("new", p, router.currentPath()));
+  router.route("/chat", (p) => loadAndRender("chat", p, router.currentPath()));
   router.route("/approvals", (p) => loadAndRender("approvals", p, router.currentPath()));
   router.route("/approvals/:jobId", (p) => loadAndRender("approvals", p, router.currentPath()));
   router.route("/dag", (p) => loadAndRender("dag", p, router.currentPath()));

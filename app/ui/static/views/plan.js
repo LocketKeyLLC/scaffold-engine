@@ -53,7 +53,13 @@ function renderPlan(container, jobId) {
   const drawer = el("div", { class: "dag-drawer hidden" });
   const reorderPanel = el("div", { class: "reorder-panel hidden" });
   const stage = el("div", { class: "dag-stage" }, canvas, drawer);
-  mount(container, header, warning, reorderPanel, stage);
+  // Shown only at ≤820px (CSS): plan editing is a desktop-first surface.
+  const mobileNote = el(
+    "div",
+    { class: "mobile-note" },
+    "✎ Editing the plan is easiest on a wider screen. You can still tap a node to review it."
+  );
+  mount(container, header, mobileNote, warning, reorderPanel, stage);
   mount(canvas, loading("Loading plan…"));
 
   const graph = createGraphCanvas(canvas);

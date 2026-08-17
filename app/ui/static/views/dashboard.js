@@ -26,6 +26,10 @@ const ATTENTION = new Set([
   "blocked",
 ]);
 
+// First-run onboarding: shown once when the install has zero jobs, then
+// suppressed via this localStorage flag (survives navigation + reloads).
+const ONBOARD_KEY = "scaffold_onboarded";
+
 /** Per-job navigation targets derived from status + node_count. */
 function jobLinks(job) {
   const links = [];
@@ -114,7 +118,58 @@ export default function dashboard(container) {
     }
   }
 
+  // First-run welcome: a 3-step orientation shown only on an empty install.
+  function welcomeCard() {
+    const step = (n, title, body) =>
+      el(
+        "div",
+        { class: "welcome-step" },
+        el("div", { class: "welcome-step-n", text: String(n) }),
+        el(
+          "div",
+          {},
+          el("div", { class: "welcome-step-t", text: title }),
+          el("div", { class: "welcome-step-b dim", text: body })
+        )
+      );
+    return el(
+      "div",
+      { class: "card card-pad welcome-card" },
+      el("div", { class: "welcome-logo", text: "🧬" }),
+      el("h2", { class: "welcome-title", text: "Welcome to Scaffold Engine" }),
+      el("p", {
+        class: "welcome-sub dim",
+        text: "Turn an idea into a planned, executed multi-step workflow. Three steps to your first run:",
+      }),
+      el(
+        "div",
+        { class: "welcome-steps" },
+        step(1, "Create an idea", "Describe what you want built — the engine triages it and refines it into a brief."),
+        step(2, "Approve the plan", "Review the feasibility assessment and generated DAG, edit if needed, then approve."),
+        step(3, "Watch it run", "Follow live execution node-by-node here, then collect the compiled output.")
+      ),
+      el(
+        "div",
+        { class: "welcome-actions row" },
+        el("a", { class: "btn btn-primary", href: "#/new", text: "＋ Create your first idea" }),
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          text: "Dismiss",
+          onClick: () => {
+            localStorage.setItem(ONBOARD_KEY, "1");
+            load();
+          },
+        })
+      )
+    );
+  }
+
   function render(status, work) {
+    // Empty install + not yet dismissed → orientation instead of zeroed tiles.
+    if ((status.total_jobs || 0) === 0 && !localStorage.getItem(ONBOARD_KEY)) {
+      mount(outlet, welcomeCard());
+      return;
+    }
     const counts = status.status_counts || {};
     const sum = (set) => Object.entries(counts).reduce((a, [k, v]) => a + (set.has(k) ? v : 0), 0);
     const activeN = sum(ACTIVE);

@@ -332,6 +332,11 @@ services:
       MCP_TOOL_ENABLED: "${MCP_TOOL_ENABLED:-false}"
       MCP_SERVER_ENABLED: "${MCP_SERVER_ENABLED:-false}"
       MCP_SERVERS_CONFIG: "${MCP_SERVERS_CONFIG:-[]}"
+      # §17.788 — native OpenAI surface at /v1 (chat/completions + models). Off
+      # by default (the OWUI pipeline path is unchanged); flip to true in .env to
+      # point OpenAI clients (OWUI-as-connection, the /ui SPA, external SDKs) at
+      # the engine directly. See docs/native_openai_surface_plan.md.
+      NATIVE_OPENAI_ENABLED: "${NATIVE_OPENAI_ENABLED:-false}"
       SCHEDULER_ENABLED: "true"
       SCHEDULER_TIMEZONE: "UTC"
       # §17.803 — role→model learning: a periodic golden re-A/B that stages

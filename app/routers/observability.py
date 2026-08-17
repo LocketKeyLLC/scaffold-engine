@@ -22,7 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.modules import observability_rollups
-from app.schemas import ErrorLogResolveInput, ErrorLogResolveResponse
+from app.schemas import (
+    ErrorLogResolveInput,
+    ErrorLogResolveResponse,
+    JobTracesResponse,
+)
 
 router = APIRouter(tags=["Observability"])
 
@@ -131,6 +135,46 @@ async def quality_rollup_endpoint(
         grounding_threshold=grounding_threshold,
         db=db,
     )
+
+
+@router.get(
+    "/trace/{job_id}",
+    response_model=JobTracesResponse,
+    tags=["Observability"],
+)
+async def job_traces_endpoint(
+    job_id: str,
+    limit: int = Query(50, ge=1, le=500,
+        description="Max trace rows returned (default 50)."),
+    offset: int = Query(0, ge=0,
+        description="Rows to skip, for paging through a long run."),
+    kind: str | None = Query(None,
+        description="Filter to one request_kind: generate | chat | tool_call | embed."),
+    db: AsyncSession = Depends(get_db),
+) -> JobTracesResponse:
+    """§17.787 — full request/response content of a job's LLM calls.
+
+    Surfaces the ``llm_traces`` content sink (§17.786) for one job in call
+    order (oldest first) so a run can be debugged or replayed: each row is
+    the prompt/messages + system + sampling params we sent and the response
+    text + tool calls + error we got back, keyed to the same ``call_kind`` /
+    ``node_id`` as the ``llm_call_logs`` metrics row.
+
+    Content exists only for calls made while the default-OFF
+    ``trace_capture_enabled`` valve was on; ``capture_enabled`` in the
+    response echoes the current valve so an empty result reads correctly
+    (capture-off vs. no-calls). 422 on a non-UUID ``job_id``; fail-open on a
+    DB error (empty shape + ``data_source='error'``), never 500.
+    """
+    try:
+        UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    payload = await observability_rollups.get_job_traces(
+        job_id=job_id, limit=limit, offset=offset, kind=kind, db=db,
+    )
+    return JobTracesResponse(**payload)
 
 
 @router.patch(

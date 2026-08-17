@@ -43,6 +43,20 @@ class AsyncJobsResource:
         """``GET /jobs/{job_id}/costs`` — cost + latency rollup. J.3.b."""
         return await self._client.request("GET", f"/jobs/{job_id}/costs")
 
+    async def traces(
+        self,
+        job_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        kind: str | None = None,
+    ) -> dict[str, Any]:
+        """``GET /trace/{job_id}`` — full request/response content of a job's
+        LLM calls, in call order. §17.787. Content sibling of :meth:`costs`;
+        ``kind`` filters ``request_kind``, ``limit``/``offset`` paginate."""
+        params = _drop_none({"limit": limit, "offset": offset, "kind": kind})
+        return await self._client.request("GET", f"/trace/{job_id}", params=params)
+
     async def set_synthesis_override(
         self, job_id: str, override: bool | None,
     ) -> dict[str, Any]:

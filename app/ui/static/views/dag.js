@@ -3,7 +3,7 @@
 // and a read-only node drawer that lazy-loads the node's output + prompt.
 import * as api from "../api.js";
 import { el, mount, shortId, mdToHtml, timeAgo } from "../util.js";
-import { statusBadge, loading, errorPanel } from "../components.js";
+import { statusBadge, loading, errorPanel, emptyState } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
 
 // ── Canvas view for one job ──────────────────────────────────────────
@@ -149,7 +149,12 @@ function renderPicker(container) {
       if (disposed) return;
       const jobs = (res.jobs || []).filter((j) => (j.node_count || 0) > 0);
       if (!jobs.length) {
-        mount(outlet, el("div", { class: "card empty-state" }, el("div", { class: "empty-icon", text: "⬡" }), el("p", { text: "No jobs with a DAG yet." })));
+        mount(outlet, emptyState({
+          icon: "⬡",
+          title: "No DAGs yet",
+          body: "Approve a plan for a job and its dependency graph appears here, ready to inspect and pan.",
+          action: { label: "＋ New idea", href: "#/new" },
+        }));
         return;
       }
       mount(

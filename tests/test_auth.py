@@ -273,6 +273,71 @@ async def test_singleuser_does_not_consult_db(_api_key_set, monkeypatch):
         await _api_key_set.require_api_key(_mk_request("/dag/abc"), key="sk-scaffold-live")
     assert exc_info.value.status_code == 401
     verify.assert_not_awaited()
+# §17.788 — require_openai_key: the native /v1 surface accepts a Bearer token
+# (what OpenAI clients send) OR X-API-Key, against the same SCAFFOLD_API_KEY.
+# ===========================================================================
+
+
+@pytest.mark.smoke
+async def test_openai_key_accepts_bearer(_api_key_set):
+    result = await _api_key_set.require_openai_key(bearer="Bearer testkey123", x_api_key=None)
+    assert result == "testkey123"
+
+
+@pytest.mark.smoke
+async def test_openai_key_accepts_bearer_case_insensitive(_api_key_set):
+    result = await _api_key_set.require_openai_key(bearer="bearer testkey123", x_api_key=None)
+    assert result == "testkey123"
+
+
+@pytest.mark.smoke
+async def test_openai_key_accepts_bare_token(_api_key_set):
+    """Tolerant of a bare token with no ``Bearer `` prefix."""
+    result = await _api_key_set.require_openai_key(bearer="testkey123", x_api_key=None)
+    assert result == "testkey123"
+
+
+@pytest.mark.smoke
+async def test_openai_key_accepts_x_api_key_fallback(_api_key_set):
+    """The /ui SPA sends X-API-Key, not Bearer — it must still authenticate."""
+    result = await _api_key_set.require_openai_key(bearer=None, x_api_key="testkey123")
+    assert result == "testkey123"
+
+
+@pytest.mark.smoke
+async def test_openai_key_bearer_precedence_over_x_api_key(_api_key_set):
+    """When both are present, a valid Bearer authenticates even if X-API-Key is junk."""
+    result = await _api_key_set.require_openai_key(bearer="Bearer testkey123", x_api_key="junk")
+    assert result == "testkey123"
+
+
+@pytest.mark.smoke
+async def test_openai_key_rejects_wrong(_api_key_set):
+    with pytest.raises(HTTPException) as exc_info:
+        await _api_key_set.require_openai_key(bearer="Bearer nope", x_api_key=None)
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.smoke
+async def test_openai_key_rejects_missing(_api_key_set):
+    with pytest.raises(HTTPException) as exc_info:
+        await _api_key_set.require_openai_key(bearer=None, x_api_key=None)
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.smoke
+async def test_openai_key_non_ascii_raises_401_not_typeerror(_api_key_set):
+    """§17.596 — non-ASCII header bytes must yield a clean 401, not a TypeError."""
+    with pytest.raises(HTTPException) as exc_info:
+        await _api_key_set.require_openai_key(bearer="Bearer caf\xe9\xff", x_api_key=None)
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.smoke
+async def test_openai_key_auth_disabled_bypasses(_api_key_unset):
+    """SCAFFOLD_AUTH_DISABLED=1 bypasses the /v1 guard too (dev opt-out parity)."""
+    result = await _api_key_unset.require_openai_key(bearer=None, x_api_key=None)
+    assert result == ""
 
 
 @pytest.mark.smoke

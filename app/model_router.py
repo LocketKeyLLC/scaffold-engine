@@ -280,7 +280,42 @@ async def _record_call(resp: ModelResponse) -> ModelResponse:
         record_llm_span(resp)
     except Exception:
         logger.debug("record_llm_span_escape", exc_info=True)
+    # §17.786 — capture the full request/response CONTENT into llm_traces.
+    # No-op unless settings.trace_capture_enabled is on; reads the request
+    # snapshot set by _begin_trace at the public entry point. Guarded so a
+    # trace-write failure never breaks the LLM call path.
+    try:
+        from app.utils.trace_capture import record_trace
+        await record_trace(resp)
+    except Exception:
+        logger.debug("record_trace_escape", exc_info=True)
     return resp
+
+
+def _begin_trace(
+    kind: str,
+    *,
+    prompt: str | None = None,
+    messages: list[dict[str, Any]] | None = None,
+    system: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> None:
+    """§17.786 — stash the in-flight request for the trace writer.
+
+    Called at the top of each public entry point (generate/chat/tool_call/
+    embed). The resolved model/provider/tokens are read from the returned
+    ``ModelResponse`` at write time, so this only needs the request content +
+    sampling params known here. No-op (and cheap) when trace capture is off;
+    never raises."""
+    try:
+        from app.utils.trace_capture import set_current_request
+        set_current_request(
+            kind, prompt=prompt, messages=messages, system=system,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+    except Exception:
+        logger.debug("begin_trace_escape", exc_info=True)
 
 
 async def _dispatch_with_retry(
@@ -551,6 +586,10 @@ async def generate(
     ``_effective_response_schema``.
     """
     _reject_role_model_collision(role, model)
+    _begin_trace(
+        "generate", prompt=prompt, system=system,
+        temperature=temperature, max_tokens=max_tokens,
+    )
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
         schema = _effective_response_schema(response_schema, provider)
@@ -644,6 +683,10 @@ async def chat(
     valve is on AND the resolved provider enforces schemas.
     """
     _reject_role_model_collision(role, model)
+    _begin_trace(
+        "chat", messages=messages,
+        temperature=temperature, max_tokens=max_tokens,
+    )
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
         schema = _effective_response_schema(response_schema, provider)
@@ -789,6 +832,10 @@ async def _tool_call_once(
     """One tool-call draw (native-first-then-coax + telemetry). See ``tool_call``
     for the retry wrapper (§17.583)."""
     _reject_role_model_collision(role, model)
+    _begin_trace(
+        "tool_call", messages=messages,
+        temperature=temperature, max_tokens=max_tokens,
+    )
 
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
@@ -966,6 +1013,7 @@ async def embed(
     """
     _reject_role_model_collision(role, model)
     inputs = text if isinstance(text, list) else [text]
+    _begin_trace("embed", messages=[{"role": "input", "content": s} for s in inputs])
 
     if role:
         resolved_model, provider = _resolve_role(role, overrides)

@@ -5,7 +5,7 @@
 // / assist_guide_done). Message composer persists via /assist/{id}/turn.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, fmtDate, mdToHtml } from "../util.js";
-import { statusBadge, loading, errorPanel, toast } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
 
 // ── Picker ────────────────────────────────────────────────────────────
 function renderPicker(container) {
@@ -61,7 +61,12 @@ function renderPicker(container) {
         );
       }
       if (!blocks.length) {
-        mount(outlet, el("div", { class: "card empty-state" }, el("div", { class: "empty-icon", text: "✦" }), el("p", { text: "No assist sessions. Park a job as a plan (awaiting_assist) to drive it here." })));
+        mount(outlet, emptyState({
+          icon: "✦",
+          title: "No assist sessions",
+          body: "Park a job as a plan (status: awaiting_assist) to drive it step-by-step here with the assistant.",
+          action: { label: "＋ New idea", href: "#/new" },
+        }));
         return;
       }
       mount(outlet, ...blocks);

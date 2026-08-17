@@ -285,6 +285,48 @@ def test_jobs_status_prints_key_fields(runner):
 
 
 # ---------------------------------------------------------------------------
+# §17.787 — `scaffold jobs traces <id>`
+# ---------------------------------------------------------------------------
+
+
+def test_jobs_traces_renders_rows(runner):
+    payload = {
+        "job_id": "abc", "count": 1, "limit": 50, "offset": 0,
+        "capture_enabled": True, "data_source": "ok",
+        "traces": [{
+            "id": 7, "request_kind": "chat", "provider": "openai",
+            "model": "gpt-4o", "call_kind": "synthesis", "latency_ms": 900,
+            "success": True, "system_prompt": "sys", "request_content": "REQ",
+            "response_content": "RESP", "tool_calls": None, "error": None,
+        }],
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = payload
+        res = runner.invoke(cli, ["jobs", "traces", "abc", "--kind", "chat"])
+    assert res.exit_code == 0
+    assert "capture: on" in res.output
+    assert "#7  chat  openai/gpt-4o  [ok]" in res.output
+    assert "request:  REQ" in res.output
+    assert "response: RESP" in res.output
+    # kind filter + pagination threaded into the request params.
+    _, kwargs = ClientCls.return_value.__enter__.return_value.get.call_args
+    assert kwargs["params"]["kind"] == "chat"
+
+
+def test_jobs_traces_hints_when_capture_off_and_empty(runner):
+    payload = {
+        "job_id": "abc", "count": 0, "limit": 50, "offset": 0,
+        "capture_enabled": False, "data_source": "ok", "traces": [],
+    }
+    with patch("scaffold_cli.main.Client") as ClientCls:
+        ClientCls.return_value.__enter__.return_value.get.return_value = payload
+        res = runner.invoke(cli, ["jobs", "traces", "abc"])
+    assert res.exit_code == 0
+    assert "capture: off" in res.output
+    assert "trace_capture_enabled" in res.output
+
+
+# ---------------------------------------------------------------------------
 # J.3.c — `--costs` flag on `scaffold jobs status`
 # ---------------------------------------------------------------------------
 

@@ -4,7 +4,7 @@
 // GET /jobs/{id}.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, mdToHtml, copy } from "../util.js";
-import { statusBadge, loading, errorPanel, toast } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
 
 function download(filename, textContent) {
   const blob = new Blob([textContent], { type: "text/markdown" });
@@ -32,7 +32,12 @@ function renderPicker(container) {
       if (disposed) return;
       const jobs = res.jobs || [];
       if (!jobs.length) {
-        mount(outlet, el("div", { class: "card empty-state" }, el("div", { class: "empty-icon", text: "▤" }), el("p", { text: "No completed jobs yet." })));
+        mount(outlet, emptyState({
+          icon: "▤",
+          title: "No outputs yet",
+          body: "Finished jobs and their compiled deliverables show up here. Start something to see its output.",
+          action: { label: "＋ New idea", href: "#/new" },
+        }));
         return;
       }
       mount(
@@ -105,7 +110,7 @@ function renderOutput(container, jobId) {
 
       const compiledBlock = compiled
         ? el("div", { class: "card card-pad output-doc" }, el("div", { class: "md", html: mdToHtml(compiled) }))
-        : el("div", { class: "card empty-state" }, el("div", { class: "empty-icon", text: "∅" }), el("p", { text: "No compiled output for this job." }));
+        : emptyState({ icon: "∅", title: "No compiled output", body: "This job hasn't produced a deliverable yet. Individual node outputs are below." });
 
       const nodeBlocks = (logs.nodes || []).map((n) =>
         el(

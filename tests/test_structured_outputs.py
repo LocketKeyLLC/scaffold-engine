@@ -103,13 +103,24 @@ def test_apply_openai_response_format_dict_string_none():
     _apply_openai_response_format(p, _SCHEMA)
     assert p["response_format"]["type"] == "json_schema"
     assert p["response_format"]["json_schema"]["schema"] == _SCHEMA
-    assert p["response_format"]["json_schema"]["strict"] is False
+    # §17.789 — _SCHEMA qualifies for strict mode (object, additionalProperties
+    # false, required == all property keys), so strict is now enabled.
+    assert p["response_format"]["json_schema"]["strict"] is True
     p = {}
     _apply_openai_response_format(p, "json")
     assert p["response_format"] == {"type": "json_object"}
     p = {}
     _apply_openai_response_format(p, None)
     assert "response_format" not in p
+
+
+def test_apply_openai_response_format_non_strict_schema_stays_false():
+    """§17.789 — a schema that doesn't satisfy strict-mode requirements (missing
+    additionalProperties:false / not all-required) falls back to strict:false."""
+    lenient = {"type": "object", "properties": {"name": {"type": "string"}}}
+    p = {}
+    _apply_openai_response_format(p, lenient)
+    assert p["response_format"]["json_schema"]["strict"] is False
 
 
 @pytest.mark.asyncio

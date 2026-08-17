@@ -46,11 +46,83 @@ from app.providers.base import (
 logger = logging.getLogger("scaffold.providers.openai")
 
 
-def _apply_openai_response_format(payload: dict[str, Any], response_schema: Any) -> None:
-    """§17.773 — set OpenAI's ``response_format`` from a response schema.
+# §17.789 — reasoning-model families (OpenAI o1/o3/o4 + gpt-5) require
+# ``max_completion_tokens`` instead of ``max_tokens`` and reject a non-default
+# ``temperature``. Matched by leading token so dated/sized variants (o3-mini,
+# gpt-5-mini, o1-2024-12-17, …) are covered. OpenAI-compatible backends that
+# also accept these fields (vLLM, LocalAI) are unaffected.
+_REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 
-    A JSON Schema ``dict`` becomes a ``json_schema`` response format (constrain to
-    that shape, ``strict=false``). The literal string ``"json"`` maps to the older
+
+def _is_reasoning_model(model: str) -> bool:
+    m = (model or "").lower().split("/")[-1]
+    return any(m == p or m.startswith(p + "-") for p in _REASONING_MODEL_PREFIXES)
+
+
+def _apply_model_params(
+    payload: dict[str, Any], model: str, temperature: float, max_tokens: int
+) -> None:
+    """§17.789 — set token-limit + sampling params per model family.
+
+    Reasoning models get ``max_completion_tokens`` and NO ``temperature`` (they
+    400 on the legacy ``max_tokens`` and on a non-default temperature); standard
+    chat models get the legacy ``max_tokens`` + ``temperature`` pair.
+    """
+    if _is_reasoning_model(model):
+        payload["max_completion_tokens"] = max_tokens
+    else:
+        payload["max_tokens"] = max_tokens
+        payload["temperature"] = temperature
+
+
+def _schema_is_strict_ready(schema: Any) -> bool:
+    """§17.789 — True if a JSON Schema satisfies OpenAI strict ``json_schema`` mode.
+
+    Strict mode requires every object to set ``additionalProperties:false`` and to
+    list *all* its property keys in ``required``. Checked recursively through
+    ``properties``, array ``items``, combinator branches (anyOf/allOf/oneOf), and
+    ``$defs``/``definitions``. A schema that doesn't qualify falls back to
+    ``strict:false`` (constrains shape without 400-ing).
+    """
+    if not isinstance(schema, dict):
+        return True  # leaf / boolean schema — nothing to enforce here
+    if schema.get("type") == "object" or "properties" in schema:
+        props = schema.get("properties")
+        if not isinstance(props, dict):
+            return False
+        if schema.get("additionalProperties") is not False:
+            return False
+        required = schema.get("required")
+        if not isinstance(required, list) or set(required) != set(props):
+            return False
+        if not all(_schema_is_strict_ready(v) for v in props.values()):
+            return False
+    if schema.get("type") == "array" or "items" in schema:
+        items = schema.get("items")
+        if isinstance(items, dict) and not _schema_is_strict_ready(items):
+            return False
+    for key in ("anyOf", "allOf", "oneOf"):
+        branches = schema.get(key)
+        if isinstance(branches, list) and not all(
+            _schema_is_strict_ready(b) for b in branches
+        ):
+            return False
+    for key in ("$defs", "definitions"):
+        defs = schema.get(key)
+        if isinstance(defs, dict) and not all(
+            _schema_is_strict_ready(v) for v in defs.values()
+        ):
+            return False
+    return True
+
+
+def _apply_openai_response_format(payload: dict[str, Any], response_schema: Any) -> None:
+    """§17.773/§17.789 — set OpenAI's ``response_format`` from a response schema.
+
+    A JSON Schema ``dict`` becomes a ``json_schema`` response format; ``strict``
+    is enabled only when the schema satisfies OpenAI strict-mode requirements
+    (:func:`_schema_is_strict_ready`), else ``false`` (constrain shape without
+    400-ing on a lenient schema). The literal string ``"json"`` maps to the older
     ``json_object`` mode (any valid JSON). ``None`` / falsy is a no-op.
     """
     if not response_schema:
@@ -63,7 +135,7 @@ def _apply_openai_response_format(payload: dict[str, Any], response_schema: Any)
             "json_schema": {
                 "name": "scaffold_response",
                 "schema": response_schema,
-                "strict": False,
+                "strict": _schema_is_strict_ready(response_schema),
             },
         }
     else:  # pragma: no cover — defensive; callers pass dict|str|None
@@ -139,15 +211,12 @@ class OpenAIProvider(LLMProvider):
             "model": model,
             "messages": messages,
             "stream": False,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
         }
-        # §17.773 — grammar-constrained decoding: translate the provider-agnostic
-        # ``response_schema`` into OpenAI's ``response_format`` json_schema. strict
-        # is False because the schemas threaded here aren't guaranteed to satisfy
-        # OpenAI's strict-mode requirements (every object needs
-        # additionalProperties:false and all-required); strict=false still
-        # constrains to schema-shaped JSON without 400-ing on a lenient schema.
+        # §17.789 — reasoning models need max_completion_tokens + no temperature.
+        _apply_model_params(payload, model, temperature, max_tokens)
+        # §17.773/§17.789 — grammar-constrained decoding: translate the
+        # provider-agnostic ``response_schema`` into OpenAI's ``response_format``
+        # json_schema, with strict enabled iff the schema qualifies.
         _apply_openai_response_format(payload, opts.get("response_schema"))
         # Pass through any caller extras (response_format, top_p, …) that the
         # OpenAI API understands. ``fallback`` is Ollama-specific and is
@@ -240,9 +309,13 @@ class OpenAIProvider(LLMProvider):
             "model": model,
             "messages": messages,
             "stream": True,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            # §17.789 — request a terminal usage chunk (choices:[] + usage) so
+            # cost tracking can read it. Well-supported by OpenAI + vLLM; backends
+            # that don't understand it simply never emit the chunk.
+            "stream_options": {"include_usage": True},
         }
+        # §17.789 — reasoning models need max_completion_tokens + no temperature.
+        _apply_model_params(payload, model, temperature, max_tokens)
         for k, v in opts.items():
             if k == "fallback":  # Ollama-specific; not part of OpenAI's API
                 continue
@@ -277,11 +350,24 @@ class OpenAIProvider(LLMProvider):
                     continue
                 choices = chunk.get("choices") or []
                 if not choices:
+                    # §17.789 — the terminal usage chunk (stream_options.
+                    # include_usage) carries no choices; log for cost visibility
+                    # and skip. Full threading into _record_call would need a
+                    # structured stream contract (deferred).
+                    usage = chunk.get("usage")
+                    if usage:
+                        logger.debug("openai_stream_usage: %s", usage)
                     continue
                 delta = choices[0].get("delta") or {}
                 content = delta.get("content")
                 if content:
                     yield content
+                    continue
+                # §17.789 — surface a safety refusal as visible text rather than
+                # an empty stream (the content-only contract has no refusal slot).
+                refusal = delta.get("refusal")
+                if refusal:
+                    yield refusal
 
     # ------------------------------------------------------------------
     # tool_call — Sprint I.2 (POST /chat/completions with tools=[...])
@@ -335,12 +421,12 @@ class OpenAIProvider(LLMProvider):
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
             "tools": self._tools_to_openai(tools),
             "tool_choice": self._tool_choice_to_openai(tool_choice),
             "stream": False,
         }
+        # §17.789 — reasoning models need max_completion_tokens + no temperature.
+        _apply_model_params(payload, model, temperature, max_tokens)
         for k, v in opts.items():
             if k == "fallback":
                 continue
