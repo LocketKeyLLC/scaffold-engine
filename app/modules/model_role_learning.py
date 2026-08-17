@@ -57,6 +57,7 @@ ROLE_TASKS: dict[str, str] = {
     "model_cloud_heavy": "codegen",      # proxy: escalation = hard-node capability
     "model_cloud_alt": "codegen",        # proxy: alternate heavy-cloud capability
     "model_fallback": "routing",         # proxy: light capability; LOCAL candidates only
+    "model_triage": "routing",           # §17.791 real job: conversational intent classification
 }
 
 
