@@ -3411,6 +3411,18 @@
             "title": "Node Count",
             "type": "integer"
           },
+          "progress": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress"
+          },
           "status": {
             "title": "Status",
             "type": "string"

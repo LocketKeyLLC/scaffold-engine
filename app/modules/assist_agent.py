@@ -360,6 +360,38 @@ async def start_assist_session(
     }
 
 
+#  §17.811 — terminal assist step statuses (a step that has moved on).
+_ASSIST_STEP_TERMINAL = frozenset({"committed", "skipped", "handed_off", "escalated"})
+
+
+def _assist_step_progress(step_counts: dict) -> Optional[dict]:
+    """Derive a count/pct progress block from an assist step roll-up.
+
+    No time ETA: assist is human-gated between steps, so wall-clock remaining is
+    meaningless. Returns None for a trivial (<2 step) session.
+    """
+    if not settings.progress_eta_enabled:
+        return None
+    total = sum(int(v) for v in step_counts.values())
+    if total < 2:
+        return None
+    done = sum(int(v) for k, v in step_counts.items() if k in _ASSIST_STEP_TERMINAL)
+    pct = int(round(100.0 * done / total)) if total else None
+    return {
+        "phase": "assisted_executing",
+        "label": "Assisted steps",
+        "unit": "steps",
+        "completed": done,
+        "total": total,
+        "pct": pct,
+        "eta_ms": None,
+        "eta_human": None,
+        "current_item": None,
+        "summary": f"{done}/{total} steps · {pct}%",
+        "soft": False,
+    }
+
+
 async def get_session(*, session_id: str, db) -> Optional[dict]:
     """Return session + step roll-up. None if not found."""
     sess = (await db.execute(
@@ -396,9 +428,13 @@ async def get_session(*, session_id: str, db) -> Optional[dict]:
     # metadata blob from the response; expose only the distilled facts).
     sess_dict = dict(sess)
     env = _environment_from_metadata(sess_dict.pop("metadata", None))
+    step_counts = {r["status"]: r["cnt"] for r in rollup}
     return {
         **{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in sess_dict.items()},
-        "step_counts": {r["status"]: r["cnt"] for r in rollup},
+        "step_counts": step_counts,
+        # §17.811 — step progress. Assist is human-gated between steps, so there
+        # is no honest wall-clock ETA; report completed/total/pct only.
+        "progress": _assist_step_progress(step_counts),
         "divergence_count": int(divergence_count),
         "memory_facts": env.get("facts") or [],
     }

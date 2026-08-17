@@ -1177,12 +1177,19 @@ async def _walk_to_latest_version(
 async def ingest_entries(
     entries: list[dict], domain: str = "eng",
     *, session_id: str | None = None,
+    progress_cb=None,
 ) -> "IngestStatsDict":
     """Embed and upsert knowledge entries into toon_v2.
 
     Returns: {new, versioned, rejected, skipped_hash, skipped_empty}.
     Upsert is keyed on entry_id, closing the hash-check+insert race where
     two concurrent ingests of the same logical entry would duplicate.
+
+    §17.811 — ``progress_cb(completed, total)`` is an optional synchronous hook
+    invoked (throttled) as Pass 3 upserts each prepared entry, so a caller can
+    surface ingest progress. ``total`` is the count entering Pass 3 (post
+    exact-hash filter). Fail-soft: a raising callback is swallowed, never
+    breaking ingest.
     """
     stats = {"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0, "skipped_empty": 0}
     if not entries:
@@ -1297,7 +1304,24 @@ async def ingest_entries(
     version_threshold = float(settings.version_chain_threshold)
 
     # ---- Pass 3: semantic dedup + version chain + upsert ----
-    for p, vector in zip(prepared, vectors):
+    # §17.811 — throttle progress callbacks so a large batch doesn't spam the
+    # caller; the final entry always reports (handled after the loop).
+    from app.utils.progress import EmitThrottle as _EmitThrottle
+
+    _ing_total = len(prepared)
+    _ing_thr = _EmitThrottle(settings.progress_emit_min_interval_seconds)
+
+    def _emit_ingest_progress(done: int, *, final: bool = False) -> None:
+        if progress_cb is None:
+            return
+        if _ing_thr.ready(final=final):
+            try:
+                progress_cb(done, _ing_total)
+            except Exception:  # noqa: BLE001 — progress is best-effort
+                pass
+
+    for _idx, (p, vector) in enumerate(zip(prepared, vectors)):
+        _emit_ingest_progress(_idx)
         if vector is None:
             logger.warning("ingest_embed_failed for title=%s", p["title"])
             continue
@@ -1449,6 +1473,8 @@ async def ingest_entries(
                 provenance_writes.append((entry_id, p["provenance"] or {}, p["raw_upstream_hash"]))
         except Exception as e:
             logger.warning("ingest_upsert_failed: %s", e)
+
+    _emit_ingest_progress(_ing_total, final=True)  # §17.811 — terminal 100%
 
     inserted = stats["new"] + stats["versioned"]
     if inserted > 0:

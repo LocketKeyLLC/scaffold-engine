@@ -139,6 +139,21 @@ STREAM_STALLED = "stream_stalled"
 
 
 # ---------------------------------------------------------------------------
+# Progress / ETA events (§17.811)
+# ---------------------------------------------------------------------------
+# Uniform progress + ETA signal emitted by every long-running subsystem
+# (execution_agent / research_agent / rag_pipeline / assist_agent /
+# decomposition / design_pipeline). The data payload is a
+# ``app.utils.progress.ProgressTracker.snapshot()`` dict:
+# {phase, label, unit, completed, total, pct, elapsed_ms, eta_ms, eta_human,
+#  rate_per_min, current_item, done_items, soft, summary}. Consumers that don't
+# render it degrade gracefully — it never carries terminal state. The same
+# snapshot is persisted to ``jobs.metadata.progress`` for read-path/reconnect.
+
+PROGRESS = "progress"
+
+
+# ---------------------------------------------------------------------------
 # Generic / control events
 # ---------------------------------------------------------------------------
 # Used by every streaming endpoint regardless of source module.
@@ -178,6 +193,8 @@ ALL_EVENT_NAMES = frozenset({
     STAGE_START, STAGE_DONE, STAGE_ERROR, CANCELLED,
     # consumer-synthesized
     STREAM_STALLED,
+    # progress / ETA (§17.811)
+    PROGRESS,
     # generic
     DONE, ERROR, WARNING, HEARTBEAT, QUEUED,
 })

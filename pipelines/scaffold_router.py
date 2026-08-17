@@ -4198,6 +4198,20 @@ class Pipeline:
         elif event_type == "node_retry":
             title = payload.get("title", "")
             yield f"🔄 Step {payload.get('node_key','?')}: Retrying{' — ' + title if title else ''} (attempt {payload.get('retry_count',0)})...\n"
+        elif event_type == "progress":
+            # §17.811 — progress + ETA snapshot. The `summary` is a deterministic
+            # one-liner ("4/10 nodes · 40% · ~3m 20s left"); `current_item` /
+            # `done_items` add optional context lines. `narration` (📝) only
+            # present when the LLM-summary valve is on server-side.
+            summary = payload.get("summary")
+            if summary:
+                yield f"📊 {summary}\n"
+                current = payload.get("current_item")
+                if current:
+                    yield f"   ↳ now: {current}\n"
+                narration = payload.get("narration")
+                if narration:
+                    yield f"   📝 {narration}\n"
         elif event_type == "blocked":
             # §17.295 — render the cause-aware blocked payload. Pre-§17.295
             # this read top-level `node_key` + `blocked_by` (a list of

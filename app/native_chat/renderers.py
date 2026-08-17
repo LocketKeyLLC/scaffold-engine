@@ -79,6 +79,10 @@ def results(d: dict[str, Any]) -> str:
         total = d.get("total_nodes")
         if counts or total:
             lines.append(f"Progress: {counts} of {total} nodes.")
+        # §17.811 — one-line ETA when a run is in flight.
+        prog = d.get("progress") or {}
+        if prog.get("eta_human"):
+            lines.append(f"📊 {prog['summary']}")
         nxt = d.get("next_node")
         if nxt:
             lines.append(f"Next node: {nxt}")
