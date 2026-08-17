@@ -201,9 +201,9 @@ doctor-explain: ## Same as doctor, but with a one-liner per check explaining wha
 init: ## Provider/model wizard: user-mode + compute profile + per-role provider + keys, update .env
 	@bash scripts/init.sh
 
-key-add: ## §17.807 Mint a scoped API key (multi-user). Usage: make key-add LABEL="alice laptop" [OWNER=alice]
-	@if [ -z "$(LABEL)" ]; then echo 'usage: make key-add LABEL="..." [OWNER=...]'; exit 2; fi
-	@docker exec $(CONTAINER) python scripts/keyctl.py add --label "$(LABEL)" $(if $(OWNER),--owner "$(OWNER)")
+key-add: ## §17.807/810 Mint a scoped API key (multi-user). Usage: make key-add LABEL="alice laptop" [OWNER=alice] [ROLE=user|admin]
+	@if [ -z "$(LABEL)" ]; then echo 'usage: make key-add LABEL="..." [OWNER=...] [ROLE=user|admin]'; exit 2; fi
+	@docker exec $(CONTAINER) python scripts/keyctl.py add --label "$(LABEL)" $(if $(OWNER),--owner "$(OWNER)") $(if $(ROLE),--role "$(ROLE)")
 
 key-list: ## §17.807 List scoped API keys. Usage: make key-list [ALL=1]
 	@docker exec $(CONTAINER) python scripts/keyctl.py list $(if $(ALL),--all)

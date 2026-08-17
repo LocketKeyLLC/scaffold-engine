@@ -25,6 +25,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
+from app.authz import (
+    Principal,
+    assert_visible,
+    get_principal,
+    owner_filter,
+    require_admin,
+)
 from app.database import get_db
 from app.modules.cleanup import reap_stale_jobs
 from app.modules.execution_agent import execute_all_nodes
@@ -52,8 +59,15 @@ router = APIRouter()
 
 
 @router.post("/jobs/cleanup", tags=["ops"])
-async def cleanup_stale_jobs(db: AsyncSession = Depends(get_db)):
-    """Find and resolve stale/orphaned jobs. Requires API key (global auth)."""
+async def cleanup_stale_jobs(
+    db: AsyncSession = Depends(get_db),
+    _admin: Principal = Depends(require_admin),
+):
+    """Find and resolve stale/orphaned jobs.
+
+    §17.810 — admin-only: the reaper sweeps every job regardless of owner, so it
+    is not a per-user operation. Non-admin callers get 403.
+    """
     result = await reap_stale_jobs(db)
     return {
         "cleaned": result,
@@ -66,6 +80,7 @@ async def resume_job_endpoint(
     job_id: str,
     body: ResumeJobInput,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     """Resume a cancelled job and stream its execution.
 
@@ -86,6 +101,10 @@ async def resume_job_endpoint(
         parsed_id = UUID(job_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid job_id format")
+
+    # §17.810 — ownership gate. Non-owner (and non-admin) → 404, so another
+    # user's job is indistinguishable from a missing one.
+    await assert_visible(db, principal, str(parsed_id), detail=f"Job {job_id} not found")
 
     await _require_valid_models(body.model_overrides)
     outcome = await resume_cancelled_job(parsed_id, db)
@@ -117,6 +136,7 @@ async def resume_job_endpoint(
 async def cancel_job_endpoint(
     job_id: str,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     """§17.322 — operator-driven cancel for a non-terminal job.
 
@@ -148,6 +168,9 @@ async def cancel_job_endpoint(
         parsed_id = UUID(job_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    # §17.810 — ownership gate (404 for non-owner, matching the not-found shape).
+    await assert_visible(db, principal, str(parsed_id), detail=f"job not found: {job_id}")
 
     outcome = await cancel_active_job(parsed_id, db)
 
@@ -191,6 +214,7 @@ async def list_jobs(
     limit: int = 25,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     """Paginated job list with optional status filter and title search.
 
@@ -219,10 +243,19 @@ async def list_jobs(
         where_clauses.append("j.compiled_output_synthesized = :synthesized")
         params["synthesized"] = synthesized
 
+    # §17.810 — ownership scope: a non-admin sees only their own jobs (owner =
+    # identity); admin sees all (owner_filter returns ""). NULL-owner legacy
+    # rows are therefore hidden from non-admins. owner_filter's fragment leads
+    # with " AND ", so strip that and treat it as a standalone clause here.
+    owner_clause, owner_params = owner_filter(principal, column="j.owner")
+    if owner_clause:
+        where_clauses.append(owner_clause.removeprefix(" AND "))
+        params.update(owner_params)
+
     # SAFE: where_clauses contain only bind-parameter placeholders (:status, :q,
-    # :synthesized); all user values flow through `params` dict. Do not
-    # interpolate user input into where_clauses directly without enum/whitelist
-    # validation first.
+    # :synthesized, :principal_owner); all user values flow through `params`
+    # dict. Do not interpolate user input into where_clauses directly without
+    # enum/whitelist validation first.
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
     total_row = await db.execute(text(f"SELECT COUNT(*) FROM jobs j {where_sql}"), params)
@@ -276,7 +309,11 @@ def _json_obj(v):
 
 
 @router.get("/jobs/{job_id}", response_model=JobDetailResponse, tags=["Management"])
-async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
+async def get_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Single-job detail incl. the Phase-1 refined brief + feasibility.
 
     Backs the /ui approval gate (renders ``refined_brief`` + ``feasibility``
@@ -290,8 +327,11 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
 
+    # §17.810 — ownership predicate folded into the WHERE so a non-owner gets an
+    # identical 404 to a missing job (no existence leak).
+    owner_clause, owner_params = owner_filter(principal, column="j.owner")
     row = (await db.execute(
-        text("""
+        text(f"""
             SELECT j.id, j.title, j.status, j.input_text,
                    j.refined_brief, j.research_data, j.deliverable_kind,
                    (j.compiled_output IS NOT NULL) AS has_compiled_output,
@@ -299,9 +339,9 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
                    j.parent_job_id, j.component_index, j.metadata,
                    (SELECT COUNT(*) FROM dag_nodes WHERE job_id = j.id) AS node_count
             FROM jobs j
-            WHERE j.id = :id
+            WHERE j.id = :id{owner_clause}
         """),
-        {"id": job_id},
+        {"id": job_id, **owner_params},
     )).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
@@ -328,7 +368,11 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/jobs/{job_id}", response_model=DeleteResponse, tags=["Management"])
-async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_job(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Hard-delete a job. Cascade removes dag_nodes / execution_logs / artifacts /
     error_logs (FK ON DELETE CASCADE). llm_call_logs rows are unaffected
     (no FK; off-job calls live there too)."""
@@ -337,7 +381,13 @@ async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
 
-    r = await db.execute(text("DELETE FROM jobs WHERE id = :id RETURNING id"), {"id": job_id})
+    # §17.810 — owner predicate in the DELETE: a non-owner deletes zero rows and
+    # gets the same 404 as a missing job.
+    owner_clause, owner_params = owner_filter(principal, column="owner")
+    r = await db.execute(
+        text(f"DELETE FROM jobs WHERE id = :id{owner_clause} RETURNING id"),
+        {"id": job_id, **owner_params},
+    )
     if r.fetchone() is None:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
     await db.commit()
@@ -345,20 +395,27 @@ async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/jobs/{job_id}", response_model=JobSummary, tags=["Management"])
-async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depends(get_db)):
+async def rename_job(
+    job_id: str,
+    body: JobRenameInput,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Rename a job (set title)."""
     try:
         UUID(job_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
 
-    r = await db.execute(text("""
+    # §17.810 — owner predicate: a non-owner updates zero rows → 404.
+    owner_clause, owner_params = owner_filter(principal, column="owner")
+    r = await db.execute(text(f"""
         UPDATE jobs SET title = :title, updated_at = NOW()
-        WHERE id = :id
+        WHERE id = :id{owner_clause}
         RETURNING id, title, status, created_at, updated_at, completed_at,
                   parent_job_id, component_index,
                   (SELECT COUNT(*) FROM dag_nodes WHERE job_id = :id) AS node_count
-    """), {"id": job_id, "title": body.title})
+    """), {"id": job_id, "title": body.title, **owner_params})
     row = r.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
@@ -383,6 +440,7 @@ async def rename_job(job_id: str, body: JobRenameInput, db: AsyncSession = Depen
 async def get_job_costs_endpoint(
     job_id: str,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     """Sprint J.3.b — aggregate cost + latency for a job.
 
@@ -397,6 +455,9 @@ async def get_job_costs_endpoint(
         UUID(job_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    # §17.810 — ownership gate before reading another user's cost breakdown.
+    await assert_visible(db, principal, job_id, detail=f"job not found: {job_id}")
 
     from app.modules.cost_rollup import get_job_costs
     payload = await get_job_costs(job_id, db)
@@ -432,6 +493,7 @@ async def set_job_synthesis_override(
     job_id: str,
     body: JobSynthesisOverrideInput,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     """Sprint X.6 — set the per-job opt-in for the W.7 LLM synthesis pass.
 
@@ -448,13 +510,15 @@ async def set_job_synthesis_override(
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
 
-    r = await db.execute(text("""
+    # §17.810 — owner predicate: non-owner updates zero rows → 404.
+    owner_clause, owner_params = owner_filter(principal, column="owner")
+    r = await db.execute(text(f"""
         UPDATE jobs
            SET compile_synthesis_override = :override,
                updated_at = NOW()
-         WHERE id = :id
+         WHERE id = :id{owner_clause}
         RETURNING id, compile_synthesis_override
-    """), {"id": job_id, "override": body.override})
+    """), {"id": job_id, "override": body.override, **owner_params})
     row = r.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
@@ -474,6 +538,7 @@ async def set_job_budget(
     job_id: str,
     body: JobBudgetInput,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     """§17.777 — set per-job token / cost budget overrides.
 
@@ -496,6 +561,10 @@ async def set_job_budget(
         UUID(job_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+
+    # §17.810 — ownership gate up front; every SQL path below then operates on a
+    # job the caller is allowed to touch.
+    await assert_visible(db, principal, job_id, detail=f"job not found: {job_id}")
 
     # Only touch axes the caller actually sent (model_fields_set), so a
     # partial body doesn't clobber the other axis. Both null and a number are

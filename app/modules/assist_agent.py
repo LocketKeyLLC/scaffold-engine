@@ -1229,7 +1229,7 @@ ASSIST_INPROGRESS_STATUSES = tuple(
 
 
 async def list_assist_candidates(
-    *, db, limit: int = 25, in_progress: bool = False,
+    *, db, limit: int = 25, in_progress: bool = False, owner: str | None = None,
 ) -> list[dict]:
     """§17.626 — jobs a user could step through in Assist Mode, newest first.
 
@@ -1243,23 +1243,27 @@ async def list_assist_candidates(
     it so a topic match or "continue" can't resurface a completed/cancelled job;
     the explicit-redo default (``False``) keeps the full re-openable list."""
     statuses = ASSIST_INPROGRESS_STATUSES if in_progress else ASSIST_ELIGIBLE_STATUSES
+    # §17.810 — scope to the caller's own jobs when an owner is supplied (a
+    # non-admin principal); None (admin / single-user) means no restriction.
+    owner_clause = " AND j.owner = :owner" if owner is not None else ""
     # §17.721 — thread the live session's last_activity_at through so the
     # pipeline's continuity reconnect can tell "the session the operator is
     # mid-conversation in" apart from a title-similar sibling. Only an
     # active/paused session counts as live activity.
     rows = (await db.execute(
-        text("""
+        text(f"""
             SELECT j.id, j.title, j.status, j.job_type,
                    (SELECT COUNT(*) FROM dag_nodes n WHERE n.job_id = j.id) AS node_count,
                    s.last_activity_at
               FROM jobs j
               LEFT JOIN assist_sessions s
                 ON s.job_id = j.id AND s.status IN ('active', 'paused')
-             WHERE j.status = ANY(:statuses)
+             WHERE j.status = ANY(:statuses){owner_clause}
              ORDER BY j.created_at DESC
              LIMIT :lim
         """),
-        {"statuses": list(statuses), "lim": limit},
+        {"statuses": list(statuses), "lim": limit,
+         **({"owner": owner} if owner is not None else {})},
     )).mappings().all()
     out: list[dict] = []
     for r in rows:

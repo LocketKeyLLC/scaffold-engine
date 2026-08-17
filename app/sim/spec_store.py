@@ -219,6 +219,7 @@ async def list_pending_confirmations(
     *,
     job_id: uuid.UUID | None = None,
     limit: int = 100,
+    owner: str | None = None,
 ) -> list[SpecRow]:
     """List specs awaiting confirmation, oldest first.
 
@@ -227,33 +228,35 @@ async def list_pending_confirmations(
     partial index (created in migration 040) doesn't accelerate
     *unconfirmed* lookups directly, but the typical pending list is
     small and the planner just sequential-scans the small set.
+
+    §17.810 — ``owner`` (a non-admin principal's identity) scopes the list to
+    specs whose parent job the caller owns, via ``jobs.owner``. None (admin /
+    single-user) means no restriction. Columns are table-qualified so the
+    optional ``jobs`` join stays unambiguous.
     """
-    if job_id is None:
-        result = await db.execute(
-            text(
-                """
-                SELECT id, job_id, schema_version, spec_json, spec_sha256,
-                       confirmed_by, confirmed_at, created_at
-                FROM specs
-                WHERE confirmed_at IS NULL
-                ORDER BY created_at ASC
-                LIMIT :lim
-                """
-            ),
-            {"lim": limit},
-        )
-    else:
-        result = await db.execute(
-            text(
-                """
-                SELECT id, job_id, schema_version, spec_json, spec_sha256,
-                       confirmed_by, confirmed_at, created_at
-                FROM specs
-                WHERE confirmed_at IS NULL AND job_id = :job_id
-                ORDER BY created_at ASC
-                LIMIT :lim
-                """
-            ),
-            {"job_id": str(job_id), "lim": limit},
-        )
+    clauses = ["s.confirmed_at IS NULL"]
+    params: dict = {"lim": limit}
+    join = ""
+    if job_id is not None:
+        clauses.append("s.job_id = :job_id")
+        params["job_id"] = str(job_id)
+    if owner is not None:
+        join = "JOIN jobs j ON j.id = s.job_id"
+        clauses.append("j.owner = :owner")
+        params["owner"] = owner
+    where_sql = " AND ".join(clauses)
+    result = await db.execute(
+        text(
+            f"""
+            SELECT s.id, s.job_id, s.schema_version, s.spec_json, s.spec_sha256,
+                   s.confirmed_by, s.confirmed_at, s.created_at
+            FROM specs s
+            {join}
+            WHERE {where_sql}
+            ORDER BY s.created_at ASC
+            LIMIT :lim
+            """
+        ),
+        params,
+    )
     return [_row_to_spec(r) for r in result.mappings().all()]

@@ -40,24 +40,35 @@ def generate_raw_key() -> str:
 
 
 async def add_key(
-    session: AsyncSession, *, label: str, owner: str | None = None
+    session: AsyncSession,
+    *,
+    label: str,
+    owner: str | None = None,
+    role: str = "user",
 ) -> tuple[int, str]:
     """Mint and persist a new key. Returns ``(id, raw_key)``.
 
     The raw key is returned to the caller for one-time display and is NOT
     recoverable afterwards — only ``hash_key(raw)`` is stored.
+
+    ``role`` (§17.810) is ``'user'`` (default, least-privilege) or ``'admin'``.
+    An admin scoped key sees/manages every job, same as the master key; a user
+    key is scoped to its own owner. Validated here so a typo fails fast at mint
+    time rather than at the DB CHECK constraint.
     """
+    if role not in ("admin", "user"):
+        raise ValueError(f"role must be 'admin' or 'user', got {role!r}")
     raw = generate_raw_key()
     row = (
         await session.execute(
             text(
                 """
-                INSERT INTO api_keys (key_hash, label, owner)
-                VALUES (:key_hash, :label, :owner)
+                INSERT INTO api_keys (key_hash, label, owner, role)
+                VALUES (:key_hash, :label, :owner, :role)
                 RETURNING id
                 """
             ),
-            {"key_hash": hash_key(raw), "label": label, "owner": owner},
+            {"key_hash": hash_key(raw), "label": label, "owner": owner, "role": role},
         )
     ).one()
     await session.commit()
@@ -65,13 +76,13 @@ async def add_key(
 
 
 async def list_keys(session: AsyncSession, *, include_revoked: bool = False) -> list[dict[str, Any]]:
-    """List keys (id/label/owner/created_at/revoked_at). Never exposes the hash."""
+    """List keys (id/label/owner/role/created_at/revoked_at). Never exposes the hash."""
     where = "" if include_revoked else "WHERE revoked_at IS NULL"
     rows = (
         await session.execute(
             text(
                 f"""
-                SELECT id, label, owner, created_at, revoked_at
+                SELECT id, label, owner, role, created_at, revoked_at
                   FROM api_keys
                   {where}
               ORDER BY id
@@ -110,19 +121,21 @@ async def revoke_key(
     return int(result.rowcount or 0)
 
 
-async def verify_key(session: AsyncSession, raw: str) -> bool:
-    """Return True iff ``raw`` matches a live (non-revoked) stored key.
+async def resolve_key(session: AsyncSession, raw: str) -> dict[str, Any] | None:
+    """Return ``{id, owner, role}`` for a live (non-revoked) key, else None.
 
     Auth hot path — a single indexed lookup against the partial
-    ``idx_api_keys_live_hash`` index (mig 066).
+    ``idx_api_keys_live_hash`` index (mig 066). §17.810 promoted the old
+    boolean ``verify_key`` to this richer lookup so ``app/auth.py`` can build a
+    Principal (identity + role) instead of a pass/fail, without a second query.
     """
     if not raw:
-        return False
-    hit = (
+        return None
+    row = (
         await session.execute(
             text(
                 """
-                SELECT 1
+                SELECT id, owner, role
                   FROM api_keys
                  WHERE key_hash = :key_hash AND revoked_at IS NULL
                  LIMIT 1
@@ -130,5 +143,13 @@ async def verify_key(session: AsyncSession, raw: str) -> bool:
             ),
             {"key_hash": hash_key(raw)},
         )
-    ).first()
-    return hit is not None
+    ).mappings().first()
+    return dict(row) if row is not None else None
+
+
+async def verify_key(session: AsyncSession, raw: str) -> bool:
+    """Return True iff ``raw`` matches a live (non-revoked) stored key.
+
+    Thin bool wrapper over ``resolve_key`` kept for backward compatibility.
+    """
+    return await resolve_key(session, raw) is not None

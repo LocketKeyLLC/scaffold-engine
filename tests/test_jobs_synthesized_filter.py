@@ -15,6 +15,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.authz import ADMIN_PRINCIPAL
+
 
 def _capture_db():
     """Mocked AsyncSession that records the SQL + params for every execute()."""
@@ -47,7 +49,7 @@ class TestSynthesizedFilter:
     async def test_synthesized_true_adds_where_clause(self):
         from app.routers.jobs import list_jobs  # §17.176: moved from main in §17.174
         db = _capture_db()
-        await list_jobs(synthesized=True, db=db)
+        await list_jobs(synthesized=True, db=db, principal=ADMIN_PRINCIPAL)
         # Both COUNT and SELECT carry the new clause.
         for sql in _all_calls_sql_text(db):
             assert "j.compiled_output_synthesized = :synthesized" in sql
@@ -60,7 +62,7 @@ class TestSynthesizedFilter:
     async def test_synthesized_false_adds_where_clause(self):
         from app.routers.jobs import list_jobs  # §17.176: moved from main in §17.174
         db = _capture_db()
-        await list_jobs(synthesized=False, db=db)
+        await list_jobs(synthesized=False, db=db, principal=ADMIN_PRINCIPAL)
         for sql in _all_calls_sql_text(db):
             assert "j.compiled_output_synthesized = :synthesized" in sql
         for call in db.execute.await_args_list:
@@ -73,7 +75,7 @@ class TestSynthesizedFilter:
         comparison sneaking in."""
         from app.routers.jobs import list_jobs  # §17.176: moved from main in §17.174
         db = _capture_db()
-        await list_jobs(db=db)  # synthesized defaults to None
+        await list_jobs(db=db, principal=ADMIN_PRINCIPAL)  # synthesized defaults to None
         for sql in _all_calls_sql_text(db):
             assert "compiled_output_synthesized" not in sql
         for call in db.execute.await_args_list:
@@ -85,7 +87,7 @@ class TestSynthesizedFilter:
         AND-combine into a single WHERE block."""
         from app.routers.jobs import list_jobs  # §17.176: moved from main in §17.174
         db = _capture_db()
-        await list_jobs(status="completed", synthesized=True, db=db)
+        await list_jobs(status="completed", synthesized=True, db=db, principal=ADMIN_PRINCIPAL)
         sql, params = _last_call_sql_and_params(db)
         assert "j.status = :status" in sql
         assert "j.compiled_output_synthesized = :synthesized" in sql
@@ -98,7 +100,7 @@ class TestSynthesizedFilter:
         """Three-way filter combination: status + q + synthesized."""
         from app.routers.jobs import list_jobs  # §17.176: moved from main in §17.174
         db = _capture_db()
-        await list_jobs(q="homelab", synthesized=False, db=db)
+        await list_jobs(q="homelab", synthesized=False, db=db, principal=ADMIN_PRINCIPAL)
         sql, params = _last_call_sql_and_params(db)
         assert "j.title ILIKE :q" in sql
         assert "j.compiled_output_synthesized = :synthesized" in sql

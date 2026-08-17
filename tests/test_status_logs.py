@@ -69,6 +69,7 @@ _spec.loader.exec_module(_mod)
 get_status = _mod.get_status
 get_logs = _mod.get_logs
 get_work = _mod.get_work
+from app.authz import ADMIN_PRINCIPAL  # §17.810
 StatusResponse = _mod.StatusResponse
 LogsResponse = _mod.LogsResponse
 StatusCounts = _mod.StatusCounts
@@ -151,7 +152,7 @@ class TestGetStatus:
 
         db = _make_db([_make_result(count_rows), _make_result(jobs_rows)])
 
-        resp = await get_status(limit=20, status_filter=None, db=db)
+        resp = await get_status(limit=20, status_filter=None, db=db, principal=ADMIN_PRINCIPAL)
 
         assert isinstance(resp, StatusResponse)
         assert resp.status_counts.completed == 10
@@ -185,7 +186,7 @@ class TestGetStatus:
 
         db = _make_db([_make_result(count_rows), _make_result(jobs_rows)])
 
-        resp = await get_status(limit=20, status_filter=None, db=db)
+        resp = await get_status(limit=20, status_filter=None, db=db, principal=ADMIN_PRINCIPAL)
 
         assert len(resp.recent_jobs) == 2
         assert resp.recent_jobs[0].id == "job-1"
@@ -212,7 +213,7 @@ class TestGetStatus:
         ]
         db = _make_db([_make_result(count_rows), _make_result(jobs_rows)])
 
-        resp = await get_status(limit=20, status_filter=None, db=db)
+        resp = await get_status(limit=20, status_filter=None, db=db, principal=ADMIN_PRINCIPAL)
 
         assert resp.recent_jobs[0].title == "Build a markdown linter"
         assert resp.recent_jobs[0].next_actions, \
@@ -236,7 +237,7 @@ class TestGetStatus:
         ]
         db = _make_db([_make_result(count_rows), _make_result(jobs_rows)])
 
-        resp = await get_status(limit=20, status_filter=None, db=db)
+        resp = await get_status(limit=20, status_filter=None, db=db, principal=ADMIN_PRINCIPAL)
         assert resp.recent_jobs[0].title == ""
 
     @pytest.mark.asyncio
@@ -244,7 +245,7 @@ class TestGetStatus:
         """No jobs returns zero counts and empty list."""
         db = _make_db([_make_result([]), _make_result([])])
 
-        resp = await get_status(limit=20, status_filter=None, db=db)
+        resp = await get_status(limit=20, status_filter=None, db=db, principal=ADMIN_PRINCIPAL)
 
         assert resp.total_jobs == 0
         assert resp.recent_jobs == []
@@ -255,7 +256,7 @@ class TestGetStatus:
         """When status filter is provided, it's included in the query params."""
         db = _make_db([_make_result([]), _make_result([])])
 
-        await get_status(limit=10, status_filter="failed", db=db)
+        await get_status(limit=10, status_filter="failed", db=db, principal=ADMIN_PRINCIPAL)
 
         # Second call is the jobs query — check params include filter
         call_args = db.execute.call_args_list[1]
@@ -267,7 +268,7 @@ class TestGetStatus:
         """Response timestamp is valid ISO format."""
         db = _make_db([_make_result([]), _make_result([])])
 
-        resp = await get_status(limit=20, status_filter=None, db=db)
+        resp = await get_status(limit=20, status_filter=None, db=db, principal=ADMIN_PRINCIPAL)
 
         # Should parse without error
         parsed = datetime.fromisoformat(resp.timestamp)
@@ -290,7 +291,7 @@ class TestGetStatus:
 
         db = _make_db([_make_result(count_rows), _make_result(jobs_rows)])
 
-        resp = await get_status(limit=20, status_filter=None, db=db)
+        resp = await get_status(limit=20, status_filter=None, db=db, principal=ADMIN_PRINCIPAL)
 
         assert resp.recent_jobs[0].created_at is None
         assert resp.recent_jobs[0].updated_at is None
@@ -333,7 +334,7 @@ class TestGetLogs:
         count_result = _make_result(node_rows)
         db = _make_db([job_result, count_result, nodes_result])
 
-        resp = await get_logs(job_id="11111111-1111-4111-8111-111111111111", include_output=False, include_compiled=True, db=db, limit=100, offset=0)
+        resp = await get_logs(job_id="11111111-1111-4111-8111-111111111111", include_output=False, include_compiled=True, db=db, limit=100, offset=0, principal=ADMIN_PRINCIPAL)
 
         assert isinstance(resp, LogsResponse)
         assert resp.job_id == "11111111-1111-4111-8111-111111111111"
@@ -356,7 +357,7 @@ class TestGetLogs:
                        _make_result([])])
         resp = await get_logs(job_id="11111111-1111-4111-8111-111111111111",
                               include_output=False, include_compiled=True,
-                              db=db, limit=100, offset=0)
+                              db=db, limit=100, offset=0, principal=ADMIN_PRINCIPAL)
         assert resp.deliverable_kind == "plan_only"
 
     @pytest.mark.asyncio
@@ -366,7 +367,7 @@ class TestGetLogs:
         db = _make_db([empty_result])
 
         with pytest.raises(HTTPException) as exc_info:
-            await get_logs(job_id="22222222-2222-4222-8222-222222222222", include_output=False, db=db, limit=100, offset=0)
+            await get_logs(job_id="22222222-2222-4222-8222-222222222222", include_output=False, db=db, limit=100, offset=0, principal=ADMIN_PRINCIPAL)
 
         assert exc_info.value.status_code == 404
         assert "Job not found" in exc_info.value.detail
@@ -391,7 +392,7 @@ class TestGetLogs:
 
         db = _make_db([_make_result([job_row]), _make_result(node_rows), _make_result(node_rows)])
 
-        resp = await get_logs(job_id="33333333-3333-4333-8333-333333333333", include_output=False, db=db, limit=100, offset=0)
+        resp = await get_logs(job_id="33333333-3333-4333-8333-333333333333", include_output=False, db=db, limit=100, offset=0, principal=ADMIN_PRINCIPAL)
 
         assert len(resp.nodes[0].output_preview) == 501  # 500 + "…"
         assert resp.nodes[0].output_preview.endswith("…")
@@ -416,7 +417,7 @@ class TestGetLogs:
 
         db = _make_db([_make_result([job_row]), _make_result(node_rows), _make_result(node_rows)])
 
-        resp = await get_logs(job_id="44444444-4444-4444-8444-444444444444", include_output=True, db=db, limit=100, offset=0)
+        resp = await get_logs(job_id="44444444-4444-4444-8444-444444444444", include_output=True, db=db, limit=100, offset=0, principal=ADMIN_PRINCIPAL)
 
         assert resp.nodes[0].output_preview == long_output
 
@@ -439,7 +440,7 @@ class TestGetLogs:
 
         db = _make_db([_make_result([job_row]), _make_result(node_rows), _make_result(node_rows)])
 
-        resp = await get_logs(job_id="55555555-5555-4555-8555-555555555555", include_output=False, db=db, limit=100, offset=0)
+        resp = await get_logs(job_id="55555555-5555-4555-8555-555555555555", include_output=False, db=db, limit=100, offset=0, principal=ADMIN_PRINCIPAL)
 
         assert resp.nodes[0].output_preview is None
 
@@ -450,7 +451,7 @@ class TestGetLogs:
 
         db = _make_db([_make_result([job_row]), _make_result([]), _make_result([])])
 
-        resp = await get_logs(job_id="66666666-6666-4666-8666-666666666666", include_output=False, db=db, limit=100, offset=0)
+        resp = await get_logs(job_id="66666666-6666-4666-8666-666666666666", include_output=False, db=db, limit=100, offset=0, principal=ADMIN_PRINCIPAL)
 
         assert resp.node_count == 0
         assert resp.nodes == []
@@ -470,7 +471,7 @@ class TestGetLogs:
 
         db = _make_db([_make_result([job_row]), _make_result(node_rows), _make_result(node_rows)])
 
-        resp = await get_logs(job_id="77777777-7777-4777-8777-777777777777", include_output=False, db=db, limit=100, offset=0)
+        resp = await get_logs(job_id="77777777-7777-4777-8777-777777777777", include_output=False, db=db, limit=100, offset=0, principal=ADMIN_PRINCIPAL)
 
         keys = [n.node_key for n in resp.nodes]
         assert keys == ["T1", "T2", "T3"]
@@ -537,7 +538,7 @@ class TestEnumParity:
         being discarded by the valid_keys filter."""
         count_rows = [_make_row(status="aggregating", cnt=2)]
         db = _make_db([_make_result(count_rows), _make_result([])])
-        resp = await get_status(limit=20, status_filter=None, db=db)
+        resp = await get_status(limit=20, status_filter=None, db=db, principal=ADMIN_PRINCIPAL)
         assert resp.status_counts.aggregating == 2
 
 
@@ -573,7 +574,7 @@ class TestGetWork:
         ]
         db = _make_db([_make_result(job_rows), _make_result(sess_rows)])
 
-        resp = await get_work(db=db)
+        resp = await get_work(db=db, principal=ADMIN_PRINCIPAL)
 
         assert isinstance(resp, WorkResponse)
         assert len(resp.jobs) == 1
@@ -590,7 +591,7 @@ class TestGetWork:
     async def test_empty_work(self):
         """No active work returns two empty lists, not an error."""
         db = _make_db([_make_result([]), _make_result([])])
-        resp = await get_work(db=db)
+        resp = await get_work(db=db, principal=ADMIN_PRINCIPAL)
         assert resp.jobs == []
         assert resp.assist_sessions == []
 
@@ -609,6 +610,6 @@ class TestGetWork:
             ),
         ]
         db = _make_db([_make_result(job_rows), _make_result(sess_rows)])
-        resp = await get_work(db=db)
+        resp = await get_work(db=db, principal=ADMIN_PRINCIPAL)
         assert resp.assist_sessions[0].job_title == ""
         assert resp.assist_sessions[0].current_node_key is None

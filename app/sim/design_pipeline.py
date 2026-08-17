@@ -348,6 +348,7 @@ async def create_design_job(
     *,
     db: AsyncSession,
     model_role: str | None = None,
+    owner: str | None = None,
 ) -> DesignCreateResult:
     """Run the §17.144 extractor on ``brief``. On extractor success,
     create a ``jobs`` row with ``job_type='design_circuit'`` in
@@ -380,11 +381,11 @@ async def create_design_job(
         text(
             """
             INSERT INTO jobs (
-                title, description, status, input_text, job_type
+                title, description, status, input_text, job_type, owner
             )
             VALUES (
                 :title, :description, 'awaiting_confirmation',
-                :input_text, :job_type
+                :input_text, :job_type, :owner
             )
             RETURNING id
             """
@@ -394,6 +395,7 @@ async def create_design_job(
             "description": brief.strip()[:1000],
             "input_text": brief.strip(),
             "job_type": JOB_TYPE,
+            "owner": owner,
         },
     )
     job_id = job_row.scalar_one()

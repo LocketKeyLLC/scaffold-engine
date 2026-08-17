@@ -2221,6 +2221,7 @@ async def run_research(
     depth: str = "medium",
     domain: str | None = None,
     model_overrides: dict | None = None,
+    owner: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Execute research, yielding SSE events. Dispatches to direct modes by prefix.
 
@@ -2254,7 +2255,7 @@ async def run_research(
         mode, state_depth = "topic", depth
 
     session_id, existing = await _guard_and_create_session(
-        topic, state_depth, research_domain,
+        topic, state_depth, research_domain, owner,
     )
     if session_id is None:
         payload = {
@@ -2555,6 +2556,7 @@ async def run_research_pdf(
     extractor: str = "auto",
     domain: str | None = None,
     model_overrides: dict | None = None,
+    owner: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Entry point for PDF research (called from /research/pdf endpoint).
 
@@ -2566,7 +2568,7 @@ async def run_research_pdf(
     research_domain = domain or _detect_domain(filename)
 
     session_id, existing = await _guard_and_create_session(
-        filename, "direct_pdf", research_domain,
+        filename, "direct_pdf", research_domain, owner,
     )
     if session_id is None:
         payload = {

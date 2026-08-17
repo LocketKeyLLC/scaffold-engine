@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
+from app.authz import Principal, assert_visible, get_principal
 from app.database import get_db
 from app.schemas import (
     DesignAmbiguityRead,
@@ -48,6 +49,7 @@ router = APIRouter(tags=["Design"], prefix="/design")
 async def post_create(
     body: DesignCreateInput,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ) -> DesignCreateResponse:
     """Create a design_circuit job from a natural-language brief.
 
@@ -63,7 +65,7 @@ async def post_create(
         posture as the simulator wrappers).
     """
     result = await create_design_job(
-        body.brief, db=db, model_role=body.model_role,
+        body.brief, db=db, model_role=body.model_role, owner=principal.identity,
     )
     return DesignCreateResponse(
         job_id=result.job_id,
@@ -84,6 +86,7 @@ async def post_advance(
     job_id: uuid.UUID,
     stage: str = "topology",
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     """Advance the design_circuit pipeline by one stage. Returns an
     SSE stream — clients should read ``text/event-stream`` events of
@@ -118,6 +121,8 @@ async def post_advance(
     # before the SSE connection opens. The advancer's own checks
     # would surface the same error inside an SSE event, but operators
     # debugging 404 vs. legitimate stage failure want the distinction.
+    # §17.810 — ownership gate (404 for non-owner, before the SSE opens).
+    await assert_visible(db, principal, str(job_id), detail="design job not found")
     try:
         await get_design_state(job_id, db=db)
     except DesignJobNotFoundError as exc:
@@ -134,6 +139,7 @@ async def post_advance(
 async def get_state(
     job_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ) -> DesignStateRead:
     """Read the aggregated pipeline state for a design_circuit job.
 
@@ -145,6 +151,8 @@ async def get_state(
 
     404 when the job_id is missing or not a design_circuit job.
     """
+    # §17.810 — ownership gate (404 for non-owner).
+    await assert_visible(db, principal, str(job_id), detail="design job not found")
     try:
         state = await get_design_state(job_id, db=db)
     except DesignJobNotFoundError as exc:

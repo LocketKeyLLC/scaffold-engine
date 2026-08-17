@@ -6,7 +6,8 @@ from fastapi.security import APIKeyHeader
 
 from app.config import settings
 from app.database import async_session
-from app.modules.api_keys import verify_key
+from app.authz import ADMIN_PRINCIPAL, principal_for_key_row
+from app.modules.api_keys import resolve_key
 
 _logger = logging.getLogger(__name__)
 
@@ -87,16 +88,25 @@ async def require_api_key(
     except TypeError:
         is_admin = False
     if is_admin:
+        # §17.810 — the master key authenticates as the admin principal. Attach
+        # it so downstream handlers (get_principal) see full-visibility identity.
+        request.state.principal = ADMIN_PRINCIPAL
         return key
 
     # §17.807 — multi-user mode: a presented key that isn't the master may still
     # be a live scoped key (api_keys, mig 066), matched by SHA-256 digest. The
     # DB is consulted only here (non-admin key + multi-user on), so single-user
     # installs keep the pure in-memory compare above with no per-request query.
+    #
+    # §17.810 — resolve to the key's Principal (identity from its owner tag, role
+    # from the row) and attach it to request.state so job endpoints can scope by
+    # owner. A missing/revoked key yields None → falls through to 401.
     if settings.multi_user_enabled and key:
         try:
             async with async_session() as session:
-                if await verify_key(session, key):
+                row = await resolve_key(session, key)
+                if row is not None:
+                    request.state.principal = principal_for_key_row(row)
                     return key
         except TypeError:
             # Non-ASCII header byte reaches hashlib as-is (utf-8 encodable), so
@@ -143,6 +153,16 @@ async def require_openai_key(
     Accepts ``Authorization: Bearer <SCAFFOLD_API_KEY>`` OR ``X-API-Key`` against
     the same key. Returns the matched key on success; raises 401 on failure (the
     /v1 sub-app formats it as an OpenAI ``{"error": {...}}`` envelope).
+
+    §17.810 — ADMIN-ONLY BY DESIGN under multi-user. This compares only against
+    the master key, so scoped keys get 401 here. That is deliberate: the /v1
+    handlers reach the job pipeline through the native_chat in-process loopback
+    (``app/native_chat/engine_client.py``), which re-authenticates as the master
+    key and cannot forward a per-caller identity. Accepting scoped keys without
+    that forwarding would let a non-admin create admin-owned jobs and list every
+    user's work — a privilege escalation. Per-user multi-user access is via the
+    direct JSON API (which resolves a Principal) and the /ui SPA (which sends
+    X-API-Key). Forwarding identity through the loopback is future work.
     """
     if settings.scaffold_auth_disabled:
         return ""

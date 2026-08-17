@@ -42,6 +42,19 @@ async def test_verify_key_empty_is_false_without_db():
 
 
 @pytest.mark.smoke
+async def test_resolve_key_empty_is_none_without_db():
+    """§17.810 — resolve_key short-circuits an empty key to None before any query."""
+    assert await ak.resolve_key(session=None, raw="") is None
+
+
+@pytest.mark.smoke
+async def test_add_key_rejects_bad_role_before_db():
+    """§17.810 — an invalid role is rejected up front (session never touched)."""
+    with pytest.raises(ValueError):
+        await ak.add_key(session=None, label="x", role="superuser")
+
+
+@pytest.mark.smoke
 async def test_revoke_key_requires_exactly_one_selector():
     """revoke_key guards its args before touching the DB, so session=None is fine."""
     with pytest.raises(ValueError):

@@ -11,19 +11,62 @@ from __future__ import annotations
 
 import logging
 from typing import Literal, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from starlette.responses import StreamingResponse
 
+from app.authz import (
+    Principal,
+    assert_visible,
+    assert_visible_by_query,
+    get_principal,
+)
 from app.config import settings
 from app.database import get_db
 from app.modules import assist_agent, assist_session_map
 
 logger = logging.getLogger("scaffold")
 
-router = APIRouter(tags=["Assist"])
+
+# §17.810 — an assist_session has no owner column of its own; it derives from
+# its parent job (assist_sessions.job_id → jobs.owner). This router-level
+# dependency gates EVERY session-scoped route ({session_id} path param) in one
+# place: a non-admin who isn't the parent job's owner gets a 404, identical to a
+# missing session. Routes without a session_id path param (/assist/start,
+# /assist/candidates, /assist/_chatmap/*) short-circuit here and enforce their
+# own ownership where relevant. Admin / single-user installs no-op (no query).
+async def _require_assist_session_visible(
+    request: Request,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+) -> None:
+    if principal.is_admin:
+        return
+    sid = request.path_params.get("session_id")
+    if not sid:
+        return
+    # A malformed session id can't own anything; leave it to the handler's own
+    # not-found path rather than 500 on an invalid-UUID comparison.
+    try:
+        UUID(str(sid))
+    except (ValueError, AttributeError, TypeError):
+        return
+    await assert_visible_by_query(
+        db, principal,
+        "SELECT j.owner FROM assist_sessions s JOIN jobs j ON j.id = s.job_id "
+        "WHERE s.id = :sid",
+        {"sid": str(sid)},
+        detail=f"assist session not found: {sid}",
+    )
+
+
+router = APIRouter(
+    tags=["Assist"],
+    dependencies=[Depends(_require_assist_session_visible)],
+)
 
 
 class AssistStartInput(BaseModel):
@@ -253,7 +296,16 @@ async def assist_chatmap_delete(chat_id: str):
 
 
 @router.post("/assist/start")
-async def assist_start(body: AssistStartInput, db=Depends(get_db)):
+async def assist_start(
+    body: AssistStartInput,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    # §17.810 — a session can only be started on a job the caller owns.
+    await assert_visible(
+        db, principal, body.job_id,
+        detail=f"job not found: {body.job_id}",
+    )
     try:
         result = await assist_agent.start_assist_session(
             job_id=body.job_id,
@@ -278,16 +330,23 @@ async def assist_start(body: AssistStartInput, db=Depends(get_db)):
 # route match (FastAPI matches in declaration order; otherwise `candidates`
 # binds to `{session_id}`).
 @router.get("/assist/candidates")
-async def assist_candidates(in_progress: bool = False, db=Depends(get_db)):
+async def assist_candidates(
+    in_progress: bool = False,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Jobs a user could step through in Assist Mode (natural-language start).
 
     §17.681 — ``in_progress=true`` excludes terminal (completed/cancelled) jobs.
     The automatic cross-chat continuity paths pass it so a "continue"/topic
     match can't silently re-open a finished or reaper-cancelled job; the
-    explicit-redo default keeps the full re-openable list."""
+    explicit-redo default keeps the full re-openable list.
+
+    §17.810 — a non-admin sees only their own jobs as candidates."""
     return {
         "candidates": await assist_agent.list_assist_candidates(
             db=db, in_progress=in_progress,
+            owner=None if principal.is_admin else principal.identity,
         )
     }
 

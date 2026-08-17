@@ -4554,7 +4554,7 @@
     },
     "/assist/candidates": {
       "get": {
-        "description": "Jobs a user could step through in Assist Mode (natural-language start).\n\n§17.681 — ``in_progress=true`` excludes terminal (completed/cancelled) jobs.\nThe automatic cross-chat continuity paths pass it so a \"continue\"/topic\nmatch can't silently re-open a finished or reaper-cancelled job; the\nexplicit-redo default keeps the full re-openable list.",
+        "description": "Jobs a user could step through in Assist Mode (natural-language start).\n\n§17.681 — ``in_progress=true`` excludes terminal (completed/cancelled) jobs.\nThe automatic cross-chat continuity paths pass it so a \"continue\"/topic\nmatch can't silently re-open a finished or reaper-cancelled job; the\nexplicit-redo default keeps the full re-openable list.\n\n§17.810 — a non-admin sees only their own jobs as candidates.",
         "operationId": "assist_candidates_assist_candidates_get",
         "parameters": [
           {
@@ -6786,7 +6786,7 @@
     },
     "/execute": {
       "post": {
-        "description": "Step 15: Execute the next pending DAG node for a job.\n\nNo DB dependency: execute_next_node manages its own short-lived sessions.",
+        "description": "Step 15: Execute the next pending DAG node for a job.\n\nNo request-scoped DB dependency: execute_next_node manages its own\nshort-lived sessions, and the §17.810 ownership check opens its own.",
         "operationId": "execute_next_execute_post",
         "requestBody": {
           "content": {
@@ -7406,7 +7406,7 @@
     },
     "/jobs/cleanup": {
       "post": {
-        "description": "Find and resolve stale/orphaned jobs. Requires API key (global auth).",
+        "description": "Find and resolve stale/orphaned jobs.\n\n§17.810 — admin-only: the reaper sweeps every job regardless of owner, so it\nis not a per-user operation. Non-admin callers get 403.",
         "operationId": "cleanup_stale_jobs_jobs_cleanup_post",
         "responses": {
           "200": {
@@ -10238,7 +10238,7 @@
     },
     "/specs/pending": {
       "get": {
-        "description": "List specs awaiting operator confirmation, oldest first.\n\nOptional ``job_id`` query parameter scopes the list to a specific\njob; without it the list is global across the deployment. UI\nlayers use this to render a \"needs your attention\" panel.",
+        "description": "List specs awaiting operator confirmation, oldest first.\n\nOptional ``job_id`` query parameter scopes the list to a specific\njob; without it the list is global across the deployment. UI\nlayers use this to render a \"needs your attention\" panel.\n\n§17.810 — a non-admin sees only specs whose parent job they own.",
         "operationId": "get_pending_specs_pending_get",
         "parameters": [
           {
@@ -10451,7 +10451,7 @@
     },
     "/status": {
       "get": {
-        "description": "Return job status counts and recent jobs.",
+        "description": "Return job status counts and recent jobs.\n\n§17.810 — counts and the recent-jobs list are scoped to the caller's own\njobs for a non-admin principal; admin (and single-user) sees everything.",
         "operationId": "get_status_status_get",
         "parameters": [
           {

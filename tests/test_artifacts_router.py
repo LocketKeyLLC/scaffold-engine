@@ -12,6 +12,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
+from app.authz import ADMIN_PRINCIPAL
 from app.routers.artifacts import list_job_artifacts, get_artifact
 
 
@@ -57,13 +58,13 @@ class TestListJobArtifacts:
     async def test_returns_artifacts(self):
         rows = [_row(artifact_type="report"), _row(artifact_type="code",
                                                    node_id=uuid4())]
-        resp = await list_job_artifacts(_JID, db=_db(_result(all_rows=rows)))
+        resp = await list_job_artifacts(_JID, db=_db(_result(all_rows=rows)), principal=ADMIN_PRINCIPAL)
         assert resp.total == 2
         assert {a.artifact_type for a in resp.artifacts} == {"report", "code"}
 
     @pytest.mark.asyncio
     async def test_empty(self):
-        resp = await list_job_artifacts(_JID, db=_db(_result(all_rows=[])))
+        resp = await list_job_artifacts(_JID, db=_db(_result(all_rows=[])), principal=ADMIN_PRINCIPAL)
         assert resp.total == 0
         assert resp.artifacts == []
 
@@ -77,7 +78,7 @@ class TestListJobArtifacts:
 class TestGetArtifact:
     @pytest.mark.asyncio
     async def test_returns_one(self):
-        resp = await get_artifact(_AID, db=_db(_result(first_row=_row())))
+        resp = await get_artifact(_AID, db=_db(_result(first_row=_row())), principal=ADMIN_PRINCIPAL)
         assert resp.title == "Deliverable"
         assert resp.content == "# body"
 

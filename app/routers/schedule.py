@@ -14,6 +14,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.authz import (
+    Principal,
+    assert_visible,
+    get_principal,
+    owner_filter,
+)
 from app.database import get_db
 from app.schemas import ScheduleCreate, ScheduleResponse
 from app.utils.model_validation import _require_valid_models
@@ -22,7 +28,11 @@ router = APIRouter()
 
 
 @router.post("/schedule", response_model=ScheduleResponse)
-async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_db)):
+async def create_schedule(
+    body: ScheduleCreate,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Create a recurring research schedule."""
     from apscheduler.triggers.cron import CronTrigger
     from app.scheduler import add_schedule, remove_schedule
@@ -34,14 +44,16 @@ async def create_schedule(body: ScheduleCreate, db: AsyncSession = Depends(get_d
 
     await _require_valid_models(body.model_overrides)
 
+    # §17.810 — stamp the creating principal; the owner is propagated to every
+    # research session this schedule later spawns (app/scheduler.py).
     result = await db.execute(text("""
-        INSERT INTO scheduled_jobs (topic, depth, cron_expression, timezone, domain, enabled)
-        VALUES (:topic, :depth, :cron, :tz, :domain, TRUE)
+        INSERT INTO scheduled_jobs (topic, depth, cron_expression, timezone, domain, enabled, owner)
+        VALUES (:topic, :depth, :cron, :tz, :domain, TRUE, :owner)
         RETURNING id, topic, depth, cron_expression, timezone, domain, enabled,
                   last_run_at, last_status, last_job_id, next_run_at,
                   run_count, failure_count, created_at
     """), {"topic": body.topic, "depth": body.depth, "cron": body.cron_expression,
-           "tz": body.timezone, "domain": body.domain})
+           "tz": body.timezone, "domain": body.domain, "owner": principal.identity})
     row = result.mappings().first()
 
     # APScheduler registration + next_run_at UPDATE both run in this same
@@ -77,22 +89,27 @@ async def list_schedules(
     limit: int = 50,
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=422, detail="limit must be 1..200")
     if offset < 0:
         raise HTTPException(status_code=422, detail="offset must be >= 0")
+    # §17.810 — non-admin sees only their own schedules; admin sees all.
+    owner_clause, owner_params = owner_filter(principal, column="owner")
+    where_sql = f"WHERE {owner_clause.removeprefix(' AND ')}" if owner_clause else ""
     total = (await db.execute(
-        text("SELECT COUNT(*) FROM scheduled_jobs")
+        text(f"SELECT COUNT(*) FROM scheduled_jobs {where_sql}"), owner_params
     )).scalar() or 0
-    rows = (await db.execute(text("""
+    rows = (await db.execute(text(f"""
         SELECT id, topic, depth, cron_expression, timezone, domain, enabled,
                last_run_at, last_status, last_job_id, next_run_at,
                run_count, failure_count, created_at
         FROM scheduled_jobs
+        {where_sql}
         ORDER BY created_at DESC
         LIMIT :limit OFFSET :offset
-    """), {"limit": limit, "offset": offset})).mappings().all()
+    """), {"limit": limit, "offset": offset, **owner_params})).mappings().all()
     return {
         "schedules": [dict(r) for r in rows],
         "total": total,
@@ -102,9 +119,19 @@ async def list_schedules(
 
 
 @router.delete("/schedule/{schedule_id}")
-async def delete_schedule(schedule_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_schedule(
+    schedule_id: int,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     from app.scheduler import delete_schedule as _scheduler_delete
 
+    # §17.810 — only the owner (or admin) may delete a schedule. Pre-check so a
+    # non-owner gets the same 404 as a missing schedule (no existence leak).
+    await assert_visible(
+        db, principal, schedule_id,
+        table="scheduled_jobs", detail="schedule not found",
+    )
     deleted = await _scheduler_delete(db, schedule_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="schedule not found")

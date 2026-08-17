@@ -168,7 +168,7 @@ async def _await_with_heartbeat(
 # =============================================================================
 
 async def _guard_and_create_session(
-    topic: str, depth: str, domain: str,
+    topic: str, depth: str, domain: str, owner: str | None = None,
 ) -> tuple[str | None, dict | None]:
     """Atomically create a 'running' research session.
 
@@ -189,11 +189,11 @@ async def _guard_and_create_session(
     from sqlalchemy.exc import IntegrityError
 
     insert_sql = text(
-        "INSERT INTO research_sessions (topic, depth, domain, status) "
-        "VALUES (:topic, :depth, :domain, 'running') "
+        "INSERT INTO research_sessions (topic, depth, domain, status, owner) "
+        "VALUES (:topic, :depth, :domain, 'running', :owner) "
         "RETURNING id"
     )
-    params = {"topic": topic, "depth": depth, "domain": domain}
+    params = {"topic": topic, "depth": depth, "domain": domain, "owner": owner}
 
     async with _ra().async_session() as db:
         try:

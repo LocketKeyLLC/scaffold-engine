@@ -26,8 +26,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 
+from app.authz import (
+    Principal,
+    assert_visible,
+    get_principal,
+    owner_filter,
+)
 from app.config import settings
-from app.database import get_db
+from app.database import async_session, get_db
 from app.modules.dag_generator import generate_dag as _generate_dag
 from app.modules.decomposition import (
     MIN_COMPONENTS,
@@ -71,7 +77,11 @@ router = APIRouter()
 
 
 @router.post("/ideas")
-async def submit_idea(body: IdeaInput, db=Depends(get_db)):
+async def submit_idea(
+    body: IdeaInput,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Step 10: Submit new idea → trigger refinement."""
     # §17.809 — --quick: fast model map + flag the job (see /ideate).
     overrides = (
@@ -81,8 +91,9 @@ async def submit_idea(body: IdeaInput, db=Depends(get_db)):
     await _require_valid_models(overrides)
     # §17.442 — bound concurrent ideation requests (router-layer so the job
     # isn't even created until a slot frees). See ideation_global_concurrency.
+    # §17.810 — stamp the creating principal as the job owner.
     async with get_ideation_slot_sem():
-        result = await refine_idea(body.idea, db, model=body.model, domain=body.domain, model_overrides=overrides)
+        result = await refine_idea(body.idea, db, model=body.model, domain=body.domain, model_overrides=overrides, owner=principal.identity)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
             status_code=result.get("http_status", 500),
@@ -94,7 +105,11 @@ async def submit_idea(body: IdeaInput, db=Depends(get_db)):
 
 
 @router.post("/ideate")
-async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
+async def ideate_endpoint(
+    body: IdeaInput,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Phase 1: Analyze idea, assess feasibility, halt for confirmation."""
     # §17.809 — --quick: run Phase 1 on the fast "quick" model map and flag the
     # job so the later phases (confirm/dag/execute) stay fast without the client
@@ -106,7 +121,7 @@ async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
     await _require_valid_models(overrides)
     # §17.442 — bound concurrent ideation requests (see ideation_global_concurrency).
     async with get_ideation_slot_sem():
-        result = await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain, model_overrides=overrides)
+        result = await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain, model_overrides=overrides, owner=principal.identity)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
             status_code=result.get("http_status", 500),
@@ -118,7 +133,11 @@ async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
 
 
 @router.post("/ideate/start")
-async def ideate_start_endpoint(body: IdeaInput, db=Depends(get_db)):
+async def ideate_start_endpoint(
+    body: IdeaInput,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """§17.454 — Async kickoff for Phase 1. Creates the job row and returns its
     ``job_id`` immediately, then runs the 100-547s refinement in a background task.
 
@@ -134,7 +153,9 @@ async def ideate_start_endpoint(body: IdeaInput, db=Depends(get_db)):
         else body.model_overrides
     )
     await _require_valid_models(overrides)
-    job_id = await create_ideation_job(body.idea, db, domain=body.domain)
+    # §17.810 — stamp owner at row creation; the background refine reuses this
+    # same row (job_id), so ownership is set before Phase 1 even starts.
+    job_id = await create_ideation_job(body.idea, db, domain=body.domain, owner=principal.identity)
     if body.quick:
         await mark_job_quick(job_id)
     spawn_phase1_background(
@@ -146,7 +167,11 @@ async def ideate_start_endpoint(body: IdeaInput, db=Depends(get_db)):
 
 
 @router.post("/decompose")
-async def decompose_endpoint(body: IdeaInput, db=Depends(get_db)):
+async def decompose_endpoint(
+    body: IdeaInput,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """§17.526 — split a multi-part idea into an umbrella + component child jobs,
     each run autonomously through the normal pipeline (Phase 1 → grounded Phase 2
     → DAG → execute). Returns the umbrella id + child roll-up immediately.
@@ -196,14 +221,21 @@ async def decompose_endpoint(body: IdeaInput, db=Depends(get_db)):
         )
     result = await create_and_run_decomposition(
         body.idea, db, components=components, model_overrides=body.model_overrides,
+        owner=principal.identity,
     )
     result["decomposed"] = True
     return result
 
 
 @router.post("/ideate/confirm")
-async def ideate_confirm_endpoint(body: ConfirmInput, db=Depends(get_db)):
+async def ideate_confirm_endpoint(
+    body: ConfirmInput,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Phase 2: User confirms -> research -> ingest -> compile -> present workflow."""
+    # §17.810 — only the job's owner (or an admin) may advance it to Phase 2.
+    await assert_visible(db, principal, body.job_id, detail=f"job not found: {body.job_id}")
     # §17.809 — if the job was started with --quick, layer the fast model map.
     overrides = await resolve_job_overrides(body.job_id, body.model_overrides)
     await _require_valid_models(overrides)
@@ -222,15 +254,22 @@ async def ideate_confirm_endpoint(body: ConfirmInput, db=Depends(get_db)):
 
 
 @router.get("/dag/{job_id}")
-async def get_dag(job_id: str, db: AsyncSession = Depends(get_db)):
+async def get_dag(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Step 18: Retrieve DAG nodes + job status for a job."""
     try:
         UUID(job_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid job_id format")
+    # §17.810 — owner predicate folded into the status probe; a non-owner sees
+    # the same "Job not found" as a missing job.
+    owner_clause, owner_params = owner_filter(principal, column="owner")
     row = await db.execute(
-        text("SELECT status FROM jobs WHERE id = :id"),
-        {"id": job_id},
+        text(f"SELECT status FROM jobs WHERE id = :id{owner_clause}"),
+        {"id": job_id, **owner_params},
     )
     job = row.mappings().first()
     if not job:
@@ -247,8 +286,14 @@ async def get_dag(job_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/dag")
-async def generate_dag_endpoint(body: DagInput, db=Depends(get_db)):
+async def generate_dag_endpoint(
+    body: DagInput,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Step 11: Generate DAG from refined idea brief."""
+    # §17.810 — only the owner (or admin) may plan a job's DAG.
+    await assert_visible(db, principal, body.job_id, detail=f"job not found: {body.job_id}")
     # §17.809 — --quick jobs plan on the fast model map too.
     overrides = await resolve_job_overrides(body.job_id, body.model_overrides)
     await _require_valid_models(overrides)
@@ -262,19 +307,30 @@ async def generate_dag_endpoint(body: DagInput, db=Depends(get_db)):
 
 
 @router.get("/exec/status/{job_id}")
-async def exec_status(job_id: str, db: AsyncSession = Depends(get_db)):
+async def exec_status(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Get execution state for a job."""
     try:
-        result = await execution_status(UUID(job_id), db)
-        if "error" in result:
-            raise HTTPException(status_code=404, detail=result["error"])
-        return result
+        parsed_id = UUID(job_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid job_id format")
+    # §17.810 — ownership gate before revealing execution state.
+    await assert_visible(db, principal, str(parsed_id), detail=f"job not found: {job_id}")
+    result = await execution_status(parsed_id, db)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 
 @router.get("/exec/nodes/{job_id}")
-async def exec_nodes(job_id: str, db: AsyncSession = Depends(get_db)):
+async def exec_nodes(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """§17.471 — per-node output text (T1..Tn) for a job.
 
     Distinct from ``/exec/status``, which is summary-only (counts + node
@@ -285,23 +341,33 @@ async def exec_nodes(job_id: str, db: AsyncSession = Depends(get_db)):
     leaves, dropping every interior node from a multi-leaf job.
     """
     try:
-        result = await node_outputs(UUID(job_id), db)
-        if "error" in result:
-            raise HTTPException(status_code=404, detail=result["error"])
-        return result
+        parsed_id = UUID(job_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid job_id format")
+    # §17.810 — ownership gate before revealing per-node outputs.
+    await assert_visible(db, principal, str(parsed_id), detail=f"job not found: {job_id}")
+    result = await node_outputs(parsed_id, db)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 
 @router.post("/exec/retry")
-async def exec_retry(body: ExecRetryInput, db: AsyncSession = Depends(get_db)):
+async def exec_retry(
+    body: ExecRetryInput,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Reset a failed node to pending for retry."""
     if not body.job_id or not body.node_key:
         raise HTTPException(status_code=400, detail="Missing job_id or node_key")
     try:
-        result = await retry_failed_node(UUID(body.job_id), body.node_key, db)
+        parsed_id = UUID(body.job_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid job_id format")
+    # §17.810 — only the owner (or admin) may retry a node on the job.
+    await assert_visible(db, principal, str(parsed_id), detail=f"job not found: {body.job_id}")
+    result = await retry_failed_node(parsed_id, body.node_key, db)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
@@ -321,11 +387,25 @@ async def optimize_endpoint(body: PromptOptimizeInput):
 
 
 @router.post("/execute", response_model=ExecutionResult, tags=["Step 15"])
-async def execute_next(body: ExecuteNextInput):
+async def execute_next(
+    body: ExecuteNextInput,
+    principal: Principal = Depends(get_principal),
+):
     """Step 15: Execute the next pending DAG node for a job.
 
-    No DB dependency: execute_next_node manages its own short-lived sessions.
+    No request-scoped DB dependency: execute_next_node manages its own
+    short-lived sessions, and the §17.810 ownership check opens its own.
     """
+    # §17.810 — ownership gate. Own a short-lived session for the check so no
+    # request-scoped connection is held across node execution. A malformed id is
+    # left to execute_next_node's own error handling (skip the check).
+    try:
+        parsed_id = UUID(body.job_id)
+    except (ValueError, TypeError, AttributeError):
+        parsed_id = None
+    if parsed_id is not None:
+        async with async_session() as _s:
+            await assert_visible(_s, principal, str(parsed_id), detail=f"job not found: {body.job_id}")
     # §17.809 — --quick jobs execute on the fast model map.
     overrides = await resolve_job_overrides(body.job_id, body.model_overrides)
     await _require_valid_models(overrides)
@@ -348,7 +428,10 @@ async def execute_next(body: ExecuteNextInput):
 
 
 @router.post("/execute/all", tags=["Step 15"])
-async def execute_all_endpoint(body: ExecuteNextInput):
+async def execute_all_endpoint(
+    body: ExecuteNextInput,
+    principal: Principal = Depends(get_principal),
+):
     """Execute all DAG nodes in sequence, streaming SSE events.
     Auto-generates DAG if none exists.  Failed nodes are skipped;
     downstream nodes blocked by failures are reported at the end.
@@ -361,6 +444,10 @@ async def execute_all_endpoint(body: ExecuteNextInput):
         UUID(body.job_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid job_id format")
+    # §17.810 — ownership gate BEFORE we start streaming (own short-lived session
+    # so no connection is held across the whole SSE run).
+    async with async_session() as _s:
+        await assert_visible(_s, principal, body.job_id, detail=f"job not found: {body.job_id}")
     # §17.809 — --quick jobs execute every node on the fast model map.
     overrides = await resolve_job_overrides(body.job_id, body.model_overrides)
     await _require_valid_models(overrides)
@@ -372,6 +459,13 @@ async def execute_all_endpoint(body: ExecuteNextInput):
 
 
 @router.post("/skip", response_model=ExecutionResult, tags=["Step 15"])
-async def skip_node_endpoint(body: SkipNodeInput, db: AsyncSession = Depends(get_db)):
+async def skip_node_endpoint(
+    body: SkipNodeInput,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Step 15: Skip a specific DAG node."""
+    # §17.810 — ownership gate. body.job_id is a UUID-validated field on the
+    # schema, so it is safe to hand straight to assert_visible.
+    await assert_visible(db, principal, body.job_id, detail=f"job not found: {body.job_id}")
     return await skip_node(job_id=body.job_id, node_key=body.node_key, db=db)
