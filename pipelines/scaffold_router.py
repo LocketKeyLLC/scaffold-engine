@@ -140,7 +140,7 @@ _RATE_LIMIT_RE = re.compile(
 _FOOTER_COMMANDS: frozenset = frozenset({"/results", "/cost", "/logs", "/rag"})
 
 KNOWN_SUBCOMMANDS: dict = {
-    "/model": ("list", "available", "set", "reset", "probe", "proposals", "apply", "test", "help"),
+    "/model": ("list", "available", "set", "reset", "probe", "proposals", "apply", "profile", "test", "help"),
     "/jobs": ("list", "find", "rename", "delete", "help"),
     # U.8.D — `run-now` was advertised here but never had an orchestrator
     # endpoint or a chat handler. Removed; see audit follow-ups.
@@ -2042,6 +2042,10 @@ class Pipeline:
 
     def _handle_go(self, msg: str, messages: List[dict]) -> Generator[str, None, None]:
         tokens = msg.split()
+        # §17.809 — per-job quick mode: `/go --quick` (also --fast / -q). The flag
+        # rides on the /go command line, which is excluded from idea synthesis, so
+        # it never pollutes the brief.
+        quick = any(t.lower() in ("--quick", "--fast", "-q") for t in tokens)
         is_confirm = len(tokens) >= 2 and tokens[1].lower() == "confirm"
 
         # `/go confirm` — launch the exact brief shown on the previous `/go`.
@@ -2049,7 +2053,7 @@ class Pipeline:
             pending = self._extract_pending_brief(messages)
             if pending:
                 yield f"> **Launching with:** {pending}\n\n---\n\n"
-                yield from self._auto_chain(pending)
+                yield from self._auto_chain(pending, quick=quick)
                 return
             yield ("_(No pending brief found — re-synthesizing from the "
                    "conversation and launching.)_\n\n")
@@ -2107,7 +2111,7 @@ class Pipeline:
             return
 
         yield f"> **Launching with:** {synthesized}\n\n---\n\n"
-        yield from self._auto_chain(synthesized)
+        yield from self._auto_chain(synthesized, quick=quick)
 
     def _handle_research_reply(self, msg: str) -> Generator[str, None, None]:
         parts = msg.split(None, 2)
@@ -3420,15 +3424,21 @@ class Pipeline:
         )
         return True
 
-    def _auto_chain(self, message: str) -> Generator[str, None, None]:
-        if self.valves.decompose_on_go:
+    def _auto_chain(self, message: str, quick: bool = False) -> Generator[str, None, None]:
+        # §17.809 — --quick flags the job quick-mode; the orchestrator layers the
+        # fast "quick" model map across every phase (see IdeaInput.quick). Decompose
+        # children don't inherit the flag yet, so route --quick down the single-job
+        # path regardless of the decompose_on_go valve.
+        if self.valves.decompose_on_go and not quick:
             handled = yield from self._try_decompose(message)
             if handled:
                 return
+        if quick:
+            yield "⚡ **Quick mode** — fast cloud models, tightened for speed.\n\n"
         yield "Let me think about this"
         ok, res = yield from self._post_with_keepalive(
             f"{self.valves.orchestrator_url}/ideate",
-            {"idea": message, "model_overrides": self._model_overrides()},
+            {"idea": message, "model_overrides": self._model_overrides(), "quick": quick},
             self.valves.stream_timeout,
             progress_label="Phase 1 — refining idea",
         )
@@ -4303,11 +4313,17 @@ class Pipeline:
                 if len(parts) < 2:
                     return "Usage: /idea <description>"
                 text = " ".join(parts[1:])
+                # §17.809 — strip a per-job --quick/--fast flag so it doesn't
+                # pollute the brief; flag the job quick-mode instead.
+                _qtok = ("--quick", "--fast", "-q")
+                quick = any(t.lower() in _qtok for t in text.split())
+                if quick:
+                    text = " ".join(t for t in text.split() if t.lower() not in _qtok).strip()
                 if _is_placeholder(text):
                     return "It looks like the description is missing or a placeholder. Try `/idea Build a CLI that converts screenshots to a searchable PDF`."
                 r = _HTTP_SESSION.post(
                     f"{self.valves.orchestrator_url}/ideate",
-                    json={"idea": text, "model_overrides": self._model_overrides()},
+                    json={"idea": text, "model_overrides": self._model_overrides(), "quick": quick},
                     headers=self._auth_headers(),
                     timeout=self.valves.stream_timeout,
                 )
@@ -7060,8 +7076,9 @@ class Pipeline:
         if sub == "probe":     return self._model_probe()
         if sub == "proposals": return self._model_proposals()      # §17.803
         if sub == "apply":     return self._model_apply_card(parts)  # §17.803
+        if sub == "profile":   return self._model_profile(parts)     # §17.809
         if sub == "help":      return self._model_help()
-        close = difflib.get_close_matches(sub, ("list", "available", "set", "reset", "probe", "proposals", "apply", "help"), n=2, cutoff=0.6)
+        close = difflib.get_close_matches(sub, ("list", "available", "set", "reset", "probe", "proposals", "apply", "profile", "help"), n=2, cutoff=0.6)
         hint = ""
         if close:
             hint = "\n\nClosest matches:\n" + "\n".join(f"  - `/model {c}`" for c in close)
@@ -7159,10 +7176,104 @@ class Pipeline:
 | `/model probe` | Probe embedder dimension (must equal 512) |
 | `/model proposals` | Show staged role→model swap proposals |
 | `/model apply <role>` | Review a staged swap as a confirm card |
+| `/model profile [name]` | Show / activate a runtime profile (e.g. `quick`) |
+| `/model profile off` | Turn the active profile off (revert everything) |
 | `/model help` | Show this message |
 
 **Roles:** general, verifier, coder, embedder, reranker, router, fallback, cloud_alt
-**Example:** `/model set general qwen3:8b`"""
+**Example:** `/model set general qwen3:8b`
+**Quick mode:** `/model profile quick` (persistent, engine-wide) or `/go … --quick` (one job)"""
+
+    # ------------------------------------------------------------------
+    # §17.809 — runtime compute profiles ("quick mode")
+    # ------------------------------------------------------------------
+
+    def _model_profile(self, parts: list) -> str:
+        """Show or activate a runtime compute profile (the global 'quick mode').
+
+        ``/model profile``                → list available + which is active
+        ``/model profile <name>``         → activate it engine-wide (persistent)
+        ``/model profile off|none|clear`` → turn the active profile off
+        """
+        base = f"{self.valves.orchestrator_url}/config/profile"
+        arg = parts[2].lower() if len(parts) > 2 else ""
+
+        # --- turn off ---
+        if arg in ("off", "none", "clear", "reset", "default"):
+            try:
+                r = _HTTP_SESSION.delete(
+                    base, headers=self._auth_headers(),
+                    timeout=self.valves.request_timeout,
+                )
+            except requests.exceptions.RequestException as e:
+                return f"Couldn't reach the orchestrator: {e}"
+            if r.status_code >= 400:
+                return f"Couldn't turn the profile off (HTTP {r.status_code})."
+            return (
+                "**Runtime profile turned off.** Every role + knob reverted to "
+                "its env/config default."
+            )
+
+        # --- activate a named profile ---
+        if arg and arg not in ("list", "show", "status"):
+            try:
+                r = _HTTP_SESSION.post(
+                    base, headers=self._auth_headers(),
+                    json={"name": arg}, timeout=self.valves.request_timeout,
+                )
+            except requests.exceptions.RequestException as e:
+                return f"Couldn't reach the orchestrator: {e}"
+            if r.status_code == 404:
+                return (
+                    f"Unknown profile `{arg}`. Run `/model profile` to see the "
+                    f"available profiles."
+                )
+            if r.status_code >= 400:
+                return f"Couldn't activate profile `{arg}` (HTTP {r.status_code})."
+            try:
+                d = r.json()
+            except ValueError:
+                d = {}
+            n_models = len(d.get("models") or {})
+            n_knobs = len(d.get("knobs") or {})
+            return (
+                f"✅ **Profile `{arg}` active** — persistent, survives restart.\n\n"
+                f"Re-pointed {n_models} model role(s) and tightened {n_knobs} "
+                f"knob(s). Turn it off with `/model profile off`."
+            )
+
+        # --- list (GET) ---
+        try:
+            r = _HTTP_SESSION.get(
+                base, headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            return f"Couldn't reach the orchestrator: {e}"
+        if r.status_code >= 400:
+            return f"Couldn't fetch profiles (HTTP {r.status_code})."
+        try:
+            d = r.json()
+        except ValueError:
+            return "Malformed response fetching profiles."
+        active = d.get("active") or {}
+        active_name = active.get("name") if isinstance(active, dict) else None
+        available = d.get("available") or []
+        lines = ["**Runtime compute profiles**", ""]
+        if active_name:
+            lines.append(f"🟢 Active: **{active_name}**")
+        else:
+            lines.append("⚪ Active: _none_ (env/config defaults)")
+        lines += ["", "| Profile | Description |", "|---|---|"]
+        for p in available:
+            mark = " ✅" if p.get("name") == active_name else ""
+            lines.append(f"| `{p.get('name')}`{mark} | {p.get('description', '')} |")
+        lines += [
+            "",
+            "_Activate:_ `/model profile <name>`  ·  _Off:_ `/model profile off`",
+            "_One job only:_ `/go … --quick`",
+        ]
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # §17.803 — role→model swap proposals (staged by the learning job)

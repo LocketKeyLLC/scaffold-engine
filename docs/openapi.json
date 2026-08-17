@@ -1785,6 +1785,11 @@
               }
             ],
             "title": "Model Overrides"
+          },
+          "quick": {
+            "default": false,
+            "title": "Quick",
+            "type": "boolean"
           }
         },
         "required": [
@@ -2909,6 +2914,22 @@
           }
         },
         "title": "NodeResetInput",
+        "type": "object"
+      },
+      "ProfileApplyInput": {
+        "description": "§17.809 — activate a named runtime compute profile (e.g. ``quick``).",
+        "properties": {
+          "name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ProfileApplyInput",
         "type": "object"
       },
       "PromptOptimizeInput": {
@@ -5913,6 +5934,109 @@
         "summary": "Reset Log Level",
         "tags": [
           "ops"
+        ]
+      }
+    },
+    "/config/profile": {
+      "delete": {
+        "description": "Turn the active profile off, reverting every model + knob it set.",
+        "operationId": "clear_profile_endpoint_config_profile_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Clear Profile Endpoint Config Profile Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Clear Profile Endpoint",
+        "tags": [
+          "Config"
+        ]
+      },
+      "get": {
+        "description": "The globally-active profile (or ``null``) plus the available registry.",
+        "operationId": "get_profile_endpoint_config_profile_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Profile Endpoint Config Profile Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Profile Endpoint",
+        "tags": [
+          "Config"
+        ]
+      },
+      "post": {
+        "description": "Activate a named profile globally. 404 on an unknown profile name.",
+        "operationId": "apply_profile_endpoint_config_profile_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileApplyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Apply Profile Endpoint Config Profile Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Apply Profile Endpoint",
+        "tags": [
+          "Config"
         ]
       }
     },

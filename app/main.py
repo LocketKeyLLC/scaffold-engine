@@ -341,6 +341,21 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("model_overrides_hook_failed: err=%s", exc)
 
+    # §17.809 — Re-apply the active runtime profile's KNOBS onto settings. Must
+    # run AFTER the model-overrides replay above: a profile writes its per-role
+    # model swaps through set_override (so they ride the hook above), and this
+    # only restores the non-model knobs (max_retries, node_escalation, the
+    # faithfulness/CoVe/research caps) that a restart reset to env defaults.
+    # Fail-soft — a hiccup leaves knobs at env defaults, never blocks startup.
+    try:
+        from app.modules.profiles import load_profile_into_settings
+        async with async_session() as _prof_db:
+            active_prof = await load_profile_into_settings(_prof_db)
+        if active_prof:
+            logger.info("runtime_profile_applied_at_startup: name=%s", active_prof)
+    except Exception as exc:
+        logger.warning("runtime_profile_hook_failed: err=%s", exc)
+
     # §17.774 — Automatic crash-resume of jobs orphaned mid-execution. Must run
     # AFTER migrations (needs the 061 resume counters) and AFTER the node sweep
     # + model-overrides replay above (so a resumed job's node is 'pending' again
@@ -643,6 +658,7 @@ from app.routers.artifacts import router as artifacts_router  # noqa: E402 — �
 from app.routers.route import router as route_router  # noqa: E402 — §17.628
 from app.routers.mcp import router as mcp_router  # noqa: E402 — §17.772
 from app.routers.model_proposals import router as model_proposals_router  # noqa: E402 — §17.803
+from app.routers.profiles import router as profiles_router  # noqa: E402 — §17.809
 app.include_router(workflow_router)
 app.include_router(research_router)
 app.include_router(jobs_router)
@@ -655,6 +671,7 @@ app.include_router(artifacts_router)
 app.include_router(route_router)
 app.include_router(mcp_router)  # §17.772 — MCP server registry + introspection
 app.include_router(model_proposals_router)  # §17.803 — role→model swap proposals
+app.include_router(profiles_router)  # §17.809 — runtime compute profiles (/config/profile)
 
 
 # Sprint X.26 — Prometheus exposition. No auth (Prometheus scrapers

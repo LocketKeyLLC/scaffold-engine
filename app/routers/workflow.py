@@ -48,6 +48,11 @@ from app.modules.ideation_workflow import (
     research_and_compile,
     spawn_phase1_background,
 )
+from app.modules.profiles import (  # §17.809 — per-job --quick
+    mark_job_quick,
+    merge_quick_overrides,
+    resolve_job_overrides,
+)
 from app.modules.prompt_optimizer import optimize_prompt
 from app.schemas import (
     ConfirmInput,
@@ -68,31 +73,47 @@ router = APIRouter()
 @router.post("/ideas")
 async def submit_idea(body: IdeaInput, db=Depends(get_db)):
     """Step 10: Submit new idea → trigger refinement."""
-    await _require_valid_models(body.model_overrides)
+    # §17.809 — --quick: fast model map + flag the job (see /ideate).
+    overrides = (
+        merge_quick_overrides(body.model_overrides) if body.quick
+        else body.model_overrides
+    )
+    await _require_valid_models(overrides)
     # §17.442 — bound concurrent ideation requests (router-layer so the job
     # isn't even created until a slot frees). See ideation_global_concurrency.
     async with get_ideation_slot_sem():
-        result = await refine_idea(body.idea, db, model=body.model, domain=body.domain, model_overrides=body.model_overrides)
+        result = await refine_idea(body.idea, db, model=body.model, domain=body.domain, model_overrides=overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
             status_code=result.get("http_status", 500),
             detail=result["error"],
         )
+    if body.quick and isinstance(result, dict):
+        await mark_job_quick(result.get("job_id"))
     return result
 
 
 @router.post("/ideate")
 async def ideate_endpoint(body: IdeaInput, db=Depends(get_db)):
     """Phase 1: Analyze idea, assess feasibility, halt for confirmation."""
-    await _require_valid_models(body.model_overrides)
+    # §17.809 — --quick: run Phase 1 on the fast "quick" model map and flag the
+    # job so the later phases (confirm/dag/execute) stay fast without the client
+    # having to re-send the map on every turn.
+    overrides = (
+        merge_quick_overrides(body.model_overrides) if body.quick
+        else body.model_overrides
+    )
+    await _require_valid_models(overrides)
     # §17.442 — bound concurrent ideation requests (see ideation_global_concurrency).
     async with get_ideation_slot_sem():
-        result = await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain, model_overrides=body.model_overrides)
+        result = await analyze_and_confirm(body.idea, db, model=body.model, domain=body.domain, model_overrides=overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
             status_code=result.get("http_status", 500),
             detail=result["error"],
         )
+    if body.quick and isinstance(result, dict):
+        await mark_job_quick(result.get("job_id"))
     return result
 
 
@@ -106,12 +127,20 @@ async def ideate_start_endpoint(body: IdeaInput, db=Depends(get_db)):
     keeps using the synchronous ``POST /ideate``, which returns the full refined
     brief + feasibility in one shot. The model-validation gate runs here so a bad
     override 422s before any row is created."""
-    await _require_valid_models(body.model_overrides)
+    # §17.809 — --quick: fast model map + flag the job before the background
+    # Phase 1 spawns, so every phase (including this async refine) runs fast.
+    overrides = (
+        merge_quick_overrides(body.model_overrides) if body.quick
+        else body.model_overrides
+    )
+    await _require_valid_models(overrides)
     job_id = await create_ideation_job(body.idea, db, domain=body.domain)
+    if body.quick:
+        await mark_job_quick(job_id)
     spawn_phase1_background(
         job_id, body.idea,
         model=body.model, domain=body.domain,
-        model_overrides=body.model_overrides,
+        model_overrides=overrides,
     )
     return {"job_id": job_id, "status": "refining"}
 
@@ -175,12 +204,14 @@ async def decompose_endpoint(body: IdeaInput, db=Depends(get_db)):
 @router.post("/ideate/confirm")
 async def ideate_confirm_endpoint(body: ConfirmInput, db=Depends(get_db)):
     """Phase 2: User confirms -> research -> ingest -> compile -> present workflow."""
-    await _require_valid_models(body.model_overrides)
+    # §17.809 — if the job was started with --quick, layer the fast model map.
+    overrides = await resolve_job_overrides(body.job_id, body.model_overrides)
+    await _require_valid_models(overrides)
     result = await research_and_compile(
         body.job_id, db,
         user_feedback=body.feedback,
         push_to_github=body.push_to_github,
-        model_overrides=body.model_overrides,
+        model_overrides=overrides,
     )
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
@@ -218,8 +249,10 @@ async def get_dag(job_id: str, db: AsyncSession = Depends(get_db)):
 @router.post("/dag")
 async def generate_dag_endpoint(body: DagInput, db=Depends(get_db)):
     """Step 11: Generate DAG from refined idea brief."""
-    await _require_valid_models(body.model_overrides)
-    result = await _generate_dag(body.job_id, db, model=body.model, model_overrides=body.model_overrides)
+    # §17.809 — --quick jobs plan on the fast model map too.
+    overrides = await resolve_job_overrides(body.job_id, body.model_overrides)
+    await _require_valid_models(overrides)
+    result = await _generate_dag(body.job_id, db, model=body.model, model_overrides=overrides)
     if isinstance(result, dict) and "error" in result:
         raise HTTPException(
             status_code=result.get("http_status", 500),
@@ -293,12 +326,14 @@ async def execute_next(body: ExecuteNextInput):
 
     No DB dependency: execute_next_node manages its own short-lived sessions.
     """
-    await _require_valid_models(body.model_overrides)
+    # §17.809 — --quick jobs execute on the fast model map.
+    overrides = await resolve_job_overrides(body.job_id, body.model_overrides)
+    await _require_valid_models(overrides)
     result = await execute_next_node(
         job_id=body.job_id,
         skip_optimize=body.skip_optimize,
         skip_verify=body.skip_verify,
-        model_overrides=body.model_overrides,
+        model_overrides=overrides,
     )
     # Parity with /ideas, /dag, /rag: convert dict-error responses to a real
     # HTTP error so clients can dispatch on status code instead of having to
@@ -326,9 +361,11 @@ async def execute_all_endpoint(body: ExecuteNextInput):
         UUID(body.job_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid job_id format")
-    await _require_valid_models(body.model_overrides)
+    # §17.809 — --quick jobs execute every node on the fast model map.
+    overrides = await resolve_job_overrides(body.job_id, body.model_overrides)
+    await _require_valid_models(overrides)
     return StreamingResponse(
-        execute_all_nodes(body.job_id, model_overrides=body.model_overrides),
+        execute_all_nodes(body.job_id, model_overrides=overrides),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},  # disable nginx buffering
     )
