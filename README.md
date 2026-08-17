@@ -187,6 +187,65 @@ Open WebUI is for chat-driven workflows. The Python SDK and `scaffold` CLI exist
 
 ---
 
+## Multi-user setup
+
+By default the engine is **single-user**: the one `SCAFFOLD_API_KEY` is the only accepted credential, and it has full access to everything. That's the right mode for a personal box. If you want several people (or several machines) sharing one deployment, each seeing only their own work, turn on **multi-user mode**.
+
+### 1. Enable the mode
+
+Flip the flag in `.env` (it ships as `MULTI_USER_ENABLED=false`) and restart the orchestrator:
+
+```bash
+sed -i 's/^MULTI_USER_ENABLED=.*/MULTI_USER_ENABLED=true/' .env
+docker compose up -d
+```
+
+`SCAFFOLD_API_KEY` stays valid — it becomes the **admin** key (sees and manages every user's jobs). Additional users get their own **scoped keys**, minted below.
+
+### 2. Mint a key per user
+
+```bash
+make key-add LABEL="alice laptop" OWNER=alice ROLE=user      # a normal user
+make key-add LABEL="ops box"      OWNER=carol ROLE=admin     # a second admin
+```
+
+The raw key (`sk-scaffold-…`) is printed **once** and never recoverable — only its SHA-256 hash is stored. Hand it to that person as their `X-API-Key` header value.
+
+Two things to understand about the identity model:
+
+- **`OWNER` is the user.** Two keys minted with the same `OWNER` are the *same* user — they share visibility. So `alice laptop` and `alice desktop` (both `OWNER=alice`) both see alice's jobs. Omit `OWNER` and the key is isolated to itself.
+- **`ROLE`** is `user` (default — sees and manages only their own jobs) or `admin` (full access, like the master key). `ROLE` defaults to the least-privileged `user` if omitted.
+
+### 3. What each user sees
+
+Once multi-user is on, every job (and research session, schedule, assist session, design job, artifact) is stamped with its creator's owner. Enforcement is automatic across the whole API:
+
+| Actor | `GET /jobs`, `/status`, `/logs`, … | Another user's job | `POST /jobs/cleanup` |
+|---|---|---|---|
+| `user` (alice) | only alice's own | **404** (indistinguishable from "doesn't exist") | **403** (admin-only) |
+| `admin` / master key | everything | 200 | 200 |
+
+Cross-user access returns **404, not 403** on purpose — a user can't even learn that someone else's job exists.
+
+### Managing keys
+
+```bash
+make key-list                          # id, label, owner, role, status
+make key-list ALL=1                    # include revoked keys
+make key-revoke ID=3                   # revoke by id (or LABEL="alice laptop")
+```
+
+Revocation is immediate — the next request with that key gets a 401.
+
+> **Admin-only surfaces.** The OpenAI-compatible `/v1` API, the MCP server at `/mcp`, and the server-rendered `/web` console accept only the **master admin key** and are not per-user. They reach the pipeline through an internal loopback that authenticates as the master key, so they operate with admin visibility by design. Per-user access is the JSON API and the `/ui` SPA (both send `X-API-Key` and are fully scoped). In a multi-user deployment, keep `/web` network-restricted (it's an operator console that shows all jobs).
+
+> **What can go wrong:**
+> - Minted a key but the user still gets 401 → confirm `MULTI_USER_ENABLED=true` is actually set in the *running* container: `docker exec scaffold-orchestrator printenv MULTI_USER_ENABLED`. It's read at startup, so a `.env` edit needs `docker compose up -d`.
+> - A user sees no jobs after creating one → check the key's `ROLE`/`OWNER` with `make key-list`; jobs created *before* multi-user was enabled have no owner and are visible only to admins.
+> - Turning the flag back off reverts to single-user (master key only) with no data change — the `owner`/`role` columns simply stop being consulted.
+
+---
+
 ## Updating
 
 Pull the latest code and rebuild:
@@ -250,7 +309,7 @@ The default `docker compose up -d` brings up everything below — there's no opt
 
 - **Prometheus `/metrics`** (no auth). Set `METRICS_ENABLED=true` in `.env` (default on). The orchestrator emits counters/gauges for LLM calls (by provider/model/success), HTTP request RED metrics (by method/path/status), alert fire and suppression rates (by kind/severity), jobs by status, executor concurrency in-flight vs cap, and quarterly-calibration cron health. Sample scrape: `curl http://localhost:8000/metrics`. See [`docs/observability.md`](docs/observability.md) for the full metric inventory, recommended scrape config, and a 5-rule starter alert-rule pack.
 - **Simulation sidecars.** Three FastAPI services at `127.0.0.1:8001-8003` for hardware-design tasks: `scaffold-ngspice` (analog SPICE), `scaffold-verilator` (digital SystemVerilog), `scaffold-symbiyosys` (formal verification). The orchestrator invokes them via the `ai-network` bridge; they isolate untrusted simulator input from the orchestrator's process tree. Each has its own `/health`; the orchestrator's `/health` aggregates them. If you don't run hardware-design workflows you can comment out the three `scaffold-*` services in `docker-compose.yml` without losing other functionality.
-- **Native web UI.** `http://localhost:8000/web/jobs` is a server-rendered HTML browser for jobs, ideate/confirm forms, and live SSE-streamed execution progress. Auth-bypassed on the loopback bind, since `localhost:8000` is the operator's box.
+- **Native web UI.** `http://localhost:8000/web/jobs` is a server-rendered HTML browser for jobs, ideate/confirm forms, and live SSE-streamed execution progress. Auth-bypassed on the loopback bind, since `localhost:8000` is the operator's box. It's an **operator/admin console** — it has no per-browser login and shows all jobs, so in a multi-user deployment (see [Multi-user setup](#multi-user-setup)) keep it network-restricted and point users at the `/ui` SPA instead.
 
 ---
 
