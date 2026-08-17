@@ -62,6 +62,21 @@ def test_quick_profile_registered_and_valid():
 
 
 @pytest.mark.smoke
+def test_quick_profile_bounds_execution():
+    """§17.809 — the execution-side levers that get quick mode under 5 min:
+    fewer/coarser nodes, a wider frontier, and no per-node reranker/optimize
+    overhead. Defaults stay ON everywhere else (flipped only by the profile)."""
+    quick = pf.PROFILES["quick"].settings
+    assert quick["dag_max_nodes"] == 6                       # cap the build
+    assert quick["parallel_execution_max_inflight"] == 4     # wider frontier
+    assert quick["execution_rerank_enabled"] is False        # skip ~21s/node CPU rerank
+    assert quick["execution_optimize_enabled"] is False      # skip ~6s/node optimize
+    # These are real settings attrs with ON defaults (guarded at import).
+    assert config.settings.execution_rerank_enabled is True
+    assert config.settings.execution_optimize_enabled is True
+
+
+@pytest.mark.smoke
 def test_get_profile_unknown_raises():
     with pytest.raises(ValueError):
         pf.get_profile("nope")
