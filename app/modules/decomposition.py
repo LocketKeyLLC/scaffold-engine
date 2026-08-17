@@ -287,6 +287,31 @@ async def _refresh_umbrella_children_snapshot(
             changed = True
     if changed:
         meta["children"] = kids
+        # §17.811 — refresh the umbrella's progress + ETA over component children
+        # (single writer; folded into the same metadata write, no race). Children
+        # are heterogeneous concurrent pipelines, so report count/pct without a
+        # time ETA rather than a misleading one.
+        if settings.progress_eta_enabled:
+            _terminal = {"completed", "failed", "cancelled"}
+            _total = len(kids)
+            _done = sum(
+                1 for k in kids
+                if isinstance(k, dict) and k.get("status") in _terminal
+            )
+            _pct = int(round(100.0 * _done / _total)) if _total else None
+            meta["progress"] = {
+                "phase": "aggregating",
+                "label": "Building components",
+                "unit": "components",
+                "completed": _done,
+                "total": _total,
+                "pct": _pct,
+                "eta_ms": None,
+                "eta_human": None,
+                "current_item": None,
+                "summary": f"{_done}/{_total} components · {_pct}%",
+                "soft": False,
+            }
         await db.execute(
             text("UPDATE jobs SET metadata = CAST(:m AS jsonb), updated_at = NOW() "
                  "WHERE id = :u"),

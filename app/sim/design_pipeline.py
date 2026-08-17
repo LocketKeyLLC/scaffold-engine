@@ -48,6 +48,7 @@ from typing import Any, AsyncGenerator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.sim.device_sizing import (
     CandidateIndexError,
     TopologySelectionNotFoundError,
@@ -74,6 +75,9 @@ logger = logging.getLogger("scaffold")
 
 JOB_TYPE = "design_circuit"
 VALID_STAGES = frozenset({"topology", "size", "verify", "report"})
+# §17.811 — canonical stage order for progress %. VALID_STAGES is a set (no
+# order); this tuple is the pipeline sequence used to derive "stage N/4".
+STAGE_ORDER: tuple[str, ...] = ("topology", "size", "verify", "report")
 
 
 class DesignJobNotFoundError(LookupError):
@@ -500,7 +504,28 @@ async def advance_design_stage(
 
     spec_id: uuid.UUID = spec_row["id"]
 
-    yield _sse("stage_start", {"stage": stage, "job_id": str(job_id)})
+    # §17.811 — fold stage progress INTO stage_start (no separate `progress`
+    # event, so the fixed per-stage event sequence is unchanged). Stages are
+    # heterogeneous (sizing dominates), so report count/pct without a time ETA.
+    _stage_start_data = {"stage": stage, "job_id": str(job_id)}
+    if settings.progress_eta_enabled and stage in STAGE_ORDER:
+        _done = STAGE_ORDER.index(stage)
+        _total = len(STAGE_ORDER)
+        _pct = int(round(100.0 * _done / _total))
+        _stage_start_data["progress"] = {
+            "phase": "designing",
+            "label": "Design pipeline",
+            "unit": "stages",
+            "completed": _done,
+            "total": _total,
+            "pct": _pct,
+            "eta_ms": None,
+            "eta_human": None,
+            "current_item": stage,
+            "summary": f"stage {_done + 1}/{_total}: {stage} · {_pct}%",
+            "soft": False,
+        }
+    yield _sse("stage_start", _stage_start_data)
 
     if stage == "topology":
         await _set_job_status(db, job_id, "planning")

@@ -1157,6 +1157,23 @@ class Settings(BaseSettings):
     # today; the parallel-frontier path is unaffected when this is on (its
     # per-node deltas are a deferred follow-up).
     node_token_streaming_enabled: bool = Field(default=False)
+    # §17.811 — progress + ETA signal. When on, long-running subsystems (DAG
+    # exec, research, RAG ingest, assist, decompose, sim) emit a `progress` SSE
+    # frame carrying an EWMA-based ETA and a deterministic one-line summary, and
+    # persist the snapshot to jobs.metadata.progress. Deterministic and cheap —
+    # no model call in the hot loop.
+    progress_eta_enabled: bool = Field(default=True)
+    # Throttle: at most one live `progress` emit + metadata persist per this many
+    # seconds (the terminal snapshot and the first tick always land). Bounds SSE
+    # chatter + DB writes when many fast units complete in a burst.
+    progress_emit_min_interval_seconds: float = Field(default=5.0, ge=0.0, le=120.0)
+    # EWMA smoothing for per-unit duration (higher = more reactive to the latest
+    # unit; lower = smoother, slower-moving ETA).
+    progress_ewma_alpha: float = Field(default=0.3, ge=0.01, le=1.0)
+    # Opt-in LLM-narrated rolling summary (the `📝` prose line). OFF by default:
+    # this host is CPU-only and it adds a model_general call per emit. The
+    # deterministic summary ships regardless; this only ADDS a prose line.
+    progress_summary_llm_enabled: bool = Field(default=False)
     max_upstream_chars: int = Field(default=8000, ge=100, le=200000)
     # §17.477 (Phase 3) — when over max_upstream_chars, allocate each upstream
     # node's surviving char budget by (verifier confidence × length) instead of

@@ -1028,6 +1028,18 @@ def _render_event_html(event_name: str, data: dict) -> str:
             f'<code>{node_key}</code> '
             f'<span class="event-meta">budget remaining: {budget}</span></li>'
         )
+    if event_name == "progress":
+        # §17.811 — live progress + ETA snapshot.
+        summary = esc(str(data.get("summary", "")))
+        current = data.get("current_item")
+        current_html = (
+            f' <span class="event-meta">now: {esc(str(current))}</span>'
+            if current else ""
+        )
+        return (
+            f'<li class="run-event run-event-progress">'
+            f'<span class="event-icon">📊</span> {summary}{current_html}</li>'
+        )
     if event_name == "pipeline_complete":
         passed = esc(str(data.get("passed", "?")))
         failed = esc(str(data.get("failed", "?")))

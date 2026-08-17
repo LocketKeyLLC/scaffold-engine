@@ -31,6 +31,7 @@ import trafilatura
 
 from app import model_router
 from app.config import settings, get_model
+from app.utils.progress import ProgressTracker
 from app.database import async_session
 from app.modules.rag_pipeline import ingest_entries
 from app.providers.base import ModelResponse, Tool
@@ -1462,12 +1463,37 @@ async def _execute_iteration_loop(
     queries = initial_queries
     coverage: float | None = None
 
+    # §17.811 — progress + ETA over research iterations. soft_total: the loop
+    # can early-exit on convergence, so max_iterations is an upper bound and the
+    # ETA renders as "≤". initial_completed carries a resumed session's prior
+    # iterations. One `progress` frame per iteration (coarse cadence — no
+    # throttle needed); the snapshot is also persisted via state.progress.
+    _rp = (
+        ProgressTracker(
+            state.max_iterations,
+            phase="researching",
+            unit="iterations",
+            label=f"Researching: {topic[:60]}",
+            soft_total=True,
+            initial_completed=state.iteration,
+            alpha=settings.progress_ewma_alpha,
+        )
+        if settings.progress_eta_enabled and state.max_iterations >= 2
+        else None
+    )
+
     while state.iteration < state.max_iterations:
         state.iteration += 1
-        yield _sse("iteration_started", {
+        _it_data = {
             "iteration": state.iteration,
             "query_count": len(queries),
-        })
+        }
+        if _rp is not None:
+            _rp.current_item = f"iteration {state.iteration}: searching"
+            state.progress = _rp.snapshot()
+            _it_data["progress"] = state.progress
+            yield _sse("progress", {"session_id": session_id, **state.progress})
+        yield _sse("iteration_started", _it_data)
 
         results = await _search_queries(queries, state)
         yield _sse("search_complete", {
@@ -1490,7 +1516,13 @@ async def _execute_iteration_loop(
         )
         async for hb in _await_with_heartbeat(
             extract_task,
-            {"status": "extracting", "iteration": state.iteration},
+            {
+                "status": "extracting",
+                "iteration": state.iteration,
+                # §17.811 — carry the current ETA snapshot on the heartbeat so a
+                # long extraction still shows "≤ Xm left" between iteration ticks.
+                **({"progress": state.progress} if state.progress else {}),
+            },
             session_id=session_id,
         ):
             yield hb
@@ -1512,7 +1544,18 @@ async def _execute_iteration_loop(
         ingested = 0
         if entries:
             state.all_entries.extend(entries)
-            stats = await ingest_entries(entries, domain=state.domain, session_id=session_id)
+            # §17.811 — reflect ingest sub-progress in the persisted snapshot so
+            # a long ingest updates "now: ingesting X/N" between iteration ticks.
+            def _ingest_cb(done: int, total: int, _it=state.iteration) -> None:
+                if _rp is not None and state.progress is not None:
+                    state.progress = {
+                        **state.progress,
+                        "current_item": f"iteration {_it}: ingesting {done}/{total}",
+                    }
+            stats = await ingest_entries(
+                entries, domain=state.domain, session_id=session_id,
+                progress_cb=_ingest_cb,
+            )
             ingested = stats["new"] + stats["versioned"]
             state.total_new += stats["new"]
             state.total_versioned += stats["versioned"]
@@ -1527,12 +1570,19 @@ async def _execute_iteration_loop(
             "total_rejected": state.total_rejected,
         })
 
-        yield _sse("iteration_complete", {
+        _ic_data = {
             "iteration": state.iteration,
             "entries_extracted": len(entries),
             "entries_ingested": ingested,
-        })
+        }
+        if _rp is not None:  # §17.811 — advance the ETA one iteration
+            state.progress = _rp.tick(
+                current_item=f"iteration {state.iteration}: done",
+            )
+            _ic_data["progress"] = state.progress
+        yield _sse("iteration_complete", _ic_data)
 
+        # §17.811 — state.progress is persisted into state_snapshot here.
         await _update_session_iteration(session_id, state, coverage)
 
         if state.iteration >= state.max_iterations:

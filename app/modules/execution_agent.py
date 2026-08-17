@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.database import async_session
 from app import model_router
 from app.config import settings, get_model
+from app.utils.progress import EmitThrottle, ProgressTracker
 from app.modules.execution_compile import _compile_output, compute_deliverable_kind  # re-exported for test patches
 from app.modules.execution_verify import (
     VERIFY_SYSTEM, _verify_output,  # re-exported for test patches
@@ -78,6 +79,48 @@ def _sse_event(event: str, data: dict) -> str:
     """§17.568 — module-level SSE formatter (byte-identical to the nested
     `_sse` in execute_all_nodes) so `_run_parallel_frontier` can emit frames."""
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+async def _make_dag_progress_tracker(
+    job_id: str, *, phase: str = "executing", label: str = "Executing DAG"
+) -> ProgressTracker | None:
+    """§17.811 — prime a ProgressTracker for a DAG run, or None when disabled.
+
+    Counts total nodes and how many are already terminal (a resumed run may have
+    done/failed/skipped nodes) so the tracker's percentage is job-wide while its
+    EWMA rate only reflects units completed *this* run. Returns None when the
+    valve is off or the DAG is trivial (<2 nodes — a single node's "0% → 100%"
+    is pure noise). Fail-soft: any query error disables progress, never the run.
+    """
+    if not settings.progress_eta_enabled:
+        return None
+    try:
+        async with async_session() as db:
+            row = (
+                await db.execute(
+                    text(
+                        "SELECT count(*) AS total, "
+                        "count(*) FILTER (WHERE status IN ('done','failed','skipped')) "
+                        "AS done FROM dag_nodes WHERE job_id = :jid"
+                    ),
+                    {"jid": job_id},
+                )
+            ).mappings().first()
+        total = int((row and row["total"]) or 0)
+        done = int((row and row["done"]) or 0)
+    except Exception as exc:  # noqa: BLE001 — progress is best-effort
+        logger.warning("progress_tracker_init_failed: job=%s err=%s", job_id, exc)
+        return None
+    if total < 2:
+        return None
+    return ProgressTracker(
+        total,
+        phase=phase,
+        unit="nodes",
+        label=label,
+        initial_completed=done,
+        alpha=settings.progress_ewma_alpha,
+    )
 
 # ---------------------------------------------------------------------------
 # Sprint X.24 — process-wide cap on concurrent execute_all_nodes runs.
@@ -2059,6 +2102,12 @@ async def _run_parallel_frontier(
     results_q: asyncio.Queue = asyncio.Queue()
     inflight: set[asyncio.Task] = set()
     node_results: list[dict] = []
+    # §17.811 — progress + ETA (parallel path). Emitted ONLY from the drain loop
+    # body below, never from `_worker` — the loop owns all SSE ordering, and one
+    # emit site keeps the throttle state single-writer. None when disabled/trivial.
+    _prog = await _make_dag_progress_tracker(job_id)
+    _prog_thr = EmitThrottle(settings.progress_emit_min_interval_seconds)
+    _prog_done: list[str] = []
 
     async def _worker(node: dict) -> None:
         async with sem:
@@ -2116,6 +2165,11 @@ async def _run_parallel_frontier(
                         "failed=%s duration_ms=%s", job_id, summary["total_nodes"],
                         summary["passed"], summary["failed"], elapsed_ms,
                     )
+                    if _prog is not None:  # §17.811 — force terminal 100% snapshot
+                        yield _sse("progress", {
+                            "job_id": job_id,
+                            **_prog.tick(_prog.total, done_items=_prog_done),
+                        })
                     yield _sse("pipeline_complete", summary)
                     return
                 # Not all done → blocked. Job is still 'running' (no worker
@@ -2156,6 +2210,11 @@ async def _run_parallel_frontier(
                     "tool": res.get("tool"),
                     "runbook_only": _done_tool == "shell" and not settings.shell_tool_enabled,
                 })
+                if _prog is not None:  # §17.811
+                    _prog_done.append(res.get("title") or res.get("node_key") or "step")
+                    snap = _prog.tick(done_items=_prog_done)
+                    if _prog_thr.ready():
+                        yield _sse("progress", {"job_id": job_id, **snap})
             elif status == "failed":
                 _failed_key = res.get("node_key", "")
                 _retried = False
@@ -2185,6 +2244,11 @@ async def _run_parallel_frontier(
                         "model_used": res.get("model_used"),
                         "retries_exhausted": not _retried,
                     })
+                    if _prog is not None:  # §17.811 — terminal failure = completed unit
+                        _prog_done.append((res.get("title") or _failed_key or "step") + " (failed)")
+                        snap = _prog.tick(done_items=_prog_done)
+                        if _prog_thr.ready():
+                            yield _sse("progress", {"job_id": job_id, **snap})
             elif status == "budget_exhausted":
                 # §17.777 — a worker hit the per-job budget gate; the job is
                 # already flipped to 'failed'. Surface the terminal frame and
@@ -2422,6 +2486,13 @@ async def execute_all_nodes(
                 yield _ev
             return
 
+        # §17.811 — progress + ETA tracker (serial path). Per-run state; emit is
+        # throttled so a burst of fast nodes can't spam the stream. None when the
+        # valve is off / DAG is trivial.
+        _prog = await _make_dag_progress_tracker(job_id)
+        _prog_thr = EmitThrottle(settings.progress_emit_min_interval_seconds)
+        _prog_done: list[str] = []
+
         # ---- Main execute loop (serial) ----
         while True:
             # ---- Session 4 (short peek only; execute_next_node owns its own sessions) ----
@@ -2433,6 +2504,12 @@ async def execute_all_nodes(
                     "title": node["title"],
                     "tool": node.get("tool", "LLM"),
                 })
+                # §17.811 — live progress at node_start: completions so far +
+                # the node now running. No tick (no new completion) — snapshot only.
+                if _prog is not None:
+                    _prog.current_item = node["title"]
+                    if _prog_thr.ready():
+                        yield _sse("progress", {"job_id": job_id, **_prog.snapshot()})
 
             # Spawn keepalive so the SSE stream doesn't look dead during long LLM calls.
             keepalive_stop = asyncio.Event()
@@ -2523,6 +2600,14 @@ async def execute_all_nodes(
                     job_id, summary["total_nodes"], summary["passed"],
                     summary["failed"], elapsed_ms,
                 )
+                # §17.811 — force-emit the terminal 100% snapshot (bypass throttle)
+                # so a client always sees the run land at complete.
+                if _prog is not None:
+                    _prog.current_item = None
+                    yield _sse("progress", {
+                        "job_id": job_id,
+                        **_prog.tick(_prog.total, done_items=_prog_done),
+                    })
                 yield _sse("pipeline_complete", summary)
                 return
 
@@ -2553,6 +2638,11 @@ async def execute_all_nodes(
                     "tool": result.get("tool"),
                     "runbook_only": _done_tool == "shell" and not settings.shell_tool_enabled,
                 })
+                if _prog is not None:  # §17.811
+                    _prog_done.append(result.get("title") or result.get("node_key") or "step")
+                    snap = _prog.tick(done_items=_prog_done)
+                    if _prog_thr.ready():
+                        yield _sse("progress", {"job_id": job_id, **snap})
             elif status == "failed":
                 _failed_key = result.get("node_key", "")
                 _retried = False
@@ -2594,6 +2684,13 @@ async def execute_all_nodes(
                     "model_used": result.get("model_used"),
                     "retries_exhausted": not _retried,
                 })
+                if _prog is not None:  # §17.811 — a terminal failure is a completed unit
+                    _prog_done.append(
+                        (result.get("title") or _failed_key or "step") + " (failed)"
+                    )
+                    snap = _prog.tick(done_items=_prog_done)
+                    if _prog_thr.ready():
+                        yield _sse("progress", {"job_id": job_id, **snap})
             else:
                 logger.warning(
                     "Unexpected node status '%s' in execute_all", status
@@ -2610,6 +2707,11 @@ async def execute_all_nodes(
                 early_summary = await _build_pipeline_summary(
                     job_id, node_results, elapsed_ms, async_session,
                 )
+                if _prog is not None:  # §17.811 — terminal snapshot
+                    yield _sse("progress", {
+                        "job_id": job_id,
+                        **_prog.tick(_prog.total, done_items=_prog_done),
+                    })
                 yield _sse("pipeline_complete", early_summary)
                 return
 
