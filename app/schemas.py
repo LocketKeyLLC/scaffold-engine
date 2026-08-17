@@ -387,6 +387,12 @@ class PromptOptimizeInput(BaseModel):
     skip_verify: bool = False
     model_overrides: dict | None = None
 
+class ProfileApplyInput(BaseModel):
+    """§17.809 — activate a named runtime compute profile (e.g. ``quick``)."""
+    model_config = ConfigDict(protected_namespaces=())
+    name: str = Field(min_length=1, max_length=64)
+
+
 class PromptOptimizeResult(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     original_prompt: str
@@ -541,6 +547,9 @@ class IdeaInput(BaseModel):
     domain: str | None = None
     model: str | None = None
     model_overrides: dict | None = None
+    # §17.809 — per-job --quick: flag the job quick-mode so every phase layers
+    # the fast "quick" model map, without touching global settings.
+    quick: bool = False
 
 
 class ConfirmInput(BaseModel):
