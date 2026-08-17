@@ -2026,6 +2026,9 @@ class Pipeline:
     # brief shown on the prior `/go` turn from chat history (stateless, no
     # re-synthesis drift between what was shown and what launches).
     _PENDING_BRIEF_MARKER = "📋 **Proposed launch brief:**"
+    # §17.809 — invisible (HTML-comment) sentinel stamped on the correction gate
+    # when --quick was requested, so `/go confirm` can re-inherit quick mode.
+    _QUICK_PENDING_MARKER = "<!--scaffold:quick-->"
 
     def _extract_pending_brief(self, messages: List[dict]) -> str | None:
         """Recover the most recent gated brief from a prior assistant turn."""
@@ -2040,6 +2043,18 @@ class Pipeline:
                     return brief
         return None
 
+    def _pending_was_quick(self, messages: List[dict]) -> bool:
+        """§17.809 — was the most recent gated brief a --quick one? Scans back to
+        the newest correction-gate turn and reports whether it carried the quick
+        sentinel (stops at that turn so an older quick brief can't leak forward)."""
+        for m in reversed(messages):
+            if m.get("role") != "assistant":
+                continue
+            content = m.get("content", "")
+            if isinstance(content, str) and self._PENDING_BRIEF_MARKER in content:
+                return self._QUICK_PENDING_MARKER in content
+        return False
+
     def _handle_go(self, msg: str, messages: List[dict]) -> Generator[str, None, None]:
         tokens = msg.split()
         # §17.809 — per-job quick mode: `/go --quick` (also --fast / -q). The flag
@@ -2047,6 +2062,12 @@ class Pipeline:
         # it never pollutes the brief.
         quick = any(t.lower() in ("--quick", "--fast", "-q") for t in tokens)
         is_confirm = len(tokens) >= 2 and tokens[1].lower() == "confirm"
+        # §17.809 — carry --quick across the confirm_before_launch gate: the
+        # first `/go --quick` shows the brief and stops, so `/go confirm` (no
+        # flag) would otherwise drop quick mode. Re-read the intent from the
+        # correction-gate marker we stamped last turn.
+        if is_confirm and not quick:
+            quick = self._pending_was_quick(messages)
 
         # `/go confirm` — launch the exact brief shown on the previous `/go`.
         if is_confirm:
@@ -2103,9 +2124,11 @@ class Pipeline:
         # or keeps chatting to refine. Skipped when this turn IS the confirm
         # (re-synthesis fallback above) or the valve is disabled.
         if self.valves.confirm_before_launch and not is_confirm:
+            quick_tag = self._QUICK_PENDING_MARKER if quick else ""
+            eta = "≈3–5 min (quick mode)" if quick else "≈10–25 min on this host"
             yield (
-                f"{self._PENDING_BRIEF_MARKER}\n\n{synthesized}\n\n---\n\n"
-                "Type `/go confirm` to launch this (≈10–25 min on this host), "
+                f"{quick_tag}{self._PENDING_BRIEF_MARKER}\n\n{synthesized}\n\n---\n\n"
+                f"Type `/go confirm` to launch this ({eta}), "
                 "or keep chatting to refine it first."
             )
             return

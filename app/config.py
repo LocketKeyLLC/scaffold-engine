@@ -1279,6 +1279,14 @@ class Settings(BaseSettings):
     # a high max_inflight on slow hardware (this host's STALE_THRESHOLD=1560).
     parallel_execution_enabled: bool = Field(default=True)
     parallel_execution_max_inflight: int = Field(default=2, ge=1, le=16)
+    # §17.809 — per-node execution-speed levers (default ON = unchanged
+    # behaviour; the quick profile flips them OFF). Both are pure overhead on the
+    # serial critical path: the CPU cross-encoder reranker adds ~21 s/node on
+    # this host (RRF-only grounding stays available when off), and the per-node
+    # LLM prompt-optimize pass ~6 s/node. Read live at execution time so a
+    # runtime profile toggle takes effect on the next node.
+    execution_rerank_enabled: bool = Field(default=True)
+    execution_optimize_enabled: bool = Field(default=True)
     # §17.774 — automatic crash-resume of orphaned mid-execution jobs.
     # After a process crash the lifespan sweep resets the interrupted node
     # 'running'->'pending' but the parent job stays 'running' and nothing

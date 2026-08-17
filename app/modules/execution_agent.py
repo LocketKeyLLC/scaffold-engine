@@ -747,7 +747,12 @@ async def _best_of_n_inference(gen_fn, evidence: str, node_key: str) -> str:
 async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = None) -> str:
     """Query RAG pipeline and format results as grounding context."""
     try:
-        rag = await query_rag(query, top_k=top_k, skip_rerank=False, domain=domain)
+        # §17.809 — quick mode disables the CPU cross-encoder rerank (~21 s/node
+        # here); RRF fusion still orders the shortlist, so grounding survives.
+        rag = await query_rag(
+            query, top_k=top_k,
+            skip_rerank=not settings.execution_rerank_enabled, domain=domain,
+        )
         if rag.get("status") != "ok" or not rag.get("results"):
             return ""
         entries = []
@@ -1422,7 +1427,8 @@ async def execute_next_node(
         # below is intentionally narrower than the outer W.4 wrap — optimizer
         # failures fall back to raw_prompt rather than failing the node, while
         # exceptions raised before this point reach the W.4 outer handler.
-        if not skip_optimize:
+        # §17.809 — quick mode skips this per-node LLM optimize pass (~6 s/node).
+        if not skip_optimize and settings.execution_optimize_enabled:
             try:
                 opt_result = await optimize_prompt(
                     prompt=raw_prompt,

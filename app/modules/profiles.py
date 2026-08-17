@@ -79,7 +79,11 @@ PROFILES: dict[str, Profile] = {
         ),
         models={
             "model_general": "deepseek-v4-pro:cloud",
-            "model_coder": "qwen3-coder-next:cloud",
+            # NB: qwen3-coder-next:cloud was RETIRED 2026-07-15 (HTTP 410 at
+            # /api/generate though it still lists in /api/tags — the classic
+            # stale-tag trap). Verify cloud coder liveness on *generate*, not
+            # the tag list. kimi-k2.7-code:cloud is live + code-specialized.
+            "model_coder": "kimi-k2.7-code:cloud",
             "model_verifier": "kimi-k2.6:cloud",      # operator speed-verified
             "model_router": "gpt-oss:20b-cloud",
             "model_research_extract": "gpt-oss:20b-cloud",
@@ -101,6 +105,23 @@ PROFILES: dict[str, Profile] = {
             "research_max_urls_shallow": 15,
             "research_max_urls_medium": 20,
             "research_max_urls_deep": 25,
+            # Execution-side bounds — the real end-to-end lever (§17.809 live
+            # finding: with fast models, wall-clock is dominated by node_count ×
+            # cloud_latency ÷ concurrency, none of which the model swaps touch).
+            #  * Fewer, coarser nodes: cap the DAG at 6 (default 40). Truncation
+            #    is topology-aware (§17.615) — the deliverable/sink is preserved,
+            #    excess middle nodes are dropped — so a smaller build stays valid.
+            #  * Wider frontier: run up to 4 independent nodes at once (default 2,
+            #    a LOCAL-Ollama NUM_PARALLEL constraint that doesn't bind quick
+            #    mode's cloud models — the cloud serves a concurrent frontier
+            #    ~2.6× faster, §17.568/571).
+            "dag_max_nodes": 6,
+            "parallel_execution_max_inflight": 4,
+            # Kill the per-node overhead on the serial critical path (§17.809
+            # live finding: ~21 s CPU-reranker + ~6 s optimize per node). RRF
+            # still grounds; raw prompt still carries the RAG + upstream context.
+            "execution_rerank_enabled": False,
+            "execution_optimize_enabled": False,
         },
         research_depth=QUICK_RESEARCH_DEPTH,
     ),
