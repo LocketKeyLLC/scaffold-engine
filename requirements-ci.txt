@@ -3,13 +3,13 @@
 #
 # Pinned to match requirements.txt / requirements-dev.txt production versions
 # (#82) so CI never drifts from what the container actually runs.
-fastapi==0.140.1
-starlette==1.3.1  # §17.584 — CVE-2026-48710 + PYSEC-2026-248/249 (see requirements.txt)
-uvicorn[standard]==0.51.0
-sqlalchemy[asyncio]==2.0.51
+fastapi==0.141.1
+starlette==1.6.0  # §17.584 — CVE-2026-48710 + PYSEC-2026-248/249 (see requirements.txt)
+uvicorn[standard]==0.52.3
+sqlalchemy[asyncio]==2.0.52
 asyncpg==0.31.0
 pydantic==2.13.4
-pydantic-settings==2.14.2
+pydantic-settings==2.15.0
 httpx==0.28.1
 # §17.772 — Model Context Protocol SDK (both sides: engine-as-server + MCP DAG
 # nodes). Kept in lockstep with requirements.txt; mcp 2.0 ships its own
@@ -21,15 +21,15 @@ httpx2==2.10.0
 httpcore2==2.10.0
 PyJWT==2.13.0
 truststore==0.10.4
-pymilvus==3.0.0
+pymilvus==3.0.1
 setuptools==83.0.0  # §17.585
-json_repair==0.61.7
+json_repair==0.63.2
 requests==2.34.2
 structlog==26.1.0
 prometheus-client==0.26.0
-redis==8.0.1
-trafilatura==2.1.0
-pypdf==6.15.0  # §17.585, §17.724 GHSA bump
+redis==8.1.0
+trafilatura==2.2.0
+pypdf==6.16.1  # §17.585, §17.724 GHSA bump
 pdfplumber==0.11.10  # §17.585 — pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
 apscheduler==3.11.3
 tzlocal==5.4.4
