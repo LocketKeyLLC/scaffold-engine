@@ -67,10 +67,32 @@ async def _fetch_spec(url: str) -> dict[str, Any]:
     """
     # #76 — use shared pooled client (was ephemeral AsyncClient per call)
     from app.utils.http_clients import get_generic_http_client
+
+    # §17.812 (audit C1) — SSRF guard. The /research openapi: path fetched the
+    # spec URL directly, bypassing the _is_public_host choke point that guards
+    # every /research url: fetch — so an authenticated caller (incl. a non-admin
+    # scoped key under MULTI_USER_ENABLED) could reach cloud-metadata / internal
+    # Docker-network services. Validate the host here, off the event loop (the
+    # guard does a blocking getaddrinfo), same as _fetch_url_bounded.
+    from app.modules.research_extractors import _is_public_host
+    ok, reason = await asyncio.to_thread(_is_public_host, url)
+    if not ok:
+        raise OpenAPIFetchError(f"Refused to fetch {url}: SSRF guard ({reason})")
+
     try:
         client = get_generic_http_client()
         r = await client.get(url, timeout=float(settings.openapi_timeout))
         r.raise_for_status()
+        # §17.812 — re-validate the FINAL URL: the generic client follows 3xx,
+        # so a public URL can redirect to a private IP without this re-check.
+        final_url = str(r.url)
+        if final_url != url:
+            ok2, reason2 = await asyncio.to_thread(_is_public_host, final_url)
+            if not ok2:
+                raise OpenAPIFetchError(
+                    f"Refused after redirect {url} -> {final_url}: "
+                    f"SSRF guard ({reason2})"
+                )
         text = r.text
     except httpx.HTTPError as e:
         raise OpenAPIFetchError(f"Failed to fetch {url}: {e}") from e
@@ -274,6 +296,33 @@ def _walk_paths(spec: dict) -> tuple[list[dict[str, Any]], int]:
     return entries, skipped_refs
 
 
+def _collect_absolute_ref_urls(node: Any) -> set[str]:
+    """Walk a spec and return every ``$ref`` value that is an absolute http(s) URL.
+
+    §17.812 (audit C1 companion) — prance's ResolvingParser resolves absolute
+    ``$ref: "http://…"`` entries via its own fetcher, outside every Scaffold
+    SSRF guard, byte cap, and timeout. We collect them here so the caller can
+    validate each host before handing the spec to prance.
+    """
+    found: set[str] = set()
+
+    def _walk(n: Any) -> None:
+        if isinstance(n, dict):
+            for k, v in n.items():
+                if k == "$ref" and isinstance(v, str):
+                    low = v.strip().lower()
+                    if low.startswith("http://") or low.startswith("https://"):
+                        found.add(v.strip())
+                else:
+                    _walk(v)
+        elif isinstance(n, list):
+            for item in n:
+                _walk(item)
+
+    _walk(node)
+    return found
+
+
 async def _resolve_refs(spec: dict, url: str) -> tuple[dict, bool]:
     """Resolve $refs via prance. Returns (spec, refs_resolved).
 
@@ -284,6 +333,21 @@ async def _resolve_refs(spec: dict, url: str) -> tuple[dict, bool]:
     if not _PRANCE_AVAILABLE:
         logger.warning("prance not installed — skipping $ref resolution")
         return spec, False
+
+    # §17.812 (audit C1 companion) — refuse to resolve if the spec contains any
+    # absolute-URL $ref pointing at a non-public host. prance would fetch it
+    # server-side outside the SSRF guard; one private-host ref poisons the whole
+    # resolve, so we skip resolution entirely (safer than partial) and return the
+    # spec unresolved rather than reaching an internal service.
+    from app.modules.research_extractors import _is_public_host
+    for ref_url in _collect_absolute_ref_urls(spec):
+        ok, reason = await asyncio.to_thread(_is_public_host, ref_url)
+        if not ok:
+            logger.warning(
+                "openapi_ref_blocked_ssrf: ref=%s reason=%s — skipping $ref resolution",
+                ref_url, reason,
+            )
+            return spec, False
 
     spec_string = json.dumps(spec)
 

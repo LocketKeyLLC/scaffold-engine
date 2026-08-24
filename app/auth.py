@@ -65,7 +65,16 @@ async def require_api_key(
     if path in _AUTH_EXEMPT_PATHS:
         return ""
     if any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
-        return ""
+        # §17.812 (audit C9) — /web is server-rendered admin-view HTML whose
+        # loopback re-authenticates as the master key; under MULTI_USER_ENABLED
+        # it would expose every user's jobs to an unauthenticated browser (authz
+        # resolves the exempt path to ADMIN). Gate /web in that mode — browsers
+        # send no X-API-Key so they get 401 and must use the per-user /ui SPA.
+        # /static + /ui asset serving stay exempt (the SPA sends its own key).
+        if path.startswith("/web/") and settings.multi_user_enabled:
+            pass  # fall through to the key validation below
+        else:
+            return ""
 
     # Explicit opt-out only — empty key with no opt-out would have raised at import
     if settings.scaffold_auth_disabled:
@@ -169,7 +178,16 @@ async def require_openai_key(
 
     candidate = _bearer_token(bearer) or x_api_key
     try:
-        ok = candidate is not None and secrets.compare_digest(candidate, _RAW_KEY)
+        # §17.812 (audit LOW) — bool(_RAW_KEY) mirrors require_api_key's master
+        # path (:87): under MULTI_USER_ENABLED the master key may be empty, and
+        # without this guard an empty candidate would compare "" == "" and pass.
+        # _bearer_token already returns None for empty input, so this is
+        # defense-in-depth against a future change there — kept symmetric.
+        ok = (
+            candidate is not None
+            and bool(_RAW_KEY)
+            and secrets.compare_digest(candidate, _RAW_KEY)
+        )
     except TypeError:
         # §17.596 — non-ASCII header bytes make compare_digest raise; treat as fail.
         ok = False

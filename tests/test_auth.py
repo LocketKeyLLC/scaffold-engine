@@ -147,11 +147,16 @@ async def test_explicit_auth_disabled_returns_empty(_api_key_unset):
     "/ui/static/app.js",    # SPA asset (nested)
     "/ui/static/views/dag.js",
 ])
-async def test_exempt_prefix_paths_bypass_without_key(_api_key_set, path):
-    """Every path under /web/ and /static/ must bypass auth WITHOUT a key.
+async def test_exempt_prefix_paths_bypass_without_key(_api_key_set, path, monkeypatch):
+    """Every path under /web/, /static/, /ui/ must bypass auth WITHOUT a key.
     The native web UI and its CSS load from a browser that doesn't carry
     the X-API-Key header — embedded SDK Client supplies the key on the
-    loopback HTTP call to the real endpoints."""
+    loopback HTTP call to the real endpoints.
+
+    §17.812 — /web exemption is single-user-only, so pin the mode explicitly
+    (the ambient container may run MULTI_USER_ENABLED=true)."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
     result = await _api_key_set.require_api_key(_mk_request(path), key=None)
     assert result == "", f"path {path!r} must bypass auth without a key"
 
@@ -182,10 +187,14 @@ async def test_prefix_confusable_paths_require_key(_api_key_set, path):
 
 
 @pytest.mark.smoke
-async def test_exempt_prefix_does_not_validate_key_when_present(_api_key_set):
+async def test_exempt_prefix_does_not_validate_key_when_present(_api_key_set, monkeypatch):
     """A request that hits an exempt prefix WITH a (wrong) key still
     bypasses — the prefix check fires before key validation. Locks in
-    that the exempt prefixes are unconditional, not "exempt-if-no-key"."""
+    that the exempt prefixes are unconditional, not "exempt-if-no-key".
+
+    §17.812 — /web is single-user-exempt, so pin single-user mode."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
     result = await _api_key_set.require_api_key(
         _mk_request("/web/index.html"), key="totally-wrong-key",
     )
@@ -359,3 +368,126 @@ async def test_exempt_prefixes_set_shape_is_loadable(_api_key_set):
             f"prefix {p!r} missing trailing '/' — would match too broadly "
             f"(e.g. /web matches /webhook). See §17.266."
         )
+
+
+# ===========================================================================
+# §17.812 (audit C9) — /web is gated under MULTI_USER_ENABLED
+# ===========================================================================
+#
+# /web is server-rendered admin-view HTML whose loopback re-auths as master;
+# authz resolves the exempt path to ADMIN. Single-user: harmless (sole user).
+# Multi-user: it would expose every user's jobs to an unauthenticated browser,
+# so the /web exemption is withdrawn in that mode (browsers get 401 → use /ui).
+
+
+@pytest.mark.smoke
+async def test_web_prefix_still_exempt_single_user(_api_key_set, monkeypatch):
+    """Single-user: /web stays exempt — no regression from §17.266."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
+    result = await _api_key_set.require_api_key(_mk_request("/web/index.html"), key=None)
+    assert result == "", "/web must stay exempt in single-user mode"
+
+
+@pytest.mark.smoke
+async def test_web_prefix_gated_under_multi_user(_api_key_set, monkeypatch):
+    """Multi-user: an unauthenticated /web request no longer bypasses — it
+    falls through to key validation and 401s."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
+    monkeypatch.setattr(_api_key_set, "resolve_key", AsyncMock(return_value=None))
+    monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
+    with pytest.raises(HTTPException) as exc_info:
+        await _api_key_set.require_api_key(_mk_request("/web/index.html"), key=None)
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.smoke
+async def test_web_prefix_multi_user_master_key_ok(_api_key_set, monkeypatch):
+    """Multi-user: the master key still reaches /web (admin)."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
+    monkeypatch.setattr(_api_key_set, "resolve_key", AsyncMock(return_value=None))
+    monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
+    req = _mk_request("/web/index.html")
+    result = await _api_key_set.require_api_key(req, key="testkey123")
+    assert result == "testkey123"
+
+
+@pytest.mark.smoke
+async def test_ui_and_static_stay_exempt_under_multi_user(_api_key_set, monkeypatch):
+    """The /ui SPA + /static assets stay exempt even in multi-user mode — the
+    SPA sends its own X-API-Key on API calls; only /web is withdrawn."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
+    for path in ("/ui/index.html", "/ui/static/app.js", "/static/css/app.css"):
+        result = await _api_key_set.require_api_key(_mk_request(path), key=None)
+        assert result == "", f"{path} must stay exempt in multi-user mode"
+
+
+# ===========================================================================
+# §17.812 (audit LOW) — require_openai_key empty-master-key symmetry
+# ===========================================================================
+#
+# The /v1 surface's bearer check lacked the bool(_RAW_KEY) guard that the
+# master path in require_api_key has. Under MULTI_USER_ENABLED the master key
+# may be empty; without the guard an empty candidate would compare "" == "" and
+# authenticate. _bearer_token returns None for empty input today, but a direct
+# empty X-API-Key ("") reaches compare_digest as "" — this locks the guard in.
+
+
+@pytest.fixture
+def _empty_master_multiuser(monkeypatch):
+    """Empty master key, MULTI_USER_ENABLED on, auth NOT disabled — the one
+    configuration where require_openai_key could compare "" == "" (allowed by
+    the import-time guard, app/auth.py:20, only because multi-user is on)."""
+    import importlib
+    from pydantic import SecretStr
+    import app.config
+    import app.auth
+    original_key = app.config.settings.scaffold_api_key
+    original_mu = app.config.settings.multi_user_enabled
+    original_disabled = app.config.settings.scaffold_auth_disabled
+    app.config.settings.scaffold_api_key = SecretStr("")
+    app.config.settings.multi_user_enabled = True
+    app.config.settings.scaffold_auth_disabled = False
+    importlib.reload(app.auth)
+    yield app.auth
+    app.config.settings.scaffold_api_key = original_key
+    app.config.settings.multi_user_enabled = original_mu
+    app.config.settings.scaffold_auth_disabled = original_disabled
+    importlib.reload(app.auth)
+
+
+@pytest.mark.smoke
+async def test_openai_key_empty_master_rejects_empty_x_api_key(_empty_master_multiuser):
+    """The regression: empty X-API-Key against an empty master must 401, not
+    slip through compare_digest("", "")."""
+    with pytest.raises(HTTPException) as exc_info:
+        await _empty_master_multiuser.require_openai_key(bearer=None, x_api_key="")
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.smoke
+async def test_openai_key_empty_master_rejects_empty_bearer(_empty_master_multiuser):
+    """Empty bearer token against an empty master must 401."""
+    with pytest.raises(HTTPException) as exc_info:
+        await _empty_master_multiuser.require_openai_key(bearer="Bearer ", x_api_key=None)
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.smoke
+async def test_openai_key_valid_master_accepted(_api_key_set):
+    """Sanity: a real master key is still accepted via both header forms."""
+    assert await _api_key_set.require_openai_key(
+        bearer="Bearer testkey123", x_api_key=None) == "testkey123"
+    assert await _api_key_set.require_openai_key(
+        bearer=None, x_api_key="testkey123") == "testkey123"
+
+
+@pytest.mark.smoke
+async def test_openai_key_wrong_key_rejected(_api_key_set):
+    """A wrong key still 401s (guard didn't loosen the normal path)."""
+    with pytest.raises(HTTPException) as exc_info:
+        await _api_key_set.require_openai_key(bearer="Bearer nope", x_api_key=None)
+    assert exc_info.value.status_code == 401

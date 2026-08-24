@@ -12,6 +12,15 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.database import get_db
 
+
+@pytest.fixture(autouse=True)
+def _single_user_mode(monkeypatch):
+    """§17.812 — /web is auth-exempt only in single-user mode; pin it so these
+    tests don't depend on the ambient MULTI_USER_ENABLED env."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
+
+
 _UUID = "01ab243e-1234-5678-9abc-def012345678"
 _PAYLOAD = {
     "job_id": "jx", "job_title": "X", "job_status": "executing",

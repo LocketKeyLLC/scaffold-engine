@@ -89,6 +89,11 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
         "test_research_pause_resume.py",
         "test_research_pdf_mode.py",
         "test_research_ssrf_guard.py",
+        # §17.812 — imports app.utils.openapi_ingest at module load, which pulls
+        # openapi_spec_validator/prance (not in the lightweight ci-smoke env).
+        # Covered by the full "Unit Tests (no live services)" job, same as the
+        # sibling SSRF test above. Fast-gate SSRF coverage is plan item 7.4.
+        "test_openapi_ssrf_guard.py",
         "test_research_url_mode.py",
         "test_retrieval_golden.py",
         "test_score_retrieval.py",
