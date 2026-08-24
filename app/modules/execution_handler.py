@@ -9,9 +9,68 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.modules.recovery import next_actions_for
 
 logger = logging.getLogger("scaffold.execution_handler")
+
+
+_TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "blocked"}
+
+
+def _compute_read_progress(rows, job_status: str | None = None) -> dict | None:
+    """§17.811 — derive a progress + ETA snapshot from ``dag_nodes`` timestamps.
+
+    Compute-on-read (NO persistence, no write-race): mean wall-clock duration of
+    nodes that recorded ``started_at``+``completed_at``, times the remaining node
+    count. Returns None for trivial (<2 node) DAGs. The shape mirrors
+    ``app.utils.progress.ProgressTracker.snapshot()`` so read + live consumers
+    share one contract. ETA is None until at least one node has a duration and
+    while work remains but no rate is known yet, and is suppressed once the job
+    is terminal (a finished job must not advertise "time left").
+    """
+    from app.utils.progress import humanize_ms
+
+    total = len(rows)
+    if total < 2:
+        return None
+    terminal = {"done", "failed", "skipped"}
+    completed = sum(1 for r in rows if r.status in terminal)
+    durs = []
+    for r in rows:
+        _s = getattr(r, "started_at", None)
+        _c = getattr(r, "completed_at", None)
+        if _s and _c:
+            d = (_c - _s).total_seconds() * 1000.0
+            if d >= 0:
+                durs.append(d)
+    mean_ms = (sum(durs) / len(durs)) if durs else None
+    remaining = max(0, total - completed)
+    is_terminal = job_status in _TERMINAL_JOB_STATUSES
+    eta_ms = (
+        int(mean_ms * remaining)
+        if (mean_ms is not None and remaining > 0 and not is_terminal)
+        else None
+    )
+    pct = int(round(100.0 * completed / total))
+    running = next((r.title for r in rows if r.status == "running"), None)
+    eta_human = ("~" + humanize_ms(eta_ms)) if eta_ms is not None else None
+    summary = f"{completed}/{total} nodes · {pct}%"
+    if eta_human:
+        summary += f" · {eta_human} left"
+    return {
+        "phase": "executing",
+        "label": "Executing DAG",
+        "unit": "nodes",
+        "completed": completed,
+        "total": total,
+        "pct": pct,
+        "eta_ms": eta_ms,
+        "eta_human": eta_human,
+        "current_item": running,
+        "summary": summary,
+        "soft": False,
+    }
 
 
 async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
@@ -51,7 +110,7 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
             SELECT node_key, title, status, execution_order, depends_on,
                    assigned_model, last_verification_reason,
                    COALESCE(is_deliverable, FALSE) AS is_deliverable,
-                   confidence, tool
+                   confidence, tool, started_at, completed_at
             FROM dag_nodes
             WHERE job_id = :job_id
             ORDER BY execution_order
@@ -93,6 +152,16 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
             "is_deliverable": bool(r.is_deliverable),
             "confidence": r.confidence,
             "tool": r.tool,
+            # §17.811 — per-node timing, previously captured but never surfaced.
+            # Feeds the compute-on-read ETA below and lets the web/CLI show
+            # per-node durations. getattr so a SimpleNamespace mock row that omits
+            # the columns degrades to None (mirrors the job.* access pattern below).
+            "started_at": (
+                _s.isoformat() if (_s := getattr(r, "started_at", None)) else None
+            ),
+            "completed_at": (
+                _c.isoformat() if (_c := getattr(r, "completed_at", None)) else None
+            ),
         }
         nodes.append(node)
 
@@ -174,6 +243,13 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
         "next_actions": actions,
         "nodes": nodes,
         "costs": cost_totals,
+        # §17.811 — compute-on-read progress + ETA (from dag_nodes timestamps).
+        # None for trivial DAGs / when the valve is off; reconnecting clients and
+        # pollers read ETA here without any persisted snapshot.
+        "progress": (
+            _compute_read_progress(rows, job.status)
+            if settings.progress_eta_enabled else None
+        ),
     }
 
 

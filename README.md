@@ -315,7 +315,7 @@ The default `docker compose up -d` brings up everything below — there's no opt
 
 ## Status
 
-Actively developed. Latest release: v1.2.0 (2026-08-16) — see [CHANGELOG.md](./CHANGELOG.md). API contract pinned at v1.2.0 (`docs/openapi.json`). For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
+Actively developed. Latest release: v1.3.0 (2026-08-24) — see [CHANGELOG.md](./CHANGELOG.md). API contract pinned at v1.2.0 (`docs/openapi.json`) — v1.3.0 is additive (RBAC enforcement plus the additive `progress` SSE event) and does not change the contract. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
 
 ## License
 

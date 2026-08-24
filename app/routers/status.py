@@ -14,10 +14,43 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.authz import Principal, get_principal, owner_filter
+from app.config import settings
 from app.database import get_db
 from app.modules.recovery import next_actions_for
 from app.schemas import JOB_STATUSES, JobStatus
+from app.utils.progress import humanize_ms
 from app.web.routes import phase_label_for
+
+# §17.811 — DAG job statuses for which a compute-on-read ETA is meaningful.
+_ETA_ACTIVE_STATUSES = frozenset({"running", "executing"})
+
+
+def _row_progress(row) -> Optional[dict[str, Any]]:
+    """Compute-on-read progress + ETA for a /status list row (in-flight DAG jobs).
+
+    Uses the done-count + mean-node-duration already aggregated in the query, so
+    no extra round-trip. Returns None for trivial (<2 node) or non-active jobs.
+    """
+    total = row.node_count or 0
+    if total < 2 or row.status not in _ETA_ACTIVE_STATUSES:
+        return None
+    done = row.done_count or 0
+    remaining = max(0, total - done)
+    avg_s = getattr(row, "avg_dur_s", None)
+    eta_ms = int(avg_s * 1000 * remaining) if (avg_s and remaining > 0) else None
+    pct = int(round(100.0 * done / total))
+    eta_human = ("~" + humanize_ms(eta_ms)) if eta_ms is not None else None
+    summary = f"{done}/{total} nodes · {pct}%"
+    if eta_human:
+        summary += f" · {eta_human} left"
+    return {
+        "completed": done,
+        "total": total,
+        "pct": pct,
+        "eta_ms": eta_ms,
+        "eta_human": eta_human,
+        "summary": summary,
+    }
 
 logger = logging.getLogger("scaffold.routers.status")
 router = APIRouter()
@@ -71,6 +104,9 @@ class RecentJobSummary(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     next_actions: list[dict[str, Any]] = []
+    # §17.811 — compute-on-read progress + ETA for in-flight DAG jobs
+    # ({completed,total,pct,eta_ms,eta_human,summary}); None otherwise.
+    progress: Optional[dict[str, Any]] = None
 
 
 class StatusResponse(BaseModel):
@@ -177,10 +213,20 @@ async def get_status(
     query = """
         SELECT j.id, j.title, j.status, j.created_at, j.updated_at,
                COALESCE(n.node_count, 0) AS node_count,
+               COALESCE(n.done_count, 0) AS done_count,
+               n.avg_dur_s,
                s.id AS session_id
         FROM jobs j
         LEFT JOIN (
-            SELECT job_id, COUNT(*) AS node_count
+            -- §17.811 — same single scan also yields done-count + mean node
+            -- duration so the list can show a compute-on-read ETA for free.
+            SELECT job_id, COUNT(*) AS node_count,
+                   COUNT(*) FILTER (
+                       WHERE status IN ('done', 'failed', 'skipped')
+                   ) AS done_count,
+                   AVG(EXTRACT(EPOCH FROM (completed_at - started_at))) FILTER (
+                       WHERE completed_at IS NOT NULL AND started_at IS NOT NULL
+                   ) AS avg_dur_s
             FROM dag_nodes GROUP BY job_id
         ) n ON n.job_id = j.id
         -- §17.599 — active assist session for assisted_* recovery links.
@@ -218,6 +264,7 @@ async def get_status(
                 row.status, str(row.id),
                 session_id=str(row.session_id) if row.session_id else None,
             ),
+            progress=_row_progress(row) if settings.progress_eta_enabled else None,
         )
         for row in jobs_result
     ]

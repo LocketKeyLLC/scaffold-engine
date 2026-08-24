@@ -45,6 +45,46 @@ class TestExecuteAllNodesSSESequence:
             "pipeline_complete",
         ]
 
+    async def test_progress_events_emitted_with_eta_fields(self):
+        """§17.811 — a 2-node run emits `progress` frames carrying ETA fields and
+        a terminal 100% snapshot before pipeline_complete."""
+        from app.utils.progress import ProgressTracker
+
+        db, mock_session = _make_sse_db(dag_node_count=2)
+        mock_get_job = AsyncMock(return_value={"status": "executing", "id": "job-1"})
+        mock_get_next = AsyncMock(side_effect=[
+            {"node_key": "T1", "title": "Research", "tool": "SearXNG"},
+            {"node_key": "T2", "title": "Summarize", "tool": "LLM"},
+            None,
+        ])
+        mock_exec_next = AsyncMock(side_effect=[
+            {"status": "done", "node_key": "T1", "title": "Research", "output": "r"},
+            {"status": "done", "node_key": "T2", "title": "Summarize", "output": "s"},
+            {"status": "complete", "message": "All nodes done."},
+        ])
+        # Force a real tracker regardless of the DB mock's count-query shape.
+        real_tracker = AsyncMock(return_value=ProgressTracker(
+            2, phase="executing", unit="nodes", label="Executing DAG"
+        ))
+
+        with patch("app.modules.execution_agent.async_session", mock_session), \
+             patch("app.modules.execution_agent._get_job", mock_get_job), \
+             patch("app.modules.execution_agent._peek_next_node", mock_get_next), \
+             patch("app.modules.execution_agent.execute_next_node", mock_exec_next), \
+             patch("app.modules.execution_agent._make_dag_progress_tracker", real_tracker):
+            from app.modules.execution_agent import execute_all_nodes
+            events = await _collect_sse(execute_all_nodes("job-1"))
+
+        progress = [d for (e, d) in events if e == "progress"]
+        assert progress, f"no progress frames in {[e for e, _ in events]}"
+        # Every progress frame carries the snapshot contract.
+        for p in progress:
+            assert p["job_id"] == "job-1"
+            assert p["unit"] == "nodes" and p["total"] == 2
+            assert "eta_ms" in p and "eta_human" in p and "summary" in p
+        # Terminal snapshot lands at 100% and is the last progress frame.
+        assert progress[-1]["completed"] == 2 and progress[-1]["pct"] == 100
+
     async def test_pipeline_complete_has_summary_fields(self):
         """pipeline_complete event contains total_nodes, passed, failed, duration_ms."""
         db, mock_session = _make_sse_db(dag_node_count=1)
@@ -172,6 +212,10 @@ class TestExecuteAllNodesAbnormalExit:
         # one LLM node → not hands-on → gate doesn't park, loop runs as before.
         dag_tools = MagicMock()
         dag_tools.mappings.return_value.all.return_value = [{"tool": "LLM"}]
+        # §17.811 — serial-path progress tracker counts nodes; total=1 keeps it
+        # disabled (trivial DAG), so no extra `progress` frames in this assertion.
+        prog_count = MagicMock()
+        prog_count.mappings.return_value.first.return_value = {"total": 1, "done": 0}
         cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "running"
         cleanup_update = MagicMock()
 
@@ -180,6 +224,7 @@ class TestExecuteAllNodesAbnormalExit:
             guard_result,     # Session 1 guard UPDATE
             dag_check,        # Session 3 DAG COUNT
             dag_tools,        # §17.624 hands-on gate: SELECT tool FROM dag_nodes
+            prog_count,       # §17.811 progress-tracker node count
             cleanup_status,   # finally: SELECT status
             cleanup_update,   # finally: UPDATE status='failed'
         ])
@@ -222,12 +267,15 @@ class TestExecuteAllNodesAbnormalExit:
         # §17.624 — hands-on gate reads tool tags; one LLM node → not hands-on.
         dag_tools = MagicMock()
         dag_tools.mappings.return_value.all.return_value = [{"tool": "LLM"}]
+        # §17.811 — progress-tracker node count (total=1 → tracker stays disabled).
+        prog_count = MagicMock()
+        prog_count.mappings.return_value.first.return_value = {"total": 1, "done": 0}
         cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "running"
         cleanup_update = MagicMock()
 
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[
-            guard_result, dag_check, dag_tools, cleanup_status, cleanup_update,
+            guard_result, dag_check, dag_tools, prog_count, cleanup_status, cleanup_update,
         ])
         db.commit = AsyncMock()
 

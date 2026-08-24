@@ -85,6 +85,11 @@ class ResearchState:
     # fabricated choices). Shape: {decision, options:[{label,fit,tradeoff}],
     # suggested, why}. Surfaced on the research_complete payload + summary block.
     options: dict | None = None
+    # §17.811 — latest progress + ETA snapshot (ProgressTracker.snapshot()),
+    # folded into state_snapshot so the read/reconnect surface shows an ETA.
+    # None until the first iteration ticks. soft_total (early-exit on
+    # convergence) → the ETA is an upper bound.
+    progress: dict | None = None
 
     @property
     def max_iterations(self) -> int:
@@ -252,6 +257,8 @@ def _build_snapshot(state: ResearchState) -> dict:
             "versioned": state.total_versioned,
             "skipped_hash": state.total_skipped_hash,
         },
+        # §17.811 — progress + ETA snapshot for the read/reconnect surface.
+        "progress": state.progress,
     }
 
 

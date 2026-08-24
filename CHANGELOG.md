@@ -6,6 +6,17 @@ Day-to-day development is tracked at sprint granularity in the commit log (`fix(
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-08-24
+
+Multi-user access control, a fast-execution profile, and uniform progress/ETA streaming, layered on the v1.2.0 stack (§17.809–§17.811). Highlights:
+
+- **Multi-user & RBAC** — per-user job ownership with a two-tier role model (`admin` | `user`), extending the §17.807 scoped keys from "named keys, equal access" into real isolation. Every job (and research session, schedule, assist session, design job, artifact) is owned by its creator: a `user` sees and manages only their own work — cross-user access returns **404, not 403**, so it can't even confirm another user's job exists — while `admin` and the master key see everything. Enforced across the whole JSON API and gated by `MULTI_USER_ENABLED`, so single-user installs are byte-for-byte unchanged. Keys carry an owner tag (several keys can map to one user) and a role, minted with `make key-add … OWNER=… ROLE=user|admin`. The `/v1`, `/mcp`, and server-rendered `/web` surfaces stay master-admin-only by design (their internal loopback re-authenticates as the master key); per-user access is the JSON API and the `/ui` SPA (§17.810, migration 068).
+- **Quick-mode profile** — a GPU/cloud-fast preset targeting a sub-5-minute build for small DAGs: `/model profile quick` (global) and `/go --quick` (per-job) apply a fast model map plus execution-side levers — skip the CPU cross-encoder reranker and the per-node prompt-optimize pass, and cap the node count. Honest scope: the floor is the sum of cloud node latencies, so large branchy builds still won't fit (§17.809).
+- **Progress ETAs & streaming summaries** — a uniform `progress` SSE event with elapsed/percent/ETA across every long-running component (DAG execution, research, RAG ingest, decomposition, simulation, assist), backed by a shared `ProgressTracker`/`EmitThrottle`. DAG progress is computed on read from `dag_nodes` timestamps (no metadata write, so the parallel frontier can't race it). Deterministic per-phase summaries default on; optional LLM narration defaults off (§17.811).
+- **Platform** — retired-cloud-model guard (probe liveness on `/api/generate`, not the stale tag list, after a coder model 410'd mid-run) and a golden-task mapping fix for the `model_triage` role (§17.809b, §17.791×§17.805).
+
+The API contract is unchanged from v1.2.0 — the RBAC layer is additive (dependency-level enforcement plus two nullable columns) and the `progress` event is additive to the SSE stream, with no endpoint or request/response schema changes.
+
 ## [1.2.0] — 2026-08-16
 
 80 commits since v1.1.0 (§17.714–§17.808). Highlights:
@@ -50,7 +61,8 @@ First stable release.
 
 Early pre-release: core orchestrator, initial DAG execution, and RAG pipeline.
 
-[Unreleased]: https://github.com/LocketKeyLLC/scaffold-engine/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/LocketKeyLLC/scaffold-engine/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/LocketKeyLLC/scaffold-engine/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/LocketKeyLLC/scaffold-engine/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/LocketKeyLLC/scaffold-engine/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/LocketKeyLLC/scaffold-engine/compare/v0.2.0...v1.0.0
