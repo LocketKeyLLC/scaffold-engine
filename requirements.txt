@@ -1,10 +1,10 @@
 apscheduler==3.11.3
 asyncpg==0.31.0
-fastapi==0.140.1
+fastapi==0.141.1
 # §17.584 — pin starlette explicitly (fastapi 0.139 allows >=0.46). 1.3.1 clears
 # CVE-2026-48710 "BadHost" host-header auth-bypass (fix 1.0.1) + PYSEC-2026-248/
 # 249 (fix 1.3.0/1.3.1). fastapi bumped 0.115.6→0.139.0 to permit starlette 1.x.
-starlette==1.3.1
+starlette==1.6.0
 # §17.143 — JSON Schema validation for spec-capture (engineering-design track).
 # Pure-Python, validates app/sim/spec_schema.json against incoming spec
 # payloads. No optional deps pulled in.
@@ -21,25 +21,25 @@ httpx==0.28.1
 mcp==2.0.0
 mcp-types==2.0.0
 sse-starlette==3.4.8
-httpx2==2.10.0
-httpcore2==2.10.0
+httpx2==2.12.0
+httpcore2==2.12.0
 PyJWT==2.13.0
 truststore==0.10.4
-json_repair==0.61.7
+json_repair==0.63.3
 pydantic==2.13.4
-pydantic-settings==2.14.2
-pymilvus==3.0.0
-redis==8.0.1
+pydantic-settings==2.15.0
+pymilvus==3.0.1
+redis==8.1.0
 requests==2.34.2
 # sentence-transformers 5.x is softly-breaking vs 4.x; we only use
 # CrossEncoder(...).predict(...) which is API-stable (#86).
 sentence-transformers==5.6.1
 setuptools==83.0.0  # §17.585 — was 71.1.0 (PYSEC-2025-49); also bumped in Dockerfile
-sqlalchemy[asyncio]==2.0.51
+sqlalchemy[asyncio]==2.0.52
 structlog==26.1.0
-trafilatura==2.1.0
+trafilatura==2.2.0
 tzlocal==5.4.4
-uvicorn[standard]==0.51.0
+uvicorn[standard]==0.52.4
 psycopg2-binary==2.9.12
 
 # --- PDF ingestion (4.5b) ---
@@ -47,7 +47,7 @@ psycopg2-binary==2.9.12
 # stable modern API (PdfReader/.pages/.extract_text() at research_extractors.py
 # + forum_ingest.py), unaffected by the 6.0 removals.
 # §17.724 — 6.14.2→6.15.0 (GHSA-fwg2-594c-jp42 + GHSA-fp3f-mc75-235c).
-pypdf==6.15.0
+pypdf==6.16.1
 pdfplumber==0.11.10  # §17.585 — was 0.11.4; pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
 python-multipart==0.0.32  # §17.585 — was 0.0.17 (GHSA); fastapi form/file parsing
 # §17.458 — server-side markdown rendering for the web UI's compiled_output.
