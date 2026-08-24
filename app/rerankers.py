@@ -79,7 +79,19 @@ def get_score_range_info(
 # ---------------------------------------------------------------------------
 _cross_encoder = None
 _load_failed = False
+_load_failed_at = 0.0  # monotonic time of the last hard load failure
+# §17.812 (audit C4) — retry a hard-failed load after this cooldown so a transient
+# failure at boot doesn't pin every query to RRF-only for the process lifetime.
+_LOAD_RETRY_COOLDOWN_S = 300.0
 _load_lock = threading.Lock()
+
+
+def reranker_load_failed() -> bool:
+    """§17.812 (audit C4) — True while the CrossEncoder load has HARD-FAILED (RAG
+    is on RRF-only fallback). /health reads this so a dead reranker reports
+    'down' instead of the stale prewarm 'up' — the prewarm catches no exception
+    when the load merely returns None, so it would otherwise stamp 'up'."""
+    return _load_failed
 
 
 def reset_reranker():
@@ -96,12 +108,23 @@ def _get_cross_encoder():
     Uses double-checked locking so concurrent first calls don\'t trigger
     multiple ~13s CrossEncoder loads.
     """
-    global _cross_encoder, _load_failed
+    global _cross_encoder, _load_failed, _load_failed_at
     # Fast path (no lock) — hot path after initial load
     if _cross_encoder is not None:
         return _cross_encoder
     if _load_failed:
-        return None
+        # §17.812 (audit C4) — self-heal: the failure was STICKY for the whole
+        # process (reset_reranker had no caller). After the cooldown, clear the
+        # flag and let this call retry the load instead of staying dead forever.
+        if (time.monotonic() - _load_failed_at) < _LOAD_RETRY_COOLDOWN_S:
+            return None
+        with _load_lock:
+            if _load_failed and (time.monotonic() - _load_failed_at) >= _LOAD_RETRY_COOLDOWN_S:
+                logger.info(
+                    "crossencoder_retry_after_cooldown: down_for_s=%.0f",
+                    time.monotonic() - _load_failed_at,
+                )
+                _load_failed = False
 
     with _load_lock:
         # Recheck under lock
@@ -147,6 +170,7 @@ def _get_cross_encoder():
                     time.sleep(delay)
 
         _load_failed = True
+        _load_failed_at = time.monotonic()  # §17.812 — start the retry cooldown
         logger.error(
             "crossencoder_load_failed: attempts=%d last_error=%s",
             _MAX_ATTEMPTS, last_err,
