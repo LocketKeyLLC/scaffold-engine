@@ -309,7 +309,7 @@ async def test_warmup_scan_pattern_scoped_to_current_identity(monkeypatch):
     await cache.warmup()
     assert len(seen_match) == 1
     pattern = seen_match[0]
-    assert pattern.startswith("embedv3:")
+    assert pattern.startswith("embedv4:")
     assert f":{cache.model_id}:" in pattern
     assert f":d{cache.dim}:" in pattern
     assert pattern.endswith(":*")

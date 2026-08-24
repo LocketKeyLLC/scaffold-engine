@@ -54,7 +54,13 @@ async def check_embedder_drift(db: AsyncSession) -> dict:
     - ``skipped``: DB error during the lookup. The check is best-effort;
       startup continues.
     """
-    current = settings.model_embedder_id
+    # §17.812 (audit M7) — the drift detector's whole job is to catch an embedder
+    # swap, but it compared the STATIC model_embedder_id label, which never
+    # changes on a swap — so it always reported "unchanged". Compare the ACTUAL
+    # vector-producing model (model_embedder_pipeline) + dim, the same identity
+    # the embedding cache now keys on. (One-time: the first boot after this change
+    # sees the old label as "stored" and reports drift once, then self-heals.)
+    current = f"{settings.model_embedder_pipeline}:d{settings.embedding_dim}"
     try:
         row = await db.execute(
             text(

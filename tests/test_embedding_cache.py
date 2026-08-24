@@ -44,14 +44,32 @@ def test_encoded_size_is_four_bytes_per_dim():
 
 
 # ---------------------------------------------------------------------------
-# Cache key — now embedv3 with :d{dim}: segment
+# Cache key — embedv4 (§17.812) with :d{dim}: segment
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
-def test_cache_key_uses_embedv3_prefix_and_dim_segment():
+def test_cache_key_uses_embedv4_prefix_and_dim_segment():
     c = EmbeddingCache(dim=512)
     k = c._cache_key("anything")
-    assert k.startswith("embedv3:")
+    assert k.startswith("embedv4:")
     assert ":d512:" in k
+
+
+@pytest.mark.smoke
+def test_cache_key_defaults_to_pipeline_model_not_static_label(monkeypatch):
+    """§17.812 (M7) — the key is derived from model_embedder_pipeline (the actual
+    vector producer), so swapping it changes the key (old vectors invalidate),
+    and it does NOT track the static model_embedder_id label."""
+    import app.config
+
+    monkeypatch.setattr(app.config.settings, "model_embedder_pipeline", "model-x")
+    monkeypatch.setattr(app.config.settings, "model_embedder_id", "static-label")
+    k1 = EmbeddingCache()._cache_key("t")
+    assert ":model-x:" in k1
+    assert ":static-label:" not in k1
+
+    monkeypatch.setattr(app.config.settings, "model_embedder_pipeline", "model-y")
+    k2 = EmbeddingCache()._cache_key("t")
+    assert k1 != k2  # pipeline swap → different key → old vectors not served
 
 
 @pytest.mark.smoke
@@ -131,7 +149,7 @@ async def test_put_calls_setex_with_ttl():
     fake_redis.setex.assert_awaited_once()
     args, _ = fake_redis.setex.call_args
     # args = (key, ttl_seconds, blob)
-    assert args[0].startswith("embedv3:")
+    assert args[0].startswith("embedv4:")
     assert ":d512:" in args[0]
     assert isinstance(args[1], int) and args[1] > 0
     assert isinstance(args[2], bytes)
