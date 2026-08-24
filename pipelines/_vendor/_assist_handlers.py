@@ -2242,7 +2242,35 @@ def _dispatch_decision(
     divergence more fully off `plan_impact`.)"""
     action = (decision.get("action") or "question").strip()
     impact = (decision.get("plan_impact") or "none").strip()
-    nk = _recall_node_key(pipe, chat_id, node_key)
+    # §17.812 (audit I-4) — prefer the node_key the /decide call resolved
+    # server-side (what the decision actually reasoned about). Fall back to the
+    # chatmap recall only when the decision didn't carry one — this OWUI setup
+    # delivers no chat_id, so the recall is usually empty and a `submit` would
+    # silently degrade to `next` (discarding the operator's evidence).
+    nk = (str(decision.get("node_key") or "").strip()
+          or _recall_node_key(pipe, chat_id, node_key))
+
+    # §17.812 (audit C2) — DETERMINISTIC VETO on the decision. The unified /decide
+    # path returns before the cascade's high-precision deterministic gates, so
+    # those gates only ran on LOW confidence — i.e. gated on the very classifier
+    # they exist to compensate for. Re-apply the highest-severity one here as a
+    # post-filter: a pasted shell error mid-fix (or after a fix walkthrough) must
+    # route to FIX, never auto-submit PAST a broken command (§17.748/749). The
+    # signals are deterministic (regex on msg/history), so the decision proposes
+    # and this vetoes.
+    if (action == "submit"
+            and getattr(pipe.valves, "assist_fix_followup_enabled", True)
+            and _looks_like_shell_evidence(msg)
+            and (_last_assistant_was_fix(history) or _looks_like_shell_error(msg))):
+        try:
+            pipe.logger.info(
+                "assist_veto_shell_error_to_fix session=%s was_action=submit",
+                session_id,
+            )
+        except Exception:
+            pass
+        action = "fix"
+        decision = {**decision, "action": "fix", "error_text": msg.strip()}
 
     # Plan-affecting → surface-and-ask re-plan (server assess_note_impact).
     if action == "note" or impact == "reshape":
