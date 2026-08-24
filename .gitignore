@@ -34,3 +34,8 @@ pipelines/*/valves.json
 
 # Stray local pip/tooling/build cache dir at the repo root — never tracked.
 .cache/
+
+# Claude Code local settings + harness temp files (never commit)
+.claude/settings.local.json
+.claude/settings.local.json.tmp.*
+.claude/*.tmp.*

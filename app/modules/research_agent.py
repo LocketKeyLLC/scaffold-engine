@@ -639,12 +639,26 @@ async def _search_queries(
                         except Exception as e:
                             logger.warning("searxng_fallback_failed: query='%s' error=%s",
                                            query_text, e)
-                    await _searxng_cache_set(query_text, results)
+                    # §17.812 (audit C5) — do NOT cache an EMPTY result list. A
+                    # transient CAPTCHA/rate-limit that zeroed the query (even
+                    # after the fallback) would otherwise be served from cache for
+                    # the full TTL (~1h) across ALL sessions, poisoning the query
+                    # AND bypassing the fallback retry on every later run. Cache
+                    # only real hits; an empty stays a cache-miss so it re-queries.
+                    if results:
+                        await _searxng_cache_set(query_text, results)
                     logger.info("searxng_cache_miss: query=%s results=%d", query_text, len(results))
                     state.search_history.add(query_key)
                     return q.get("facet", ""), results
-                # Non-200: mark attempted (matches pre-§17.543 behavior) but no results.
-                state.search_history.add(query_key)
+                # §17.812 (audit C5) — non-200 (CAPTCHA / 429 / 403) was SILENT and
+                # burned the query for the whole session (search_history.add). Log
+                # it, flag degradation so the caller emits an SSE warning, and leave
+                # query_key UN-added so a later iteration can retry — mirroring the
+                # exception path below (its comment already says so).
+                logger.warning(
+                    "searxng_non_200: query='%s' status=%d", query_text, resp.status_code,
+                )
+                state.search_degraded = True
             except Exception as e:
                 # Exception leaves query_key un-added so a later iteration may retry.
                 logger.warning("research_search_failed: query='%s' error=%s", query_text, e)
@@ -1495,12 +1509,27 @@ async def _execute_iteration_loop(
             yield _sse("progress", {"session_id": session_id, **state.progress})
         yield _sse("iteration_started", _it_data)
 
+        state.search_degraded = False  # §17.812 — reset per iteration
         results = await _search_queries(queries, state)
         yield _sse("search_complete", {
             "iteration": state.iteration,
             "results_found": len(results),
             "total_urls": len(state.url_history),
         })
+
+        # §17.812 (audit C5) — surface a blocked/rate-limited backend instead of
+        # letting it pass as a quietly-empty iteration.
+        if state.search_degraded:
+            yield _sse("warning", {
+                "iteration": state.iteration,
+                "stage": "search",
+                "code": "search_degraded",
+                "message": (
+                    "The web search backend blocked or rate-limited one or more "
+                    "queries (CAPTCHA / 429 / 403); results this iteration may be "
+                    "incomplete. Affected queries will be retried."
+                ),
+            })
 
         if not results:
             yield _sse("iteration_complete", {
@@ -2421,26 +2450,41 @@ async def run_research(
 
         # Item 8: summary failure must not fail the whole run.
         summary: str | None = None
-        try:
-            summary_task = asyncio.create_task(
-                _generate_summary(state, overrides=model_overrides)
+        if not state.all_entries:
+            # §17.812 (audit C5) — never ask the model to "summarize" ZERO
+            # entries: an unconstrained summary prompt over an empty corpus
+            # hallucinates (training-data recall presented as research findings —
+            # the documented "kubernetes → Svelte tutorial" bleed). Mirror the
+            # direct-mode guard (`if summarize and state.all_entries`) and give an
+            # honest no-sources message instead.
+            logger.info("topic_summary_skipped_no_entries: session=%s", session_id)
+            summary = (
+                "No sources were collected for this topic — the web search "
+                "returned no usable results (often a transient block/rate-limit "
+                "or an over-narrow query). Nothing was ingested. Try again, "
+                "broaden the topic, or check the search backend."
             )
-            async for hb in _await_with_heartbeat(
-                summary_task, {"status": "summarizing"},
-                session_id=session_id,
-            ):
-                yield hb
-            summary = summary_task.result()
-        except Exception as summary_exc:
-            logger.warning(
-                "summary_failed: session=%s error=%s",
-                session_id, summary_exc, exc_info=True,
-            )
-            yield _sse("warning", {
-                "stage": "summary",
-                "message": f"Summary generation failed: {summary_exc}",
-                "session_id": session_id,
-            })
+        else:
+            try:
+                summary_task = asyncio.create_task(
+                    _generate_summary(state, overrides=model_overrides)
+                )
+                async for hb in _await_with_heartbeat(
+                    summary_task, {"status": "summarizing"},
+                    session_id=session_id,
+                ):
+                    yield hb
+                summary = summary_task.result()
+            except Exception as summary_exc:
+                logger.warning(
+                    "summary_failed: session=%s error=%s",
+                    session_id, summary_exc, exc_info=True,
+                )
+                yield _sse("warning", {
+                    "stage": "summary",
+                    "message": f"Summary generation failed: {summary_exc}",
+                    "session_id": session_id,
+                })
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         await _update_session_iteration(session_id, state)

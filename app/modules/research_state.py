@@ -58,6 +58,12 @@ class ResearchState:
     search_history: set = field(default_factory=set)
     url_history: set = field(default_factory=set)
     all_entries: list = field(default_factory=list)
+    # §17.812 (audit C5) — transient, per-iteration: set True when a SearXNG
+    # query returns a non-200 (CAPTCHA / 429 / 403). The search loop reads it to
+    # emit an SSE `warning` so a blocked backend surfaces instead of silently
+    # yielding an empty/incomplete iteration. Not serialized (resets to False on
+    # resume, and it's reset at the top of every iteration anyway).
+    search_degraded: bool = False
     total_ingested: int = 0
     total_rejected: int = 0
     total_new: int = 0
