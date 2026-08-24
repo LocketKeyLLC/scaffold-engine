@@ -95,6 +95,24 @@ class TestCheckRerankerState:
         assert result["elapsed_s"] == 2.5
         assert result["prewarmed_at"].startswith("2026-05-08")
 
+    def test_down_when_load_failed_even_if_prewarmed(self, monkeypatch):
+        # §17.812 (audit C4) — a live CrossEncoder load failure must win over the
+        # stale prewarm stamp: prewarm reports 'up' even when the load returned
+        # None (no exception), so /health lied while the reranker was dead.
+        monkeypatch.setattr("app.rerankers.reranker_load_failed", lambda: True)
+        from app.main import _check_reranker_state
+
+        state = SimpleNamespace(
+            reranker_prewarmed_at="2026-05-08T03:00:00+00:00",
+            reranker_prewarm_elapsed_s=2.5,
+            reranker_prewarm_error=None,
+            reranker_prewarm_skipped=False,
+        )
+        result = _check_reranker_state(state)
+        assert result["status"] == "down"
+        assert result["degraded"] is True
+        assert result["prewarmed"] is False
+
     def test_down_when_error_set(self):
         from app.main import _check_reranker_state
 

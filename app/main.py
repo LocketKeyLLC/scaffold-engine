@@ -106,10 +106,21 @@ def _check_reranker_state(state) -> dict:
     # §17.187 — score-range surface, populated regardless of prewarm outcome
     # (an operator inspecting a "down" reranker still benefits from knowing
     # which model would have been loaded).
-    from app.rerankers import get_score_range_info
+    from app.rerankers import get_score_range_info, reranker_load_failed
     model_name = getattr(settings, "model_reranker", None)
     score_range, _ = get_score_range_info(model_name)
     base = {"model": model_name, "score_range": score_range}
+
+    # §17.812 (audit C4) — the LIVE loader state trumps the prewarm stamp. Prewarm
+    # catches no exception when the load merely returns None, so it stamps
+    # reranker_prewarmed_at and this would report "up" while the reranker is
+    # actually dead and every query silently degraded to RRF-only. If the loader
+    # has hard-failed, report down+degraded so /health.warnings fires.
+    if reranker_load_failed():
+        return {
+            **base, "status": "down", "prewarmed": False, "degraded": True,
+            "error": "CrossEncoder load failed — RAG on RRF-only fallback (auto-retries)",
+        }
 
     if state is None:
         return {**base, "status": "unknown", "prewarmed": False}
