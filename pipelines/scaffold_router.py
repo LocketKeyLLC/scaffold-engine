@@ -1931,9 +1931,10 @@ class Pipeline:
         # list — but real operator wording kept MISSING it ("i'm logged in via ssh,
         # are these the commands?" is a status+question that matches no phrase),
         # so it kept falling through. §17.770 stops the phrase whack-a-mole and
-        # INVERTS the gate: when EXACTLY ONE assist session is active (the
-        # unambiguous case — `_sole_active_session_via_work` returns None for 0 or
-        # >1, which then falls to the §17.633 multi-job continuity path) and this
+        # INVERTS the gate: when EXACTLY ONE assist session is active (§17.770c:
+        # `_sole_active_session_via_work` returns None ONLY for ZERO active; for
+        # >1 it binds the MOST-RECENTLY-active by last_activity_at — so the §17.633
+        # disambiguation pick-list now governs only the zero-active case) and this
         # does NOT EXPLICITLY announce a new project, the session is sticky —
         # plain text continues it. §17.770b — the gate uses the STRICT
         # `_looks_like_starts_new_project` (novelty markers only), NOT the broad
