@@ -54,7 +54,7 @@ def test_cold_start_has_no_eta():
 
 
 # ---------------------------------------------------------------------------
-# EWMA ETA
+# Elapsed-rate ETA (§17.812 — concurrency-correct; replaced the per-unit EWMA)
 # ---------------------------------------------------------------------------
 @pytest.mark.smoke
 def test_eta_from_uniform_rate():
@@ -78,14 +78,45 @@ def test_eta_from_uniform_rate():
 
 
 @pytest.mark.smoke
-def test_ewma_reacts_to_slowdown():
+def test_eta_tracks_average_elapsed_rate():
+    # §17.812 — ETA = elapsed / units_done × remaining. After 2 units in 12s of
+    # wall-clock, the average is 6s/unit, so 8 remaining → 48s.
     clk = FakeClock()
-    pt = ProgressTracker(10, phase="x", alpha=0.5, clock=clk)
+    pt = ProgressTracker(10, phase="x", clock=clk)
     clk.advance(2)
-    pt.tick(1)  # ewma = 2s
+    pt.tick(1)
     clk.advance(10)
-    snap = pt.tick(2)  # ewma = 0.5*10 + 0.5*2 = 6s → 8 remaining × 6s = 48s
+    snap = pt.tick(2)  # elapsed=12, done=2 → 6s/unit × 8 remaining = 48s
     assert snap["eta_ms"] == 48000
+
+
+@pytest.mark.smoke
+def test_parallel_wave_eta_reflects_wall_clock_not_interarrival():
+    # §17.812 (audit M2) — the core fix. A wave of 4 nodes each ~60s wall finishes
+    # together at t=60; the drain ticks them back-to-back (inter-arrival ~0). The
+    # OLD per-unit EWMA folded those near-zero gaps and collapsed the ETA toward
+    # zero. Elapsed-rate: 60s / 4 done = 15s effective per node × 4 remaining = 60s.
+    clk = FakeClock()
+    pt = ProgressTracker(8, phase="executing", unit="nodes", clock=clk)
+    clk.advance(60)
+    pt.tick(1)
+    pt.tick(2)
+    pt.tick(3)
+    snap = pt.tick(4)  # all at t=60 (burst)
+    assert snap["completed"] == 4
+    assert snap["eta_ms"] == 60000  # NOT ~0 (the old EWMA bug)
+
+
+@pytest.mark.smoke
+def test_resume_baseline_excluded_from_rate():
+    # §17.812 — a resumed run counts pre-resume completions toward pct but NOT the
+    # rate: only work done THIS session (completed - initial) / elapsed.
+    clk = FakeClock()
+    pt = ProgressTracker(10, phase="x", initial_completed=6, clock=clk)
+    clk.advance(10)
+    snap = pt.tick(8)  # 2 done this session in 10s → 5s/unit × 2 remaining = 10s
+    assert snap["completed"] == 8
+    assert snap["eta_ms"] == 10000
 
 
 @pytest.mark.smoke
@@ -98,16 +129,20 @@ def test_default_tick_increments():
 
 
 @pytest.mark.smoke
-def test_stale_count_updates_labels_without_perturbing_rate():
+def test_stale_count_updates_labels_and_eta_reflects_stall():
+    # §17.812 — a repeated (non-advancing) tick still updates the labels, and the
+    # elapsed-rate ETA GROWS to reflect the stall (no progress for 100s → the
+    # estimate widens honestly, rather than freezing as the old EWMA did).
     clk = FakeClock()
-    pt = ProgressTracker(4, phase="x", alpha=0.5, clock=clk)
+    pt = ProgressTracker(4, phase="x", clock=clk)
     clk.advance(10)
     pt.tick(1)
-    eta_before = pt.snapshot()["eta_ms"]
-    clk.advance(100)  # long idle, but no forward progress
+    eta_before = pt.snapshot()["eta_ms"]  # 10s/unit × 3 = 30s
+    clk.advance(100)  # long idle, no forward progress
     snap = pt.tick(1, current_item="still-node-1")  # same count
     assert snap["current_item"] == "still-node-1"
-    assert snap["eta_ms"] == eta_before  # rate untouched by a non-advancing tick
+    assert snap["eta_ms"] > eta_before  # ETA widens to reflect the stall
+    assert snap["completed"] == 1  # count unchanged
 
 
 # ---------------------------------------------------------------------------

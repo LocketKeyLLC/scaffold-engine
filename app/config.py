@@ -1159,16 +1159,19 @@ class Settings(BaseSettings):
     node_token_streaming_enabled: bool = Field(default=False)
     # §17.811 — progress + ETA signal. When on, long-running subsystems (DAG
     # exec, research, RAG ingest, assist, decompose, sim) emit a `progress` SSE
-    # frame carrying an EWMA-based ETA and a deterministic one-line summary, and
-    # persist the snapshot to jobs.metadata.progress. Deterministic and cheap —
-    # no model call in the hot loop.
+    # frame carrying an elapsed-rate ETA (§17.812, concurrency-correct) and a
+    # deterministic one-line summary. The DAG path computes the read-path snapshot
+    # ON DEMAND from dag_nodes timestamps (no metadata write — parallel-frontier
+    # race); the serial subsystems persist it to their state row. Deterministic
+    # and cheap — no model call in the hot loop.
     progress_eta_enabled: bool = Field(default=True)
-    # Throttle: at most one live `progress` emit + metadata persist per this many
-    # seconds (the terminal snapshot and the first tick always land). Bounds SSE
-    # chatter + DB writes when many fast units complete in a burst.
+    # Throttle: at most one live `progress` emit (+ state persist where the
+    # subsystem persists) per this many seconds — the terminal snapshot and the
+    # first tick always land. Bounds SSE chatter + DB writes on a fast burst.
     progress_emit_min_interval_seconds: float = Field(default=5.0, ge=0.0, le=120.0)
-    # EWMA smoothing for per-unit duration (higher = more reactive to the latest
-    # unit; lower = smoother, slower-moving ETA).
+    # §17.812 — LEGACY: smoothing for the per-unit EWMA that no longer drives the
+    # ETA (now elapsed-rate). Still accepted by ProgressTracker(alpha=) and folded
+    # by tick(); retained to avoid a signature/knob churn. No effect on the ETA.
     progress_ewma_alpha: float = Field(default=0.3, ge=0.01, le=1.0)
     # Opt-in LLM-narrated rolling summary (the `📝` prose line). OFF by default:
     # this host is CPU-only and it adds a model_general call per emit. The

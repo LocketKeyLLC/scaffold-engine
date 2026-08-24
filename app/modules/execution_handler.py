@@ -36,22 +36,27 @@ def _compute_read_progress(rows, job_status: str | None = None) -> dict | None:
         return None
     terminal = {"done", "failed", "skipped"}
     completed = sum(1 for r in rows if r.status in terminal)
-    durs = []
+    # §17.812 (audit M2) — elapsed-RATE ETA, concurrency-correct. The old
+    # mean-node-duration × remaining ignored parallelism: under the parallel
+    # frontier it over-estimated by ~inflight-cap× and diverged (by ~cap×) from
+    # the live SSE ETA for the SAME job. The wall-clock SPAN of the timed nodes ÷
+    # their count is the effective per-node wall time (already ÷ concurrency);
+    # × remaining. Uses only DB timestamps (no now()/tz mix).
+    starts, ends, done_timed = [], [], 0
     for r in rows:
         _s = getattr(r, "started_at", None)
         _c = getattr(r, "completed_at", None)
-        if _s and _c:
-            d = (_c - _s).total_seconds() * 1000.0
-            if d >= 0:
-                durs.append(d)
-    mean_ms = (sum(durs) / len(durs)) if durs else None
+        if _s and _c and _c >= _s:
+            starts.append(_s)
+            ends.append(_c)
+            done_timed += 1
     remaining = max(0, total - completed)
     is_terminal = job_status in _TERMINAL_JOB_STATUSES
-    eta_ms = (
-        int(mean_ms * remaining)
-        if (mean_ms is not None and remaining > 0 and not is_terminal)
-        else None
-    )
+    eta_ms = None
+    if done_timed > 0 and remaining > 0 and not is_terminal:
+        span_ms = (max(ends) - min(starts)).total_seconds() * 1000.0
+        if span_ms > 0:
+            eta_ms = int(span_ms / done_timed * remaining)
     pct = int(round(100.0 * completed / total))
     running = next((r.title for r in rows if r.status == "running"), None)
     eta_human = ("~" + humanize_ms(eta_ms)) if eta_ms is not None else None

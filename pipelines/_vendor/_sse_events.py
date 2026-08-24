@@ -147,8 +147,10 @@ STREAM_STALLED = "stream_stalled"
 # ``app.utils.progress.ProgressTracker.snapshot()`` dict:
 # {phase, label, unit, completed, total, pct, elapsed_ms, eta_ms, eta_human,
 #  rate_per_min, current_item, done_items, soft, summary}. Consumers that don't
-# render it degrade gracefully — it never carries terminal state. The same
-# snapshot is persisted to ``jobs.metadata.progress`` for read-path/reconnect.
+# render it degrade gracefully — it never carries terminal state. Read-path /
+# reconnect: the DAG path computes the snapshot ON DEMAND from ``dag_nodes``
+# timestamps (no metadata write — the parallel frontier would race it, §17.811);
+# the serial subsystems (research, decomposition) persist it to their state row.
 
 PROGRESS = "progress"
 
