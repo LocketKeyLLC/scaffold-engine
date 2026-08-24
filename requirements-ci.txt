@@ -28,7 +28,7 @@ requests==2.34.2
 structlog==26.1.0
 prometheus-client==0.26.0
 redis==8.0.1
-trafilatura==2.1.0
+trafilatura==2.1.0  # HELD at 2.1.x (mirror requirements.txt) — 2.2.0 heading-loss regression, audit M12
 pypdf==6.15.0  # §17.585, §17.724 GHSA bump
 pdfplumber==0.11.10  # §17.585 — pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
 apscheduler==3.11.3
