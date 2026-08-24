@@ -159,6 +159,14 @@ class Settings(BaseSettings):
             "deep": self.research_max_urls_deep,
         }.get(depth, self.research_max_urls_medium)
 
+    # §17.812 (audit M3) — refuse to serve when a startup migration fails.
+    # Default False keeps the historical "log + boot on a partial schema"
+    # behavior (unchanged for tests + existing installs); set true (fresh
+    # installs / compose) to hard-fail instead of silently serving traffic
+    # against a schema missing later migrations. Either way the failure is now
+    # surfaced on /health.warnings and via a system alert (see app/main.py).
+    fail_on_migration_error: bool = False
+
     # Scheduler
     scheduler_enabled: bool = True
     scheduler_timezone: str = "UTC"

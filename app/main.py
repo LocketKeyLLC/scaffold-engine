@@ -58,6 +58,11 @@ from app.routers.status import router as status_router
 
 logger = logging.getLogger("scaffold")
 
+# §17.812 (audit M3) — records a startup migration failure so it stops being
+# silent: /health surfaces it as a warning and the operator sees it without
+# grepping logs. None = migrations OK (or not yet run). Set in the lifespan.
+_MIGRATION_STATE: dict | None = None
+
 # §17.179 — cap each lifespan service probe at this many seconds. The
 # Ollama client default (1800 s = local_timeout, sized for LLM calls),
 # pymilvus's unbounded connect, and asyncpg's 60 s connect_timeout were
@@ -313,11 +318,17 @@ async def lifespan(app: FastAPI):
     # Opt out with SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false (default: true).
     _run_migs = os.getenv("SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP", "true").strip().lower()
     if _run_migs not in ("0", "false", "no", "off"):
+        global _MIGRATION_STATE
+        _mig_failure: str | None = None
         try:
             from app.migrations import run_migrations
             mig_result = await run_migrations()
             if mig_result.get("status") == "error":
                 logger.error("migrations_failed_at_startup: %s", mig_result)
+                _mig_failure = (
+                    f"{mig_result.get('failed_file') or '?'}: "
+                    f"{mig_result.get('error') or mig_result}"
+                )
             elif mig_result.get("applied"):
                 logger.info(
                     "migrations_applied_at_startup: count=%d files=%s",
@@ -325,6 +336,30 @@ async def lifespan(app: FastAPI):
                 )
         except Exception as exc:
             logger.error("migrations_hook_crashed: error=%s", exc)
+            _mig_failure = f"migration hook crashed: {exc}"
+
+        # §17.812 (audit M3) — a startup migration failure used to be a single
+        # log line: the app booted and served traffic against a PARTIAL schema
+        # (every path touching a later table 500s), with no operator-visible
+        # signal. Surface it on /health.warnings, fire a system alert, and — when
+        # fail_on_migration_error is set — refuse to serve rather than run broken.
+        if _mig_failure:
+            _MIGRATION_STATE = {"status": "error", "detail": _mig_failure}
+            try:
+                from app.observability import alerts
+                await alerts.emit(
+                    kind="migration.failed",
+                    severity="critical",
+                    message=f"Startup migration failed: {_mig_failure}",
+                    dedup_key="migration.failed",
+                )
+            except Exception as _alert_exc:  # emit never raises, but be defensive
+                logger.warning("migration_alert_emit_failed: err=%s", _alert_exc)
+            if settings.fail_on_migration_error:
+                raise RuntimeError(
+                    f"Startup migration failed and fail_on_migration_error is set — "
+                    f"refusing to serve on a partial schema: {_mig_failure}"
+                )
     else:
         logger.info("migrations_skipped_by_env: SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=%s", _run_migs)
 
@@ -1175,6 +1210,13 @@ async def health():
     # reading only the top-level field would otherwise miss: a wedged cache,
     # a down sidecar, or recent OOM kills.
     warnings: list[str] = []
+    if _MIGRATION_STATE is not None:
+        # §17.812 (audit M3) — a startup migration failed; the schema may be
+        # partial and paths touching later tables will 500.
+        warnings.append(
+            f"startup migration FAILED — schema may be partial: "
+            f"{_MIGRATION_STATE.get('detail')}"
+        )
     if redis_info.get("status") != "up":
         warnings.append("redis is down — caching and session memory are degraded")
     if reranker.get("status") not in ("up", "skipped"):
