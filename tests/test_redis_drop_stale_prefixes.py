@@ -31,7 +31,7 @@ def test_allowlist_contains_every_shipped_prefix():
     """Sanity: every cache-prefix this repo defines must be in the
     allowlist. Forgetting one would silently make this script unable
     to clean it up after a contract bump."""
-    expected = {"embedv1", "embedv2", "embedv3", "fetchv1",
+    expected = {"embedv1", "embedv2", "embedv3", "embedv4", "fetchv1",
                 "llmverifyv1", "ragv1"}
     assert expected <= drop_mod.ALLOWED_PREFIXES, (
         f"missing prefixes: {expected - drop_mod.ALLOWED_PREFIXES}"

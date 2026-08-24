@@ -35,8 +35,11 @@ def _mock_db_with_lookup(*, stored: str | None):
 @pytest.mark.asyncio
 async def test_first_run_inserts_and_no_alert(monkeypatch):
     monkeypatch.setattr(
-        "app.utils.embedder_drift.settings.model_embedder_id",
-        "nomic-embed-text-mrl512", raising=False,
+        "app.utils.embedder_drift.settings.model_embedder_pipeline",
+        "nomic-embed-text", raising=False,
+    )
+    monkeypatch.setattr(
+        "app.utils.embedder_drift.settings.embedding_dim", 512, raising=False,
     )
     db = _mock_db_with_lookup(stored=None)
     emit_calls: list = []
@@ -49,7 +52,7 @@ async def test_first_run_inserts_and_no_alert(monkeypatch):
         out = await _drift.check_embedder_drift(db)
 
     assert out["outcome"] == "first_run"
-    assert out["current"] == "nomic-embed-text-mrl512"
+    assert out["current"] == "nomic-embed-text:d512"
     assert out["stored"] is None
     assert emit_calls == []
     # First call SELECT, second call INSERT-on-conflict
@@ -57,7 +60,7 @@ async def test_first_run_inserts_and_no_alert(monkeypatch):
     insert_call = db.execute.await_args_list[1]
     sql_text = str(insert_call.args[0])
     assert "INSERT INTO cache_metadata" in sql_text
-    assert insert_call.args[1] == {"k": "active_embedder_id", "v": "nomic-embed-text-mrl512"}
+    assert insert_call.args[1] == {"k": "active_embedder_id", "v": "nomic-embed-text:d512"}
     db.commit.assert_awaited()
 
 
@@ -68,10 +71,13 @@ async def test_first_run_inserts_and_no_alert(monkeypatch):
 @pytest.mark.asyncio
 async def test_unchanged_touches_timestamp_no_alert(monkeypatch):
     monkeypatch.setattr(
-        "app.utils.embedder_drift.settings.model_embedder_id",
-        "nomic-embed-text-mrl512", raising=False,
+        "app.utils.embedder_drift.settings.model_embedder_pipeline",
+        "nomic-embed-text", raising=False,
     )
-    db = _mock_db_with_lookup(stored="nomic-embed-text-mrl512")
+    monkeypatch.setattr(
+        "app.utils.embedder_drift.settings.embedding_dim", 512, raising=False,
+    )
+    db = _mock_db_with_lookup(stored="nomic-embed-text:d512")
     emit_calls: list = []
 
     async def _spy_emit(**kw):
@@ -82,7 +88,7 @@ async def test_unchanged_touches_timestamp_no_alert(monkeypatch):
         out = await _drift.check_embedder_drift(db)
 
     assert out["outcome"] == "unchanged"
-    assert out["current"] == out["stored"] == "nomic-embed-text-mrl512"
+    assert out["current"] == out["stored"] == "nomic-embed-text:d512"
     assert emit_calls == []
     # SELECT + UPDATE updated_at
     assert db.execute.await_count == 2
@@ -98,10 +104,13 @@ async def test_unchanged_touches_timestamp_no_alert(monkeypatch):
 @pytest.mark.asyncio
 async def test_drift_emits_critical_alert_and_upserts(monkeypatch, caplog):
     monkeypatch.setattr(
-        "app.utils.embedder_drift.settings.model_embedder_id",
-        "qwen3-embedding:8b-mrl512", raising=False,
+        "app.utils.embedder_drift.settings.model_embedder_pipeline",
+        "qwen3-embedding:8b", raising=False,
     )
-    db = _mock_db_with_lookup(stored="nomic-embed-text-mrl512")
+    monkeypatch.setattr(
+        "app.utils.embedder_drift.settings.embedding_dim", 512, raising=False,
+    )
+    db = _mock_db_with_lookup(stored="nomic-embed-text:d512")
     emit_calls: list = []
 
     async def _spy_emit(**kw):
@@ -113,20 +122,20 @@ async def test_drift_emits_critical_alert_and_upserts(monkeypatch, caplog):
             out = await _drift.check_embedder_drift(db)
 
     assert out["outcome"] == "drift"
-    assert out["stored"] == "nomic-embed-text-mrl512"
-    assert out["current"] == "qwen3-embedding:8b-mrl512"
+    assert out["stored"] == "nomic-embed-text:d512"
+    assert out["current"] == "qwen3-embedding:8b:d512"
     # Exactly one critical alert
     assert len(emit_calls) == 1
     call = emit_calls[0]
     assert call["kind"] == "cache.embedder_drift"
     assert call["severity"] == "critical"
     payload = call["payload"]
-    assert payload["stored_embedder_id"] == "nomic-embed-text-mrl512"
-    assert payload["configured_embedder_id"] == "qwen3-embedding:8b-mrl512"
+    assert payload["stored_embedder_id"] == "nomic-embed-text:d512"
+    assert payload["configured_embedder_id"] == "qwen3-embedding:8b:d512"
     assert "reindex.py" in payload["reindex_command"]
     # Dedup key embeds the value pair so different drifts fire separately
     assert call["dedup_key"] == (
-        "cache.embedder_drift:nomic-embed-text-mrl512->qwen3-embedding:8b-mrl512"
+        "cache.embedder_drift:nomic-embed-text:d512->qwen3-embedding:8b:d512"
     )
     # Logged at CRITICAL severity
     assert any(
@@ -140,7 +149,7 @@ async def test_drift_emits_critical_alert_and_upserts(monkeypatch, caplog):
     upsert_call = db.execute.await_args_list[1]
     assert "INSERT INTO cache_metadata" in str(upsert_call.args[0])
     assert upsert_call.args[1] == {
-        "k": "active_embedder_id", "v": "qwen3-embedding:8b-mrl512",
+        "k": "active_embedder_id", "v": "qwen3-embedding:8b:d512",
     }
 
 
@@ -150,7 +159,7 @@ async def test_drift_upsert_failure_still_returns_drift_outcome(monkeypatch):
     outcome=drift so the caller knows the alert fired. The upsert
     failure is recorded as upsert_failed=True for diagnostics."""
     monkeypatch.setattr(
-        "app.utils.embedder_drift.settings.model_embedder_id",
+        "app.utils.embedder_drift.settings.model_embedder_pipeline",
         "model_b", raising=False,
     )
     lookup_result = MagicMock()
@@ -198,8 +207,8 @@ async def test_db_read_failure_returns_skipped(caplog):
 @pytest.mark.asyncio
 async def test_first_run_db_write_failure_returns_skipped(monkeypatch, caplog):
     monkeypatch.setattr(
-        "app.utils.embedder_drift.settings.model_embedder_id",
-        "nomic-embed-text-mrl512", raising=False,
+        "app.utils.embedder_drift.settings.model_embedder_pipeline",
+        "nomic-embed-text:d512", raising=False,
     )
     lookup_result = MagicMock()
     lookup_result.scalar.return_value = None
@@ -232,7 +241,7 @@ async def test_drift_alert_failure_still_upserts(monkeypatch):
     of re-firing the same alert. This is the path that prevents an
     operator from getting paged on every restart."""
     monkeypatch.setattr(
-        "app.utils.embedder_drift.settings.model_embedder_id",
+        "app.utils.embedder_drift.settings.model_embedder_pipeline",
         "model_b", raising=False,
     )
     lookup_result = MagicMock()

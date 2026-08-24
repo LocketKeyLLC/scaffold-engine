@@ -1,8 +1,14 @@
 """Two-tier embedding cache: in-memory LRU + Redis persistent store.
 
-Cache key format: embedv3:{model_id}:d{dim}:{sha256(normalized_text)}
-- v3 folds embedding_dim into the key so dim changes auto-invalidate (#45 follow-up).
-- Old embedv2 keys expire naturally via Redis TTL.
+Cache key format: embedv4:{pipeline_model}:d{dim}:{sha256(normalized_text)}
+- §17.812 (audit M7): v4 keys on the ACTUAL vector-producing model
+  (settings.model_embedder_pipeline, env-overridable) — NOT the static
+  settings.model_embedder_id label. Keying on the static label meant swapping
+  MODEL_EMBEDDER_PIPELINE kept serving OLD-model vectors for up to the 30-day
+  TTL (queries and index living in two vector spaces at once). The v3→v4 bump
+  invalidates the old keys in one step (they read as a miss → re-embed).
+- v4 folds embedding_dim into the key so dim changes auto-invalidate (#45 follow-up).
+- Old embedv2/embedv3 keys expire naturally via Redis TTL.
 - Stores truncated 512d embeddings, not full 4096d.
 - Binary float32 encoding: ~4x smaller than JSON.
 """
@@ -25,7 +31,7 @@ logger = logging.getLogger("scaffold.embedding_cache")
 _REDIS_FAILURE_THRESHOLD = 3
 
 # Cache key version prefix (bump on wire-format or key-schema change)
-_KEY_PREFIX = "embedv3"
+_KEY_PREFIX = "embedv4"  # §17.812 (M7) — was embedv3; now keys on pipeline model
 
 
 def normalize_cache_text(text: str) -> str:
@@ -53,7 +59,10 @@ class EmbeddingCache:
         dim: int | None = None,
     ):
         self.redis_url = redis_url or settings.redis_url
-        self.model_id = model_id or settings.model_embedder_id
+        # §17.812 (audit M7) — key on the ACTUAL vector-producing model
+        # (model_embedder_pipeline), not the static model_embedder_id label, so a
+        # pipeline swap invalidates the cache instead of serving stale vectors.
+        self.model_id = model_id or settings.model_embedder_pipeline
         self.dim = dim or settings.embedding_dim
         self._memory: OrderedDict[str, list[float]] = OrderedDict()
         self._redis: aioredis.Redis | None = None
