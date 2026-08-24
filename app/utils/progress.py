@@ -98,7 +98,14 @@ class ProgressTracker:
         self._start = clock()
         self._last_tick_t = self._start
         self._completed = max(0, int(initial_completed))
-        self._ewma_ms: float | None = None  # EWMA of per-unit wall-clock duration
+        # §17.812 (audit M2) — the resume baseline: ETA is a wall-clock RATE over
+        # work done THIS session (completed - initial) / elapsed, so a resumed run
+        # doesn't divide pre-resume completions by only post-resume elapsed.
+        self._initial = self._completed
+        # Legacy per-unit EWMA — still folded by tick() but NO LONGER drives the
+        # ETA (§17.812 switched eta_ms to an elapsed-rate model). Kept to avoid
+        # churning tick()'s signature / the alpha knob; harmless.
+        self._ewma_ms: float | None = None
         self.current_item: str | None = None
         self.done_items: list[str] = []
 
@@ -141,11 +148,31 @@ class ProgressTracker:
 
     # ------------------------------------------------------------------
     def eta_ms(self, now: float | None = None) -> int | None:
-        """Estimated remaining time in ms, or ``None`` before the first tick."""
-        if self._ewma_ms is None or self.total <= 0:
+        """Estimated remaining time in ms, or ``None`` before any forward progress.
+
+        §17.812 (audit M2) — elapsed-RATE model, not a per-unit EWMA. The old
+        EWMA folded the wall-clock span between successive ``tick()`` calls into a
+        "per-node duration"; under the parallel frontier ``tick()`` fires once per
+        result drained from the queue, so that span was the inter-ARRIVAL gap
+        (near-zero within a wave), which dragged the estimate far below the truth.
+
+        Wall-clock per completed unit = elapsed / units_done_this_session already
+        accounts for concurrency: C nodes finishing in wall-time D give D/C per
+        unit, so ETA = (D/C) × remaining is correct. Collapses to mean node
+        duration × remaining for a serial run.
+        """
+        if self.total <= 0:
             return None
         remaining = max(0, self.total - self._completed)
-        return int(self._ewma_ms * remaining)
+        if remaining == 0:
+            return 0  # complete — no time left
+        now = now if now is not None else self._clock()
+        done = self._completed - self._initial
+        elapsed = now - self._start
+        if done <= 0 or elapsed <= 0:
+            return None  # no forward progress this session yet
+        per_unit_wall_s = elapsed / done
+        return int(per_unit_wall_s * remaining * 1000.0)
 
     def snapshot(self, now: float | None = None) -> dict[str, Any]:
         """Return the current progress snapshot (the payload emitted/persisted)."""
