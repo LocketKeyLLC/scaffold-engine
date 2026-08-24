@@ -168,6 +168,34 @@ jobs:
           ignore-unfixed: true
           exit-code: '0'
 
+      # §17.812 (audit C7) — db/init.sql is only the post-033 BASELINE; migrations
+      # 034+ apply at app lifespan (which pytest never triggers), so CI was testing
+      # against a schema with no api_keys / runtime_profile / jobs.owner — every
+      # multi-user RBAC path took a caught-exception branch and an authz regression
+      # could pass the gate. Apply them here inside the CI image (needs the app's
+      # asyncpg deps + the runner's own file-resolution: _MIGRATIONS_DIR is the
+      # baked /code/db/migrations, overlaid by the PR's db/ mount). This mirrors
+      # the production startup path exactly.
+      - name: Apply migrations 034+ (init.sql is the 033 baseline)
+        run: |
+          docker run --rm --network host \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e PYTHONPATH=/code:/code/sdk \
+            -v "$PWD/app:/code/app:ro" \
+            -v "$PWD/db:/code/db:ro" \
+            scaffold-orchestrator:ci \
+            python -m app.migrations
+
+      # §17.812 — fail LOUDLY if the load-bearing RBAC/runtime schema is absent,
+      # so a broken migration can't slip through on exception-handler coverage.
+      - name: Assert RBAC/runtime schema is present
+        run: |
+          PGPASSWORD=scaffold_ci_pw psql -h localhost -U scaffold -d scaffold_engine \
+            -v ON_ERROR_STOP=1 -c \
+            "SELECT 'api_keys'::regclass, 'runtime_profile'::regclass, 'model_overrides'::regclass;" \
+            -c "SELECT owner FROM jobs LIMIT 0;" \
+            -c "SELECT quick_mode FROM jobs LIMIT 0;"
+
       # §17.555 — full unit suite + app/ coverage gate at COVERAGE_MIN%.
       # §17.588 — mount THIS PR's source over the (pulled) image so tests run
       # against the PR's code + the image's deps. Mirrors docker-compose.dev.yml's

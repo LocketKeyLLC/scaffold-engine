@@ -8,6 +8,15 @@ from app.main import app
 from app.database import get_db
 
 
+@pytest.fixture(autouse=True)
+def _single_user_mode(monkeypatch):
+    """§17.812 — /web is auth-exempt only in single-user mode; pin it so these
+    rendering tests don't depend on the ambient MULTI_USER_ENABLED env (the
+    live container runs multi-user, where /web now requires the master key)."""
+    import app.config
+    monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
+
+
 def _empty_db():
     res = MagicMock()
     res.mappings.return_value.all.return_value = []

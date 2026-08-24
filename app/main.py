@@ -43,6 +43,7 @@ from app.middleware.error_logging import ErrorLoggingMiddleware
 from app.middleware.performance import PerformanceMiddleware
 from app.middleware.request_id import RequestIdMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
+from app.middleware.web_csrf import WebCsrfMiddleware
 from app.routers.alerts import router as alerts_router
 from app.routers.assist import router as assist_router
 from app.routers.observability import router as observability_router
@@ -595,6 +596,11 @@ app.add_middleware(RequestIdMiddleware)
 # wrap the final response right before client send. Set-here-only semantics
 # (uses setdefault) so a future per-endpoint header override still wins.
 app.add_middleware(SecurityHeadersMiddleware)
+# §17.812 (audit C9) — outermost: refuse cross-origin state-changing requests to
+# the auth-exempt /web UI (CSRF stopgap) before any handler or body processing.
+# Passes non-/web and same-origin requests straight through, so SecurityHeaders
+# (registered just before → second-outermost) still wraps every real response.
+app.add_middleware(WebCsrfMiddleware)
 
 # §17.438 — OTel FastAPI instrumentation MUST attach at app-build time, not in
 # lifespan: it adds a middleware, and Starlette forbids that once the app has

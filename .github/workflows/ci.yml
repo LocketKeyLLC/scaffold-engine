@@ -151,8 +151,17 @@ jobs:
         # non-optional transitive of sentence-transformers (the CrossEncoder
         # reranker). Suppressed via --ignore-vuln (pip-audit's intended
         # mechanism for unfixable CVEs) so the gate reflects deps we can act on.
-        # REVISIT when a patched torch ships. All other CVEs cleared in §17.585.
+        # §17.812 (audit 1.6) — the suppressions now carry an EXPIRY: past
+        # PIP_AUDIT_REVISIT this step fails, forcing a re-check for a patched
+        # torch instead of the ignore living forever with no owner.
         run: |
+          PIP_AUDIT_REVISIT="2026-11-01"
+          today="$(date -u +%F)"
+          echo "pip-audit CVE suppressions (expire $PIP_AUDIT_REVISIT): PYSEC-2026-139, CVE-2025-3000 — torch, unfixable-upstream (§17.585)"
+          if [[ "$today" > "$PIP_AUDIT_REVISIT" ]]; then
+            echo "::error::pip-audit ignore allowlist expired on $PIP_AUDIT_REVISIT. Re-check PYSEC-2026-139 / CVE-2025-3000 for a fixed torch, then refresh PIP_AUDIT_REVISIT."
+            exit 1
+          fi
           for f in requirements.txt requirements-ci.txt requirements-dev.txt; do
             printf '\n== pip-audit -r %s ==\n' "$f"
             pip-audit --strict -r "$f" \

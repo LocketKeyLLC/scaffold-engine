@@ -64,6 +64,11 @@ def _mock_fetch_response(spec: dict):
     resp = MagicMock()
     resp.text = json.dumps(spec)
     resp.raise_for_status = MagicMock()
+    # §17.812 — a real httpx Response always carries .url (the post-redirect
+    # final URL). Set it to a public host so the SSRF post-redirect re-check in
+    # _fetch_spec sees a valid URL, not a MagicMock repr. Value is a public
+    # host so the re-validation passes regardless of the per-test request URL.
+    resp.url = "https://example.com/spec.json"
 
     client = MagicMock()
     client.get = AsyncMock(return_value=resp)
