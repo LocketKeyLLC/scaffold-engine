@@ -231,10 +231,15 @@ class TestExecuteResearchJob:
             yield 'event: research_started\ndata: {"session_id": "abc-123", "topic": "x"}\n\n'
             yield 'event: research_complete\ndata: {"summary": "done"}\n\n'
 
+        # §17.812 — the reconciliation reads the session's status; a 'completed'
+        # session keeps last_status='success'.
+        mock_result = MagicMock()
+        mock_result.first.return_value = ("completed",)
+        mock_result.rowcount = 1
         mock_session = MagicMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
-        mock_session.execute = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
         mock_session.commit = AsyncMock()
 
         sched_mod._scheduler = None
@@ -243,10 +248,65 @@ class TestExecuteResearchJob:
              patch("app.modules.research_agent.run_research", side_effect=yields_session_id):
             await sched_mod._execute_research_job(2, "topic", "shallow")
 
-        call = mock_session.execute.call_args
+        call = mock_session.execute.call_args  # last call = the UPDATE
         params = call[0][1] if len(call[0]) > 1 else call[1]
         assert params.get("jid") == "abc-123"
         assert params.get("st") == "success"
+
+    @pytest.mark.asyncio
+    async def test_failed_session_reconciles_last_status_to_failed(self):
+        """§17.812 (audit C8) — run_research swallows an internal failure (yields
+        an SSE error, returns normally). last_status must follow the SESSION's
+        actual 'failed' status, not the default 'success'."""
+        from app import scheduler as sched_mod
+
+        async def yields_then_errors(*args, **kwargs):
+            yield 'event: research_started\ndata: {"session_id": "sess-9", "topic": "x"}\n\n'
+            yield 'event: error\ndata: {"message": "ollama down"}\n\n'
+
+        mock_result = MagicMock()
+        mock_result.first.return_value = ("failed",)  # the session finalized failed
+        mock_result.rowcount = 1
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+        sched_mod._scheduler = None
+
+        with patch.object(sched_mod, "async_session", return_value=mock_session), \
+             patch("app.modules.research_agent.run_research", side_effect=yields_then_errors):
+            await sched_mod._execute_research_job(9, "topic", "medium")
+
+        params = mock_session.execute.call_args[0][1]
+        assert params.get("st") == "failed"
+
+    @pytest.mark.asyncio
+    async def test_no_session_reconciles_last_status_to_skipped(self):
+        """§17.812 (audit C8) — the singleton-running guard refuses to start a
+        session (yields one error event, no session_id). That is NOT a success —
+        last_status must be 'skipped'."""
+        from app import scheduler as sched_mod
+
+        async def guard_refused(*args, **kwargs):
+            yield 'event: error\ndata: {"message": "another research already running"}\n\n'
+
+        mock_result = MagicMock()
+        mock_result.first.return_value = None
+        mock_result.rowcount = 1
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+        sched_mod._scheduler = None
+
+        with patch.object(sched_mod, "async_session", return_value=mock_session), \
+             patch("app.modules.research_agent.run_research", side_effect=guard_refused):
+            await sched_mod._execute_research_job(11, "topic", "shallow")
+
+        params = mock_session.execute.call_args[0][1]
+        assert params.get("st") == "skipped"
 
 
     @pytest.mark.asyncio

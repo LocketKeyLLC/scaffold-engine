@@ -637,6 +637,28 @@ async def _execute_research_job(
     try:
         try:
             await asyncio.wait_for(_consume(), timeout=settings.scheduler_job_timeout)
+            # §17.812 (audit C8) — a normal _consume() return does NOT mean the
+            # research succeeded: run_research swallows an internal failure
+            # (finalizes the session 'failed' + yields an SSE error, then returns),
+            # and the singleton-running guard yields one error event with NO
+            # session. Reconcile last_status against reality so /schedule is honest.
+            if session_id is None:
+                # No session created — the guard refused (another research in
+                # flight) or the run errored before creating one. Not a success.
+                status = "skipped"
+                logger.warning(
+                    'event="scheduled_research_no_session" schedule_id=%s '
+                    'reason="guard_refused_or_pre_session_error"', schedule_id,
+                )
+            else:
+                _sess_status = await _read_session_status(session_id)
+                if _sess_status in ("failed", "cancelled"):
+                    status = _sess_status
+                    logger.error(
+                        'event="scheduled_research_session_not_ok" schedule_id=%s '
+                        'session_id=%s session_status=%s',
+                        schedule_id, session_id, _sess_status,
+                    )
         except asyncio.TimeoutError:
             timed_out = True
             status = "timeout"
@@ -770,6 +792,27 @@ async def _execute_research_job(
             schedule_id, session_id,
             (datetime.now(timezone.utc) - started).total_seconds(),
         )
+
+
+async def _read_session_status(session_id: str) -> Optional[str]:
+    """§17.812 (audit C8) — read a research session's terminal status, fail-soft.
+
+    Returns the ``research_sessions.status`` for ``session_id`` (e.g. 'completed'
+    / 'failed'), or None on any error or missing row. Never raises — a read hiccup
+    must not turn a genuinely-successful run into a reported failure.
+    """
+    try:
+        async with async_session() as db:
+            row = (await db.execute(
+                text("SELECT status FROM research_sessions WHERE id = :id"),
+                {"id": session_id},
+            )).first()
+            return row[0] if row else None
+    except Exception:
+        logger.warning(
+            'event="schedule_session_status_read_failed" session_id=%s', session_id,
+        )
+        return None
 
 
 def _extract_session_id(event) -> Optional[str]:
