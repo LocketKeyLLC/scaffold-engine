@@ -81,6 +81,27 @@ def _sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+async def _await_keepalives_cancelled(*tasks: asyncio.Task) -> None:
+    """§17.812 (audit M1) — await already-cancelled keepalive tasks during teardown.
+
+    Swallows each task's OWN ``CancelledError`` (the one our ``.cancel()`` raised —
+    the task then reports ``.cancelled() is True``) and any other exception it
+    raised while unwinding. But a ``CancelledError`` delivered to the *current*
+    task (e.g. the client disconnects mid-teardown) surfaces at the ``await`` with
+    the child NOT cancelled — re-raise it so the outer cancellation propagates
+    instead of being silently dropped (which would leave the generator emitting
+    SSE + writing the DB for a consumer that is already gone).
+    """
+    for t in tasks:
+        try:
+            await t
+        except asyncio.CancelledError:
+            if not t.cancelled():
+                raise
+        except Exception:
+            pass
+
+
 async def _make_dag_progress_tracker(
     job_id: str, *, phase: str = "executing", label: str = "Executing DAG"
 ) -> ProgressTracker | None:
@@ -2578,14 +2599,9 @@ async def execute_all_nodes(
                 keepalive_stop.set()
                 hb_task.cancel()
                 ka_task.cancel()  # §17.261
-                try:
-                    await hb_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-                try:
-                    await ka_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                # §17.812 (audit M1) — swallow the children's own cancellation but
+                # re-raise a cancel delivered to THIS task (see helper docstring).
+                await _await_keepalives_cancelled(hb_task, ka_task)
             status = result.get("status", "unknown")
 
             # -- terminal: all nodes done --

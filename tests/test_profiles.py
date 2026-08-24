@@ -251,3 +251,30 @@ async def test_post_endpoint_applies_quick():
         assert out["active"] == "quick"
     finally:
         _restore_settings(snap)
+
+
+@pytest.mark.smoke
+async def test_apply_profile_persists_snapshot_before_overrides(monkeypatch):
+    """§17.812 (audit M4) — the profile snapshot row is written + committed
+    BEFORE any per-role override, so a mid-apply failure leaves a RECOVERABLE
+    row rather than settings-mutated-with-no-snapshot (which stranded the engine
+    in quick mode with active_profile()=None and clear_profile() a no-op)."""
+    quick = pf.PROFILES["quick"]
+    snap = _snapshot_settings(quick)
+    db = _mock_db()
+    boom = AsyncMock(side_effect=RuntimeError("override write failed"))
+    monkeypatch.setattr(pf, "set_override", boom)
+    try:
+        with pytest.raises(RuntimeError):
+            await pf.apply_profile("quick", db)
+        # The snapshot upsert ran + committed before the override blew up.
+        assert db.commit.await_count >= 1
+        first = db.execute.await_args_list[0]
+        params = first.args[1]
+        assert params["name"] == "quick"
+        applied = json.loads(params["applied"])
+        assert set(applied) == {"models", "knobs"}
+        assert applied["knobs"]["max_retries"] == 1
+        assert applied["models"]  # full intended model map is persisted
+    finally:
+        _restore_settings(snap)

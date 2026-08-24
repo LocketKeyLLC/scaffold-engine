@@ -357,6 +357,16 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("runtime_profile_hook_failed: err=%s", exc)
 
+    # §17.812 (audit C6) — eager-init the shared HTTP clients BEFORE crash-resume.
+    # resume_orphaned_executions() spawns detached _drain_execution tasks that
+    # reach the first LLM/embedder call, and get_ollama_client() has NO lazy path
+    # (it raises if init_clients() hasn't run). This block used to sit after the
+    # await-heavy drift/warmup hooks below, so a drain could hit an uninitialized
+    # client during those awaits and spuriously FAIL a resumable job on cold
+    # start. init_clients() is a dependency-free singleton init — safe to hoist.
+    from app.utils.http_clients import init_clients
+    init_clients()
+
     # §17.774 — Automatic crash-resume of jobs orphaned mid-execution. Must run
     # AFTER migrations (needs the 061 resume counters) and AFTER the node sweep
     # + model-overrides replay above (so a resumed job's node is 'pending' again
@@ -422,9 +432,8 @@ async def lifespan(app: FastAPI):
             logger.warning("embedding_cache_warmup_hook_failed: err=%s", exc)
 
     logger.info("engine_started: log_level=%s", settings.log_level)
-    # Eager-init shared HTTP clients (searxng, github, generic) — no lazy path
-    from app.utils.http_clients import init_clients
-    init_clients()
+    # §17.812 — init_clients() moved up (before crash-resume, audit C6); the
+    # shared HTTP clients are already live by this point.
 
     # Pre-warm reranker (Apr 26 2026): avoid ~13s cold-load on first user request.
     # Opt out: SCAFFOLD_PREWARM_RERANKER=false
