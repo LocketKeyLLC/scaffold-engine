@@ -800,13 +800,17 @@ class Settings(BaseSettings):
     # append it. Code default OFF so tests + fresh installs keep the legacy path
     # (and never fire the follow-up call); live-on via compose. Fail-soft.
     assist_decision_suggestion_enforce: bool = False
-    # §17.771 (Phase 1) — the unified assist decision (`assist_decide.decide_turn`):
-    # ONE context-rich call that replaces the fragmented classifier + phrase-gates
-    # + track + reroute. Default OFF. When on, Phase 1 runs it in SHADOW (the live
-    # pipeline is unchanged; `classify_session_turn` fires it fire-and-forget and
-    # logs the Decision-vs-classifier comparison to the friction log). Phase 2
-    # flips the pipeline to dispatch on the Decision, keeping the cascade as the
-    # low-confidence/error fallback.
+    # §17.771 — the unified assist decision (`assist_decide.decide_turn`): ONE
+    # context-rich call that replaces the fragmented classifier + phrase-gates +
+    # track + reroute. THIS server-side flag gates the /decide ENDPOINT (returns
+    # 404 when off, §17.810). A SEPARATE pipeline valve of the same name (in
+    # `pipelines/scaffold_router/valves.json`) gates whether the pipeline actually
+    # DISPATCHES on the Decision — the two are independent despite sharing a name.
+    # §17.812 — LIVE behavior is Phase 2 (dispatch on the Decision), with the
+    # deterministic shell-error signal re-applied as a VETO post-filter in
+    # `_dispatch_decision` and the cascade as the low-confidence/error fallback.
+    # (The Phase-1 SHADOW mode — Decision logged for comparison, pipeline unchanged
+    # — is historical.) Default OFF so tests + fresh installs keep the legacy path.
     assist_unified_decision_enabled: bool = False
     assist_decide_model_role: str = "model_general"
     # §17.771 (post-verify) — the Phase-1 SHADOW logger, now DECOUPLED from the
