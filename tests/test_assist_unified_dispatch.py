@@ -113,3 +113,62 @@ def test_surface_dispatches_action_then_appends_heads_up(pipe):
     assert ask.called and not note.called   # action ran, no re-plan hijack
     assert "<ask>" in out
     assert "Heads-up" in out and "re-plan" in out  # gentle nudge appended
+
+
+# ── §17.812 (audit C2) — deterministic veto + (I-4) decision node_key ──────────
+
+def test_veto_reroutes_submit_to_fix_on_shell_error(pipe):
+    """A high-confidence `submit` decision must be VETOED to `fix` when the
+    message is a shell error — never auto-submit past a broken command."""
+    decision = {"action": "submit", "confidence": "high", "plan_impact": "none",
+                "evidence": "done"}
+    handlers = {
+        "assist_submit": MagicMock(return_value=["<submit>"]),
+        "assist_fix_cmd": MagicMock(return_value=["<fix>"]),
+    }
+    with patch.object(_vendor, "_recall_node_key", return_value="T3"), \
+         patch.object(_vendor, "_looks_like_shell_evidence", return_value=True), \
+         patch.object(_vendor, "_looks_like_shell_error", return_value=True), \
+         patch.multiple(_vendor, **handlers):
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="-bash: scsi0: command not found",
+            node_key="T3", chat_id="c1", history=[]))
+    assert handlers["assist_fix_cmd"].called
+    assert not handlers["assist_submit"].called
+    assert "<fix>" in out
+
+
+def test_no_veto_on_clean_submit(pipe):
+    """A clean completion paste (not a shell error) still submits."""
+    decision = {"action": "submit", "confidence": "high", "plan_impact": "none",
+                "evidence": "done"}
+    handlers = {
+        "assist_submit": MagicMock(return_value=["<submit>"]),
+        "assist_fix_cmd": MagicMock(return_value=["<fix>"]),
+    }
+    with patch.object(_vendor, "_recall_node_key", return_value="T3"), \
+         patch.object(_vendor, "_looks_like_shell_evidence", return_value=False), \
+         patch.object(_vendor, "_looks_like_shell_error", return_value=False), \
+         patch.multiple(_vendor, **handlers):
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="all set, the pool is created",
+            node_key="T3", chat_id="c1", history=[]))
+    assert handlers["assist_submit"].called
+    assert not handlers["assist_fix_cmd"].called
+
+
+def test_dispatch_prefers_decision_node_key(pipe):
+    """§17.812 (I-4) — the node_key the /decide call resolved is used; the
+    chatmap recall is NOT consulted (it's empty in this OWUI setup)."""
+    decision = {"action": "submit", "confidence": "high", "plan_impact": "none",
+                "node_key": "N9", "evidence": "done"}
+    recall = MagicMock(return_value="WRONG")
+    submit = MagicMock(return_value=["<submit>"])
+    with patch.object(_vendor, "_recall_node_key", recall), \
+         patch.object(_vendor, "_looks_like_shell_evidence", return_value=False), \
+         patch.object(_vendor, "assist_submit", submit):
+        list(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="ok done", node_key=None,
+            chat_id="c1", history=[]))
+    recall.assert_not_called()
+    assert submit.call_args[0][2] == "N9"  # assist_submit(pipe, sid, nk, ev, ...)
