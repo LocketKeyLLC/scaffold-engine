@@ -23,6 +23,14 @@ updates:
       python-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # trafilatura 2.2.0 drops <h1> section headings from txt/markdown extraction
+      # (verified 2026-08-24: `<h1>Installation</h1>` disappears, code blocks duplicate),
+      # which strips titles from every ingested HF/web doc chunk — a corpus-wide
+      # content-quality regression, not a brittle test. Held at 2.1.x until the
+      # heading-preserving extraction upgrade lands (audit M12 / plan Phase 8).
+      - dependency-name: "trafilatura"
+        versions: [">=2.2.0"]
 
   # ── Python deps — the four harness sidecars (docker/<name>/requirements.txt)
   - package-ecosystem: "pip"
