@@ -212,21 +212,30 @@ async def apply_profile(name: str, db) -> dict:
     """
     prof = get_profile(name)
 
-    # Models → per-role override table (persist + startup replay for free).
-    for role, tag in prof.models.items():
-        await set_override(role, tag, db)   # validates + commits per role
-
-    # Knobs → live settings + a self-describing snapshot for precise revert.
-    applied_knobs: dict[str, object] = {}
-    for knob, value in prof.settings.items():
-        setattr(settings, knob, value)
-        applied_knobs[knob] = value
-
+    # §17.812 (audit M4) — persist the profile snapshot FIRST, so the state is
+    # always recoverable. Previously the row was written LAST: a failure in a
+    # per-role set_override (each self-commits) or the final upsert left settings
+    # already mutated and some overrides committed, but with NO profile row —
+    # active_profile() then returned None and clear_profile() reverted NOTHING,
+    # stranding the engine in quick-mode with only a restart to escape. Writing
+    # the row first means the snapshot always describes the full intended set, so
+    # clear_profile()'s per-item (fail-soft, no-op-safe) revert can fully undo it
+    # even if a later step raises.
+    applied_knobs: dict[str, object] = dict(prof.settings)
     snapshot = {"models": dict(prof.models), "knobs": applied_knobs}
     await db.execute(
         _UPSERT_PROFILE, {"name": name, "applied": json.dumps(snapshot)}
     )
     await db.commit()
+
+    # Models → per-role override table (persist + startup replay for free).
+    for role, tag in prof.models.items():
+        await set_override(role, tag, db)   # validates + commits per role
+
+    # Knobs → live settings.
+    for knob, value in prof.settings.items():
+        setattr(settings, knob, value)
+
     logger.info(
         "profile_applied name=%s models=%d knobs=%d",
         name, len(prof.models), len(applied_knobs),
