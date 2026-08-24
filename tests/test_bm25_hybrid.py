@@ -69,8 +69,32 @@ def test_collection_has_bm25_false():
     assert collection_has_bm25(col) is False
 
 
-def test_collection_has_bm25_handles_broken_schema():
-    assert collection_has_bm25(object()) is False  # no .schema → False, not raise
+def test_collection_has_bm25_raises_on_broken_client():
+    # §17.812 (audit M18) — was a silent `return False`, which the CALLER then
+    # memoized, permanently pinning keyword search to the (worse) LIKE fallback
+    # after one transient failure. Now it RAISES so the caller can decline to
+    # cache an error-derived answer.
+    with pytest.raises(Exception):
+        collection_has_bm25(object())  # no describe_collection → AttributeError
+
+
+@pytest.mark.asyncio
+async def test_bm25_presence_error_is_not_memoized(monkeypatch):
+    """§17.812 (audit M18) — a transient describe failure must NOT be cached: the
+    next call re-checks instead of staying on LIKE for the client's lifetime."""
+    rag_pipeline._bm25_present_cache.clear()
+    calls = {"n": 0}
+
+    def _flaky(_c):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient describe_collection failure")
+        return True
+
+    monkeypatch.setattr("app.utils.milvus_utils.collection_has_bm25", _flaky)
+    col = object()
+    assert await rag_pipeline._collection_has_bm25_cached(col) is False  # error → LIKE, uncached
+    assert await rag_pipeline._collection_has_bm25_cached(col) is True   # re-checks, now definitive
 
 
 # --- _keyword_search dispatcher ---

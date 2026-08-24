@@ -169,8 +169,14 @@ def collection_has_bm25(client: "MilvusClient") -> bool:
     try:
         desc = client.describe_collection(COLLECTION_NAME)
         return any(f.get("name") == BM25_SPARSE_FIELD for f in desc.get("fields", []))
-    except Exception:
-        return False
+    except Exception as e:
+        # §17.812 (audit M18) — was a SILENT `return False`, which the caller then
+        # MEMOIZED for the client's lifetime, permanently pinning keyword search
+        # to the (materially worse, near-random) LIKE fallback after ONE transient
+        # describe_collection hiccup. Log + raise so the caller can decline to
+        # cache an error-derived answer and re-check next time.
+        logger.warning("collection_has_bm25_check_failed: err=%s", e)
+        raise
 
 
 def _auto_create_collection() -> None:

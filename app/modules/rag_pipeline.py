@@ -389,12 +389,21 @@ _bm25_present_cache: dict[int, bool] = {}
 async def _collection_has_bm25_cached(collection: "MilvusClient") -> bool:
     key = id(collection)
     cached = _bm25_present_cache.get(key)
-    if cached is None:
-        from app.utils.milvus_utils import collection_has_bm25
+    if cached is not None:
+        return cached
+    from app.utils.milvus_utils import collection_has_bm25
+    try:
         # Off-loop: describe_collection is a blocking PyMilvus gRPC call.
-        cached = await asyncio.to_thread(collection_has_bm25, collection)
-        _bm25_present_cache[key] = cached
-    return cached
+        present = await asyncio.to_thread(collection_has_bm25, collection)
+    except Exception as e:
+        # §17.812 (audit M18) — do NOT memoize an error-derived answer: a
+        # transient describe failure would otherwise pin keyword search to the
+        # LIKE fallback for the client's whole lifetime. Fall back to LIKE for
+        # THIS query only and re-check on the next call.
+        logger.warning("bm25_presence_check_failed_uncached: err=%s", e)
+        return False
+    _bm25_present_cache[key] = present  # only a DEFINITIVE result is memoized
+    return present
 
 
 async def _keyword_search(
@@ -1155,9 +1164,16 @@ async def _walk_to_latest_version(
                     filter=f'supersedes_id == "{eid}" and domain == "{safe_domain}"',
                     output_fields=["entry_id", "version"],
                     limit=1,
+                    # §17.812 (audit M5) — Strong consistency: this walk runs INSIDE
+                    # the predecessor advisory lock to find the chain tail before an
+                    # upsert. The collection default is Bounded (~5s staleness), so a
+                    # just-written superseding row could be invisible and the chain
+                    # would BRANCH — the exact race the lock exists to prevent. This
+                    # read must see its own recent writes.
+                    consistency_level="Strong",
                 )
             except Exception as e:
-                logger.debug("version_walk_query_failed: %s", e)
+                logger.warning("version_walk_query_failed: %s", e)  # §17.812 (M6): was debug
                 return []
 
         rows = await loop.run_in_executor(None, _sync)
@@ -1280,11 +1296,19 @@ async def ingest_entries(
                     filter=f'content_hash in [{in_list}] and domain == "{safe_domain}"',
                     output_fields=["content_hash"],
                     limit=len(hashes),
+                    # §17.812 (audit M5) — Strong consistency: the exact-hash
+                    # pre-filter must see rows written seconds ago (same ingest
+                    # batch / a concurrent one), else near-simultaneous duplicates
+                    # slip past it under the collection's Bounded default.
+                    consistency_level="Strong",
                 ),
             )
             present_hashes = {r.get("content_hash") for r in (existing or [])}
         except Exception as e:
-            logger.debug("dedup_check_failed: %s", e)
+            # §17.812 (audit M6) — was debug (silent). A failed pre-filter means
+            # duplicates may slip to the semantic pass; surface it + count it.
+            logger.warning("dedup_check_failed: %s", e)
+            stats["dedup_errors"] = stats.get("dedup_errors", 0) + 1
 
     prepared: list[dict] = []
     for c in candidates:
@@ -1437,7 +1461,13 @@ async def ingest_entries(
                     # Lock released; row recorded. Skip the new-entry path.
                     continue
         except Exception as e:
-            logger.debug("semantic_dedup_failed: %s", e)
+            # §17.812 (audit M6) — was debug (SILENT). A semantic-dedup failure
+            # (e.g. a transient Milvus ANN error) drops the entry to the plain
+            # new-entry path below, so a blip during a bulk ingest silently
+            # accumulates duplicates as fresh v1 rows with `new=N` and an empty
+            # dedup_log. Surface + count it so the degradation is visible.
+            logger.warning("semantic_dedup_failed: %s", e)
+            stats["dedup_errors"] = stats.get("dedup_errors", 0) + 1
 
         # §17.269 — only NEW entries (no predecessor) reach here. Version-
         # chain entries took the lock + upsert path above and `continue`d.
@@ -1482,6 +1512,14 @@ async def ingest_entries(
         logger.info(
             "ingested %d (new=%d versioned=%d rejected=%d hash_skipped=%d) into toon_v2",
             inserted, stats["new"], stats["versioned"], stats["rejected"], stats["skipped_hash"],
+        )
+    # §17.812 (audit M6) — surface dedup-check failures so a bulk ingest that
+    # silently accumulated duplicates (dedup errored → entries fell through as
+    # new v1) is visible in ops, not just per-entry warnings.
+    if stats.get("dedup_errors"):
+        logger.warning(
+            "ingest_dedup_degraded: dedup_errors=%d — some entries may have been "
+            "inserted as new without a dedup check (toon_v2)", stats["dedup_errors"],
         )
 
     if provenance_writes:
