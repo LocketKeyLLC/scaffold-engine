@@ -22,7 +22,7 @@ httpcore2==2.10.0
 PyJWT==2.13.0
 truststore==0.10.4
 pymilvus==3.0.0
-setuptools==83.0.0  # §17.585
+setuptools==84.0.0  # §17.585
 json_repair==0.61.7
 requests==2.34.2
 structlog==26.1.0

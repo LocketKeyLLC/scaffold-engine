@@ -34,7 +34,7 @@ requests==2.34.2
 # sentence-transformers 5.x is softly-breaking vs 4.x; we only use
 # CrossEncoder(...).predict(...) which is API-stable (#86).
 sentence-transformers==6.0.0
-setuptools==83.0.0  # §17.585 — was 71.1.0 (PYSEC-2025-49); also bumped in Dockerfile
+setuptools==84.0.0  # §17.585 — was 71.1.0 (PYSEC-2025-49); also bumped in Dockerfile
 sqlalchemy[asyncio]==2.0.51
 structlog==26.1.0
 trafilatura==2.1.0  # HELD: 2.2.0 drops <h1> headings from extraction (audit M12) — see .github/dependabot.yml ignore
