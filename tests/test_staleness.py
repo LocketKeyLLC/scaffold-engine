@@ -161,3 +161,59 @@ async def test_sweep_expired_returns_error_when_collection_unavailable():
     with patch.object(staleness, "get_client", return_value=None):
         result = await staleness.sweep_expired()
     assert result["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# §17.836 (plan 8.8) — ghost pages, Strong reads, honest `clean` flag
+# ---------------------------------------------------------------------------
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_sweep_ghost_only_page_reports_not_clean():
+    """A page consisting entirely of just-deleted rows (delete-visibility
+    lag) must NOT be reported as a clean finish — unseen expired rows beyond
+    the unordered page may remain."""
+    fake_col = MagicMock()
+    # Page 1 must be FULL (page-size 1000) so the loop continues; a short
+    # page legitimately means "that was everything" under the Strong read.
+    page1 = [{"entry_id": f"id{i}", "title": f"T{i}"} for i in range(1000)]
+    fake_col.query.side_effect = [
+        page1,
+        # The same full page re-surfaces after delete+flush → every row is
+        # in `seen` → fresh is empty while `expired` is not: ghost page.
+        list(page1),
+    ]
+    with patch.object(staleness, "get_client", return_value=fake_col):
+        result = await staleness.sweep_expired()
+    assert result["expired_count"] == 1000
+    assert result["clean"] is False
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_sweep_clean_true_on_genuine_finish():
+    fake_col = MagicMock()
+    fake_col.query.side_effect = [
+        [{"entry_id": "a", "title": "A"}],
+        [],
+    ]
+    with patch.object(staleness, "get_client", return_value=fake_col):
+        result = await staleness.sweep_expired()
+    assert result["clean"] is True
+
+    fake_col2 = MagicMock()
+    fake_col2.query.return_value = []
+    with patch.object(staleness, "get_client", return_value=fake_col2):
+        empty = await staleness.sweep_expired()
+    assert empty["clean"] is True
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_sweep_queries_use_strong_consistency():
+    """§17.836 — the sweep read must be Strong (M5 pattern) so its own
+    deletes don't re-surface as ghosts under Bounded staleness."""
+    fake_col = MagicMock()
+    fake_col.query.return_value = []
+    with patch.object(staleness, "get_client", return_value=fake_col):
+        await staleness.sweep_expired()
+    assert fake_col.query.call_args.kwargs.get("consistency_level") == "Strong"

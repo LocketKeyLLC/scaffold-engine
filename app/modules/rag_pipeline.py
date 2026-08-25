@@ -1593,6 +1593,14 @@ async def ingest_entries(
             "ingested %d (new=%d versioned=%d rejected=%d hash_skipped=%d) into toon_v2",
             inserted, stats["new"], stats["versioned"], stats["rejected"], stats["skipped_hash"],
         )
+        # §17.836 (plan 8.8) — the ragv1 result cache advertised an on-ingest
+        # SCAN invalidation workflow that nothing ever called: a cached
+        # response could serve pre-ingest results for its full TTL after new
+        # knowledge landed in the domain. Invalidate the domain's keys (+ the
+        # cross-domain "all" keys) whenever rows actually landed. Fail-open
+        # inside the method; gated so a cache-off install pays nothing.
+        if settings.cache_rag_results:
+            await get_rag_result_cache().invalidate_domain(domain)
     # §17.812 (audit M6) — surface dedup-check failures so a bulk ingest that
     # silently accumulated duplicates (dedup errored → entries fell through as
     # new v1) is visible in ops, not just per-entry warnings.
