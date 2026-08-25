@@ -27,6 +27,11 @@ from app.utils.openapi_ingest import (
     _resolve_refs,
 )
 
+# §17.829 (plan 7.4) — smoke-marked so the cloud ci-smoke PR gate runs these
+# (all mock-based, no network). openapi-spec-validator + prance were added to
+# requirements-ci.txt for the module import; the old collect_ignore is gone.
+pytestmark = pytest.mark.smoke
+
 
 # ---------------------------------------------------------------------------
 # _fetch_spec — pre-fetch SSRF rejection (guard fires before the client call)

@@ -88,12 +88,14 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
         "test_research_agent_lifecycle.py",
         "test_research_pause_resume.py",
         "test_research_pdf_mode.py",
+        # §17.829 (plan 7.4) — the SSRF guard-function tests moved to
+        # test_net_guard.py (smoke-marked, runs in this tier); what remains
+        # here are the _fetch_url_bounded / research_agent fetch-boundary
+        # tests, which stay ignored with their research_* siblings.
+        # test_openapi_ssrf_guard.py is no longer ignored: openapi-spec-
+        # validator + prance are in requirements-ci.txt now, and its tests
+        # are smoke-marked — the fast PR gate finally has SSRF coverage.
         "test_research_ssrf_guard.py",
-        # §17.812 — imports app.utils.openapi_ingest at module load, which pulls
-        # openapi_spec_validator/prance (not in the lightweight ci-smoke env).
-        # Covered by the full "Unit Tests (no live services)" job, same as the
-        # sibling SSRF test above. Fast-gate SSRF coverage is plan item 7.4.
-        "test_openapi_ssrf_guard.py",
         "test_research_url_mode.py",
         "test_retrieval_golden.py",
         "test_score_retrieval.py",

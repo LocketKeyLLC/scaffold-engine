@@ -7,11 +7,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
-import ipaddress
 import json
 import logging
 import re
-import socket
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -22,6 +20,9 @@ from pypdf import PdfReader
 from app.config import settings
 from app.modules.gt_extractor import TOPIC_KEYWORDS
 from app.utils.http_clients import get_generic_http_client
+# §17.829 — re-export for backward compatibility (see the note at the guard's
+# original location, ~:440); the guard itself lives in net_guard now.
+from app.utils.net_guard import _PRIVATE_HOSTNAMES, _is_public_host  # noqa: F401
 from app.utils.topic_detection import detect_topic_id
 
 logger = logging.getLogger("scaffold.research.extractors")
@@ -438,60 +439,11 @@ async def _robots_allowed(url: str, user_agent: str = "ScaffoldEngine/1.0") -> b
         return True
 
 
-_PRIVATE_HOSTNAMES = frozenset({
-    "localhost", "localhost.localdomain",
-    "0.0.0.0", "::", "ip6-localhost", "ip6-loopback",
-})
-
-
-def _is_public_host(url: str) -> tuple[bool, str]:
-    """§17.93 SSRF guard — return (ok, reason) for a target URL.
-
-    Rejects:
-      - non-http(s) schemes (file://, gopher://, etc.)
-      - literal private hostnames (localhost, 0.0.0.0, ip6-loopback)
-      - hostnames that resolve to any IPv4/IPv6 address in:
-        loopback, link-local, private (RFC1918, ULA), unspecified,
-        reserved, or multicast space.
-
-    ``settings.research_allow_private_hosts`` (default False) opts
-    out for local-development scenarios. The opt-out applies to the
-    full resolution check, not the scheme check — non-HTTP schemes
-    are always rejected.
-    """
-    try:
-        p = urlparse(url.strip())
-    except Exception as e:
-        return False, f"url_parse_failed: {e}"
-    if p.scheme not in ("http", "https"):
-        return False, f"non_http_scheme: {p.scheme!r}"
-    host = (p.hostname or "").lower().strip()
-    if not host:
-        return False, "empty_hostname"
-    if settings.research_allow_private_hosts:
-        return True, "private_hosts_allowed_by_setting"
-    if host in _PRIVATE_HOSTNAMES:
-        return False, f"literal_private_hostname: {host!r}"
-    try:
-        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror as e:
-        return False, f"dns_resolve_failed: {e}"
-    for fam, _stype, _proto, _canon, sockaddr in infos:
-        ip_str = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
-            return False, f"unparseable_resolved_ip: {ip_str!r}"
-        if (
-            ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast or ip.is_unspecified
-        ):
-            return False, (
-                f"resolved_to_private_ip: host={host!r} ip={ip_str!r} "
-                f"flags=private:{ip.is_private},loopback:{ip.is_loopback},"
-                f"link_local:{ip.is_link_local}"
-            )
-    return True, "public_host"
+# §17.829 (plan 7.4) — the §17.93 SSRF guard (_is_public_host and its
+# _PRIVATE_HOSTNAMES set) moved to app/utils/net_guard.py: dependency-light,
+# so the guard tests run in the cloud ci-smoke PR gate (this module's
+# pdfplumber/trafilatura imports kept them out). Re-exported via the top-of-
+# file import so existing callers and mock patch targets keep working.
 
 
 async def _fetch_url_bounded(
