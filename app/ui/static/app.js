@@ -298,6 +298,7 @@ const VIEWS = {
   rag: lazy("rag", "Knowledge (RAG)"),
   schedules: lazy("schedules", "Schedules"),
   settings: lazy("settings", "Settings"),
+  setup: lazy("setup", "Connect your models"),
   library: lazy("library", "Library"),
   costs: lazy("costs", "Costs"),
   traces: lazy("traces", "LLM Traces"),
@@ -333,6 +334,7 @@ function registerRoutes() {
   router.route("/rag", (p) => loadAndRender("rag", p, router.currentPath()));
   router.route("/schedules", (p) => loadAndRender("schedules", p, router.currentPath()));
   router.route("/settings", (p) => loadAndRender("settings", p, router.currentPath()));
+  router.route("/setup", (p) => loadAndRender("setup", p, router.currentPath()));
   router.route("/library", (p) => loadAndRender("library", p, router.currentPath()));
   router.route("/costs", (p) => loadAndRender("costs", p, router.currentPath()));
   router.route("/traces", (p) => loadAndRender("traces", p, router.currentPath()));
@@ -343,8 +345,24 @@ function registerRoutes() {
 
 // ── Boot ──────────────────────────────────────────────────────────────
 let started = false;
+// §17.817 — server-side first-run: an empty engine routes its admin to the
+// connect-models wizard once per INSTALL (not per browser). Fail-soft: an
+// older server (404) or non-admin never redirects.
+async function maybeFirstRun() {
+  const p = api.principal();
+  if (p?.is_admin === false) return;
+  try {
+    const fr = await api.get("/meta/first-run");
+    if (fr && fr.first_run && !location.hash.startsWith("#/setup")) {
+      location.hash = "#/setup";
+    }
+  } catch {
+    /* pre-§17.817 server */
+  }
+}
 async function boot() {
   buildChrome();
+  maybeFirstRun();
   if (!started) {
     registerRoutes();
     router.start();
