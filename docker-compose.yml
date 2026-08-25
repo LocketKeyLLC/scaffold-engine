@@ -27,13 +27,17 @@
 # Host is 15 GiB RAM with Ollama on the host; one runaway container can
 # OOM the whole stack. Hard caps via mem_limit (SIGKILL on breach;
 # restart policy revives). No memswap_limit — swap stays as the
-# last-resort overflow. Totals ~12.5 GiB, leaving ~2.5 GiB for Ollama +
-# host OS. Sized off measured idle usage (docker stats) plus peak
-# headroom: PDF dual-extraction, partition fan-out, embedder/reranker
-# singletons. Raise a single cap if /health or restart-loop logs
-# indicate a real workload genuinely exceeds it; don't raise all of
-# them in lockstep — the point is to localize OOMs, not push them
-# back onto the host.
+# last-resort overflow. §17.821 (plan 6.6) — the math, current: the
+# always-on services cap at ~14.75 GiB; the owui profile adds ~0.75 GiB
+# (OWUI 512m + pipelines 256m) → ~15.5 GiB, the §17.232 design ceiling
+# (real usage sits well below cap everywhere but the orchestrator);
+# sandbox (+512m) and observability (+1g) profiles push past it — on a
+# 15 GiB host run those only alongside owui-off or accept swap. Sized
+# off measured idle usage (docker stats) plus peak headroom: PDF
+# dual-extraction, partition fan-out, embedder/reranker singletons.
+# Raise a single cap if /health or restart-loop logs indicate a real
+# workload genuinely exceeds it; don't raise all of them in lockstep —
+# the point is to localize OOMs, not push them back onto the host.
 x-default-logging: &default-logging
   driver: json-file
   options:
@@ -44,6 +48,12 @@ services:
   open-webui:
     image: ghcr.io/open-webui/open-webui@sha256:7f1b0a1a50cfbac23da3b16f96bc968fd757b26dc9e54e93813d61768ea9184e
     container_name: open-webui
+    # §17.821 (plan 6.3, operator decision 2) — OWUI + pipelines are an
+    # OPTIONAL chat front-end now that the /ui SPA is the native front door.
+    # Fresh installs get the native-only stack; opt in with
+    # COMPOSE_PROFILES=owui in .env (comma-append sandbox/observability as
+    # desired). The pipelines stay maintained.
+    profiles: ["owui"]
     logging: *default-logging
     mem_limit: 512m
     # §17.93 — bind to loopback only. Internal container traffic still
@@ -82,6 +92,7 @@ services:
   pipelines:
     image: ghcr.io/open-webui/pipelines@sha256:b48e9bc338ce2be0acfbeff01810db72408a12f07739f9e3879c1f2b00952d6e
     container_name: open-webui-pipelines
+    profiles: ["owui"]  # §17.821 — rides with open-webui (decision 2)
     logging: *default-logging
     mem_limit: 256m
     # §17.93 — bind to loopback only. OWUI reaches pipelines via the
@@ -93,8 +104,9 @@ services:
     # root. The image runs as root by default; pinning user: here is the
     # only way to neutralize the "container escape rewrites valves.json as
     # root" half of the threat. See per-file :ro mounts below for the
-    # other half — the executable .py code.
-    user: "1000:1000"
+    # other half — the executable .py code. §17.821 (plan 6.6) —
+    # parameterized for hosts whose operator UID isn't 1000.
+    user: "${PIPELINES_UID:-1000}:${PIPELINES_GID:-1000}"
     environment:
       - PIPELINES_API_KEY=${OPENWEBUI_PIPELINES_KEY:?OPENWEBUI_PIPELINES_KEY is required}
       # Forwarded to pipeline _apply_env_fallbacks so a wiped valves.json
@@ -197,8 +209,10 @@ services:
       POSTGRES_DB: scaffold_engine
       POSTGRES_USER: ${POSTGRES_USER:-scaffold}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-    env_file:
-      - .env
+    # §17.821 (plan 6.6) — env_file removed (least-privilege, the §17.536
+    # posture OWUI/pipelines already follow): the wholesale .env injected
+    # SCAFFOLD_API_KEY / MODEL_* / WEBUI_SECRET_KEY into a container that
+    # only reads the three POSTGRES_* values set explicitly above.
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro

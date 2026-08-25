@@ -65,7 +65,7 @@ printf '%s│%s   1. .env                          (required secrets present)\n'
     "$C_INFO" "$C_RST"
 printf '%s│%s   2. Docker network + volumes      (ai-network, postgres + milvus data)\n' \
     "$C_INFO" "$C_RST"
-printf '%s│%s   3. Containers                    (all 7 services running)\n' \
+printf '%s│%s   3. Containers                    (5 core services + owui profile)\n' \
     "$C_INFO" "$C_RST"
 printf '%s│%s   4. Orchestrator /health          (per-subsystem latencies)\n' \
     "$C_INFO" "$C_RST"
@@ -122,19 +122,33 @@ for n in ai-network; do
         fail "network $n missing — run 'make bootstrap'"
     fi
 done
-for vol in open-webui milvus-data-v2; do
+# §17.821 — resolve enabled compose profiles once (ambient env wins over
+# .env); used by the volume + container + key-sync sections below.
+_compose_profiles="${COMPOSE_PROFILES:-$(grep -E '^COMPOSE_PROFILES=' "$REPO_ROOT/.env" 2>/dev/null | cut -d= -f2- || true)}"
+
+for vol in milvus-data-v2; do
     if docker volume inspect "$vol" >/dev/null 2>&1; then
         pass "volume $vol exists"
     else
         fail "volume $vol missing — run 'make bootstrap'"
     fi
 done
+# §17.821 — the open-webui volume matters only when the owui profile is on.
+if [[ ",${_compose_profiles}," == *",owui,"* ]]; then
+    if docker volume inspect open-webui >/dev/null 2>&1; then
+        pass "volume open-webui exists (owui profile)"
+    else
+        fail "volume open-webui missing — run 'make bootstrap'"
+    fi
+else
+    info "owui profile off — open-webui volume not required"
+fi
 
 # ---- 3. Containers ---------------------------------------------------
 hdr "Containers"
-explain "All 7 containers should be running. orchestrator hosts the API; postgres holds job state; milvus is the vector store; redis backs the embedding cache; open-webui serves chat; pipelines hosts slash-commands; searxng is the web-search backend for /research."
+explain "§17.821 — 5 always-on containers (orchestrator hosts the API; postgres holds job state; milvus is the vector store; redis backs the embedding cache; searxng is the web-search backend for /research) plus the EDA sidecars. open-webui + pipelines are the optional 'owui' compose profile (chat front-end; the /ui SPA is the native front door) — checked only when COMPOSE_PROFILES enables them."
 
-for c in scaffold-orchestrator scaffold-postgres milvus-standalone scaffold-redis open-webui open-webui-pipelines searxng; do
+for c in scaffold-orchestrator scaffold-postgres milvus-standalone scaffold-redis searxng; do
     state="$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null || echo missing)"
     case "$state" in
         running) pass "$c $state" ;;
@@ -142,6 +156,22 @@ for c in scaffold-orchestrator scaffold-postgres milvus-standalone scaffold-redi
         *)       fail "$c $state" ;;
     esac
 done
+
+# §17.821 — owui-profile containers: required when the profile is enabled
+# (in .env COMPOSE_PROFILES or the ambient environment), informational
+# otherwise. (_compose_profiles resolved in section 2.)
+if [[ ",${_compose_profiles}," == *",owui,"* ]]; then
+    for c in open-webui open-webui-pipelines; do
+        state="$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null || echo missing)"
+        case "$state" in
+            running) pass "$c $state (owui profile)" ;;
+            missing) fail "$c not found — 'docker compose up -d' (owui profile is enabled)" ;;
+            *)       fail "$c $state" ;;
+        esac
+    done
+else
+    info "owui profile not enabled — open-webui + pipelines not expected (set COMPOSE_PROFILES=owui in .env to opt in)"
+fi
 
 # ---- 4. Orchestrator health ------------------------------------------
 hdr "Orchestrator /health"
@@ -217,7 +247,7 @@ fi
 
 # ---- 7. API-key sync between .env and orchestrator container --------
 hdr "API key sync"
-explain "SCAFFOLD_API_KEY lives in 5 places that must stay aligned (.env, valves.json per pipeline, ~/.bashrc, the orchestrator container env, the OWUI pipelines container env). This check verifies the orchestrator container is running with the same value as .env. Drift here is the #1 cause of mysterious 401s."
+explain "SCAFFOLD_API_KEY lives in up to 5 places that must stay aligned (.env, valves.json per pipeline, ~/.bashrc, the orchestrator container env, the OWUI pipelines container env — the last two pipeline surfaces exist only with the owui profile, §17.821). This check verifies the orchestrator container is running with the same value as .env. Drift here is the #1 cause of mysterious 401s."
 
 if [[ -f "$ENV_FILE" ]] && docker ps --format '{{.Names}}' | grep -qx scaffold-orchestrator; then
     ENV_KEY="$(grep -E '^SCAFFOLD_API_KEY=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
@@ -332,7 +362,7 @@ fi
 # a container that wasn't restarted post-rotation. Loud-fails on any
 # of the six surfaces disagreeing with .env.
 hdr "API key 6-surface sync (read-side)"
-explain "Reads SCAFFOLD_API_KEY from all six places it must agree on: .env, every pipelines/*/valves.json, ~/.bashrc, the scaffold-orchestrator container env, and the open-webui-pipelines container env. Section 7 above only covers .env↔orchestrator; this section covers the full §17.35 surface so a stale valves.json or unsourced bashrc shows up here, not as a mysterious 401 mid-job."
+explain "Reads SCAFFOLD_API_KEY from every place it must agree on: .env, every pipelines/*/valves.json, ~/.bashrc, the scaffold-orchestrator container env, and (owui profile only, §17.821) the open-webui-pipelines container env. Section 7 above only covers .env↔orchestrator; this section covers the full §17.35 surface so a stale valves.json or unsourced bashrc shows up here, not as a mysterious 401 mid-job."
 
 if [[ ! -f "$ENV_FILE" ]]; then
     warn ".env missing — cannot establish reference value for 6-surface sync"
@@ -448,8 +478,10 @@ else:
             else
                 pass "open-webui-pipelines container matches .env"
             fi
-        else
+        elif [[ ",${_compose_profiles}," == *",owui,"* ]]; then
             warn "open-webui-pipelines container not running — env unverifiable"
+        else
+            info "open-webui-pipelines not running (owui profile off) — container env check skipped"
         fi
 
         if [[ $SYNC_MISMATCH -eq 0 ]]; then
