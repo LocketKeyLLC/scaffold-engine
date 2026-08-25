@@ -27,6 +27,15 @@ env:
 # 24 unit tests — extraction pipeline, pure Python, <30s
 # ──────────────────────────────────────────────────────────
 jobs:
+  ui-tests:
+    name: "SPA JS unit tests (§17.814)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: node --test (SPA util/components)
+        run: node --test 'tests/ui/**/*.test.mjs'
+
   smoke:
     name: "Tier 1 · Smoke (unit tests)"
     runs-on: ubuntu-latest
