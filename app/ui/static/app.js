@@ -111,10 +111,14 @@ function connectGate(message) {
           { class: "gate-steps" },
           gateStep(
             1,
-            "Find your operator key",
-            "This key is the console's password — it proves to your engine that you're the operator (not someone else on the network). Copy the SCAFFOLD_API_KEY value from the .env file on the server."
+            "Get your administrator key",
+            "Installing the engine created it for you: the SCAFFOLD_API_KEY value in the .env file on the server. (make bootstrap also prints a one-click sign-in link that skips this page entirely.)"
           ),
-          gateStep(2, "Sign in", "Paste it below and press Connect. It stays in this browser only."),
+          gateStep(
+            2,
+            "Pair this browser",
+            "Paste the key and press Connect — that's how the console knows this browser is yours. It's remembered here, so you won't be asked again."
+          ),
           gateStep(
             3,
             "Connect your models",
@@ -445,6 +449,15 @@ async function boot() {
 }
 
 async function main() {
+  // One-click pairing (§17.840): `make bootstrap` prints /ui/?key=<operator
+  // key>. Adopt it, then immediately strip it from the address bar + history
+  // so the secret doesn't linger on screen. Same pattern as Jupyter's token
+  // links; the manual paste gate below remains the fallback.
+  const urlKey = new URLSearchParams(location.search).get("key");
+  if (urlKey && urlKey.trim()) {
+    api.setKey(urlKey.trim());
+    history.replaceState(null, "", location.pathname + location.hash);
+  }
   if (!api.hasKey()) {
     connectGate();
     return;
