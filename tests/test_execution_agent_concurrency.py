@@ -14,6 +14,19 @@ from app.modules import execution_agent as ea
 
 
 @pytest.fixture(autouse=True)
+def _force_sequential_execution(monkeypatch):
+    """§17.827 (plan 7.3) — pin sequential execution mode for this module.
+
+    The cross-job semaphore assertions here read the per-job SSE sequence to
+    detect slot acquisition; under the code default
+    ``parallel_execution_enabled=True`` the parallel-frontier path changes
+    that sequence and 4 of the 12 tests fail. See the twin fixture in
+    test_execution_agent_sse.py for the full history (§17.589 misattribution).
+    """
+    monkeypatch.setattr(settings, "parallel_execution_enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_slot_sem():
     """Drop the cached semaphore so each test re-reads settings."""
     ea._reset_execution_slot_sem()
