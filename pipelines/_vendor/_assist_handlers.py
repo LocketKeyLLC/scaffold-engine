@@ -2454,9 +2454,9 @@ def assist_nl_turn(
     # §17.677 — a bare yes/no resolves a pending note-triggered plan fix before
     # any other classification. Only pays the GET when the message *looks* like a
     # confirm (deterministic phrase match), so normal turns are unaffected.
-    decision = _replan_decision(msg)
-    if decision and fetch_pending_replan(pipe, session_id):
-        yield from assist_replan_confirm(pipe, session_id, decision)
+    replan_choice = _replan_decision(msg)
+    if replan_choice and fetch_pending_replan(pipe, session_id):
+        yield from assist_replan_confirm(pipe, session_id, replan_choice)
         return
     intent = fast_classify_turn(msg)
     evidence, error_text, query, note_text, note_kind = "", "", "", "", "note"

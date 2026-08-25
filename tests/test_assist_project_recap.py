@@ -104,10 +104,15 @@ async def test_get_project_recap_refreshes_when_grown(monkeypatch):
         ]),
         _result(first_={"notes": [{"kind": "decision", "text": "use ZFS mirror"}],
                         "metadata": {"environment": {"facts": ["2 NICs"]}}}),  # session
-        _result(first_=None),  # UPDATE
     ])
     db.commit = AsyncMock()
-    with patch.object(assist_guide, "summarize_project_progress",
+    # §17.812 — the cache persist runs on its OWN session, never the caller's.
+    cache_db = AsyncMock()
+    acm = MagicMock()
+    acm.__aenter__ = AsyncMock(return_value=cache_db)
+    acm.__aexit__ = AsyncMock(return_value=False)
+    with patch.object(assist_agent, "async_session", return_value=acm), \
+         patch.object(assist_guide, "summarize_project_progress",
                       new=AsyncMock(return_value="GOAL: fresh board")) as summ:
         out = await assist_agent.get_project_recap(job_id=_JID, db=db)
     assert out == "GOAL: fresh board"
@@ -116,9 +121,12 @@ async def test_get_project_recap_refreshes_when_grown(monkeypatch):
     assert kw["goal"] == "build a homelab"
     assert "Install Proxmox" in kw["nodes_block"] and "T3 (pending)" in kw["nodes_block"]
     assert "2 NICs" in kw["facts_block"] and "use ZFS mirror" in kw["notes_block"]
-    # persisted with the new done-node watermark (2)
-    upd = [c for c in db.execute.await_args_list if "project_recap = :r" in str(c.args[0])]
+    # §17.812 — persisted with the new done-node watermark (2) on the cache
+    # session; the caller's transaction untouched.
+    upd = [c for c in cache_db.execute.await_args_list if "project_recap = :r" in str(c.args[0])]
     assert upd and upd[0].args[1]["n"] == 2
+    cache_db.commit.assert_awaited_once()
+    db.commit.assert_not_awaited()
 
 
 # ── funnel prepends the project recap to the job digest ─────────────────────

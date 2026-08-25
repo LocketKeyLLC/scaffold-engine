@@ -465,3 +465,75 @@ def test_fact_count_of_tolerates_mocks():
     assert assist_agent._fact_count_of({"facts": "notalist"}) == 0
     assert assist_agent._fact_count_of(MagicMock()) == 0
     assert assist_agent._fact_count_of(None) == 0
+
+
+# ── §17.812 — capture dedupe + consolidate raced-watermark ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_capture_assistant_reply_dedupes_backtoback_replay():
+    """A cached re-present identical to the node's most recent assistant turn
+    writes nothing; new content still lands."""
+    from app.config import settings
+    db = AsyncMock()
+    scal = MagicMock()
+    scal.scalar.return_value = "walkthrough text"
+    db.execute = AsyncMock(return_value=scal)
+    with patch.object(settings, "assist_unified_memory_enabled", True), \
+         patch.object(settings, "assist_umem_capture", True), \
+         patch.object(assist_agent, "ingest_turn",
+                      new=AsyncMock(return_value=True)) as ing:
+        ok = await assist_agent.capture_assistant_reply(
+            session_id="s1", node_key="T2", kind="guide",
+            content="walkthrough text", db=db)
+    assert ok is False
+    ing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capture_assistant_reply_replay_after_other_turns_records():
+    """The same walkthrough re-shown AFTER intervening dialogue IS new thread
+    context — captured."""
+    from app.config import settings
+    db = AsyncMock()
+    scal = MagicMock()
+    scal.scalar.return_value = "something else was said since"
+    db.execute = AsyncMock(return_value=scal)
+    with patch.object(settings, "assist_unified_memory_enabled", True), \
+         patch.object(settings, "assist_umem_capture", True), \
+         patch.object(assist_agent, "ingest_turn",
+                      new=AsyncMock(return_value=True)) as ing:
+        ok = await assist_agent.capture_assistant_reply(
+            session_id="s1", node_key="T2", kind="guide",
+            content="walkthrough text", db=db)
+    assert ok is True
+    ing.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_consolidate_raced_noop_watermarks_locked_length():
+    """§17.812 — merges proposed but the ledger changed under the model so
+    nothing applies: the watermark must record the LOCKED (current) length,
+    not the stale pre-model snapshot, or the debounce re-fires every fold."""
+    stale = {"environment": {"facts": [f"F{i}" for i in range(8)]}}
+    # Under the lock the two merge members are already gone (retracted) and the
+    # ledger grew elsewhere: 9 entries, none matching the merge group twice.
+    fresh = {"environment": {"facts": [f"G{i}" for i in range(9)]}}
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[
+        _result(mappings_first={"metadata": stale}),   # read
+        _result(mappings_first={"metadata": fresh}),   # FOR UPDATE re-read
+        _result(mappings_first=None),                  # watermark UPDATE
+    ])
+    db.commit = AsyncMock()
+    merges = [{"replaces": ["F1", "F2"], "text": "merged F"}]
+    with patch("app.config.settings.assist_unified_memory_enabled", True), \
+         patch("app.config.settings.assist_umem_consolidate", True), \
+         patch("app.config.settings.assist_facts_consolidate_min", 5), \
+         patch("app.modules.assist_guide.consolidate_facts",
+               new=AsyncMock(return_value=merges)):
+        await assist_agent.consolidate_session_facts(session_id="s1", db=db)
+    import json as _json
+    upd = db.execute.await_args_list[-1]
+    patch_arg = _json.loads(upd.args[1]["patch"])
+    assert patch_arg["facts_consolidated_n"] == 9   # locked length, not 8

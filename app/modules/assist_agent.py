@@ -860,9 +860,13 @@ async def generate_step_guidance(
         conversation=mem.conversation,
         db=db,
     )
-    # §17.726 — record what the engine told the operator (freshly generated
-    # only; a cache hit re-shows text already in the transcript).
-    if (res.get("guidance") or "").strip() and not res.get("cached"):
+    # §17.726/§17.812 — record what the engine told the operator. Cached
+    # re-presents are captured too (gap 2): a walkthrough generated before the
+    # capture valve was on, or re-shown after intervening turns, was otherwise
+    # absent from the durable transcript. capture_assistant_reply dedupes
+    # against the node's most recent assistant turn, so a back-to-back replay
+    # still writes nothing.
+    if (res.get("guidance") or "").strip():
         await capture_assistant_reply(
             session_id=session_id, node_key=nk, kind="guide",
             content=res["guidance"], db=db,
@@ -949,9 +953,8 @@ async def generate_step_guidance_stream(
             yield {"type": "delta", "text": _panel + "\n\n"}
 
     # §17.726 — tee the streamed walkthrough so the assembled reply lands in the
-    # transcript once the stream completes (fresh generations only).
+    # transcript once the stream completes.
     _buf: list[str] = []
-    _cached = False
     async for ev in assist_guide.generate_guidance_stream(
         session_id=session_id,
         node_key=nk,
@@ -971,10 +974,10 @@ async def generate_step_guidance_stream(
     ):
         if ev.get("type") == "delta":
             _buf.append(ev.get("text") or "")
-        else:
-            _cached = bool(ev.get("cached"))
         yield ev
-    if _buf and not _cached:
+    # §17.812 (gap 2) — cached streams are captured too; the in-capture dedupe
+    # keeps back-to-back replays out of the transcript.
+    if _buf:
         await capture_assistant_reply(
             session_id=session_id, node_key=nk, kind="guide",
             content="".join(_buf), db=db,
@@ -2180,6 +2183,11 @@ async def consolidate_session_facts(*, session_id: str, db) -> dict:
             cur_env = _environment_from_metadata((locked or {}).get("metadata"))
             cur = [str(f) for f in (cur_env.get("facts") or [])]
             new = _apply_fact_merges(cur, merges)
+            # §17.812 — the raced no-op case (merges proposed but the ledger
+            # changed under the model so nothing applies) must watermark the
+            # LOCKED length, not the stale pre-model `facts` snapshot below —
+            # else the debounce re-fires a model pass on every subsequent fold.
+            facts = cur
             if new != cur:
                 cur_env["facts"] = new
                 await db.execute(
@@ -2317,10 +2325,33 @@ async def capture_assistant_reply(
     pipeline's 6-turn OWUI history window — gone entirely on a cross-chat
     reconnect. Same valve gating + fail-soft as ``ingest_turn``; bounded so a
     long walkthrough doesn't bloat the transcript (the full text lives in the
-    guidance cache / step output anyway)."""
+    guidance cache / step output anyway).
+
+    §17.812 (gap 2) — dedupes against the node's MOST RECENT assistant turn so
+    cached re-presents can be captured by callers without back-to-back replays
+    stacking identical rows: a replay after intervening turns IS new dialogue
+    worth recording (the operator saw it again at that point in the thread)."""
+    from app.config import settings
+
+    bounded = (content or "")[:8000]
+    if settings.assist_unified_memory_enabled and settings.assist_umem_capture:
+        try:
+            last = (await db.execute(
+                text("""
+                    SELECT content FROM assist_turns
+                     WHERE session_id = :sid AND role = 'assistant'
+                       AND node_key IS NOT DISTINCT FROM :nk
+                     ORDER BY created_at DESC, id DESC LIMIT 1
+                """),
+                {"sid": session_id, "nk": node_key},
+            )).scalar()
+            if (last or "") == bounded:
+                return False
+        except Exception as e:  # noqa: BLE001 — dedupe is best-effort
+            logger.debug("capture_dedupe_check_failed session_id=%s err=%r", session_id, e)
     return await ingest_turn(
         session_id=session_id, role="assistant", kind=kind,
-        content=(content or "")[:8000], node_key=node_key, db=db,
+        content=bounded, node_key=node_key, db=db,
     )
 
 
@@ -2499,15 +2530,21 @@ async def get_step_recap(
         )
         if not recap:
             return cached
-        await db.execute(
-            text("""
-                UPDATE assist_steps
-                   SET progress_recap = :r, progress_recap_turns = :n, updated_at = NOW()
-                 WHERE session_id = :sid AND node_key = :nk
-            """),
-            {"r": recap, "n": n, "sid": session_id, "nk": node_key},
-        )
-        await db.commit()
+        # §17.812 — persist the cache on its OWN session: this helper runs
+        # mid-request inside arbitrary callers (guide/fix/track/note-impact),
+        # and committing the CALLER's transaction here silently flushed
+        # whatever half-done work the caller had pending — a commit point the
+        # caller never chose. The cache write is independent, so isolate it.
+        async with async_session() as cache_db:
+            await cache_db.execute(
+                text("""
+                    UPDATE assist_steps
+                       SET progress_recap = :r, progress_recap_turns = :n, updated_at = NOW()
+                     WHERE session_id = :sid AND node_key = :nk
+                """),
+                {"r": recap, "n": n, "sid": session_id, "nk": node_key},
+            )
+            await cache_db.commit()
         logger.info(
             "assist_step_recap_refreshed session_id=%s node_key=%s turns=%d",
             session_id, node_key, n,
@@ -2595,12 +2632,15 @@ async def get_project_recap(*, job_id: str, db) -> str:
         )
         if not recap:
             return cached
-        await db.execute(
-            text("UPDATE jobs SET project_recap = :r, project_recap_nodes = :n "
-                 "WHERE id = :jid"),
-            {"r": recap, "n": done_n, "jid": job_id},
-        )
-        await db.commit()
+        # §17.812 — own-session cache write, same rationale as get_step_recap:
+        # never commit the caller's transaction mid-request.
+        async with async_session() as cache_db:
+            await cache_db.execute(
+                text("UPDATE jobs SET project_recap = :r, project_recap_nodes = :n "
+                     "WHERE id = :jid"),
+                {"r": recap, "n": done_n, "jid": job_id},
+            )
+            await cache_db.commit()
         logger.info("assist_project_recap_refreshed job_id=%s done_nodes=%d", job_id, done_n)
         return recap
     except Exception as e:  # noqa: BLE001 — a recap must never break the turn
