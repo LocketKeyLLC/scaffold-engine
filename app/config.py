@@ -277,6 +277,16 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=32, ge=1, le=512)
 
     # Model assignments
+    # §17.819 (audit plan 6.2, operator decision 3) — LOCAL-SAFE DEFAULTS.
+    # Every switchable role now defaults to a small local tag so a fresh
+    # install makes ZERO cloud calls out of the box. The A/B-tuned cloud
+    # picks (§17.346/498/567/632/631 history below) did not disappear:
+    #   - docker-compose.yml carries them as commented guidance,
+    #   - .env.example documents them per-role,
+    #   - the §17.817 connect-models wizard offers them as the
+    #     "Ollama Cloud (tuned)" preset (CLOUD_PICKS in views/setup.js).
+    # Deployed boxes keep their behavior via .env MODEL_* pins (the
+    # compose ${VAR:-default} chain) and/or model_overrides rows.
     # §17.346 — model_router / model_coder / model_verifier defaults flipped
     # to the same cloud model that §17.344 chose for triage. Justified per-role:
     #   model_router: same model + same arg as §17.344 — cloud 287× faster + better discipline
@@ -294,15 +304,15 @@ class Settings(BaseSettings):
     # model_fallback stays local on purpose — fallback should be DIFFERENT from
     # primary to actually help when primary fails (cloud → cloud fallback gives
     # no failure-mode diversity).
-    model_router: str = "qwen3.5:397b-cloud"
+    model_router: str = "qwen3:4b"  # §17.819 local-safe (tuned cloud pick: qwen3.5:397b-cloud)
     model_embedder_pipeline: str = "nomic-embed-text"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-    model_coder: str = "kimi-k2.7-code:cloud"  # §17.575 — reverted §17.572 (see docker-compose.yml MODEL_CODER, decisive)
+    model_coder: str = "qwen2.5-coder:7b"  # §17.819 local-safe (tuned cloud pick: kimi-k2.7-code:cloud, §17.575/498)
     # §17.632 — was qwen3.5:397b-cloud; A/B'd (synthesis probe, 5 reps) →
     # deepseek-v4-pro:cloud is 3.4× faster (5.6s vs 19.2s) at equal reliability
     # (5/5 non-empty) and equal/better synthesis quality with clean punctuation.
     # Env-overridable (docker-compose MODEL_GENERAL is decisive — 3-site sync).
-    model_general: str = "deepseek-v4-pro:cloud"
+    model_general: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: deepseek-v4-pro:cloud, §17.632)
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit
     # #6.1 default, slower on CPU). "model_general" = the flagship cloud
@@ -351,7 +361,7 @@ class Settings(BaseSettings):
     # compounds. (kimi was flaky on EXTRACTION (§17.566) but perfect on the
     # lenient presence-check verify task — per-task reliability differs.) Not in
     # tool_call_coax_models, so it uses the native path.
-    model_verifier: str = "kimi-k2.7-code:cloud"
+    model_verifier: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: kimi-k2.7-code:cloud, §17.567)
     # §17.548 — research extraction (record_entries tool call) points at a
     # tool-CAPABLE model (native tool_calls) rather than the thinking
     # model_verifier (qwen3.5, which never does — see §17.547), so the
@@ -368,9 +378,9 @@ class Settings(BaseSettings):
     # at 30/30 AND fastest of the perfect-reliability models (5.9s; vs
     # minimax-m3 30/30@9.5s, deepseek-v4-pro 30/30@6.4s, qwen3.5 30/30@52.8s;
     # glm-5.2 was 28/30). NOT in tool_call_coax_models → native tool-call path.
-    model_research_extract: str = "glm-5.1:cloud"
-    model_cloud_heavy: str = "qwen3.5:397b-cloud"
-    model_cloud_alt: str = "qwen3.5:397b-cloud"
+    model_research_extract: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: glm-5.1:cloud, §17.631)
+    model_cloud_heavy: str = "qwen3.5:latest"  # §17.819 local-safe: escalation target = biggest local tag
+    model_cloud_alt: str = "qwen3.5:latest"  # §17.819 local-safe (tuned cloud pick: qwen3.5:397b-cloud)
     model_fallback: str = "qwen3.5:latest"
 
     # §17.547 — models that do NOT reliably emit native `tool_calls`. qwen3.5
@@ -406,7 +416,7 @@ class Settings(BaseSettings):
     # §17.791 — native triage/synthesis model (mirrors the OWUI pipeline's live
     # triage_model). A thinking model; the native path strips <think> and uses a
     # generous max_tokens so it doesn't return empty-after-strip.
-    model_triage: str = "qwen3.5:397b-cloud"
+    model_triage: str = "qwen3:4b"  # §17.819 local-safe (tuned cloud pick: qwen3.5:397b-cloud)
     model_triage_provider: ProviderName = "ollama"
     # §17.791 — triage history window (turns). Pins every user turn (facts) +
     # the last N turns to bound CPU-only thinking-model latency. Mirror of the

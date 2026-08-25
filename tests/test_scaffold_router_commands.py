@@ -728,12 +728,11 @@ class TestModelCommand:
         assert url.endswith("/models/roles/model_coder")
         assert "Reset to defaults" in result
         assert "general" in result
-        assert pipe.valves.model_general == "deepseek-v4-pro:cloud"  # §17.632 A/B swap
-        # §17.346: model_verifier default flipped qwen2.5:7b → cloud;
-        # §17.440: migrated qwen3-vl:235b-instruct-cloud → qwen3.5:397b-cloud;
-        # §17.567: A/B-driven swap qwen3.5:397b-cloud → kimi-k2.7-code:cloud
-        # (verify verdict-match 30/30 @ 1.34s vs 6.12s).
-        assert pipe.valves.model_verifier == "kimi-k2.7-code:cloud"
+        # §17.819 (plan 6.2) — valve defaults are the LOCAL-SAFE tags now;
+        # the A/B-tuned cloud picks (§17.632 general, §17.567 verifier) moved
+        # to the wizard preset + compose/.env.example guidance.
+        assert pipe.valves.model_general == "qwen2.5:7b"
+        assert pipe.valves.model_verifier == "qwen2.5:7b"
 
     @patch("scaffold_router._HTTP_SESSION.get")
     def test_model_available(self, mock_get, pipe):

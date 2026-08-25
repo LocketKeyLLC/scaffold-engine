@@ -275,13 +275,25 @@ services:
       # that silently shadowed both the §17.346 code defaults AND any
       # .env override — `scaffold model set router X` would write to .env
       # and the container would still read the compose-baked value at boot.
-      # Defaults below match the §17.346 Settings defaults so a deploy with
-      # no overrides gets the cloud-flipped routing layer out of the box.
-      MODEL_ROUTER: ${MODEL_ROUTER:-qwen3.5:397b-cloud}
-      MODEL_CODER: ${MODEL_CODER:-kimi-k2.7-code:cloud}  # §17.575 — REVERTED §17.572 swap: qwen3-coder-next intermittently omits main() on cli-entrypoint (live test flaky); kimi is faithful
-      MODEL_VERIFIER: ${MODEL_VERIFIER:-kimi-k2.7-code:cloud}  # §17.567 — A/B'd: kimi 30/30 @1.34s vs qwen3.5 30/30 @6.12s (verdict-match)
-      MODEL_GENERAL: ${MODEL_GENERAL:-deepseek-v4-pro:cloud}  # §17.632 — A/B'd: deepseek-v4-pro 5/5 non-empty @5.6s vs qwen3.5 5/5 @19.2s (3.4× faster, equal/better synthesis quality, clean punctuation)
-      MODEL_CLOUD_ALT: ${MODEL_CLOUD_ALT:-qwen3.5:397b-cloud}
+      # §17.819 (plan 6.2) — defaults below are LOCAL-SAFE and match the
+      # config.py Settings defaults: a deploy with no .env pins makes zero
+      # cloud calls. The A/B-tuned cloud picks (§17.498/567/632/631) are the
+      # wizard's "Ollama Cloud (tuned)" preset; pin them in .env to opt in:
+      #   MODEL_ROUTER=qwen3.5:397b-cloud   MODEL_CODER=kimi-k2.7-code:cloud
+      #   MODEL_VERIFIER=kimi-k2.7-code:cloud MODEL_GENERAL=deepseek-v4-pro:cloud
+      #   MODEL_RESEARCH_EXTRACT=glm-5.1:cloud MODEL_TRIAGE=qwen3.5:397b-cloud
+      #   MODEL_CLOUD_HEAVY=qwen3.5:397b-cloud MODEL_CLOUD_ALT=qwen3.5:397b-cloud
+      MODEL_ROUTER: ${MODEL_ROUTER:-qwen3:4b}
+      MODEL_CODER: ${MODEL_CODER:-qwen2.5-coder:7b}
+      MODEL_VERIFIER: ${MODEL_VERIFIER:-qwen2.5:7b}
+      MODEL_GENERAL: ${MODEL_GENERAL:-qwen2.5:7b}
+      MODEL_CLOUD_ALT: ${MODEL_CLOUD_ALT:-qwen3.5:latest}
+      # §17.819 — these three roles were previously absent here, so .env pins
+      # could not reach the container and they silently rode config.py
+      # defaults (audit: research_extract/triage read source=default live).
+      MODEL_CLOUD_HEAVY: ${MODEL_CLOUD_HEAVY:-qwen3.5:latest}
+      MODEL_RESEARCH_EXTRACT: ${MODEL_RESEARCH_EXTRACT:-qwen2.5:7b}
+      MODEL_TRIAGE: ${MODEL_TRIAGE:-qwen3:4b}
       # MODEL_FALLBACK stays local by default (§17.346) — fallback must be
       # different from primary to actually help on cloud-side failure.
       MODEL_FALLBACK: ${MODEL_FALLBACK:-qwen3.5:latest}
