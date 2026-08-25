@@ -612,3 +612,20 @@ async def test_fix_endpoint_captures_operator_error():
     assert ing.call_args.kwargs["role"] == "operator"
     assert ing.call_args.kwargs["content"] == "-bash: scsi0: command not found"
     assert out["fix"] == "escape the semicolon"
+
+
+def test_assist_step_progress_real_call_no_nameerror(monkeypatch):
+    """§17.812 hotfix — `_assist_step_progress` referenced `settings` without an
+    import (latent since §17.811): every assist endpoint's get_session raised
+    NameError once a live server actually loaded that code (unit tests all
+    mocked get_session, so only the live smoke caught it). Pin the REAL call."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "progress_eta_enabled", True, raising=False)
+    out = assist_agent._assist_step_progress({"committed": 2, "pending": 2})
+    assert out == {
+        "phase": "assisted_executing", "label": "Assisted steps", "unit": "steps",
+        "completed": 2, "total": 4, "pct": 50, "eta_ms": None, "eta_human": None,
+        "current_item": None, "summary": "2/4 steps · 50%", "soft": False,
+    }
+    monkeypatch.setattr(settings, "progress_eta_enabled", False, raising=False)
+    assert assist_agent._assist_step_progress({"committed": 2, "pending": 2}) is None
