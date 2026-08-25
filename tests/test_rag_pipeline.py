@@ -57,7 +57,9 @@ def _patch_rag_deps(
         keyword_results = []
 
     async def mock_rerank(query, results, top_k, *, max_candidates=None, doc_truncate=None):
-        """New contract: _rerank returns (ranked, meta).
+        """§17.834 contract: _rerank returns (ranked_full, meta) — the FULL
+        sorted list; query_rag slices to top_k after the supersedes sweep
+        (enabling backfill).
 
         §17.234 — max_candidates kwarg added; mock accepts and ignores
         (mock returns the input results in their existing order; the
@@ -68,7 +70,7 @@ def _patch_rag_deps(
             r.rerank_score = r.rrf_score
             r.final_score = r.rrf_score
         meta = {"backend": "mock", "skipped_rerank": False, "warnings": []}
-        return results[:top_k], meta
+        return results, meta
 
     async def mock_superseded(collection, ids):
         return set(superseded_ids or [])

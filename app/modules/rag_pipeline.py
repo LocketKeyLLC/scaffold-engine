@@ -652,9 +652,14 @@ async def _rerank(
     max_candidates: int | None = None,
     doc_truncate: int | None = None,
 ) -> tuple[list[RagResult], dict[str, Any]]:
-    """Rerank via CrossEncoder. Returns (ranked, meta).
+    """Rerank via CrossEncoder. Returns (ranked_full, meta).
 
-    meta contains: backend, skipped_rerank, warnings (list[str]).
+    §17.834 — returns the FULL sorted list (was ``[:top_k]``); the single
+    caller (query_rag) slices after the supersedes sweep so swept rows can
+    be backfilled. ``top_k`` is still used for the cap-honesty warning.
+
+    meta contains: backend, skipped_rerank, warnings (list[str]), and
+    rerank_capped_at (int) when top_k exceeded the scored shortlist.
 
     §17.234 — ``max_candidates`` overrides ``settings.rerank_max_candidates``
     per call. When None, the config default applies (post-§17.233: 10).
@@ -670,6 +675,24 @@ async def _rerank(
     doc_trunc = int(doc_truncate if doc_truncate is not None else settings.rerank_doc_truncate)
     warn_ms = int(settings.rerank_warn_ms)
     error_ms = int(settings.rerank_error_ms)
+
+    # §17.834 (plan 8.4 / audit M9) — cap honesty. When the caller asks for
+    # more results than the CrossEncoder shortlist scores, the tail beyond
+    # max_cand keeps RRF-scale scores (~0.01–0.03 vs the head's 0–1), so the
+    # downstream confidence threshold silently drops it and the caller gets
+    # ≤ max_cand rows with no explanation. Batched reranking is deliberately
+    # NOT the fix on this host (CrossEncoder is CPU-saturated, ~6s/query warm
+    # — §17.704); we annotate instead so callers/UI can say "top_k capped by
+    # reranker".
+    if top_k > max_cand and len(results) > max_cand:
+        meta["warnings"].append("rerank_cap_truncation")
+        meta["rerank_capped_at"] = max_cand
+        logger.warning(
+            "rerank_cap_truncation: top_k=%d > rerank_max_candidates=%d "
+            "(results=%d) — tail beyond the shortlist keeps RRF-scale scores "
+            "and is typically dropped by the confidence threshold",
+            top_k, max_cand, len(results),
+        )
 
     docs = [r.content[:doc_trunc] for r in results[:max_cand]]
 
@@ -710,7 +733,9 @@ async def _rerank(
         meta["warnings"].append(warning_kind)
         rebuilt = [replace(r, rerank_score=r.rrf_score, final_score=r.rrf_score) for r in results]
         rebuilt.sort(key=lambda r: r.final_score, reverse=True)
-        return rebuilt[:top_k], meta
+        # §17.834 — return the FULL sorted list; the (single) caller slices to
+        # top_k after the supersedes sweep so swept rows can be backfilled.
+        return rebuilt, meta
 
     score_map = {item.index: item.score for item in rr.items}
     rebuilt: list[RagResult] = []
@@ -759,7 +784,9 @@ async def _rerank(
     )
 
     results.sort(key=lambda r: r.final_score, reverse=True)
-    return results[:top_k], meta
+    # §17.834 — full sorted list (see the fallback branch note): query_rag
+    # slices to top_k after the supersedes sweep, enabling backfill.
+    return results, meta
 
 
 # ---------------------------------------------------------------------------
@@ -920,16 +947,23 @@ async def query_rag(
     fused = _rrf_fuse(vector_results, keyword_results)
 
     rerank_meta: dict[str, Any] = {"skipped_rerank": False, "backend": None, "warnings": []}
+    # §17.834 (plan 8.4 / audit M9) — ``ranked_pool`` is the FULL sorted list;
+    # ``ranked`` is the top_k head the response is built from. The pool exists
+    # so the supersedes sweep below can BACKFILL: pre-§17.834 the sweep ran on
+    # the already-sliced head, so every superseded row it dropped simply
+    # shrank the response below top_k with no replacement.
     if skip_rerank or not fused:
         # §17.409 (arch-review R6) — use replace() for uniformity with the rest
         # of this module's immutable-RagResult discipline (these are fresh
         # _rrf_fuse objects, so in-place was already safe; this is consistency).
         fused = [replace(r, final_score=r.rrf_score) for r in fused]
+        ranked_pool = fused
         ranked = fused[:top_k]
         if skip_rerank:
             rerank_meta["skipped_rerank"] = True
     else:
-        ranked, rerank_meta = await _rerank(query, fused, top_k, max_candidates=max_candidates, doc_truncate=doc_truncate)
+        ranked_pool, rerank_meta = await _rerank(query, fused, top_k, max_candidates=max_candidates, doc_truncate=doc_truncate)
+        ranked = ranked_pool[:top_k]
 
     warnings.extend(rerank_meta.get("warnings", []))
     backend = rerank_meta.get("backend")
@@ -949,12 +983,47 @@ async def query_rag(
             warnings.append("fell_back_to_top3")
 
     # Post-query supersedes sweep (Milvus lookup on all returned entry_ids)
+    superseded_dropped = 0
+    superseded_backfilled = 0
     if not include_history and filtered:
         entry_ids = [r.entry_id for r in filtered if r.entry_id]
         if entry_ids:
             superseded = await _lookup_superseded(collection, entry_ids)
             if superseded:
+                pre_sweep_len = len(filtered)
                 filtered = [r for r in filtered if r.entry_id not in superseded]
+                superseded_dropped = pre_sweep_len - len(filtered)
+                # §17.834 (audit M9) — backfill the swept slots from the rest
+                # of the ranked pool so a query whose head is full of
+                # superseded ancestors still returns top_k rows. Candidates
+                # must clear the same threshold the head cleared (unless the
+                # run already fell back below-threshold), and get their own
+                # one-shot supersedes check — no loop; if the batch is also
+                # superseded we return short and say so in the metadata.
+                have = {r.entry_id for r in filtered}
+                candidates = [
+                    r for r in ranked_pool
+                    if r.entry_id and r.entry_id not in have
+                    and r.entry_id not in superseded
+                ]
+                if not (skip_rerank or skipped_rerank
+                        or confidence_threshold <= 0.0 or fell_back_to_top3):
+                    candidates = [
+                        r for r in candidates
+                        if r.final_score >= confidence_threshold
+                    ]
+                candidates = candidates[:superseded_dropped + 8]
+                if candidates:
+                    sup2 = await _lookup_superseded(
+                        collection, [r.entry_id for r in candidates],
+                    )
+                    for r in candidates:
+                        if len(filtered) >= pre_sweep_len:
+                            break
+                        if r.entry_id not in sup2:
+                            filtered.append(r)
+                            superseded_backfilled += 1
+                    filtered.sort(key=lambda r: r.final_score, reverse=True)
 
     # Batch-fetch provenance for the final result set. Entries ingested
     # without a provenance dict won't have a row; the map lacks those
@@ -968,9 +1037,12 @@ async def query_rag(
                     prov_map = await get_provenance_batch(session, final_ids)
             except Exception as e:
                 # Failed lookup → empty map → results carry provenance=None.
-                # No warnings.append: a missing provenance row is the same
-                # API shape whether it's "row absent" or "DB unreachable".
+                # §17.834 (audit M9) — DO warn now: "DB unreachable" also
+                # zeroes every §17.120 quality bump for this response, which
+                # "row absent" doesn't do at scale. The API shape per-result
+                # is the same; the response-level warning is the tell.
                 logger.warning("provenance_fetch_failed: %s", e)
+                warnings.append("provenance_fetch_failed")
 
     # §17.120 — quality-signal-weighted rerank. Apply a per-result
     # multiplicative bump based on quality_signal from provenance; re-sort
@@ -1045,6 +1117,14 @@ async def query_rag(
             "reranked": not (skip_rerank or skipped_rerank),
             "skipped_rerank": skipped_rerank or skip_rerank,
             "reranker_backend": backend,
+            # §17.834 (audit M9) — non-None when top_k exceeded the reranker
+            # shortlist (warning `rerank_cap_truncation` fires alongside).
+            "rerank_capped_at": rerank_meta.get("rerank_capped_at"),
+            # §17.834 — supersedes-sweep accounting: rows dropped as
+            # superseded and rows backfilled from the ranked pool. A short
+            # response with dropped > backfilled is explained here.
+            "superseded_dropped": superseded_dropped,
+            "superseded_backfilled": superseded_backfilled,
             "warnings": warnings,
             # §17.767 — partitions that RAISED during search (always present; []
             # on success). `degraded` = a suspect empty result: a failure
