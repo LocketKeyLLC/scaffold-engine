@@ -5,6 +5,24 @@ and helpers live in _execution_agent_shared.
 """
 from tests._execution_agent_shared import *  # noqa: F401, F403
 
+
+@pytest.fixture(autouse=True)
+def _force_sequential_execution(monkeypatch):
+    """§17.827 (plan 7.3) — pin sequential execution mode for this module.
+
+    These tests assert the strict sequential SSE contract (one node_start →
+    node_done pair at a time). Under the code default
+    ``parallel_execution_enabled=True`` the parallel-frontier path emits a
+    different event sequence and 7 of the 10 assertions here fail. The suite
+    only ever passed where the host env pinned PARALLEL_EXECUTION_ENABLED=false
+    (the live compose stack) — which is why test.yml hard-ignored this module,
+    misattributed in §17.589 to missing live services. Pin the setting here so
+    the result no longer depends on host env.
+    """
+    from app.config import settings
+    monkeypatch.setattr(settings, "parallel_execution_enabled", False)
+
+
 @pytest.mark.smoke
 class TestExecuteAllNodesSSESequence:
     """SSE events emitted in correct order for a 2-node happy path."""

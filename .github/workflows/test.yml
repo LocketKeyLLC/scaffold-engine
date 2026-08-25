@@ -212,11 +212,12 @@ jobs:
           # pipelines/ dir is owned by the runner uid; make it group/other
           # writable so the valve bootstrap can create valves.json.
           chmod -R a+w pipelines || true
-          # §17.589 — --ignore ONLY the modules that need live services this
-          # no-services job lacks (Redis/Milvus/Ollama for execute_all_nodes);
-          # they pass locally + in the nightly full stack. Everything else runs
-          # on just Postgres, keeping coverage ~80% (the broad
-          # SCAFFOLD_CI_SMOKE_MODE excluded ~52 modules → 70%, under the gate).
+          # §17.827 (plan 7.3) — the three §17.589 --ignore'd modules
+          # (execution_agent_sse / execution_agent_concurrency / sse_streaming)
+          # are un-ignored: §17.589 blamed missing Redis/Milvus/Ollama, but an
+          # env bisect showed they only needed PARALLEL_EXECUTION_ENABLED=false
+          # (the live box's pin); each module now pins sequential mode via an
+          # autouse fixture, so they pass here on just Postgres.
           docker run --rm \
             --network host \
             -e DATABASE_URL=$DATABASE_URL \
@@ -239,9 +240,6 @@ jobs:
             pytest tests/ --timeout=30 -v \
               -k "not integration" \
               --ignore-glob='*/test_scaffold_router_*' \
-              --ignore=tests/test_execution_agent_sse.py \
-              --ignore=tests/test_execution_agent_concurrency.py \
-              --ignore=tests/test_sse_streaming.py \
               --cov=app --cov-branch \
               --cov-report=term-missing:skip-covered \
               --cov-fail-under=${COVERAGE_MIN}

@@ -11,6 +11,20 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+@pytest.fixture(autouse=True)
+def _force_sequential_execution(monkeypatch):
+    """§17.827 (plan 7.3) — pin sequential execution mode for this module.
+
+    The SSE-behavior assertions here (event order, pipeline_complete shape,
+    keepalive watchdog) encode the sequential execute_all_nodes contract;
+    under the code default ``parallel_execution_enabled=True`` 11 of the 18
+    tests fail. See the twin fixture in test_execution_agent_sse.py for the
+    full history (§17.589 misattribution).
+    """
+    from app.config import settings
+    monkeypatch.setattr(settings, "parallel_execution_enabled", False)
+
+
 # ---------------------------------------------------------------------------
 # Helpers (same pattern as test_execution_agent.py)
 # ---------------------------------------------------------------------------
