@@ -772,3 +772,15 @@ select.input:focus-visible,
     scroll-behavior: auto !important;
   }
 }
+
+/* §17.815 — signed-in identity (sidebar foot) */
+.identity {
+  font-size: 12px;
+  color: var(--text-dim, #8b93a7);
+  padding: 2px 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.identity-name { font-weight: 600; color: var(--text, #c9d1e3); }
+.identity-role { opacity: 0.8; }

@@ -71,7 +71,10 @@ export async function req(path, { method = "GET", body, signal, query } = {}) {
     body: body != null ? JSON.stringify(body) : undefined,
     signal,
   });
-  if (!resp.ok) throw await parseError(resp);
+  if (!resp.ok) {
+    _maybeSignalUnauthorized(resp.status);
+    throw await parseError(resp);
+  }
   if (resp.status === 204) return null;
   const ct = resp.headers.get("content-type") || "";
   return ct.includes("application/json") ? resp.json() : resp.text();
@@ -100,7 +103,10 @@ export async function* stream(path, { method = "POST", body, signal } = {}) {
     body: body != null ? JSON.stringify(body) : undefined,
     signal,
   });
-  if (!resp.ok) throw await parseError(resp);
+  if (!resp.ok) {
+    _maybeSignalUnauthorized(resp.status);
+    throw await parseError(resp);
+  }
   if (!resp.body) throw new ApiError(0, "No response body for stream");
 
   const reader = resp.body.getReader();
@@ -171,10 +177,49 @@ export async function health() {
   return resp.json();
 }
 
-/** Probe the key by hitting a cheap authenticated endpoint. Returns true on 200. */
+// ── Identity (§17.815 / plan 5.3) ─────────────────────────────────────
+
+// §17.815 — a 401 mid-session (rotated/revoked key) routes the operator back
+// to the connect gate instead of every view failing with opaque toasts.
+// Dispatched as an event so api.js stays UI-free; app.js owns the response.
+// Guarded for non-browser contexts (the node test lane).
+function _maybeSignalUnauthorized(status) {
+  if (status === 401 && typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("scaffold:unauthorized"));
+  }
+}
+
+let _principal = null;
+
+/** The cached /auth/whoami result ({identity, role, is_admin, key_id,
+ *  multi_user}) or null before login. */
+export function principal() {
+  return _principal;
+}
+
+/** Fetch + cache the caller's identity. Falls back to the single-user admin
+ *  default on a pre-§17.815 server (404) so the SPA still works there. */
+export async function whoami() {
+  try {
+    _principal = await get("/auth/whoami");
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      _principal = {
+        identity: "admin", role: "admin", is_admin: true,
+        key_id: null, multi_user: false,
+      };
+    } else {
+      throw e;
+    }
+  }
+  return _principal;
+}
+
+/** Probe the key via /auth/whoami (also caches identity). True on success,
+ *  false on 401; other failures (network) throw for separate surfacing. */
 export async function validateKey() {
   try {
-    await get("/jobs", { query: { limit: 1 } });
+    await whoami();
     return true;
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) return false;
