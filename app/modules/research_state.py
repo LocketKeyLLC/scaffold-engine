@@ -78,6 +78,11 @@ class ResearchState:
     # `summary_empty`). Pre-§17.831 timeout and dead-model were deliberately
     # indistinguishable; the plan (8.1) reversed that call.
     summary_fallback: str | None = None
+    # §17.833 (plan 8.3 / audit M8) — the cite-aware summary's numbered source
+    # list ({url, source_type, confidence_score}, index = [n]-1), stamped by
+    # _generate_summary in cite mode so research_complete carries the EXACT
+    # list the inline [n] markers refer to. None on the default path.
+    cited_sources: list | None = None
     total_ingested: int = 0
     total_rejected: int = 0
     total_new: int = 0

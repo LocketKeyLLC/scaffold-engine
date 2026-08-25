@@ -166,16 +166,20 @@ async def score_citation_faithfulness(
     role: str = "model_verifier",
     overrides: dict | None = None,
 ) -> dict | None:
-    """Return ``{score, supported, total, cited, dangling, unsupported_citations}``
-    or ``None`` (fail-soft).
+    """Return ``{score, supported, total, cited, dangling, unverified,
+    unsupported_citations}`` or ``None`` (fail-soft).
 
     ``sources`` is 1-indexed by position (source ``[1]`` is ``sources[0]``);
     each element may be a string or a ``{"text"/"content": ...}`` dict.
 
     ``None`` when: input is empty, the answer has NO citations (attribution is
-    undefined — "not scored"), or the LLM judge fails after retries. Dangling
-    citations (source number out of range) are scored as unsupported without an
-    LLM call.
+    undefined — "not scored"), the LLM judge fails after retries, or (§17.833)
+    every citation ended ``unverified`` — a score over zero rulings would be
+    fabricated. Dangling citations (source number out of range) are scored as
+    unsupported without an LLM call. §17.833 (audit M8): citations the judge
+    OMITS — even after a one-shot re-judge of just the omitted subset — count
+    as ``unverified`` and stay out of the score's denominator; pre-§17.833
+    they silently counted as unsupported, deflating live scores.
     """
     if not (answer or "").strip() or not sources:
         return None
@@ -186,11 +190,11 @@ async def score_citation_faithfulness(
     in_range = [x for x in instances if x["in_range"]]
     dangling = [x for x in instances if not x["in_range"]]
 
-    # Judge only the in-range instances; dangling ones are unsupported a priori.
-    verdicts: dict[int, bool] = {}
-    if in_range:
-        prompt = _build_judge_prompt(in_range, sources)
-        results = None
+    async def _judge_batch(batch: list[dict]) -> dict[int, bool] | None:
+        """One judge pass over ``batch``. Returns {1-based batch position:
+        verdict} for every position the judge answered, None on hard failure
+        (all attempts timed out / no parseable results / provider error)."""
+        prompt = _build_judge_prompt(batch, sources)
         for attempt in range(_JUDGE_ATTEMPTS):
             try:
                 resp = await asyncio.wait_for(
@@ -217,23 +221,55 @@ async def score_citation_faithfulness(
             args = read_tool_args(resp)
             candidate = args.get("results") if args else None
             if isinstance(candidate, list) and candidate:
-                results = candidate
-                break
+                out: dict[int, bool] = {}
+                for r in candidate:
+                    if isinstance(r, dict) and isinstance(r.get("index"), int):
+                        out[r["index"]] = r.get("supported") is True
+                return out
             logger.warning(
                 "citation_faithfulness_no_results: attempt=%d (coax miss) — %s",
                 attempt, "retrying" if attempt < _JUDGE_ATTEMPTS - 1 else "giving up",
             )
-        if not results:
+        return None
+
+    # Judge only the in-range instances; dangling ones are unsupported a priori.
+    verdicts: dict[int, bool] = {}
+    if in_range:
+        first = await _judge_batch(in_range)
+        if first is None:
             return None
-        for r in results:
-            if isinstance(r, dict) and isinstance(r.get("index"), int):
-                verdicts[r["index"]] = r.get("supported") is True
+        verdicts.update({i: v for i, v in first.items() if 1 <= i <= len(in_range)})
+        # §17.833 (plan 8.3 / audit M8) — partial-verdict retry. The judge
+        # sometimes answers a subset (long batch, token budget); pre-§17.833
+        # the retry fired only on a FULLY empty result and every omitted
+        # instance silently counted as unsupported. Re-judge just the omitted
+        # instances once, mapping their 1-based positions back to the
+        # original batch positions.
+        missing_pos = [i for i in range(1, len(in_range) + 1) if i not in verdicts]
+        if missing_pos:
+            logger.info(
+                "citation_faithfulness_partial: judged=%d/%d — re-judging %d omitted",
+                len(verdicts), len(in_range), len(missing_pos),
+            )
+            second = await _judge_batch([in_range[i - 1] for i in missing_pos])
+            if second:
+                for batch_pos, verdict in second.items():
+                    if 1 <= batch_pos <= len(missing_pos):
+                        verdicts[missing_pos[batch_pos - 1]] = verdict
 
     total = len(instances)
     supported = 0
+    unverified = 0
     unsupported: list[dict] = []
     for i, inst in enumerate(in_range, start=1):
-        if verdicts.get(i) is True:
+        if i not in verdicts:
+            # §17.833 — the judge never ruled on this citation (even after the
+            # re-judge). That's a judge limitation, not evidence against the
+            # claim: count it `unverified` and keep it OUT of the score's
+            # denominator instead of deflating the user-visible number.
+            unverified += 1
+            continue
+        if verdicts[i]:
             supported += 1
         else:
             unsupported.append({"claim": inst["claim"][:200], "source_id": inst["source_id"]})
@@ -241,11 +277,18 @@ async def score_citation_faithfulness(
         unsupported.append({"claim": inst["claim"][:200], "source_id": inst["source_id"],
                             "dangling": True})
 
+    judged = supported + len(unsupported)  # explicit verdicts + dangling
+    if judged == 0:
+        # Nothing was actually ruled on — a score would be fabricated.
+        logger.warning("citation_faithfulness_all_unverified: total=%d", total)
+        return None
+
     return {
-        "score": round(supported / total, 2),
+        "score": round(supported / judged, 2),
         "supported": supported,
         "total": total,
         "cited": len(in_range),
         "dangling": len(dangling),
+        "unverified": unverified,
         "unsupported_citations": unsupported[:10],
     }
