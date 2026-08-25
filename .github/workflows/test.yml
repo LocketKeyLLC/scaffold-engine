@@ -158,15 +158,42 @@ jobs:
       # §17.534 — report-only image scan. §17.587 — continue-on-error so a
       # trivy DB-pull flake can't fail the job. §17.584 — SHA-pinned v0.36.0
       # (action was supply-chain-compromised Mar 2026; pin to the commit).
+      # §17.830 (audit "Trivy is double non-blocking", plan 7.7) — still
+      # report-only, but the report now lands in the job summary + a warning
+      # annotation instead of being buried mid-log where nobody ever saw it.
       - name: Trivy image scan (report-only)
         continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           image-ref: scaffold-orchestrator:ci
           format: table
+          output: trivy-report.txt
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '0'
+
+      # §17.830 (plan 7.7) — publish the scan where it's actually seen: the
+      # run's job summary (renders on the PR checks page) plus a ::warning
+      # annotation when there are findings. Blocking on HIGH+fixable is a
+      # deliberate later step (plan note) — this makes report-only honest.
+      - name: Publish Trivy report to job summary (§17.830)
+        if: always()
+        run: |
+          {
+            echo "### Trivy image scan — HIGH/CRITICAL, fixable only (report-only)"
+            if [ -s trivy-report.txt ]; then
+              echo '```'
+              cat trivy-report.txt
+              echo '```'
+            else
+              echo "_No report produced (scan flaked or image missing) — see the Trivy step log._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # A table with any vulnerability rows mentions the severity keywords;
+          # an empty/clean scan doesn't. Rough but errs toward warning.
+          if [ -s trivy-report.txt ] && grep -qE 'HIGH|CRITICAL' trivy-report.txt; then
+            echo "::warning title=Trivy image scan::HIGH/CRITICAL findings in scaffold-orchestrator:ci — see the job summary for the table."
+          fi
 
       # §17.812 (audit C7) — db/init.sql is only the post-033 BASELINE; migrations
       # 034+ apply at app lifespan (which pytest never triggers), so CI was testing
