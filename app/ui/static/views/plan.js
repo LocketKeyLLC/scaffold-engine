@@ -9,7 +9,8 @@ import { el, mount, shortId } from "../util.js";
 import { statusBadge, loading, errorPanel, toast } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
 
-const EDITED_BY = "operator";
+// §17.815 — edit attribution is SERVER-derived from the API key (audit-trail
+// integrity); the client no longer sends a spoofable label.
 
 function field(label, control, hint) {
   return el(
@@ -191,7 +192,6 @@ function renderPlan(container, jobId) {
         const res = await api.patch(`/nodes/${jobId}/${node.node_key}`, {
           ...fields,
           expected_version: node.edit_version,
-          edited_by: EDITED_BY,
         });
         if (disposed) return;
         const resetMsg = res.reset && res.reset.length ? ` — reset ${res.reset.length} node(s)` : "";
@@ -239,7 +239,7 @@ function renderPlan(container, jobId) {
   async function deleteNode(key) {
     if (!confirm(`Delete ${key}? Dependents are rewired and cascade-reset.`)) return;
     try {
-      const res = await api.del(`/nodes/${jobId}/${key}`, { query: { edited_by: EDITED_BY } });
+      const res = await api.del(`/nodes/${jobId}/${key}`);
       if (disposed) return;
       const extra = res.rewired && res.rewired.length ? ` — rewired ${res.rewired.length}` : "";
       toast(`Deleted ${key}${extra}.`, "ok");
@@ -303,7 +303,6 @@ function renderPlan(container, jobId) {
           tool: toolIn.value || "LLM",
           prompt_template: promptIn.value || null,
           depends_on: readDeps(depsIn),
-          edited_by: EDITED_BY,
         });
         if (disposed) return;
         toast(`Inserted ${node_key}.`, "ok");
@@ -358,7 +357,7 @@ function renderPlan(container, jobId) {
     }
     async function saveOrder() {
       try {
-        await api.post(`/nodes/${jobId}/reorder`, { ordered_keys: order, edited_by: EDITED_BY });
+        await api.post(`/nodes/${jobId}/reorder`, { ordered_keys: order });
         if (disposed) return;
         toast("Order saved.", "ok");
         toggleReorder();

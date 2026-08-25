@@ -23,9 +23,22 @@ function surfaceError(err) {
 window.addEventListener("unhandledrejection", (e) => surfaceError(e.reason));
 window.addEventListener("error", (e) => { if (e.error) surfaceError(e.error); });
 
+// §17.815 — a 401 mid-session (rotated/revoked key) sends the operator back to
+// the connect gate. No-op while the gate is already showing (the gate's own
+// validation 401 must not loop it).
+window.addEventListener("scaffold:unauthorized", () => {
+  if (!document.querySelector(".shell")) return;
+  api.setKey("");
+  connectGate("Your key was rejected (401) — it may have been rotated. Re-enter it.");
+});
+
 const NAV = [
   { id: "new", path: "/new", label: "New idea", icon: "＋" },
-  { id: "chat", path: "/chat", label: "Chat", icon: "💬" },
+  // §17.815 — native chat rides /v1, which is admin-only BY DESIGN (§17.810:
+  // the loopback re-auths as master; scoped keys without identity-forwarding
+  // would be an escalation). Hide it from non-admin identities; single-user
+  // installs are always admin so nothing changes there.
+  { id: "chat", path: "/chat", label: "Chat", icon: "💬", adminOnly: true },
   { id: "dashboard", path: "/", label: "Dashboard", icon: "◈" },
   { id: "approvals", path: "/approvals", label: "Approvals", icon: "⏻" },
   { id: "dag", path: "/dag", label: "DAG Canvas", icon: "⬡" },
@@ -109,7 +122,12 @@ function connectGate(message) {
 function buildChrome() {
   outlet = el("main", { class: "content", id: "outlet" });
 
-  const navLinks = NAV.map((n) =>
+  // §17.815 — admin surfaces disappear for non-admin identities. Unknown
+  // principal (pre-§17.815 server) fails open to admin: the server still
+  // enforces authz on every request; this is navigation hygiene.
+  const p = api.principal();
+  const visibleNav = NAV.filter((n) => !n.adminOnly || p?.is_admin !== false);
+  const navLinks = visibleNav.map((n) =>
     el(
       "a",
       { class: "nav-link", href: "#" + n.path, dataset: { nav: n.id } },
@@ -134,10 +152,20 @@ function buildChrome() {
     el(
       "div",
       { class: "sidebar-foot" },
+      // §17.815 — who this key is (from /auth/whoami), so shared boxes show
+      // real attribution instead of an anonymous session.
+      p
+        ? el(
+            "div",
+            { class: "identity", title: `key_id: ${p.key_id ?? "master"}` },
+            el("span", { class: "identity-name", text: p.identity }),
+            el("span", { class: "identity-role", text: ` (${p.role})` })
+          )
+        : null,
       el("div", { class: "health" }, healthDot, healthText),
       el("button", {
         class: "btn btn-ghost btn-sm",
-        text: "Disconnect",
+        text: "Sign out",
         onClick: () => {
           api.setKey("");
           location.reload();
