@@ -261,19 +261,31 @@ For embedder model changes (rarely needed), see USER_GUIDE.md "Embedder portabil
 
 ---
 
+## Backup & restore
+
+```bash
+make backup                    # → .backups/<utc-timestamp>/
+make restore                   # newest backup, interactive confirm
+make restore BACKUP=<ts> YES=1 # scripted restore of a specific backup
+```
+
+`make backup` captures **all** engine state: a `pg_dump` of Postgres (jobs, DAG nodes, research sessions, schedules, API keys, model overrides…), a JSONL export of the entire Milvus `toon_v2` knowledge corpus **including dense vectors** (no re-embedding on restore), and a `manifest.json` of row/entity counts that `make restore` verifies against. Backups are plain files under `.backups/` — copy them off-box on whatever schedule you like (a weekly cron of `make backup` + rsync is plenty).
+
+Take a backup before any upgrade, `docker compose down`, or volume surgery.
+
 ## Tearing it down
 
 ```bash
-docker compose down
+docker compose restart   # safe way to bounce the stack
 ```
 
-Stops all containers but preserves volumes (Postgres data, Milvus collections, model caches).
+> **⚠ `docker compose down` does NOT reliably preserve the Milvus knowledge corpus.** Postgres data survives `down` on its named volume, but the Milvus collection has been observed (twice) to come back **empty** after a `down`/`up` cycle — segments orphan despite the persistent volume. Until that's root-caused: use `docker compose restart` for routine bounces, and run `make backup` first if you must `down` (then `make restore` brings the corpus back, vectors included).
 
 ```bash
 docker compose down -v
 ```
 
-Stops containers AND deletes volumes. **This loses every job, knowledge base entry, and schedule** — use with care.
+Stops containers AND deletes volumes. **This loses every job, knowledge base entry, and schedule** — use with care (and only after `make backup`).
 
 ```bash
 git clean -fdx

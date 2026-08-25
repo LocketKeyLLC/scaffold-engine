@@ -201,6 +201,12 @@ bootstrap-host: ## Audit I1: host-level setup audit (SSD mount, daemon.json, ai-
 bootstrap-host-check: ## Same as bootstrap-host, but read-only — no changes applied.
 	@bash scripts/bootstrap-host.sh check
 
+backup: ## §17.822 (C11) — full-state backup: pg_dump + Milvus toon_v2 export + manifest → .backups/<ts>/
+	@bash scripts/backup.sh
+
+restore: ## §17.822 (C11) — restore newest backup (or BACKUP=<ts>); pass YES=1 to skip the confirm
+	@bash scripts/restore.sh $(BACKUP) $(if $(YES),--yes)
+
 doctor: ## Health audit: probe every dep + verify key sync + cold-backup mount guard (read-only, 11 sections)
 	@bash scripts/doctor.sh
 
