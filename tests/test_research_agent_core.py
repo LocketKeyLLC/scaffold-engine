@@ -106,6 +106,7 @@ class TestSearchQueries:
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock):
             mock_settings.research_max_queries = 10
             mock_settings.research_searxng_delay = 0
+            mock_settings.research_relevance_gate_enabled = False
             mock_settings.research_searxng_concurrency = 3
             mock_settings.research_recency_query_boost = False
             mock_settings.research_max_urls_for_depth.return_value = 30
@@ -137,6 +138,7 @@ class TestSearchQueries:
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock):
             mock_settings.research_max_queries = 10
             mock_settings.research_searxng_delay = 0
+            mock_settings.research_relevance_gate_enabled = False
             mock_settings.research_searxng_concurrency = 3
             mock_settings.research_recency_query_boost = False
             mock_settings.research_max_urls_for_depth.return_value = 30
@@ -161,6 +163,7 @@ class TestSearchQueries:
              patch("app.modules.research_agent.asyncio.sleep", new_callable=AsyncMock):
             mock_settings.research_max_queries = 10
             mock_settings.research_searxng_delay = 0
+            mock_settings.research_relevance_gate_enabled = False
             mock_settings.research_searxng_concurrency = 3
             mock_settings.research_recency_query_boost = False
             mock_settings.research_max_urls_for_depth.return_value = 30

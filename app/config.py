@@ -538,6 +538,14 @@ class Settings(BaseSettings):
     # early. iters 3→10, queries 12→40, urls/iter 30→100, ideation 5→15.
     research_max_iterations: int = Field(default=10, ge=1, le=20)
     research_max_queries: int = Field(default=40, ge=1, le=50)
+    # §17.837 (plan 8.2 / audit M10) — apply the §17.729 relevance gate
+    # (relevant_search_results: drop results sharing NO distinctive token with
+    # the query) to the PRIMARY research path, _search_queries. The gate
+    # already defends the assist + execution SearXNG paths; research — the
+    # heaviest consumer — was the gap. Default OFF: flipping on is gated on a
+    # golden-eval A/B (unchanged-or-better) per the plan. Conservative by
+    # construction either way — an all-filler query keeps everything.
+    research_relevance_gate_enabled: bool = False
     ideation_max_queries: int = Field(default=15, ge=1, le=50)
     ideation_max_distill_results: int = Field(default=15, ge=1, le=200)
     # §17.802 — per-iteration URL fetch cap, DEPTH-SCALED (was a flat 100).

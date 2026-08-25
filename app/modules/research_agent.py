@@ -75,6 +75,7 @@ from app.modules.research_extractors import (
     _parse_so_ref,
     _parse_wiki_ref,
     _resolve_confidence,
+    relevant_search_results,
     _robots_allowed,
     _score_source,
     _searxng_cache_get,
@@ -657,6 +658,21 @@ async def _search_queries(
 
     client = get_searxng_client()
 
+    def _gate(query_text: str, results: list[dict]) -> list[dict]:
+        """§17.837 (plan 8.2 / audit M10) — the §17.729 relevance gate on the
+        primary research path. Applied on READ (both cache-hit and fresh
+        paths) rather than before the cache write, so cached raw results
+        survive valve flips. Default off; flip gated on a golden-eval A/B."""
+        if not settings.research_relevance_gate_enabled or not results:
+            return results
+        kept = relevant_search_results(query_text, results)
+        if len(kept) < len(results):
+            logger.info(
+                "research_relevance_gate: query='%s' kept=%d/%d",
+                query_text, len(kept), len(results),
+            )
+        return kept
+
     # §17.543 — Phase 1: dedup queries + resolve cache hits sequentially (cheap
     # Redis gets). Each result group is (facet, [result dicts]); facet travels
     # with its results so the concurrent fan-out below stays order-independent.
@@ -676,7 +692,7 @@ async def _search_queries(
         if cached is not None:
             logger.info("searxng_cache_hit: query=%s results=%d", query_text, len(cached))
             state.search_history.add(query_key)
-            cache_groups.append((q.get("facet", ""), cached))
+            cache_groups.append((q.get("facet", ""), _gate(query_text, cached)))
         else:
             pending.append(q)
 
@@ -739,7 +755,8 @@ async def _search_queries(
                         await _searxng_cache_set(query_text, results)
                     logger.info("searxng_cache_miss: query=%s results=%d", query_text, len(results))
                     state.search_history.add(query_key)
-                    return q.get("facet", ""), results
+                    # §17.837 — gate AFTER the raw cache write above.
+                    return q.get("facet", ""), _gate(query_text, results)
                 # §17.812 (audit C5) — non-200 (CAPTCHA / 429 / 403) was SILENT and
                 # burned the query for the whole session (search_history.add). Log
                 # it, flag degradation so the caller emits an SSE warning, and leave
