@@ -895,14 +895,15 @@ class Pipeline:
         # streaming command replies. Never interleaved into an SSE stream.
         status_footer_enabled: bool = True
 
-        # Model overrides — §17.346 flipped router/coder/verifier defaults to
-        # the same cloud model as §17.344's triage flip. Keep in sync with
-        # app/config.py Settings defaults; the per-role rationale lives there.
-        model_general: str = "deepseek-v4-pro:cloud"  # §17.632 — A/B'd 3.4× faster than qwen3.5 at equal synthesis quality; keep in sync w/ config.py + compose MODEL_GENERAL
-        # §17.567 — A/B'd (model_ab.py --task verifier): kimi 30/30 @ 1.34s vs
-        # qwen3.5 30/30 @ 6.12s. Keep in sync with app/config.py:model_verifier.
-        model_verifier: str = "kimi-k2.7-code:cloud"
-        model_coder: str = "kimi-k2.7-code:cloud"  # §17.498 — A/B'd coder-specialized model
+        # Model overrides — §17.819 (plan 6.2): defaults are LOCAL-SAFE and
+        # keep in sync with app/config.py Settings defaults (a fresh install
+        # makes zero cloud calls). The A/B-tuned cloud picks (§17.632 general,
+        # §17.567 verifier, §17.498 coder, §17.346 router) live in the
+        # orchestrator's connect-models wizard preset + docker-compose.yml
+        # guidance; live installs keep their materialized valves.json values.
+        model_general: str = "qwen2.5:7b"  # tuned cloud pick: deepseek-v4-pro:cloud (§17.632)
+        model_verifier: str = "qwen2.5:7b"  # tuned cloud pick: kimi-k2.7-code:cloud (§17.567)
+        model_coder: str = "qwen2.5-coder:7b"  # tuned cloud pick: kimi-k2.7-code:cloud (§17.498)
         # §17.472 — synced to the orchestrator's real embedder. §17.83
         # switched the live embedder to nomic-embed-text (qwen3-embedding:8b
         # wedged deterministically on this host's Ollama --ollama-engine
@@ -915,9 +916,9 @@ class Pipeline:
         # native dim 768, truncated to 512 via MRL (same _EMBEDDER_EXPECTED_DIM).
         model_embedder: str = "nomic-embed-text"
         model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-        model_router: str = "qwen3.5:397b-cloud"
+        model_router: str = "qwen3:4b"  # §17.819 local-safe (tuned cloud pick: qwen3.5:397b-cloud)
         model_fallback: str = "qwen3.5:latest"
-        model_cloud_alt: str = "qwen3.5:397b-cloud"
+        model_cloud_alt: str = "qwen3.5:latest"  # §17.819 local-safe (tuned cloud pick: qwen3.5:397b-cloud)
 
     _MODEL_ROLES = (
         "model_general", "model_verifier", "model_coder",

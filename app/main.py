@@ -34,7 +34,7 @@ from sqlalchemy import text
 from app.model_router import close_client
 
 from app.auth import require_api_key
-from app.config import settings
+from app.config import SWITCHABLE_ROLE_FIELDS, settings
 from app.modules.cleanup import start_cleanup_task, reap_stale_jobs
 from app.database import engine, async_session
 from app.logging_config import setup_logging
@@ -817,6 +817,31 @@ async def web_root_redirect():
 
 # ── Health check (no auth — exempt from global require_api_key) ──────
 
+def _model_role_warnings(pulled: set[str]) -> list[str]:
+    """§17.819 (plan 6.2) — models unconfigured/unreachable advisory.
+
+    The settings singleton IS the live effective config (env pins applied at
+    boot, DB overrides replayed by load_overrides_into_settings and mutated
+    in-place by set_override), so comparing it against the daemon's
+    pulled-tag list (already fetched by _check_ollama — no extra call)
+    catches a fresh install whose role tags aren't pulled before the first
+    job fails on them. Advisory only; points at the connect-models wizard.
+    """
+    missing = sorted(
+        f"{role}={getattr(settings, role)}"
+        for role in SWITCHABLE_ROLE_FIELDS
+        if getattr(settings, role) not in pulled
+    )
+    if not missing:
+        return []
+    return [
+        "model roles reference tags not pulled on the Ollama daemon: "
+        + ", ".join(missing)
+        + " — pull them (ollama pull <tag>) or open the connect-models "
+        "wizard at /ui/#/setup"
+    ]
+
+
 @app.get("/health", dependencies=[], response_model=HealthCheckResponse)
 async def health():
     """Concurrent dependency health check — no auth required."""
@@ -1251,6 +1276,8 @@ async def health():
             f"{host_oom_alerts['total']} host OOM event(s) in the last "
             f"{host_oom_alerts.get('window_hours')}h — host-wide memory pressure"
         )
+    if ollama_up:
+        warnings.extend(_model_role_warnings(set(ollama.get("models_loaded") or [])))
 
     return {
         "status": status,
