@@ -41,6 +41,7 @@ async def sweep_expired() -> dict:
         total_ids: list[str] = []
         total_titles: list[str] = []
         hit_cap = True
+        ghost_only_page = False  # §17.836 — see the break below
         seen: set[str] = set()  # §17.604 — dedup across pages
 
         for _ in range(_MAX_PAGES):
@@ -59,10 +60,28 @@ async def sweep_expired() -> dict:
                 filter=expr,
                 output_fields=["entry_id", "title", "source_type", "expires_at"],
                 limit=_PAGE_SIZE,
+                # §17.836 (plan 8.8) — Strong read-your-writes, same as the M5
+                # version-chain reads: under the default Bounded level the
+                # rows deleted+flushed on the PREVIOUS iteration can re-surface
+                # here, and a page consisting entirely of those ghosts made
+                # `fresh` empty → the loop broke reporting CLEAN while unseen
+                # expired rows (beyond the unordered 1000-row page) remained.
+                consistency_level="Strong",
             )
             fresh = [e for e in expired if e["entry_id"] not in seen]
             if not fresh:
                 hit_cap = False
+                # §17.836 — belt-and-braces: even with Strong reads, an
+                # all-ghosts page means we CANNOT claim the collection is
+                # clean — say so instead of pretending.
+                ghost_only_page = bool(expired)
+                if ghost_only_page:
+                    logger.warning(
+                        "staleness_sweep_ghost_page: %d just-deleted rows "
+                        "re-surfaced (delete-visibility lag); expired entries "
+                        "may remain — next sweep cycle will retry",
+                        len(expired),
+                    )
                 break
 
             ids = [e["entry_id"] for e in fresh]
@@ -93,6 +112,10 @@ async def sweep_expired() -> dict:
             "expired_count": len(total_ids),
             "deleted": total_titles[:_TITLES_CAP],
             "deleted_truncated": len(total_titles) > _TITLES_CAP,
+            # §17.836 — honest completion flag: False when the page cap fired
+            # OR an all-ghosts page forced the break; consumers (cleanup tick
+            # log line) can stop reading "sweep ran" as "collection clean".
+            "clean": not hit_cap and not ghost_only_page,
         }
 
     return await loop.run_in_executor(None, _sync)

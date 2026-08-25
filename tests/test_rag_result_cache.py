@@ -380,3 +380,67 @@ async def test_put_then_get_round_trip(monkeypatch):
     assert out == _OK_RESPONSE
     assert cache.stats()["hits"] == 1
     assert cache.stats()["puts"] == 1
+
+
+# ---------------------------------------------------------------------------
+# §17.836 (plan 8.8) — invalidate_domain (the advertised-but-unimplemented
+# on-ingest SCAN workflow, now real)
+# ---------------------------------------------------------------------------
+
+def _scan_iter_returning(keys_by_pattern):
+    """Build a scan_iter mock: async generator keyed on the match pattern."""
+    def _scan_iter(match=None, count=None):
+        async def _gen():
+            for k in keys_by_pattern.get(match, []):
+                yield k
+        return _gen()
+    return _scan_iter
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_invalidate_domain_scans_domain_and_all_segments():
+    from app.utils.rag_result_cache import RagResultCache
+    cache = RagResultCache(redis_url="redis://mock:1/0")
+    mock_redis = AsyncMock()
+    mock_redis.scan_iter = _scan_iter_returning({
+        "ragv1:eng:*": [b"ragv1:eng:h1", b"ragv1:eng:h2"],
+        "ragv1:all:*": [b"ragv1:all:h3"],
+    })
+    mock_redis.delete = AsyncMock(side_effect=lambda *keys: len(keys))
+    cache._redis = mock_redis
+
+    deleted = await cache.invalidate_domain("eng")
+    assert deleted == 3
+    # Both the domain's keys and the cross-domain "all" keys were dropped.
+    deleted_keys = {k for call in mock_redis.delete.await_args_list for k in call.args}
+    assert deleted_keys == {b"ragv1:eng:h1", b"ragv1:eng:h2", b"ragv1:all:h3"}
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_invalidate_domain_none_drops_whole_prefix():
+    from app.utils.rag_result_cache import RagResultCache
+    cache = RagResultCache(redis_url="redis://mock:1/0")
+    mock_redis = AsyncMock()
+    mock_redis.scan_iter = _scan_iter_returning({
+        "ragv1:*": [b"ragv1:eng:h1", b"ragv1:all:h2"],
+    })
+    mock_redis.delete = AsyncMock(side_effect=lambda *keys: len(keys))
+    cache._redis = mock_redis
+
+    assert await cache.invalidate_domain(None) == 2
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_invalidate_domain_fail_open():
+    from app.utils.rag_result_cache import RagResultCache
+    cache = RagResultCache(redis_url="redis://mock:1/0")
+    mock_redis = AsyncMock()
+    def _boom(**kwargs):
+        raise RuntimeError("redis down")
+    mock_redis.scan_iter = _boom
+    cache._redis = mock_redis
+
+    assert await cache.invalidate_domain("eng") == 0  # absorbed, no raise

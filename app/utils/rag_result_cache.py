@@ -12,8 +12,11 @@ Key format: ``ragv1:{domain_or_all}:{sha256(canonical_payload)}``
 - Canonical payload is ``json.dumps({query, domain, top_k,
   confidence_threshold, skip_rerank, include_history, query_intent},
   sort_keys=True)``. Any drift in retrieval params invalidates the entry.
-- Domain segment lifts the partition into the key path so the operator
-  can ``SCAN MATCH ragv1:eng:*`` to drop one domain's cache on ingest.
+- Domain segment lifts the partition into the key path so invalidation can
+  target one domain. §17.836 — ``invalidate_domain()`` implements that SCAN
+  workflow and ``ingest_entries`` calls it automatically whenever rows land
+  (the domain's keys + the cross-domain ``all`` keys); for years this line
+  only *advertised* the possibility and nothing called it.
 
 Value: full ``query_rag`` response dict (status / query / result_count /
 results / metadata), JSON-serialized.
@@ -260,6 +263,47 @@ class RagResultCache:
             return False
         self._puts += 1
         return True
+
+    async def invalidate_domain(self, domain: str | None) -> int:
+        """§17.836 (plan 8.8) — drop cached results that could contain the
+        (re)ingested domain's entries: the domain's own ``ragv1:{domain}:*``
+        keys AND the cross-domain ``ragv1:all:*`` keys (domain=None queries
+        fan out over every partition, so an ingest anywhere staled them).
+        domain=None invalidates everything under the prefix.
+
+        This implements the SCAN workflow the module docstring advertised
+        since ragv1 shipped but nothing ever called — pre-§17.836 a cached
+        response could serve pre-ingest results for the full TTL after new
+        knowledge landed. Fail-open like every other path here; returns the
+        number of keys deleted (0 on error / nothing matched).
+        """
+        patterns = (
+            [f"{_KEY_PREFIX}:*"] if domain is None
+            else [f"{_KEY_PREFIX}:{domain}:*", f"{_KEY_PREFIX}:all:*"]
+        )
+        deleted = 0
+        try:
+            r = await self._get_redis()
+            for pattern in patterns:
+                batch: list[bytes] = []
+                async for key in r.scan_iter(match=pattern, count=200):
+                    batch.append(key)
+                    if len(batch) >= 200:
+                        deleted += await r.delete(*batch)
+                        batch = []
+                if batch:
+                    deleted += await r.delete(*batch)
+            if deleted:
+                logger.info(
+                    "rag_result_cache_invalidated: domain=%s keys=%d",
+                    domain or "all", deleted,
+                )
+        except Exception as exc:
+            logger.warning(
+                "rag_result_cache_invalidate_failed: domain=%s err=%s",
+                domain or "all", exc,
+            )
+        return deleted
 
     def stats(self) -> dict[str, int]:
         return {
