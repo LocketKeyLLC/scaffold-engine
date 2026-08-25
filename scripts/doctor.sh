@@ -90,13 +90,21 @@ printf '%s└──%s pass --explain to see what each section verifies inline.\n
 
 # ---- 1. .env file ----------------------------------------------------
 hdr ".env"
-explain "Verifies the four required runtime secrets exist and that .env beats valves.json on key rotation."
+explain "Verifies the required runtime secrets exist (the two OWUI secrets only with the owui profile, §17.824) and that .env beats valves.json on key rotation."
+
+# §17.824 — resolved here (was section 2) because the required-secrets set
+# depends on it: the OWUI keys are owui-profile-only since the compose
+# interpolations became soft defaults (a hard :? broke native-only `up -d`).
+_compose_profiles="${COMPOSE_PROFILES:-$(grep -E '^COMPOSE_PROFILES=' "$REPO_ROOT/.env" 2>/dev/null | cut -d= -f2- || true)}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
     fail ".env not found at $ENV_FILE — run 'make bootstrap'"
 else
     pass ".env present"
-    REQUIRED_VARS=(SCAFFOLD_API_KEY POSTGRES_PASSWORD WEBUI_SECRET_KEY OPENWEBUI_PIPELINES_KEY)
+    REQUIRED_VARS=(SCAFFOLD_API_KEY POSTGRES_PASSWORD)
+    if [[ ",${_compose_profiles}," == *",owui,"* ]]; then
+        REQUIRED_VARS+=(WEBUI_SECRET_KEY OPENWEBUI_PIPELINES_KEY)
+    fi
     for v in "${REQUIRED_VARS[@]}"; do
         if grep -qE "^${v}=.+" "$ENV_FILE"; then
             pass "$v set"
@@ -104,6 +112,9 @@ else
             fail "$v missing or empty in .env"
         fi
     done
+    if [[ ",${_compose_profiles}," != *",owui,"* ]]; then
+        info "owui profile off — WEBUI_SECRET_KEY / OPENWEBUI_PIPELINES_KEY not required"
+    fi
     if grep -qE "^SCAFFOLD_VALVES_ENV_OVERRIDE=(true|1|yes|on)" "$ENV_FILE"; then
         pass "SCAFFOLD_VALVES_ENV_OVERRIDE=true (env wins over valves.json)"
     else
@@ -122,10 +133,7 @@ for n in ai-network; do
         fail "network $n missing — run 'make bootstrap'"
     fi
 done
-# §17.821 — resolve enabled compose profiles once (ambient env wins over
-# .env); used by the volume + container + key-sync sections below.
-_compose_profiles="${COMPOSE_PROFILES:-$(grep -E '^COMPOSE_PROFILES=' "$REPO_ROOT/.env" 2>/dev/null | cut -d= -f2- || true)}"
-
+# (_compose_profiles resolved in section 1 — §17.824.)
 for vol in milvus-data-v2; do
     if docker volume inspect "$vol" >/dev/null 2>&1; then
         pass "volume $vol exists"

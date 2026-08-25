@@ -51,7 +51,16 @@ If you're on Pop!_OS / Ubuntu and Docker is fresh, also run `sudo usermod -aG do
 
 ## First-time install
 
-These steps go from a fresh `git clone` to a running stack ready to take ideas. Run them in order.
+The quickstart is two commands:
+
+```bash
+git clone https://github.com/LocketKeyLLC/scaffold-engine.git && cd scaffold-engine
+make bootstrap
+```
+
+`make bootstrap` does everything the manual path below does: checks Docker/Ollama, offers to pull the default local models, creates the network/volumes, seeds the SearXNG config, asks whether you want the optional Open WebUI chat front-end, generates a `.env` with strong secrets, brings up the stack, and finishes with a full `make doctor` health audit. When it's done, open **http://localhost:8000/ui**, sign in with the `SCAFFOLD_API_KEY` it generated (it's in your `.env`), and the first-run **"Connect your models" wizard** takes it from there.
+
+The rest of this section is the same install done **manually**, step by step — read it to understand what bootstrap did, or if you prefer explicit control.
 
 ### 1. Clone the repo
 
@@ -68,7 +77,7 @@ You should see `app/`, `sdk/`, `cli/`, `pipelines/`, `db/`, `docker-compose.yml`
 cp .env.example .env
 ```
 
-Now open `.env` in your editor and set the four **required** values at the top — the file walks you through each one. The most important is `SCAFFOLD_API_KEY`, which gates every authenticated request to the orchestrator. Generate one with `openssl rand -hex 32` if you don't have a preferred secret-generation flow.
+Now open `.env` in your editor and set the **required** values at the top — the file walks you through each one (`WEBUI_SECRET_KEY`/`OPENWEBUI_PIPELINES_KEY` matter only if you enable the `owui` profile). The most important is `SCAFFOLD_API_KEY`, which gates every authenticated request to the orchestrator. Generate one with `openssl rand -hex 32` if you don't have a preferred secret-generation flow.
 
 > **What can go wrong:** if you skip this step and start the stack, `docker compose` will refuse to bring up the orchestrator (the compose file has `${SCAFFOLD_API_KEY:?...}` as a hard requirement). The error message tells you which variable is missing.
 
@@ -78,14 +87,14 @@ Now open `.env` in your editor and set the four **required** values at the top �
 ollama pull qwen3:4b qwen2.5:7b qwen2.5-coder:7b nomic-embed-text qwen3.5:latest
 ```
 
-This downloads the five default local models. Each is 1–8 GB except `nomic-embed-text` (~270 MB); on a typical home connection plan for ~10 minutes total. Ollama caches them in `~/.ollama/models`.
+This downloads the five default local models (role-mapped: `qwen3:4b` routes/triages, `qwen2.5:7b` generates/verifies/extracts, `qwen2.5-coder:7b` codes, `qwen3.5:latest` is the escalation + fallback tier, `nomic-embed-text` embeds). Each is 1–8 GB except `nomic-embed-text` (~270 MB); on a typical home connection plan for ~10 minutes total. Ollama caches them in `~/.ollama/models`.
 
 > **Embedder note:** the embedder is `nomic-embed-text` (137M params, 768-dim native, MRL-truncated to 512 to match Milvus). The embedding dimension is locked at 512, so the embedder is configured once at install and is not swapped per-request; changing it later means re-embedding the corpus (see USER_GUIDE.md "Embedder portability").
 
 > **What can go wrong:**
 > - "model not found" → Ollama isn't running. Start it: `ollama serve` (foreground) or check the systemd unit on Linux.
 > - Slow download → Ollama shows download progress; if it stalls, Ctrl-C and retry. Resume is automatic.
-> - You don't have to use all five. The system will tell you at request time which roles are missing models — see `make doctor` below.
+> - You don't have to use all five. The system will tell you at request time which roles are missing models — see `make doctor` below, and the `/ui` wizard flags unpulled role tags.
 
 ### 4. Bring up the stack
 
