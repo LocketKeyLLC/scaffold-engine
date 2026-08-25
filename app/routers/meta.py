@@ -67,5 +67,11 @@ async def complete_first_run(db: AsyncSession = Depends(get_db)) -> dict:
 
 @router.get("/meta/domains")
 async def get_domains() -> dict:
-    """The user-selectable domain list for client pickers."""
-    return {"domains": list(_USER_DOMAINS)}
+    """The user-selectable domain list for client pickers.
+
+    §17.820 — derived from ``idea_refinement.ALLOWED_DOMAINS`` (the set
+    ``create_ideation_job`` + IdeaInput actually enforce) instead of a
+    hardcoded twin; _USER_DOMAINS pins the presentation order."""
+    from app.modules.idea_refinement import ALLOWED_DOMAINS
+
+    return {"domains": [d for d in _USER_DOMAINS if d in ALLOWED_DOMAINS]}

@@ -109,29 +109,30 @@ class TestValidDomains:
 # ---------------------------------------------------------------------------
 
 class TestAllowedDomainsParity:
-    """The two ALLOWED_DOMAINS literals must equal each other AND be a
-    subset of VALID_DOMAINS (allowing /ideate to be more restrictive
-    than the schema but never to accept a value the schema rejects)."""
+    """§17.820 — the /web literal died with the retirement; the remaining
+    twin is app/routers/meta.py::_USER_DOMAINS (the /meta/domains picker
+    order). It must cover ALLOWED_DOMAINS exactly, and ALLOWED_DOMAINS must
+    stay a subset of VALID_DOMAINS (never accept a value the schema
+    rejects)."""
 
-    def test_idea_refinement_and_routes_allowed_domains_equal(self):
+    def test_meta_user_domains_match_allowed_domains(self):
         from app.modules.idea_refinement import ALLOWED_DOMAINS as REFINE_AD
-        from app.web.routes import _ALLOWED_DOMAINS as WEB_AD
-        assert set(REFINE_AD) == set(WEB_AD), (
-            f"ALLOWED_DOMAINS drift: idea_refinement={sorted(REFINE_AD)} "
-            f"vs web.routes={sorted(WEB_AD)}. The routes.py comment says "
-            f"these must match — update both literals together."
+        from app.routers.meta import _USER_DOMAINS
+        assert set(_USER_DOMAINS) == set(REFINE_AD), (
+            f"domain-picker drift: meta._USER_DOMAINS={sorted(_USER_DOMAINS)} "
+            f"vs idea_refinement.ALLOWED_DOMAINS={sorted(REFINE_AD)}. "
+            f"/meta/domains filters _USER_DOMAINS to ALLOWED_DOMAINS, so a "
+            f"missing entry silently vanishes from every client picker."
         )
 
     def test_allowed_domains_subset_of_valid_domains(self):
         from app.modules.idea_refinement import ALLOWED_DOMAINS as REFINE_AD
-        from app.web.routes import _ALLOWED_DOMAINS as WEB_AD
         # /ideate's allow-list may be a STRICT subset of the schema's
         # VALID_DOMAINS (e.g. /ideate could legitimately refuse `code`
         # while the schema accepts it on direct ingest). The invariant
         # is one-way: nothing in ALLOWED_DOMAINS may be outside
         # VALID_DOMAINS.
         assert set(REFINE_AD).issubset(VALID_DOMAINS)
-        assert set(WEB_AD).issubset(VALID_DOMAINS)
 
 
 # ---------------------------------------------------------------------------

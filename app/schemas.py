@@ -467,6 +467,21 @@ class ExecutionResult(BaseModel):
 # Research Agent
 # ---------------------------------------------------------------------------
 
+def _ideation_domain_or_422(v: str | None) -> str | None:
+    """§17.820 (plan 5.9) — ideation-facing domain allowlist. Uses the TIGHTER
+    ``idea_refinement.ALLOWED_DOMAINS`` (not config.VALID_DOMAINS, which adds
+    retrieval-only partitions like code/qa) because ``create_ideation_job``
+    enforces exactly that set. Pre-retirement, only the /web form validated
+    this — the JSON API let unknown domains through to a bare ValueError → 500.
+    ``None`` (auto-detect) is allowed. Imported lazily to avoid import cycles."""
+    if v is None:
+        return v
+    from app.modules.idea_refinement import ALLOWED_DOMAINS
+    if v not in ALLOWED_DOMAINS:
+        raise ValueError(f"domain must be one of {sorted(ALLOWED_DOMAINS)}")
+    return v
+
+
 def _domain_or_422(v: str | None) -> str | None:
     """§17.769 (Phase 3) — reject an explicit unknown domain. Retrieval fans out
     only over VALID_DOMAINS, and ingest writes the partition-key value verbatim,
@@ -483,10 +498,19 @@ def _domain_or_422(v: str | None) -> str | None:
 
 class ResearchInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
-    topic: str = Field(max_length=MAX_QUERY_LEN)
+    # §17.820 — blank topics rejected at the schema (the /web form used to
+    # gate this; a whitespace topic would start a real 20-60 min session).
+    topic: str = Field(min_length=1, max_length=MAX_QUERY_LEN)
     depth: ResearchDepth = "medium"
     domain: str | None = None
     model_overrides: dict | None = None
+
+    @field_validator("topic")
+    @classmethod
+    def _topic_nonblank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("topic must be non-empty")
+        return v
 
     @field_validator("domain")
     @classmethod
@@ -543,13 +567,28 @@ class ScheduleResponse(BaseModel):
 
 class IdeaInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
-    idea: str = Field(max_length=MAX_LLM_TEXT_LEN)
+    # §17.820 — min_length + the validators below port the /web form's input
+    # gate to the API: a blank/whitespace idea created a real job row, and an
+    # unknown domain 500'd (bare ValueError from create_ideation_job).
+    idea: str = Field(min_length=1, max_length=MAX_LLM_TEXT_LEN)
     domain: str | None = None
     model: str | None = None
     model_overrides: dict | None = None
     # §17.809 — per-job --quick: flag the job quick-mode so every phase layers
     # the fast "quick" model map, without touching global settings.
     quick: bool = False
+
+    @field_validator("idea")
+    @classmethod
+    def _idea_nonblank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("idea must be non-empty")
+        return v
+
+    @field_validator("domain")
+    @classmethod
+    def _validate_domain(cls, v: str | None) -> str | None:
+        return _ideation_domain_or_422(v)
 
 
 class ConfirmInput(BaseModel):

@@ -134,3 +134,14 @@ export async function copy(text) {
     return false;
   }
 }
+
+/** §17.820 — swap arr[i] with arr[i+delta] in place (reorder verbs).
+ * Returns true if the swap happened, false when it would fall off either
+ * end. Pure array semantics extracted from the plan view so the reorder
+ * permutation the server receives is unit-testable. */
+export function moveItem(arr, i, delta) {
+  const j = i + delta;
+  if (j < 0 || j >= arr.length || i < 0 || i >= arr.length) return false;
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+  return true;
+}

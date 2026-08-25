@@ -92,3 +92,30 @@ test("timeAgo handles bad input", () => {
   assert.equal(timeAgo(null), "—");
   assert.equal(timeAgo("not-a-date"), "—");
 });
+
+// ── §17.820 (plan 5.9) — scenarios ported from the retired /web test suite ──
+
+test("javascript: links are never linkified (scheme allowlist is https?: only)", () => {
+  const out = mdToHtml("[click me](javascript:alert(1))");
+  assert.ok(!out.includes("<a "), "javascript: URL must not become an anchor");
+  assert.ok(!out.includes("javascript:alert(1)\" "), "raw scheme must not land in an attribute");
+});
+
+test("data: and file: links are never linkified either", () => {
+  for (const bad of ["data:text/html,x", "file:///etc/passwd", "vbscript:x"]) {
+    const out = mdToHtml(`[x](${bad})`);
+    assert.ok(!out.includes("<a "), `${bad} must not become an anchor`);
+  }
+});
+
+test("moveItem swaps up and down and reports success", async () => {
+  const { moveItem } = await import("../../app/ui/static/util.js");
+  const order = ["T1", "T2", "T3"];
+  // "move T2 up" — the retired /web scenario asserted the server received
+  // ["T2","T1","T3"] for dir=up on T2.
+  assert.equal(moveItem(order, 1, -1), true);
+  assert.deepEqual(order, ["T2", "T1", "T3"]);
+  assert.equal(moveItem(order, 2, 1), false, "moving the last item down is a no-op");
+  assert.deepEqual(order, ["T2", "T1", "T3"]);
+  assert.equal(moveItem(order, 0, -1), false, "moving the first item up is a no-op");
+});

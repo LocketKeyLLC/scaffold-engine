@@ -2723,16 +2723,18 @@ async def run_research_in_background(
     depth: str = "medium",
     domain: str | None = None,
     model_overrides: dict | None = None,
+    owner: str | None = None,
 ) -> None:
     """§17.481 — drain ``run_research`` to completion off the request path so a
     web/CLI caller can fire-and-forget. ``run_research`` owns its session
     lifecycle (``_run_with_session_lifecycle`` finalizes the row on success,
     error, or cancellation), so we just consume the generator; any unexpected
-    error is logged."""
+    error is logged. §17.820 — ``owner`` threads the creating principal into
+    the session row (the old /web caller ran as admin and never stamped it)."""
     try:
         async for _ in run_research(
             topic=topic, depth=depth, domain=domain,
-            model_overrides=model_overrides,
+            model_overrides=model_overrides, owner=owner,
         ):
             pass
     except Exception:
@@ -2744,12 +2746,14 @@ def spawn_research_background(
     depth: str = "medium",
     domain: str | None = None,
     model_overrides: dict | None = None,
+    owner: str | None = None,
 ) -> asyncio.Task:
     """§17.481 — fire-and-forget background research with a strong ref so it
     survives GC, plus a done-callback to release the ref on completion."""
     task = asyncio.create_task(
         run_research_in_background(
             topic, depth=depth, domain=domain, model_overrides=model_overrides,
+            owner=owner,
         )
     )
     _RESEARCH_BACKGROUND_TASKS.add(task)
