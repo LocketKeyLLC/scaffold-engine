@@ -238,12 +238,58 @@ jobs:
             scaffold-orchestrator:ci \
             pytest tests/ --timeout=30 -v \
               -k "not integration" \
+              --ignore-glob='*/test_scaffold_router_*' \
               --ignore=tests/test_execution_agent_sse.py \
               --ignore=tests/test_execution_agent_concurrency.py \
               --ignore=tests/test_sse_streaming.py \
               --cov=app --cov-branch \
               --cov-report=term-missing:skip-covered \
               --cov-fail-under=${COVERAGE_MIN}
+
+      # §17.826 (audit M11, plan 7.1) — the OWUI pipelines lane, run the way the
+      # Makefile declares CORRECT: --noconftest. tests/conftest.py eager-loads
+      # app/, which shadows the pipeline mocks (`_scaffold_router_setup.py`
+      # stubs Pipeline._probe_embedder_dim etc.); before this step the 43
+      # test_scaffold_router_* modules ran inside the main pytest run WITH
+      # conftest — a configuration whose results the Makefile explicitly
+      # distrusts (`make test` ignore-globs them; `make test-pipelines` is the
+      # real lane). The main run above now ignore-globs them to match, and this
+      # step runs them the correct way. No live services needed (verified
+      # off-network: 1178 passed). pipelines/ stays the rw mount from the
+      # chmod above (valve bootstrap writes valves.json on a fresh checkout).
+      - name: Pipelines lane (test_scaffold_router_*, --noconftest)
+        run: |
+          docker run --rm \
+            -e SCAFFOLD_API_KEY=$SCAFFOLD_API_KEY \
+            -e PYTHONPATH=/code:/code/sdk \
+            -v "$PWD/app:/code/app:ro" \
+            -v "$PWD/tests:/code/tests:ro" \
+            -v "$PWD/sdk:/code/sdk:ro" \
+            -v "$PWD/pipelines:/code/pipelines" \
+            -v "$PWD/pyproject.toml:/code/pyproject.toml:ro" \
+            -w /code \
+            scaffold-orchestrator:ci \
+            sh -c 'pytest tests/test_scaffold_router_*.py --noconftest --timeout=30 -q'
+
+      # §17.826 (audit M11, plan 7.2) — the CLI + SDK suites ran in NO workflow
+      # (only via `make test-cli` / `make test-sdk` on the operator's box).
+      # Same commands the Makefile runs, in the same image. Both are pure-mock
+      # httpx suites (verified off-network: 167 + 146 passed).
+      - name: CLI suite (cli/tests)
+        run: |
+          docker run --rm \
+            -v "$PWD/cli:/code/cli:ro" \
+            -w /code/cli \
+            scaffold-orchestrator:ci \
+            python -m pytest tests/ --timeout=10 -q
+
+      - name: SDK suite (sdk/tests)
+        run: |
+          docker run --rm \
+            -v "$PWD/sdk:/code/sdk:ro" \
+            -w /code/sdk \
+            scaffold-orchestrator:ci \
+            python -m pytest tests/ --timeout=10 -q
 
   # Full integration tests require Ollama + Milvus + SearXNG.
   # Enable this job on a self-hosted runner with GPU/CPU inference.
