@@ -371,17 +371,18 @@ async def test_exempt_prefixes_set_shape_is_loadable(_api_key_set):
 
 
 # ===========================================================================
-# §17.812 (audit C9) — /web is gated under MULTI_USER_ENABLED
+# §17.820b — /web is exempt in EVERY mode (the §17.812 multi-user gate is gone)
 # ===========================================================================
 #
-# /web is server-rendered admin-view HTML whose loopback re-auths as master;
-# authz resolves the exempt path to ADMIN. Single-user: harmless (sole user).
-# Multi-user: it would expose every user's jobs to an unauthenticated browser,
-# so the /web exemption is withdrawn in that mode (browsers get 401 → use /ui).
+# The §17.812 (audit C9) gate existed because /web served admin-view HTML
+# whose loopback re-authed as master — under MULTI_USER_ENABLED an
+# unauthenticated browser saw every user's jobs. Post-§17.820 retirement,
+# /web is 301 redirects only (static SPA Locations, zero data), so old
+# bookmarks must land on the SPA login in every mode, never a bare 401.
 
 
 @pytest.mark.smoke
-async def test_web_prefix_still_exempt_single_user(_api_key_set, monkeypatch):
+async def test_web_prefix_exempt_single_user(_api_key_set, monkeypatch):
     """Single-user: /web stays exempt — no regression from §17.266."""
     import app.config
     monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
@@ -390,28 +391,14 @@ async def test_web_prefix_still_exempt_single_user(_api_key_set, monkeypatch):
 
 
 @pytest.mark.smoke
-async def test_web_prefix_gated_under_multi_user(_api_key_set, monkeypatch):
-    """Multi-user: an unauthenticated /web request no longer bypasses — it
-    falls through to key validation and 401s."""
+async def test_web_prefix_exempt_under_multi_user(_api_key_set, monkeypatch):
+    """Multi-user: an unauthenticated /web request bypasses too — the route
+    is a data-free 301 to the SPA, and a keyless browser following an old
+    bookmark must reach the SPA login."""
     import app.config
     monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
-    monkeypatch.setattr(_api_key_set, "resolve_key", AsyncMock(return_value=None))
-    monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
-    with pytest.raises(HTTPException) as exc_info:
-        await _api_key_set.require_api_key(_mk_request("/web/index.html"), key=None)
-    assert exc_info.value.status_code == 401
-
-
-@pytest.mark.smoke
-async def test_web_prefix_multi_user_master_key_ok(_api_key_set, monkeypatch):
-    """Multi-user: the master key still reaches /web (admin)."""
-    import app.config
-    monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
-    monkeypatch.setattr(_api_key_set, "resolve_key", AsyncMock(return_value=None))
-    monkeypatch.setattr(_api_key_set, "async_session", _fake_session_factory())
-    req = _mk_request("/web/index.html")
-    result = await _api_key_set.require_api_key(req, key="testkey123")
-    assert result == "testkey123"
+    result = await _api_key_set.require_api_key(_mk_request("/web/index.html"), key=None)
+    assert result == "", "/web must stay exempt under MULTI_USER_ENABLED"
 
 
 @pytest.mark.smoke

@@ -65,16 +65,16 @@ async def require_api_key(
     if path in _AUTH_EXEMPT_PATHS:
         return ""
     if any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
-        # §17.812 (audit C9) — /web is server-rendered admin-view HTML whose
-        # loopback re-authenticates as the master key; under MULTI_USER_ENABLED
-        # it would expose every user's jobs to an unauthenticated browser (authz
-        # resolves the exempt path to ADMIN). Gate /web in that mode — browsers
-        # send no X-API-Key so they get 401 and must use the per-user /ui SPA.
+        # §17.820b — the §17.812 (audit C9) multi-user gate on /web is gone
+        # WITH ITS REASON: /web served admin-view HTML whose loopback
+        # re-authenticated as the master key, so under MULTI_USER_ENABLED an
+        # unauthenticated browser saw every user's jobs. Since the §17.820
+        # retirement /web is 301 redirects ONLY (static SPA Locations, no
+        # data), so old bookmarks must land on the SPA login in every mode —
+        # not a bare 401. The whole /web/ prefix (and this exemption entry)
+        # is deleted one release after the redirects.
         # /static + /ui asset serving stay exempt (the SPA sends its own key).
-        if path.startswith("/web/") and settings.multi_user_enabled:
-            pass  # fall through to the key validation below
-        else:
-            return ""
+        return ""
 
     # Explicit opt-out only — empty key with no opt-out would have raised at import
     if settings.scaffold_auth_disabled:
