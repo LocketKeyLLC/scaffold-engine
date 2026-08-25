@@ -925,6 +925,18 @@ class Pipeline:
         "model_fallback", "model_cloud_alt",
     )
     _SINGLETON_ROLES = {"model_embedder", "model_reranker"}
+    # §17.813 (audit M13) — switchable engine roles with NO pipeline valve:
+    # settable via `/model set` through the orchestrator API alone. Deliberately
+    # NOT added to _MODEL_ROLES/valves — chat-launched jobs ship the valve roles
+    # as per-job overrides, and adding valves here would pin these three to
+    # pipeline defaults, re-creating the two-sources-of-truth problem the
+    # server API exists to end.
+    _SERVER_ONLY_ROLES = ("model_cloud_heavy", "model_triage", "model_research_extract")
+
+    @staticmethod
+    def _orch_role(role_key: str) -> str:
+        """Pipeline role token → the orchestrator's role name."""
+        return "model_embedder_pipeline" if role_key == "model_embedder" else role_key
 
     def __init__(self):
         self.id = "scaffold_router"
@@ -7123,14 +7135,45 @@ class Pipeline:
         return f"Unknown subcommand: `/model {sub}`{hint}\n\n{self._model_help()}"
 
     def _model_list(self) -> str:
-        lines = ["| Role | Current Model | Default? |", "|---|---|---|"]
-        default_valves = self.Valves()
-        for role in self._MODEL_ROLES:
-            current = getattr(self.valves, role, "")
-            default = getattr(default_valves, role, "")
-            is_default = "yes" if current == default else "no"
-            lines.append(f"| `{role.replace('model_','')}` | `{current}` | {is_default} |")
-        return "**Current Model Assignments**\n\n" + "\n".join(lines)
+        # §17.813 (audit M13) — live effective config from the ENGINE
+        # (GET /models/roles), not this pipeline's valves: the valves only
+        # govern chat-launched jobs' per-job overrides, and showing them as
+        # "current assignments" hid what the engine actually runs.
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/models/roles",
+                headers=self._auth_headers(),
+                timeout=self.valves.request_timeout,
+            )
+            r.raise_for_status()
+            rows = r.json().get("roles", [])
+        except Exception as e:
+            lines = ["| Role | Valve (chat-launch only) |", "|---|---|"]
+            for role in self._MODEL_ROLES:
+                lines.append(f"| `{role.replace('model_','')}` | `{getattr(self.valves, role, '')}` |")
+            return (f"**Engine unreachable** (`/models/roles`: {str(e)[:120]}) — "
+                    "showing this pipeline's valves instead.\n\n" + "\n".join(lines))
+        lines = ["| Role | Current Model | Source |", "|---|---|---|"]
+        diverged = []
+        for row in rows:
+            role = row.get("role", "")
+            token = "embedder" if role == "model_embedder_pipeline" else role.replace("model_", "")
+            model = row.get("model", "")
+            src = row.get("source", "")
+            if row.get("switchable") is False:
+                src += " (locked)"
+            lines.append(f"| `{token}` | `{model}` | {src} |")
+            valve_key = "model_embedder" if role == "model_embedder_pipeline" else role
+            vval = getattr(self.valves, valve_key, None)
+            if (vval and valve_key in self._MODEL_ROLES
+                    and valve_key not in self._SINGLETON_ROLES and vval != model):
+                diverged.append(
+                    f"- `{token}`: chat-launched jobs use this pipeline's valve "
+                    f"`{vval}` (engine runs `{model}`) — `/model set {token} {model}` to re-sync")
+        out = "**Current Model Assignments (engine truth)**\n\n" + "\n".join(lines)
+        if diverged:
+            out += "\n\n**⚠️ Valve divergence:**\n" + "\n".join(diverged)
+        return out
 
     def _model_available(self) -> str:
         try:
@@ -7155,48 +7198,110 @@ class Pipeline:
         model_tag = parts[3]
         role_key = role_input if role_input.startswith("model_") else f"model_{role_input}"
 
-        if role_key not in self._MODEL_ROLES:
-            valid = ", ".join(r.replace("model_", "") for r in self._MODEL_ROLES)
+        known = set(self._MODEL_ROLES) | set(self._SERVER_ONLY_ROLES)
+        if role_key not in known:
+            valid = ", ".join(sorted(r.replace("model_", "") for r in known))
             return f"Unknown role: `{role_input}`\nValid roles: {valid}"
 
         if role_key in self._SINGLETON_ROLES:
-            env_var = role_key.upper()
+            env_var = self._orch_role(role_key).upper()
             return (f"Role `{role_input}` is config-locked; set `{env_var}` env var "
                     f"and restart the container.")
 
-        if role_key != "model_reranker":
-            try:
-                r = _HTTP_SESSION.get(f"{self.valves.ollama_url}/api/tags",
-                                 timeout=self.valves.request_timeout)
-                r.raise_for_status()
-                available = {m["name"] for m in r.json().get("models", [])}
-                available_bare = {n.replace(":latest", "") for n in available}
-                if model_tag not in available and model_tag not in available_bare:
-                    return (f"Model `{model_tag}` not found on Ollama.\n"
-                            f"Run `/model available` to see available models.")
-            except requests.exceptions.ConnectionError:
-                return "Cannot reach Ollama to validate. Model not set."
-            except Exception as e:
-                return f"Validation error: {e}"
+        try:
+            r = _HTTP_SESSION.get(f"{self.valves.ollama_url}/api/tags",
+                             timeout=self.valves.request_timeout)
+            r.raise_for_status()
+            available = {m["name"] for m in r.json().get("models", [])}
+            available_bare = {n.replace(":latest", "") for n in available}
+            if model_tag not in available and model_tag not in available_bare:
+                return (f"Model `{model_tag}` not found on Ollama.\n"
+                        f"Run `/model available` to see available models.")
+        except requests.exceptions.ConnectionError:
+            return "Cannot reach Ollama to validate. Model not set."
+        except Exception as e:
+            return f"Validation error: {e}"
 
-        old = getattr(self.valves, role_key)
-        setattr(self.valves, role_key, model_tag)
-        result = f"**Updated `{role_key.replace('model_','')}`**\n`{old}` -> `{model_tag}`"
-        result += "\n\n_(session-only; container restart reverts to env/defaults)_"
-        return result
+        # §17.813 (audit M13) — the set is ENGINE-WIDE: persisted via the
+        # orchestrator's model-management API (PUT /models/roles/{role}, which
+        # re-validates and generate-probes cloud tags). The old behavior wrote
+        # only this pipeline's valve — an engine-blind knob that silently
+        # applied to chat-launched jobs alone while reporting "Updated".
+        try:
+            resp = _HTTP_SESSION.put(
+                f"{self.valves.orchestrator_url}/models/roles/{self._orch_role(role_key)}",
+                json={"model": model_tag},
+                headers=self._auth_headers(),
+                timeout=max(int(self.valves.request_timeout), 90),  # cloud probe
+            )
+        except requests.exceptions.RequestException as e:
+            return f"Cannot reach the engine to set the model: {e}"
+        if resp.status_code == 404:
+            return ("Engine lacks the model-management API (`/models/roles`) — "
+                    "update + restart the orchestrator.")
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except ValueError:
+                detail = resp.text
+            return f"Engine rejected the change: {detail}"
+
+        old = getattr(self.valves, role_key, "(engine default)")
+        if hasattr(self.valves, role_key):
+            # Chat-launched jobs ship the valve roles as per-job overrides —
+            # keep the valve in lockstep so those jobs match the engine.
+            setattr(self.valves, role_key, model_tag)
+        return (f"**Updated `{role_key.replace('model_','')}` engine-wide**\n"
+                f"`{old}` -> `{model_tag}`\n\n"
+                "_(persisted — survives restarts; applies to engine work and "
+                "chat-launched jobs)_")
 
     def _model_reset(self) -> str:
+        # §17.813 (audit M13) — reset clears the ENGINE's persisted overrides
+        # (DELETE /models/roles/{role} → revert to env defaults) AND restores
+        # this pipeline's valves, so both truth sources land on defaults.
+        cleared, errors = [], []
+        try:
+            r = _HTTP_SESSION.get(
+                f"{self.valves.orchestrator_url}/models/roles",
+                headers=self._auth_headers(), timeout=self.valves.request_timeout,
+            )
+            r.raise_for_status()
+            overridden = [row["role"] for row in r.json().get("roles", [])
+                          if row.get("source") == "override"]
+        except Exception as e:
+            overridden = []
+            errors.append(f"engine unreachable (`/models/roles`): {str(e)[:120]}")
+        for role in overridden:
+            try:
+                dr = _HTTP_SESSION.delete(
+                    f"{self.valves.orchestrator_url}/models/roles/{role}",
+                    headers=self._auth_headers(), timeout=self.valves.request_timeout,
+                )
+                if dr.status_code < 400:
+                    cleared.append(role.replace("model_", ""))
+                else:
+                    errors.append(f"{role}: HTTP {dr.status_code}")
+            except requests.exceptions.RequestException as e:
+                errors.append(f"{role}: {e}")
         default_valves = self.Valves()
-        changes = []
+        valve_changes = []
         for role in self._MODEL_ROLES:
             current = getattr(self.valves, role)
             default = getattr(default_valves, role)
             if current != default:
                 setattr(self.valves, role, default)
-                changes.append(f"- `{role.replace('model_','')}`: `{current}` -> `{default}`")
-        if not changes:
+                valve_changes.append(f"- `{role.replace('model_','')}`: `{current}` -> `{default}`")
+        if not cleared and not valve_changes and not errors:
             return "All roles are already at default values."
-        return "**Reset to defaults:**\n\n" + "\n".join(changes)
+        out = []
+        if cleared:
+            out.append("**Engine overrides cleared:** " + ", ".join(f"`{c}`" for c in cleared))
+        if valve_changes:
+            out.append("**Reset to defaults:**\n\n" + "\n".join(valve_changes))
+        if errors:
+            out.append("**Errors:**\n" + "\n".join(f"- {e}" for e in errors))
+        return "\n\n".join(out)
 
     def _model_probe(self) -> str:
         ok, msg = self._probe_embedder_dim()
@@ -7218,8 +7323,9 @@ class Pipeline:
 | `/model profile off` | Turn the active profile off (revert everything) |
 | `/model help` | Show this message |
 
-**Roles:** general, verifier, coder, embedder, reranker, router, fallback, cloud_alt
+**Roles:** general, verifier, coder, embedder, reranker, router, fallback, cloud_alt, cloud_heavy, triage, research_extract
 **Example:** `/model set general qwen3:8b`
+**Persistence:** `/model set` applies engine-wide via the orchestrator (survives restarts)
 **Quick mode:** `/model profile quick` (persistent, engine-wide) or `/go … --quick` (one job)"""
 
     # ------------------------------------------------------------------
