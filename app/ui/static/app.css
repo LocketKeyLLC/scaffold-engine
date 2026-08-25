@@ -174,8 +174,13 @@ a:hover { text-decoration: underline; }
 }
 .gate-logo { width: 56px; height: 56px; }
 .gate-title { margin: 8px 0 2px; font-size: 22px; }
-.gate-sub { margin: 0 0 10px; color: var(--text-dim); }
-.gate-desc { margin: 0 0 20px; color: var(--text-faint); font-size: var(--fs-sm); line-height: 1.55; text-align: left; }
+.gate-sub { margin: 0 0 14px; color: var(--text-dim); }
+/* Step-by-step connect instructions (mirrors the welcome-card steps). */
+.gate-steps { display: flex; flex-direction: column; gap: var(--sp-3); margin: 0 0 18px; text-align: left; }
+.gate-step { display: flex; align-items: flex-start; gap: var(--sp-3); }
+.gate-step-n { flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: var(--fw-bold); font-size: var(--fs-xs); }
+.gate-step-t { font-weight: var(--fw-semi); font-size: var(--fs-sm); }
+.gate-step-b { color: var(--text-dim); font-size: var(--fs-xs); line-height: 1.5; margin-top: 1px; }
 .gate-status { min-height: 20px; margin-top: 12px; color: var(--warn); font-size: 13px; }
 .gate-hint { margin-top: 16px; color: var(--text-faint); font-size: 12px; }
 

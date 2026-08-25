@@ -41,6 +41,20 @@ let outlet = null; // the content container the active view renders into
 let cleanup = () => {}; // teardown hook returned by the active view
 
 // ── Auth / connect gate ───────────────────────────────────────────────
+function gateStep(n, title, body) {
+  return el(
+    "div",
+    { class: "gate-step" },
+    el("div", { class: "gate-step-n", text: String(n) }),
+    el(
+      "div",
+      {},
+      el("div", { class: "gate-step-t", text: title }),
+      el("div", { class: "gate-step-b", text: body })
+    )
+  );
+}
+
 function connectGate(message) {
   const input = el("input", {
     type: "password",
@@ -92,20 +106,19 @@ function connectGate(message) {
         el("img", { class: "gate-logo", src: "/ui/static/logo.svg", alt: "" }),
         el("h1", { class: "gate-title", text: "Scaffold Engine" }),
         el("p", { class: "gate-sub", text: "Connect to the orchestrator" }),
-        el("p", {
-          class: "gate-desc",
-          text:
-            "This console drives your self-hosted orchestration engine: refine an idea into a brief, " +
-            "approve the generated plan, then watch it execute node-by-node — with research, knowledge, " +
-            "and model management alongside. Connect with your operator API key (SCAFFOLD_API_KEY in the " +
-            "server's .env).",
-        }),
+        el(
+          "div",
+          { class: "gate-steps" },
+          gateStep(1, "Find your key", "On the server, open the .env file and copy the SCAFFOLD_API_KEY value."),
+          gateStep(2, "Connect", "Paste the key below and press Connect. It stays in this browser only."),
+          gateStep(3, "Go build", "First time here? A quick wizard will help you connect your models — then describe an idea and watch it run.")
+        ),
         input,
         btn,
         status,
         el("p", {
           class: "gate-hint",
-          text: "The key is stored in this browser only and sent as X-API-Key on each request.",
+          text: "Sent as the X-API-Key header on each request.",
         })
       )
     )
