@@ -127,11 +127,18 @@ _TRACKER_SYSTEM = (
 )
 
 
-async def assess_progress(*, session_id: str, message: str, db) -> dict:
+async def assess_progress(*, session_id: str, message: str, db,
+                          node_key: str | None = None,
+                          history: list[dict] | None = None) -> dict:
     """§17.754 — reconcile the plan pointer with where the operator actually is.
 
-    Returns ``{verdict, current_step_done, covered_by_node, new_step_title,
-    new_step_request, confidence, reason}``. Fail-soft: a disabled valve, a
+    Returns ``{verdict, node_key, current_step_done, covered_by_node,
+    new_step_title, new_step_request, confidence, reason}`` — ``node_key`` is
+    the step the tracker actually assessed (§17.812, audit I-3/M14: the caller's
+    step when it names a real node, else the session pointer), so the caller
+    retires the step DISCUSSED, not whatever the pointer drifted to cross-chat.
+    ``history`` (same-chat OWUI turns) grounds the judgment when supplied; the
+    durable transcript is the fallback. Fail-soft: a disabled valve, a
     non-active session, a model error, or an unparsed tool call all return
     ``{verdict: 'on_step', confidence: 0.0, reason: <why>}`` so the caller simply
     proceeds with normal handling — the tracker never blocks or mutates on doubt.
@@ -159,6 +166,11 @@ async def assess_progress(*, session_id: str, message: str, db) -> dict:
                  "ORDER BY execution_order NULLS LAST, node_key"),
             {"jid": job_id},
         )).mappings().all()
+        # §17.812 (audit I-3/M14) — ground on the step the caller is actually
+        # discussing when it names a real node; unknown/stale keys fall back to
+        # the session pointer so a bad caller hint can't derail the assessment.
+        if node_key and any(n["node_key"] == node_key for n in nodes):
+            nk = node_key
         if not nk or not nodes:
             return {**_NOOP, "reason": "no_current_step"}
         cur = next((n for n in nodes if n["node_key"] == nk), None)
@@ -173,7 +185,7 @@ async def assess_progress(*, session_id: str, message: str, db) -> dict:
         facts = assist_guide.render_facts_block(
             assist_agent._environment_from_metadata(sess.get("metadata")))
         history = await assist_agent._history_or_transcript(
-            history=None, session_id=session_id, db=db, exclude_tail=message)
+            history=history, session_id=session_id, db=db, exclude_tail=message)
         convo = assist_agent._conversation_block_for(history)
 
         user = (
@@ -207,6 +219,7 @@ async def assess_progress(*, session_id: str, message: str, db) -> dict:
         return {**_NOOP, "reason": "tracker_unparsed"}
     out = {**_NOOP}
     out.update({
+        "node_key": nk,   # §17.812 — the step this verdict is ABOUT
         "verdict": args["verdict"],
         "current_step_done": bool(args.get("current_step_done")),
         "covered_by_node": str(args.get("covered_by_node") or "").strip(),
