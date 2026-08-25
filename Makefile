@@ -158,6 +158,15 @@ ci: _ensure_dev ## Run CI-safe tests (no live services; dev image) + bench regre
 	@printf '\n--- Audit I4: bench regression gates ---\n'
 	$(MAKE) bench-check
 
+test-ui: ## §17.814 — SPA JS unit tests (node --test; dev-only, zero runtime deps). Uses host node when present, else a digest-pinned node container.
+	@if command -v node >/dev/null 2>&1; then \
+		node --test 'tests/ui/**/*.test.mjs'; \
+	else \
+		docker run --rm -v $$(pwd):/code -w /code \
+			node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 \
+			node --test 'tests/ui/**/*.test.mjs'; \
+	fi
+
 ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift lint-migrations ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The 5 prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
 	@printf '\033[1m▶ static-scan inventory tests (host pytest, --noconftest)\033[0m\n'
 	@if command -v pytest >/dev/null 2>&1; then \
