@@ -2212,6 +2212,41 @@ def _track_progress(
         return None
 
 
+def _tracker_reconcile(pipe, session_id: str, msg: str, nk: str, history, chat_id):
+    """§17.754/§17.812 — consult the server-side progress tracker and PRESENT
+    its outcome. Yields the rendered turn and returns True when the tracker
+    handled it (step added / session finalized / step retired-and-advanced);
+    returns False on proceed/error so the caller falls through to its normal
+    handling. Shared by the cascade's tracker block and the unified dispatch
+    (audit I-2) so both paths retire/finalize identically."""
+    track = _track_progress(pipe, session_id, msg, nk, history)
+    taction = (track or {}).get("action")
+    if taction == "added_step":
+        step = track.get("step") or {}
+        title = (step.get("title") or "a new step").strip()
+        yield (f"➕ It looks like you've moved past the current step onto "
+               f"something the plan didn't cover — I've added **{title}** and "
+               f"we'll do it now, then pick up where we were.\n\n")
+        yield from assist_next(pipe, session_id, chat_id=chat_id)
+        return True
+    if taction == "finalized":
+        # §17.766 — that was the LAST step; retiring it finalized the whole
+        # session (deliverable compiled). Show the completion + result
+        # instead of calling assist_next (which would say "no step ready").
+        yield ("🎉 That was the last step — you've completed the whole plan! "
+               "Here's what you built:\n\n")
+        yield from assist_done(pipe, session_id, chat_id=chat_id)
+        return True
+    if taction == "advanced":
+        # §17.754 (#2) — the tracker confirmed you've finished this step;
+        # the prior step was retired, so present the next one.
+        yield ("✅ Looks like you've finished that step — moving on to what's "
+               "next.\n\n")
+        yield from assist_next(pipe, session_id, chat_id=chat_id)
+        return True
+    return False
+
+
 def _decide_call(pipe, session_id: str, msg: str, node_key, history) -> dict | None:
     """§17.771 (Phase 2) — POST /assist/{sid}/decide → the unified Decision, or
     None on 404 (server valve off) / error. Fail-soft: any hiccup returns None so
@@ -2272,6 +2307,14 @@ def _dispatch_decision(
         action = "fix"
         decision = {**decision, "action": "fix", "error_text": msg.strip()}
 
+    # §17.812 (audit C2 remainder) — §17.707 checklist gate, restored for the
+    # unified path (it sat below the dispatch-and-return, so "what do you need
+    # from me?" became an ordinary question and the live operator-input
+    # checklist was unreachable). Same high-precision phrase match as the
+    # cascade; a shell paste never matches it, so this can't steal evidence.
+    if action != "fix" and _looks_like_checklist_request(msg):
+        yield from assist_checklist_cmd(pipe, session_id); return
+
     # Plan-affecting → surface-and-ask re-plan (server assess_note_impact).
     if action == "note" or impact == "reshape":
         kind = decision.get("note_kind") or ("decision" if impact == "reshape" else "note")
@@ -2300,6 +2343,20 @@ def _emit_decision_action(
     """§17.771 — the action -> handler branches, extracted so plan_impact=
     surface can append a footer AFTER the action runs (the branches return)."""
     if action == "advance":
+        # §17.812 (audit I-2) — parity with the cascade's §17.754/§17.766
+        # tracker path: a substantive "done, that worked — what's next" turn
+        # must RETIRE the in-flight step server-side (and finalize the session
+        # when it was the last one) before presenting the next; assist_next
+        # alone re-presents the same claimed step forever. Bare verbs ("next")
+        # skip the tracker via the same word gate the cascade uses, and a
+        # shell paste is submit/fix territory, never a tracker advance.
+        if (nk and getattr(pipe.valves, "assist_progress_tracker", True)
+                and not _looks_like_shell_evidence(msg)
+                and _word_count(msg) >= getattr(pipe.valves, "assist_tracker_min_words", 5)):
+            handled = yield from _tracker_reconcile(
+                pipe, session_id, msg, nk, history, chat_id)
+            if handled:
+                return
         yield from assist_next(pipe, session_id, chat_id=chat_id); return
     if action == "skip":
         if not nk:
@@ -2354,6 +2411,15 @@ def _emit_decision_action(
     if action == "set_verbosity":
         yield from assist_env_cmd(
             pipe, session_id, verbosity=_verbosity_from_message(msg), chat_id=chat_id,
+        ); return
+    # §17.812 (audit C2 remainder) — §17.733/763 help→research, restored for
+    # the unified path: a genuine how-to / help request the decision read as a
+    # bare `question` must reach research (actionable steps), not the step
+    # re-render. Same deterministic phrase gates as the cascade.
+    if _looks_like_howto_question(msg) or _looks_like_help_request(msg):
+        yield from assist_research_cmd(
+            pipe, session_id, msg.strip(), node_key=nk, chat_id=chat_id,
+            history=history,
         ); return
     # question (default) — re-render / clarify the current step.
     yield from assist_chat_turn(
@@ -2518,30 +2584,9 @@ def assist_nl_turn(
             and _word_count(msg) >= getattr(pipe.valves, "assist_tracker_min_words", 5)):
         _tnk = _recall_node_key(pipe, chat_id, node_key)
         if _tnk:
-            track = _track_progress(pipe, session_id, msg, _tnk, history)
-            _taction = (track or {}).get("action")
-            if _taction == "added_step":
-                step = track.get("step") or {}
-                title = (step.get("title") or "a new step").strip()
-                yield (f"➕ It looks like you've moved past the current step onto "
-                       f"something the plan didn't cover — I've added **{title}** and "
-                       f"we'll do it now, then pick up where we were.\n\n")
-                yield from assist_next(pipe, session_id, chat_id=chat_id)
-                return
-            if _taction == "finalized":
-                # §17.766 — that was the LAST step; retiring it finalized the whole
-                # session (deliverable compiled). Show the completion + result
-                # instead of calling assist_next (which would say "no step ready").
-                yield ("🎉 That was the last step — you've completed the whole plan! "
-                       "Here's what you built:\n\n")
-                yield from assist_done(pipe, session_id, chat_id=chat_id)
-                return
-            if _taction == "advanced":
-                # §17.754 (#2) — the tracker confirmed you've finished this step;
-                # the prior step was retired, so present the next one.
-                yield ("✅ Looks like you've finished that step — moving on to what's "
-                       "next.\n\n")
-                yield from assist_next(pipe, session_id, chat_id=chat_id)
+            handled = yield from _tracker_reconcile(
+                pipe, session_id, msg, _tnk, history, chat_id)
+            if handled:
                 return
 
     # §17.733/§17.763/§17.765 — help→research + the fuzzy §17.693 re-plan, reached

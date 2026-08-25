@@ -172,3 +172,136 @@ def test_dispatch_prefers_decision_node_key(pipe):
             chat_id="c1", history=[]))
     recall.assert_not_called()
     assert submit.call_args[0][2] == "N9"  # assist_submit(pipe, sid, nk, ev, ...)
+
+
+# ── §17.812 (audit I-2 / C2 remainder) — unified-path parity gates ────────────
+
+def test_advance_consults_tracker_and_retires(pipe):
+    """A substantive "done, what's next" advance goes through /track so the
+    in-flight step is retired SERVER-side; the tracker's `advanced` outcome
+    renders the ✅ banner then presents the next step (audit I-2)."""
+    decision = {"action": "advance", "confidence": "high", "plan_impact": "none",
+                "node_key": "T3"}
+    nxt = MagicMock(return_value=["<next>"])
+    track = MagicMock(return_value={"action": "advanced", "retired_prior_step": "T3"})
+    with patch.object(_vendor, "_track_progress", track), \
+         patch.object(_vendor, "assist_next", nxt):
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="ok that step is finished and it all works",
+            node_key="T3", chat_id="c1", history=[]))
+    track.assert_called_once()
+    assert track.call_args[0][3] == "T3"  # _track_progress(pipe, sid, msg, nk, …)
+    assert nxt.called
+    assert "finished that step" in out and "<next>" in out
+
+
+def test_advance_tracker_finalized_reaches_completion(pipe):
+    """End-to-end via the unified path ONLY (audit I-2): the tracker finalizing
+    on the last step renders the 🎉 completion + deliverable (assist_done), not
+    a confusing "no step ready" from assist_next."""
+    decision = {"action": "advance", "confidence": "high", "plan_impact": "none",
+                "node_key": "T9"}
+    done = MagicMock(return_value=["<done>"])
+    nxt = MagicMock(return_value=["<next>"])
+    with patch.object(_vendor, "_track_progress",
+                      MagicMock(return_value={"action": "finalized"})), \
+         patch.object(_vendor, "assist_done", done), \
+         patch.object(_vendor, "assist_next", nxt):
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="that last step is done and verified working",
+            node_key="T9", chat_id="c1", history=[]))
+    assert done.called and not nxt.called
+    assert "completed the whole plan" in out and "<done>" in out
+
+
+def test_advance_tracker_added_step_presents_it(pipe):
+    """Tracker `added_step` outcome renders the ➕ banner + the new step."""
+    decision = {"action": "advance", "confidence": "high", "plan_impact": "none",
+                "node_key": "T3"}
+    nxt = MagicMock(return_value=["<next>"])
+    track = MagicMock(return_value={
+        "action": "added_step", "step": {"title": "Fix the bridge"}})
+    with patch.object(_vendor, "_track_progress", track), \
+         patch.object(_vendor, "assist_next", nxt):
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="I moved on and got the bridge half working",
+            node_key="T3", chat_id="c1", history=[]))
+    assert "Fix the bridge" in out and "<next>" in out
+
+
+def test_advance_bare_verb_skips_tracker(pipe):
+    """A bare "next" goes straight to assist_next — no tracker LLM call (the
+    same word gate the cascade uses)."""
+    decision = {"action": "advance", "confidence": "high", "plan_impact": "none",
+                "node_key": "T3"}
+    track = MagicMock()
+    nxt = MagicMock(return_value=["<next>"])
+    with patch.object(_vendor, "_track_progress", track), \
+         patch.object(_vendor, "assist_next", nxt):
+        "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="next", node_key="T3", chat_id="c1",
+            history=[]))
+    track.assert_not_called()
+    assert nxt.called
+
+
+def test_advance_tracker_proceed_falls_through_to_next(pipe):
+    """Tracker says proceed (or errors → None): fall through to assist_next
+    with no banner — fail-soft, same as the cascade."""
+    decision = {"action": "advance", "confidence": "high", "plan_impact": "none",
+                "node_key": "T3"}
+    nxt = MagicMock(return_value=["<next>"])
+    with patch.object(_vendor, "_track_progress",
+                      MagicMock(return_value={"action": "proceed"})), \
+         patch.object(_vendor, "assist_next", nxt):
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="ok that part of the work is behind us now",
+            node_key="T3", chat_id="c1", history=[]))
+    assert nxt.called
+    assert out == "<next>"
+
+
+def test_question_howto_reroutes_to_research(pipe):
+    """§17.733/763 restored on the unified path: a how-to the decision read as
+    a bare `question` reaches research, not the step re-render."""
+    decision = {"action": "question", "confidence": "high", "plan_impact": "none",
+                "node_key": "T3"}
+    research = MagicMock(return_value=["<research>"])
+    chat = MagicMock(return_value=["<chat>"])
+    with patch.object(_vendor, "assist_research_cmd", research), \
+         patch.object(_vendor, "assist_chat_turn", chat):
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="how do I set up the bridge interface?",
+            node_key="T3", chat_id="c1", history=[]))
+    assert research.called and not chat.called
+    assert "<research>" in out
+
+
+def test_question_plain_still_chats(pipe):
+    """A plain clarification stays on assist_chat_turn (no over-trigger)."""
+    decision = {"action": "question", "confidence": "high", "plan_impact": "none",
+                "node_key": "T3"}
+    research = MagicMock(return_value=["<research>"])
+    chat = MagicMock(return_value=["<chat>"])
+    with patch.object(_vendor, "assist_research_cmd", research), \
+         patch.object(_vendor, "assist_chat_turn", chat):
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="can you show that step again please",
+            node_key="T3", chat_id="c1", history=[]))
+    assert chat.called and not research.called
+
+
+def test_checklist_request_reaches_checklist(pipe):
+    """§17.707 restored on the unified path: "what do you need from me?" hits
+    the live operator-input checklist, whatever the decision proposed."""
+    decision = {"action": "question", "confidence": "high", "plan_impact": "none"}
+    chk = MagicMock(return_value=["<checklist>"])
+    chat = MagicMock(return_value=["<chat>"])
+    with patch.object(_vendor, "_recall_node_key", return_value="T3"), \
+         patch.object(_vendor, "assist_checklist_cmd", chk), \
+         patch.object(_vendor, "assist_chat_turn", chat):
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="what do you need from me right now?",
+            node_key="T3", chat_id="c1", history=[]))
+    assert chk.called and not chat.called
+    assert "<checklist>" in out
