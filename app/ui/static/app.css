@@ -821,3 +821,7 @@ select.input:focus-visible,
 .traces-pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 340px; overflow-y: auto; background: var(--bg-inset, #f5f7fb); padding: 8px; border-radius: 6px; }
 .alerts-h2 { margin: 16px 0 8px; font-size: 15px; }
 .alerts-msg { font-size: 13px; }
+
+/* §17.816 — costs view */
+.costs-tiles { gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.costs-h2 { margin: 18px 0 8px; font-size: 15px; }
