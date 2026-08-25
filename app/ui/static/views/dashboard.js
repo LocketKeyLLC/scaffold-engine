@@ -256,7 +256,7 @@ export default function dashboard(container) {
     return el(
       "div",
       { class: "card card-pad welcome-card" },
-      el("div", { class: "welcome-logo", text: "🧬" }),
+      el("img", { class: "welcome-logo", src: "/ui/static/logo.svg", alt: "" }),
       el("h2", { class: "welcome-title", text: "Welcome to Scaffold Engine" }),
       el("p", {
         class: "welcome-sub dim",

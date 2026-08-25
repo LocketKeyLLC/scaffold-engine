@@ -172,9 +172,10 @@ a:hover { text-decoration: underline; }
   padding: 32px;
   text-align: center;
 }
-.gate-logo { font-size: 44px; }
+.gate-logo { width: 56px; height: 56px; }
 .gate-title { margin: 8px 0 2px; font-size: 22px; }
-.gate-sub { margin: 0 0 20px; color: var(--text-dim); }
+.gate-sub { margin: 0 0 10px; color: var(--text-dim); }
+.gate-desc { margin: 0 0 20px; color: var(--text-faint); font-size: var(--fs-sm); line-height: 1.55; text-align: left; }
 .gate-status { min-height: 20px; margin-top: 12px; color: var(--warn); font-size: 13px; }
 .gate-hint { margin-top: 16px; color: var(--text-faint); font-size: 12px; }
 
@@ -202,7 +203,7 @@ a:hover { text-decoration: underline; }
   font-weight: 600;
   font-size: 16px;
 }
-.brand-logo { font-size: 20px; }
+.brand-logo { width: 22px; height: 22px; display: block; }
 .nav { display: flex; flex-direction: column; gap: 2px; flex: 1; overflow-y: auto; min-height: 0; }
 /* Grouped nav (UI design phase): section label + its links. */
 .nav-group { display: flex; flex-direction: column; gap: 1px; }
@@ -489,7 +490,7 @@ select.input:focus-visible,
 
 /* First-run onboarding card */
 .welcome-card { max-width: 640px; margin: 8px auto; text-align: center; display: flex; flex-direction: column; align-items: center; gap: var(--sp-2); padding: var(--sp-8); }
-.welcome-logo { font-size: 44px; }
+.welcome-logo { width: 52px; height: 52px; }
 .welcome-title { margin: 0; font-size: var(--fs-xl); font-weight: 650; }
 .welcome-sub { margin: 0 0 var(--sp-3); max-width: 48ch; }
 .welcome-steps { display: flex; flex-direction: column; gap: var(--sp-3); width: 100%; text-align: left; margin-bottom: var(--sp-2); }
@@ -789,7 +790,7 @@ select.input:focus-visible,
     border-bottom: 1px solid var(--border);
     font-weight: var(--fw-semi);
   }
-  .mobile-topbar .brand-logo { font-size: 20px; }
+  .mobile-topbar .brand-logo { width: 22px; height: 22px; display: block; }
   .hamburger {
     display: inline-flex;
     align-items: center;

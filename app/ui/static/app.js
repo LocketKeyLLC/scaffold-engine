@@ -89,9 +89,17 @@ function connectGate(message) {
       el(
         "div",
         { class: "gate-card card" },
-        el("div", { class: "gate-logo", text: "🧬" }),
+        el("img", { class: "gate-logo", src: "/ui/static/logo.svg", alt: "" }),
         el("h1", { class: "gate-title", text: "Scaffold Engine" }),
         el("p", { class: "gate-sub", text: "Connect to the orchestrator" }),
+        el("p", {
+          class: "gate-desc",
+          text:
+            "This console drives your self-hosted orchestration engine: refine an idea into a brief, " +
+            "approve the generated plan, then watch it execute node-by-node — with research, knowledge, " +
+            "and model management alongside. Connect with your operator API key (SCAFFOLD_API_KEY in the " +
+            "server's .env).",
+        }),
         input,
         btn,
         status,
@@ -143,7 +151,7 @@ function buildChrome() {
     el(
       "div",
       { class: "brand" },
-      el("span", { class: "brand-logo", text: "🧬" }),
+      el("img", { class: "brand-logo", src: "/ui/static/logo.svg", alt: "" }),
       el("span", { class: "brand-name", text: "Scaffold" })
     ),
     el("nav", { class: "nav" }, ...navGroups),
@@ -199,7 +207,7 @@ function buildChrome() {
     "div",
     { class: "mobile-topbar" },
     hamburger,
-    el("span", { class: "brand-logo", text: "🧬" }),
+    el("img", { class: "brand-logo", src: "/ui/static/logo.svg", alt: "" }),
     el("span", { class: "brand-name", text: "Scaffold" })
   );
   // Tapping a destination navigates → close the drawer; Escape closes too.
