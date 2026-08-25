@@ -22,6 +22,7 @@ the integration suite is small (~18 tests) so the overhead is negligible.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -31,6 +32,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import async_session, engine
 
 
+def pytest_collection_modifyitems(items):
+    """§17.828 (plan 7.5) — auto-mark everything in this directory `integration`.
+
+    Cloud CI (test.yml) deselects these with ``-m "not integration"``; the
+    marker replaces the old ``-k "not integration"`` node-id substring match,
+    which only worked because the directory happens to be named
+    "integration". This hook sees the whole session's items, so filter to
+    files under this directory.
+    """
+    here = str(Path(__file__).parent)
+    for item in items:
+        if str(item.fspath).startswith(here):
+            item.add_marker(pytest.mark.integration)
 
 
 @pytest_asyncio.fixture(autouse=True)

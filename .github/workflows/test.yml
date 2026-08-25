@@ -38,8 +38,10 @@ env:
   TOKENIZERS_PARALLELISM: "false"
   PYTHONPATH: /code
   # §17.555 — app/ coverage floor for the unit-test job. 77 = ~4-5 pts under
-  # the measured baselines (81% in this exact `-k "not integration"` scope,
-  # 82% for `-m "not validate"`); headroom for churn, fails on a real drop.
+  # the measured baselines (81% in this scope, 82% for `-m "not validate"`);
+  # headroom for churn, fails on a real drop. (§17.828: the scope selector
+  # changed from `-k "not integration"` to the registered marker — verified
+  # byte-identical selection, 103 deselected either way.)
   COVERAGE_MIN: "77"
 
 jobs:
@@ -238,11 +240,40 @@ jobs:
             -v "$PWD/pyproject.toml:/code/pyproject.toml:ro" \
             scaffold-orchestrator:ci \
             pytest tests/ --timeout=30 -v \
-              -k "not integration" \
+              -m "not integration" \
               --ignore-glob='*/test_scaffold_router_*' \
               --cov=app --cov-branch \
               --cov-report=term-missing:skip-covered \
-              --cov-fail-under=${COVERAGE_MIN}
+              --cov-fail-under=${COVERAGE_MIN} 2>&1 | tee /tmp/unit-tests.out
+        # §17.828 (plan 7.5) — `-m "not integration"` replaces the fragile
+        # `-k "not integration"` node-id SUBSTRING match: the marker is
+        # registered in pyproject, auto-applied to tests/integration/ by its
+        # conftest, and explicit in tests/test_integration.py. Selection
+        # verified byte-identical (103 deselected either way) — but now a
+        # test merely NAMED *integration* isn't silently dropped, and the
+        # integration set can't leak in via a rename. The tee feeds the
+        # skip-count step below; explicit `shell: bash` (unlike the implicit
+        # default) runs with -o pipefail, so pytest's exit code still fails
+        # the step through the pipe.
+        shell: bash
+
+      # §17.828 (plan 7.5) — same skip-count watch as ci.yml's smoke lane:
+      # skips grow silently (collect_ignore additions, module-level skips,
+      # environment probes going dark) and nothing else watches the number.
+      # Observed baseline: 14 skipped (2026-08-25). Loose threshold — catches
+      # a JUMP, not +1.
+      - name: Report skip count (§17.828)
+        if: always()
+        env:
+          SKIP_ALERT_MAX: "25"
+        run: |
+          line=$(grep -oE '[0-9]+ passed[^=]*' /tmp/unit-tests.out | tail -1 || true)
+          echo "### unit-tests pytest result" >> "$GITHUB_STEP_SUMMARY"
+          echo "${line:-no pytest summary line found}" >> "$GITHUB_STEP_SUMMARY"
+          skipped=$(echo "$line" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' || true)
+          if [ "${skipped:-0}" -gt "$SKIP_ALERT_MAX" ]; then
+            echo "::warning title=unit-tests skip count jumped::${skipped} tests skipped (baseline 14, alert >${SKIP_ALERT_MAX}). Check for new collect_ignore entries / module-level skips."
+          fi
 
       # §17.826 (audit M11, plan 7.1) — the OWUI pipelines lane, run the way the
       # Makefile declares CORRECT: --noconftest. tests/conftest.py eager-loads
