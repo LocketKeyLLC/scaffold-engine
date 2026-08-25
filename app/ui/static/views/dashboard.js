@@ -128,12 +128,115 @@ export default function dashboard(container) {
   async function load() {
     if (disposed) return;
     try {
-      const [status, work] = await Promise.all([api.get("/status"), api.get("/work")]);
+      // Health + roles are enrichment — fail-soft to null so a degraded
+      // orchestrator (or a non-admin key on /models/roles) still renders
+      // the core dashboard.
+      const [status, work, health, roles] = await Promise.all([
+        api.get("/status"),
+        api.get("/work"),
+        api.health().catch(() => null),
+        api.get("/models/roles").catch(() => null),
+      ]);
       if (disposed) return;
-      render(status, work);
+      render(status, work, health, roles);
     } catch (e) {
       if (!disposed) mount(outlet, errorPanel(e, () => load()));
     }
+  }
+
+  // Quick actions — the "what do I do next" entry points.
+  function quickActions(counts) {
+    const awaiting = counts.awaiting_confirmation || 0;
+    return el(
+      "div",
+      { class: "quick-actions" },
+      el("a", { class: "btn btn-primary", href: "#/new", text: "＋ New idea" }),
+      el(
+        "a",
+        { class: "btn", href: "#/approvals" },
+        "⏻ Approvals",
+        awaiting ? el("span", { class: "count-pill", text: String(awaiting) }) : null
+      ),
+      el("a", { class: "btn", href: "#/research", text: "◎ Research" }),
+      el("a", { class: "btn", href: "#/assist", text: "✦ Assistant" })
+    );
+  }
+
+  // Persistent setup checklist — rendered while /health carries advisory
+  // warnings (unpulled role models, redis down, …); disappears when green.
+  function setupChecklist(health) {
+    const warns = health?.warnings || [];
+    if (!warns.length) return null;
+    return el(
+      "div",
+      { class: "card card-pad setup-checklist" },
+      el(
+        "div",
+        { class: "setup-checklist-head" },
+        el("span", { class: "setup-checklist-title", text: `Setup checklist — ${warns.length} item${warns.length === 1 ? "" : "s"} need attention` }),
+        el("span", { class: "spacer" }),
+        el("a", { class: "btn btn-sm", href: "#/setup", text: "Open Setup" })
+      ),
+      el("ul", { class: "setup-checklist-items" }, ...warns.map((w) => el("li", { text: w })))
+    );
+  }
+
+  // System row — per-service health dots + current model-role bindings.
+  function systemSection(health, roles) {
+    const cards = [];
+    const checks = Object.entries(health?.checks || {}).filter(
+      ([, c]) => c && typeof c === "object" && typeof c.status === "string"
+    );
+    if (checks.length) {
+      cards.push(
+        el(
+          "div",
+          { class: "card card-pad" },
+          el("div", { class: "section-head" }, el("h2", { text: "Services" })),
+          el(
+            "div",
+            { class: "health-items" },
+            ...checks.map(([name, c]) =>
+              el(
+                "span",
+                { class: "health-item" },
+                // Pass the real status through: "unknown" must render neutral
+                // (CSS default gray), not a false-alarm red. Only a hard
+                // "down"/"error" goes red.
+                el("span", { class: "health-dot", dataset: { state: ["up", "degraded", "unknown"].includes(c.status) ? c.status : "down" } }),
+                name,
+                c.latency_ms != null ? el("span", { class: "faint", text: `${c.latency_ms} ms` }) : null
+              )
+            )
+          )
+        )
+      );
+    }
+    const switchable = (roles?.roles || []).filter((r) => r.switchable);
+    if (switchable.length) {
+      cards.push(
+        el(
+          "div",
+          { class: "card card-pad" },
+          el(
+            "div",
+            { class: "section-head" },
+            el("h2", { text: "Model roles" }),
+            el("span", { class: "spacer" }),
+            el("a", { class: "btn btn-ghost btn-sm", href: "#/models", text: "Manage" })
+          ),
+          el(
+            "div",
+            { class: "roles-list" },
+            ...switchable.map((r) =>
+              el("div", {}, el("span", { class: "role-k", text: r.role.replace("model_", "") }), r.model)
+            )
+          )
+        )
+      );
+    }
+    if (!cards.length) return null;
+    return el("section", { class: "dash-section" }, el("div", { class: "grid grid-2" }, ...cards));
   }
 
   // First-run welcome: a 3-step orientation shown only on an empty install.
@@ -182,10 +285,10 @@ export default function dashboard(container) {
     );
   }
 
-  function render(status, work) {
+  function render(status, work, health, roles) {
     // Empty install + not yet dismissed → orientation instead of zeroed tiles.
     if ((status.total_jobs || 0) === 0 && !localStorage.getItem(ONBOARD_KEY)) {
-      mount(outlet, welcomeCard());
+      mount(outlet, setupChecklist(health), welcomeCard());
       return;
     }
     const counts = status.status_counts || {};
@@ -233,7 +336,13 @@ export default function dashboard(container) {
     const recentSection = el(
       "section",
       { class: "dash-section" },
-      el("div", { class: "section-head" }, el("h2", { text: "Recent jobs" })),
+      el(
+        "div",
+        { class: "section-head" },
+        el("h2", { text: "Recent jobs" }),
+        el("span", { class: "spacer" }),
+        el("a", { class: "btn btn-ghost btn-sm", href: "#/output", text: "All outputs →" })
+      ),
       recent.length
         ? el(
             "div",
@@ -248,7 +357,16 @@ export default function dashboard(container) {
         : el("div", { class: "card empty-state small" }, el("p", { text: "No recent jobs." }))
     );
 
-    mount(outlet, tiles, strip, workSection, recentSection);
+    mount(
+      outlet,
+      quickActions(counts),
+      setupChecklist(health),
+      tiles,
+      strip,
+      workSection,
+      systemSection(health, roles),
+      recentSection
+    );
   }
 
   load();

@@ -5,6 +5,7 @@ import * as router from "./router.js";
 import { placeholder } from "./views/placeholder.js";
 import { mountCommandPalette } from "./command_palette.js";
 import { toast } from "./components.js";
+import { NAV, NAV_GROUPS } from "./nav.js";
 
 // ── Global error surface ──────────────────────────────────────────────
 // A backstop so anything that escapes a view's own try/catch becomes a
@@ -32,32 +33,8 @@ window.addEventListener("scaffold:unauthorized", () => {
   connectGate("Your key was rejected (401) — it may have been rotated. Re-enter it.");
 });
 
-const NAV = [
-  { id: "new", path: "/new", label: "New idea", icon: "＋" },
-  // §17.815 — native chat rides /v1, which is admin-only BY DESIGN (§17.810:
-  // the loopback re-auths as master; scoped keys without identity-forwarding
-  // would be an escalation). Hide it from non-admin identities; single-user
-  // installs are always admin so nothing changes there.
-  { id: "chat", path: "/chat", label: "Chat", icon: "💬", adminOnly: true },
-  { id: "dashboard", path: "/", label: "Dashboard", icon: "◈" },
-  { id: "approvals", path: "/approvals", label: "Approvals", icon: "⏻" },
-  { id: "dag", path: "/dag", label: "DAG Canvas", icon: "⬡" },
-  { id: "theater", path: "/theater", label: "Execution", icon: "▶" },
-  { id: "output", path: "/output", label: "Outputs", icon: "▤" },
-  { id: "compare", path: "/compare", label: "Compare", icon: "⇄" },
-  { id: "research", path: "/research", label: "Research", icon: "◎" },
-  { id: "assist", path: "/assist", label: "Assistant", icon: "✦" },
-  // §17.816 — global model config is an admin surface (writes are
-  // require_admin server-side).
-  { id: "models", path: "/models", label: "Models", icon: "⚙" , adminOnly: true },
-  { id: "rag", path: "/rag", label: "Knowledge", icon: "◉" },
-  { id: "library", path: "/library", label: "Library", icon: "❒" },
-  { id: "schedules", path: "/schedules", label: "Schedules", icon: "◷" },
-  { id: "costs", path: "/costs", label: "Costs", icon: "◍" },
-  { id: "traces", path: "/traces", label: "Traces", icon: "≣", adminOnly: true },
-  { id: "alerts", path: "/alerts", label: "Alerts", icon: "⚑", adminOnly: true },
-  { id: "settings", path: "/settings", label: "Settings", icon: "☰", adminOnly: true },
-];
+// Nav structure (groups + admin flags) lives in nav.js, shared with the
+// command palette.
 
 const root = document.getElementById("root");
 let outlet = null; // the content container the active view renders into
@@ -136,15 +113,26 @@ function buildChrome() {
   // principal (pre-§17.815 server) fails open to admin: the server still
   // enforces authz on every request; this is navigation hygiene.
   const p = api.principal();
-  const visibleNav = NAV.filter((n) => !n.adminOnly || p?.is_admin !== false);
-  const navLinks = visibleNav.map((n) =>
-    el(
-      "a",
-      { class: "nav-link", href: "#" + n.path, dataset: { nav: n.id } },
-      el("span", { class: "nav-icon", text: n.icon }),
-      el("span", { class: "nav-label", text: n.label })
-    )
-  );
+  const navLinks = [];
+  const navGroups = NAV_GROUPS.map((g) => {
+    const items = g.items.filter((n) => !n.adminOnly || p?.is_admin !== false);
+    if (!items.length) return null;
+    const links = items.map((n) =>
+      el(
+        "a",
+        { class: "nav-link", href: "#" + n.path, dataset: { nav: n.id } },
+        el("span", { class: "nav-icon", text: n.icon }),
+        el("span", { class: "nav-label", text: n.label })
+      )
+    );
+    navLinks.push(...links);
+    return el(
+      "div",
+      { class: "nav-group" },
+      el("div", { class: "nav-group-label", text: g.label }),
+      ...links
+    );
+  }).filter(Boolean);
 
   const healthDot = el("span", { class: "health-dot", dataset: { state: "unknown" } });
   const healthText = el("span", { class: "health-text", text: "checking…" });
@@ -158,7 +146,7 @@ function buildChrome() {
       el("span", { class: "brand-logo", text: "🧬" }),
       el("span", { class: "brand-name", text: "Scaffold" })
     ),
-    el("nav", { class: "nav" }, ...navLinks),
+    el("nav", { class: "nav" }, ...navGroups),
     el(
       "div",
       { class: "sidebar-foot" },
@@ -172,6 +160,7 @@ function buildChrome() {
             el("span", { class: "identity-role", text: ` (${p.role})` })
           )
         : null,
+      el("div", { class: "foot-controls" }, themeToggle(), densityToggle()),
       el("div", { class: "health" }, healthDot, healthText),
       el("button", {
         class: "btn btn-ghost btn-sm",
@@ -222,6 +211,57 @@ function buildChrome() {
   mount(root, el("div", { class: "shell" }, topbar, sidebar, scrim, outlet));
   mountCommandPalette(); // idempotent; overlay lives on document.body
   startHealthPolling(healthDot, healthText);
+}
+
+// ── Theme + density toggles ───────────────────────────────────────────
+// Persisted per-browser; theme_boot.js re-applies both before first paint so
+// there's no flash. Theme cycles auto → dark → light; density toggles
+// comfortable ↔ compact (token overrides in app.css).
+const THEME_KEY = "scaffold_theme";
+const DENSITY_KEY = "scaffold_density";
+const THEME_LABELS = { auto: "◐ Auto", dark: "● Dark", light: "○ Light" };
+
+function themeToggle() {
+  const cur = () => localStorage.getItem(THEME_KEY) || "auto";
+  const btn = el("button", {
+    class: "btn btn-ghost",
+    title: "Theme (auto follows the OS)",
+    text: THEME_LABELS[cur()],
+  });
+  btn.addEventListener("click", () => {
+    const order = ["auto", "dark", "light"];
+    const next = order[(order.indexOf(cur()) + 1) % order.length];
+    if (next === "auto") {
+      localStorage.removeItem(THEME_KEY);
+      delete document.documentElement.dataset.theme;
+    } else {
+      localStorage.setItem(THEME_KEY, next);
+      document.documentElement.dataset.theme = next;
+    }
+    btn.textContent = THEME_LABELS[next];
+  });
+  return btn;
+}
+
+function densityToggle() {
+  const compact = () => localStorage.getItem(DENSITY_KEY) === "compact";
+  const label = () => (compact() ? "▦ Compact" : "▢ Cozy");
+  const btn = el("button", {
+    class: "btn btn-ghost",
+    title: "Density — compact tightens paddings for more rows per screen",
+    text: label(),
+  });
+  btn.addEventListener("click", () => {
+    if (compact()) {
+      localStorage.removeItem(DENSITY_KEY);
+      delete document.documentElement.dataset.density;
+    } else {
+      localStorage.setItem(DENSITY_KEY, "compact");
+      document.documentElement.dataset.density = "compact";
+    }
+    btn.textContent = label();
+  });
+  return btn;
 }
 
 function highlightNav(path) {
