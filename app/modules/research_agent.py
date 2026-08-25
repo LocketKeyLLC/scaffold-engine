@@ -1126,9 +1126,45 @@ def _build_sources_list(state: "ResearchState") -> list[dict]:
     )
 
 
-def _attach_sources_block(summary: str, state: "ResearchState") -> str:
-    """Append a deterministic ``**Sources**`` markdown block to a summary."""
+def _attach_sources_block(
+    summary: str, state: "ResearchState", cite_sources: list[dict] | None = None,
+) -> str:
+    """Append a deterministic ``**Sources**`` markdown block to a summary.
+
+    §17.833 (plan 8.3 / audit M8) — when ``cite_sources`` is given (the
+    cite-aware path), the block is rendered FROM that list, numbered to match
+    the inline ``[n]`` markers exactly: ``[3]`` in the text is line ``3.`` in
+    the block, guaranteed, because they are the same list in the same order.
+    Pre-§17.833 the block came from `_build_sources_list` (different content
+    filter, different cap, both confidence-sorted independently) so ``[3]``
+    could cite a different URL than bullet 3. Sources the model could NOT
+    cite (not in the numbered list) still appear, unnumbered, below the
+    numbered ones. Default path (no cite_sources) is byte-unchanged.
+    """
     srcs = _build_sources_list(state)
+    if cite_sources:
+        cited_lines = "\n".join(
+            f"{i}. {s['url']} ({s['source_type']}, confidence "
+            f"{s['confidence_score']:.2f})"
+            for i, s in enumerate(cite_sources, start=1)
+        )
+        cited_urls = {s["url"] for s in cite_sources}
+        extras = [s for s in srcs if s["url"] not in cited_urls]
+        shown_extras = extras[:max(0, _MAX_SOURCES_RENDERED - len(cite_sources))]
+        extra_lines = "".join(
+            f"\n- {s['url']} ({s['source_type']}, confidence "
+            f"{s['confidence_score']:.2f})"
+            for s in shown_extras
+        )
+        more = (
+            f"\n…and {len(extras) - len(shown_extras)} more."
+            if len(extras) > len(shown_extras) else ""
+        )
+        total = len(cited_urls | {s["url"] for s in srcs})
+        return (
+            f"{summary}\n\n**Sources** ({total}; numbered = citeable as [n])"
+            f":\n{cited_lines}{extra_lines}{more}"
+        )
     if not srcs:
         return summary
     shown = srcs[:_MAX_SOURCES_RENDERED]
@@ -1263,9 +1299,16 @@ async def _maybe_cove_revise(
     return summary_text
 
 
-def _finalize_summary_text(summary_text: str, state: "ResearchState") -> str:
-    """Attach the Sources block (A2) + CoVe (C) + faithfulness (B1) notes."""
-    out = _attach_sources_block(summary_text, state)
+def _finalize_summary_text(
+    summary_text: str, state: "ResearchState",
+    cite_sources: list[dict] | None = None,
+) -> str:
+    """Attach the Sources block (A2) + CoVe (C) + faithfulness (B1) notes.
+
+    §17.833 — ``cite_sources`` threads the cite-aware numbered list through to
+    `_attach_sources_block` so the rendered block matches the inline [n]s.
+    """
+    out = _attach_sources_block(summary_text, state, cite_sources=cite_sources)
     c = getattr(state, "cove", None)
     if c and c.get("changed"):
         out += (
@@ -1510,7 +1553,16 @@ async def _generate_summary(
         state.citation_faithfulness = await _maybe_score_citation_faithfulness(
             summary_text, cite_sources, overrides,
         )
-    finalized = _finalize_summary_text(summary_text, state)
+    # §17.833 — record the numbered list (sans bulky text) for the payload and
+    # pass it through so the rendered Sources block matches the inline [n]s.
+    if cite_mode:
+        state.cited_sources = [
+            {k: s[k] for k in ("url", "source_type", "confidence_score")}
+            for s in cite_sources
+        ]
+    finalized = _finalize_summary_text(
+        summary_text, state, cite_sources=cite_sources if cite_mode else None,
+    )
     # §17.662 — branch out into user-tailored options when the topic is
     # decision-shaped (only-when-applicable → None for factual topics). Appended
     # AFTER the sources/notes so the factual summary stays clean above the choices.
@@ -1576,6 +1628,10 @@ def _build_research_complete_payload(
         # §17.799 — per-citation attribution score (None unless the cite-aware
         # summary path ran). Structured for programmatic readers.
         "citation_faithfulness": getattr(state, "citation_faithfulness", None),
+        # §17.833 (audit M8) — the numbered source list the inline [n] markers
+        # actually cite (index = n-1); None on the default path. `sources`
+        # above stays the full deduped list for back-compat.
+        "cited_sources": getattr(state, "cited_sources", None),
         # §17.662 — user-tailored decision options (None when the topic isn't
         # decision-shaped). Structured for programmatic readers; also rendered
         # into the summary text as a "🔀 Your options" block.

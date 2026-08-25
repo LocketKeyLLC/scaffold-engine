@@ -151,12 +151,50 @@ async def test_dict_sources_use_text_field():
 
 
 @pytest.mark.asyncio
-async def test_missing_verdict_counts_unsupported():
-    """A judge that omits an index for an in-range citation → that one is
-    unsupported (conservative), not dropped from the denominator."""
+async def test_missing_verdict_counts_unverified_after_rejudge_fails():
+    """§17.833 (audit M8) — a citation the judge omits, even after the
+    re-judge of the omitted subset, is `unverified` and stays OUT of the
+    score's denominator (pre-§17.833 it silently counted as unsupported,
+    deflating live scores)."""
     answer = "One [1]. Two [1]."  # two distinct claims, same source
     sources = ["s1"]
-    results = [{"index": 1, "supported": True}]  # verdict for #2 missing
-    with patch.object(C.model_router, "tool_call", new=AsyncMock(return_value=_resp(results))):
+    first = _resp([{"index": 1, "supported": True}])  # verdict for #2 missing
+    empty = _resp([])  # re-judge coax-misses through all attempts
+    mock = AsyncMock(side_effect=[first, empty, empty, empty])
+    with patch.object(C.model_router, "tool_call", new=mock):
         out = await C.score_citation_faithfulness(answer, sources)
-    assert out["total"] == 2 and out["supported"] == 1 and out["score"] == 0.5
+    assert out["total"] == 2 and out["supported"] == 1
+    assert out["unverified"] == 1
+    assert out["score"] == 1.0  # 1 supported / 1 judged — omission doesn't deflate
+    assert out["unsupported_citations"] == []
+
+
+@pytest.mark.asyncio
+async def test_partial_verdict_rejudges_missing_subset():
+    """§17.833 — the judge omitting a verdict triggers ONE re-judge of just
+    the omitted instances, with batch positions mapped back correctly."""
+    answer = "One [1]. Two [1]. Three [1]."
+    sources = ["s1"]
+    first = _resp([{"index": 1, "supported": True},
+                   {"index": 3, "supported": True}])  # omits #2
+    second = _resp([{"index": 1, "supported": False}])  # #2 re-judged → False
+    mock = AsyncMock(side_effect=[first, second])
+    with patch.object(C.model_router, "tool_call", new=mock):
+        out = await C.score_citation_faithfulness(answer, sources)
+    assert mock.await_count == 2
+    assert out["supported"] == 2 and out["unverified"] == 0
+    assert out["score"] == 0.67  # 2/3 — the re-judged False lands on claim #2
+    assert out["unsupported_citations"] == [{"claim": "Two", "source_id": 1}]
+
+
+@pytest.mark.asyncio
+async def test_all_unverified_returns_none():
+    """§17.833 — zero actual rulings (judge answers only bogus indices, twice)
+    → None, not a fabricated score."""
+    answer = "One [1]."
+    sources = ["s1"]
+    bogus = _resp([{"index": 99, "supported": True}])
+    mock = AsyncMock(return_value=bogus)
+    with patch.object(C.model_router, "tool_call", new=mock):
+        out = await C.score_citation_faithfulness(answer, sources)
+    assert out is None
