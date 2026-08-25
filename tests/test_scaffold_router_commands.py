@@ -597,28 +597,93 @@ class TestModelCommand:
                      "reranker", "router", "fallback", "cloud_alt"):
             assert role in result, f"Missing role '{role}' in help output"
 
-    def test_model_list(self, pipe):
-        """'/model list' returns a markdown table with all role assignments."""
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_model_list(self, mock_get, pipe):
+        """§17.813 — '/model list' shows ENGINE truth from GET /models/roles."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"roles": [
+                {"role": "model_general", "model": "deepseek-v4-pro:cloud",
+                 "source": "env", "switchable": True},
+                {"role": "model_triage", "model": "qwen3.5:397b-cloud",
+                 "source": "override", "switchable": True},
+                {"role": "model_embedder_pipeline", "model": "nomic-embed-text",
+                 "source": "env", "switchable": False},
+            ]},
+            raise_for_status=lambda: None,
+        )
         result = pipe._handle_model("/model list")
-        assert "Current Model Assignments" in result
-        assert "| Role |" in result
-        # All 8 roles present
-        for role in ("general", "verifier", "coder", "embedder",
-                     "reranker", "router", "fallback", "cloud_alt"):
-            assert role in result
+        assert "engine truth" in result
+        assert "| Role |" in result and "Source" in result
+        assert "triage" in result and "override" in result
+        assert "embedder" in result and "locked" in result
+        url = mock_get.call_args.args[0]
+        assert url.endswith("/models/roles")
 
     @patch("scaffold_router._HTTP_SESSION.get")
-    def test_model_set_valid(self, mock_get, pipe):
-        """'/model set general qwen3:8b' with valid Ollama response updates the valve."""
+    def test_model_list_engine_unreachable_falls_back_to_valves(self, mock_get, pipe):
+        """Engine down → the valve view, clearly labeled (never fake truth)."""
+        import requests as _rq
+        mock_get.side_effect = _rq.exceptions.ConnectionError("down")
+        result = pipe._handle_model("/model list")
+        assert "Engine unreachable" in result
+        assert "chat-launch only" in result
+
+    @patch("scaffold_router._HTTP_SESSION.put")
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_model_set_valid(self, mock_get, mock_put, pipe):
+        """§17.813 — '/model set' routes through PUT /models/roles/{role}
+        (engine-wide, persisted) AND keeps the valve in lockstep for
+        chat-launched jobs' per-job overrides."""
         mock_get.return_value = MagicMock(
             status_code=200,
             json=lambda: {"models": [{"name": "qwen3:8b"}, {"name": "qwen2.5:7b"}]},
             raise_for_status=lambda: None,
         )
+        mock_put.return_value = MagicMock(status_code=200, json=lambda: {
+            "role": "model_general", "model": "qwen3:8b", "source": "override"})
         result = pipe._handle_model("/model set general qwen3:8b")
-        assert "Updated" in result
+        assert "Updated" in result and "engine-wide" in result
         assert "qwen3:8b" in result
         assert pipe.valves.model_general == "qwen3:8b"
+        url = mock_put.call_args.args[0]
+        assert url.endswith("/models/roles/model_general")
+        assert mock_put.call_args.kwargs["json"] == {"model": "qwen3:8b"}
+
+    @patch("scaffold_router._HTTP_SESSION.put")
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_model_set_server_only_role(self, mock_get, mock_put, pipe):
+        """§17.813 — triage/cloud_heavy/research_extract have no valve; the
+        set still works engine-wide via the API alone."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"models": [{"name": "qwen3.5:397b-cloud"}]},
+            raise_for_status=lambda: None,
+        )
+        mock_put.return_value = MagicMock(status_code=200, json=lambda: {
+            "role": "model_triage", "model": "qwen3.5:397b-cloud", "source": "override"})
+        result = pipe._handle_model("/model set triage qwen3.5:397b-cloud")
+        assert "Updated" in result and "engine-wide" in result
+        assert not hasattr(pipe.valves, "model_triage")
+        url = mock_put.call_args.args[0]
+        assert url.endswith("/models/roles/model_triage")
+
+    @patch("scaffold_router._HTTP_SESSION.put")
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_model_set_engine_rejection_surfaces_detail(self, mock_get, mock_put, pipe):
+        """A 422 from the engine (e.g. failed cloud generate-probe) surfaces
+        its detail and leaves the valve unchanged."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"models": [{"name": "dead:cloud"}]},
+            raise_for_status=lambda: None,
+        )
+        mock_put.return_value = MagicMock(status_code=422, json=lambda: {
+            "detail": "model 'dead:cloud' failed the generate probe: HTTP 410"})
+        old = pipe.valves.model_general
+        result = pipe._handle_model("/model set general dead:cloud")
+        assert "rejected" in result and "generate probe" in result
+        assert pipe.valves.model_general == old
 
     def test_model_set_invalid_role(self, pipe):
         """'/model set bogus qwen3:8b' returns error listing valid roles."""
@@ -639,11 +704,28 @@ class TestModelCommand:
         assert "not found" in result
         assert pipe.valves.model_general == old_val  # unchanged
 
-    def test_model_reset(self, pipe):
-        """'/model reset' restores defaults and reports changes."""
+    @patch("scaffold_router._HTTP_SESSION.delete")
+    @patch("scaffold_router._HTTP_SESSION.get")
+    def test_model_reset(self, mock_get, mock_delete, pipe):
+        """§17.813 — '/model reset' clears the ENGINE's persisted overrides
+        (DELETE per overridden role) and restores this pipeline's valves."""
+        mock_get.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"roles": [
+                {"role": "model_coder", "model": "x:cloud", "source": "override",
+                 "switchable": True},
+                {"role": "model_general", "model": "deepseek-v4-pro:cloud",
+                 "source": "env", "switchable": True},
+            ]},
+            raise_for_status=lambda: None,
+        )
+        mock_delete.return_value = MagicMock(status_code=200)
         pipe.valves.model_general = "custom:13b"
         pipe.valves.model_verifier = "custom:1b"
         result = pipe._handle_model("/model reset")
+        assert "Engine overrides cleared" in result and "coder" in result
+        url = mock_delete.call_args.args[0]
+        assert url.endswith("/models/roles/model_coder")
         assert "Reset to defaults" in result
         assert "general" in result
         assert pipe.valves.model_general == "deepseek-v4-pro:cloud"  # §17.632 A/B swap
