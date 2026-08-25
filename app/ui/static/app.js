@@ -51,6 +51,7 @@ const NAV = [
   // require_admin server-side).
   { id: "models", path: "/models", label: "Models", icon: "⚙" , adminOnly: true },
   { id: "rag", path: "/rag", label: "Knowledge", icon: "◉" },
+  { id: "library", path: "/library", label: "Library", icon: "❒" },
   { id: "schedules", path: "/schedules", label: "Schedules", icon: "◷" },
   { id: "costs", path: "/costs", label: "Costs", icon: "◍" },
   { id: "traces", path: "/traces", label: "Traces", icon: "≣", adminOnly: true },
@@ -297,6 +298,7 @@ const VIEWS = {
   rag: lazy("rag", "Knowledge (RAG)"),
   schedules: lazy("schedules", "Schedules"),
   settings: lazy("settings", "Settings"),
+  library: lazy("library", "Library"),
   costs: lazy("costs", "Costs"),
   traces: lazy("traces", "LLM Traces"),
   alerts: lazy("alerts", "Alerts"),
@@ -331,6 +333,7 @@ function registerRoutes() {
   router.route("/rag", (p) => loadAndRender("rag", p, router.currentPath()));
   router.route("/schedules", (p) => loadAndRender("schedules", p, router.currentPath()));
   router.route("/settings", (p) => loadAndRender("settings", p, router.currentPath()));
+  router.route("/library", (p) => loadAndRender("library", p, router.currentPath()));
   router.route("/costs", (p) => loadAndRender("costs", p, router.currentPath()));
   router.route("/traces", (p) => loadAndRender("traces", p, router.currentPath()));
   router.route("/traces/:jobId", (p) => loadAndRender("traces", p, router.currentPath()));

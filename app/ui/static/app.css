@@ -831,3 +831,11 @@ select.input:focus-visible,
 
 /* §17.816 — dag node verbs */
 .dag-node-verbs { gap: 8px; }
+
+/* §17.816 — library view */
+.lib-tabs { gap: 6px; }
+.lib-controls { gap: 8px; align-items: center; margin: 10px 0; }
+.lib-pager { gap: 8px; align-items: center; }
+.lib-row { margin-bottom: 8px; }
+.lib-summary { gap: 8px; align-items: center; cursor: pointer; flex-wrap: wrap; }
+.lib-snippet { margin-top: 4px; font-size: 13px; }
