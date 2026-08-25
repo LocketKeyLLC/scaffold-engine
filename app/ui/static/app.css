@@ -801,3 +801,27 @@ select.input:focus-visible,
 .rag-hit-text { white-space: pre-wrap; font-size: 13px; }
 .rag-dedup-title { margin: 18px 0 8px; font-size: 15px; }
 .rag-hit-title { font-weight: 600; margin-bottom: 4px; }
+
+/* §17.816 — settings + schedules views */
+.settings-filter { flex: 1; min-width: 260px; }
+.settings-controls { gap: 10px; align-items: center; flex-wrap: wrap; }
+.settings-check { gap: 4px; font-size: 12px; align-items: center; }
+.settings-table td { vertical-align: top; }
+.settings-val code { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+.sched-topic { flex: 1; min-width: 220px; }
+.sched-cron { width: 150px; }
+.sched-tz { width: 170px; }
+.sched-controls { gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* §17.816 — traces + alerts views */
+.traces-hint { margin: 8px 0; }
+.traces-job-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.traces-row { margin-bottom: 8px; }
+.traces-summary { gap: 8px; align-items: center; cursor: pointer; flex-wrap: wrap; }
+.traces-pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 340px; overflow-y: auto; background: var(--bg-inset, #f5f7fb); padding: 8px; border-radius: 6px; }
+.alerts-h2 { margin: 16px 0 8px; font-size: 15px; }
+.alerts-msg { font-size: 13px; }
+
+/* §17.816 — costs view */
+.costs-tiles { gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.costs-h2 { margin: 18px 0 8px; font-size: 15px; }
