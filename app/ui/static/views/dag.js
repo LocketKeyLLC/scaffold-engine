@@ -3,7 +3,7 @@
 // and a read-only node drawer that lazy-loads the node's output + prompt.
 import * as api from "../api.js";
 import { el, mount, shortId, mdToHtml, timeAgo } from "../util.js";
-import { statusBadge, loading, errorPanel, emptyState } from "../components.js";
+import { statusBadge, loading, errorPanel, emptyState, toast } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
 
 // ── Canvas view for one job ──────────────────────────────────────────
@@ -92,7 +92,42 @@ function renderCanvas(container, jobId) {
       ? el("div", { class: "drawer-section" }, el("div", { class: "drawer-label", text: "Output" }), el("div", { class: "md drawer-output", html: mdToHtml(outputText) }))
       : el("div", { class: "drawer-section" }, el("div", { class: "drawer-label", text: "Output" }), el("div", { class: "dim", text: "No output yet." }));
 
-    mount(body, meta, outBlock);
+    // §17.816 (plan 5.4i) — node recovery verbs, previously CLI/OWUI-only:
+    // Retry re-queues a failed/skipped node (POST /exec/retry resets it and
+    // its downstream); Skip marks a stuck node skipped so the frontier moves.
+    const verbs = [];
+    async function nodeVerb(btn, fn, okMsg) {
+      btn.disabled = true;
+      try {
+        await fn();
+        toast(okMsg, "ok");
+        closeDrawer();
+        outputsCache = null;
+        load();
+      } catch (e) {
+        toast(e.detail || e.message, "err");
+        btn.disabled = false;
+      }
+    }
+    if (["failed", "skipped"].includes(node.status)) {
+      const b = el("button", { class: "btn btn-sm", text: "↻ Retry node" });
+      b.addEventListener("click", () =>
+        nodeVerb(b, () => api.post("/exec/retry", { job_id: jobId, node_key: node.node_key }),
+          `${node.node_key} re-queued.`));
+      verbs.push(b);
+    }
+    if (["pending", "failed", "running"].includes(node.status)) {
+      const b = el("button", { class: "btn btn-sm btn-ghost", text: "⏩ Skip node" });
+      b.addEventListener("click", () =>
+        nodeVerb(b, () => api.post("/skip", { job_id: jobId, node_key: node.node_key }),
+          `${node.node_key} skipped.`));
+      verbs.push(b);
+    }
+    const verbRow = verbs.length
+      ? el("div", { class: "drawer-section row dag-node-verbs" }, ...verbs)
+      : null;
+
+    mount(body, meta, verbRow, outBlock);
   }
 
   function metaRow(k, v, cls) {
