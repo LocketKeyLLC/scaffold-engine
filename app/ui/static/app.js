@@ -105,13 +105,21 @@ function connectGate(message) {
         { class: "gate-card card" },
         el("img", { class: "gate-logo", src: "/ui/static/logo.svg", alt: "" }),
         el("h1", { class: "gate-title", text: "Scaffold Engine" }),
-        el("p", { class: "gate-sub", text: "Connect to the orchestrator" }),
+        el("p", { class: "gate-sub", text: "Operator sign-in" }),
         el(
           "div",
           { class: "gate-steps" },
-          gateStep(1, "Find your key", "On the server, open the .env file and copy the SCAFFOLD_API_KEY value."),
-          gateStep(2, "Connect", "Paste the key below and press Connect. It stays in this browser only."),
-          gateStep(3, "Go build", "First time here? A quick wizard will help you connect your models — then describe an idea and watch it run.")
+          gateStep(
+            1,
+            "Find your operator key",
+            "This key is the console's password — it proves to your engine that you're the operator (not someone else on the network). Copy the SCAFFOLD_API_KEY value from the .env file on the server."
+          ),
+          gateStep(2, "Sign in", "Paste it below and press Connect. It stays in this browser only."),
+          gateStep(
+            3,
+            "Connect your models",
+            "That happens after sign-in — the Setup wizard links the engine to your Ollama models (local or cloud). Then describe an idea and watch it run."
+          )
         ),
         input,
         btn,
