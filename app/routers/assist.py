@@ -1033,13 +1033,18 @@ async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(g
         text("SELECT job_id, current_node_key FROM assist_sessions WHERE id = :sid"),
         {"sid": session_id},
     )).mappings().first()
+    # §17.812 (audit I-3/M14) — thread the caller's node_key + history through:
+    # cross-chat, the session pointer can sit on a DIFFERENT step than the one
+    # the operator is discussing, and the retire below must hit the discussed
+    # step. The tracker validates the key and reports which step it assessed.
     verdict = await assist_tracker.assess_progress(
         session_id=session_id, message=body.message, db=db,
+        node_key=body.node_key, history=body.history,
     )
     out = {"session_id": session_id, "action": "proceed", "verdict": verdict}
     v = verdict.get("verdict")
     confident = float(verdict.get("confidence") or 0.0) >= settings.assist_tracker_confidence
-    prior_nk = (prior or {}).get("current_node_key")
+    prior_nk = verdict.get("node_key") or (prior or {}).get("current_node_key")
     job_id = str((prior or {}).get("job_id"))
     if v == "add_step" and confident and (verdict.get("new_step_request") or "").strip():
         try:
