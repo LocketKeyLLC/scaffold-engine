@@ -784,3 +784,9 @@ select.input:focus-visible,
 }
 .identity-name { font-weight: 600; color: var(--text, #c9d1e3); }
 .identity-role { opacity: 0.8; }
+
+/* §17.816 — models view */
+.models-table td { vertical-align: middle; }
+.models-input { width: 220px; }
+.models-actions { gap: 6px; align-items: center; flex-wrap: wrap; }
+.models-row-status { margin-left: 8px; font-size: 12px; }
