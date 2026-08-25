@@ -17,6 +17,11 @@ import asyncio
 import pytest_asyncio
 import os
 
+# §17.828 (plan 7.5) — live-stack suite (Ollama + Milvus + Postgres); the
+# `integration` marker keeps it deselected in cloud CI's `-m "not integration"`
+# run, exactly as the old `-k "not integration"` name-substring match did.
+pytestmark = pytest.mark.integration
+
 SCAFFOLD_API_KEY = os.environ.get("SCAFFOLD_API_KEY", "test-key-for-ci")
 AUTH_HEADERS = {"X-API-Key": SCAFFOLD_API_KEY}
 

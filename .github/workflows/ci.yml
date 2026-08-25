@@ -123,7 +123,31 @@ jobs:
           # stalls cloud CI on cold HF download; reranker has no role
           # in smoke tests anyway.
           SCAFFOLD_PREWARM_RERANKER: "false"
-        run: make ci-smoke
+        # §17.828 (plan 7.5) — tee the output so the skip-count step below can
+        # read the pytest summary line. pipefail keeps make's exit code the
+        # step's result (GH's default `bash -e` has no pipefail).
+        run: |
+          set -o pipefail
+          make ci-smoke 2>&1 | tee /tmp/ci-smoke.out
+
+      # §17.828 (plan 7.5) — surface the pytest result line in the job summary
+      # and warn loudly if the skip count jumps. Skips grow silently (a
+      # collect_ignore addition, a new module-level pytest.skip, a fixture
+      # environment probe going dark) and nothing else watches the number:
+      # observed baseline is 2 skipped (2026-08-25). The threshold is
+      # deliberately loose — it exists to catch a JUMP, not to break on +1.
+      - name: Report skip count (§17.828)
+        if: always()
+        env:
+          SKIP_ALERT_MAX: "10"
+        run: |
+          line=$(grep -oE '[0-9]+ passed[^=]*' /tmp/ci-smoke.out | tail -1 || true)
+          echo "### ci-smoke pytest result" >> "$GITHUB_STEP_SUMMARY"
+          echo "${line:-no pytest summary line found}" >> "$GITHUB_STEP_SUMMARY"
+          skipped=$(echo "$line" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' || true)
+          if [ "${skipped:-0}" -gt "$SKIP_ALERT_MAX" ]; then
+            echo "::warning title=ci-smoke skip count jumped::${skipped} tests skipped (baseline 2, alert >${SKIP_ALERT_MAX}). Check for new collect_ignore entries / module-level skips."
+          fi
 
   # ──────────────────────────────────────────────────────────
   # Dependency CVE scan (§17.534)

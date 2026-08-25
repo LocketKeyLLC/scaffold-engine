@@ -66,6 +66,11 @@ asyncio_default_test_loop_scope = "session"
 markers = [
     "smoke: Fast sanity checks - unit tests, extraction pipeline (<2 min)",
     "validate: Integration tests - API, reranker, verifier (<15 min)",
+    # §17.828 (plan 7.5) — everything under tests/integration/ (auto-applied by
+    # its conftest) plus tests/test_integration.py. Cloud CI deselects with
+    # `-m "not integration"`; before this marker test.yml used the fragile
+    # `-k "not integration"` node-id substring match.
+    "integration: Needs the live docker stack (Postgres at minimum, some Milvus/Ollama); deselected in cloud CI",
 ]
 # Known noise: ~6-8 RuntimeWarnings per full-suite run with messages
 # `coroutine 'AsyncMockMixin._execute_mock_call' was never awaited` and
