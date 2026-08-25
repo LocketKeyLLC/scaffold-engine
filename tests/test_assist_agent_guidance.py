@@ -882,8 +882,11 @@ async def test_generate_step_guidance_captures_fresh_reply():
 
 
 @pytest.mark.asyncio
-async def test_generate_step_guidance_cache_hit_not_recaptured():
-    # A cache hit re-shows text already in the transcript — no duplicate turn.
+async def test_generate_step_guidance_cache_hit_captured_via_dedupe():
+    # §17.812 (gap 2) — a cache hit is CAPTURED too (a walkthrough generated
+    # before the capture valve was on, or re-shown after intervening turns, was
+    # otherwise absent from the durable transcript). Back-to-back duplicates
+    # are suppressed inside capture_assistant_reply, not by skipping capture.
     sess = {"id": "s", "job_id": "j", "status": "active", "current_node_key": "T3",
             "metadata": {}}
     db = _db_with_session(sess, extra_rows=[{"status": "presented"}])
@@ -894,7 +897,8 @@ async def test_generate_step_guidance_cache_hit_not_recaptured():
                                            "cached": True, "guidance_meta": {}})), \
          patch.object(assist_agent, "capture_assistant_reply", new=AsyncMock()) as cap:
         await assist_agent.generate_step_guidance(session_id="s", research=False, db=db)
-    cap.assert_not_awaited()
+    cap.assert_awaited_once()
+    assert cap.await_args.kwargs["content"] == "same text"
 
 
 @pytest.mark.asyncio
@@ -1014,13 +1018,18 @@ async def test_get_step_recap_refreshes_when_grown():
         # §17.752 — the ledger fetch (notes + metadata/facts) for a ledger-aware recap
         _result({"notes": [{"kind": "constraint", "text": "only 2 NICs"}],
                  "metadata": {"environment": {"facts": ["no TPM on this host"]}}}),
-        _result(None),   # UPDATE recap
     ])
     db.commit = AsyncMock()
+    # §17.812 — the cache persist runs on its OWN session, never the caller's.
+    cache_db = AsyncMock()
+    acm = MagicMock()
+    acm.__aenter__ = AsyncMock(return_value=cache_db)
+    acm.__aexit__ = AsyncMock(return_value=False)
     with patch.object(_settings, "assist_step_recap_enabled", True), \
          patch.object(_settings, "assist_step_recap_every", 3), \
          patch.object(_settings, "assist_step_recap_min_turns", 4), \
          patch.object(_settings, "assist_recap_ledger_aware", True), \
+         patch.object(assist_agent, "async_session", return_value=acm), \
          patch("app.modules.assist_guide.summarize_step_progress",
                new=AsyncMock(return_value="GOAL: fresh recap")) as summ:
         out = await assist_agent.get_step_recap(
@@ -1031,9 +1040,12 @@ async def test_get_step_recap_refreshes_when_grown():
     kw = summ.await_args.kwargs
     assert "no TPM on this host" in kw["facts_block"]
     assert "only 2 NICs" in kw["notes_block"]
-    # the refreshed recap + new watermark were written
-    upd = [c for c in db.execute.await_args_list if "progress_recap = :r" in str(c.args[0])]
+    # §17.812 — the refreshed recap + new watermark were written on the cache
+    # session; the CALLER's transaction was never committed.
+    upd = [c for c in cache_db.execute.await_args_list if "progress_recap = :r" in str(c.args[0])]
     assert upd and upd[0].args[1]["n"] == 20
+    cache_db.commit.assert_awaited_once()
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

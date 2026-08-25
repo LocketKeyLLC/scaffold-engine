@@ -118,3 +118,15 @@ async def test_note_impact_prompt_omits_facts_when_absent():
         )
     prompt = tc.await_args.kwargs["messages"][0]["content"]
     assert "judge impact against this reality" not in prompt.lower()
+
+
+def test_render_facts_block_caps_at_budget_keeping_newest():
+    """§17.812 — an uncapped ledger render crowded out the transcript/recap in
+    every prompt that threads it. The cap keeps the NEWEST facts (tail)."""
+    facts = [f"fact number {i}: " + ("x" * 100) for i in range(100)]
+    out = assist_guide.render_facts_block({"facts": facts}, max_chars=1000)
+    assert len(out) < 1200                       # header + ~1000 budget
+    assert "fact number 99" in out               # newest kept
+    assert "fact number 0:" not in out           # oldest dropped
+    # order preserved among the kept tail
+    assert out.index("fact number 98") < out.index("fact number 99")

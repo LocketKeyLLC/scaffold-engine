@@ -805,16 +805,29 @@ def render_environment_block(environment: dict | None) -> str:
     return "\n\n".join(parts)
 
 
-def render_facts_block(environment: dict | None) -> str:
+def render_facts_block(environment: dict | None, *, max_chars: int = 4000) -> str:
     """§17.752 — just the durable observed facts (§17.709) as a compact block, for
     prompts that ground on the operator's ACTUAL system state (the recap, the
     note-impact analyzer) without the full environment/substitutions framing.
-    Returns "" when there are no facts so callers thread it unconditionally."""
+    Returns "" when there are no facts so callers thread it unconditionally.
+    §17.812 — budget-capped: the ledger itself is trimmed newest-kept (§17.722)
+    but grows to dozens of long facts on a real build; an uncapped render let it
+    crowd out the transcript/recap in every prompt that threads it. Keeps the
+    NEWEST facts (tail) within ``max_chars``, preserving order."""
     facts = [str(f).strip() for f in ((environment or {}).get("facts") or []) if str(f).strip()]
     if not facts:
         return ""
+    kept: list[str] = []
+    total = 0
+    for f in reversed(facts):          # newest last → walk from the tail
+        line_len = len(f) + 3          # "- " + newline
+        if kept and total + line_len > max_chars:
+            break
+        kept.append(f)
+        total += line_len
+    kept.reverse()
     return "Known facts about the operator's system (observed):\n" + "\n".join(
-        f"- {f}" for f in facts
+        f"- {f}" for f in kept
     )
 
 
