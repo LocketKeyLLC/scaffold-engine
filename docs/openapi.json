@@ -3136,6 +3136,20 @@
         "title": "NodeResetInput",
         "type": "object"
       },
+      "ProbeInput": {
+        "properties": {
+          "model": {
+            "description": "The model tag to probe (generate-based).",
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "ProbeInput",
+        "type": "object"
+      },
       "ProfileApplyInput": {
         "description": "§17.809 — activate a named runtime compute profile (e.g. ``quick``).",
         "properties": {
@@ -3664,6 +3678,26 @@
           }
         },
         "title": "ResumeJobInput",
+        "type": "object"
+      },
+      "RoleModelInput": {
+        "properties": {
+          "model": {
+            "description": "The model tag to point this role at.",
+            "title": "Model",
+            "type": "string"
+          },
+          "probe": {
+            "default": true,
+            "description": "Generate-probe cloud tags before applying (the pulled-tag list serves stale 200s for retired cloud models). Local tags are only checked against the pulled list — probing one would force a full model load on this CPU-only host.",
+            "title": "Probe",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "RoleModelInput",
         "type": "object"
       },
       "RouteInput": {
@@ -8274,6 +8308,55 @@
         ]
       }
     },
+    "/models/probe": {
+      "post": {
+        "description": "Explicit generate-based liveness probe (the wizard's \"test\" button).\n\nAlways generates — the caller opted into the latency, and for a LOCAL tag\nthat first call is also what a real request would pay (model load).",
+        "operationId": "probe_model_models_probe_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProbeInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Probe Model Models Probe Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Probe Model",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
     "/models/proposals": {
       "get": {
         "description": "Open role→model swap proposals awaiting review, newest first.",
@@ -8398,6 +8481,143 @@
           }
         ],
         "summary": "Dismiss Proposal Endpoint",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/models/roles": {
+      "get": {
+        "description": "Live effective model config for every role, with provenance.",
+        "operationId": "get_model_roles_models_roles_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Model Roles Models Roles Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Model Roles",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/models/roles/{role}": {
+      "delete": {
+        "description": "Clear a role's persisted override; revert to the env/config default.",
+        "operationId": "delete_model_role_models_roles__role__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "role",
+            "required": true,
+            "schema": {
+              "title": "Role",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Model Role Models Roles  Role  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Delete Model Role",
+        "tags": [
+          "Models"
+        ]
+      },
+      "put": {
+        "description": "Point a switchable role at a model (persisted; survives restart).",
+        "operationId": "put_model_role_models_roles__role__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "role",
+            "required": true,
+            "schema": {
+              "title": "Role",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleModelInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Model Role Models Roles  Role  Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Put Model Role",
         "tags": [
           "Models"
         ]
