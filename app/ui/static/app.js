@@ -52,6 +52,8 @@ const NAV = [
   { id: "models", path: "/models", label: "Models", icon: "⚙" , adminOnly: true },
   { id: "rag", path: "/rag", label: "Knowledge", icon: "◉" },
   { id: "schedules", path: "/schedules", label: "Schedules", icon: "◷" },
+  { id: "traces", path: "/traces", label: "Traces", icon: "≣", adminOnly: true },
+  { id: "alerts", path: "/alerts", label: "Alerts", icon: "⚑", adminOnly: true },
   { id: "settings", path: "/settings", label: "Settings", icon: "☰", adminOnly: true },
 ];
 
@@ -294,6 +296,8 @@ const VIEWS = {
   rag: lazy("rag", "Knowledge (RAG)"),
   schedules: lazy("schedules", "Schedules"),
   settings: lazy("settings", "Settings"),
+  traces: lazy("traces", "LLM Traces"),
+  alerts: lazy("alerts", "Alerts"),
 };
 
 async function loadAndRender(name, params, path) {
@@ -325,6 +329,9 @@ function registerRoutes() {
   router.route("/rag", (p) => loadAndRender("rag", p, router.currentPath()));
   router.route("/schedules", (p) => loadAndRender("schedules", p, router.currentPath()));
   router.route("/settings", (p) => loadAndRender("settings", p, router.currentPath()));
+  router.route("/traces", (p) => loadAndRender("traces", p, router.currentPath()));
+  router.route("/traces/:jobId", (p) => loadAndRender("traces", p, router.currentPath()));
+  router.route("/alerts", (p) => loadAndRender("alerts", p, router.currentPath()));
   router.setNotFound(() => loadAndRender("dashboard", {}, "/"));
 }
 
