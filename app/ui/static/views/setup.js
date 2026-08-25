@@ -57,6 +57,71 @@ export default function setup(container) {
     location.hash = "#/new";
   }
 
+  // ── Step 0 (§17.840): create the admin account — skippable ──────────
+  // Shown only while unclaimed. Creation rides this session's key (the
+  // endpoint is admin-authed), so nobody on the network can race the claim.
+  // Afterwards the sign-in page greets by name and takes the password
+  // instead of the pasted key.
+  async function stepAccount() {
+    const acct = await api.accountStatus();
+    if (disposed) return;
+    if (!acct || acct.claimed) {
+      stepConnect();
+      return;
+    }
+    mount(
+      container,
+      el(
+        "div",
+        { class: "view-header" },
+        el(
+          "div",
+          {},
+          el("h1", { text: "Welcome — let's set up" }),
+          el("div", { class: "sub", text: "First — create your admin account (optional)" })
+        ),
+        el("button", { class: "btn btn-ghost btn-sm", text: "Skip for now", onClick: stepConnect })
+      ),
+      body
+    );
+    const name = el("input", { class: "input", placeholder: "Display name (e.g. Adam)", autocomplete: "name" });
+    const pw = el("input", { class: "input", type: "password", placeholder: "Password (8+ characters)", autocomplete: "new-password" });
+    const pw2 = el("input", { class: "input", type: "password", placeholder: "Repeat password", autocomplete: "new-password" });
+    const status = el("div", { class: "gate-status" });
+    const create = el("button", { class: "btn btn-primary", text: "Create account →" });
+    create.addEventListener("click", async () => {
+      if (!name.value.trim()) { status.textContent = "Pick a display name."; return; }
+      if (pw.value.length < 8) { status.textContent = "Password needs at least 8 characters."; return; }
+      if (pw.value !== pw2.value) { status.textContent = "Passwords don't match."; return; }
+      create.disabled = true;
+      status.textContent = "Creating…";
+      try {
+        await api.setupAccount(name.value.trim(), pw.value);
+        toast(`Account created — next time, sign in as ${name.value.trim()} with your password.`, "ok");
+        stepConnect();
+      } catch (e) {
+        status.textContent = e.detail || e.message;
+        create.disabled = false;
+      }
+    });
+    mount(
+      body,
+      el(
+        "div",
+        { class: "card card-pad setup-account" },
+        el("h3", { text: "Create your admin account" }),
+        el("p", {
+          class: "dim",
+          text: "From then on this page signs you in with a friendly password — no more hunting for the API key. The key keeps working too (CLI, scripts, recovery).",
+        }),
+        name, pw, pw2,
+        el("div", { class: "row setup-account-actions" }, create, el("button", { class: "btn btn-ghost", text: "Skip for now", onClick: stepConnect })),
+        status
+      )
+    );
+    name.focus();
+  }
+
   // ── Step 1: connectivity ────────────────────────────────────────────
   async function stepConnect() {
     mount(container, header("Step 1 of 4 — reach your Ollama daemon"), body);
@@ -280,7 +345,7 @@ export default function setup(container) {
     );
   }
 
-  stepConnect();
+  stepAccount();
   return () => {
     disposed = true;
   };

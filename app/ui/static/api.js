@@ -177,6 +177,37 @@ export async function health() {
   return resp.json();
 }
 
+// ── Admin account (§17.840 — password unlocks the console) ────────────
+
+/** Public: {claimed, display_name, login_available}. Null on any failure
+ *  (pre-§17.840 server) so the gate falls back to key-paste. */
+export async function accountStatus() {
+  try {
+    const resp = await fetch("/auth/account/status");
+    return resp.ok ? await resp.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Password → console credential. Throws ApiError (401 wrong password,
+ *  429 throttled). On success the key is stored like a manual paste. */
+export async function login(password) {
+  const resp = await fetch("/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  if (!resp.ok) throw await parseError(resp);
+  const out = await resp.json();
+  if (out?.api_key) setKey(out.api_key);
+  return out;
+}
+
+/** Create/replace the admin account (requires the current session's key). */
+export const setupAccount = (display_name, password) =>
+  post("/auth/account/setup", { display_name, password });
+
 // ── Identity (§17.815 / plan 5.3) ─────────────────────────────────────
 
 // §17.815 — a 401 mid-session (rotated/revoked key) routes the operator back

@@ -1,6 +1,28 @@
 {
   "components": {
     "schemas": {
+      "AccountSetup": {
+        "properties": {
+          "display_name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "password": {
+            "maxLength": 256,
+            "minLength": 8,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "display_name",
+          "password"
+        ],
+        "title": "AccountSetup",
+        "type": "object"
+      },
       "ArtifactListResponse": {
         "properties": {
           "artifacts": {
@@ -2617,6 +2639,21 @@
           "model"
         ],
         "title": "LlmTraceItem",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "password": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "title": "LoginRequest",
         "type": "object"
       },
       "LogsResponse": {
@@ -6082,6 +6119,133 @@
         "summary": "Assist List Turns",
         "tags": [
           "Assist"
+        ]
+      }
+    },
+    "/auth/account/setup": {
+      "post": {
+        "description": "Create/replace the admin account. Admin-authed by design: reaching\nthis proves the caller already holds the key, so nobody races to claim.",
+        "operationId": "account_setup_auth_account_setup_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountSetup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Account Setup Auth Account Setup Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Account Setup",
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/auth/account/status": {
+      "get": {
+        "description": "Public (auth-exempt): does an admin account exist, and can the gate\noffer password login? The display name is shown on the sign-in page\n(\"Welcome back, X\") — deliberate, same disclosure class as OWUI/Grafana.",
+        "operationId": "account_status_auth_account_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Account Status Auth Account Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Account Status",
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "description": "Password → console credential (the master key, exactly what the paste\ngate stores). Auth-exempt; throttled; 404 unclaimed / 409 no-master.",
+        "operationId": "login_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Login Auth Login Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Login",
+        "tags": [
+          "Auth"
         ]
       }
     },

@@ -40,7 +40,14 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 # read-only counters/gauges with no PII (matches the /health rationale).
 # The set is built at module load — if metrics_path is reconfigured, the
 # orchestrator must restart for the exemption to track.
-_AUTH_EXEMPT_PATHS = frozenset({"/health", "/", settings.metrics_path})
+# §17.840 — /auth/login (password → console credential, throttled) and
+# /auth/account/status (does an account exist?) must be reachable by a
+# not-yet-authenticated browser: they ARE the sign-in flow. Exact paths only —
+# the admin-authed /auth/account/setup is NOT exempt.
+_AUTH_EXEMPT_PATHS = frozenset({
+    "/health", "/", settings.metrics_path,
+    "/auth/login", "/auth/account/status",
+})
 
 # Sprint J.2.a — prefix-based auth exemption. The native web UI lives at
 # ``/web/*`` and serves a browsable page (operators don't pass headers in

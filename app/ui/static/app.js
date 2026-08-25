@@ -55,6 +55,64 @@ function gateStep(n, title, ...body) {
   );
 }
 
+// §17.840 — password sign-in, shown when an admin account exists. The key
+// gate stays one click away ("Use an API key instead") for recovery.
+function passwordGate(displayName, message) {
+  const input = el("input", {
+    type: "password",
+    class: "input",
+    placeholder: "Password",
+    autocomplete: "current-password",
+  });
+  const status = el("div", { class: "gate-status" }, message || "");
+  const btn = el("button", { class: "btn btn-primary", text: "Sign in" });
+
+  async function submit() {
+    if (!input.value) {
+      status.textContent = "Enter your password.";
+      return;
+    }
+    btn.disabled = true;
+    status.textContent = "Signing in…";
+    try {
+      await api.login(input.value);
+      boot();
+    } catch (e) {
+      status.textContent = e.detail || e.message;
+      btn.disabled = false;
+    }
+  }
+
+  btn.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submit();
+  });
+
+  mount(
+    root,
+    el(
+      "div",
+      { class: "gate" },
+      el(
+        "div",
+        { class: "gate-card card" },
+        el("img", { class: "gate-logo", src: "/ui/static/logo.svg", alt: "" }),
+        el("h1", { class: "gate-title", text: "Scaffold Engine" }),
+        el("p", { class: "gate-sub", text: `Welcome back, ${displayName}` }),
+        input,
+        btn,
+        status,
+        el("button", {
+          class: "btn btn-ghost btn-sm gate-alt",
+          text: "Use an API key instead",
+          onClick: () => connectGate(),
+        })
+      )
+    )
+  );
+  input.focus();
+}
+
 function connectGate(message) {
   const input = el("input", {
     type: "password",
@@ -461,7 +519,12 @@ async function main() {
     history.replaceState(null, "", location.pathname + location.hash);
   }
   if (!api.hasKey()) {
-    connectGate();
+    // §17.840 — an install with an admin account gets the friendly password
+    // gate; everything else (fresh install, pre-account, no-master multi-user)
+    // gets the key gate with its step-by-step instructions.
+    const acct = await api.accountStatus();
+    if (acct?.claimed && acct?.login_available) passwordGate(acct.display_name);
+    else connectGate();
     return;
   }
   // Have a key — verify it before showing the app.
