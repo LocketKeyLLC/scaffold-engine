@@ -801,3 +801,14 @@ select.input:focus-visible,
 .rag-hit-text { white-space: pre-wrap; font-size: 13px; }
 .rag-dedup-title { margin: 18px 0 8px; font-size: 15px; }
 .rag-hit-title { font-weight: 600; margin-bottom: 4px; }
+
+/* §17.816 — settings + schedules views */
+.settings-filter { flex: 1; min-width: 260px; }
+.settings-controls { gap: 10px; align-items: center; flex-wrap: wrap; }
+.settings-check { gap: 4px; font-size: 12px; align-items: center; }
+.settings-table td { vertical-align: top; }
+.settings-val code { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+.sched-topic { flex: 1; min-width: 220px; }
+.sched-cron { width: 150px; }
+.sched-tz { width: 170px; }
+.sched-controls { gap: 8px; align-items: center; flex-wrap: wrap; }

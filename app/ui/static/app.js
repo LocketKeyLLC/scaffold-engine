@@ -51,6 +51,8 @@ const NAV = [
   // require_admin server-side).
   { id: "models", path: "/models", label: "Models", icon: "⚙" , adminOnly: true },
   { id: "rag", path: "/rag", label: "Knowledge", icon: "◉" },
+  { id: "schedules", path: "/schedules", label: "Schedules", icon: "◷" },
+  { id: "settings", path: "/settings", label: "Settings", icon: "☰", adminOnly: true },
 ];
 
 const root = document.getElementById("root");
@@ -290,6 +292,8 @@ const VIEWS = {
   assist: lazy("assist", "Assistant"),
   models: lazy("models", "Models"),
   rag: lazy("rag", "Knowledge (RAG)"),
+  schedules: lazy("schedules", "Schedules"),
+  settings: lazy("settings", "Settings"),
 };
 
 async function loadAndRender(name, params, path) {
@@ -319,6 +323,8 @@ function registerRoutes() {
   router.route("/assist/:sessionId", (p) => loadAndRender("assist", p, router.currentPath()));
   router.route("/models", (p) => loadAndRender("models", p, router.currentPath()));
   router.route("/rag", (p) => loadAndRender("rag", p, router.currentPath()));
+  router.route("/schedules", (p) => loadAndRender("schedules", p, router.currentPath()));
+  router.route("/settings", (p) => loadAndRender("settings", p, router.currentPath()));
   router.setNotFound(() => loadAndRender("dashboard", {}, "/"));
 }
 
