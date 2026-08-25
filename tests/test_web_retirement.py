@@ -65,14 +65,15 @@ class TestWebRedirects:
             assert resp.status_code == 301, old
             assert resp.headers["location"] == "/ui/#/"
 
-    def test_redirects_survive_missing_auth(self, monkeypatch):
+    @pytest.mark.parametrize("multi_user", [False, True])
+    def test_redirects_survive_missing_auth(self, monkeypatch, multi_user):
         """/web stays in _AUTH_EXEMPT_PREFIXES for the redirect release so
-        old bookmarks land on the SPA login rather than a bare 401. The
-        exemption is single-user-only (§17.812 C9), so pin the mode — under
-        MULTI_USER_ENABLED an unauthenticated /web hit stays 401 by design."""
+        old bookmarks land on the SPA login rather than a bare 401 — in BOTH
+        auth modes (§17.820b dropped the §17.812 multi-user gate along with
+        its reason: the routes are data-free 301s now)."""
         from app.config import settings
 
-        monkeypatch.setattr(settings, "multi_user_enabled", False)
+        monkeypatch.setattr(settings, "multi_user_enabled", multi_user)
         with TestClient(app, follow_redirects=False) as tc:
             resp = tc.get("/web/jobs")
         assert resp.status_code == 301
