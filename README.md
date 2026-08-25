@@ -93,7 +93,15 @@ This downloads the five default local models. Each is 1–8 GB except `nomic-emb
 docker compose up -d
 ```
 
-This starts ten containers: orchestrator, Postgres, Milvus, Redis, SearXNG, Open WebUI, the OWUI pipelines, and three simulation sidecars (ngspice, verilator, symbiyosys — see [Optional surfaces](#optional-surfaces)). First time takes ~3 minutes (image downloads + initial DB migration). Subsequent starts are ~15 seconds.
+This starts eight containers: orchestrator, Postgres, Milvus, Redis, SearXNG, and three simulation sidecars (ngspice, verilator, symbiyosys — see [Optional surfaces](#optional-surfaces)). First time takes ~3 minutes (image downloads + initial DB migration). Subsequent starts are ~15 seconds.
+
+Optional services live behind [compose profiles](https://docs.docker.com/compose/how-tos/profiles/) — set `COMPOSE_PROFILES` in `.env` (comma-separated) before `docker compose up -d`:
+
+| Profile | Adds | Why |
+|---|---|---|
+| `owui` | Open WebUI (`:3000`) + its pipelines container | The chat front-end. Optional since §17.821 — the `/ui` SPA is the native front door. |
+| `sandbox` | `scaffold-coderunner` | Isolated code-execution sidecar. |
+| `observability` | Phoenix (`:6006`) | OTel trace viewer. |
 
 > **What you'll see:** `docker compose` prints a green checkmark per container as each becomes healthy. If any go red, check `docker compose logs <name>` for that container.
 
@@ -115,13 +123,23 @@ Returns a JSON object with `status: "healthy"` and per-dependency latency number
 > - `Cannot reach orchestrator` → run `docker ps` to confirm all containers are up. Check `docker logs scaffold-orchestrator` for startup errors.
 > - `ollama: down` → host Ollama isn't running, or the bridge gateway isn't reaching it. Confirm `ollama list` works on the host. If yes, check that `OLLAMA_BASE_URL` in `.env` points at the bridge gateway (default `http://172.18.0.1:11434` for Pop!_OS / native Docker).
 
-### 6. Open the chat UI
+### 6. Open the UI
+
+The native operator SPA is the front door:
+
+```bash
+open http://localhost:8000/ui
+```
+
+Paste your `SCAFFOLD_API_KEY` at the login screen. From there the first-run "Connect your models" wizard walks you through pointing every model role at your Ollama daemon.
+
+**Optional — Open WebUI chat.** If you enabled the `owui` profile (`COMPOSE_PROFILES=owui` in `.env`):
 
 ```bash
 open http://localhost:3000
 ```
 
-(Or just paste the URL into your browser.) Open WebUI loads. Create the local admin account (it's not federated; the credentials only exist on your machine). At the top of the chat window, the model selector should show **scaffold_router** (or any name containing "scaffold") — that's the OWUI pipeline that talks to the orchestrator.
+Open WebUI loads. Create the local admin account (it's not federated; the credentials only exist on your machine). At the top of the chat window, the model selector should show **scaffold_router** (or any name containing "scaffold") — that's the OWUI pipeline that talks to the orchestrator.
 
 If `scaffold_router` doesn't appear in the model dropdown, the OWUI pipelines container hasn't picked up the pipeline files yet. Run `docker restart open-webui-pipelines` and refresh the page.
 
