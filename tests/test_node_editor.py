@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.authz import ADMIN_PRINCIPAL
+
 from app.modules import node_editor
 
 
@@ -223,6 +225,9 @@ class TestReset:
 
 @pytest.mark.smoke
 class TestRouterDispatch:
+    # §17.815 — endpoints take a Principal for edit attribution; direct
+    # calls pass the admin singleton (single-user behavior).
+
     async def test_bad_uuid_400(self):
         from app.routers import nodes as nr
         from app.schemas import NodeEditInput
@@ -239,7 +244,8 @@ class TestRouterDispatch:
         with patch.object(nr.node_editor, "edit_node",
                           AsyncMock(return_value={"error": "stale", "http_status": 409})):
             with pytest.raises(HTTPException) as ei:
-                await nr.node_edit(_JID, "T1", NodeEditInput(title="x"), db=_db())
+                await nr.node_edit(_JID, "T1", NodeEditInput(title="x"), db=_db(),
+                                   principal=ADMIN_PRINCIPAL)
         assert ei.value.status_code == 409
 
     async def test_ok_result_passthrough(self):
@@ -249,7 +255,8 @@ class TestRouterDispatch:
         _JID = "c2b18327-cde9-4842-add4-72a248d99666"
         with patch.object(nr.node_editor, "reset_node",
                           AsyncMock(return_value={"status": "ok", "node_key": "T1"})):
-            out = await nr.node_reset(_JID, "T1", NodeResetInput(), db=_db())
+            out = await nr.node_reset(_JID, "T1", NodeResetInput(), db=_db(),
+                                      principal=ADMIN_PRINCIPAL)
         assert out["status"] == "ok"
 
 

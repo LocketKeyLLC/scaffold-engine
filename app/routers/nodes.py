@@ -15,6 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.authz import Principal, get_principal
 from app.database import get_db
 from app.modules import node_editor
 from app.schemas import (
@@ -43,6 +44,21 @@ def _valid_uuid(job_id: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid job_id format")
 
 
+def _attributed(principal: Principal, client_value: str | None) -> str:
+    """§17.815 (plan 5.3) — server-derived edit attribution.
+
+    A NON-admin scoped key is always attributed by its real identity — the
+    client-sent label is ignored, so one user can't stamp edits as another
+    (the §17.810 audit-trail requirement). Admin callers (master key,
+    single-user installs, trusted loopbacks) keep their client label
+    ("web"/"cli"/"operator" — useful surface provenance) with the admin
+    identity as the fallback, preserving pre-§17.815 behavior byte-for-byte
+    on single-user boxes."""
+    if not principal.is_admin:
+        return principal.identity
+    return (client_value or "").strip() or principal.identity
+
+
 @router.get("/nodes/{job_id}")
 async def node_list(job_id: str, db: AsyncSession = Depends(get_db)):
     """Full editable node list for the /ui plan editor.
@@ -60,11 +76,12 @@ async def node_list(job_id: str, db: AsyncSession = Depends(get_db)):
 async def node_edit(
     job_id: str, node_key: str, body: NodeEditInput,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     _valid_uuid(job_id)
     data = body.model_dump(exclude_unset=True)
     expected_version = data.pop("expected_version", None)
-    edited_by = data.pop("edited_by", None)
+    edited_by = _attributed(principal, data.pop("edited_by", None))
     return _dispatch(await node_editor.edit_node(
         job_id, node_key, data,
         expected_version=expected_version, edited_by=edited_by, db=db,
@@ -74,10 +91,11 @@ async def node_edit(
 @router.post("/nodes/{job_id}")
 async def node_insert(
     job_id: str, body: NodeInsertInput, db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     _valid_uuid(job_id)
     spec = body.model_dump(exclude_unset=False)
-    edited_by = spec.pop("edited_by", None)
+    edited_by = _attributed(principal, spec.pop("edited_by", None))
     return _dispatch(await node_editor.insert_node(
         job_id, spec, edited_by=edited_by, db=db,
     ))
@@ -87,20 +105,23 @@ async def node_insert(
 async def node_delete(
     job_id: str, node_key: str, edited_by: str | None = None,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     _valid_uuid(job_id)
     return _dispatch(await node_editor.delete_node(
-        job_id, node_key, edited_by=edited_by, db=db,
+        job_id, node_key, edited_by=_attributed(principal, edited_by), db=db,
     ))
 
 
 @router.post("/nodes/{job_id}/reorder")
 async def node_reorder(
     job_id: str, body: NodeReorderInput, db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     _valid_uuid(job_id)
     return _dispatch(await node_editor.reorder_nodes(
-        job_id, body.ordered_keys, edited_by=body.edited_by, db=db,
+        job_id, body.ordered_keys,
+        edited_by=_attributed(principal, body.edited_by), db=db,
     ))
 
 
@@ -108,9 +129,10 @@ async def node_reorder(
 async def node_reset(
     job_id: str, node_key: str, body: NodeResetInput | None = None,
     db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
 ):
     _valid_uuid(job_id)
-    edited_by = body.edited_by if body else None
+    edited_by = _attributed(principal, body.edited_by if body else None)
     return _dispatch(await node_editor.reset_node(
         job_id, node_key, edited_by=edited_by, db=db,
     ))
