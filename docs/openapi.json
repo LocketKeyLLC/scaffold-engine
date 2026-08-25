@@ -8337,6 +8337,93 @@
         ]
       }
     },
+    "/meta/first-run": {
+      "get": {
+        "description": "Whether this install still needs the connect-models wizard.\n\nThe explicit flag wins. When it has never been written (fresh install OR\nan existing box upgrading onto this feature), fall back to a heuristic:\nan install with jobs or persisted model overrides has clearly been used —\nnever nag it with a first-run wizard. Only a genuinely empty engine\n(no jobs, no overrides) reads as first-run.",
+        "operationId": "get_first_run_meta_first_run_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get First Run Meta First Run Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get First Run",
+        "tags": [
+          "Meta"
+        ]
+      }
+    },
+    "/meta/first-run/complete": {
+      "post": {
+        "description": "Mark the wizard done (idempotent).",
+        "operationId": "complete_first_run_meta_first_run_complete_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Complete First Run Meta First Run Complete Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Complete First Run",
+        "tags": [
+          "Meta"
+        ]
+      }
+    },
+    "/models/available": {
+      "get": {
+        "description": "§17.817 (plan 5.7) — the pulled Ollama tag list for the wizard's\npickers, split local vs cloud. ``reachable: false`` (with an empty list)\nwhen the daemon is down — the wizard renders that state instead of a\nspinner-forever.",
+        "operationId": "get_available_models_models_available_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Available Models Models Available Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Available Models",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
     "/models/probe": {
       "post": {
         "description": "Explicit generate-based liveness probe (the wizard's \"test\" button).\n\nAlways generates — the caller opted into the latency, and for a LOCAL tag\nthat first call is also what a real request would pay (model load).",

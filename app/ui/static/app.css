@@ -831,3 +831,19 @@ select.input:focus-visible,
 
 /* §17.816 — dag node verbs */
 .dag-node-verbs { gap: 8px; }
+
+/* §17.816 — library view */
+.lib-tabs { gap: 6px; }
+.lib-controls { gap: 8px; align-items: center; margin: 10px 0; }
+.lib-pager { gap: 8px; align-items: center; }
+.lib-row { margin-bottom: 8px; }
+.lib-summary { gap: 8px; align-items: center; cursor: pointer; flex-wrap: wrap; }
+.lib-snippet { margin-top: 4px; font-size: 13px; }
+
+/* §17.817 — setup wizard */
+.setup-presets { margin-top: 8px; }
+.setup-preset h3 { margin-bottom: 6px; }
+.setup-preset .btn { margin-top: 10px; }
+.setup-health { margin-bottom: 12px; }
+.setup-health-card .row { gap: 8px; align-items: center; }
+.setup-apply-status { margin-left: 10px; }

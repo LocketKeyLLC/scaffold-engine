@@ -129,6 +129,25 @@ async def get_model_roles(db: AsyncSession = Depends(get_db)) -> dict:
     return {"roles": roles, "switchable": sorted(SWITCHABLE_ROLE_FIELDS)}
 
 
+@router.get("/models/available")
+async def get_available_models() -> dict:
+    """§17.817 (plan 5.7) — the pulled Ollama tag list for the wizard's
+    pickers, split local vs cloud. ``reachable: false`` (with an empty list)
+    when the daemon is down — the wizard renders that state instead of a
+    spinner-forever."""
+    tags = await _pulled_tags()
+    if tags is None:
+        return {"reachable": False, "ollama_url": settings.ollama_base_url,
+                "local": [], "cloud": []}
+    names = sorted(t for t in tags if t)
+    return {
+        "reachable": True,
+        "ollama_url": settings.ollama_base_url,
+        "local": [t for t in names if not _is_cloud_tag(t)],
+        "cloud": [t for t in names if _is_cloud_tag(t)],
+    }
+
+
 @router.put("/models/roles/{role}", dependencies=[Depends(require_admin)])
 async def put_model_role(
     role: str, body: RoleModelInput, db: AsyncSession = Depends(get_db),
