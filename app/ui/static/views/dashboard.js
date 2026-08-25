@@ -252,7 +252,8 @@ export default function dashboard(container) {
   }
 
   load();
-  timer = setInterval(load, 10000);
+  // §17.818 — don't poll a hidden tab.
+  timer = setInterval(() => { if (!document.hidden) load(); }, 10000);
 
   return () => {
     disposed = true;

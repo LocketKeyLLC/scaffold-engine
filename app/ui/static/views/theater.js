@@ -135,7 +135,9 @@ function renderTheater(container, jobId) {
   );
   mount(container, header, progressBar, grid);
 
+  let lastJobStatus = null; // §17.818 — compare payload state, not DOM text
   function setStatusPill(status) {
+    lastJobStatus = status;
     mount(statusPill, statusBadge(status));
   }
 
@@ -218,7 +220,7 @@ function renderTheater(container, jobId) {
     log("queued", "Starting execution…");
 
     // cancelled jobs resume; everything else runs execute/all
-    const cancelled = statusPill.textContent.trim() === "cancelled";
+    const cancelled = lastJobStatus === "cancelled";
     const path = cancelled ? `/jobs/${jobId}/resume` : "/execute/all";
     const body = cancelled ? {} : { job_id: jobId };
 

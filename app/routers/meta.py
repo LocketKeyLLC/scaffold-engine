@@ -21,6 +21,13 @@ router = APIRouter(tags=["Meta"])
 
 _FLAG = "first_run_completed"
 
+# §17.818 (plan 5.8) — the user-selectable ingest/build domains. Single source
+# for every client picker (SPA compose/rag/schedules/library, /web/new) — the
+# audit found the list duplicated as constants in four SPA views + the web
+# template. Mirrors app/web/routes.py::_ALLOWED_DOMAINS (the user-facing six;
+# VALID_DOMAINS' code/qa are internal-only partitions).
+_USER_DOMAINS = ("prompt", "rag", "llm", "spec", "eng", "eng_design")
+
 
 @router.get("/meta/first-run")
 async def get_first_run(db: AsyncSession = Depends(get_db)) -> dict:
@@ -56,3 +63,9 @@ async def complete_first_run(db: AsyncSession = Depends(get_db)) -> dict:
     )
     await db.commit()
     return {"first_run": False, "source": "flag"}
+
+
+@router.get("/meta/domains")
+async def get_domains() -> dict:
+    """The user-selectable domain list for client pickers."""
+    return {"domains": list(_USER_DOMAINS)}

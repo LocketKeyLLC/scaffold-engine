@@ -7,9 +7,8 @@ import * as router from "../router.js";
 import { el, mount } from "../util.js";
 import { toast } from "../components.js";
 
-// Mirrors app/web/routes.py::_ALLOWED_DOMAINS (no API exposes this list).
-// "" = auto-detect from the idea text.
-const DOMAINS = ["prompt", "rag", "llm", "spec", "eng", "eng_design"];
+// §17.818 — domains come from GET /meta/domains (single source; the audit
+// found this list duplicated across four views + the web template).
 
 export default function compose(container) {
   let busy = false;
@@ -22,9 +21,9 @@ export default function compose(container) {
   const domain = el(
     "select",
     { class: "input" },
-    el("option", { value: "", text: "Auto-detect from idea" }),
-    ...DOMAINS.map((d) => el("option", { value: d, text: d }))
+    el("option", { value: "", text: "Auto-detect from idea" })
   );
+  api.domains().then((ds) => ds.forEach((d) => domain.append(el("option", { value: d, text: d }))));
   const status = el("div", { class: "compose-status", role: "status" });
   const submit = el("button", { class: "btn btn-primary", text: "Submit idea" });
 

@@ -7,7 +7,12 @@
 import * as api from "../api.js";
 import { el, mount, mdToHtml } from "../util.js";
 
-const MODEL = "scaffold-engine";
+// §17.818 — the chat model id comes from GET /v1/models (was a literal).
+let MODEL = "scaffold-engine";
+api.get("/v1/models").then((r) => {
+  const id = r?.data?.[0]?.id;
+  if (id) MODEL = id;
+}).catch(() => {});
 // Hide the confirm-card marker line from display but keep it in history (it's
 // how the engine reconstructs a pending action on the next turn).
 const MARKER_RE = /^[ \t]*(?:\[nlc\]:[ \t]*|<!--[ \t]*)NL_CONFIRM:[A-Za-z0-9_-]+[ \t]*(?:-->)?[ \t]*$/gm;
@@ -122,7 +127,7 @@ export default function chat(container) {
     } catch (e) {
       if (e.name !== "AbortError") {
         const msg = e.status === 404
-          ? "Native chat is off. Set NATIVE_OPENAI_ENABLED=true and restart the orchestrator."
+          ? "Native chat is off. Set NATIVE_OPENAI_ENABLED=true and restart the orchestrator — or check [Settings](#/settings) for the effective config."
           : e.detail || e.message || "stream error";
         body.innerHTML = mdToHtml(`⚠ ${msg}`);
         if (acc) messages.push({ role: "assistant", content: acc });

@@ -8337,6 +8337,35 @@
         ]
       }
     },
+    "/meta/domains": {
+      "get": {
+        "description": "The user-selectable domain list for client pickers.",
+        "operationId": "get_domains_meta_domains_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Domains Meta Domains Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Domains",
+        "tags": [
+          "Meta"
+        ]
+      }
+    },
     "/meta/first-run": {
       "get": {
         "description": "Whether this install still needs the connect-models wizard.\n\nThe explicit flag wins. When it has never been written (fresh install OR\nan existing box upgrading onto this feature), fall back to a heuristic:\nan install with jobs or persisted model overrides has clearly been used —\nnever nag it with a first-run wizard. Only a genuinely empty engine\n(no jobs, no overrides) reads as first-run.",
