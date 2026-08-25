@@ -131,14 +131,15 @@ export default function dashboard(container) {
       // Health + roles are enrichment — fail-soft to null so a degraded
       // orchestrator (or a non-admin key on /models/roles) still renders
       // the core dashboard.
-      const [status, work, health, roles] = await Promise.all([
+      const [status, work, health, roles, account] = await Promise.all([
         api.get("/status"),
         api.get("/work"),
         api.health().catch(() => null),
         api.get("/models/roles").catch(() => null),
+        api.accountStatus(),
       ]);
       if (disposed) return;
-      render(status, work, health, roles);
+      render(status, work, health, roles, account);
     } catch (e) {
       if (!disposed) mount(outlet, errorPanel(e, () => load()));
     }
@@ -159,6 +160,40 @@ export default function dashboard(container) {
       ),
       el("a", { class: "btn", href: "#/research", text: "◎ Research" }),
       el("a", { class: "btn", href: "#/assist", text: "✦ Assistant" })
+    );
+  }
+
+  // §17.840 — used installs never see the wizard automatically (§17.817's
+  // never-nag rule), so without this card an existing operator has no way to
+  // discover the admin-account step. Shown to admins while unclaimed;
+  // dismissible for those who deliberately skipped.
+  const ACCOUNT_PROMPT_KEY = "scaffold_account_prompt_dismissed";
+  function accountPrompt(account) {
+    if (!account || account.claimed) return null;
+    if (api.principal()?.is_admin === false) return null;
+    if (localStorage.getItem(ACCOUNT_PROMPT_KEY)) return null;
+    return el(
+      "div",
+      { class: "card card-pad setup-checklist account-prompt" },
+      el(
+        "div",
+        { class: "setup-checklist-head" },
+        el("span", { class: "setup-checklist-title", text: "Create your admin account" }),
+        el("span", { class: "spacer" }),
+        el("a", { class: "btn btn-sm btn-primary", href: "#/setup", text: "Set it up" }),
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          text: "Dismiss",
+          onClick: (e) => {
+            localStorage.setItem(ACCOUNT_PROMPT_KEY, "1");
+            e.target.closest(".account-prompt")?.remove();
+          },
+        })
+      ),
+      el("p", {
+        class: "dim account-prompt-body",
+        text: "Takes 30 seconds: pick a name and password, and this console signs you in with them from then on — no more API key hunting. The key keeps working for CLI and scripts.",
+      })
     );
   }
 
@@ -285,7 +320,7 @@ export default function dashboard(container) {
     );
   }
 
-  function render(status, work, health, roles) {
+  function render(status, work, health, roles, account) {
     // Empty install + not yet dismissed → orientation instead of zeroed tiles.
     if ((status.total_jobs || 0) === 0 && !localStorage.getItem(ONBOARD_KEY)) {
       mount(outlet, setupChecklist(health), welcomeCard());
@@ -360,6 +395,7 @@ export default function dashboard(container) {
     mount(
       outlet,
       quickActions(counts),
+      accountPrompt(account),
       setupChecklist(health),
       tiles,
       strip,

@@ -473,6 +473,11 @@ select.input:focus-visible,
 .setup-checklist-items li { display: flex; align-items: baseline; gap: 8px; font-size: var(--fs-sm); color: var(--text-dim); }
 .setup-checklist-items li::before { content: "•"; color: var(--warn); }
 
+/* §17.840 — admin-account prompt (violet, distinct from the amber health
+   checklist). */
+.account-prompt { border-color: var(--accent-dim); }
+.account-prompt-body { margin: 0; font-size: var(--fs-sm); }
+
 /* System row — health checks + model-role bindings. */
 .health-items { display: flex; flex-wrap: wrap; gap: 12px 20px; }
 .health-item { display: inline-flex; align-items: center; gap: 7px; font-size: var(--fs-sm); }
