@@ -63,10 +63,28 @@ function workCard(job) {
       "div",
       { class: "row row-wrap work-foot" },
       el("span", { class: "faint mono", text: `${job.node_count || 0} nodes` }),
+      progressChip(job),
       el("span", { class: "spacer" }),
       ...links.map((l) => el("a", { class: "btn btn-sm btn-ghost", href: l.href, text: l.label }))
     )
   );
+}
+
+// §17.818 (plan 5.6) — live progress/ETA chip on in-flight cards, filled
+// lazily from /exec/status (compute-on-read §17.811 snapshot). Only jobs
+// actually executing get the extra request; everything else renders nothing.
+function progressChip(job) {
+  if (!["executing", "running", "assisted_executing", "assisted_running"].includes(job.status)) return null;
+  const chip = el("span", { class: "tag prog-chip", text: "…" });
+  api.get(`/exec/status/${job.id}`)
+    .then((d) => {
+      const pr = d.progress;
+      if (!pr || pr.total == null) { chip.remove(); return; }
+      chip.textContent = `${pr.pct ?? 0}%` + (pr.eta_human ? ` · ~${pr.eta_human}` : "");
+      chip.title = pr.summary || "";
+    })
+    .catch(() => chip.remove());
+  return chip;
 }
 
 function recentRow(job) {

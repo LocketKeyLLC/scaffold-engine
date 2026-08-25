@@ -847,3 +847,10 @@ select.input:focus-visible,
 .setup-health { margin-bottom: 12px; }
 .setup-health-card .row { gap: 8px; align-items: center; }
 .setup-apply-status { margin-left: 10px; }
+
+/* §17.818 — theater progress bar */
+.theater-progress { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; }
+.theater-progress.hidden { display: none; }
+.prog-track { flex: 1; height: 8px; border-radius: 4px; background: var(--bg-inset, #e8ecf4); overflow: hidden; }
+.prog-fill { height: 100%; width: 0; border-radius: 4px; background: var(--accent, #3b82f6); transition: width .4s ease; }
+.prog-text { white-space: nowrap; font-size: 12px; }

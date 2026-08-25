@@ -98,6 +98,23 @@ function renderTheater(container, jobId) {
     )
   );
 
+  // §17.818 (plan 5.6) — the §17.811 progress/ETA signal, previously
+  // emitted-but-unrendered here. Seeded from /exec/status (compute-on-read),
+  // updated live by the `progress` SSE event.
+  const progFill = el("div", { class: "prog-fill" });
+  const progText = el("span", { class: "prog-text faint" });
+  const progressBar = el("div", { class: "theater-progress hidden" },
+    el("div", { class: "prog-track" }, progFill), progText);
+  function setProgress(pr) {
+    if (!pr || pr.total == null) return;
+    progressBar.classList.remove("hidden");
+    const pct = Math.max(0, Math.min(100, pr.pct ?? 0));
+    progFill.style.width = pct + "%";
+    progText.textContent =
+      (pr.summary || `${pr.completed}/${pr.total} ${pr.unit || ""}`) +
+      (pr.eta_human ? ` · ~${pr.eta_human} left` : "");
+  }
+
   const nodeListEl = el("div", { class: "theater-nodes" }, loading("Loading nodes…"));
   const stageTitle = el("div", { class: "stage-node-title dim", text: "Idle — press Run to begin." });
   const stageBody = el("div", { class: "stage-body md" });
@@ -116,7 +133,7 @@ function renderTheater(container, jobId) {
       el("div", { class: "card theater-panel log-panel" }, el("div", { class: "panel-head", text: "Event stream" }), logEl)
     )
   );
-  mount(container, header, grid);
+  mount(container, header, progressBar, grid);
 
   function setStatusPill(status) {
     mount(statusPill, statusBadge(status));
@@ -165,6 +182,7 @@ function renderTheater(container, jobId) {
       nodeState.clear();
       for (const n of data.nodes || []) nodeState.set(n.node_key, { status: n.status, title: n.title, tool: n.tool, order: n.execution_order, output: "" });
       renderNodes();
+      setProgress(data.progress);
       // Adjust the run button for cancelled jobs
       if (data.job_status === "cancelled") runBtn.textContent = "▶ Resume";
       const counts = data.counts || {};
@@ -262,6 +280,9 @@ function renderTheater(container, jobId) {
         log("node_done", `${data.node_key} done${data.verified === false ? " (unverified)" : ""}${data.confidence != null ? ` · conf ${Number(data.confidence).toFixed(2)}` : ""}`, "ok");
         if (data.node_key === currentKey) showNode(data.node_key);
         renderNodes();
+        break;
+      case "progress":
+        setProgress(data);
         break;
       case "node_retry":
         ensureNode(data.node_key, { status: "running" });
