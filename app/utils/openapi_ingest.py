@@ -74,7 +74,7 @@ async def _fetch_spec(url: str) -> dict[str, Any]:
     # scoped key under MULTI_USER_ENABLED) could reach cloud-metadata / internal
     # Docker-network services. Validate the host here, off the event loop (the
     # guard does a blocking getaddrinfo), same as _fetch_url_bounded.
-    from app.modules.research_extractors import _is_public_host
+    from app.utils.net_guard import _is_public_host
     ok, reason = await asyncio.to_thread(_is_public_host, url)
     if not ok:
         raise OpenAPIFetchError(f"Refused to fetch {url}: SSRF guard ({reason})")
@@ -339,7 +339,7 @@ async def _resolve_refs(spec: dict, url: str) -> tuple[dict, bool]:
     # server-side outside the SSRF guard; one private-host ref poisons the whole
     # resolve, so we skip resolution entirely (safer than partial) and return the
     # spec unresolved rather than reaching an internal service.
-    from app.modules.research_extractors import _is_public_host
+    from app.utils.net_guard import _is_public_host
     for ref_url in _collect_absolute_ref_urls(spec):
         ok, reason = await asyncio.to_thread(_is_public_host, ref_url)
         if not ok:
