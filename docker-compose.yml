@@ -65,10 +65,14 @@ services:
     environment:
       - OLLAMA_BASE_URL=http://172.18.0.1:11434
       - OPENAI_API_BASE_URLS=http://pipelines:9099
-      - OPENAI_API_KEYS=${OPENWEBUI_PIPELINES_KEY:?OPENWEBUI_PIPELINES_KEY is required}
+      # §17.824 (plan 6.1) — soft default, NOT :?-required: compose interpolates
+      # the whole file even for profile-off services, so a hard requirement
+      # here broke `up -d` on the default native-only stack. When the owui
+      # profile IS enabled, `make doctor` fails loudly on an empty value.
+      - OPENAI_API_KEYS=${OPENWEBUI_PIPELINES_KEY:-}
       - RESET_CONFIG_ON_START=false
       - USE_OLLAMA_DOCKER=false
-      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?WEBUI_SECRET_KEY is required}
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-}  # §17.824 — soft default (see OPENAI_API_KEYS note below)
       - DEFAULT_MODELS=scaffold_router
     # §17.536 — env_file removed (least-privilege). Loading the whole .env
     # injected POSTGRES_PASSWORD / SCAFFOLD_API_KEY / MODEL_* / timeouts OWUI
@@ -108,7 +112,7 @@ services:
     # parameterized for hosts whose operator UID isn't 1000.
     user: "${PIPELINES_UID:-1000}:${PIPELINES_GID:-1000}"
     environment:
-      - PIPELINES_API_KEY=${OPENWEBUI_PIPELINES_KEY:?OPENWEBUI_PIPELINES_KEY is required}
+      - PIPELINES_API_KEY=${OPENWEBUI_PIPELINES_KEY:-}  # §17.824 — soft default (owui-profile-only var; doctor guards it)
       # Forwarded to pipeline _apply_env_fallbacks so a wiped valves.json
       # can recover api_key/url/ollama from env. Without these the 4 non-
       # router pipelines silently use baked-in defaults after rotation.
