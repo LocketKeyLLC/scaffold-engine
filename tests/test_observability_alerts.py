@@ -94,6 +94,73 @@ class TestEmit:
         assert record["severity"] == "info"
         assert record["payload"] == {"a": 2}
 
+    async def test_emit_posts_webhook_when_configured(self, monkeypatch):
+        """§17.835 (plan 8.7) — URL set → one JSON POST carrying both the
+        Slack-compatible `text` line and the full record."""
+        monkeypatch.setattr(
+            "app.observability.alerts.settings.alert_webhook_url",
+            "http://ntfy.local/alerts", raising=False,
+        )
+        client = MagicMock()
+        client.post = AsyncMock(return_value=MagicMock(status_code=200))
+        db = _mock_db(insert_id="00000000-0000-0000-0000-000000000002")
+        with patch("app.utils.http_clients.get_generic_http_client",
+                   return_value=client):
+            await _alerts.emit(
+                kind="test.hook", severity="critical", message="boom",
+                payload={"x": 1}, db=db,
+            )
+        client.post.assert_awaited_once()
+        args, kwargs = client.post.await_args
+        assert args[0] == "http://ntfy.local/alerts"
+        body = kwargs["json"]
+        assert body["text"] == "[critical] test.hook: boom"
+        assert body["kind"] == "test.hook" and body["payload"] == {"x": 1}
+        assert body["id"] == "00000000-0000-0000-0000-000000000002"
+
+    async def test_emit_webhook_default_off_no_call(self):
+        client = MagicMock()
+        client.post = AsyncMock()
+        with patch("app.utils.http_clients.get_generic_http_client",
+                   return_value=client):
+            await _alerts.emit(
+                kind="test.hook", severity="info", message="quiet",
+                db=_mock_db(),
+            )
+        client.post.assert_not_awaited()
+
+    async def test_emit_webhook_failure_absorbed(self, monkeypatch):
+        """A dead receiver can never break alert emission."""
+        monkeypatch.setattr(
+            "app.observability.alerts.settings.alert_webhook_url",
+            "http://dead.local/", raising=False,
+        )
+        client = MagicMock()
+        client.post = AsyncMock(side_effect=RuntimeError("conn refused"))
+        with patch("app.utils.http_clients.get_generic_http_client",
+                   return_value=client):
+            result = await _alerts.emit(
+                kind="test.hook", severity="warning", message="still emitted",
+                db=_mock_db(),
+            )
+        assert result["emitted"] is True  # other sinks unaffected
+
+    async def test_emit_webhook_suppressed_alert_not_posted(self, monkeypatch):
+        """Cooldown-suppressed alerts don't spam the webhook."""
+        monkeypatch.setattr(
+            "app.observability.alerts.settings.alert_webhook_url",
+            "http://ntfy.local/alerts", raising=False,
+        )
+        client = MagicMock()
+        client.post = AsyncMock()
+        with patch("app.utils.http_clients.get_generic_http_client",
+                   return_value=client):
+            await _alerts.emit(
+                kind="test.hook", severity="warning", message="dup",
+                dedup_key="k:1", db=_mock_db(dedup_hit=True),
+            )
+        client.post.assert_not_awaited()
+
     async def test_emit_invalid_severity_normalized(self):
         db = _mock_db()
         result = await _alerts.emit(

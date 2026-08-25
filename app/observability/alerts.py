@@ -102,6 +102,55 @@ def _write_file_sink(path: str, record: dict[str, Any]) -> None:
 
 # ── Public emit ─────────────────────────────────────────────────────
 
+async def _post_webhook(record: dict[str, Any], alert_id: str | None) -> None:
+    """§17.835 — POST one alert to the configured webhook. Never raises.
+
+    Body = the full record plus a Slack-compatible ``text`` one-liner (and a
+    ``title`` for ntfy-style receivers), so the same generic JSON POST lands
+    usefully on Slack/Discord incoming webhooks, ntfy's JSON publish
+    endpoint, Matrix hookshot, or a bespoke receiver.
+    """
+    body = {
+        "text": f"[{record['severity']}] {record['kind']}: {record['message']}",
+        "title": f"scaffold-engine alert: {record['kind']}",
+        **record,
+    }
+    if alert_id:
+        body["id"] = alert_id
+    try:
+        try:
+            from app.utils.http_clients import get_generic_http_client
+            client = get_generic_http_client()
+            resp = await client.post(
+                settings.alert_webhook_url,
+                json=body,
+                timeout=settings.alert_webhook_timeout_seconds,
+            )
+        except RuntimeError:
+            # Shared client not initialized — alerts can fire OUTSIDE the app
+            # lifespan (migration-failure alerts during startup, the CLI
+            # `python -m app.observability.alerts` path). One-shot client so
+            # exactly those alerts still reach the webhook. (Found by the
+            # §17.835 live drill, not by the mocked tests.)
+            import httpx
+            async with httpx.AsyncClient() as one_shot:
+                resp = await one_shot.post(
+                    settings.alert_webhook_url,
+                    json=body,
+                    timeout=settings.alert_webhook_timeout_seconds,
+                )
+        if resp.status_code >= 400:
+            logger.warning(
+                "alert_webhook_rejected: status=%d kind=%s url=%s",
+                resp.status_code, record["kind"], settings.alert_webhook_url,
+            )
+    except Exception as exc:
+        logger.warning(
+            "alert_webhook_failed: kind=%s err=%s (other sinks still fired)",
+            record["kind"], exc,
+        )
+
+
 async def emit(
     *,
     kind: str,
@@ -240,6 +289,13 @@ async def emit(
             await asyncio.to_thread(
                 _write_file_sink, settings.alert_file_path, record_with_id,
             )
+
+        # §17.835 (plan 8.7) — webhook sink (default off: empty URL). Awaited
+        # inline like the file sink, bounded by its own timeout, and — like
+        # every other leg — absorbed on failure so a dead receiver can never
+        # break alert emission (the logger leg above already fired).
+        if settings.alert_webhook_url:
+            await _post_webhook(record, alert_id)
 
         try:
             _metrics.alerts_emitted_total.labels(kind=kind, severity=severity).inc()
