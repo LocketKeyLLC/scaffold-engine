@@ -41,7 +41,7 @@ let outlet = null; // the content container the active view renders into
 let cleanup = () => {}; // teardown hook returned by the active view
 
 // ── Auth / connect gate ───────────────────────────────────────────────
-function gateStep(n, title, body) {
+function gateStep(n, title, ...body) {
   return el(
     "div",
     { class: "gate-step" },
@@ -50,7 +50,7 @@ function gateStep(n, title, body) {
       "div",
       {},
       el("div", { class: "gate-step-t", text: title }),
-      el("div", { class: "gate-step-b", text: body })
+      el("div", { class: "gate-step-b" }, ...body)
     )
   );
 }
@@ -111,13 +111,15 @@ function connectGate(message) {
           { class: "gate-steps" },
           gateStep(
             1,
-            "Get your administrator key",
-            "Installing the engine created it for you: the SCAFFOLD_API_KEY value in the .env file on the server. (make bootstrap also prints a one-click sign-in link that skips this page entirely.)"
+            "Get your sign-in link",
+            "On the server, open a terminal in the folder you installed Scaffold Engine into and run:",
+            el("code", { class: "gate-code", text: "make signin-link" }),
+            "Click the link it prints — this browser signs in as administrator, and you won't be asked again."
           ),
           gateStep(
             2,
-            "Pair this browser",
-            "Paste the key and press Connect — that's how the console knows this browser is yours. It's remembered here, so you won't be asked again."
+            "Or paste the key by hand",
+            "It's the SCAFFOLD_API_KEY line inside the (hidden) .env file in that same folder. Paste the value below and press Connect — it stays in this browser only."
           ),
           gateStep(
             3,
