@@ -312,6 +312,10 @@ function buildChrome() {
 // comfortable ↔ compact (token overrides in app.css).
 const THEME_KEY = "scaffold_theme";
 const DENSITY_KEY = "scaffold_density";
+// §17.840 — set by the wizard's "Skip for now" AND the dashboard card's
+// Dismiss (dashboard.js uses the same literal): stops the boot-time route
+// into setup for operators who deliberately declined the account.
+const ACCOUNT_PROMPT_KEY = "scaffold_account_prompt_dismissed";
 const THEME_LABELS = { auto: "◐ Auto", dark: "● Dark", light: "○ Light" };
 
 function themeToggle() {
@@ -478,19 +482,28 @@ function registerRoutes() {
 
 // ── Boot ──────────────────────────────────────────────────────────────
 let started = false;
-// §17.817 — server-side first-run: an empty engine routes its admin to the
-// connect-models wizard once per INSTALL (not per browser). Fail-soft: an
-// older server (404) or non-admin never redirects.
+// Where does a fresh sign-in land?
+// §17.817 — an empty engine routes its admin to the wizard once per INSTALL
+// (server-side flag). §17.840 — beyond that, an admin who hasn't created
+// their account (nor skipped it) goes to setup FIRST: the front door is
+// user setup, not the console. Fail-soft: an older server or non-admin
+// never redirects.
 async function maybeFirstRun() {
   const p = api.principal();
   if (p?.is_admin === false) return;
+  if (location.hash.startsWith("#/setup")) return;
   try {
     const fr = await api.get("/meta/first-run");
-    if (fr && fr.first_run && !location.hash.startsWith("#/setup")) {
+    if (fr && fr.first_run) {
       location.hash = "#/setup";
+      return;
     }
   } catch {
     /* pre-§17.817 server */
+  }
+  const acct = await api.accountStatus();
+  if (acct && !acct.claimed && !localStorage.getItem(ACCOUNT_PROMPT_KEY)) {
+    location.hash = "#/setup";
   }
 }
 async function boot() {

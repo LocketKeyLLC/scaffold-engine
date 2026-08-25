@@ -69,6 +69,12 @@ export default function setup(container) {
       stepConnect();
       return;
     }
+    // Skipping is remembered (same key as the dashboard card's Dismiss) so
+    // the boot-time route into setup stops nagging a deliberate decliner.
+    const skip = () => {
+      localStorage.setItem("scaffold_account_prompt_dismissed", "1");
+      stepConnect();
+    };
     mount(
       container,
       el(
@@ -80,7 +86,7 @@ export default function setup(container) {
           el("h1", { text: "Welcome — let's set up" }),
           el("div", { class: "sub", text: "First — create your admin account (optional)" })
         ),
-        el("button", { class: "btn btn-ghost btn-sm", text: "Skip for now", onClick: stepConnect })
+        el("button", { class: "btn btn-ghost btn-sm", text: "Skip for now", onClick: skip })
       ),
       body
     );
@@ -115,7 +121,7 @@ export default function setup(container) {
           text: "From then on this page signs you in with a friendly password — no more hunting for the API key. The key keeps working too (CLI, scripts, recovery).",
         }),
         name, pw, pw2,
-        el("div", { class: "row setup-account-actions" }, create, el("button", { class: "btn btn-ghost", text: "Skip for now", onClick: stepConnect })),
+        el("div", { class: "row setup-account-actions" }, create, el("button", { class: "btn btn-ghost", text: "Skip for now", onClick: skip })),
         status
       )
     );
