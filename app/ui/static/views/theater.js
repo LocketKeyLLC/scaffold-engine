@@ -183,6 +183,11 @@ function renderTheater(container, jobId) {
       for (const n of data.nodes || []) nodeState.set(n.node_key, { status: n.status, title: n.title, tool: n.tool, order: n.execution_order, output: "" });
       renderNodes();
       setProgress(data.progress);
+      // §17.818 (plan 5.5) — one-shot auto-run handoff from the approve gate.
+      if (sessionStorage.getItem("scaffold_autorun") === jobId) {
+        sessionStorage.removeItem("scaffold_autorun");
+        if (!running) toggleRun();
+      }
       // Adjust the run button for cancelled jobs
       if (data.job_status === "cancelled") runBtn.textContent = "▶ Resume";
       const counts = data.counts || {};
