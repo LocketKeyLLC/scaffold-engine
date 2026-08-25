@@ -167,7 +167,10 @@ test-ui: ## §17.814 — SPA JS unit tests (node --test; dev-only, zero runtime 
 			node --test 'tests/ui/**/*.test.mjs'; \
 	fi
 
-ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift lint-migrations ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The 5 prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
+check-env-example: ## §17.823 (M15) — every compose ${VAR} must be documented in .env.example. Static, no docker. Part of ci-tier-0.
+	@python3 scripts/check_env_example.py
+
+ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift lint-migrations check-env-example ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The 6 prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
 	@printf '\033[1m▶ static-scan inventory tests (host pytest, --noconftest)\033[0m\n'
 	@if command -v pytest >/dev/null 2>&1; then \
 		PYTHONPATH=$(CURDIR):$(CURDIR)/sdk pytest \
