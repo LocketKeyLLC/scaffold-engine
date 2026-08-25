@@ -2394,6 +2394,26 @@ def _emit_decision_action(
         yield from assist_handoff(pipe, session_id, nk, _handoff_mode_from_message(msg))
         return
     if action == "finalize":
+        # §17.839 (plan 8.0 — the §17.816 smoke's "candidate polish"): a
+        # single turn carrying completion evidence PLUS "that was the last
+        # step" classifies `finalize` while the step is still in-flight;
+        # assist_done alone then summarized with the step showing `active`
+        # and the operator needed a second plain "done". Retire the
+        # in-flight step FIRST via the same tracker reconcile the advance
+        # path uses (same gates — bare "we're done" turns skip the tracker
+        # exactly like bare "next" does): when it was the last step the
+        # reconcile itself finalizes and renders the 🎉 completion; when
+        # the plan has MORE steps than the operator thinks, it presents the
+        # next one, surfacing the mismatch instead of a summary that
+        # quietly shows an active step. proceed/error falls through to the
+        # plain summary as before.
+        if (nk and getattr(pipe.valves, "assist_progress_tracker", True)
+                and not _looks_like_shell_evidence(msg)
+                and _word_count(msg) >= getattr(pipe.valves, "assist_tracker_min_words", 5)):
+            handled = yield from _tracker_reconcile(
+                pipe, session_id, msg, nk, history, chat_id)
+            if handled:
+                return
         yield from assist_done(pipe, session_id, chat_id=chat_id); return
     if action == "pause":
         yield from assist_simple_post(pipe, session_id, "pause"); return
