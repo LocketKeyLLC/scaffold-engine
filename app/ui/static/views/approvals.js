@@ -133,6 +133,17 @@ function renderDetail(container, jobId) {
 
   const progress = el("div", { class: "approval-progress hidden" });
   const approveBtn = el("button", { class: "btn btn-primary", text: "✓ Approve — research & plan", onClick: () => approve() });
+  // §17.818 (plan 5.5) — one approve semantic across surfaces: approve always
+  // means confirm → plan-ready; RUNNING is an explicit choice. This toggle
+  // mirrors the OWUI auto-chain for operators who want approve→run in one
+  // gesture. UI preference only (localStorage) — the server chain entries
+  // (/ideate/confirm → /dag → /execute/all) are identical either way.
+  const autoRun = el("input", { type: "checkbox" });
+  autoRun.checked = localStorage.getItem("scaffold_auto_run") === "1";
+  autoRun.addEventListener("change", () =>
+    localStorage.setItem("scaffold_auto_run", autoRun.checked ? "1" : "0"));
+  const autoRunLabel = el("label", { class: "row faint autorun-toggle" },
+    autoRun, " Auto-run after approve");
   const rejectBtn = el("button", { class: "btn btn-danger", text: "✕ Reject (cancel)", onClick: () => reject() });
 
   let waitingShown = false; // dedupe re-renders while polling the waiting state
@@ -164,7 +175,7 @@ function renderDetail(container, jobId) {
           el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Refined brief" }), renderRecord(job.refined_brief)),
           el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Feasibility" }), renderRecord(job.feasibility)),
           progress,
-          el("div", { class: "drawer-actions approval-actions" }, approveBtn, rejectBtn)
+          el("div", { class: "drawer-actions approval-actions" }, approveBtn, rejectBtn, autoRunLabel)
         );
         return;
       }
@@ -254,8 +265,16 @@ function renderDetail(container, jobId) {
       // Generate the DAG but DO NOT execute — the operator edits it next.
       await api.post("/dag", { job_id: jobId });
       if (disposed) return;
-      toast("Approved — plan generated. Edit before executing.", "ok");
-      router.navigate(`/plan/${jobId}`);
+      if (autoRun.checked) {
+        // §17.818 — hand off to the theater's runner (same /execute/all SSE
+        // the manual Run uses; sessionStorage carries the one-shot intent).
+        sessionStorage.setItem("scaffold_autorun", jobId);
+        toast("Approved — plan generated. Starting execution…", "ok");
+        router.navigate(`/theater/${jobId}`);
+      } else {
+        toast("Approved — plan generated. Edit before executing.", "ok");
+        router.navigate(`/plan/${jobId}`);
+      }
     } catch (e) {
       if (!disposed) {
         toast(`Approve failed: ${e.detail || e.message}`, "err");

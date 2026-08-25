@@ -6,8 +6,6 @@ import * as api from "../api.js";
 import { el, fmtNum, mount, shortId, timeAgo } from "../util.js";
 import { emptyState, errorPanel, loading, statTile } from "../components.js";
 
-const DOMAINS = ["", "prompt", "rag", "llm", "spec", "eng", "eng_design"];
-
 export default function library(container) {
   let disposed = false;
   let tab = "gt";
@@ -36,8 +34,9 @@ export default function library(container) {
   const gtDomain = el(
     "select",
     { class: "input input-sm" },
-    ...DOMAINS.map((d) => el("option", { value: d, text: d || "all domains" }))
+    el("option", { value: "", text: "all domains" })
   );
+  api.domains().then((ds) => ds.forEach((d) => gtDomain.append(el("option", { value: d, text: d }))));
   gtDomain.addEventListener("change", () => {
     gtPage = 1;
     renderGt();

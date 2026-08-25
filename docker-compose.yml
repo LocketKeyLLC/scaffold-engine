@@ -336,7 +336,7 @@ services:
       # by default (the OWUI pipeline path is unchanged); flip to true in .env to
       # point OpenAI clients (OWUI-as-connection, the /ui SPA, external SDKs) at
       # the engine directly. See docs/native_openai_surface_plan.md.
-      NATIVE_OPENAI_ENABLED: "${NATIVE_OPENAI_ENABLED:-false}"
+      NATIVE_OPENAI_ENABLED: "${NATIVE_OPENAI_ENABLED:-true}"  # §17.818 (5.10) — native /v1 on by default; pin false to withdraw
       SCHEDULER_ENABLED: "true"
       SCHEDULER_TIMEZONE: "UTC"
       # §17.803 — role→model learning: a periodic golden re-A/B that stages

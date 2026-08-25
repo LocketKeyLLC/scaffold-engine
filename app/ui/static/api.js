@@ -226,3 +226,17 @@ export async function validateKey() {
     throw e; // network / other — surface separately
   }
 }
+
+// §17.818 (plan 5.8) — single-source domain list for pickers, cached per
+// session. Falls back to the historical constant on a pre-§17.818 server.
+let _domains = null;
+export async function domains() {
+  if (_domains) return _domains;
+  try {
+    const res = await get("/meta/domains");
+    _domains = res.domains || [];
+  } catch {
+    _domains = ["prompt", "rag", "llm", "spec", "eng", "eng_design"];
+  }
+  return _domains;
+}

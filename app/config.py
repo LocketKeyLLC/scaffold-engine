@@ -1460,10 +1460,12 @@ class Settings(BaseSettings):
     # /ui SPA chat, external SDKs) drives the engine directly and the OWUI
     # pipeline adapter becomes optional. Mounted as a sub-app so it bypasses the
     # global X-API-Key dependency and carries its own Bearer-or-X-API-Key guard
-    # (require_openai_key). Default off — the pipeline path is unchanged while
-    # off. Phase 0 is a passthrough to model_general; triage/NL routing land in
-    # later phases (see docs/native_openai_surface_plan.md).
-    native_openai_enabled: bool = Field(default=False)
+    # (require_openai_key). §17.818 (plan 5.10) — default ON: the /ui SPA chat
+    # is the flagship no-OWUI surface and a fresh install should have it lit
+    # without a hidden env flag (audit C10 called it "dark and undiscoverable").
+    # Set NATIVE_OPENAI_ENABLED=false to withdraw the /v1 mount; existing
+    # deployments with an explicit env pin are unchanged either way.
+    native_openai_enabled: bool = Field(default=True)
     # Advertised model id on GET /v1/models and the default routed persona.
     native_openai_model_id: str = Field(default="scaffold-engine")
 

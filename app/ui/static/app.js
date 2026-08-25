@@ -255,7 +255,7 @@ async function startHealthPolling(dot, text) {
     }
   }
   await tick();
-  setInterval(tick, 15000);
+  setInterval(() => { if (!document.hidden) tick(); }, 15000); // §17.818 — skip hidden tabs
 }
 
 // ── View lifecycle ────────────────────────────────────────────────────

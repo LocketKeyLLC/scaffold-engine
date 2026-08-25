@@ -6,7 +6,6 @@ import { el, fmtDate, mount, timeAgo } from "../util.js";
 import { emptyState, errorPanel, loading, toast } from "../components.js";
 
 const DEPTHS = ["shallow", "medium", "deep"];
-const DOMAINS = ["", "prompt", "rag", "llm", "spec", "eng", "eng_design"];
 
 function statusBadge(s) {
   const cls = { success: "ok", failed: "err", skipped: "warn" }[s] || "";
@@ -31,8 +30,9 @@ export default function schedules(container) {
   const domain = el(
     "select",
     { class: "input input-sm" },
-    ...DOMAINS.map((d) => el("option", { value: d, text: d || "auto domain" }))
+    el("option", { value: "", text: "auto domain" })
   );
+  api.domains().then((ds) => ds.forEach((d) => domain.append(el("option", { value: d, text: d }))));
   const addBtn = el("button", { class: "btn btn-primary", text: "Add schedule" });
   const listBox = el("div", {});
 

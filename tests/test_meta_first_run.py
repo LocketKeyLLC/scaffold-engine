@@ -74,3 +74,11 @@ async def test_available_unreachable_daemon():
     with patch.object(models_router, "_pulled_tags", new=AsyncMock(return_value=None)):
         out = await models_router.get_available_models()
     assert out["reachable"] is False and out["local"] == [] and out["cloud"] == []
+
+
+@pytest.mark.asyncio
+async def test_domains_endpoint_serves_user_facing_six():
+    """§17.818 — single source for every client picker; internal-only
+    partitions (code/qa) stay out."""
+    out = await m.get_domains()
+    assert out == {"domains": ["prompt", "rag", "llm", "spec", "eng", "eng_design"]}

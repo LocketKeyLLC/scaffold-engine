@@ -7,8 +7,6 @@ import * as api from "../api.js";
 import { el, mount } from "../util.js";
 import { emptyState, errorPanel, loading, toast } from "../components.js";
 
-const DOMAINS = ["", "prompt", "rag", "llm", "spec", "eng", "eng_design"];
-
 export default function rag(container) {
   let disposed = false;
 
@@ -19,8 +17,9 @@ export default function rag(container) {
   const domain = el(
     "select",
     { class: "input input-sm" },
-    ...DOMAINS.map((d) => el("option", { value: d, text: d || "all domains" }))
+    el("option", { value: "", text: "all domains" })
   );
+  api.domains().then((ds) => ds.forEach((d) => domain.append(el("option", { value: d, text: d }))));
   const history = el("input", { type: "checkbox" });
   const searchBtn = el("button", { class: "btn btn-primary", text: "Search" });
   const resultsBox = el("div", { class: "rag-results" });
