@@ -7,14 +7,17 @@ stays byte-identical post-refactor.
 
 Routes:
   POST   /research                              — research_endpoint (SSE)
+  POST   /research/start                        — research_start_endpoint (§17.820 detached kickoff)
   POST   /research/reply                        — research_reply_endpoint (SSE)
   GET    /research/verify/{session_id}          — research_verify_endpoint
   POST   /research/pdf                          — research_pdf_endpoint (SSE)
   GET    /research/pdf                          — research_pdf_upload_page (template)
   GET    /research/sessions                     — list_research_sessions
+  GET    /research/sessions/{session_id}        — get_research_session (§17.820 detail)
   DELETE /research/sessions/{session_id}        — delete_research_session
   PATCH  /research/sessions/{session_id}        — rename_research_session
 """
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -46,6 +49,8 @@ from app.utils.sse import _sse_with_disconnect_watch
 from app.utils.upload import read_capped
 
 router = APIRouter()
+
+logger = logging.getLogger("scaffold")
 
 # Template registry — kept local because the only template the router
 # uses is research_pdf_upload.html. Moving to a shared location is
@@ -84,6 +89,67 @@ async def research_endpoint(
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/research/start", tags=["Research"])
+async def research_start_endpoint(
+    body: ResearchInput,
+    principal: Principal = Depends(get_principal),
+):
+    """§17.820 (plan 5.9) — fire-and-forget research kickoff.
+
+    The detached-run capability the /web form had (spawn_research_background,
+    §17.454 pattern: the 20-60 min run survives the browser closing), now as
+    JSON. The streaming ``POST /research`` cancels the session when the client
+    disconnects — this one finalizes server-side regardless. Progress lands in
+    ``GET /research/sessions`` / ``GET /research/sessions/{id}``.
+    """
+    await _require_valid_models(body.model_overrides)
+    from app.modules.research_agent import spawn_research_background
+
+    spawn_research_background(
+        body.topic.strip(),
+        depth=body.depth,
+        domain=body.domain,
+        model_overrides=body.model_overrides,
+        owner=principal.identity,
+    )
+    logger.info(
+        "research_start_detached topic=%s depth=%s owner=%s",
+        body.topic.strip()[:80], body.depth, principal.identity,
+    )
+    return {"status": "started", "topic": body.topic.strip(), "depth": body.depth}
+
+
+@router.get("/research/sessions/{session_id}", tags=["Management"])
+async def get_research_session(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.820 (plan 5.9) — single-session detail read.
+
+    The /web detail page's 17-column payload (stats + summary + error), which
+    the JSON surface lacked — ``GET /research/sessions`` is a thin list and
+    ``/research/verify/{id}`` is a different (grounding) payload.
+    """
+    try:
+        UUID(session_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="session_id must be a valid UUID")
+
+    # §17.810 — owner predicate: a non-owner reads zero rows → 404.
+    owner_clause, owner_params = owner_filter(principal, column="owner")
+    row = (await db.execute(text(f"""
+        SELECT id, topic, depth, domain, status, summary, error_message,
+               iterations_completed, total_entries_extracted, total_entries_ingested,
+               total_entries_rejected, total_urls_searched, total_queries,
+               coverage_pct, duration_ms, created_at, completed_at
+        FROM research_sessions WHERE id = :id{owner_clause}
+    """), {"id": session_id, **owner_params})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"research_session not found: {session_id}")
+    return dict(row)
 
 
 @router.post("/research/reply", tags=["Research"])

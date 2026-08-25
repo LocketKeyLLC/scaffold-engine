@@ -239,9 +239,13 @@ async def ideate_confirm_endpoint(
     # §17.809 — if the job was started with --quick, layer the fast model map.
     overrides = await resolve_job_overrides(body.job_id, body.model_overrides)
     await _require_valid_models(overrides)
+    # §17.820 — whitespace-only feedback means "no feedback" (ported from the
+    # /web form's normalization; a "  " string would otherwise be folded into
+    # the brief as if the user said something).
+    feedback = (body.feedback or "").strip() or None
     result = await research_and_compile(
         body.job_id, db,
-        user_feedback=body.feedback,
+        user_feedback=feedback,
         push_to_github=body.push_to_github,
         model_overrides=overrides,
     )

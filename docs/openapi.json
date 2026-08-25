@@ -1760,6 +1760,7 @@
           },
           "idea": {
             "maxLength": 50000,
+            "minLength": 1,
             "title": "Idea",
             "type": "string"
           },
@@ -3502,6 +3503,7 @@
           },
           "topic": {
             "maxLength": 10000,
+            "minLength": 1,
             "title": "Topic",
             "type": "string"
           }
@@ -8339,7 +8341,7 @@
     },
     "/meta/domains": {
       "get": {
-        "description": "The user-selectable domain list for client pickers.",
+        "description": "The user-selectable domain list for client pickers.\n\n§17.820 — derived from ``idea_refinement.ALLOWED_DOMAINS`` (the set\n``create_ideation_job`` + IdeaInput actually enforce) instead of a\nhardcoded twin; _USER_DOMAINS pins the presentation order.",
         "operationId": "get_domains_meta_domains_get",
         "responses": {
           "200": {
@@ -10257,6 +10259,50 @@
           "Management"
         ]
       },
+      "get": {
+        "description": "§17.820 (plan 5.9) — single-session detail read.\n\nThe /web detail page's 17-column payload (stats + summary + error), which\nthe JSON surface lacked — ``GET /research/sessions`` is a thin list and\n``/research/verify/{id}`` is a different (grounding) payload.",
+        "operationId": "get_research_session_research_sessions__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Research Session",
+        "tags": [
+          "Management"
+        ]
+      },
       "patch": {
         "description": "Rename a research session (set topic).",
         "operationId": "rename_research_session_research_sessions__session_id__patch",
@@ -10311,6 +10357,51 @@
         "summary": "Rename Research Session",
         "tags": [
           "Management"
+        ]
+      }
+    },
+    "/research/start": {
+      "post": {
+        "description": "§17.820 (plan 5.9) — fire-and-forget research kickoff.\n\nThe detached-run capability the /web form had (spawn_research_background,\n§17.454 pattern: the 20-60 min run survives the browser closing), now as\nJSON. The streaming ``POST /research`` cancels the session when the client\ndisconnects — this one finalizes server-side regardless. Progress lands in\n``GET /research/sessions`` / ``GET /research/sessions/{id}``.",
+        "operationId": "research_start_endpoint_research_start_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResearchInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Research Start Endpoint",
+        "tags": [
+          "Research"
         ]
       }
     },

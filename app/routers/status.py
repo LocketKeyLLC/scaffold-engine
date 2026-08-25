@@ -19,7 +19,7 @@ from app.database import get_db
 from app.modules.recovery import next_actions_for
 from app.schemas import JOB_STATUSES, JobStatus
 from app.utils.progress import humanize_ms
-from app.web.routes import phase_label_for
+from app.modules.job_phase import phase_label_for
 
 # §17.811 — DAG job statuses for which a compute-on-read ETA is meaningful.
 _ETA_ACTIVE_STATUSES = frozenset({"running", "executing"})

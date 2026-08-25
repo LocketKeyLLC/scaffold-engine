@@ -5,7 +5,7 @@
 // execution theater. Reached via the approval gate's Approve chain.
 import * as api from "../api.js";
 import * as router from "../router.js";
-import { el, mount, shortId } from "../util.js";
+import { el, mount, moveItem, shortId } from "../util.js";
 import { statusBadge, loading, errorPanel, toast } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
 
@@ -350,10 +350,7 @@ function renderPlan(container, jobId) {
       );
     }
     function move(i, d) {
-      const j = i + d;
-      if (j < 0 || j >= order.length) return;
-      [order[i], order[j]] = [order[j], order[i]];
-      renderList();
+      if (moveItem(order, i, d)) renderList();
     }
     async function saveOrder() {
       try {
