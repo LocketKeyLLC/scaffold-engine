@@ -537,3 +537,78 @@ async def test_consolidate_raced_noop_watermarks_locked_length():
     upd = db.execute.await_args_list[-1]
     patch_arg = _json.loads(upd.args[1]["patch"])
     assert patch_arg["facts_consolidated_n"] == 9   # locked length, not 8
+
+
+# ── §17.812 (audit gap 1) — derive parity rides the capture funnel ────────────
+
+
+@pytest.mark.asyncio
+async def test_ingest_turn_schedules_derive_for_operator(monkeypatch):
+    """Every operator capture site (turn/submit/note/fix) now derives — the
+    derive rides ingest_turn instead of only POST /turn."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "assist_unified_memory_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "assist_umem_capture", True, raising=False)
+    sched = MagicMock()
+    with patch.object(assist_agent, "schedule_derive_turn_memory", new=sched):
+        ok = await assist_agent.ingest_turn(
+            session_id="s1", role="operator", kind="submit",
+            content="qm create 100 done, VM boots", node_key="T3", db=AsyncMock())
+    assert ok is True
+    sched.assert_called_once()
+    assert sched.call_args.kwargs["message"] == "qm create 100 done, VM boots"
+    assert sched.call_args.kwargs["node_key"] == "T3"
+
+
+@pytest.mark.asyncio
+async def test_ingest_turn_assistant_reply_not_derived(monkeypatch):
+    """The engine's own words are not operator memory — no derive."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "assist_unified_memory_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "assist_umem_capture", True, raising=False)
+    sched = MagicMock()
+    with patch.object(assist_agent, "schedule_derive_turn_memory", new=sched):
+        await assist_agent.ingest_turn(
+            session_id="s1", role="assistant", kind="guide",
+            content="here is the walkthrough", node_key="T3", db=AsyncMock())
+    sched.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_schedule_derive_dedupes_recent_content(monkeypatch):
+    """NL turns reach the funnel twice (message + submit/fix double-record);
+    the scribe must run once per distinct content, not race itself."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "assist_unified_memory_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "assist_umem_derive", True, raising=False)
+    assist_agent._RECENT_DERIVES.clear()
+    bg = AsyncMock()
+    with patch.object(assist_agent, "_derive_turn_memory_bg", new=bg):
+        assist_agent.schedule_derive_turn_memory(
+            session_id="s1", node_key="T1", message="the pool is created")
+        assist_agent.schedule_derive_turn_memory(
+            session_id="s1", node_key="T1", message="  the pool is created  ")
+        assist_agent.schedule_derive_turn_memory(
+            session_id="s1", node_key="T1", message="something else entirely")
+        await assist_agent.drain_derive_tasks()
+    assert bg.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fix_endpoint_captures_operator_error():
+    """§17.812 — a slash/CLI /fix records the operator's error report as a raw
+    turn (it previously lived only as a truncated friction note)."""
+    import types
+    from app.routers import assist as assist_router
+    body = types.SimpleNamespace(
+        node_key="T3", error="-bash: scsi0: command not found", history=[])
+    ing = AsyncMock()
+    with patch.object(assist_router.assist_agent, "ingest_turn", new=ing), \
+         patch.object(assist_router.assist_agent, "run_step_fix",
+                      new=AsyncMock(return_value={"fix": "escape the semicolon"})):
+        out = await assist_router.assist_fix("s1", body, db=AsyncMock())
+    ing.assert_awaited_once()
+    assert ing.call_args.kwargs["kind"] == "fix"
+    assert ing.call_args.kwargs["role"] == "operator"
+    assert ing.call_args.kwargs["content"] == "-bash: scsi0: command not found"
+    assert out["fix"] == "escape the semicolon"

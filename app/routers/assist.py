@@ -482,6 +482,16 @@ async def assist_research(session_id: str, body: AssistResearchInput, db=Depends
 @router.post("/assist/{session_id}/fix")
 async def assist_fix(session_id: str, body: AssistFixInput, db=Depends(get_db)):
     """Diagnose an operator-reported error on a step and return corrected steps."""
+    # §17.710a/§17.812 — lossless capture of the operator's error report, BEFORE
+    # diagnosis. Slash/CLI/SDK fixes never pass the pipeline's /turn capture, so
+    # the reported error lived only as a truncated friction note — invisible to
+    # the recap/transcript and never derived. NL-path fixes reach the funnel
+    # twice (raw message via /turn, error text here); the transcript renderer
+    # collapses identical rows and the derive funnel dedupes recent content.
+    await assist_agent.ingest_turn(
+        session_id=session_id, role="operator", kind="fix",
+        content=body.error, node_key=body.node_key, db=db,
+    )
     try:
         return await assist_agent.run_step_fix(
             session_id=session_id,
@@ -575,14 +585,9 @@ async def assist_record_turn(session_id: str, body: AssistTurnInput, db=Depends(
         session_id=session_id, role=body.role, kind=body.kind, content=body.content,
         node_key=body.node_key, evidence_kind=body.evidence_kind, db=db,
     )
-    # §17.715 — unconditional per-message derive: review this raw turn for any
-    # durable plan-relevant memory and log it, off the request path. No-op unless
-    # the derive valve is on; only operator messages (not the assistant's own
-    # turns). Fire-and-forget so /turn stays fast and never blocks the chat.
-    if (body.role or "").strip().lower() == "operator":
-        assist_agent.schedule_derive_turn_memory(
-            session_id=session_id, node_key=body.node_key, message=body.content,
-        )
+    # §17.715/§17.812 — the per-message derive now rides the capture funnel
+    # itself (ingest_turn schedules it for operator turns), so every capture
+    # site — this endpoint, /submit, /note, /fix — gets identical treatment.
     return {"session_id": session_id, "recorded": recorded}
 
 
@@ -1033,13 +1038,18 @@ async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(g
         text("SELECT job_id, current_node_key FROM assist_sessions WHERE id = :sid"),
         {"sid": session_id},
     )).mappings().first()
+    # §17.812 (audit I-3/M14) — thread the caller's node_key + history through:
+    # cross-chat, the session pointer can sit on a DIFFERENT step than the one
+    # the operator is discussing, and the retire below must hit the discussed
+    # step. The tracker validates the key and reports which step it assessed.
     verdict = await assist_tracker.assess_progress(
         session_id=session_id, message=body.message, db=db,
+        node_key=body.node_key, history=body.history,
     )
     out = {"session_id": session_id, "action": "proceed", "verdict": verdict}
     v = verdict.get("verdict")
     confident = float(verdict.get("confidence") or 0.0) >= settings.assist_tracker_confidence
-    prior_nk = (prior or {}).get("current_node_key")
+    prior_nk = verdict.get("node_key") or (prior or {}).get("current_node_key")
     job_id = str((prior or {}).get("job_id"))
     if v == "add_step" and confident and (verdict.get("new_step_request") or "").strip():
         try:

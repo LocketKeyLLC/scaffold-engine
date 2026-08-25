@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid as _uuid
 from dataclasses import asdict, dataclass
 from typing import Any, AsyncGenerator, Optional
@@ -2055,6 +2056,27 @@ async def _derive_turn_memory_bg(
         logger.debug("derive_turn_memory_bg_failed session_id=%s err=%r", session_id, e)
 
 
+_RECENT_DERIVES: dict[tuple[str, int], float] = {}
+_RECENT_DERIVE_TTL = 300.0  # seconds
+
+
+def _derived_recently(session_id: str, message: str) -> bool:
+    """§17.812 — True when this exact content was already scheduled for this
+    session within the TTL. The same operator turn reaches the derive funnel
+    twice on NL paths (the pipeline's /turn capture AND the endpoint's own
+    capture, e.g. message+submit); without this guard the scribe LLM runs twice
+    concurrently and can double-insert before either's notes land."""
+    now = time.monotonic()
+    key = (session_id, hash((message or "").strip()))
+    if len(_RECENT_DERIVES) > 256:  # bound the map; entries age out lazily
+        for k, ts in list(_RECENT_DERIVES.items()):
+            if now - ts > _RECENT_DERIVE_TTL:
+                _RECENT_DERIVES.pop(k, None)
+    seen = _RECENT_DERIVES.get(key)
+    _RECENT_DERIVES[key] = now
+    return seen is not None and (now - seen) <= _RECENT_DERIVE_TTL
+
+
 def schedule_derive_turn_memory(
     *, session_id: str, node_key: str | None, message: str,
 ) -> None:
@@ -2064,6 +2086,8 @@ def schedule_derive_turn_memory(
     task isn't GC'd before it finishes."""
     from app.config import settings
     if not (settings.assist_unified_memory_enabled and settings.assist_umem_derive):
+        return
+    if _derived_recently(session_id, message):
         return
     task = asyncio.create_task(
         _derive_turn_memory_bg(
@@ -2309,7 +2333,20 @@ async def ingest_turn(
                 {"sid": session_id},
             )
         await db.commit()
-        return bool(getattr(res, "rowcount", 0))
+        recorded = bool(getattr(res, "rowcount", 0))
+        # §17.812 (audit gap 1) — derive parity: the per-turn derive (§17.715)
+        # fired only from POST /turn, so slash/CLI/SDK submits, notes and fixes
+        # were captured but their durable plan-relevant memory never derived.
+        # Folding it into the capture funnel gives every operator capture site
+        # the same treatment (assistant turns are the engine's own words —
+        # skipped). schedule_derive_turn_memory gates on its own valves and
+        # dedupes recent content, so NL turns that reach the funnel twice
+        # (message + submit/fix double-record) derive once.
+        if recorded and (role or "").strip().lower() == "operator":
+            schedule_derive_turn_memory(
+                session_id=session_id, node_key=node_key, message=content or "",
+            )
+        return recorded
     except Exception as e:  # noqa: BLE001 — capture must never break the turn
         logger.debug("ingest_turn_failed session_id=%s err=%r", session_id, e)
         return False
