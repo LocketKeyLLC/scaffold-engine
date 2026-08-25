@@ -13,6 +13,7 @@ import re
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
+import httpx
 import pdfplumber
 import trafilatura
 from pypdf import PdfReader
@@ -448,13 +449,23 @@ async def _robots_allowed(url: str, user_agent: str = "ScaffoldEngine/1.0") -> b
 
 async def _fetch_url_bounded(
     url: str, max_bytes: int | None = None, timeout: float | None = None,
+    failure: dict | None = None,
 ) -> str | None:
     """Stream-fetch with hard byte cap. Returns text or None on failure/cap.
 
     §17.612 — ``timeout`` overrides ``settings.research_url_fetch_timeout`` so
     callers with a tighter budget (topic-mode fetch uses research_fetch_timeout)
     can route through this single hardened choke point without loosening it.
+
+    §17.831 (plan 8.1) — pass ``failure={}`` to learn WHY a fetch returned
+    None: ``failure["reason"]`` is set to one of ``ssrf_rejected`` /
+    ``ssrf_redirect_rejected`` / ``http_<status>`` / ``size_cap_exceeded`` /
+    ``timeout`` / ``fetch_error``. Callers that don't care pass nothing and
+    see the exact pre-§17.831 behavior.
     """
+    def _fail(reason: str) -> None:
+        if failure is not None:
+            failure["reason"] = reason
     # §17.93 — SSRF guard. The fetch helper is the choke point for every
     # /research url:, /research openapi:, and pre-fetch path; rejecting
     # here covers all three without forcing per-caller validation.
@@ -464,6 +475,7 @@ async def _fetch_url_bounded(
     ok, reason = await asyncio.to_thread(_is_public_host, url)
     if not ok:
         logger.warning("url_fetch_rejected_ssrf: url=%s reason=%s", url, reason)
+        _fail("ssrf_rejected")
         return None
     cap = max_bytes or settings.research_max_url_bytes
     try:
@@ -488,27 +500,36 @@ async def _fetch_url_bounded(
                         "initial=%s final=%s reason=%s",
                         url, final_url, reason2,
                     )
+                    _fail("ssrf_redirect_rejected")
                     return None
             if resp.status_code != 200:
                 logger.warning("url_fetch_status: url=%s status=%d", url, resp.status_code)
+                _fail(f"http_{resp.status_code}")
                 return None
             cl = resp.headers.get("content-length")
             if cl and cl.isdigit() and int(cl) > cap:
                 logger.warning("url_fetch_content_length_exceeded: url=%s bytes=%s", url, cl)
+                _fail("size_cap_exceeded")
                 return None
             buf = bytearray()
             async for chunk in resp.aiter_bytes():
                 buf.extend(chunk)
                 if len(buf) > cap:
                     logger.warning("url_fetch_cap_exceeded: url=%s bytes=%d", url, len(buf))
+                    _fail("size_cap_exceeded")
                     return None
             enc = resp.encoding or "utf-8"
             try:
                 return bytes(buf).decode(enc, errors="replace")
             except LookupError:
                 return bytes(buf).decode("utf-8", errors="replace")
+    except httpx.TimeoutException as e:
+        logger.warning("url_fetch_timeout: url=%s error=%s", url, e)
+        _fail("timeout")
+        return None
     except Exception as e:
         logger.warning("url_fetch_failed: url=%s error=%s", url, e)
+        _fail("fetch_error")
         return None
 
 

@@ -22,7 +22,7 @@ async def test_fetch_and_extract_respects_concurrency_bound(monkeypatch):
     peak = 0
     lock = asyncio.Lock()
 
-    async def _fake_fetch(url, timeout=None):
+    async def _fake_fetch(url, timeout=None, failure=None):
         nonlocal live, peak
         async with lock:
             live += 1
@@ -55,7 +55,7 @@ async def test_fetch_and_extract_bound_of_one_serializes(monkeypatch):
     peak = 0
     lock = asyncio.Lock()
 
-    async def _fake_fetch(url, timeout=None):
+    async def _fake_fetch(url, timeout=None, failure=None):
         nonlocal live, peak
         async with lock:
             live += 1

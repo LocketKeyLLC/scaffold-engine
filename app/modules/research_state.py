@@ -64,6 +64,20 @@ class ResearchState:
     # yielding an empty/incomplete iteration. Not serialized (resets to False on
     # resume, and it's reset at the top of every iteration anyway).
     search_degraded: bool = False
+    # §17.831 (plan 8.1) — run-level fetch tally, accumulated per iteration
+    # from the `research_fetch` progress dict; surfaced on research_complete
+    # as `fetch_stats` so a fetch outage (high failed, low ok) or a heavily
+    # snippet-degraded run (high fallback_entries) is visible in the terminal
+    # payload instead of only in server logs.
+    fetch_attempted: int = 0
+    fetch_ok: int = 0
+    fetch_failed: int = 0
+    fallback_entries: int = 0
+    # §17.831 — why the summary fell back to the stub, or None when the real
+    # summary was generated (`summary_timeout` / `summary_llm_failed` /
+    # `summary_empty`). Pre-§17.831 timeout and dead-model were deliberately
+    # indistinguishable; the plan (8.1) reversed that call.
+    summary_fallback: str | None = None
     total_ingested: int = 0
     total_rejected: int = 0
     total_new: int = 0

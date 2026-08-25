@@ -75,6 +75,10 @@ RESEARCH_STARTED = "research_started"
 RESEARCH_RESUMED = "research_resumed"
 RESEARCH_COMPLETE = "research_complete"
 SEARCH_COMPLETE = "search_complete"
+# §17.831 (plan 8.1) — live fetch/extract fan-out progress ({fetched, total,
+# ok, failed, failed_reasons, last_url} per movement). The name existed in
+# docs and log lines for months before this event was actually emitted.
+RESEARCH_FETCH = "research_fetch"
 EXTRACTION_COMPLETE = "extraction_complete"
 INGESTION_COMPLETE = "ingestion_complete"
 DECOMPOSITION_COMPLETE = "decomposition_complete"
@@ -183,7 +187,7 @@ ALL_EVENT_NAMES = frozenset({
     ASSIST_GUIDE_DELTA, ASSIST_GUIDE_DONE,
     # research
     RESEARCH_STARTED, RESEARCH_RESUMED, RESEARCH_COMPLETE,
-    SEARCH_COMPLETE, EXTRACTION_COMPLETE, INGESTION_COMPLETE,
+    SEARCH_COMPLETE, RESEARCH_FETCH, EXTRACTION_COMPLETE, INGESTION_COMPLETE,
     DECOMPOSITION_COMPLETE, ITERATION_STARTED, ITERATION_COMPLETE,
     CONVERGENCE, GAP_ANALYSIS, CACHE_HIT_UPSTREAM,
     SOURCE_REF_RESOLVED, DISTILL_BYPASSED, CONTENT_TRUNCATED,
