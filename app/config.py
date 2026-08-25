@@ -1518,6 +1518,16 @@ class Settings(BaseSettings):
 
     alert_file_path: str = ""              # empty disables file sink
     alert_db_enabled: bool = True
+    # §17.835 (plan 8.7) — optional webhook sink: every emitted (non-suppressed)
+    # alert is POSTed as JSON to this URL. Empty = disabled (the default).
+    # The body carries both a Slack-compatible `text` one-liner and the full
+    # record (`kind`/`severity`/`message`/`payload`/…), so it works out of the
+    # box with Slack/Discord incoming webhooks, ntfy's JSON publish endpoint,
+    # Matrix hookshot, or any generic JSON receiver. Operator-configured
+    # endpoint (like the OTel exporter) — deliberately NOT behind the §17.93
+    # SSRF guard, so LAN targets (a local ntfy) work.
+    alert_webhook_url: str = ""
+    alert_webhook_timeout_seconds: float = Field(default=5.0, ge=0.5, le=60.0)
     alert_cooldown_seconds: int = Field(default=3600, ge=0, le=86400)
 
     alert_eval_enabled: bool = True
