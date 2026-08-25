@@ -102,9 +102,82 @@ function renderChat(container, sessionId) {
   const composerText = el("textarea", { class: "chat-input", placeholder: "Message the assistant…", rows: "2" });
   const guideBtn = el("button", { class: "btn btn-sm", text: "✦ Guide current step", onClick: () => guideCurrent() });
   const sendBtn = el("button", { class: "btn btn-sm btn-primary", text: "Send", onClick: () => sendMessage() });
+  // §17.816 (plan 5.4h) — step verbs, previously slash/OWUI-only. Submit and
+  // Fix consume the composer text (evidence / error report); the server side
+  // captures + derives it (§17.812 3E) and verifies submits (§17.731).
+  const verbBtns = {};
+  function verb(label, title, fn) {
+    const b = el("button", { class: "btn btn-sm btn-ghost", text: label, title });
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try {
+        await fn();
+      } catch (e) {
+        toast(e.detail || e.message, "err");
+      } finally {
+        b.disabled = false;
+      }
+    });
+    verbBtns[label] = b;
+    return b;
+  }
+  const verbsBar = el(
+    "div",
+    { class: "row assist-verbs" },
+    verb("⏭ Next", "Claim / re-present the current step", async () => {
+      await api.get(`/assist/${sessionId}/next`);
+      toast("Step claimed — streaming its walkthrough…", "ok");
+      await load();
+      guideCurrent();
+    }),
+    verb("✓ Submit", "Record the composer text as this step's evidence and commit it", async () => {
+      const nk = session?.current_node_key;
+      if (!nk) { toast("No step in flight — use Next first.", "err"); return; }
+      const output = composerText.value.trim();
+      if (!output) { toast("Describe what you did (or paste output) in the composer first.", "err"); return; }
+      composerText.value = "";
+      await api.post(`/assist/${sessionId}/submit`, {
+        node_key: nk, output, action: "submit", history: historyForGuide(),
+      });
+      toast(`Step ${nk} submitted.`, "ok");
+      load();
+    }),
+    verb("⏩ Skip", "Skip the current step", async () => {
+      const nk = session?.current_node_key;
+      if (!nk) { toast("No step in flight.", "err"); return; }
+      await api.post(`/assist/${sessionId}/submit`, { node_key: nk, action: "skip" });
+      toast(`Step ${nk} skipped.`, "ok");
+      load();
+    }),
+    verb("🔧 Fix", "Diagnose the error pasted in the composer", async () => {
+      const err = composerText.value.trim();
+      if (!err) { toast("Paste the error into the composer first.", "err"); return; }
+      composerText.value = "";
+      appendBubble("operator", "fix", err);
+      const res = await api.post(`/assist/${sessionId}/fix`, {
+        error: err, node_key: session?.current_node_key || null, history: historyForGuide(),
+      });
+      appendBubble("assistant", "fix", res.fix || "(no fix returned)");
+      load();
+    }),
+    verb("🤝 Handoff", "Let the engine do the current step autonomously", async () => {
+      const nk = session?.current_node_key;
+      if (!nk) { toast("No step in flight.", "err"); return; }
+      await api.post(`/assist/${sessionId}/handoff`, { node_key: nk, mode: "single" });
+      toast(`Step ${nk} handed to the engine.`, "ok");
+      load();
+    }),
+    verb("⏸", "Pause / resume the session", async () => {
+      const paused = session?.status === "paused";
+      await api.post(`/assist/${sessionId}/${paused ? "resume" : "pause"}`);
+      toast(paused ? "Session resumed." : "Session paused.", "ok");
+      load();
+    })
+  );
   const composer = el(
     "div",
     { class: "chat-composer" },
+    verbsBar,
     composerText,
     el("div", { class: "composer-actions" }, guideBtn, el("span", { class: "spacer" }), sendBtn)
   );
@@ -125,6 +198,13 @@ function renderChat(container, sessionId) {
       sendMessage();
     }
   });
+
+  // §17.816 — append one bubble immediately (verb actions render optimistic
+  // feedback; load() then reconciles with the durable transcript).
+  function appendBubble(role, kind, content) {
+    transcript.append(bubble(role, kind, content, new Date().toISOString()));
+    transcript.scrollTop = transcript.scrollHeight;
+  }
 
   function bubble(role, kind, content, ts) {
     const cls = role === "operator" ? "op" : role === "assistant" ? "as" : "sys";
@@ -147,6 +227,7 @@ function renderChat(container, sessionId) {
 
   function renderSidebar() {
     if (!session) return;
+    if (verbBtns["⏸"]) verbBtns["⏸"].textContent = session.status === "paused" ? "▶" : "⏸";
     const sc = session.step_counts || {};
     const notes = (session.notes || []).slice(-6).reverse();
     const facts = (session.memory_facts || []).slice(-8).reverse();

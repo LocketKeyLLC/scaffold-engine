@@ -825,3 +825,9 @@ select.input:focus-visible,
 /* §17.816 — costs view */
 .costs-tiles { gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 .costs-h2 { margin: 18px 0 8px; font-size: 15px; }
+
+/* §17.816 — assist step verbs */
+.assist-verbs { gap: 6px; flex-wrap: wrap; padding: 6px 0; }
+
+/* §17.816 — dag node verbs */
+.dag-node-verbs { gap: 8px; }
