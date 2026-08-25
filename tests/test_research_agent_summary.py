@@ -294,7 +294,7 @@ class TestBoundedToolCall:
 
         # Skip the trafilatura fetch step — the test wants to drive the
         # batch loop with the synthetic-failed response.
-        async def _fake_fetch(rs):
+        async def _fake_fetch(rs, progress=None):
             return []
 
         with patch("app.modules.research_agent._bounded_tool_call",

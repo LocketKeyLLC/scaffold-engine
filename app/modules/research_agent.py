@@ -133,16 +133,44 @@ def _check_contradictions(entries: list[dict]) -> list[dict]:
 # Web fetch + extract
 # =============================================================================
 
-async def _fetch_and_extract(results: list[dict]) -> list[dict]:
+async def _fetch_and_extract(
+    results: list[dict], progress: dict | None = None,
+) -> list[dict]:
     """Fetch URLs concurrently, extract clean text via trafilatura.
 
     Returns [{"url", "content"}] for pages with ≥100 chars extracted.
+
+    §17.831 (plan 8.1) — pass ``progress={}`` to watch the fan-out live: the
+    dict is mutated in place (single event loop — plain dict ops, no lock)
+    with ``total`` / ``done`` / ``ok`` / ``failed`` / ``last_url`` plus a
+    ``failed_reasons`` counter keyed by the `_fetch_url_bounded` failure
+    reason (``no_content`` = fetched but nothing extractable). The iteration
+    loop drains it into `research_fetch` SSE frames.
     """
     if not results:
         return []
 
     sem = asyncio.Semaphore(settings.research_fetch_concurrency)
     urls = [r["url"] for r in results if r.get("url")]
+    if progress is not None:
+        progress.update(
+            total=len(urls), done=0, ok=0, failed=0,
+            last_url="", failed_reasons={},
+        )
+
+    def _tick(url: str, ok: bool, reason: str | None = None) -> None:
+        if progress is None:
+            return
+        progress["done"] += 1
+        progress["last_url"] = url
+        if ok:
+            progress["ok"] += 1
+        else:
+            progress["failed"] += 1
+            if reason:
+                progress["failed_reasons"][reason] = (
+                    progress["failed_reasons"].get(reason, 0) + 1
+                )
 
     async def _fetch_one(url: str) -> dict | None:
         async with sem:
@@ -152,8 +180,12 @@ async def _fetch_and_extract(results: list[dict]) -> list[dict]:
                 # cap) instead of a raw client.get whose full body buffered into
                 # orchestrator RAM and whose follow_redirects could reach a
                 # private/metadata IP. Keep the tighter topic-fetch timeout.
-                html = await _fetch_url_bounded(url, timeout=settings.research_fetch_timeout)
+                fail: dict = {}
+                html = await _fetch_url_bounded(
+                    url, timeout=settings.research_fetch_timeout, failure=fail,
+                )
                 if not html:
+                    _tick(url, ok=False, reason=fail.get("reason", "fetch_error"))
                     return None
                 text_out = await asyncio.to_thread(
                     trafilatura.extract,
@@ -162,15 +194,73 @@ async def _fetch_and_extract(results: list[dict]) -> list[dict]:
                     with_metadata=False,
                 )
                 if not text_out or len(text_out) < 100:
+                    _tick(url, ok=False, reason="no_content")
                     return None
+                _tick(url, ok=True)
                 return {"url": url, "content": text_out}
             except Exception as e:
                 logger.debug("trafilatura_fetch_failed: url=%s error=%s", url, e)
+                _tick(url, ok=False, reason="fetch_error")
                 return None
 
     fetched = await asyncio.gather(*[_fetch_one(u) for u in urls])
 
     return [f for f in fetched if f is not None]
+
+
+# §17.831 — poll cadence for the fetch-progress drain below. Finer than the
+# heartbeat interval so per-URL movement shows within a couple of seconds,
+# coarse enough to stay negligible next to network fetches.
+_FETCH_PROGRESS_POLL_S = 2
+
+
+async def _await_extract_with_fetch_progress(
+    task: asyncio.Task,
+    heartbeat_payload: dict,
+    fetch_progress: dict,
+    *,
+    iteration: int,
+    session_id: str | None = None,
+) -> AsyncGenerator[str, None]:
+    """`_await_with_heartbeat`, plus live `research_fetch` frames (§17.831).
+
+    While ``task`` (the extract stage) runs, watch the shared
+    ``fetch_progress`` dict that `_fetch_and_extract` mutates and yield a
+    `research_fetch` SSE frame whenever the done-count moved — the event the
+    docs promised for years while the name existed only in log lines. Between
+    movements, plain heartbeats keep the old cadence so proxies stay open and
+    the LLM-distill tail (after all URLs are fetched) behaves exactly as
+    before. Caller reads ``task.result()`` afterwards, same contract as
+    `_await_with_heartbeat`.
+    """
+    hb_interval = HEARTBEAT_INTERVAL_SECONDS
+    last_done = -1
+    since_heartbeat = 0.0
+    while not task.done():
+        await asyncio.wait({task}, timeout=_FETCH_PROGRESS_POLL_S)
+        if task.done():
+            break
+        done = fetch_progress.get("done", 0)
+        total = fetch_progress.get("total", 0)
+        if total and done != last_done:
+            last_done = done
+            since_heartbeat = 0.0
+            yield _sse("research_fetch", {
+                "iteration": iteration,
+                "fetched": done,
+                "total": total,
+                "ok": fetch_progress.get("ok", 0),
+                "failed": fetch_progress.get("failed", 0),
+                "failed_reasons": dict(fetch_progress.get("failed_reasons", {})),
+                "last_url": fetch_progress.get("last_url", ""),
+            })
+        else:
+            since_heartbeat += _FETCH_PROGRESS_POLL_S
+            if since_heartbeat >= hb_interval:
+                since_heartbeat = 0.0
+                yield _sse("heartbeat", heartbeat_payload)
+    if session_id is not None:
+        await _touch_last_activity(session_id)
 
 
 # =============================================================================
@@ -695,16 +785,22 @@ async def _extract_entries(
     role: str = "model_research_extract",
     overrides: dict | None = None,
     session_id: str | None = None,
+    fetch_progress: dict | None = None,
 ) -> list[dict]:
     """Distill search results into knowledge entries.
 
     Fetches full pages via trafilatura; chunks long pages; snippet fallback.
     §17.89 Pattern 3 — dispatch via role= so MODEL_VERIFIER_PROVIDER is honored.
+    §17.831 — ``fetch_progress`` is threaded to `_fetch_and_extract` for the
+    live `research_fetch` SSE frames; this function also bumps its
+    ``fallback_entries`` counter when the LLM distill falls back to raw
+    snippet chunks (`source_type="community"`), so research_complete can
+    report how much of the corpus skipped distillation.
     """
     if not results:
         return []
 
-    fetched = await _fetch_and_extract(results)
+    fetched = await _fetch_and_extract(results, progress=fetch_progress)
     url_to_text: dict[str, str] = {f["url"]: f["content"] for f in fetched}
     if fetched:
         logger.info(
@@ -851,6 +947,11 @@ async def _extract_entries(
                         "provenance": build_provenance(source_ref=r.get("url", "")),
                     })
                     logger.info("extraction_fallback: url='%s'", r.get("url", ""))
+                    # §17.831 — count raw-chunk fallbacks for research_complete.
+                    if fetch_progress is not None:
+                        fetch_progress["fallback_entries"] = (
+                            fetch_progress.get("fallback_entries", 0) + 1
+                        )
 
     return all_entries
 
@@ -1307,11 +1408,13 @@ async def _generate_summary(
     """Generate human-readable summary of all collected research.
 
     §17.89 Pattern 3 — dispatch via role= so MODEL_VERIFIER_PROVIDER is honored.
-    §17.166 — char-budgeted prompt + per-call timeout. The fallback string
-    is the same shape produced by the resp.success=False branch, so
-    callers can't tell timeout from upstream failure (intentional —
-    both produce a partial summary; the LLM call path always reaches
-    finalize_session within bounded wall time).
+    §17.166 — char-budgeted prompt + per-call timeout, so the LLM call path
+    always reaches finalize_session within bounded wall time.
+    §17.831 (plan 8.1) — the fallback now SAYS why (timeout vs failed model
+    vs empty content) both in the stub text and in ``state.summary_fallback``
+    (→ research_complete). §17.166 originally made them indistinguishable on
+    purpose; the audit reversed that call — "model dead" and "model slow"
+    have different operator fixes.
     """
     # §17.799 — cite-aware mode: generate over NUMBERED sources with a prompt that
     # asks for inline [n] markers, so the per-citation check below has citations to
@@ -1337,9 +1440,13 @@ async def _generate_summary(
             + _build_summary_prompt_body(state)
         )
 
-    def _fallback() -> str:
+    def _fallback(reason: str, detail: str) -> str:
+        # §17.831 — stamp the machine-readable reason for research_complete
+        # and say it in the stub so a reader of just the summary knows too.
+        state.summary_fallback = reason
         return _attach_sources_block(
-            f"Research collected {len(state.all_entries)} entries on '{state.topic}'.",
+            f"Research collected {len(state.all_entries)} entries on "
+            f"'{state.topic}'. (Full summary unavailable: {detail}.)",
             state,
         )
 
@@ -1363,9 +1470,15 @@ async def _generate_summary(
                 "summary_timeout: topic=%s entries=%d budget_s=%d — falling back",
                 state.topic, len(state.all_entries), _SUMMARY_PROMPT_TIMEOUT_S,
             )
-            return _fallback()
+            return _fallback(
+                "summary_timeout",
+                f"the summary model timed out after {_SUMMARY_PROMPT_TIMEOUT_S}s",
+            )
         if not resp.success:
-            return _fallback()
+            return _fallback(
+                "summary_llm_failed",
+                f"the summary model call failed ({resp.error or 'no error detail'})",
+            )
         summary_text = (resp.text or "").strip()
         if summary_text:
             break
@@ -1376,7 +1489,11 @@ async def _generate_summary(
         )
 
     if not summary_text:
-        return _fallback()
+        return _fallback(
+            "summary_empty",
+            "the summary model returned empty content twice "
+            "(likely a thinking model spending its token budget on reasoning)",
+        )
 
     # §17.452 (Phase C / CoVe) — revise the summary against the sources FIRST,
     # so the faithfulness score below reflects the revised text (default-off).
@@ -1434,6 +1551,21 @@ def _build_research_complete_payload(
         "skipped_hash": state.total_skipped_hash,
         "total_urls_searched": len(state.url_history),
         "total_queries": len(state.search_history),
+        # §17.831 (plan 8.1) — run-level fetch tally: a fetch outage (ok≈0)
+        # or a snippet-degraded corpus (high fallback_entries, entries built
+        # from raw chunks with source_type=community) is visible here instead
+        # of only in server logs.
+        # getattr like the sibling fields below — test stubs (and any pickled
+        # pre-§17.831 resume snapshot) may lack the new attributes.
+        "fetch_stats": {
+            "attempted": getattr(state, "fetch_attempted", 0),
+            "ok": getattr(state, "fetch_ok", 0),
+            "failed": getattr(state, "fetch_failed", 0),
+            "fallback_entries": getattr(state, "fallback_entries", 0),
+        },
+        # §17.831 — non-None when the summary is the fallback stub:
+        # summary_timeout | summary_llm_failed | summary_empty.
+        "summary_fallback": getattr(state, "summary_fallback", None),
         # §17.445 (A2) — post-hoc source attribution for any consumer.
         "sources": _build_sources_list(state),
         # §17.448 (B1) — faithfulness of the summary vs sources (None if the
@@ -1540,10 +1672,18 @@ async def _execute_iteration_loop(
             })
             break
 
+        # §17.831 (plan 8.1) — live fetch feedback. The extract stage opens with
+        # a fan-out over up to research_max_urls_for_depth URLs (the longest
+        # silent stretch in a run); a shared counter dict is mutated by
+        # _fetch_and_extract and drained here into `research_fetch` frames.
+        fetch_prog: dict = {}
         extract_task = asyncio.create_task(
-            _extract_entries(results, topic, overrides=overrides, session_id=session_id)
+            _extract_entries(
+                results, topic, overrides=overrides, session_id=session_id,
+                fetch_progress=fetch_prog,
+            )
         )
-        async for hb in _await_with_heartbeat(
+        async for frame in _await_extract_with_fetch_progress(
             extract_task,
             {
                 "status": "extracting",
@@ -1552,10 +1692,17 @@ async def _execute_iteration_loop(
                 # long extraction still shows "≤ Xm left" between iteration ticks.
                 **({"progress": state.progress} if state.progress else {}),
             },
+            fetch_prog,
+            iteration=state.iteration,
             session_id=session_id,
         ):
-            yield hb
+            yield frame
         entries = extract_task.result()
+        # §17.831 — accumulate the run-level fetch tally for research_complete.
+        state.fetch_attempted += fetch_prog.get("total", 0)
+        state.fetch_ok += fetch_prog.get("ok", 0)
+        state.fetch_failed += fetch_prog.get("failed", 0)
+        state.fallback_entries += fetch_prog.get("fallback_entries", 0)
 
         yield _sse("extraction_complete", {
             "iteration": state.iteration,
@@ -1918,11 +2065,25 @@ async def _run_research_url_mode(
     if not await _robots_allowed(url):
         raise RuntimeError(f"robots.txt disallows fetching {url}")
 
-    html = await _fetch_url_bounded(url)
+    # §17.831 (plan 8.1) — surface WHICH failure it was. The old message
+    # guessed "non-200 or exceeded cap" without knowing; the failure dict
+    # carries the real reason from the fetch choke point.
+    _url_fail: dict = {}
+    html = await _fetch_url_bounded(url, failure=_url_fail)
     if not html:
+        reason = _url_fail.get("reason", "fetch_error")
         cap_mb = settings.research_max_url_bytes // (1024 * 1024)
+        detail = {
+            "size_cap_exceeded": f"page exceeded the {cap_mb}MB fetch cap",
+            "timeout": "fetch timed out",
+            "ssrf_rejected": "target host is private/loopback (SSRF guard)",
+            "ssrf_redirect_rejected":
+                "redirect target is private/loopback (SSRF guard)",
+        }.get(reason)
+        if detail is None and reason.startswith("http_"):
+            detail = f"server returned HTTP {reason.removeprefix('http_')}"
         raise RuntimeError(
-            f"Failed to fetch {url} (non-200 or exceeded {cap_mb}MB cap)"
+            f"Failed to fetch {url} ({detail or reason})"
         )
 
     text_content = await asyncio.to_thread(
