@@ -6083,6 +6083,35 @@
         ]
       }
     },
+    "/auth/whoami": {
+      "get": {
+        "description": "The authenticated caller's identity, role, and the auth mode in force.",
+        "operationId": "whoami_auth_whoami_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Whoami Auth Whoami Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Whoami",
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
     "/config": {
       "get": {
         "description": "Return the orchestrator's loaded Settings (audit item U.5).\n\nSensitive fields (SecretStr-typed or with names matching `key` /\n`secret` / `token` / `password` / `pass`) are redacted to either\n`(set)` or `(unset)` so the response can be safely shown in CLI\noutput and pasted into bug reports.\n\nEach field carries the field name, current value (or redaction),\ntype, default, whether the runtime value matches the default,\nand the field's docstring (extracted from app/config.py field\ndescriptions where available).\n\nRequires API key (inherited from global auth).",
