@@ -50,6 +50,7 @@ const NAV = [
   // §17.816 — global model config is an admin surface (writes are
   // require_admin server-side).
   { id: "models", path: "/models", label: "Models", icon: "⚙" , adminOnly: true },
+  { id: "rag", path: "/rag", label: "Knowledge", icon: "◉" },
 ];
 
 const root = document.getElementById("root");
@@ -288,6 +289,7 @@ const VIEWS = {
   research: lazy("research", "Research Explorer"),
   assist: lazy("assist", "Assistant"),
   models: lazy("models", "Models"),
+  rag: lazy("rag", "Knowledge (RAG)"),
 };
 
 async function loadAndRender(name, params, path) {
@@ -316,6 +318,7 @@ function registerRoutes() {
   router.route("/assist", (p) => loadAndRender("assist", p, router.currentPath()));
   router.route("/assist/:sessionId", (p) => loadAndRender("assist", p, router.currentPath()));
   router.route("/models", (p) => loadAndRender("models", p, router.currentPath()));
+  router.route("/rag", (p) => loadAndRender("rag", p, router.currentPath()));
   router.setNotFound(() => loadAndRender("dashboard", {}, "/"));
 }
 
