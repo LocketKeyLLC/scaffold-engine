@@ -4,7 +4,33 @@ This guide is organized around **what you're trying to do**, not "every command 
 
 For setup, install, and your literal first run, see [README.md](./README.md). For architecture, internals, and reference docs, see [OVERVIEW.md](./OVERVIEW.md). The glossary at the bottom of OVERVIEW covers every project term.
 
-> **Heads up about Open WebUI.** Most chat-driven scenarios below assume you're typing into Open WebUI at `http://localhost:3000`, with the `scaffold_router` model selected. The `scaffold` CLI and the Python SDK can do everything OWUI can — equivalents are listed at the end of each scenario.
+> **Where you type things.** The engine has three equivalent surfaces:
+> 1. **The native operator UI at `http://localhost:8000/ui`** — the front door (see the next section).
+> 2. **Open WebUI** at `http://localhost:3000` with the `scaffold_router` model selected — the optional chat front-end (`COMPOSE_PROFILES=owui`). The chat-transcript examples below were written against it; the same slash-commands work in the native UI's Chat view.
+> 3. **The `scaffold` CLI + Python SDK** — equivalents listed at the end of each scenario.
+
+---
+
+## The native operator UI (`/ui`)
+
+`http://localhost:8000/ui` is the engine's own zero-dependency web app — sign in with your `SCAFFOLD_API_KEY` (scoped keys work in multi-user mode; the header shows who you're signed in as). Everything the engine can do has a view:
+
+| View | What it's for |
+|---|---|
+| **New** | Compose an idea (domain picker, quick-mode toggle) and launch it. |
+| **Dashboard** | Every job with live status, progress and ETA chips. |
+| **Approvals** | Review a refined brief → approve → plan (with an auto-run toggle). |
+| **Plan / DAG** | The execution graph: edit, insert, reorder, retry or skip nodes. |
+| **Theater** | Watch a run stream node-by-node (SSE) with a progress bar. |
+| **Output / Compare / Library** | Compiled deliverables, side-by-side compare, GT corpus + artifacts. |
+| **Chat** | The native chat surface (the `/v1` OpenAI-compatible endpoint) — slash-commands included. |
+| **Assist** | Hands-on walkthroughs: step verbs (Next/Submit/Skip/Fix/Handoff/Pause) with the 📍 status panel. |
+| **Research** | Launch and watch research sessions; per-session stats + summary. |
+| **Models** | Per-role model table with provenance (override/env/default), set/reset, and live probes. |
+| **Knowledge** | RAG search with honesty flags (below-threshold, degraded, keyword fallback). |
+| **Settings / Schedules / Traces / Alerts / Costs** | Effective config, scheduled research, LLM traces, system alerts, spend rollups. |
+
+First run lands on the **"Connect your models" wizard**: probe your Ollama daemon, pick Local-only / Ollama Cloud (tuned) / per-role custom, test each role, apply, and check the health board — no file edits.
 
 ---
 
@@ -561,19 +587,21 @@ Everything the system reads at runtime — secrets, API keys, per-role provider 
 
 ### Model role assignments
 
-Eight valve-switchable roles. Default model in parentheses; override via `MODEL_<ROLE>` in `.env` or via `/model set <role> <model>` in chat:
+Nine valve-switchable roles plus two config-locked singletons. Defaults (§17.819) are **local-safe** — a fresh install makes zero cloud calls. Override via `MODEL_<ROLE>` in `.env`, the `/ui` Models view, `PUT /models/roles/{role}`, or `/model set <role> <model>` in chat. The A/B-tuned Ollama Cloud picks are one click away as the setup wizard's "Ollama Cloud (tuned)" preset (also documented per-role in `.env.example`).
 
-- **General** (`qwen3-vl:235b-instruct-cloud`) — main generation, used by ideation/research
+- **General** (`qwen2.5:7b`) — main generation, used by ideation/research
 - **Verifier** (`qwen2.5:7b`) — validates LLM outputs
 - **Coder** (`qwen2.5-coder:7b`) — CodeGen tool nodes
 - **Router** (`qwen3:4b`) — DAG planning, gap analysis (cheap + fast)
-- **Fallback** (`qwen3.5:latest`) — cascade fallback
-- **Cloud heavy** (`qwen3-vl:235b-instruct-cloud`) — heavy alternative
-- **Cloud alt** (`qwen3.5:397b-cloud`) — heaviest model
-- **Embedder** (`qwen3-embedding:8b`) — config-locked, dimension-locked at 512d (see "Embedder portability" below)
+- **Triage** (`qwen3:4b`) — native chat triage/synthesis
+- **Research extract** (`qwen2.5:7b`) — research entry extraction (tool-calls)
+- **Fallback** (`qwen3.5:latest`) — cascade fallback (kept local on purpose for failure-mode diversity)
+- **Cloud heavy** (`qwen3.5:latest`) — escalation target for retried nodes
+- **Cloud alt** (`qwen3.5:latest`) — alternate heavy tier
+- **Embedder** (`nomic-embed-text`) — config-locked, dimension-locked at 512d (see "Embedder portability" below)
 - **Reranker** (`tomaarsen/Qwen3-Reranker-0.6B-seq-cls`) — config-locked CrossEncoder singleton
 
-`/model set <role> <model>` works for the first seven. The embedder and reranker need a config change + restart (and the embedder also needs a corpus reindex — see below).
+`/model set <role> <model>` works for the nine switchable roles. The embedder and reranker need a config change + restart (and the embedder also needs a corpus reindex — see below).
 
 ### Per-role provider routing (Sprint E+)
 

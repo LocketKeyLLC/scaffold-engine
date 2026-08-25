@@ -6,9 +6,9 @@ scrape it, and a starter alert-rule set. All metric names are prefixed
 `scaffold_` for grouping in dashboards.
 
 > **Status of this doc.** Authoritative for the metric inventory as of
-> §17.193 (2026-05-20). New metrics added after that date should be
-> added here in the same commit (see `app/observability/metrics.py` for
-> the source of truth).
+> the §17.825 refresh (2026-08-25) — all 15 emitted series are listed.
+> New metrics should be added here in the same commit (see
+> `app/observability/metrics.py` for the source of truth).
 
 ## Enabling
 
@@ -37,6 +37,7 @@ the orchestrator publicly, gate `/metrics` at the reverse-proxy layer.
 |---|---|---|
 | `scaffold_llm_latency_seconds` | `provider`, `model` | `0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800` |
 | `scaffold_http_request_duration_seconds` | `method`, `path_template` | `0.005, 0.025, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60` |
+| `scaffold_reranker_latency_seconds` | `max_candidates`, `doc_truncate` | CrossEncoder rerank call latency, labeled by the knob config so per-request overrides chart separately (see alert 6) |
 
 Histograms emit `_bucket`, `_count`, and `_sum` series; use
 `histogram_quantile` in PromQL for percentiles.
@@ -184,6 +185,25 @@ groups:
           description: "Check `reranker_decision` log lines (§17.254) for the same (max_candidates, doc_truncate) tuple to confirm the load. If the config is intentional (deep-context research), raise this rule's threshold. Otherwise inspect `/health` for orchestrator memory pressure or container restarts (§17.232)."
 ```
 
+## Traces — per-call LLM capture + OpenTelemetry
+
+Two complementary trace surfaces:
+
+**LLM call traces (`llm_traces` table, mig 063).** When
+`TRACE_CAPTURE_ENABLED` is on, every model call is recorded (job/node
+attribution, kind, prompt/response text capped at
+`TRACE_CAPTURE_MAX_CHARS`) and browsable in the native UI's **Traces**
+view (`/ui/#/traces` — pick a job, filter by kind) or via
+`GET /trace/{job_id}`. Default **off** — payloads are verbose; enable when
+debugging prompt/behavior issues.
+
+**OpenTelemetry spans.** Strictly opt-in: set `OTEL_ENABLED=true` and point
+`OTEL_OTLP_ENDPOINT` at any OTLP/HTTP collector. The shipped zero-setup
+option is the Phoenix container (`COMPOSE_PROFILES=observability`):
+endpoint `http://scaffold-phoenix:6006/v1/traces`, viewer at
+`http://localhost:6006`. FastAPI + httpx + asyncpg are auto-instrumented;
+`/health` and `/metrics` are excluded from the span stream.
+
 ## Cross-references
 
 - `app/observability/metrics.py` — emitter definitions (source of truth).
@@ -191,13 +211,13 @@ groups:
   Fires `cost.window_exceeded` / `latency.p95_exceeded` /
   `oncall.errors_unresolved` to the `system_alerts` table; the
   Prometheus alert rules above are a complementary external pathway.
-  The §17.257 reranker p95 alert is **Prometheus-only** — there's no
-  internal-check equivalent yet because reranker calls aren't logged
-  to a DB rollup the way LLM calls are (`observability_rollups.by_model`).
-  See §17.258 candidate A in the OVERVIEW for the DB-backed mirror.
+  The reranker p95 alert (rule 6) is **Prometheus-only** — reranker calls
+  aren't logged to a DB rollup the way LLM calls are
+  (`observability_rollups.by_model`), so there's no internal-check mirror.
 - `app/observability/alerts.py` — alert emission + dedup. Read by the
-  `/observability/alerts` endpoint and the `scaffold alerts` CLI.
-- `OVERVIEW.md` §17.132 (embedding cache pressure), §17.135 (embedder
-  drift detection), §17.140-§17.142 (sim-sidecar audit rows),
-  §17.256 (reranker latency histogram), §17.257 (this entry) for the
-  history of how each metric came to be.
+  `/observability/alerts` endpoint, the `scaffold alerts` CLI, and the
+  native UI's Alerts view.
+- Provenance of individual metrics lives in the dated §-entries of the
+  project log (embedding-cache pressure, embedder drift, sim-sidecar audit
+  rows, the reranker latency histogram); see OVERVIEW.md's running log and
+  the per-release CHANGELOG entries.

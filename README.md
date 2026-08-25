@@ -42,7 +42,7 @@ Before running the install steps below, make sure you have:
 | Docker + Docker Compose | The orchestrator, database, vector store, search engine, and chat UI all run as containers. | `docker --version` and `docker compose version` should both work. |
 | Ollama installed on your **host** (not in a container) | Runs the local LLMs. The orchestrator reaches it through the docker bridge gateway. | `ollama list` should respond. Install from <https://ollama.ai>. |
 | ~30 GB free disk | Models alone are ~25 GB; the vector store and Postgres add a few more. | `df -h .` |
-| ~16 GB RAM | Milvus needs ~8 GB to load comfortably; Ollama loads models on demand. | `free -h` (Linux) / Activity Monitor (mac) |
+| ~16 GB RAM | The always-on containers are memory-capped at ~14.75 GiB combined (orchestrator 6g, Milvus 3g, Redis 2.5g, the rest smaller); Ollama loads models on demand on the host. | `free -h` (Linux) / Activity Monitor (mac) |
 | `git` and a UTF-8 terminal | For cloning and running commands. | `git --version` |
 
 If you're on Pop!_OS / Ubuntu and Docker is fresh, also run `sudo usermod -aG docker $USER` and log out + back in so you can run `docker` without `sudo`.
@@ -120,7 +120,7 @@ Optional services live behind [compose profiles](https://docs.docker.com/compose
 make doctor
 ```
 
-This runs an end-to-end audit. The script opens with a 9-section banner listing every check that's about to run (`.env`, Docker network + volumes, Containers, Orchestrator `/health`, Ollama, OpenAI provider, API key sync across .env/container/bashrc/valves.json, Auth posture, Schema migrations) so you know what's being probed before output starts scrolling. Expected output is the banner followed by a short list of subsystem checks, all `PASS`. The script also confirms your `.env` API key matches what the running containers are using and warns if they've drifted. Pass `--explain` (or run `make doctor-explain`) for a one-line description under each section.
+This runs an end-to-end audit. The script opens with an 11-section banner listing every check that's about to run (`.env`, Docker network + volumes, Containers, Orchestrator `/health`, Ollama, OpenAI provider, API key sync across .env/container/bashrc/valves.json, Auth posture, Schema migrations, cold-backup mount guard, full key-surface sync) so you know what's being probed before output starts scrolling. Expected output is the banner followed by a short list of subsystem checks, all `PASS`. The script also confirms your `.env` API key matches what the running containers are using and warns if they've drifted. Pass `--explain` (or run `make doctor-explain`) for a one-line description under each section.
 
 ```bash
 curl -H "X-API-Key: $SCAFFOLD_API_KEY" http://localhost:8000/health
@@ -348,7 +348,8 @@ The default `docker compose up -d` brings up everything below — there's no opt
 
 - **Prometheus `/metrics`** (no auth). Set `METRICS_ENABLED=true` in `.env` (default on). The orchestrator emits counters/gauges for LLM calls (by provider/model/success), HTTP request RED metrics (by method/path/status), alert fire and suppression rates (by kind/severity), jobs by status, executor concurrency in-flight vs cap, and quarterly-calibration cron health. Sample scrape: `curl http://localhost:8000/metrics`. See [`docs/observability.md`](docs/observability.md) for the full metric inventory, recommended scrape config, and a 5-rule starter alert-rule pack.
 - **Simulation sidecars.** Three FastAPI services at `127.0.0.1:8001-8003` for hardware-design tasks: `scaffold-ngspice` (analog SPICE), `scaffold-verilator` (digital SystemVerilog), `scaffold-symbiyosys` (formal verification). The orchestrator invokes them via the `ai-network` bridge; they isolate untrusted simulator input from the orchestrator's process tree. Each has its own `/health`; the orchestrator's `/health` aggregates them. If you don't run hardware-design workflows you can comment out the three `scaffold-*` services in `docker-compose.yml` without losing other functionality.
-- **Native web UI.** `http://localhost:8000/web/jobs` is a server-rendered HTML browser for jobs, ideate/confirm forms, and live SSE-streamed execution progress. Auth-bypassed on the loopback bind, since `localhost:8000` is the operator's box. It's an **operator/admin console** — it has no per-browser login and shows all jobs, so in a multi-user deployment (see [Multi-user setup](#multi-user-setup)) keep it network-restricted and point users at the `/ui` SPA instead.
+- **Native operator UI.** `http://localhost:8000/ui` is the front door: login with your API key (scoped keys supported in multi-user mode), first-run model wizard, compose/approve/watch/output views, DAG editing, assist walkthroughs, research, RAG search, models/settings/schedules/traces/alerts/costs. Zero runtime dependencies — plain ES modules served by the orchestrator. (The old server-rendered `/web/*` console is retired; its URLs 301-redirect to the SPA.)
+- **Native OpenAI surface.** `POST /v1/chat/completions` + `GET /v1/models` (default on) let any OpenAI client — including the SPA's Chat view — talk to the engine directly with slash-commands intact.
 
 ---
 
