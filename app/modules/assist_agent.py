@@ -371,6 +371,8 @@ def _assist_step_progress(step_counts: dict) -> Optional[dict]:
     No time ETA: assist is human-gated between steps, so wall-clock remaining is
     meaningless. Returns None for a trivial (<2 step) session.
     """
+    from app.config import settings
+
     if not settings.progress_eta_enabled:
         return None
     total = sum(int(v) for v in step_counts.values())
