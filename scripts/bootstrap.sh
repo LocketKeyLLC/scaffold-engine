@@ -366,6 +366,18 @@ fi
 # ---- next steps ------------------------------------------------------
 hdr "Done"
 
+# One-click pairing link (§17.840): the SPA accepts /ui/?key=… once, stores
+# it, and strips it from the address bar. Read the key from .env (not shell
+# state) so re-runs that skipped generation still print it.
+PAIR_KEY=$(grep '^SCAFFOLD_API_KEY=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+if [[ -n $PAIR_KEY ]]; then
+    SIGNIN_LINE="Open this one-click sign-in link (pairs this browser as administrator):
+     ${C_INFO}http://localhost:8000/ui/?key=${PAIR_KEY}${C_RST}"
+else
+    SIGNIN_LINE="Open http://localhost:8000/ui and sign in with the SCAFFOLD_API_KEY
+     from your .env."
+fi
+
 cat <<NEXT
 Stack is up. Quick links:
 
@@ -374,8 +386,7 @@ Stack is up. Quick links:
   ${C_INFO}Logs${C_RST}         docker logs -f scaffold-orchestrator
 
 Next steps:
-  1. Open http://localhost:8000/ui and sign in with the SCAFFOLD_API_KEY
-     from your .env.
+  1. $SIGNIN_LINE
   2. The first-run "Connect your models" wizard walks you through pointing
      every model role at your Ollama daemon (with per-role test probes).
   3. Compose your first idea from the New view — or type '/help' anywhere.

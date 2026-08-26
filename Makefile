@@ -15,7 +15,7 @@ API_KEY   ?= $(SCAFFOLD_API_KEY)
 COVERAGE_MIN ?= 77
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
+.PHONY: _ensure_dev test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -238,6 +238,14 @@ sync-valves: ## Wipe baked-in api_key from pipelines/*/valves.json (.env becomes
 
 sync-api-key: ## Strict-sync SCAFFOLD_API_KEY across .env + valves.json + ~/.bashrc (use: make sync-api-key [KEY=sk-...])
 	@bash scripts/sync_api_key.sh $(KEY)
+
+signin-link: ## §17.840 — print the one-click operator sign-in link for /ui (reads SCAFFOLD_API_KEY from .env)
+	@key=$$(grep '^SCAFFOLD_API_KEY=' .env 2>/dev/null | head -1 | cut -d= -f2-); \
+	if [ -n "$$key" ]; then \
+		echo "http://localhost:8000/ui/?key=$$key"; \
+	else \
+		echo "No SCAFFOLD_API_KEY in .env — run 'make bootstrap' first." >&2; exit 1; \
+	fi
 
 costs: ## Top-N most-expensive jobs from llm_call_logs (J.3) — defaults to 10 (use: make costs [N=20])
 	@bash scripts/costs_rollup.sh

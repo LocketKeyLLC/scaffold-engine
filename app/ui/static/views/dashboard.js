@@ -128,12 +128,150 @@ export default function dashboard(container) {
   async function load() {
     if (disposed) return;
     try {
-      const [status, work] = await Promise.all([api.get("/status"), api.get("/work")]);
+      // Health + roles are enrichment — fail-soft to null so a degraded
+      // orchestrator (or a non-admin key on /models/roles) still renders
+      // the core dashboard.
+      const [status, work, health, roles, account] = await Promise.all([
+        api.get("/status"),
+        api.get("/work"),
+        api.health().catch(() => null),
+        api.get("/models/roles").catch(() => null),
+        api.accountStatus(),
+      ]);
       if (disposed) return;
-      render(status, work);
+      render(status, work, health, roles, account);
     } catch (e) {
       if (!disposed) mount(outlet, errorPanel(e, () => load()));
     }
+  }
+
+  // Quick actions — the "what do I do next" entry points.
+  function quickActions(counts) {
+    const awaiting = counts.awaiting_confirmation || 0;
+    return el(
+      "div",
+      { class: "quick-actions" },
+      el("a", { class: "btn btn-primary", href: "#/new", text: "＋ New idea" }),
+      el(
+        "a",
+        { class: "btn", href: "#/approvals" },
+        "⏻ Approvals",
+        awaiting ? el("span", { class: "count-pill", text: String(awaiting) }) : null
+      ),
+      el("a", { class: "btn", href: "#/research", text: "◎ Research" }),
+      el("a", { class: "btn", href: "#/assist", text: "✦ Assistant" })
+    );
+  }
+
+  // §17.840 — used installs never see the wizard automatically (§17.817's
+  // never-nag rule), so without this card an existing operator has no way to
+  // discover the admin-account step. Shown to admins while unclaimed;
+  // dismissible for those who deliberately skipped.
+  const ACCOUNT_PROMPT_KEY = "scaffold_account_prompt_dismissed";
+  function accountPrompt(account) {
+    if (!account || account.claimed) return null;
+    if (api.principal()?.is_admin === false) return null;
+    if (localStorage.getItem(ACCOUNT_PROMPT_KEY)) return null;
+    return el(
+      "div",
+      { class: "card card-pad setup-checklist account-prompt" },
+      el(
+        "div",
+        { class: "setup-checklist-head" },
+        el("span", { class: "setup-checklist-title", text: "Create your admin account" }),
+        el("span", { class: "spacer" }),
+        el("a", { class: "btn btn-sm btn-primary", href: "#/setup", text: "Set it up" }),
+        el("button", {
+          class: "btn btn-ghost btn-sm",
+          text: "Dismiss",
+          onClick: (e) => {
+            localStorage.setItem(ACCOUNT_PROMPT_KEY, "1");
+            e.target.closest(".account-prompt")?.remove();
+          },
+        })
+      ),
+      el("p", {
+        class: "dim account-prompt-body",
+        text: "Takes 30 seconds: pick a name and password, and this console signs you in with them from then on — no more API key hunting. The key keeps working for CLI and scripts.",
+      })
+    );
+  }
+
+  // Persistent setup checklist — rendered while /health carries advisory
+  // warnings (unpulled role models, redis down, …); disappears when green.
+  function setupChecklist(health) {
+    const warns = health?.warnings || [];
+    if (!warns.length) return null;
+    return el(
+      "div",
+      { class: "card card-pad setup-checklist" },
+      el(
+        "div",
+        { class: "setup-checklist-head" },
+        el("span", { class: "setup-checklist-title", text: `Setup checklist — ${warns.length} item${warns.length === 1 ? "" : "s"} need attention` }),
+        el("span", { class: "spacer" }),
+        el("a", { class: "btn btn-sm", href: "#/setup", text: "Open Setup" })
+      ),
+      el("ul", { class: "setup-checklist-items" }, ...warns.map((w) => el("li", { text: w })))
+    );
+  }
+
+  // System row — per-service health dots + current model-role bindings.
+  function systemSection(health, roles) {
+    const cards = [];
+    const checks = Object.entries(health?.checks || {}).filter(
+      ([, c]) => c && typeof c === "object" && typeof c.status === "string"
+    );
+    if (checks.length) {
+      cards.push(
+        el(
+          "div",
+          { class: "card card-pad" },
+          el("div", { class: "section-head" }, el("h2", { text: "Services" })),
+          el(
+            "div",
+            { class: "health-items" },
+            ...checks.map(([name, c]) =>
+              el(
+                "span",
+                { class: "health-item" },
+                // Pass the real status through: "unknown" must render neutral
+                // (CSS default gray), not a false-alarm red. Only a hard
+                // "down"/"error" goes red.
+                el("span", { class: "health-dot", dataset: { state: ["up", "degraded", "unknown"].includes(c.status) ? c.status : "down" } }),
+                name,
+                c.latency_ms != null ? el("span", { class: "faint", text: `${c.latency_ms} ms` }) : null
+              )
+            )
+          )
+        )
+      );
+    }
+    const switchable = (roles?.roles || []).filter((r) => r.switchable);
+    if (switchable.length) {
+      cards.push(
+        el(
+          "div",
+          { class: "card card-pad" },
+          el(
+            "div",
+            { class: "section-head" },
+            el("h2", { text: "Model roles" }),
+            el("span", { class: "spacer" }),
+            el("a", { class: "btn btn-ghost btn-sm", href: "#/models", text: "Manage" })
+          ),
+          el(
+            "div",
+            { class: "roles-list" },
+            ...switchable.map((r) =>
+              el("div", {}, el("span", { class: "role-k", text: r.role.replace("model_", "") }), r.model)
+            )
+          )
+        )
+      );
+    }
+    if (!cards.length) return null;
+    return el("section", { class: "dash-section" }, el("div", { class: "grid grid-2" }, ...cards));
   }
 
   // First-run welcome: a 3-step orientation shown only on an empty install.
@@ -153,7 +291,7 @@ export default function dashboard(container) {
     return el(
       "div",
       { class: "card card-pad welcome-card" },
-      el("div", { class: "welcome-logo", text: "🧬" }),
+      el("img", { class: "welcome-logo", src: "/ui/static/logo.svg", alt: "" }),
       el("h2", { class: "welcome-title", text: "Welcome to Scaffold Engine" }),
       el("p", {
         class: "welcome-sub dim",
@@ -182,10 +320,10 @@ export default function dashboard(container) {
     );
   }
 
-  function render(status, work) {
+  function render(status, work, health, roles, account) {
     // Empty install + not yet dismissed → orientation instead of zeroed tiles.
     if ((status.total_jobs || 0) === 0 && !localStorage.getItem(ONBOARD_KEY)) {
-      mount(outlet, welcomeCard());
+      mount(outlet, setupChecklist(health), welcomeCard());
       return;
     }
     const counts = status.status_counts || {};
@@ -233,7 +371,13 @@ export default function dashboard(container) {
     const recentSection = el(
       "section",
       { class: "dash-section" },
-      el("div", { class: "section-head" }, el("h2", { text: "Recent jobs" })),
+      el(
+        "div",
+        { class: "section-head" },
+        el("h2", { text: "Recent jobs" }),
+        el("span", { class: "spacer" }),
+        el("a", { class: "btn btn-ghost btn-sm", href: "#/output", text: "All outputs →" })
+      ),
       recent.length
         ? el(
             "div",
@@ -248,7 +392,17 @@ export default function dashboard(container) {
         : el("div", { class: "card empty-state small" }, el("p", { text: "No recent jobs." }))
     );
 
-    mount(outlet, tiles, strip, workSection, recentSection);
+    mount(
+      outlet,
+      quickActions(counts),
+      accountPrompt(account),
+      setupChecklist(health),
+      tiles,
+      strip,
+      workSection,
+      systemSection(health, roles),
+      recentSection
+    );
   }
 
   load();
