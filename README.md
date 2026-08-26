@@ -337,7 +337,7 @@ scaffold-engine/
 ├── docker-compose.yml      production runtime (no tests, no Makefile in image)
 ├── docker-compose.dev.yml  dev override (mounts tests, Makefile, docs)
 ├── Dockerfile              multi-stage: builder → runtime → dev
-└── docs/openapi.json       v1.2.0 API contract (machine-readable)
+└── docs/openapi.json       v1.4.0 API contract (machine-readable)
 ```
 
 ---
@@ -355,7 +355,7 @@ The default `docker compose up -d` brings up everything below — there's no opt
 
 ## Status
 
-Actively developed. Latest release: v1.3.0 (2026-08-24) — see [CHANGELOG.md](./CHANGELOG.md). API contract pinned at v1.2.0 (`docs/openapi.json`) — v1.3.0 is additive (RBAC enforcement plus the additive `progress` SSE event) and does not change the contract. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
+Actively developed. Latest release: v1.4.0 (2026-08-26) — see [CHANGELOG.md](./CHANGELOG.md). API contract at v1.4.0 (`docs/openapi.json`) — additive over v1.2.0 (auth/identity, model management, detached research, meta/trace endpoints, plus the `progress` and `research_fetch` SSE events); the retired `/web` HTML console now answers with permanent redirects to the `/ui` SPA. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
 
 ## License
 
