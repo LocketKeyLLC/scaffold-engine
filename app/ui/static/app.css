@@ -949,8 +949,11 @@ select.input:focus-visible,
 .lib-snippet { margin-top: 4px; font-size: 13px; }
 
 /* §17.817 — setup wizard */
-.setup-account { max-width: 480px; display: flex; flex-direction: column; gap: var(--sp-1); }
+.setup-account { max-width: 520px; display: flex; flex-direction: column; gap: var(--sp-1); }
 .setup-account-actions { margin-top: var(--sp-4); }
+.setup-account-points { margin: var(--sp-2) 0 var(--sp-3); padding-left: 20px; display: flex; flex-direction: column; gap: 5px; }
+.setup-account-point { color: var(--text-dim); font-size: var(--fs-sm); }
+.setup-account-point::marker { color: var(--accent); }
 .setup-presets { margin-top: 8px; }
 .setup-preset h3 { margin-bottom: 6px; }
 .setup-preset .btn { margin-top: 10px; }

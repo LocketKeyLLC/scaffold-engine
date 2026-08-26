@@ -29,15 +29,20 @@ export default function setup(container) {
   let roles = [];   // /models/roles (switchable only)
   let plan = {};    // role -> chosen model
   const body = el("div", {});
+  // §17.840 — user creation is a full first-class step: when the admin
+  // account is still unclaimed the wizard is 5 steps (1 = create account);
+  // a claimed install keeps the original 4-step connect-models flow.
+  let stepOffset = 0; // 1 while the account step is part of this run
+  const stepLabel = (n, what) => `Step ${n + stepOffset} of ${4 + stepOffset} — ${what}`;
 
-  function header(subtitle) {
+  function header(subtitle, title = "Connect your models") {
     return el(
       "div",
       { class: "view-header" },
       el(
         "div",
         {},
-        el("h1", { text: "Connect your models" }),
+        el("h1", { text: title }),
         el("div", { class: "sub", text: subtitle })
       ),
       el("button", {
@@ -57,11 +62,11 @@ export default function setup(container) {
     location.hash = "#/new";
   }
 
-  // ── Step 0 (§17.840): create the admin account — skippable ──────────
-  // Shown only while unclaimed. Creation rides this session's key (the
-  // endpoint is admin-authed), so nobody on the network can race the claim.
-  // Afterwards the sign-in page greets by name and takes the password
-  // instead of the pasted key.
+  // ── Step 1 (§17.840): user creation — a full wizard step ────────────
+  // Shown while unclaimed (a claimed install starts at connect-models).
+  // Creation rides this session's key (the endpoint is admin-authed), so
+  // nobody on the network can race the claim. Afterwards the sign-in page
+  // greets by name and takes the password instead of the pasted key.
   async function stepAccount() {
     const acct = await api.accountStatus();
     if (disposed) return;
@@ -69,6 +74,7 @@ export default function setup(container) {
       stepConnect();
       return;
     }
+    stepOffset = 1;
     // Skipping is remembered (same key as the dashboard card's Dismiss) so
     // the boot-time route into setup stops nagging a deliberate decliner.
     const skip = () => {
@@ -83,18 +89,20 @@ export default function setup(container) {
         el(
           "div",
           {},
-          el("h1", { text: "Welcome — let's set up" }),
-          el("div", { class: "sub", text: "First — create your admin account (optional)" })
+          el("h1", { text: "Create your account" }),
+          el("div", { class: "sub", text: "Step 1 of 5 — who's driving this engine" })
         ),
         el("button", { class: "btn btn-ghost btn-sm", text: "Skip for now", onClick: skip })
       ),
       body
     );
+    const point = (t) =>
+      el("li", { class: "setup-account-point", text: t });
     const name = el("input", { class: "input", placeholder: "Display name (e.g. Adam)", autocomplete: "name" });
     const pw = el("input", { class: "input", type: "password", placeholder: "Password (8+ characters)", autocomplete: "new-password" });
     const pw2 = el("input", { class: "input", type: "password", placeholder: "Repeat password", autocomplete: "new-password" });
     const status = el("div", { class: "gate-status" });
-    const create = el("button", { class: "btn btn-primary", text: "Create account →" });
+    const create = el("button", { class: "btn btn-primary", text: "Create account & continue →" });
     create.addEventListener("click", async () => {
       if (!name.value.trim()) { status.textContent = "Pick a display name."; return; }
       if (pw.value.length < 8) { status.textContent = "Password needs at least 8 characters."; return; }
@@ -103,7 +111,7 @@ export default function setup(container) {
       status.textContent = "Creating…";
       try {
         await api.setupAccount(name.value.trim(), pw.value);
-        toast(`Account created — next time, sign in as ${name.value.trim()} with your password.`, "ok");
+        toast(`Welcome, ${name.value.trim()} — your account is ready.`, "ok");
         stepConnect();
       } catch (e) {
         status.textContent = e.detail || e.message;
@@ -115,11 +123,18 @@ export default function setup(container) {
       el(
         "div",
         { class: "card card-pad setup-account" },
-        el("h3", { text: "Create your admin account" }),
+        el("h3", { text: "Welcome to Scaffold Engine 👋" }),
         el("p", {
           class: "dim",
-          text: "From then on this page signs you in with a friendly password — no more hunting for the API key. The key keeps working too (CLI, scripts, recovery).",
+          text: "Let's start with you. Pick a name and password for this engine's administrator account:",
         }),
+        el(
+          "ul",
+          { class: "setup-account-points" },
+          point("Sign in with your password from now on — no API keys to hunt down."),
+          point("The console greets you by name and knows you're the administrator."),
+          point("Your API key keeps working for the CLI, scripts, and recovery.")
+        ),
         name, pw, pw2,
         el("div", { class: "row setup-account-actions" }, create, el("button", { class: "btn btn-ghost", text: "Skip for now", onClick: skip })),
         status
@@ -130,7 +145,7 @@ export default function setup(container) {
 
   // ── Step 1: connectivity ────────────────────────────────────────────
   async function stepConnect() {
-    mount(container, header("Step 1 of 4 — reach your Ollama daemon"), body);
+    mount(container, header(stepLabel(1, "reach your Ollama daemon")), body);
     mount(body, loading("Probing Ollama…"));
     try {
       [avail, roles] = await Promise.all([
@@ -170,7 +185,7 @@ export default function setup(container) {
 
   // ── Step 2: preset ──────────────────────────────────────────────────
   function stepPreset() {
-    mount(container, header("Step 2 of 4 — pick a starting point"), body);
+    mount(container, header(stepLabel(2, "pick a starting point")), body);
     const pulled = new Set([...avail.local, ...avail.cloud]);
     const current = Object.fromEntries(roles.map((r) => [r.role, r.model]));
 
@@ -226,7 +241,7 @@ export default function setup(container) {
 
   // ── Step 3: review + apply ──────────────────────────────────────────
   function stepReview() {
-    mount(container, header("Step 3 of 4 — review each role, then apply"), body);
+    mount(container, header(stepLabel(3, "review each role, then apply")), body);
     const allTags = [...avail.local, ...avail.cloud];
     const selects = {};
     const rows = roles.map((r) => {
@@ -306,7 +321,7 @@ export default function setup(container) {
 
   // ── Step 4: health board ────────────────────────────────────────────
   async function stepHealth() {
-    mount(container, header("Step 4 of 4 — green board means go"), body);
+    mount(container, header(stepLabel(4, "green board means go")), body);
     mount(body, loading("Checking the stack…"));
     let h = null;
     try {
