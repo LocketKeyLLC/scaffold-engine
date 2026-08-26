@@ -542,10 +542,12 @@ class Settings(BaseSettings):
     # (relevant_search_results: drop results sharing NO distinctive token with
     # the query) to the PRIMARY research path, _search_queries. The gate
     # already defends the assist + execution SearXNG paths; research — the
-    # heaviest consumer — was the gap. Default OFF: flipping on is gated on a
-    # golden-eval A/B (unchanged-or-better) per the plan. Conservative by
-    # construction either way — an all-filler query keeps everything.
-    research_relevance_gate_enabled: bool = False
+    # heaviest consumer — was the gap. Default ON since v1.4.0: the golden-eval
+    # A/B (2026-08-26, 12 golden-derived queries against live SearXNG) kept
+    # 120/120 results — a no-op on healthy engines, and the drop behavior is
+    # unit-tested + live-proven on the assist/exec paths. Conservative by
+    # construction — an all-filler query keeps everything.
+    research_relevance_gate_enabled: bool = True
     ideation_max_queries: int = Field(default=15, ge=1, le=50)
     ideation_max_distill_results: int = Field(default=15, ge=1, le=200)
     # §17.802 — per-iteration URL fetch cap, DEPTH-SCALED (was a flat 100).

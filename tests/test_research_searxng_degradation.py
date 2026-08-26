@@ -67,7 +67,10 @@ async def test_empty_200_is_not_cached():
 async def test_real_hit_is_cached():
     st = _state()
     cset = AsyncMock()
-    hit = [{"title": "T", "url": "https://example.com/a", "content": "c"}]
+    # Title shares a distinctive token with the query so the §17.837 relevance
+    # gate (default ON since v1.4.0, applied on read after the cache write)
+    # keeps the result regardless of the valve.
+    hit = [{"title": "Homelab ZFS pool sizing", "url": "https://example.com/a", "content": "c"}]
     out = await _run(_client_returning(200, hit), cset, st)
     assert len(out) == 1 and out[0]["url"] == "https://example.com/a"
     cset.assert_awaited_once()

@@ -4,7 +4,7 @@ The single source of truth for the project. Architecture, runtime, every module,
 
 This file replaces the prior scattered docs (`docs/ARCHITECTURE.md`, `docs/CHANGELOG.md`, `docs/CI.md`, `docs/logging-events.md`, `docs/audit/*`, `docs/toon/TOON_*.md`, the `review/*.md` audit notes, and the per-package READMEs). For day-to-day operator commands, see `USER_GUIDE.md`. For first-touch onboarding, see `README.md`.
 
-> **Pinned to API v1.2.0** (`docs/openapi.json`). `make openapi-check` enforces no silent contract drift.
+> **Pinned to API v1.4.0** (`docs/openapi.json`). `make openapi-check` enforces no silent contract drift.
 
 ---
 
@@ -101,7 +101,7 @@ All containers on Docker `ai-network` bridge (172.18.0.0/16). Pipelines and orch
 | SymbiYosys sidecar (§17.142) | 8003 | `scaffold-symbiyosys` | locally-built (OSS CAD Suite 2026-05-12 tarball: yosys + sby + z3), `read_only`, `cap_drop ALL`, `/tmp` 512m `exec` tmpfs |
 | Ollama | 11434 | (host, not containerized) | local install, CPU-only |
 
-**EDA sidecars are loopback-only and reached over the bridge by name** (`http://scaffold-ngspice:8001`, etc.) — they have no auth surface of their own, are not in the request-path for any chat workflow, and only fire when an operator drives the `/design` flow (`design_circuit` job_type). The orchestrator wraps each one with an audit-the-attempt contract (`sim_runs` row written even on transport/timeout/non-zero exit) so failures never raise — see §17.140-§17.142.
+**EDA sidecars are loopback-only and reached over the bridge by name** (`http://scaffold-ngspice:8001`, etc.) — they have no auth surface of their own, are not in the request-path for any chat workflow, and only fire when an operator drives the `/design` flow (`design_circuit` job_type). The orchestrator wraps each one with an audit-the-attempt contract (`sim_runs` row written even on transport/timeout/non-zero exit) so failures never raise (§17.140-§17.142).
 
 Compose: `docker-compose.yml` is the prod runtime — image is hermetic, **zero host-source bind mounts**, only the `hf-cache` and `scaffold-logs` named volumes are mounted (post-X.27, 2026-05-09; §17.62). `docker-compose.dev.yml` is the dev override that bind-mounts `app/`, `tests/`, `cli/`, `sdk/`, `scripts/`, `db/`, `pipelines/`, `Dockerfile`, `.github/`, `docs/` (all `:ro`) plus `tests/benchmarks/` (rw) for live edit + bench writes. `make dev-up` brings up the dev overlay; `make test` requires the dev image.
 
@@ -181,7 +181,7 @@ Phase 2 is long-running (10–25 min on a cold corpus); pipelines must use a lon
 
 1. Idempotency guard: if `dag_nodes` for `job_id` already exist with count > 0, return 409 (audit-flagged hot path).
 2. LLM produces a JSON list of tasks: `[{node_key, title, description, tool, domain, depends_on}, ...]`.
-3. `_normalize_tasks`: clamps `tool` to `VALID_TOOLS` (LLM/CodeGen/SearXNG/Milvus), `domain` to `VALID_DOMAINS` (prompt/rag/eng/eng_design/llm/spec/code/qa — see §17.329 for the eng/eng_design split), defaults invalids with a warning event.
+3. `_normalize_tasks`: clamps `tool` to `VALID_TOOLS` (LLM/CodeGen/SearXNG/Milvus), `domain` to `VALID_DOMAINS` (prompt/rag/eng/eng_design/llm/spec/code/qa — `eng_design` is circuit/EDA content, `eng` keeps its historical software-engineering meaning; §17.329), defaults invalids with a warning event.
 4. Kahn's cycle check (`validate_dag`); cycles → `dag_cycle_detected` event + 500.
 5. Numeric T-key sort + `_MAX_NODES` truncation (drops keys with logged warning).
 6. Determine leaf set; INSERT nodes with `is_output_node=TRUE` for leaves.
@@ -304,7 +304,7 @@ A sibling to autonomous execute. After `/dag` produces a plan, the operator opts
 | `output_text` | TEXT | the result; mirrored from assist_steps.evidence in Assist Mode |
 | `output_artifact_id` | UUID | optional FK to artifacts |
 | `confidence` | FLOAT | verifier confidence; nullable |
-| `domain` | VARCHAR(10) | one of `VALID_DOMAINS` (prompt/rag/eng/eng_design/llm/spec/code/qa); see §17.329 for the eng vs eng_design semantic split |
+| `domain` | VARCHAR(10) | one of `VALID_DOMAINS` (prompt/rag/eng/eng_design/llm/spec/code/qa); `eng_design` = circuit/EDA content, `eng` = software engineering (§17.329) |
 | `tool` | VARCHAR(50) DEFAULT `'LLM'` | one of `VALID_TOOLS` (LLM/CodeGen/SearXNG/Milvus) |
 | `retry_count`, `max_retries` | INT | retry budget |
 | `parallel_group`, `execution_order` | INT | scheduling hints |
@@ -1873,12 +1873,12 @@ Reaper warning at startup: `node_timeout_seconds >= stale_threshold_minutes*60` 
 
 | Suite | Command | Last full sweep |
 |---|---|---|
-| Core | `make test` | 4,330 passed · 1 skipped · 0 failed (2026-08-24) |
-| OWUI pipelines | `make test-pipelines` (`--noconftest` lane) | 1,178 passed (2026-08-25) |
-| Combined | `make test-all` | ~5,500 passed |
-| SPA JS | `make test-ui` | 21 passed (2026-08-25) |
-| SDK | `make test-sdk` | 142 passed |
-| CLI | `make test-cli` | 165 passed |
+| Core | `make test` | 4,626 passed · 1 skipped · 0 failed (2026-08-26) |
+| OWUI pipelines | `make test-pipelines` (`--noconftest` lane) | 1,183 passed (2026-08-26) |
+| Combined | `make test-all` | ~5,800 passed |
+| SPA JS | `make test-ui` | 26 passed (2026-08-26) |
+| SDK | `make test-sdk` | 146 passed |
+| CLI | `make test-cli` | 167 passed |
 
 The single core-lane skip is the documented live-LLM model-variance self-skip in `tests/integration/test_topology_select_db.py`. Every PR is gated by CI (pip-audit, Tier-1 smoke, the no-services Unit Tests job, and the SPA JS lane); service-dependent modules run in `make test` and the nightly full-stack tier. Per-commit baseline lineage and failure post-mortems are tracked in the internal sprint log.
 
@@ -2275,7 +2275,7 @@ CPU-only on the project's reference T480 (8-core / 16GB). Cloud-routed models (`
 | 501 | 2026-04-18 | 95.0% | 0.95 | — | 0.86 | `scripts/score_retrieval.py` (in-process) |
 | **1093** | **2026-05-07 (W.8)** | **95.0%** | **0.933** | **0.933** | **0.860** | HTTP `/rag` (W.8 ad-hoc, equivalent semantics) |
 
-Quality held flat under 2x corpus growth. MRR identical; Recall@5 -1.7pt on a single multi-doc query (g016 — got 2 of 3 expected docs in top-5). One MISS (g011) consistent with prior runs. See §17.26 for the W.8 sprint details + the ground_truth.json staleness finding it surfaced.
+Quality held flat under 2x corpus growth. MRR identical; Recall@5 -1.7pt on a single multi-doc query (g016 — got 2 of 3 expected docs in top-5). One MISS (g011) consistent with prior runs. The same sweep surfaced a ground_truth.json staleness finding, since fixed (§17.26).
 
 `scripts/score_retrieval.py` computes `recall@5`, `recall@10`, `mrr`, `coverage` against `tests/fixtures/golden_set.json`. CI workflow `retrieval-quality.yml` runs unit tests on PRs touching retrieval code; live scoring is local/manual (GitHub runners lack Milvus + Ollama).
 

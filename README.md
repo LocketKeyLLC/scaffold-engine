@@ -42,7 +42,7 @@ Before running the install steps below, make sure you have:
 | Docker + Docker Compose | The orchestrator, database, vector store, search engine, and chat UI all run as containers. | `docker --version` and `docker compose version` should both work. |
 | Ollama installed on your **host** (not in a container) | Runs the local LLMs. The orchestrator reaches it through the docker bridge gateway. | `ollama list` should respond. Install from <https://ollama.ai>. |
 | ~30 GB free disk | Models alone are ~25 GB; the vector store and Postgres add a few more. | `df -h .` |
-| ~16 GB RAM | The always-on containers are memory-capped at ~14.75 GiB combined (orchestrator 6g, Milvus 3g, Redis 2.5g, the rest smaller); Ollama loads models on demand on the host. | `free -h` (Linux) / Activity Monitor (mac) |
+| ~16 GB RAM (floor) | The always-on containers are memory-capped at ~14.75 GiB combined (orchestrator 6g, Milvus 3g, Redis 2.5g, the rest smaller); Ollama loads models on demand on the host. **On a 16 GB box, CPU-only local inference is heavily memory-contended — expect multi-minute model calls and a first job that takes 30–60+ min.** 32 GB+ (or the setup wizard's Ollama Cloud preset) gives a responsive experience. | `free -h` (Linux) / Activity Monitor (mac) |
 | `git` and a UTF-8 terminal | For cloning and running commands. | `git --version` |
 
 If you're on Pop!_OS / Ubuntu and Docker is fresh, also run `sudo usermod -aG docker $USER` and log out + back in so you can run `docker` without `sudo`.
@@ -337,7 +337,7 @@ scaffold-engine/
 ├── docker-compose.yml      production runtime (no tests, no Makefile in image)
 ├── docker-compose.dev.yml  dev override (mounts tests, Makefile, docs)
 ├── Dockerfile              multi-stage: builder → runtime → dev
-└── docs/openapi.json       v1.2.0 API contract (machine-readable)
+└── docs/openapi.json       v1.4.0 API contract (machine-readable)
 ```
 
 ---
@@ -355,7 +355,7 @@ The default `docker compose up -d` brings up everything below — there's no opt
 
 ## Status
 
-Actively developed. Latest release: v1.3.0 (2026-08-24) — see [CHANGELOG.md](./CHANGELOG.md). API contract pinned at v1.2.0 (`docs/openapi.json`) — v1.3.0 is additive (RBAC enforcement plus the additive `progress` SSE event) and does not change the contract. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
+Actively developed. Latest release: v1.4.0 (2026-08-26) — see [CHANGELOG.md](./CHANGELOG.md). API contract at v1.4.0 (`docs/openapi.json`) — additive over v1.2.0 (auth/identity, model management, detached research, meta/trace endpoints, plus the `progress` and `research_fetch` SSE events); the retired `/web` HTML console now answers with permanent redirects to the `/ui` SPA. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
 
 ## License
 
