@@ -99,10 +99,15 @@ function progressChip(job) {
 }
 
 function recentRow(job) {
-  const recentHref = job.status === "completed" ? `#/output/${job.id}` : (job.node_count || 0) > 0 ? `#/dag/${job.id}` : "";
+  // Every row is clickable — pre-DAG jobs land on the approvals detail
+  // (live refining state + approve action) instead of being dead rows.
+  const recentHref =
+    job.status === "completed" ? `#/output/${job.id}`
+    : (job.node_count || 0) > 0 ? `#/dag/${job.id}`
+    : `#/approvals/${job.id}`;
   const tr = el(
     "tr",
-    { dataset: { href: recentHref } },
+    { class: "row-link", dataset: { href: recentHref } },
     el("td", {}, statusBadge(job.status)),
     el("td", { class: "recent-title" }, job.title || "(untitled)"),
     el("td", { class: "mono", text: String(job.node_count ?? "—") }),
@@ -342,13 +347,15 @@ export default function dashboard(container) {
     const activeN = sum(ACTIVE);
     const attnN = sum(ATTENTION);
 
+    // Every tile is a doorway, not a decoration — each lands on the jobs
+    // list pre-filtered to the bucket it counts.
     const tiles = el(
       "div",
       { class: "grid grid-4" },
-      statTile("Total jobs", fmtNum(status.total_jobs), { onClick: () => (location.hash = "#/") }),
-      statTile("Running", fmtNum(activeN), { accent: "run" }),
-      statTile("Needs attention", fmtNum(attnN), { accent: "warn" }),
-      statTile("Completed", fmtNum(counts.completed || 0), { accent: "ok" })
+      statTile("Total jobs", fmtNum(status.total_jobs), { onClick: () => (location.hash = "#/jobs") }),
+      statTile("Running", fmtNum(activeN), { accent: "run", onClick: () => (location.hash = "#/jobs/running") }),
+      statTile("Needs attention", fmtNum(attnN), { accent: "warn", onClick: () => (location.hash = "#/jobs/attention") }),
+      statTile("Completed", fmtNum(counts.completed || 0), { accent: "ok", onClick: () => (location.hash = "#/jobs/completed") })
     );
 
     // Status breakdown strip (only non-zero buckets). Actionable statuses
@@ -365,8 +372,8 @@ export default function dashboard(container) {
       ...(nonzero.length
         ? nonzero.map(([k, v]) =>
             el(
-              "span",
-              { class: TERMINAL.has(k) ? "strip-item strip-dim" : "strip-item" },
+              "a",
+              { class: TERMINAL.has(k) ? "strip-item strip-dim" : "strip-item", href: `#/jobs/${k}` },
               statusBadge(k),
               el("span", { class: "strip-n mono", text: String(v) })
             )

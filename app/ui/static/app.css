@@ -499,6 +499,15 @@ select.input:focus-visible,
    historical noise must not outshout the actionable statuses. */
 .strip-dim { opacity: 0.55; }
 
+/* Status-strip badges are links into the filtered jobs list — keep the
+   badge look, add hover affordance. */
+a.strip-item { text-decoration: none; color: inherit; border-radius: 6px; padding: 2px 4px; }
+a.strip-item:hover { background: var(--bg-elev-2); }
+
+/* Jobs view */
+.jobs-chips { margin-bottom: 14px; gap: 8px; }
+.jobs-search { min-width: 220px; }
+
 /* Starter chips — one-click prompt seeds on first-touch empty surfaces
    (chat empty state, New-idea composer). */
 .starter-chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }

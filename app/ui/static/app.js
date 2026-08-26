@@ -7,6 +7,11 @@ import { mountCommandPalette } from "./command_palette.js";
 import { toast } from "./components.js";
 import { NAV, NAV_GROUPS } from "./nav.js";
 
+// Visible build stamp (sidebar foot). Bump per UI change round — it exists so
+// "is my tab running the latest UI?" is answerable at a glance instead of by
+// diffing pixels (the §17.840/§17.842 stale-module debugging sink).
+const UI_BUILD = "r2";
+
 // ── Global error surface ──────────────────────────────────────────────
 // A backstop so anything that escapes a view's own try/catch becomes a
 // visible toast instead of vanishing into the console. Deduped (a render
@@ -254,7 +259,7 @@ function buildChrome() {
           )
         : null,
       el("div", { class: "foot-controls" }, themeToggle(), densityToggle()),
-      el("div", { class: "health" }, healthDot, healthText),
+      el("div", { class: "health" }, healthDot, healthText, el("span", { class: "faint mono ui-build", text: ` · ui ${UI_BUILD}` })),
       el("button", {
         class: "btn btn-ghost btn-sm",
         text: "Sign out",
@@ -423,6 +428,7 @@ const VIEWS = {
   new: lazy("compose", "New idea"),
   chat: lazy("chat", "Chat"),
   dashboard: lazy("dashboard", "Dashboard"),
+  jobs: lazy("jobs", "Jobs"),
   approvals: lazy("approvals", "Approval Gate"),
   dag: lazy("dag", "DAG Canvas"),
   plan: lazy("plan", "Plan Editor"),
@@ -451,6 +457,8 @@ function registerRoutes() {
   router.route("/", (p) => loadAndRender("dashboard", p, router.currentPath()));
   router.route("/new", (p) => loadAndRender("new", p, router.currentPath()));
   router.route("/chat", (p) => loadAndRender("chat", p, router.currentPath()));
+  router.route("/jobs", (p) => loadAndRender("jobs", p, router.currentPath()));
+  router.route("/jobs/:filter", (p) => loadAndRender("jobs", p, router.currentPath()));
   router.route("/approvals", (p) => loadAndRender("approvals", p, router.currentPath()));
   router.route("/approvals/:jobId", (p) => loadAndRender("approvals", p, router.currentPath()));
   router.route("/dag", (p) => loadAndRender("dag", p, router.currentPath()));
