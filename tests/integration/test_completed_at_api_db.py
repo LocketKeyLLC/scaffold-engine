@@ -13,6 +13,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import text
 
+from app.authz import Principal
 from app.modules.execution_handler import execution_status
 from app.routers.jobs import list_jobs
 
@@ -52,7 +53,9 @@ async def test_jobs_list_item_carries_completed_at(db_session, insert_job):
     job_id = await insert_job(status="executing", title=title)
     await _complete(db_session, job_id)
 
-    resp = await list_jobs(q=title, db=db_session)
+    resp = await list_jobs(
+        q=title, db=db_session, principal=Principal(identity="admin", role="admin")
+    )
     item = next((j for j in resp.jobs if j.id == job_id), None)
     assert item is not None, "inserted job not found in list response"
     assert item.completed_at is not None
