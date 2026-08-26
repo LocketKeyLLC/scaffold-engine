@@ -103,6 +103,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 )
                 response.headers.setdefault("X-Content-Type-Options", "nosniff")
                 response.headers.setdefault("Referrer-Policy", "same-origin")
+            # §17.842 — the SPA's ES modules were served with ETag/Last-Modified
+            # but NO Cache-Control, so browsers heuristic-cached them and a
+            # plain reload kept running stale UI after a deploy (bit the
+            # operator twice: §17.840 round 7 and again post-release).
+            # no-cache = always revalidate (304 when unchanged), never stale.
+            if request.url.path.startswith(("/ui/", "/static/")):
+                response.headers.setdefault("Cache-Control", "no-cache")
             return response
         finally:
             if token is not None:
