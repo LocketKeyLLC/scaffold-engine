@@ -495,6 +495,15 @@ select.input:focus-visible,
 
 .status-strip { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 16px; align-items: center; }
 .strip-item { display: inline-flex; align-items: center; gap: 6px; }
+/* Terminal buckets (completed/cancelled/failed) trail the strip, dimmed —
+   historical noise must not outshout the actionable statuses. */
+.strip-dim { opacity: 0.55; }
+
+/* Starter chips — one-click prompt seeds on first-touch empty surfaces
+   (chat empty state, New-idea composer). */
+.starter-chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }
+.compose-starters { justify-content: flex-start; margin: 8px 0 4px; }
+.starter-chip { border-radius: 999px; }
 .strip-n { font-weight: 650; font-variant-numeric: tabular-nums; }
 
 .dash-section { margin-top: 28px; }

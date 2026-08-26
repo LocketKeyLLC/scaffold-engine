@@ -82,6 +82,22 @@ export default function compose(container) {
       { class: "card card-pad compose-card" },
       el("label", { class: "compose-label", text: "Idea" }),
       idea,
+      el(
+        "div",
+        { class: "starter-chips compose-starters" },
+        ...[
+          ["CLI tool", "A command-line tool that "],
+          ["Home-lab service", "Deploy and configure "],
+          ["Data pipeline", "A pipeline that ingests "],
+          ["Research + report", "Research and write a practical guide to "],
+        ].map(([label, fill]) =>
+          el("button", {
+            class: "btn btn-sm starter-chip",
+            text: label,
+            onClick: () => { idea.value = fill; idea.focus(); idea.setSelectionRange(fill.length, fill.length); },
+          })
+        )
+      ),
       el("label", { class: "compose-label", text: "Domain" }),
       domain,
       el("div", {

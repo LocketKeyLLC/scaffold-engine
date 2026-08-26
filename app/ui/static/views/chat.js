@@ -82,9 +82,27 @@ export default function chat(container) {
 
   function render() {
     if (!messages.length) {
-      mount(transcript, el("div", { class: "empty-state small" }, el("p", {
-        text: "Describe what you want to build, ask for job status (\"what's running\"), or type /go to launch.",
-      })));
+      // Starter chips: one click drops the text into the input so the first
+      // touch invites action instead of a blank panel. Editable before send.
+      const starter = (label, fill) =>
+        el("button", {
+          class: "btn btn-sm starter-chip",
+          text: label,
+          onClick: () => { input.value = fill; input.focus(); },
+        });
+      mount(transcript, el(
+        "div",
+        { class: "empty-state small" },
+        el("p", { text: "Describe what you want to build, ask for job status, or type /go to launch." }),
+        el(
+          "div",
+          { class: "starter-chips" },
+          starter("What's running?", "What's running right now?"),
+          starter("Build a CLI tool", "Build a small Python CLI that "),
+          starter("Set up a service", "Help me set up "),
+          starter("/go", "/go ")
+        )
+      ));
       return;
     }
     mount(transcript, ...messages.map((m) => bubble(m.role, m.content, false)));
