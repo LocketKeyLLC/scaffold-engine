@@ -17,7 +17,7 @@ ENV VIRTUAL_ENV=/opt/venv
 RUN python -m venv "$VIRTUAL_ENV"
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-RUN pip install --no-cache-dir "setuptools==83.0.0"  # §17.585 — was 71.1.0 (PYSEC-2025-49)
+RUN pip install --no-cache-dir "setuptools==84.0.0"  # §17.585 — was 71.1.0 (PYSEC-2025-49)
 
 COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
