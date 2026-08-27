@@ -564,6 +564,13 @@ Placeholder-first rule (§17.361):
   names that are universal (`apt install proxmox-ve`), flag values fixed
   by the deployment doc (`bs=4M`). The test is "does this value vary per
   operator?" — if yes, use a placeholder.
+- §17.850 — FREE-CHOICE names are the exception: when the runbook CREATES
+  something new whose name the operator simply gets to pick (a new VM or
+  container name, a VMID, a dataset/volume name, a new service user),
+  propose a concrete, project-fitting default (`jellyfin`, vmid `101`)
+  marked "suggested — rename if you like" instead of a placeholder. The
+  placeholder rule protects values describing the operator's EXISTING
+  system (their hostname, their IPs, their keys) — those stay placeholders.
 - Two-token placeholders match the rule: `<TAILSCALE_AUTH_KEY>`,
   `<PROXMOX_NODE_NAME>`. One-token placeholders also work:
   `<HOST_IP>`, `<HOSTNAME>`. Mixed-case placeholders
@@ -606,6 +613,30 @@ def truncate_output(content: str, max_chars: int) -> str:
     )
 
 
+def _brief_essentials(brief: dict) -> str:
+    """§17.850 — compact operator-established facts for the task prompt.
+
+    build_base_prompt rendered ONLY brief.description, so autonomous node
+    execution never saw the constraints ("PRESERVE the existing install"),
+    the operator's hardware inventory, or their approval-gate answers — the
+    §17.844/§17.845 blindness, closed for the assist funnel but not here.
+    Capped per section so a sprawling brief can't flood the node prompt."""
+    if not brief:
+        return ""
+    parts = []
+    constraints = [str(c) for c in (brief.get("constraints") or []) if str(c).strip()][:8]
+    if constraints:
+        parts.append("Constraints (honor these):\n" + "\n".join(f"- {c[:200]}" for c in constraints))
+    inputs = [str(i) for i in (brief.get("inputs_available") or []) if str(i).strip()][:10]
+    if inputs:
+        parts.append("Available hardware/inputs (already owned — use them):\n"
+                     + "\n".join(f"- {i[:200]}" for i in inputs))
+    feedback = (brief.get("user_feedback") or "").strip()
+    if feedback:
+        parts.append("Operator answers (already decided — honor, do not re-ask):\n" + feedback[:1200])
+    return "\n\n".join(parts)
+
+
 def build_base_prompt(node: dict, brief: dict) -> str:
     """The bare task prompt, before grounding or upstream injection."""
     template = node.get("prompt_template") or ""
@@ -614,11 +645,13 @@ def build_base_prompt(node: dict, brief: dict) -> str:
     if not goal and brief:
         goals = brief.get("goals", [])
         goal = goals[0] if goals else ""
+    essentials = _brief_essentials(brief or {})
+    tail = f"\n\n{essentials}" if essentials else ""
     if template:
-        return f"{template}\n\nContext: {goal}"
+        return f"{template}\n\nContext: {goal}{tail}"
     return (
         f"Execute this task: {title}\n\n"
-        f"Project goal: {goal}\n\n"
+        f"Project goal: {goal}{tail}\n\n"
         f"Produce a complete, actionable output for this task. "
         f"Base your response on the ground truth provided above where relevant."
     )
