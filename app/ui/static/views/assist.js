@@ -392,8 +392,10 @@ function renderChat(container, sessionId) {
       if (disposed) return;
       session = s;
       turns = t.turns || [];
-      checklist = cl;
-      environment = env?.environment ?? null;
+      // Transient checklist/env fetch failures keep the last known value —
+      // a blip must not blank the needs-from-you panel mid-session.
+      if (cl !== null) checklist = cl;
+      if (env !== null) environment = env?.environment ?? null;
       header.querySelector(".sub").textContent = s.job_title || shortId(sessionId);
       renderStepHero();
       renderTranscript();

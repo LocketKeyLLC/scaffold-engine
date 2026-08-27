@@ -734,8 +734,10 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 /* Assist layout v3 (operator): one slim row above the input — checklist
    left, verbs right — then the full-width input. Both elements lightened. */
 .assist-main { height: calc(100vh - 210px); min-height: 480px; }
-.composer-top { display: flex; align-items: flex-start; gap: 12px; }
-.composer-checklist { display: flex; flex-direction: column; gap: 2px; max-height: 96px; overflow-y: auto; min-width: 0; }
+/* Wrap so the verbs drop to a second line on narrow windows instead of
+   crushing the checklist to zero width (it has content priority). */
+.composer-top { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.composer-checklist { display: flex; flex-direction: column; gap: 2px; max-height: 96px; overflow-y: auto; flex: 1 1 240px; min-width: 220px; }
 .composer-checklist .side-title { font-size: 10.5px; margin-bottom: 1px; }
 .composer-checklist .side-check { padding: 1px 0; }
 .composer-checklist .check-text { font-size: 12px; }
