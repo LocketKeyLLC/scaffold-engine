@@ -1688,7 +1688,11 @@ async def set_environment(
     if substitutions:
         merged = dict(current.get("substitutions") or {})
         merged.update(substitutions)
-        current["substitutions"] = merged
+        # §17.850 — an empty/None value REMOVES the key ("/assist env KEY=" and
+        # the SPA editor's ✕ both clear a pin this way); merge otherwise.
+        current["substitutions"] = {
+            k: v for k, v in merged.items() if v is not None and str(v).strip() != ""
+        }
     if retract_facts:
         # §17.725 — retract contradicted facts BEFORE folding the new ones in.
         gone = {str(r).strip().lower() for r in retract_facts if str(r).strip()}

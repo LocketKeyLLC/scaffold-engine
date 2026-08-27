@@ -419,6 +419,42 @@ function renderChat(container, sessionId) {
     );
   }
 
+  // §17.850 — pinned-values editor: KEY = value substitutions guidance must
+  // use verbatim (the durable answer to "replace the placeholders"). Add/
+  // update applies immediately (server merges per-key); ✕ clears (empty value
+  // = delete). Auto-learned values (§17.490) appear here too.
+  function subsEditor() {
+    const subs = environment?.substitutions || {};
+    const putSub = async (k, v) => {
+      try {
+        await api.req(`/assist/${sessionId}/env`, { method: "PUT", body: { substitutions: { [k]: v } } });
+        toast(v ? `Pinned ${k} — walkthroughs will use it verbatim.` : `Cleared ${k}.`, "ok");
+        load();
+      } catch (e) { toast(`Could not save: ${e.detail || e.message}`, "err"); }
+    };
+    const keyIn = el("input", { class: "input input-sm subs-key", placeholder: "PLACEHOLDER_NAME" });
+    const valIn = el("input", { class: "input input-sm subs-val", placeholder: "actual value" });
+    const add = () => {
+      const k = keyIn.value.trim().replace(/[<>]/g, "");
+      const v = valIn.value.trim();
+      if (!k || !v) { toast("Both a name and a value are needed.", "err"); return; }
+      keyIn.value = ""; valIn.value = "";
+      putSub(k, v);
+    };
+    valIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+    return el(
+      "div",
+      { class: "subs-editor" },
+      el("div", { class: "side-title", text: "Pinned values" }),
+      el("p", { class: "dim subs-hint", text: "Walkthroughs use these verbatim wherever the matching <PLACEHOLDER> would appear." }),
+      ...Object.entries(subs).map(([k, v]) =>
+        el("div", { class: "bp-item" },
+          el("span", { class: "bp-item-text mono", text: `${k} = ${v}` }),
+          el("button", { class: "btn btn-ghost btn-sm bp-remove", text: "✕", title: "Clear this pin", onClick: () => putSub(k, "") }))),
+      el("div", { class: "row bp-add-row" }, keyIn, valIn, el("button", { class: "btn btn-sm", text: "＋ Pin", onClick: add }))
+    );
+  }
+
   // Session / Steps / notes / facts / environment — the card row below the chat.
   function renderBelow() {
     if (!session) return;
@@ -445,10 +481,13 @@ function renderChat(container, sessionId) {
         el("div", { class: "step-counts" }, ...Object.entries(sc).map(([k, v]) => el("span", { class: "strip-item" }, el("span", { class: "tag", text: k }), el("span", { class: "strip-n mono", text: String(v) }))))
       ),
       // §17.703 — the machine the engine believes you're on; empty until taught.
-      envLines.length ? el("div", { class: "card card-pad side-block" },
+      // §17.850 — plus the pinned-values editor (operator-set substitutions
+      // walkthroughs must use verbatim — kills recurring <PLACEHOLDER>s).
+      el("div", { class: "card card-pad side-block" },
         el("div", { class: "side-title", text: "Your environment (as tracked)" }),
-        ...envLines.map((l) => el("div", { class: "side-fact", text: l }))
-      ) : null,
+        ...envLines.map((l) => el("div", { class: "side-fact", text: l })),
+        subsEditor()
+      ),
       notes.length ? el("div", { class: "card card-pad side-block" },
         el("div", { class: "side-title", text: "Recent notes" }),
         ...notes.map((n) => el("div", { class: "side-note" }, el("span", { class: "note-kind tag", text: n.kind || "note" }), el("span", { class: "note-text", text: n.text || "" })))
