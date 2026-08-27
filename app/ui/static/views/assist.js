@@ -175,10 +175,49 @@ function renderChat(container, sessionId) {
       const output = composerText.value.trim();
       if (!output) { toast("Paste what happened (output/result) in the box first.", "err"); return; }
       composerText.value = "";
-      await api.post(`/assist/${sessionId}/submit`, {
+      appendBubble("operator", "submit", output);
+      const res = await api.post(`/assist/${sessionId}/submit`, {
         node_key: nk, output, action: "submit", history: historyForGuide(),
       });
-      toast(`Step ${nk} submitted.`, "ok");
+      // §17.847 — tell the TRUTH about what the submit did, and keep the loop
+      // moving. Pre-fix every outcome toasted "Step submitted." and stopped —
+      // a verifier rejection looked identical to success, and a committed
+      // step left the operator wondering why nothing advanced.
+      const st = res?.status;
+      if (st === "committed") {
+        toast(`✓ Step ${nk} committed.`, "ok");
+        await load();
+        if (session?.status === "completed") return; // hero shows the 🎉
+        // Auto-advance: claim and present the next step (§17.839's one-turn
+        // completion, SPA-side).
+        try {
+          const nxt = await api.get(`/assist/${sessionId}/next`);
+          if (nxt && nxt.node_key) {
+            await load();
+            guideCurrent();
+          }
+        } catch { /* no claimable step — load() above already showed state */ }
+        return;
+      }
+      if (st === "verification_failed" || st === "step_incomplete") {
+        const v = res.success_verdict || {};
+        appendBubble("assistant", "verify",
+          `⚠ Not committed — the verifier judged this step **${st === "step_incomplete" ? "incomplete" : "not successful"}**.` +
+          (v.reason || v.summary ? `\n\n${v.reason || v.summary}` : "") +
+          `\n\nAdd more evidence and Submit again, use 🔧 Fix error if something failed, or ⏩ Skip to move on anyway.`);
+        return;
+      }
+      if (st === "deliberating") {
+        appendBubble("assistant", "decision", res.message || "This step needs your input — see the question above and answer in the box.");
+        load();
+        return;
+      }
+      if (st === "auto_handoff") {
+        toast(`Step ${nk} handed to the engine (policy: ${res.handoff_policy}).`, "ok");
+        load();
+        return;
+      }
+      toast(`Step ${nk} submitted (${st || "recorded"}).`, "ok");
       load();
     }),
     verb("🔧 Fix error", "Paste the error in the box first — get a diagnosis for YOUR environment", async () => {

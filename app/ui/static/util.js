@@ -95,8 +95,19 @@ export function mdToHtml(src) {
   // fenced code blocks — stashed on their own paragraph so the wrapper below
   // never buries a <pre> inside a <p>.
   const blocks = [];
-  let text = String(src).replace(/```([\s\S]*?)```/g, (_, code) => {
-    blocks.push(`<pre class="md-pre"><code>${esc(code.replace(/^\n/, ""))}</code></pre>`);
+  // §17.847 — the fence info string (```bash) is metadata, NOT code: it used
+  // to land inside the block, so copy-pasting a walkthrough command grabbed
+  // "bash" as line 1 ("achieves nothing" — operator). Strip it, keep it as a
+  // label, and give every block a copy button (delegated handler in app.js —
+  // strict CSP forbids inline handlers).
+  let text = String(src).replace(/```([^\n]*)\n?([\s\S]*?)```/g, (_, info, code) => {
+    const lang = esc(info.trim().split(/\s+/)[0] || "");
+    blocks.push(
+      `<pre class="md-pre">` +
+      `<span class="md-pre-bar">${lang ? `<span class="md-lang">${lang}</span>` : ""}` +
+      `<button class="md-copy" type="button" title="Copy to clipboard">⧉ copy</button></span>` +
+      `<code>${esc(code.replace(/^\n/, ""))}</code></pre>`
+    );
     return `\n\n\x00MD${blocks.length - 1}\x00\n\n`;
   });
   text = esc(text);

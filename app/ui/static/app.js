@@ -41,6 +41,25 @@ window.addEventListener("scaffold:unauthorized", () => {
   connectGate("Your key was rejected (401) — it may have been rotated. Re-enter it.");
 });
 
+// §17.847 — click-to-copy on every markdown code block. Delegated (blocks are
+// injected via innerHTML under a strict CSP — no inline handlers). Copies the
+// CODE only: the language label and the button live outside <code>.
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".md-copy");
+  if (!btn) return;
+  const code = btn.closest(".md-pre")?.querySelector("code");
+  if (!code) return;
+  try {
+    await navigator.clipboard.writeText(code.textContent);
+    const old = btn.textContent;
+    btn.textContent = "✓ copied";
+    btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = old; btn.classList.remove("copied"); }, 1400);
+  } catch {
+    toast("Copy failed — select the text manually.", "err");
+  }
+});
+
 // Nav structure (groups + admin flags) lives in nav.js, shared with the
 // command palette.
 

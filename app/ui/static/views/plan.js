@@ -9,6 +9,7 @@ import { el, mount, moveItem, shortId } from "../util.js";
 import { statusBadge, loading, errorPanel, toast } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
 import { briefPanel } from "./brief_panel.js";
+import { flowGuide } from "./flow_guide.js";
 
 // §17.815 — edit attribution is SERVER-derived from the API key (audit-trail
 // integrity); the client no longer sends a spoofable label.
@@ -89,7 +90,13 @@ function renderPlan(container, jobId) {
       )
     );
   }).catch(() => {});
-  mount(container, header, mobileNote, guidance, briefPanel(jobId), warning, reorderPanel, stage);
+  // §17.847 — flow guide (where am I → what next), filled once the job loads.
+  const flowSlot = el("div", {});
+  api.get(`/jobs/${jobId}`).then((job) => {
+    const fg = flowGuide(job, { here: `#/plan/` });
+    if (fg) mount(flowSlot, fg);
+  }).catch(() => {});
+  mount(container, header, flowSlot, mobileNote, guidance, briefPanel(jobId), warning, reorderPanel, stage);
   mount(canvas, loading("Loading plan…"));
 
   const graph = createGraphCanvas(canvas);

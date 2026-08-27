@@ -538,6 +538,28 @@ select.input:focus-visible,
 .check-dot.done { color: var(--ok, #34d399); }
 .check-text { font-size: 12.5px; }
 
+/* §17.847 — flow guide stepper */
+.flow-guide { padding: 10px 16px; margin-bottom: 12px; }
+.flow-steps { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+.flow-step { color: var(--text-faint); font-weight: var(--fw-semi); }
+.flow-step.done { color: var(--ok, #3fb950); }
+.flow-step.current { color: var(--accent); text-transform: uppercase; letter-spacing: 0.04em; }
+.flow-sep { color: var(--text-faint); font-size: 11px; }
+.flow-hint-row { margin-top: 6px; }
+.flow-hint { font-size: 12.5px; }
+
+/* §17.847 — code-block copy bar */
+.md-pre { position: relative; }
+.md-pre-bar { display: flex; justify-content: flex-end; align-items: center; gap: 8px; position: absolute; top: 4px; right: 6px; }
+.md-lang { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); text-transform: lowercase; }
+.md-copy {
+  font-size: 11px; font-family: var(--sans); cursor: pointer;
+  background: var(--bg-elev-2); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px;
+}
+.md-copy:hover { color: var(--text); border-color: var(--border-strong); }
+.md-copy.copied { color: var(--ok, #3fb950); border-color: currentColor; }
+
 /* Answer receipt (post-approve) */
 .feedback-receipt { white-space: pre-wrap; font-size: 12.5px; }
 

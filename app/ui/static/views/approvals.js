@@ -6,6 +6,7 @@ import * as api from "../api.js";
 import * as router from "../router.js";
 import { el, mount, shortId, timeAgo, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
+import { flowGuide } from "./flow_guide.js";
 
 // Phase 1 in flight — feasibility not ready for approval yet (e.g. a job just
 // submitted from the composer). The detail view waits + polls through these
@@ -259,6 +260,7 @@ function renderDetail(container, jobId) {
       if (st === "awaiting_confirmation") {
         stopWaitPoll();
         waitingShown = false;
+        const fg = flowGuide(job, { here: "#/approvals/" });
         const brief = job.refined_brief || {};
         const feas = job.feasibility || {};
         // Verdict chips: the go/no-go signal belongs at the top, not inside
@@ -274,6 +276,7 @@ function renderDetail(container, jobId) {
             : null;
         mount(
           outlet,
+          fg,
           el(
             "div",
             { class: "row row-wrap" },
@@ -346,6 +349,7 @@ function renderDetail(container, jobId) {
       waitingShown = false;
       mount(
         outlet,
+        flowGuide(job),
         el(
           "div",
           { class: "card card-pad" },

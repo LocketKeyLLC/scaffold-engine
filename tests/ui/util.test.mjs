@@ -15,9 +15,19 @@ test("prose with space-delimited integers is untouched (C3)", () => {
 test("numbers in prose coexist with a real fenced block", () => {
   const out = mdToHtml("Step 2 of 4 :\n\n```\nmkdir ~/x\n```\n\nThen wait 10 seconds.");
   assert.ok(out.includes("Step 2 of 4"));
-  assert.ok(out.includes('<pre class="md-pre"><code>mkdir ~/x\n</code></pre>'));
+  assert.ok(out.includes("<code>mkdir ~/x\n</code></pre>"));
+  assert.ok(out.includes('class="md-copy"')); // §17.847 copy button on every block
   assert.ok(out.includes("Then wait 10 seconds."));
   assert.ok(!out.includes("undefined"));
+});
+
+test("fence info string is a label, never code (§17.847)", () => {
+  // Operator bug: ```bash\ncmd``` rendered "bash" as line 1 of the block, so
+  // copy-paste grabbed it ("achieves nothing").
+  const out = mdToHtml("```bash\necho hi\n```");
+  assert.ok(out.includes("<code>echo hi\n</code>"));
+  assert.ok(!out.includes("<code>bash"));
+  assert.ok(out.includes('<span class="md-lang">bash</span>'));
 });
 
 test("multiple fences restore in order", () => {
