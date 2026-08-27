@@ -521,7 +521,12 @@ select.input:focus-visible,
 .questions-card { border: 1px solid var(--accent); }
 .questions-list { margin: 6px 0 4px 18px; display: flex; flex-direction: column; gap: 7px; }
 .questions-hint { margin: 8px 0; }
-.feedback-box { width: 100%; resize: vertical; }
+.feedback-box { width: 100%; resize: vertical; margin-top: 10px; }
+/* Per-question answer rows */
+.qa-list { gap: 14px; }
+.qa-item::marker { color: var(--accent); font-weight: var(--fw-semi); }
+.qa-question { margin-bottom: 5px; }
+.question-answer { width: 100%; }
 .brief-details { border-top: 1px solid var(--border, rgba(128,128,128,0.18)); }
 .brief-details:first-of-type { border-top: none; }
 .brief-details summary {

@@ -94,17 +94,48 @@ function dedupeQuestions(qs) {
   return kept;
 }
 
-function questionsCard(brief, feas, feedbackBox) {
+// Per-question answer fields (operator: "what information it needs, needs to
+// be more defined... to assist the user in knowing what to give"). Each
+// question is answerable in place; blank means "let research / the plan
+// decide". collect() composes Q/A pairs + the free-form note into the
+// /ideate/confirm feedback string, so each answer travels WITH its question.
+function buildQuestionsCard(brief, feas, onAnyInput) {
   const qs = dedupeQuestions([...(feas?.clarifications_needed || []), ...(brief?.ambiguities || [])]);
   if (!qs.length) return null;
-  return el(
+  const pairs = qs.map((q) => ({
+    q,
+    input: el("input", {
+      class: "input input-sm question-answer",
+      placeholder: "Your answer — or leave blank and research/the plan will decide",
+      onInput: onAnyInput,
+    }),
+  }));
+  const extra = el("textarea", {
+    class: "input feedback-box",
+    rows: "2",
+    placeholder: "Anything else the engine should know or do differently? (optional)",
+    onInput: onAnyInput,
+  });
+  const node = el(
     "div",
     { class: "card card-pad brief-block questions-card" },
     el("h3", { class: "brief-heading", text: `The engine needs your input — ${qs.length} open question${qs.length === 1 ? "" : "s"}` }),
-    el("ol", { class: "questions-list" }, ...qs.map((q) => el("li", { text: q }))),
-    el("p", { class: "dim questions-hint", text: "Answer what you can below, in plain words — your answers are folded into the research and the plan when you approve. Unanswered questions are resolved by research or become explicit decision points in the plan." }),
-    feedbackBox
+    el("p", { class: "dim questions-hint", text: "Answer any of these in plain words. Blank ones are fine — research fills the gaps, or they become explicit decision points that pause the run and ask you." }),
+    el(
+      "ol",
+      { class: "questions-list qa-list" },
+      ...pairs.map(({ q, input }) => el("li", { class: "qa-item" }, el("div", { class: "qa-question", text: q }), input))
+    ),
+    extra
   );
+  const collect = () => {
+    const answered = pairs
+      .filter(({ input }) => input.value.trim())
+      .map(({ q, input }) => `Q: ${q}\nA: ${input.value.trim()}`);
+    const note = extra.value.trim();
+    return [...answered, note].filter(Boolean).join("\n\n") || null;
+  };
+  return { node, collect };
 }
 
 // ── List (no jobId) ──────────────────────────────────────────────────
@@ -186,17 +217,13 @@ function renderDetail(container, jobId) {
 
   const progress = el("div", { class: "approval-progress hidden" });
   const approveBtn = el("button", { class: "btn btn-primary", text: "✓ Approve — research & plan", onClick: () => approve() });
-  // Answers to the engine's open questions ride the confirm as feedback.
-  const feedbackBox = el("textarea", {
-    class: "input feedback-box",
-    rows: "4",
-    placeholder: "Your answers / extra direction (optional) — e.g. \"Use Tailscale, no port forwarding. P40 goes to the AI VM only.\"",
-    onInput: () => {
-      approveBtn.textContent = feedbackBox.value.trim()
-        ? "✓ Approve with answers — research & plan"
-        : "✓ Approve — research & plan";
-    },
-  });
+  // Built per-render by buildQuestionsCard; approve() collects the Q/A pairs.
+  let qa = null;
+  const refreshApproveLabel = () => {
+    approveBtn.textContent = qa && qa.collect()
+      ? "✓ Approve with answers — research & plan"
+      : "✓ Approve — research & plan";
+  };
   // §17.818 (plan 5.5) — one approve semantic across surfaces: approve always
   // means confirm → plan-ready; RUNNING is an explicit choice. This toggle
   // mirrors the OWUI auto-chain for operators who want approve→run in one
@@ -266,7 +293,7 @@ function renderDetail(container, jobId) {
               )
             : null,
           // 2. The engine's questions — the one part that actually wants YOU.
-          questionsCard(brief, feas, feedbackBox),
+          (qa = buildQuestionsCard(brief, feas, refreshApproveLabel))?.node ?? null,
           // 3. Everything else, collapsed with counts — expand what you care about.
           el(
             "div",
@@ -366,9 +393,9 @@ function renderDetail(container, jobId) {
     pollTimer = setInterval(pollStatus, 2500);
     try {
       // Phase 2: research → ingest → compile → planning. Synchronous, minutes.
-      // Answers/direction from the questions card travel as feedback and are
-      // folded into the brief before research.
-      await api.post("/ideate/confirm", { job_id: jobId, feedback: feedbackBox.value.trim() || null });
+      // Q/A pairs + free-form note from the questions card travel as feedback
+      // and are folded into the brief before research.
+      await api.post("/ideate/confirm", { job_id: jobId, feedback: qa ? qa.collect() : null });
       if (disposed) return;
       const line = progress.querySelector(".progress-msg");
       if (line) line.textContent = "Generating plan (DAG)…";
