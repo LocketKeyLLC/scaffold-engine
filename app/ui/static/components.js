@@ -103,7 +103,11 @@ export function toast(msg, kind = "", opts = {}) {
   );
   toastHost.append(t);
 
-  const ttl = opts.duration ?? (kind === "err" ? 6000 : 3200);
+  // §17.846 — errors are STICKY: they stay until the operator dismisses them.
+  // A 6s auto-dismiss let a mid-approve failure vanish before it could be
+  // read ("received an error that disappeared"). Success/info stay timed;
+  // an explicit opts.duration still wins for callers that know better.
+  const ttl = opts.duration ?? (kind === "err" ? 0 : 3200);
   if (ttl > 0) setTimeout(dismiss, ttl);
   return dismiss;
 }

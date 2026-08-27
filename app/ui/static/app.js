@@ -24,7 +24,10 @@ function surfaceError(err) {
   const now = Date.now();
   if (msg === _lastErr.msg && now - _lastErr.at < 4000) return;
   _lastErr = { msg, at: now };
-  toast(msg.length > 160 ? msg.slice(0, 157) + "…" : msg, "err");
+  // §17.846 — error toasts are now sticky (components.js), and the backstop
+  // points at the console so the full stack is always reachable.
+  const shown = msg.length > 160 ? msg.slice(0, 157) + "…" : msg;
+  toast(`${shown} — details in the browser console (F12)`, "err");
 }
 window.addEventListener("unhandledrejection", (e) => surfaceError(e.reason));
 window.addEventListener("error", (e) => { if (e.error) surfaceError(e.error); });
