@@ -432,9 +432,23 @@ function renderDetail(container, jobId) {
       }
     } catch (e) {
       if (!disposed) {
+        // §17.846 — a failure mid-chain must leave a READABLE trail and then
+        // reconcile with the server: confirm+plan can take minutes, and the
+        // server frequently finishes fine even when the client-side chain
+        // breaks (live incident: both calls returned 200, the operator only
+        // saw a vanishing toast). The sticky toast holds the message; the
+        // inline panel persists it on the page; load() re-syncs — if the job
+        // actually advanced, the past-gate panel with "Open plan editor"
+        // replaces the mystery.
         toast(`Approve failed: ${e.detail || e.message}`, "err");
-        progress.classList.add("hidden");
+        progress.classList.remove("hidden");
+        mount(
+          progress,
+          el("span", { text: "⚠ " }),
+          el("span", { class: "progress-msg", text: `The approve chain hit an error: ${e.detail || e.message}. Checking the job's actual state…` })
+        );
         setBusy(false);
+        load();
       }
     } finally {
       if (pollTimer) {
