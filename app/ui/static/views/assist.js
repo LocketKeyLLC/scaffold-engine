@@ -216,18 +216,11 @@ function renderChat(container, sessionId) {
   const composer = el(
     "div",
     { class: "chat-composer" },
-    el(
-      "div",
-      { class: "composer-row" },
-      checklistPanel,
-      el(
-        "div",
-        { class: "composer-main" },
-        verbsBar,
-        composerText,
-        el("div", { class: "composer-actions" }, guideBtn, el("span", { class: "spacer" }), sendBtn)
-      )
-    )
+    // Top row: what the engine needs (left) · step verbs (right).
+    el("div", { class: "composer-top" }, checklistPanel, el("span", { class: "spacer" }), verbsBar),
+    // Full-width input below.
+    composerText,
+    el("div", { class: "composer-actions" }, guideBtn, el("span", { class: "spacer" }), sendBtn)
   );
 
   const header = el(
