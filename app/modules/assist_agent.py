@@ -675,11 +675,7 @@ async def _assemble_ctx_for_node(
     )).mappings().first()
     if not node_row:
         raise ValueError(f"node not found: {job_id}/{node_key}")
-    job_row = (await db.execute(
-        text("SELECT refined_brief FROM jobs WHERE id = :id"),
-        {"id": job_id},
-    )).mappings().first()
-    brief = (job_row or {}).get("refined_brief") or {}
+    brief = await _post_confirm_brief(db=db, job_id=job_id)
 
     ctx = await assemble_step_context(
         db=db,
@@ -692,6 +688,74 @@ async def _assemble_ctx_for_node(
 
 
 # ── §17.751 — the single session-memory funnel ────────────────────────────
+
+
+async def _post_confirm_brief(*, db, job_id: str) -> dict:
+    """§17.844 — the brief AS CONFIRMED, not as first refined.
+
+    ``research_and_compile`` folds the operator's approval-gate answers into
+    ``research_data.brief`` (``user_feedback`` key) but never writes them back
+    to ``jobs.refined_brief`` — every assist reader of the stale column was
+    structurally blind to the answers (live symptom: the T1 hypervisor
+    decision re-asked a question the operator had answered at the gate).
+    Prefer the post-confirm copy; fall back to the Phase-1 brief pre-confirm.
+    """
+    row = (await db.execute(
+        text("SELECT refined_brief, research_data FROM jobs WHERE id = :id"),
+        {"id": job_id},
+    )).mappings().first()
+    if not row:
+        return {}
+    research = row.get("research_data")
+    if isinstance(research, str):
+        try:
+            research = json.loads(research)
+        except (ValueError, TypeError):
+            research = None
+    post = (research or {}).get("brief") if isinstance(research, dict) else None
+    if isinstance(post, dict) and post:
+        return post
+    fallback = row.get("refined_brief")
+    if isinstance(fallback, str):
+        try:
+            fallback = json.loads(fallback)
+        except (ValueError, TypeError):
+            fallback = None
+    return fallback if isinstance(fallback, dict) else {}
+
+
+def _brief_essentials_block(brief: dict) -> str:
+    """§17.844 — the operator-established facts every generation must honor.
+
+    ``build_base_prompt`` renders only ``brief.description``; the inventory
+    (``inputs_available``), the constraints, and the approval-gate answers
+    never reached assist prompts (live symptoms: guidance blind to the
+    hardware list given in the first request; answered questions re-asked).
+    Rendered once here and prepended via the ``job_digest`` injection path —
+    the §17.753 pattern, zero per-site prompt changes. Capped per section so
+    a sprawling brief cannot flood the prompt budget.
+    """
+    if not brief:
+        return ""
+    parts: list[str] = []
+    desc = (brief.get("description") or "").strip()
+    if desc:
+        parts.append(f"PROJECT: {desc[:500]}")
+    constraints = [str(c) for c in (brief.get("constraints") or []) if str(c).strip()][:8]
+    if constraints:
+        parts.append("CONSTRAINTS (honor these):\n" + "\n".join(f"- {c[:220]}" for c in constraints))
+    inputs = [str(i) for i in (brief.get("inputs_available") or []) if str(i).strip()][:10]
+    if inputs:
+        parts.append("AVAILABLE HARDWARE / INPUTS (the operator already has these — use them, don't ask again):\n"
+                     + "\n".join(f"- {i[:220]}" for i in inputs))
+    feedback = (brief.get("user_feedback") or "").strip()
+    if feedback:
+        parts.append("OPERATOR ANSWERS (already given at the approval gate — treat as decided; "
+                     "confirm rather than re-ask, and only reopen one if new evidence contradicts it):\n"
+                     + feedback[:1600])
+    if not parts:
+        return ""
+    return "── PROJECT BRIEF (operator-established facts) ──\n" + "\n\n".join(parts)
 
 
 @dataclass
@@ -765,7 +829,21 @@ async def assemble_generation_memory(
     # existing job_digest injection path — no new prompt params at the 5 sites.
     project_recap = await get_project_recap(job_id=str(sess["job_id"]), db=db)
     recap_block = assist_guide.render_project_recap_block(project_recap)
-    job_digest = f"{recap_block}\n\n{raw_digest}".strip() if recap_block else raw_digest
+    # §17.844 — brief essentials FIRST: constraints, the operator's hardware
+    # inventory, and the approval-gate answers (do-not-re-ask). At step 1 the
+    # digest and recap are empty — this block is the only project context.
+    # Same valve as the digest (§17.650's job-context concern, default ON).
+    from app.config import settings as _settings
+    brief_block = ""
+    if getattr(_settings, "assist_job_context_enabled", True):
+        try:
+            brief_block = _brief_essentials_block(
+                await _post_confirm_brief(db=db, job_id=str(sess["job_id"]))
+            )
+        except Exception:  # noqa: BLE001 — funnel sources are fail-soft (§17.751)
+            logger.warning("assist_brief_block_failed job_id=%s", sess.get("job_id"))
+            brief_block = ""
+    job_digest = "\n\n".join(b for b in (brief_block, recap_block, raw_digest) if b).strip()
     history = await _history_or_transcript(
         history=history, session_id=session_id, db=db, exclude_tail=exclude_tail,
     )
