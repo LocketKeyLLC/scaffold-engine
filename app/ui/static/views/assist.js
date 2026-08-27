@@ -6,6 +6,7 @@
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, fmtDate, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
+import { briefPanel } from "./brief_panel.js";
 
 // ── Picker ────────────────────────────────────────────────────────────
 function renderPicker(container) {
@@ -231,7 +232,11 @@ function renderChat(container, sessionId) {
   );
 
   const main = el("div", { class: "chat-main assist-main" }, transcript, composer);
-  mount(container, header, contractCard(), stepHero, main, belowGrid);
+  // §17.845 — the editable living brief rides with the session (mounted once
+  // the session tells us its job).
+  const briefSlot = el("div", { class: "assist-brief-slot" });
+  mount(container, header, contractCard(), stepHero, main, briefSlot, belowGrid);
+  let briefMounted = false;
 
   // 📍 Current-step hero — where am I, what's the loop position (§17.738/741
   // surface the recap in chat; this pins the essentials above it).
@@ -397,6 +402,10 @@ function renderChat(container, sessionId) {
       if (cl !== null) checklist = cl;
       if (env !== null) environment = env?.environment ?? null;
       header.querySelector(".sub").textContent = s.job_title || shortId(sessionId);
+      if (!briefMounted && s.job_id) {
+        briefMounted = true;
+        mount(briefSlot, briefPanel(String(s.job_id)));
+      }
       renderStepHero();
       renderTranscript();
       renderChecklist();

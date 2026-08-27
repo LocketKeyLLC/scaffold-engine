@@ -753,6 +753,20 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 }
 .assist-verbs .btn:hover { background: var(--bg-elev-2); color: var(--text); border-color: var(--border); }
 .assist-below { margin-top: 14px; }
+.assist-brief-slot { margin-top: 14px; }
+
+/* §17.845 — living project-brief editor */
+.brief-panel-body { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.bp-desc { width: 100%; resize: vertical; }
+.bp-items { display: flex; flex-direction: column; gap: 3px; }
+.bp-item { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }
+.bp-item-text { font-size: 13px; flex: 1; }
+.bp-remove { padding: 0 6px; color: var(--text-faint); }
+.bp-remove:hover { color: var(--err, #f85149); }
+.bp-add-row { margin: 6px 0 4px; gap: 8px; }
+.bp-add { flex: 1; }
+.bp-hint { margin: 2px 0 0; font-size: 12px; }
+.brief-panel-status { font-size: 12px; }
 @media (max-width: 820px) {
   .composer-top { flex-direction: column; }
   .assist-main { height: 66vh; }

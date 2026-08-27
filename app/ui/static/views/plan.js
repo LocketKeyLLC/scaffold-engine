@@ -8,6 +8,7 @@ import * as router from "../router.js";
 import { el, mount, moveItem, shortId } from "../util.js";
 import { statusBadge, loading, errorPanel, toast } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
+import { briefPanel } from "./brief_panel.js";
 
 // §17.815 — edit attribution is SERVER-derived from the API key (audit-trail
 // integrity); the client no longer sends a spoofable label.
@@ -88,7 +89,7 @@ function renderPlan(container, jobId) {
       )
     );
   }).catch(() => {});
-  mount(container, header, mobileNote, guidance, warning, reorderPanel, stage);
+  mount(container, header, mobileNote, guidance, briefPanel(jobId), warning, reorderPanel, stage);
   mount(canvas, loading("Loading plan…"));
 
   const graph = createGraphCanvas(canvas);
