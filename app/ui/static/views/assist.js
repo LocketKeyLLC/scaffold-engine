@@ -125,7 +125,10 @@ function renderChat(container, sessionId) {
   let turns = [];
 
   const transcript = el("div", { class: "chat-transcript" }, loading("Loading conversation…"));
-  const sidebar = el("aside", { class: "chat-sidebar" });
+  // Operator layout: no right sidebar. The input checklist docks LEFT of the
+  // chat input; session/steps/notes/facts become a card row BELOW the chat.
+  const checklistPanel = el("div", { class: "composer-checklist hidden" });
+  const belowGrid = el("div", { class: "assist-below grid grid-3" });
   const composerText = el("textarea", {
     class: "chat-input",
     placeholder: "Paste terminal output or describe what happened — or ask anything…",
@@ -213,9 +216,18 @@ function renderChat(container, sessionId) {
   const composer = el(
     "div",
     { class: "chat-composer" },
-    verbsBar,
-    composerText,
-    el("div", { class: "composer-actions" }, guideBtn, el("span", { class: "spacer" }), sendBtn)
+    el(
+      "div",
+      { class: "composer-row" },
+      checklistPanel,
+      el(
+        "div",
+        { class: "composer-main" },
+        verbsBar,
+        composerText,
+        el("div", { class: "composer-actions" }, guideBtn, el("span", { class: "spacer" }), sendBtn)
+      )
+    )
   );
 
   const header = el(
@@ -225,8 +237,8 @@ function renderChat(container, sessionId) {
     el("div", { class: "header-actions" }, el("a", { class: "btn btn-sm btn-ghost", href: "#/assist", text: "← Sessions" }), el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => load() }))
   );
 
-  const main = el("div", { class: "chat-main" }, transcript, composer);
-  mount(container, header, contractCard(), stepHero, el("div", { class: "chat-grid" }, main, sidebar));
+  const main = el("div", { class: "chat-main assist-main" }, transcript, composer);
+  mount(container, header, contractCard(), stepHero, main, belowGrid);
 
   // 📍 Current-step hero — where am I, what's the loop position (§17.738/741
   // surface the recap in chat; this pins the essentials above it).
@@ -307,56 +319,61 @@ function renderChat(container, sessionId) {
   let checklist = null;
   let environment = null;
 
-  function renderSidebar() {
+  // §17.707 — what the engine still needs from YOU, docked left of the input
+  // so it's in view exactly where you answer.
+  function renderChecklist() {
+    const checkItems = (checklist?.items || []).slice(0, 8);
+    const provided = checklist?.provided || {};
+    if (!checkItems.length) {
+      checklistPanel.classList.add("hidden");
+      return;
+    }
+    checklistPanel.classList.remove("hidden");
+    mount(
+      checklistPanel,
+      el("div", { class: "side-title", text: `The engine needs from you (${checklist?.open_count ?? checkItems.filter((i) => !i.done).length} open)` }),
+      ...checkItems.map((it) => {
+        const done = it.done === true;
+        const value = provided[it.node_key];
+        return el("div", { class: "side-check" },
+          el("span", { class: done ? "check-dot done" : "check-dot", text: done ? "✓" : "○" }),
+          el("span", { class: done ? "check-text dim" : "check-text" },
+            `${it.title || it.node_key}`,
+            done && value ? el("span", { class: "faint", text: ` — ${value}` }) : null));
+      })
+    );
+  }
+
+  // Session / Steps / notes / facts / environment — the card row below the chat.
+  function renderBelow() {
     if (!session) return;
     if (verbBtns["⏸"]) verbBtns["⏸"].textContent = session.status === "paused" ? "▶" : "⏸";
     const sc = session.step_counts || {};
     const notes = (session.notes || []).slice(-6).reverse();
     const facts = (session.memory_facts || []).slice(-8).reverse();
-    // Checklist items: {node_key, kind, title, done} (+ provided values map).
-    const checkItems = (checklist?.items || []).slice(0, 10);
-    const provided = checklist?.provided || {};
-    // Environment: profile is a free-text capture (user@host …); facts are
-    // durable system-state strings (§17.709). Skip config knobs.
     const envLines = [
       ...(environment?.profile ? [environment.profile] : []),
       ...((environment?.facts || []).map((f) => (typeof f === "string" ? f : f.text || ""))),
     ].filter(Boolean).slice(0, 5);
     mount(
-      sidebar,
+      belowGrid,
       el("div", { class: "card card-pad side-block" },
-        el("div", { class: "side-title", text: session.job_title || "Session" }),
+        el("div", { class: "side-title", text: "Session" }),
         el("div", { class: "row row-wrap side-badges" }, statusBadge(session.status), session.current_node_key ? el("span", { class: "tag", text: "node " + session.current_node_key } ) : null),
         row("Handoff", session.handoff_policy),
         row("Replan", session.replan_policy),
         row("Divergence", String(session.divergence_count ?? 0)),
         row("Started", fmtDate(session.started_at))
       ),
-      // §17.707 — what the engine still needs from YOU (decisions + info),
-      // with live done/open state. The "know what to give" panel.
-      checkItems.length ? el("div", { class: "card card-pad side-block" },
-        el("div", { class: "side-title", text: `The engine needs from you (${checklist?.open_count ?? checkItems.filter((i) => !i.done).length} open)` }),
-        ...checkItems.map((it) => {
-          const done = it.done === true;
-          const value = provided[it.node_key];
-          return el("div", { class: "side-check" },
-            el("span", { class: done ? "check-dot done" : "check-dot", text: done ? "✓" : "○" }),
-            el("span", { class: done ? "check-text dim" : "check-text" },
-              `${it.title || it.node_key}`,
-              it.kind ? el("span", { class: "faint", text: ` · ${it.kind}` }) : null,
-              done && value ? el("span", { class: "faint", text: ` — ${value}` }) : null));
-        })
-      ) : null,
-      // §17.703 — the machine the engine believes you're on. Trust signal +
-      // catches "wrong host" early; empty until the first message teaches it.
-      envLines.length ? el("div", { class: "card card-pad side-block" },
-        el("div", { class: "side-title", text: "Your environment (as tracked)" }),
-        ...envLines.map((l) => el("div", { class: "side-fact", text: l }))
-      ) : null,
       el("div", { class: "card card-pad side-block" },
         el("div", { class: "side-title", text: "Steps" }),
         el("div", { class: "step-counts" }, ...Object.entries(sc).map(([k, v]) => el("span", { class: "strip-item" }, el("span", { class: "tag", text: k }), el("span", { class: "strip-n mono", text: String(v) }))))
       ),
+      // §17.703 — the machine the engine believes you're on; empty until taught.
+      envLines.length ? el("div", { class: "card card-pad side-block" },
+        el("div", { class: "side-title", text: "Your environment (as tracked)" }),
+        ...envLines.map((l) => el("div", { class: "side-fact", text: l }))
+      ) : null,
       notes.length ? el("div", { class: "card card-pad side-block" },
         el("div", { class: "side-title", text: "Recent notes" }),
         ...notes.map((n) => el("div", { class: "side-note" }, el("span", { class: "note-kind tag", text: n.kind || "note" }), el("span", { class: "note-text", text: n.text || "" })))
@@ -387,7 +404,8 @@ function renderChat(container, sessionId) {
       header.querySelector(".sub").textContent = s.job_title || shortId(sessionId);
       renderStepHero();
       renderTranscript();
-      renderSidebar();
+      renderChecklist();
+      renderBelow();
     } catch (e) {
       if (!disposed) mount(transcript, errorPanel(e, () => load()));
     }
