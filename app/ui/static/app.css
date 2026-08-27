@@ -510,6 +510,29 @@ select.input:focus-visible,
    historical noise must not outshout the actionable statuses. */
 .strip-dim { opacity: 0.55; }
 
+/* Plan editor guidance banner */
+.plan-guidance { margin-bottom: 12px; }
+.plan-guidance p { margin: 0 0 6px; }
+.plan-guidance p:last-child { margin-bottom: 0; }
+
+/* Approval gate redesign — questions first, verdict chips, collapsed detail */
+.tag-ok { color: var(--ok, #34d399); border-color: currentColor; }
+.tag-err { color: var(--err, #f87171); border-color: currentColor; }
+.questions-card { border: 1px solid var(--accent); }
+.questions-list { margin: 6px 0 4px 18px; display: flex; flex-direction: column; gap: 7px; }
+.questions-hint { margin: 8px 0; }
+.feedback-box { width: 100%; resize: vertical; }
+.brief-details { border-top: 1px solid var(--border, rgba(128,128,128,0.18)); }
+.brief-details:first-of-type { border-top: none; }
+.brief-details summary {
+  cursor: pointer; padding: 9px 2px; font-weight: var(--fw-semi);
+  color: var(--text-dim); list-style-position: inside;
+}
+.brief-details summary:hover { color: var(--text); }
+.brief-details[open] summary { color: var(--text); }
+.brief-details > *:not(summary) { padding: 2px 2px 10px; }
+.assessment { margin-top: 12px; }
+
 /* Status-strip badges are links into the filtered jobs list — keep the
    badge look, add hover affordance. */
 a.strip-item { text-decoration: none; color: inherit; border-radius: 6px; padding: 2px 4px; }

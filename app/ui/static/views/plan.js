@@ -60,7 +60,21 @@ function renderPlan(container, jobId) {
     { class: "mobile-note" },
     "✎ Editing the plan is easiest on a wider screen. You can still tap a node to review it."
   );
-  mount(container, header, mobileNote, warning, reorderPanel, stage);
+  // Where-am-I guidance (operator critique: "no real guidance — are the
+  // nodes researched and just awaiting confirmation?"). States the contract
+  // plainly: research is done, this graph is a PROPOSAL, nothing runs yet.
+  const guidance = el(
+    "div",
+    { class: "card card-pad plan-guidance" },
+    el("p", {
+      text: "Research is done and this plan was drawn from your brief plus what it found. Nothing has run yet — every node is a proposed step, executed in dependency order only after you press Execute plan.",
+    }),
+    el("p", {
+      class: "dim",
+      text: "Click a node to inspect or edit what it will do (instructions, tool, model, dependencies) · drag nothing — order comes from the arrows · Insert adds a step · decision nodes pause execution to ask you.",
+    })
+  );
+  mount(container, header, mobileNote, guidance, warning, reorderPanel, stage);
   mount(canvas, loading("Loading plan…"));
 
   const graph = createGraphCanvas(canvas);
