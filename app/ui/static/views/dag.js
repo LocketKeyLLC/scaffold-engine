@@ -26,6 +26,9 @@ function renderCanvas(container, jobId) {
       { class: "header-actions" },
       el("a", { class: "btn btn-sm btn-ghost", href: "#/dag", text: "← Jobs" }),
       el("button", { class: "btn btn-sm", text: "Fit", onClick: () => graph.fit() }),
+      // §17.847 — the canvas is read-only; the edit surface is the plan
+      // editor, and it must be one click away (operator hit "not editable").
+      el("a", { class: "btn btn-sm", href: `#/plan/${jobId}`, text: "✎ Edit plan" }),
       el("a", { class: "btn btn-sm btn-primary", href: `#/theater/${jobId}`, text: "▶ Execution" }),
       el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => load() })
     )
