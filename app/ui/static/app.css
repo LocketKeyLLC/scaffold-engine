@@ -532,7 +532,14 @@ select.input:focus-visible,
 .step-hero { margin-bottom: 12px; border-left: 3px solid var(--accent); }
 .step-hero-pin { font-size: 15px; }
 .step-hero-title { font-size: 14px; }
-.step-hero-loop { margin-top: 6px; font-size: 12px; }
+.step-hero-loop { font-size: 12px; }
+.step-hero-action { margin-top: 10px; align-items: center; gap: 12px; }
+/* The view's primary control — big, unmissable, thumb-friendly. */
+.btn-lg.step-hero-guide {
+  font-size: 15px;
+  padding: 11px 22px;
+  border-radius: 9px;
+}
 .side-check { display: flex; gap: 7px; align-items: baseline; padding: 3px 0; }
 .check-dot { color: var(--accent); flex: none; }
 .check-dot.done { color: var(--ok, #34d399); }
