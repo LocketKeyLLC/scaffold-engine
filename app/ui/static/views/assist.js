@@ -519,6 +519,34 @@ function renderChat(container, sessionId) {
       await doneNext(text);
       return;
     }
+    // §17.849 — run the §17.754 progress tracker on EVERY substantive message
+    // BEFORE guidance (the OWUI pipeline's behavior, missing from the SPA).
+    // Guidance has no authority to close a step: without this, an operator
+    // reporting completion evidence in plain words ("i just pasted it, there
+    // was no output") got the same walkthrough re-prescribed forever — the
+    // live T3 loop. Fail-soft: tracker error/low-confidence → normal guidance.
+    if (session?.current_node_key && text.length >= 12) {
+      const note = el("div", { class: "msg sys" }, el("div", { class: "msg-body dim", text: "…checking step progress" }));
+      transcript.append(note);
+      transcript.scrollTop = transcript.scrollHeight;
+      try {
+        const tr = await api.post(`/assist/${sessionId}/track`, {
+          message: text, node_key: session.current_node_key, history: historyForGuide(),
+        });
+        note.remove();
+        if (tr?.action === "advanced") {
+          toast(`✓ Step ${tr.retired_prior_step || ""} closed out.`, "ok");
+          await claimAndGuideNext();
+          return;
+        }
+        if (tr?.action === "added_step" && tr.step?.node_key) {
+          toast(`New step ${tr.step.node_key} added — walking you through it.`, "ok");
+          await load();
+          guideCurrent();
+          return;
+        }
+      } catch { note.remove(); }
+    }
     // Ask the assistant to respond via a fresh step-guidance stream.
     guideCurrent(text);
   }
