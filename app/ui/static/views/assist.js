@@ -131,24 +131,8 @@ function renderChat(container, sessionId) {
     placeholder: "Paste terminal output or describe what happened — or ask anything…",
     rows: "2",
   });
+  const guideBtn = el("button", { class: "btn btn-sm", text: "✦ Guide me", onClick: () => guideCurrent() });
   const sendBtn = el("button", { class: "btn btn-sm btn-primary", text: "Send", onClick: () => sendMessage() });
-  // The hero's Guide button IS the primary control of this view (operator:
-  // "larger and easier to see and interact with"). Adapts to state:
-  // no step → claim + guide; step in flight → guide; streaming → stop.
-  const guideBtn = el("button", {
-    class: "btn btn-primary btn-lg step-hero-guide",
-    text: "✦ Guide me through this step",
-    onClick: async () => {
-      if (guiding) { guideCurrent(); return; }
-      if (!session?.current_node_key) {
-        guideBtn.disabled = true;
-        try { await api.get(`/assist/${sessionId}/next`); await load(); }
-        catch (e) { toast(e.detail || e.message, "err"); }
-        finally { guideBtn.disabled = false; }
-      }
-      guideCurrent();
-    },
-  });
   // Current-step hero — the persistent status layer over the conversation.
   const stepHero = el("div", { class: "card card-pad step-hero hidden" });
   // §17.816 (plan 5.4h) — step verbs, previously slash/OWUI-only. Submit and
@@ -231,7 +215,7 @@ function renderChat(container, sessionId) {
     { class: "chat-composer" },
     verbsBar,
     composerText,
-    el("div", { class: "composer-actions" }, el("span", { class: "spacer" }), sendBtn)
+    el("div", { class: "composer-actions" }, guideBtn, el("span", { class: "spacer" }), sendBtn)
   );
 
   const header = el(
@@ -252,8 +236,6 @@ function renderChat(container, sessionId) {
     const sc = session.step_counts || {};
     const doneN = (sc.done || 0) + (sc.skipped || 0);
     const totalN = Object.values(sc).reduce((a, b) => a + b, 0);
-    if (!guiding) guideBtn.textContent = nk ? "✦ Guide me through this step" : "✦ Start the first step";
-    guideBtn.classList.toggle("hidden", session.status === "completed");
     stepHero.classList.remove("hidden");
     mount(
       stepHero,
@@ -261,15 +243,13 @@ function renderChat(container, sessionId) {
         el("span", { class: "step-hero-pin", text: "📍" }),
         nk
           ? el("span", { class: "step-hero-title" }, el("strong", { text: `Step ${nk}` }), session.current_node_title ? ` — ${session.current_node_title}` : "")
-          : el("span", { class: "step-hero-title dim", text: session.status === "completed" ? "Session complete 🎉" : "Ready when you are" }),
+          : el("span", { class: "step-hero-title dim", text: session.status === "completed" ? "Session complete 🎉" : "No step claimed — press Next step to begin" }),
         el("span", { class: "spacer" }),
         totalN ? el("span", { class: "tag", text: `${doneN}/${totalN} steps done` }) : null,
         statusBadge(session.status)),
-      el("div", { class: "row row-wrap step-hero-action" },
-        guideBtn,
-        nk
-          ? el("span", { class: "step-hero-loop dim", text: "then: do it on your machine → paste what happened → ✓ Submit results" })
-          : el("span", { class: "step-hero-loop dim", text: "claims your first step and walks you through it, command by command" }))
+      nk
+        ? el("div", { class: "step-hero-loop dim", text: "The loop: ✦ Guide me → do it on your machine → paste what happened → ✓ Submit results" })
+        : null
     );
   }
 
@@ -304,7 +284,16 @@ function renderChat(container, sessionId) {
         el(
           "div",
           { class: "empty-state small" },
-          el("p", { text: "Nothing yet — press ✦ Start the first step above and the walkthrough begins here." })
+          el("p", { text: "Nothing yet — start with the walkthrough of your first step." }),
+          el("button", {
+            class: "btn btn-primary",
+            text: "✦ Guide me through the current step",
+            onClick: async () => {
+              if (!session?.current_node_key) await api.get(`/assist/${sessionId}/next`).catch(() => {});
+              await load();
+              guideCurrent();
+            },
+          })
         )
       );
       return;
@@ -429,7 +418,7 @@ function renderChat(container, sessionId) {
       return;
     }
     guiding = true;
-    guideBtn.textContent = "■ Stop this walkthrough";
+    guideBtn.textContent = "■ Stop";
     abort = new AbortController();
     const history = historyForGuide();
     if (userMsg) history.push({ role: "operator", content: userMsg });
@@ -463,7 +452,7 @@ function renderChat(container, sessionId) {
     } finally {
       guiding = false;
       abort = null;
-      guideBtn.textContent = session?.current_node_key ? "✦ Guide me through this step" : "✦ Start the first step";
+      guideBtn.textContent = "✦ Guide current step";
       live.classList.remove("streaming");
       // reload authoritative turns (guidance is persisted server-side)
       load();
