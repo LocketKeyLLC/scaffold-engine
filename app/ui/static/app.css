@@ -518,7 +518,11 @@ select.input:focus-visible,
 /* Approval gate redesign — questions first, verdict chips, collapsed detail */
 .tag-ok { color: var(--ok, #34d399); border-color: currentColor; }
 .tag-err { color: var(--err, #f87171); border-color: currentColor; }
-.questions-card { border: 1px solid var(--accent); }
+/* The questions card is the page's hero — answering these is how the
+   operator steers the outcome. Accent frame + accent heading, one notch
+   louder than everything else without breaking the token system. */
+.questions-card { border: 1px solid var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.questions-card .brief-heading { color: var(--accent); font-size: 14px; }
 .questions-list { margin: 6px 0 4px 18px; display: flex; flex-direction: column; gap: 7px; }
 .questions-hint { margin: 8px 0; }
 .feedback-box { width: 100%; resize: vertical; margin-top: 10px; }

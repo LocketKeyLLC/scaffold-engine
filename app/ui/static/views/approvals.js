@@ -292,9 +292,14 @@ function renderDetail(container, jobId) {
                 feas.summary ? el("div", { class: "assessment" }, el("h3", { class: "brief-heading", text: "Assessment" }), el("div", { class: "md brief-prose", html: mdToHtml(feas.summary) })) : null
               )
             : null,
-          // 2. The engine's questions — the one part that actually wants YOU.
+          // 2. The engine's questions — the hero of this page: answering them
+          // is how the operator steers toward the outcome they actually want.
           (qa = buildQuestionsCard(brief, feas, refreshApproveLabel))?.node ?? null,
-          // 3. Everything else, collapsed with counts — expand what you care about.
+          // 3. Decision controls directly after the questions — answer, approve,
+          // no scrolling past the reference material to act.
+          progress,
+          el("div", { class: "drawer-actions approval-actions" }, approveBtn, rejectBtn, autoRunLabel),
+          // 4. Reference material last, collapsed with counts.
           el(
             "div",
             { class: "card card-pad brief-block" },
@@ -308,9 +313,7 @@ function renderDetail(container, jobId) {
             job.input_text ? collapsible("Original request", null, el("div", { class: "md", html: mdToHtml(job.input_text) })) : null,
             collapsible("Other brief fields", null, renderRecord(brief, new Set(["description", "goals", "outputs_expected", "constraints", "inputs_available", "ambiguities", "complexity", "title", "domain"]))),
             collapsible("Other feasibility fields", null, renderRecord(feas, new Set(["summary", "feasible", "confidence", "risks", "clarifications_needed", "recommended_research_queries"])))
-          ),
-          progress,
-          el("div", { class: "drawer-actions approval-actions" }, approveBtn, rejectBtn, autoRunLabel)
+          )
         );
         return;
       }
@@ -327,7 +330,7 @@ function renderDetail(container, jobId) {
               "div",
               { class: "approval-progress" },
               el("span", { class: "spin" }),
-              el("span", { class: "progress-msg", text: "Refining your idea — the feasibility assessment will appear here for approval (usually 1–9 min)." })
+              el("span", { class: "progress-msg", text: "Refining your idea — the engine is assessing feasibility and will list the questions it needs YOU to answer. Usually 1–9 min; this page updates itself." })
             ),
             job.input_text ? el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Original request" }), el("div", { class: "md", html: mdToHtml(job.input_text) })) : null,
             el("div", { class: "drawer-actions" }, rejectBtn)
