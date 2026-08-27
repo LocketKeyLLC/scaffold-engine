@@ -6,6 +6,7 @@
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, mdToHtml, fmtNum } from "../util.js";
 import { statusBadge, loading, errorPanel, emptyState } from "../components.js";
+import { flowGuide } from "./flow_guide.js";
 
 const TERMINAL = new Set(["pipeline_complete", "execution_failed", "error", "budget_exhausted", "awaiting_assist"]);
 
@@ -133,7 +134,13 @@ function renderTheater(container, jobId) {
       el("div", { class: "card theater-panel log-panel" }, el("div", { class: "panel-head", text: "Event stream" }), logEl)
     )
   );
-  mount(container, header, progressBar, grid);
+  // §17.850 — flow guide on the Run surface too (carry-through sweep).
+  const flowSlot = el("div", {});
+  api.get(`/jobs/${jobId}`).then((job) => {
+    const fg = flowGuide(job, { here: "#/theater/" });
+    if (fg) mount(flowSlot, fg);
+  }).catch(() => {});
+  mount(container, header, flowSlot, progressBar, grid);
 
   let lastJobStatus = null; // §17.818 — compare payload state, not DOM text
   function setStatusPill(status) {
