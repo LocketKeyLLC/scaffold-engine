@@ -774,6 +774,12 @@ a.strip-item:hover { background: var(--bg-elev-2); }
   color: var(--text-dim);
 }
 .assist-verbs .btn:hover { background: var(--bg-elev-2); color: var(--text); border-color: var(--border); }
+/* §17.848 — the advance verb is the loop's primary action: always visible. */
+.assist-verbs .btn:first-child {
+  background: var(--accent-btn); color: #fff; border-color: transparent;
+  font-weight: var(--fw-semi);
+}
+.assist-verbs .btn:first-child:hover { background: var(--accent-btn-hover); color: #fff; }
 .assist-below { margin-top: 14px; }
 .assist-brief-slot { margin-top: 14px; }
 

@@ -158,67 +158,105 @@ function renderChat(container, sessionId) {
     verbBtns[label] = b;
     return b;
   }
+  // §17.848 — advance to the next claimable step and stream its walkthrough.
+  async function claimAndGuideNext() {
+    try {
+      const nxt = await api.get(`/assist/${sessionId}/next`);
+      await load();
+      if (nxt && nxt.node_key) guideCurrent();
+    } catch { await load(); }
+  }
+
+  // §17.848 — evidence-in-box submit with honest per-outcome handling
+  // (§17.847). Returns true when the loop advanced or ended cleanly.
+  async function submitEvidence(nk, output) {
+    composerText.value = "";
+    appendBubble("operator", "submit", output);
+    const res = await api.post(`/assist/${sessionId}/submit`, {
+      node_key: nk, output, action: "submit", history: historyForGuide(),
+    });
+    const st = res?.status;
+    if (st === "committed") {
+      toast(`✓ Step ${nk} committed.`, "ok");
+      await load();
+      if (session?.status !== "completed") await claimAndGuideNext();
+      return true;
+    }
+    if (st === "verification_failed" || st === "step_incomplete") {
+      const v = res.success_verdict || {};
+      appendBubble("assistant", "verify",
+        `⚠ Not committed — the verifier judged this step **${st === "step_incomplete" ? "incomplete" : "not successful"}**.` +
+        (v.reason || v.summary ? `\n\n${v.reason || v.summary}` : "") +
+        `\n\nAdd more evidence and press ✓ again, use 🔧 Fix error if something failed, or ⏩ Skip to move on anyway.`);
+      return false;
+    }
+    if (st === "deliberating") {
+      appendBubble("assistant", "decision", res.message || "This step needs your input — see the question above and answer in the box.");
+      load();
+      return false;
+    }
+    if (st === "auto_handoff") {
+      toast(`Step ${nk} handed to the engine (policy: ${res.handoff_policy}).`, "ok");
+      load();
+      return true;
+    }
+    toast(`Step ${nk} submitted (${st || "recorded"}).`, "ok");
+    load();
+    return true;
+  }
+
+  // §17.848 — THE advance verb. Operator hit a three-way dead end trying to
+  // move on (Submit demanded text, Next re-presented the same step, typed
+  // "next step" only got guidance). One button now does the right thing:
+  //   box has text  → submit it as evidence (verified, honest outcomes);
+  //   box is empty  → the §17.754 progress tracker assesses the CONVERSATION
+  //                   as the evidence — confident-done retires the step and
+  //                   the next one streams; not-done gets an honest bubble
+  //                   (never a "type something first" error).
+  async function doneNext(message) {
+    const nk = session?.current_node_key;
+    if (!nk) { await claimAndGuideNext(); return; }
+    const output = composerText.value.trim();
+    if (output) { await submitEvidence(nk, output); return; }
+    const res = await api.post(`/assist/${sessionId}/track`, {
+      message: message || "The operator says this step is done — assess and advance.",
+      node_key: nk, history: historyForGuide(),
+    });
+    const v = res?.verdict || {};
+    if (res?.action === "advanced") {
+      toast(`✓ Step ${res.retired_prior_step || nk} closed out.`, "ok");
+      await claimAndGuideNext();
+      return;
+    }
+    if (res?.action === "added_step" && res.step?.node_key) {
+      toast(`New step ${res.step.node_key} added — walking you through it.`, "ok");
+      await load();
+      guideCurrent();
+      return;
+    }
+    if (res?.action === "finalized" || v.verdict === "finalize") {
+      await load();
+      appendBubble("assistant", "done", "🎉 That was the last step — the session is wrapping up.");
+      return;
+    }
+    // Tracker not confident / thinks the step is still open — say so honestly
+    // and name the ways forward. NEVER a bare "enter text" error.
+    appendBubble("assistant", "track",
+      (v.reason ? `${v.reason}\n\n` : "The tracker isn't sure this step is finished yet.\n\n") +
+      "To close it out: paste what happened (output, a result, even one line) and press ✓ again — " +
+      "or ⏩ Skip to move on without verification.");
+  }
+
   // Verbs ordered as the loop runs (research: labeled contextual actions over
   // icon mysteries; primary path visually distinct from escape hatches).
   const verbsBar = el(
     "div",
     { class: "row row-wrap assist-verbs" },
-    verb("⏭ Next step", "Claim / re-present the current step and stream its walkthrough", async () => {
+    verb("✓ Done → next step", "Close out the current step (uses the box text as evidence when present, the conversation otherwise) and walk into the next one", () => doneNext()),
+    verb("↻ Re-show step", "Re-present the current step's walkthrough", async () => {
       await api.get(`/assist/${sessionId}/next`);
-      toast("Step claimed — streaming its walkthrough…", "ok");
       await load();
       guideCurrent();
-    }),
-    verb("✓ Submit results", "Record the composer text as this step's evidence and advance", async () => {
-      const nk = session?.current_node_key;
-      if (!nk) { toast("No step in flight — use Next step first.", "err"); return; }
-      const output = composerText.value.trim();
-      if (!output) { toast("Paste what happened (output/result) in the box first.", "err"); return; }
-      composerText.value = "";
-      appendBubble("operator", "submit", output);
-      const res = await api.post(`/assist/${sessionId}/submit`, {
-        node_key: nk, output, action: "submit", history: historyForGuide(),
-      });
-      // §17.847 — tell the TRUTH about what the submit did, and keep the loop
-      // moving. Pre-fix every outcome toasted "Step submitted." and stopped —
-      // a verifier rejection looked identical to success, and a committed
-      // step left the operator wondering why nothing advanced.
-      const st = res?.status;
-      if (st === "committed") {
-        toast(`✓ Step ${nk} committed.`, "ok");
-        await load();
-        if (session?.status === "completed") return; // hero shows the 🎉
-        // Auto-advance: claim and present the next step (§17.839's one-turn
-        // completion, SPA-side).
-        try {
-          const nxt = await api.get(`/assist/${sessionId}/next`);
-          if (nxt && nxt.node_key) {
-            await load();
-            guideCurrent();
-          }
-        } catch { /* no claimable step — load() above already showed state */ }
-        return;
-      }
-      if (st === "verification_failed" || st === "step_incomplete") {
-        const v = res.success_verdict || {};
-        appendBubble("assistant", "verify",
-          `⚠ Not committed — the verifier judged this step **${st === "step_incomplete" ? "incomplete" : "not successful"}**.` +
-          (v.reason || v.summary ? `\n\n${v.reason || v.summary}` : "") +
-          `\n\nAdd more evidence and Submit again, use 🔧 Fix error if something failed, or ⏩ Skip to move on anyway.`);
-        return;
-      }
-      if (st === "deliberating") {
-        appendBubble("assistant", "decision", res.message || "This step needs your input — see the question above and answer in the box.");
-        load();
-        return;
-      }
-      if (st === "auto_handoff") {
-        toast(`Step ${nk} handed to the engine (policy: ${res.handoff_policy}).`, "ok");
-        load();
-        return;
-      }
-      toast(`Step ${nk} submitted (${st || "recorded"}).`, "ok");
-      load();
     }),
     verb("🔧 Fix error", "Paste the error in the box first — get a diagnosis for YOUR environment", async () => {
       const err = composerText.value.trim();
@@ -458,6 +496,14 @@ function renderChat(container, sessionId) {
     return turns.slice(-8).map((t) => ({ role: t.role, content: t.content }));
   }
 
+  // §17.848 — typed advance intents ("next step", "done", "it worked",
+  // "continue") route through the progress tracker instead of only getting a
+  // guidance monologue (the operator typed "next step" and the assistant just
+  // talked). NARROW on purpose — short, unambiguous phrases only (§17.763's
+  // lesson: fuzzy phrase gates go too eager); anything longer is a real
+  // message and takes the normal guidance path.
+  const ADVANCE_RE = /^(next( step)?|done|finished|complete(d)?|continue|move on|it worked|works|all set|step (is )?done)[.! ]*$/i;
+
   async function sendMessage() {
     const text = composerText.value.trim();
     if (!text || guiding) return;
@@ -468,6 +514,10 @@ function renderChat(container, sessionId) {
       await api.post(`/assist/${sessionId}/turn`, { role: "operator", kind: "message", content: text, node_key: session?.current_node_key || null });
     } catch (e) {
       toast(`Could not persist message: ${e.detail || e.message}`, "err");
+    }
+    if (ADVANCE_RE.test(text) && session?.current_node_key) {
+      await doneNext(text);
+      return;
     }
     // Ask the assistant to respond via a fresh step-guidance stream.
     guideCurrent(text);
