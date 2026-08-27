@@ -224,12 +224,29 @@ function buildChrome() {
       )
     );
     navLinks.push(...links);
-    return el(
+    // Collapsible group (operator request: keep the sections, don't overwhelm
+    // — collapsed by default, except the group that owns the active view).
+    const open = navOpenGroups().has(g.label) || items.some((n) => n.id === topSegment(router.currentPath() || "/"));
+    const group = el(
       "div",
-      { class: "nav-group" },
-      el("div", { class: "nav-group-label", text: g.label }),
+      { class: "nav-group" + (open ? "" : " collapsed"), dataset: { group: g.label } },
+      el(
+        "button",
+        {
+          class: "nav-group-label nav-group-toggle",
+          onClick: () => {
+            const collapsed = group.classList.toggle("collapsed");
+            const set = navOpenGroups();
+            collapsed ? set.delete(g.label) : set.add(g.label);
+            saveNavOpenGroups(set);
+          },
+        },
+        el("span", { class: "nav-group-chevron", text: "▸" }),
+        g.label
+      ),
       ...links
     );
+    return group;
   }).filter(Boolean);
 
   const healthDot = el("span", { class: "health-dot", dataset: { state: "unknown" } });
@@ -366,10 +383,26 @@ function densityToggle() {
   return btn;
 }
 
+// Collapsed-group persistence: the OPEN set survives reloads; no stored
+// value means "everything collapsed" (the active view's group still
+// auto-expands so the operator always sees where they are).
+const NAV_OPEN_KEY = "scaffold_nav_open";
+function navOpenGroups() {
+  try { return new Set(JSON.parse(localStorage.getItem(NAV_OPEN_KEY)) || []); }
+  catch { return new Set(); }
+}
+function saveNavOpenGroups(set) {
+  localStorage.setItem(NAV_OPEN_KEY, JSON.stringify([...set]));
+}
+
 function highlightNav(path) {
   const active = topSegment(path);
   document.querySelectorAll(".nav-link").forEach((a) => {
     a.classList.toggle("active", a.dataset.nav === active);
+    // Deep links / palette jumps into a collapsed group must reveal the
+    // active item — expand (without persisting: a navigation isn't a
+    // deliberate "keep this open" choice).
+    if (a.dataset.nav === active) a.closest(".nav-group")?.classList.remove("collapsed");
   });
 }
 

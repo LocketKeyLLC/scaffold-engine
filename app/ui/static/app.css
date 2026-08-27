@@ -225,6 +225,17 @@ a:hover { text-decoration: underline; }
   letter-spacing: 0.07em;
   color: var(--text-faint);
 }
+/* Collapsible groups — the label is a toggle button; collapsed hides the
+   group's links. Chevron rotates when open. */
+.nav-group-toggle {
+  display: flex; align-items: center; gap: 6px;
+  background: none; border: none; cursor: pointer; text-align: left;
+  width: 100%;
+}
+.nav-group-toggle:hover { color: var(--text); }
+.nav-group-chevron { display: inline-block; transition: transform 0.12s ease; font-size: 9px; }
+.nav-group:not(.collapsed) .nav-group-chevron { transform: rotate(90deg); }
+.nav-group.collapsed .nav-link { display: none; }
 .nav-link {
   display: flex;
   align-items: center;
