@@ -348,6 +348,10 @@ async def get_job(
 
     research = _json_obj(row["research_data"]) or {}
     feasibility = research.get("feasibility") if isinstance(research, dict) else None
+    # §17.843 — the approval-gate answers as actually received (folded into
+    # research_data.brief by research_and_compile); None before confirm.
+    research_brief = research.get("brief") if isinstance(research, dict) else None
+    user_feedback = (research_brief or {}).get("user_feedback") or None
     return JobDetailResponse(
         id=str(row["id"]),
         title=row["title"] or "",
@@ -355,6 +359,7 @@ async def get_job(
         input_text=row["input_text"],
         refined_brief=_json_obj(row["refined_brief"]),
         feasibility=feasibility if isinstance(feasibility, dict) else None,
+        user_feedback=user_feedback if isinstance(user_feedback, str) else None,
         deliverable_kind=row["deliverable_kind"],
         has_compiled_output=bool(row["has_compiled_output"]),
         node_count=row["node_count"] or 0,

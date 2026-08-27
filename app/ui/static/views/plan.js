@@ -74,6 +74,20 @@ function renderPlan(container, jobId) {
       text: "Click a node to inspect or edit what it will do (instructions, tool, model, dependencies) · drag nothing — order comes from the arrows · Insert adds a step · decision nodes pause execution to ask you.",
     })
   );
+  // §17.843 — answer receipt: confirm the operator's approval-gate answers
+  // reached the plan (server-side truth via /jobs/{id}.user_feedback).
+  api.get(`/jobs/${jobId}`).then((job) => {
+    if (disposed || !job.user_feedback) return;
+    const n = (job.user_feedback.match(/^Q:/gm) || []).length;
+    guidance.append(
+      el(
+        "details",
+        { class: "brief-details" },
+        el("summary", {}, `✓ Your ${n || ""} answer${n === 1 ? "" : "s"} from the approval gate were folded into this plan — review them`),
+        el("pre", { class: "md-pre feedback-receipt", text: job.user_feedback })
+      )
+    );
+  }).catch(() => {});
   mount(container, header, mobileNote, guidance, warning, reorderPanel, stage);
   mount(canvas, loading("Loading plan…"));
 

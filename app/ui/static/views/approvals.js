@@ -351,6 +351,15 @@ function renderDetail(container, jobId) {
           { class: "card card-pad" },
           el("div", { class: "row" }, statusBadge(st), el("h2", { class: "approval-title", text: job.title || "(untitled)" })),
           el("p", { class: "dim", text: `This job has moved past the approval gate (status: ${st}).` }),
+          // §17.843 — receipt: the answers as the SERVER received them.
+          job.user_feedback
+            ? el(
+                "details",
+                { class: "brief-details", open: "" },
+                el("summary", {}, "✓ Your answers were received and folded into the research & plan"),
+                el("pre", { class: "md-pre feedback-receipt", text: job.user_feedback })
+              )
+            : null,
           el(
             "div",
             { class: "drawer-actions" },
@@ -392,13 +401,19 @@ function renderDetail(container, jobId) {
   async function approve() {
     if (busy) return;
     setBusy(true);
-    showProgress("Researching & compiling… (this can take a few minutes)");
+    const fb = qa ? qa.collect() : null;
+    const nAns = fb ? (fb.match(/^Q:/gm) || []).length : 0;
+    showProgress(
+      nAns
+        ? `✓ ${nAns} answer${nAns === 1 ? "" : "s"} received — researching with your input… (a few minutes)`
+        : "Researching & compiling… (this can take a few minutes)"
+    );
     pollTimer = setInterval(pollStatus, 2500);
     try {
       // Phase 2: research → ingest → compile → planning. Synchronous, minutes.
       // Q/A pairs + free-form note from the questions card travel as feedback
       // and are folded into the brief before research.
-      await api.post("/ideate/confirm", { job_id: jobId, feedback: qa ? qa.collect() : null });
+      await api.post("/ideate/confirm", { job_id: jobId, feedback: fb });
       if (disposed) return;
       const line = progress.querySelector(".progress-msg");
       if (line) line.textContent = "Generating plan (DAG)…";

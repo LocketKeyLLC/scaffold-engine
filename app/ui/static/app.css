@@ -526,6 +526,9 @@ select.input:focus-visible,
 .questions-list { margin: 6px 0 4px 18px; display: flex; flex-direction: column; gap: 7px; }
 .questions-hint { margin: 8px 0; }
 .feedback-box { width: 100%; resize: vertical; margin-top: 10px; }
+/* Answer receipt (post-approve) */
+.feedback-receipt { white-space: pre-wrap; font-size: 12.5px; }
+
 /* Per-question answer rows */
 .qa-list { gap: 14px; }
 .qa-item::marker { color: var(--accent); font-weight: var(--fw-semi); }

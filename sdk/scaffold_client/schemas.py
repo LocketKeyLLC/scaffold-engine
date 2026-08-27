@@ -1010,6 +1010,10 @@ class JobDetailResponse(BaseModel):
     input_text: str | None = None
     refined_brief: dict | None = None
     feasibility: dict | None = None
+    # §17.843 — the operator's approval-gate answers as the SERVER received
+    # them (research_data.brief.user_feedback). Rendered post-approve so
+    # "did it read my answers?" is answerable from the source of truth.
+    user_feedback: str | None = None
     deliverable_kind: str | None = None
     has_compiled_output: bool = False
     node_count: int = 0

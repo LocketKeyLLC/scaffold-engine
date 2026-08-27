@@ -2248,6 +2248,17 @@
           "updated_at": {
             "title": "Updated At",
             "type": "string"
+          },
+          "user_feedback": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Feedback"
           }
         },
         "required": [
