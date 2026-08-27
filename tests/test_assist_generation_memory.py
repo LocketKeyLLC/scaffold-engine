@@ -64,3 +64,89 @@ def test_every_generation_site_routes_through_the_funnel():
             f"{fn_name} does not route through assemble_generation_memory — it "
             f"will silently go memory-blind on some session sources (§17.751)"
         )
+
+
+# ── §17.844 — brief essentials reach the funnel ─────────────────────────────
+
+class _Rows:
+    """Minimal async-DB stub: .execute() returns .mappings().first() -> row."""
+    def __init__(self, row):
+        self._row = row
+
+    async def execute(self, *_a, **_k):
+        row = self._row
+        class _R:
+            def mappings(self):
+                class _M:
+                    def first(self_inner):
+                        return row
+                return _M()
+        return _R()
+
+
+@pytest.mark.asyncio
+async def test_post_confirm_brief_prefers_research_data_copy():
+    """The approval-gate answers live ONLY in research_data.brief — the stale
+    jobs.refined_brief must lose when the post-confirm copy exists."""
+    row = {
+        "refined_brief": {"description": "old", "constraints": ["keep proxmox"]},
+        "research_data": {"brief": {"description": "new", "user_feedback": "Q: x\nA: y"}},
+    }
+    brief = await assist_agent._post_confirm_brief(db=_Rows(row), job_id="j1")
+    assert brief["description"] == "new"
+    assert brief["user_feedback"] == "Q: x\nA: y"
+
+
+@pytest.mark.asyncio
+async def test_post_confirm_brief_falls_back_pre_confirm():
+    row = {"refined_brief": {"description": "phase1"}, "research_data": None}
+    brief = await assist_agent._post_confirm_brief(db=_Rows(row), job_id="j1")
+    assert brief["description"] == "phase1"
+
+
+def test_brief_essentials_block_carries_inventory_answers_constraints():
+    block = assist_agent._brief_essentials_block({
+        "description": "Build a homelab",
+        "constraints": ["PRESERVE the existing Proxmox install"],
+        "inputs_available": ["2x Xeon E5-2695 V2", "Tesla P40 24GB"],
+        "user_feedback": "Q: hypervisor?\nA: Proxmox already installed",
+    })
+    assert "PRESERVE the existing Proxmox install" in block
+    assert "Tesla P40 24GB" in block
+    assert "Proxmox already installed" in block
+    # the do-not-re-ask contract is explicit
+    assert "re-ask" in block
+    assert assist_agent._brief_essentials_block({}) == ""
+
+
+@pytest.mark.asyncio
+async def test_funnel_prepends_brief_essentials(monkeypatch):
+    """job_digest leads with the operator-established facts even when digest
+    and recap are empty (step 1 — previously the funnel carried NOTHING about
+    the project at that point)."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "assist_job_context_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "assist_step_recap_enabled", False, raising=False)
+
+    async def fake_digest(**_k):
+        return ""
+    async def fake_recap(**_k):
+        return ""
+    async def fake_project_recap(**_k):
+        return ""
+    async def fake_post_brief(**_k):
+        return {"inputs_available": ["HP V1910-24G switch"],
+                "user_feedback": "Q: k8s?\nA: on the laptops"}
+    monkeypatch.setattr(assist_agent, "_job_digest_for", fake_digest)
+    monkeypatch.setattr(assist_agent, "get_step_recap", fake_recap)
+    monkeypatch.setattr(assist_agent, "get_project_recap", fake_project_recap)
+    monkeypatch.setattr(assist_agent, "_post_confirm_brief", fake_post_brief)
+
+    sess = {"job_id": "job-1", "metadata": {}, "notes": []}
+    mem = await assist_agent.assemble_generation_memory(
+        session_id="s1", nk="T1", sess=sess, db=AsyncMock(),
+        history=[], digest_excludes=set(),
+    )
+    assert "HP V1910-24G switch" in mem.job_digest
+    assert "on the laptops" in mem.job_digest
+    assert mem.job_digest.startswith("── PROJECT BRIEF")

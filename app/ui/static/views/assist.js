@@ -6,6 +6,7 @@
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, fmtDate, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
+import { briefPanel } from "./brief_panel.js";
 
 // ── Picker ────────────────────────────────────────────────────────────
 function renderPicker(container) {
@@ -90,6 +91,33 @@ function renderPicker(container) {
 }
 
 // ── Chat for one session ─────────────────────────────────────────────
+
+// How-assist-works onboarding (research: new users need the human/AI contract
+// stated up front — the #1 confusion is "does it control my machine?").
+// Dismissed once per browser.
+const ASSIST_ONBOARD_KEY = "scaffold_assist_onboarded";
+function contractCard(onDismiss) {
+  if (localStorage.getItem(ASSIST_ONBOARD_KEY)) return null;
+  const step = (n, t, b) =>
+    el("div", { class: "welcome-step" },
+      el("div", { class: "welcome-step-n", text: String(n) }),
+      el("div", {}, el("div", { class: "welcome-step-t", text: t }), el("div", { class: "welcome-step-b dim", text: b })));
+  return el(
+    "div",
+    { class: "card card-pad assist-contract" },
+    el("div", { class: "row" },
+      el("h3", { class: "brief-heading", text: "How assist mode works" }),
+      el("span", { class: "spacer" }),
+      el("button", { class: "btn btn-ghost btn-sm", text: "Got it", onClick: (e) => { localStorage.setItem(ASSIST_ONBOARD_KEY, "1"); e.target.closest(".assist-contract")?.remove(); onDismiss?.(); } })),
+    el("p", { class: "assist-contract-lede", text: "The engine never touches your machine — it has no terminal access, by design. You are its hands: it guides, you act on your computer, it tracks and adapts." }),
+    el("div", { class: "welcome-steps" },
+      step(1, "Guide", "Press ✦ Guide me — the assistant walks you through the current step with exact commands or clicks for YOUR environment."),
+      step(2, "Do it", "Run the commands in your own terminal (or click through the UI it names). Copy-paste is expected."),
+      step(3, "Report back", "Paste what happened — output, errors, screenshots described in words. Errors? Use Fix error for a diagnosis."),
+      step(4, "Advance", "✓ Submit records the result and moves to the next step. The engine verifies, remembers, and re-plans around what you tell it."))
+  );
+}
+
 function renderChat(container, sessionId) {
   let disposed = false;
   let guiding = false;
@@ -98,10 +126,19 @@ function renderChat(container, sessionId) {
   let turns = [];
 
   const transcript = el("div", { class: "chat-transcript" }, loading("Loading conversation…"));
-  const sidebar = el("aside", { class: "chat-sidebar" });
-  const composerText = el("textarea", { class: "chat-input", placeholder: "Message the assistant…", rows: "2" });
-  const guideBtn = el("button", { class: "btn btn-sm", text: "✦ Guide current step", onClick: () => guideCurrent() });
+  // Operator layout: no right sidebar. The input checklist docks LEFT of the
+  // chat input; session/steps/notes/facts become a card row BELOW the chat.
+  const checklistPanel = el("div", { class: "composer-checklist hidden" });
+  const belowGrid = el("div", { class: "assist-below grid grid-3" });
+  const composerText = el("textarea", {
+    class: "chat-input",
+    placeholder: "Paste terminal output or describe what happened — or ask anything…",
+    rows: "2",
+  });
+  const guideBtn = el("button", { class: "btn btn-sm", text: "✦ Guide me", onClick: () => guideCurrent() });
   const sendBtn = el("button", { class: "btn btn-sm btn-primary", text: "Send", onClick: () => sendMessage() });
+  // Current-step hero — the persistent status layer over the conversation.
+  const stepHero = el("div", { class: "card card-pad step-hero hidden" });
   // §17.816 (plan 5.4h) — step verbs, previously slash/OWUI-only. Submit and
   // Fix consume the composer text (evidence / error report); the server side
   // captures + derives it (§17.812 3E) and verifies submits (§17.731).
@@ -121,20 +158,22 @@ function renderChat(container, sessionId) {
     verbBtns[label] = b;
     return b;
   }
+  // Verbs ordered as the loop runs (research: labeled contextual actions over
+  // icon mysteries; primary path visually distinct from escape hatches).
   const verbsBar = el(
     "div",
-    { class: "row assist-verbs" },
-    verb("⏭ Next", "Claim / re-present the current step", async () => {
+    { class: "row row-wrap assist-verbs" },
+    verb("⏭ Next step", "Claim / re-present the current step and stream its walkthrough", async () => {
       await api.get(`/assist/${sessionId}/next`);
       toast("Step claimed — streaming its walkthrough…", "ok");
       await load();
       guideCurrent();
     }),
-    verb("✓ Submit", "Record the composer text as this step's evidence and commit it", async () => {
+    verb("✓ Submit results", "Record the composer text as this step's evidence and advance", async () => {
       const nk = session?.current_node_key;
-      if (!nk) { toast("No step in flight — use Next first.", "err"); return; }
+      if (!nk) { toast("No step in flight — use Next step first.", "err"); return; }
       const output = composerText.value.trim();
-      if (!output) { toast("Describe what you did (or paste output) in the composer first.", "err"); return; }
+      if (!output) { toast("Paste what happened (output/result) in the box first.", "err"); return; }
       composerText.value = "";
       await api.post(`/assist/${sessionId}/submit`, {
         node_key: nk, output, action: "submit", history: historyForGuide(),
@@ -142,16 +181,9 @@ function renderChat(container, sessionId) {
       toast(`Step ${nk} submitted.`, "ok");
       load();
     }),
-    verb("⏩ Skip", "Skip the current step", async () => {
-      const nk = session?.current_node_key;
-      if (!nk) { toast("No step in flight.", "err"); return; }
-      await api.post(`/assist/${sessionId}/submit`, { node_key: nk, action: "skip" });
-      toast(`Step ${nk} skipped.`, "ok");
-      load();
-    }),
-    verb("🔧 Fix", "Diagnose the error pasted in the composer", async () => {
+    verb("🔧 Fix error", "Paste the error in the box first — get a diagnosis for YOUR environment", async () => {
       const err = composerText.value.trim();
-      if (!err) { toast("Paste the error into the composer first.", "err"); return; }
+      if (!err) { toast("Paste the error into the box first.", "err"); return; }
       composerText.value = "";
       appendBubble("operator", "fix", err);
       const res = await api.post(`/assist/${sessionId}/fix`, {
@@ -160,7 +192,15 @@ function renderChat(container, sessionId) {
       appendBubble("assistant", "fix", res.fix || "(no fix returned)");
       load();
     }),
-    verb("🤝 Handoff", "Let the engine do the current step autonomously", async () => {
+    el("span", { class: "spacer" }),
+    verb("⏩ Skip", "Skip the current step (recorded, revisitable)", async () => {
+      const nk = session?.current_node_key;
+      if (!nk) { toast("No step in flight.", "err"); return; }
+      await api.post(`/assist/${sessionId}/submit`, { node_key: nk, action: "skip" });
+      toast(`Step ${nk} skipped.`, "ok");
+      load();
+    }),
+    verb("🤝 Engine does it", "Hand this step to the engine to do autonomously (LLM work only — never your machine)", async () => {
       const nk = session?.current_node_key;
       if (!nk) { toast("No step in flight.", "err"); return; }
       await api.post(`/assist/${sessionId}/handoff`, { node_key: nk, mode: "single" });
@@ -177,7 +217,9 @@ function renderChat(container, sessionId) {
   const composer = el(
     "div",
     { class: "chat-composer" },
-    verbsBar,
+    // Top row: what the engine needs (left) · step verbs (right).
+    el("div", { class: "composer-top" }, checklistPanel, el("span", { class: "spacer" }), verbsBar),
+    // Full-width input below.
     composerText,
     el("div", { class: "composer-actions" }, guideBtn, el("span", { class: "spacer" }), sendBtn)
   );
@@ -189,8 +231,37 @@ function renderChat(container, sessionId) {
     el("div", { class: "header-actions" }, el("a", { class: "btn btn-sm btn-ghost", href: "#/assist", text: "← Sessions" }), el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => load() }))
   );
 
-  const main = el("div", { class: "chat-main" }, transcript, composer);
-  mount(container, header, el("div", { class: "chat-grid" }, main, sidebar));
+  const main = el("div", { class: "chat-main assist-main" }, transcript, composer);
+  // §17.845 — the editable living brief rides with the session (mounted once
+  // the session tells us its job).
+  const briefSlot = el("div", { class: "assist-brief-slot" });
+  mount(container, header, contractCard(), stepHero, main, briefSlot, belowGrid);
+  let briefMounted = false;
+
+  // 📍 Current-step hero — where am I, what's the loop position (§17.738/741
+  // surface the recap in chat; this pins the essentials above it).
+  function renderStepHero() {
+    if (!session) return;
+    const nk = session.current_node_key;
+    const sc = session.step_counts || {};
+    const doneN = (sc.done || 0) + (sc.skipped || 0);
+    const totalN = Object.values(sc).reduce((a, b) => a + b, 0);
+    stepHero.classList.remove("hidden");
+    mount(
+      stepHero,
+      el("div", { class: "row row-wrap" },
+        el("span", { class: "step-hero-pin", text: "📍" }),
+        nk
+          ? el("span", { class: "step-hero-title" }, el("strong", { text: `Step ${nk}` }), session.current_node_title ? ` — ${session.current_node_title}` : "")
+          : el("span", { class: "step-hero-title dim", text: session.status === "completed" ? "Session complete 🎉" : "No step claimed — press Next step to begin" }),
+        el("span", { class: "spacer" }),
+        totalN ? el("span", { class: "tag", text: `${doneN}/${totalN} steps done` }) : null,
+        statusBadge(session.status)),
+      nk
+        ? el("div", { class: "step-hero-loop dim", text: "The loop: ✦ Guide me → do it on your machine → paste what happened → ✓ Submit results" })
+        : null
+    );
+  }
 
   composerText.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -218,23 +289,74 @@ function renderChat(container, sessionId) {
 
   function renderTranscript() {
     if (!turns.length) {
-      mount(transcript, el("div", { class: "empty-state small" }, el("p", { text: "No messages yet." })));
+      mount(
+        transcript,
+        el(
+          "div",
+          { class: "empty-state small" },
+          el("p", { text: "Nothing yet — start with the walkthrough of your first step." }),
+          el("button", {
+            class: "btn btn-primary",
+            text: "✦ Guide me through the current step",
+            onClick: async () => {
+              if (!session?.current_node_key) await api.get(`/assist/${sessionId}/next`).catch(() => {});
+              await load();
+              guideCurrent();
+            },
+          })
+        )
+      );
       return;
     }
     mount(transcript, ...turns.map((t) => bubble(t.role, t.kind, t.content, t.created_at)));
     transcript.scrollTop = transcript.scrollHeight;
   }
 
-  function renderSidebar() {
+  // Lazily-fetched sidebar extras (checklist §17.707, environment §17.703) —
+  // cached per load cycle; failures degrade to absent cards, never errors.
+  let checklist = null;
+  let environment = null;
+
+  // §17.707 — what the engine still needs from YOU, docked left of the input
+  // so it's in view exactly where you answer.
+  function renderChecklist() {
+    const checkItems = (checklist?.items || []).slice(0, 8);
+    const provided = checklist?.provided || {};
+    if (!checkItems.length) {
+      checklistPanel.classList.add("hidden");
+      return;
+    }
+    checklistPanel.classList.remove("hidden");
+    mount(
+      checklistPanel,
+      el("div", { class: "side-title", text: `The engine needs from you (${checklist?.open_count ?? checkItems.filter((i) => !i.done).length} open)` }),
+      ...checkItems.map((it) => {
+        const done = it.done === true;
+        const value = provided[it.node_key];
+        return el("div", { class: "side-check" },
+          el("span", { class: done ? "check-dot done" : "check-dot", text: done ? "✓" : "○" }),
+          el("span", { class: done ? "check-text dim" : "check-text" },
+            `${it.title || it.node_key}`,
+            done && value ? el("span", { class: "faint", text: ` — ${value}` }) : null));
+      })
+    );
+  }
+
+  // Session / Steps / notes / facts / environment — the card row below the chat.
+  function renderBelow() {
     if (!session) return;
     if (verbBtns["⏸"]) verbBtns["⏸"].textContent = session.status === "paused" ? "▶" : "⏸";
     const sc = session.step_counts || {};
     const notes = (session.notes || []).slice(-6).reverse();
     const facts = (session.memory_facts || []).slice(-8).reverse();
+    const envLines = [
+      ...(environment?.profile ? [environment.profile] : []),
+      ...((environment?.facts || []).map((f) => (typeof f === "string" ? f : f.text || ""))),
+    ].filter(Boolean).slice(0, 5);
     mount(
-      sidebar,
+      belowGrid,
       el("div", { class: "card card-pad side-block" },
-        el("div", { class: "side-title", text: session.job_title || "Session" }),
+        el("div", { class: "side-title", text: "Session" }),
         el("div", { class: "row row-wrap side-badges" }, statusBadge(session.status), session.current_node_key ? el("span", { class: "tag", text: "node " + session.current_node_key } ) : null),
         row("Handoff", session.handoff_policy),
         row("Replan", session.replan_policy),
@@ -245,6 +367,11 @@ function renderChat(container, sessionId) {
         el("div", { class: "side-title", text: "Steps" }),
         el("div", { class: "step-counts" }, ...Object.entries(sc).map(([k, v]) => el("span", { class: "strip-item" }, el("span", { class: "tag", text: k }), el("span", { class: "strip-n mono", text: String(v) }))))
       ),
+      // §17.703 — the machine the engine believes you're on; empty until taught.
+      envLines.length ? el("div", { class: "card card-pad side-block" },
+        el("div", { class: "side-title", text: "Your environment (as tracked)" }),
+        ...envLines.map((l) => el("div", { class: "side-fact", text: l }))
+      ) : null,
       notes.length ? el("div", { class: "card card-pad side-block" },
         el("div", { class: "side-title", text: "Recent notes" }),
         ...notes.map((n) => el("div", { class: "side-note" }, el("span", { class: "note-kind tag", text: n.kind || "note" }), el("span", { class: "note-text", text: n.text || "" })))
@@ -261,13 +388,28 @@ function renderChat(container, sessionId) {
 
   async function load() {
     try {
-      const [s, t] = await Promise.all([api.get(`/assist/${sessionId}`), api.get(`/assist/${sessionId}/turns`)]);
+      const [s, t, cl, env] = await Promise.all([
+        api.get(`/assist/${sessionId}`),
+        api.get(`/assist/${sessionId}/turns`),
+        api.get(`/assist/${sessionId}/checklist`).catch(() => null),
+        api.get(`/assist/${sessionId}/env`).catch(() => null),
+      ]);
       if (disposed) return;
       session = s;
       turns = t.turns || [];
+      // Transient checklist/env fetch failures keep the last known value —
+      // a blip must not blank the needs-from-you panel mid-session.
+      if (cl !== null) checklist = cl;
+      if (env !== null) environment = env?.environment ?? null;
       header.querySelector(".sub").textContent = s.job_title || shortId(sessionId);
+      if (!briefMounted && s.job_id) {
+        briefMounted = true;
+        mount(briefSlot, briefPanel(String(s.job_id)));
+      }
+      renderStepHero();
       renderTranscript();
-      renderSidebar();
+      renderChecklist();
+      renderBelow();
     } catch (e) {
       if (!disposed) mount(transcript, errorPanel(e, () => load()));
     }

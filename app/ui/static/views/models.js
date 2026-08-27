@@ -101,7 +101,9 @@ export default function models(container) {
 
     const input = el("input", {
       class: "input input-sm models-input",
-      placeholder: r.env_default || "model tag",
+      // Not the current value echoed back (reads as a filled field) — an
+      // explicit change affordance. The env default stays on the tooltip.
+      placeholder: "change model…",
       title: `env default: ${r.env_default}`,
     });
     const setBtn = el("button", { class: "btn btn-sm", text: "Set" });

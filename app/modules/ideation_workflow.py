@@ -628,14 +628,23 @@ async def research_and_compile(
         raise
 
     # Step 5: Persist + transition (short-lived session)
+    # §17.845 — the folded brief (user_feedback + any confirm-time state) is
+    # written BACK to jobs.refined_brief, not just stashed in research_data.
+    # Pre-fix the two copies diverged forever and every post-confirm reader of
+    # the column (DAG generator, execution compile/agent, assist replan,
+    # native-chat triage, pipelines) was blind to the operator's approval-gate
+    # answers — the §17.844 assist fix covered ONE consumer; this closes ALL of
+    # them at the source. The original request stays intact in input_text.
     async with async_session() as write_db:
         await write_db.execute(
             text(
                 "UPDATE jobs SET status = 'planning', "
+                "refined_brief = :brief, "
                 "research_data = :data, workflow_summary = :workflow "
                 "WHERE id = :id"
             ),
             {
+                "brief": json.dumps(brief),
                 "data": json.dumps(
                     {
                         "feasibility": feasibility,

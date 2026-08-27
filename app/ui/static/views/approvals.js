@@ -36,14 +36,13 @@ function renderValue(v) {
     : el("span", { text: s });
 }
 
-function renderRecord(obj) {
-  if (!obj || typeof obj !== "object" || !Object.keys(obj).length) {
-    return el("div", { class: "dim", text: "Not available." });
-  }
+function renderRecord(obj, omit = new Set()) {
+  const entries = Object.entries(obj || {}).filter(([k]) => !omit.has(k));
+  if (!entries.length) return null;
   return el(
     "div",
     { class: "brief-record" },
-    ...Object.entries(obj).map(([k, v]) =>
+    ...entries.map(([k, v]) =>
       el(
         "div",
         { class: "brief-field" },
@@ -52,6 +51,91 @@ function renderRecord(obj) {
       )
     )
   );
+}
+
+// Collapsed-by-default section with a count in the summary line. Native
+// <details> — no JS state, works under the strict CSP.
+function collapsible(title, count, node) {
+  if (!node) return null;
+  return el(
+    "details",
+    { class: "brief-details" },
+    el("summary", {}, `${title}${count != null ? ` (${count})` : ""}`),
+    node
+  );
+}
+
+function listOrNull(arr) {
+  return Array.isArray(arr) && arr.length ? renderValue(arr) : null;
+}
+
+// The operator-facing decision layer: everything the engine wants ANSWERED,
+// pulled out of the two records it hides in (brief.ambiguities +
+// feasibility.clarifications_needed) and rendered as first-class questions
+// with an answer box. Answers travel as /ideate/confirm feedback and are
+// folded into the research + plan (§17.820 whitespace→None server-side).
+// The two source fields (brief.ambiguities, feasibility.clarifications_needed)
+// routinely restate the same question in different words — exact-match dedupe
+// isn't enough. Token-overlap Jaccard: ≥0.5 shared distinctive tokens → same
+// question; keep the longer (usually more specific) phrasing.
+function dedupeQuestions(qs) {
+  const toks = (s) => new Set(s.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 3));
+  const kept = [];
+  for (const q of qs) {
+    const qt = toks(q);
+    const dup = kept.findIndex((k) => {
+      const kt = toks(k);
+      const inter = [...qt].filter((t) => kt.has(t)).length;
+      return inter / Math.max(1, Math.min(qt.size, kt.size)) >= 0.5;
+    });
+    if (dup === -1) kept.push(q);
+    else if (q.length > kept[dup].length) kept[dup] = q;
+  }
+  return kept;
+}
+
+// Per-question answer fields (operator: "what information it needs, needs to
+// be more defined... to assist the user in knowing what to give"). Each
+// question is answerable in place; blank means "let research / the plan
+// decide". collect() composes Q/A pairs + the free-form note into the
+// /ideate/confirm feedback string, so each answer travels WITH its question.
+function buildQuestionsCard(brief, feas, onAnyInput) {
+  const qs = dedupeQuestions([...(feas?.clarifications_needed || []), ...(brief?.ambiguities || [])]);
+  if (!qs.length) return null;
+  const pairs = qs.map((q) => ({
+    q,
+    input: el("input", {
+      class: "input input-sm question-answer",
+      placeholder: "Your answer — or leave blank and research/the plan will decide",
+      onInput: onAnyInput,
+    }),
+  }));
+  const extra = el("textarea", {
+    class: "input feedback-box",
+    rows: "2",
+    placeholder: "Anything else the engine should know or do differently? (optional)",
+    onInput: onAnyInput,
+  });
+  const node = el(
+    "div",
+    { class: "card card-pad brief-block questions-card" },
+    el("h3", { class: "brief-heading", text: `The engine needs your input — ${qs.length} open question${qs.length === 1 ? "" : "s"}` }),
+    el("p", { class: "dim questions-hint", text: "Answer any of these in plain words. Blank ones are fine — research fills the gaps, or they become explicit decision points that pause the run and ask you." }),
+    el(
+      "ol",
+      { class: "questions-list qa-list" },
+      ...pairs.map(({ q, input }) => el("li", { class: "qa-item" }, el("div", { class: "qa-question", text: q }), input))
+    ),
+    extra
+  );
+  const collect = () => {
+    const answered = pairs
+      .filter(({ input }) => input.value.trim())
+      .map(({ q, input }) => `Q: ${q}\nA: ${input.value.trim()}`);
+    const note = extra.value.trim();
+    return [...answered, note].filter(Boolean).join("\n\n") || null;
+  };
+  return { node, collect };
 }
 
 // ── List (no jobId) ──────────────────────────────────────────────────
@@ -133,6 +217,13 @@ function renderDetail(container, jobId) {
 
   const progress = el("div", { class: "approval-progress hidden" });
   const approveBtn = el("button", { class: "btn btn-primary", text: "✓ Approve — research & plan", onClick: () => approve() });
+  // Built per-render by buildQuestionsCard; approve() collects the Q/A pairs.
+  let qa = null;
+  const refreshApproveLabel = () => {
+    approveBtn.textContent = qa && qa.collect()
+      ? "✓ Approve with answers — research & plan"
+      : "✓ Approve — research & plan";
+  };
   // §17.818 (plan 5.5) — one approve semantic across surfaces: approve always
   // means confirm → plan-ready; RUNNING is an explicit choice. This toggle
   // mirrors the OWUI auto-chain for operators who want approve→run in one
@@ -168,14 +259,61 @@ function renderDetail(container, jobId) {
       if (st === "awaiting_confirmation") {
         stopWaitPoll();
         waitingShown = false;
+        const brief = job.refined_brief || {};
+        const feas = job.feasibility || {};
+        // Verdict chips: the go/no-go signal belongs at the top, not inside
+        // a JSON dump.
+        const verdict =
+          typeof feas.feasible === "boolean"
+            ? el(
+                "span",
+                { class: feas.feasible ? "tag tag-ok" : "tag tag-err" },
+                feas.feasible ? "✓ Feasible" : "✕ Not feasible",
+                feas.confidence != null ? ` · ${Math.round(feas.confidence * 100)}% confidence` : ""
+              )
+            : null;
         mount(
           outlet,
-          el("div", { class: "row" }, statusBadge(st), el("h2", { class: "approval-title", text: job.title || "(untitled)" }), job.deliverable_kind ? el("span", { class: "tag", text: job.deliverable_kind }) : null),
-          job.input_text ? el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Original request" }), el("div", { class: "md", html: mdToHtml(job.input_text) })) : null,
-          el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Refined brief" }), renderRecord(job.refined_brief)),
-          el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Feasibility" }), renderRecord(job.feasibility)),
+          el(
+            "div",
+            { class: "row row-wrap" },
+            statusBadge(st),
+            el("h2", { class: "approval-title", text: job.title || "(untitled)" }),
+            verdict,
+            brief.complexity ? el("span", { class: "tag", text: `complexity: ${brief.complexity}` }) : null,
+            job.deliverable_kind ? el("span", { class: "tag", text: job.deliverable_kind }) : null
+          ),
+          // 1. What the engine understood + its assessment — prose first.
+          (brief.description || feas.summary)
+            ? el(
+                "div",
+                { class: "card card-pad brief-block" },
+                brief.description ? el("div", {}, el("h3", { class: "brief-heading", text: "What will be built" }), el("div", { class: "md brief-prose", html: mdToHtml(brief.description) })) : null,
+                feas.summary ? el("div", { class: "assessment" }, el("h3", { class: "brief-heading", text: "Assessment" }), el("div", { class: "md brief-prose", html: mdToHtml(feas.summary) })) : null
+              )
+            : null,
+          // 2. The engine's questions — the hero of this page: answering them
+          // is how the operator steers toward the outcome they actually want.
+          (qa = buildQuestionsCard(brief, feas, refreshApproveLabel))?.node ?? null,
+          // 3. Decision controls directly after the questions — answer, approve,
+          // no scrolling past the reference material to act.
           progress,
-          el("div", { class: "drawer-actions approval-actions" }, approveBtn, rejectBtn, autoRunLabel)
+          el("div", { class: "drawer-actions approval-actions" }, approveBtn, rejectBtn, autoRunLabel),
+          // 4. Reference material last, collapsed with counts.
+          el(
+            "div",
+            { class: "card card-pad brief-block" },
+            el("h3", { class: "brief-heading", text: "Details" }),
+            collapsible("Goals", (brief.goals || []).length, listOrNull(brief.goals)),
+            collapsible("Expected outputs", (brief.outputs_expected || []).length, listOrNull(brief.outputs_expected)),
+            collapsible("Constraints", (brief.constraints || []).length, listOrNull(brief.constraints)),
+            collapsible("Inputs available", (brief.inputs_available || []).length, listOrNull(brief.inputs_available)),
+            collapsible("Risks", (feas.risks || []).length, listOrNull(feas.risks)),
+            collapsible("Planned research", (feas.recommended_research_queries || []).length, listOrNull(feas.recommended_research_queries)),
+            job.input_text ? collapsible("Original request", null, el("div", { class: "md", html: mdToHtml(job.input_text) })) : null,
+            collapsible("Other brief fields", null, renderRecord(brief, new Set(["description", "goals", "outputs_expected", "constraints", "inputs_available", "ambiguities", "complexity", "title", "domain"]))),
+            collapsible("Other feasibility fields", null, renderRecord(feas, new Set(["summary", "feasible", "confidence", "risks", "clarifications_needed", "recommended_research_queries"])))
+          )
         );
         return;
       }
@@ -192,7 +330,7 @@ function renderDetail(container, jobId) {
               "div",
               { class: "approval-progress" },
               el("span", { class: "spin" }),
-              el("span", { class: "progress-msg", text: "Refining your idea — the feasibility assessment will appear here for approval (usually 1–9 min)." })
+              el("span", { class: "progress-msg", text: "Refining your idea — the engine is assessing feasibility and will list the questions it needs YOU to answer. Usually 1–9 min; this page updates itself." })
             ),
             job.input_text ? el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Original request" }), el("div", { class: "md", html: mdToHtml(job.input_text) })) : null,
             el("div", { class: "drawer-actions" }, rejectBtn)
@@ -213,6 +351,15 @@ function renderDetail(container, jobId) {
           { class: "card card-pad" },
           el("div", { class: "row" }, statusBadge(st), el("h2", { class: "approval-title", text: job.title || "(untitled)" })),
           el("p", { class: "dim", text: `This job has moved past the approval gate (status: ${st}).` }),
+          // §17.843 — receipt: the answers as the SERVER received them.
+          job.user_feedback
+            ? el(
+                "details",
+                { class: "brief-details", open: "" },
+                el("summary", {}, "✓ Your answers were received and folded into the research & plan"),
+                el("pre", { class: "md-pre feedback-receipt", text: job.user_feedback })
+              )
+            : null,
           el(
             "div",
             { class: "drawer-actions" },
@@ -254,11 +401,19 @@ function renderDetail(container, jobId) {
   async function approve() {
     if (busy) return;
     setBusy(true);
-    showProgress("Researching & compiling… (this can take a few minutes)");
+    const fb = qa ? qa.collect() : null;
+    const nAns = fb ? (fb.match(/^Q:/gm) || []).length : 0;
+    showProgress(
+      nAns
+        ? `✓ ${nAns} answer${nAns === 1 ? "" : "s"} received — researching with your input… (a few minutes)`
+        : "Researching & compiling… (this can take a few minutes)"
+    );
     pollTimer = setInterval(pollStatus, 2500);
     try {
       // Phase 2: research → ingest → compile → planning. Synchronous, minutes.
-      await api.post("/ideate/confirm", { job_id: jobId });
+      // Q/A pairs + free-form note from the questions card travel as feedback
+      // and are folded into the brief before research.
+      await api.post("/ideate/confirm", { job_id: jobId, feedback: fb });
       if (disposed) return;
       const line = progress.querySelector(".progress-msg");
       if (line) line.textContent = "Generating plan (DAG)…";

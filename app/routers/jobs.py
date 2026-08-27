@@ -17,6 +17,7 @@ Routes:
   PATCH  /jobs/{job_id}/budget          — set_job_budget (Management) [§17.777]
 """
 import json
+import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -37,6 +38,8 @@ from app.modules.cleanup import reap_stale_jobs
 from app.modules.execution_agent import execute_all_nodes
 from app.modules.execution_handler import cancel_active_job, resume_cancelled_job
 from app.schemas import (
+    BriefUpdateInput,
+    BriefUpdateResponse,
     CancelJobResult,
     DeleteResponse,
     JOB_STATUSES,
@@ -56,6 +59,7 @@ from app.schemas import (
 from app.utils.model_validation import _require_valid_models
 
 router = APIRouter()
+logger = logging.getLogger("scaffold")
 
 
 @router.post("/jobs/cleanup", tags=["ops"])
@@ -348,6 +352,10 @@ async def get_job(
 
     research = _json_obj(row["research_data"]) or {}
     feasibility = research.get("feasibility") if isinstance(research, dict) else None
+    # §17.843 — the approval-gate answers as actually received (folded into
+    # research_data.brief by research_and_compile); None before confirm.
+    research_brief = research.get("brief") if isinstance(research, dict) else None
+    user_feedback = (research_brief or {}).get("user_feedback") or None
     return JobDetailResponse(
         id=str(row["id"]),
         title=row["title"] or "",
@@ -355,6 +363,7 @@ async def get_job(
         input_text=row["input_text"],
         refined_brief=_json_obj(row["refined_brief"]),
         feasibility=feasibility if isinstance(feasibility, dict) else None,
+        user_feedback=user_feedback if isinstance(user_feedback, str) else None,
         deliverable_kind=row["deliverable_kind"],
         has_compiled_output=bool(row["has_compiled_output"]),
         node_count=row["node_count"] or 0,
@@ -365,6 +374,60 @@ async def get_job(
         component_index=row["component_index"],
         metadata=_json_obj(row["metadata"]),
     )
+
+
+@router.patch("/jobs/{job_id}/brief", response_model=BriefUpdateResponse, tags=["Management"])
+async def update_brief(
+    job_id: str,
+    body: BriefUpdateInput,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.845 — edit the living project brief (add/remove constraints,
+    inventory, goals, outputs; reword the description).
+
+    The brief is the operator-established truth every downstream generation
+    reads (§17.844 funnel, DAG generation, execution compile) — circumstances
+    change mid-project, so it must be editable. Provided sections REPLACE;
+    omitted sections stay. ``user_feedback`` and any other keys are preserved
+    verbatim. Both stored copies (jobs.refined_brief + research_data.brief,
+    when present) are updated so no reader is left on a stale side."""
+    try:
+        UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+    await assert_visible(db, principal, job_id, detail=f"job not found: {job_id}")
+    row = (await db.execute(
+        text("SELECT refined_brief, research_data FROM jobs WHERE id = :id"),
+        {"id": job_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+    brief = _json_obj(row["refined_brief"]) or {}
+    edits = body.model_dump(exclude_none=True)
+    # Normalize list sections: strip empties, cap item count/length defensively.
+    for k, v in edits.items():
+        if isinstance(v, list):
+            edits[k] = [str(i).strip()[:500] for i in v if str(i).strip()][:40]
+    brief.update(edits)
+    research = _json_obj(row["research_data"])
+    params = {"id": job_id, "brief": json.dumps(brief)}
+    if isinstance(research, dict) and isinstance(research.get("brief"), dict):
+        research["brief"] = brief
+        await db.execute(
+            text("UPDATE jobs SET refined_brief = :brief, research_data = :rd, "
+                 "updated_at = NOW() WHERE id = :id"),
+            {**params, "rd": json.dumps(research)},
+        )
+    else:
+        await db.execute(
+            text("UPDATE jobs SET refined_brief = :brief, updated_at = NOW() "
+                 "WHERE id = :id"),
+            params,
+        )
+    await db.commit()
+    logger.info("brief_updated: job=%s sections=%s", job_id, sorted(edits.keys()))
+    return BriefUpdateResponse(job_id=job_id, refined_brief=brief)
 
 
 @router.delete("/jobs/{job_id}", response_model=DeleteResponse, tags=["Management"])

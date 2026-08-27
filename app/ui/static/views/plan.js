@@ -8,6 +8,7 @@ import * as router from "../router.js";
 import { el, mount, moveItem, shortId } from "../util.js";
 import { statusBadge, loading, errorPanel, toast } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
+import { briefPanel } from "./brief_panel.js";
 
 // §17.815 — edit attribution is SERVER-derived from the API key (audit-trail
 // integrity); the client no longer sends a spoofable label.
@@ -60,7 +61,35 @@ function renderPlan(container, jobId) {
     { class: "mobile-note" },
     "✎ Editing the plan is easiest on a wider screen. You can still tap a node to review it."
   );
-  mount(container, header, mobileNote, warning, reorderPanel, stage);
+  // Where-am-I guidance (operator critique: "no real guidance — are the
+  // nodes researched and just awaiting confirmation?"). States the contract
+  // plainly: research is done, this graph is a PROPOSAL, nothing runs yet.
+  const guidance = el(
+    "div",
+    { class: "card card-pad plan-guidance" },
+    el("p", {
+      text: "Research is done and this plan was drawn from your brief plus what it found. Nothing has run yet — every node is a proposed step, executed in dependency order only after you press Execute plan.",
+    }),
+    el("p", {
+      class: "dim",
+      text: "Click a node to inspect or edit what it will do (instructions, tool, model, dependencies) · drag nothing — order comes from the arrows · Insert adds a step · decision nodes pause execution to ask you.",
+    })
+  );
+  // §17.843 — answer receipt: confirm the operator's approval-gate answers
+  // reached the plan (server-side truth via /jobs/{id}.user_feedback).
+  api.get(`/jobs/${jobId}`).then((job) => {
+    if (disposed || !job.user_feedback) return;
+    const n = (job.user_feedback.match(/^Q:/gm) || []).length;
+    guidance.append(
+      el(
+        "details",
+        { class: "brief-details" },
+        el("summary", {}, `✓ Your ${n || ""} answer${n === 1 ? "" : "s"} from the approval gate were folded into this plan — review them`),
+        el("pre", { class: "md-pre feedback-receipt", text: job.user_feedback })
+      )
+    );
+  }).catch(() => {});
+  mount(container, header, mobileNote, guidance, briefPanel(jobId), warning, reorderPanel, stage);
   mount(canvas, loading("Loading plan…"));
 
   const graph = createGraphCanvas(canvas);

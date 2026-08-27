@@ -21,6 +21,7 @@ export const NAV_GROUPS = [
     label: "Operate",
     items: [
       { id: "dashboard", path: "/", label: "Dashboard", icon: "◈" },
+      { id: "jobs", path: "/jobs", label: "Jobs", icon: "▣" },
       { id: "approvals", path: "/approvals", label: "Approvals", icon: "⏻" },
       { id: "dag", path: "/dag", label: "DAG Canvas", icon: "⬡" },
       { id: "theater", path: "/theater", label: "Execution", icon: "▶" },

@@ -30,15 +30,21 @@ const ATTENTION = new Set([
 // suppressed via this localStorage flag (survives navigation + reloads).
 const ONBOARD_KEY = "scaffold_onboarded";
 
-/** Per-job navigation targets derived from status + node_count. */
+/** Per-job navigation targets derived from status + node_count. First entry
+ * is the card's PRIMARY next action (rendered solid), so order matters:
+ * blocked → Execution (that's where the retry verbs live); assist sessions →
+ * Assistant, with a #/assist fallback so an awaiting_assist card is never a
+ * dead end even when next_actions carries no session id. */
 function jobLinks(job) {
   const links = [];
   const sid = assistSessionFromActions(job.next_actions);
   if (sid) links.push({ label: "Assistant", href: `#/assist/${sid}` });
+  else if (["awaiting_assist", "assisted_paused"].includes(job.status)) links.push({ label: "Assistant", href: "#/assist" });
   if (job.status === "awaiting_confirmation") links.push({ label: "Approve", href: `#/approvals/${job.id}` });
   if ((job.node_count || 0) > 0) {
-    links.push({ label: "DAG", href: `#/dag/${job.id}` });
-    links.push({ label: "Execution", href: `#/theater/${job.id}` });
+    const dag = { label: "DAG", href: `#/dag/${job.id}` };
+    const theater = { label: "Execution", href: `#/theater/${job.id}` };
+    links.push(...(job.status === "blocked" ? [theater, dag] : [dag, theater]));
   }
   if (job.status === "completed") links.push({ label: "Output", href: `#/output/${job.id}` });
   return links;
@@ -46,6 +52,10 @@ function jobLinks(job) {
 
 function workCard(job) {
   const links = jobLinks(job);
+  // The phase label often just restates the status ("blocked" → "Blocked",
+  // "awaiting_assist" → "Awaiting Assist") — only show it when it carries
+  // information the badge doesn't.
+  const phaseDupes = (job.phase || "").toLowerCase().replace(/\s+/g, "_") === job.status;
   return el(
     "div",
     { class: "card card-pad work-card" },
@@ -53,7 +63,7 @@ function workCard(job) {
       "div",
       { class: "row row-wrap" },
       statusBadge(job.status),
-      job.phase ? el("span", { class: "tag", text: job.phase }) : null,
+      job.phase && !phaseDupes ? el("span", { class: "tag", text: job.phase }) : null,
       job.job_type && job.job_type !== "legacy" ? el("span", { class: "tag", text: job.job_type }) : null,
       el("span", { class: "spacer" }),
       el("span", { class: "faint", text: timeAgo(job.updated_at) })
@@ -65,7 +75,8 @@ function workCard(job) {
       el("span", { class: "faint mono", text: `${job.node_count || 0} nodes` }),
       progressChip(job),
       el("span", { class: "spacer" }),
-      ...links.map((l) => el("a", { class: "btn btn-sm btn-ghost", href: l.href, text: l.label }))
+      // First link is the card's next action — give it primary weight.
+      ...links.map((l, i) => el("a", { class: i === 0 ? "btn btn-sm btn-primary" : "btn btn-sm btn-ghost", href: l.href, text: l.label }))
     )
   );
 }
@@ -88,10 +99,15 @@ function progressChip(job) {
 }
 
 function recentRow(job) {
-  const recentHref = job.status === "completed" ? `#/output/${job.id}` : (job.node_count || 0) > 0 ? `#/dag/${job.id}` : "";
+  // Every row is clickable — pre-DAG jobs land on the approvals detail
+  // (live refining state + approve action) instead of being dead rows.
+  const recentHref =
+    job.status === "completed" ? `#/output/${job.id}`
+    : (job.node_count || 0) > 0 ? `#/dag/${job.id}`
+    : `#/approvals/${job.id}`;
   const tr = el(
     "tr",
-    { dataset: { href: recentHref } },
+    { class: "row-link", dataset: { href: recentHref } },
     el("td", {}, statusBadge(job.status)),
     el("td", { class: "recent-title" }, job.title || "(untitled)"),
     el("td", { class: "mono", text: String(job.node_count ?? "—") }),
@@ -331,23 +347,36 @@ export default function dashboard(container) {
     const activeN = sum(ACTIVE);
     const attnN = sum(ATTENTION);
 
+    // Every tile is a doorway, not a decoration — each lands on the jobs
+    // list pre-filtered to the bucket it counts.
     const tiles = el(
       "div",
       { class: "grid grid-4" },
-      statTile("Total jobs", fmtNum(status.total_jobs), { onClick: () => (location.hash = "#/") }),
-      statTile("Active", fmtNum(activeN), { accent: "run" }),
-      statTile("Needs attention", fmtNum(attnN), { accent: "warn" }),
-      statTile("Completed", fmtNum(counts.completed || 0), { accent: "ok" })
+      statTile("Total jobs", fmtNum(status.total_jobs), { onClick: () => (location.hash = "#/jobs") }),
+      statTile("Running", fmtNum(activeN), { accent: "run", onClick: () => (location.hash = "#/jobs/running") }),
+      statTile("Needs attention", fmtNum(attnN), { accent: "warn", onClick: () => (location.hash = "#/jobs/attention") }),
+      statTile("Completed", fmtNum(counts.completed || 0), { accent: "ok", onClick: () => (location.hash = "#/jobs/completed") })
     );
 
-    // Status breakdown strip (only non-zero buckets)
-    const nonzero = Object.entries(counts).filter(([, v]) => v > 0);
+    // Status breakdown strip (only non-zero buckets). Actionable statuses
+    // lead; terminal noise (completed/cancelled/failed) trails, dimmed — 32
+    // old cancelled jobs must not outshout 1 blocked one.
+    const TERMINAL = new Set(["completed", "cancelled", "failed"]);
+    const stripRank = (k) => (ATTENTION.has(k) ? 0 : ACTIVE.has(k) ? 1 : TERMINAL.has(k) ? 3 : 2);
+    const nonzero = Object.entries(counts)
+      .filter(([, v]) => v > 0)
+      .sort(([a], [b]) => stripRank(a) - stripRank(b));
     const strip = el(
       "div",
       { class: "card card-pad status-strip" },
       ...(nonzero.length
         ? nonzero.map(([k, v]) =>
-            el("span", { class: "strip-item" }, statusBadge(k), el("span", { class: "strip-n mono", text: String(v) }))
+            el(
+              "a",
+              { class: TERMINAL.has(k) ? "strip-item strip-dim" : "strip-item", href: `#/jobs/${k}` },
+              statusBadge(k),
+              el("span", { class: "strip-n mono", text: String(v) })
+            )
           )
         : [el("span", { class: "dim", text: "No jobs yet." })])
     );
@@ -359,7 +388,7 @@ export default function dashboard(container) {
       el(
         "div",
         { class: "section-head" },
-        el("h2", { text: "Active work" }),
+        el("h2", { text: "Open work" }),
         el("span", { class: "count-pill", text: String(workJobs.length) })
       ),
       workJobs.length

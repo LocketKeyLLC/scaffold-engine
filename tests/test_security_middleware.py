@@ -49,6 +49,12 @@ def _build_app() -> FastAPI:
     async def health():
         return {"status": "healthy"}
 
+    @app.get("/ui/static/views/dashboard.js")
+    async def ui_module():
+        # Stands in for the StaticFiles mount — the middleware keys on the
+        # path prefix, not the responder.
+        return JSONResponse({"js": True})
+
     @app.post("/echo")
     async def echo(body: dict):
         return body
@@ -79,6 +85,16 @@ class TestSecurityHeaders:
         assert r.status_code == 200
         assert "nonce-" in r.headers.get("Content-Security-Policy", "")
         assert r.headers.get("X-Content-Type-Options") == "nosniff"
+
+    def test_ui_static_gets_no_cache(self, client):
+        # §17.842 — SPA modules must revalidate on every load; heuristic
+        # caching served stale UI after deploys (twice).
+        r = client.get("/ui/static/views/dashboard.js")
+        assert r.headers.get("Cache-Control") == "no-cache"
+
+    def test_api_route_has_no_cache_control_added(self, client):
+        r = client.get("/health")
+        assert "Cache-Control" not in r.headers
 
     def test_api_route_does_not_get_csp(self, client):
         """JSON API responses don't get CSP — a CSP header on a JSON

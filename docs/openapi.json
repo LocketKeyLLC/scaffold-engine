@@ -641,6 +641,100 @@
         "title": "Body_research_pdf_endpoint_research_pdf_post",
         "type": "object"
       },
+      "BriefUpdateInput": {
+        "description": "§17.845 — operator edits to the living project brief.\n\nEvery provided field REPLACES its section; omitted (None) fields are left\nuntouched. ``user_feedback`` and unknown keys are never editable here —\nthe approval-gate answers stay an immutable receipt.",
+        "properties": {
+          "constraints": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Constraints"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 50000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "goals": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goals"
+          },
+          "inputs_available": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inputs Available"
+          },
+          "outputs_expected": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outputs Expected"
+          }
+        },
+        "title": "BriefUpdateInput",
+        "type": "object"
+      },
+      "BriefUpdateResponse": {
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "refined_brief": {
+            "additionalProperties": true,
+            "title": "Refined Brief",
+            "type": "object"
+          }
+        },
+        "required": [
+          "job_id",
+          "refined_brief"
+        ],
+        "title": "BriefUpdateResponse",
+        "type": "object"
+      },
       "CancelJobResult": {
         "description": "§17.322 — POST /jobs/{job_id}/cancel response.\n\nStatus-conditional cancel that distinguishes three operator-relevant\noutcomes via HTTP code + body shape:\n\n- 200 + ``cancelled=True, was_already_cancelled=False`` — flipped from\n  an active status (pending/refining/awaiting_confirmation/researching/\n  planning/executing/running/blocked/assisted_*) to ``cancelled``.\n- 200 + ``cancelled=True, was_already_cancelled=True`` — already\n  ``cancelled`` before the call; idempotent OK. The router exposes\n  this so chat clients can render a different message (\"already\n  cancelled\" vs \"now cancelled\") without re-querying state.\n- 409 (no body field) — job is in a terminal non-cancellable status\n  (``completed`` or ``failed``); current_status returned in the\n  HTTPException detail so the client can guide the operator.\n\n``status_before`` captures the row's status at the moment of the\nUPDATE attempt. For ``was_already_cancelled=True`` it equals\n``'cancelled'``; for the active→cancelled flip it carries the prior\nstatus (operator-debugging signal — useful when the cancel races\nagainst an ``/execute/all`` SSE).",
         "properties": {
@@ -2248,6 +2342,17 @@
           "updated_at": {
             "title": "Updated At",
             "type": "string"
+          },
+          "user_feedback": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Feedback"
           }
         },
         "required": [
@@ -7863,6 +7968,64 @@
           }
         ],
         "summary": "List Job Artifacts"
+      }
+    },
+    "/jobs/{job_id}/brief": {
+      "patch": {
+        "description": "§17.845 — edit the living project brief (add/remove constraints,\ninventory, goals, outputs; reword the description).\n\nThe brief is the operator-established truth every downstream generation\nreads (§17.844 funnel, DAG generation, execution compile) — circumstances\nchange mid-project, so it must be editable. Provided sections REPLACE;\nomitted sections stay. ``user_feedback`` and any other keys are preserved\nverbatim. Both stored copies (jobs.refined_brief + research_data.brief,\nwhen present) are updated so no reader is left on a stale side.",
+        "operationId": "update_brief_jobs__job_id__brief_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BriefUpdateInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefUpdateResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Update Brief",
+        "tags": [
+          "Management"
+        ]
       }
     },
     "/jobs/{job_id}/budget": {

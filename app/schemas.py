@@ -996,6 +996,25 @@ class JobListResponse(BaseModel):
     offset: int
 
 
+class BriefUpdateInput(BaseModel):
+    """§17.845 — operator edits to the living project brief.
+
+    Every provided field REPLACES its section; omitted (None) fields are left
+    untouched. ``user_feedback`` and unknown keys are never editable here —
+    the approval-gate answers stay an immutable receipt."""
+    model_config = ConfigDict(protected_namespaces=())
+    description: str | None = Field(default=None, max_length=MAX_LLM_TEXT_LEN)
+    goals: list[str] | None = None
+    constraints: list[str] | None = None
+    inputs_available: list[str] | None = None
+    outputs_expected: list[str] | None = None
+
+
+class BriefUpdateResponse(BaseModel):
+    job_id: str
+    refined_brief: dict
+
+
 class JobDetailResponse(BaseModel):
     """Response for GET /jobs/{job_id} — single-job detail.
 
@@ -1010,6 +1029,10 @@ class JobDetailResponse(BaseModel):
     input_text: str | None = None
     refined_brief: dict | None = None
     feasibility: dict | None = None
+    # §17.843 — the operator's approval-gate answers as the SERVER received
+    # them (research_data.brief.user_feedback). Rendered post-approve so
+    # "did it read my answers?" is answerable from the source of truth.
+    user_feedback: str | None = None
     deliverable_kind: str | None = None
     has_compiled_output: bool = False
     node_count: int = 0
