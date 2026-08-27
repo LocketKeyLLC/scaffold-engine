@@ -560,6 +560,12 @@ select.input:focus-visible,
 .md-copy:hover { color: var(--text); border-color: var(--border-strong); }
 .md-copy.copied { color: var(--ok, #3fb950); border-color: currentColor; }
 
+/* §17.850 — pinned-values (substitutions) editor */
+.subs-editor { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.subs-hint { margin: 0 0 2px; font-size: 11.5px; }
+.subs-key { max-width: 170px; }
+.subs-val { flex: 1; }
+
 /* Answer receipt (post-approve) */
 .feedback-receipt { white-space: pre-wrap; font-size: 12.5px; }
 
