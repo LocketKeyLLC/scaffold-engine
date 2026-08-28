@@ -1321,8 +1321,14 @@ class Pipeline:
     # `<sid>`"). This regex recovers that id from history, mirroring §17.444's
     # _extract_pending_brief. \W+ consumes the "** — `" between the phrase and
     # the UUID (backtick included).
+    # §17.854 (audit F4) — also match the hidden reference-link marker the
+    # §17.761 orientation path emits ("[asess]: ASSIST_SESSION:<uuid>"), which
+    # renders as nothing in OWUI but keeps history-recovery working when the
+    # start turn led with a where-you-are orientation instead of the visible
+    # "Assist session started" banner. Without it, a later plain message in a
+    # chat with ≥2 active sessions bound to the WRONG (most-recent) session.
     _ASSIST_SESSION_MARKER_RE = re.compile(
-        r"Assist session started\W+"
+        r"(?:Assist session started\W+|ASSIST_SESSION:)"
         r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
         r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
     )
@@ -1781,9 +1787,16 @@ class Pipeline:
 
         # Normalize input (Tier 1 #1): NFKC + unicode-dash -> `--` + `-flag` -> `--flag`.
         # Surface rewrites so the parser's behavior is visible (Tier 1 #13).
-        msg, _rewrites = _normalize_input(msg)
-        if _rewrites:
-            yield f"_Note: interpreted {', '.join(_rewrites)}._\n\n"
+        # §17.854 (audit F3) — ONLY normalize slash commands. The `-la`→`--la`
+        # and unicode-dash rewrites are correct for flag parsing but CORRUPT
+        # pasted shell evidence / error output on NL turns (`ls -la` recorded and
+        # verifier-judged as `ls --la`; a fix then "corrects" a command that was
+        # never run). Flags only occur on slash commands; NL text is left verbatim.
+        _rewrites: list = []
+        if msg.startswith("/"):
+            msg, _rewrites = _normalize_input(msg)
+            if _rewrites:
+                yield f"_Note: interpreted {', '.join(_rewrites)}._\n\n"
 
         # X.7 — emit a single routing-decision log line just before dispatch.
         # The decision string mirrors the dispatch chain below; intentional
@@ -2073,9 +2086,15 @@ class Pipeline:
     # brief shown on the prior `/go` turn from chat history (stateless, no
     # re-synthesis drift between what was shown and what launches).
     _PENDING_BRIEF_MARKER = "📋 **Proposed launch brief:**"
-    # §17.809 — invisible (HTML-comment) sentinel stamped on the correction gate
-    # when --quick was requested, so `/go confirm` can re-inherit quick mode.
-    _QUICK_PENDING_MARKER = "<!--scaffold:quick-->"
+    # §17.809 — sentinel stamped on the correction gate when --quick was
+    # requested, so `/go confirm` can re-inherit quick mode.
+    # §17.854 (audit F5) — the old HTML-comment form rendered as VISIBLE literal
+    # text in OWUI v0.11 (the exact §17.660 bug that moved every other marker to
+    # a markdown reference-link definition, which renders as nothing). Use the
+    # reference-link form for new stamps; still recognize the legacy comment on
+    # read so briefs pending across the upgrade keep their quick flag.
+    _QUICK_PENDING_MARKER = "[qk]: SCAFFOLD_QUICK"
+    _QUICK_PENDING_LEGACY = "<!--scaffold:quick-->"
 
     def _extract_pending_brief(self, messages: List[dict]) -> str | None:
         """Recover the most recent gated brief from a prior assistant turn."""
@@ -2099,7 +2118,8 @@ class Pipeline:
                 continue
             content = m.get("content", "")
             if isinstance(content, str) and self._PENDING_BRIEF_MARKER in content:
-                return self._QUICK_PENDING_MARKER in content
+                return (self._QUICK_PENDING_MARKER in content
+                        or self._QUICK_PENDING_LEGACY in content)  # §17.854 F5
         return False
 
     def _handle_go(self, msg: str, messages: List[dict]) -> Generator[str, None, None]:
@@ -2171,12 +2191,16 @@ class Pipeline:
         # or keeps chatting to refine. Skipped when this turn IS the confirm
         # (re-synthesis fallback above) or the valve is disabled.
         if self.valves.confirm_before_launch and not is_confirm:
-            quick_tag = self._QUICK_PENDING_MARKER if quick else ""
+            # §17.854 (audit F5) — the quick sentinel is a reference-link marker
+            # rendered on its OWN trailing block (invisible in OWUI), matching the
+            # NL-confirm marker pattern; the old inline HTML comment showed as
+            # literal text above the brief.
+            quick_tag = f"\n\n{self._QUICK_PENDING_MARKER}" if quick else ""
             eta = "≈3–5 min (quick mode)" if quick else "≈10–25 min on this host"
             yield (
-                f"{quick_tag}{self._PENDING_BRIEF_MARKER}\n\n{synthesized}\n\n---\n\n"
+                f"{self._PENDING_BRIEF_MARKER}\n\n{synthesized}\n\n---\n\n"
                 f"Type `/go confirm` to launch this ({eta}), "
-                "or keep chatting to refine it first."
+                f"or keep chatting to refine it first.{quick_tag}"
             )
             return
 
@@ -3434,24 +3458,38 @@ class Pipeline:
         )
         markers_shown = 0
 
-        while not future.done():
-            time.sleep(self.valves.keepalive_interval)
-            if future.done():
-                break
-            now = time.monotonic()
-            threshold = first_after if markers_shown == 0 else marker_interval
-            if (
-                progress_label
-                and marker_interval > 0
-                and (now - last_marker) >= threshold
-            ):
-                elapsed = int(now - start)
-                mm, ss = elapsed // 60, elapsed % 60
-                yield f"\n\u23f3 {progress_label}\u2026 ({mm}m {ss:02d}s elapsed)\n"
-                last_marker = now
-                markers_shown += 1
-            else:
-                yield "\u200b"
+        # \u00a717.854 (audit F2) \u2014 wrap the yield loop in try/finally so a consumer
+        # disconnect (GeneratorExit raised at a yield) is observed. The worker is
+        # a `requests` POST that can't be cancelled mid-flight, but it's a daemon
+        # thread bounded by ``timeout`` (F1 already cut that ceiling from 86400s
+        # \u2192 3600s), so it drains on its own instead of pinning a pooled
+        # connection for a day; log the abandonment for visibility.
+        try:
+            while not future.done():
+                time.sleep(self.valves.keepalive_interval)
+                if future.done():
+                    break
+                now = time.monotonic()
+                threshold = first_after if markers_shown == 0 else marker_interval
+                if (
+                    progress_label
+                    and marker_interval > 0
+                    and (now - last_marker) >= threshold
+                ):
+                    elapsed = int(now - start)
+                    mm, ss = elapsed // 60, elapsed % 60
+                    yield f"\n\u23f3 {progress_label}\u2026 ({mm}m {ss:02d}s elapsed)\n"
+                    last_marker = now
+                    markers_shown += 1
+                else:
+                    yield "\u200b"
+        finally:
+            if not future.done():
+                self.logger.warning(
+                    "post_with_keepalive_abandoned: consumer disconnected while "
+                    "POST to %s still in flight (daemon thread drains within the "
+                    "%ss timeout)", url, timeout,
+                )
         # The loop exited because future.done() is True; result() returns
         # immediately or raises the set exception.
         try:
