@@ -835,10 +835,21 @@ def _model_role_warnings(pulled: set[str]) -> list[str]:
     catches a fresh install whose role tags aren't pulled before the first
     job fails on them. Advisory only; points at the connect-models wizard.
     """
+    # §17.854 (audit B6) — normalize the ``:latest`` tag both ways, exactly like
+    # validate_models does. Without this, MODEL_GENERAL=qwen2.5 with the daemon
+    # listing ``qwen2.5:latest`` passed validate_models but /health still warned
+    # "tags not pulled" and pointed the operator at the setup wizard — a lying
+    # health signal.
+    def _pulled(tag: str) -> bool:
+        return (
+            tag in pulled
+            or f"{tag}:latest" in pulled
+            or tag.removesuffix(":latest") in pulled
+        )
     missing = sorted(
         f"{role}={getattr(settings, role)}"
         for role in SWITCHABLE_ROLE_FIELDS
-        if getattr(settings, role) not in pulled
+        if not _pulled(getattr(settings, role))
     )
     if not missing:
         return []

@@ -544,8 +544,27 @@ async def test_consolidate_raced_noop_watermarks_locked_length():
 
 @pytest.mark.asyncio
 async def test_ingest_turn_schedules_derive_for_operator(monkeypatch):
-    """Every operator capture site (turn/submit/note/fix) now derives — the
-    derive rides ingest_turn instead of only POST /turn."""
+    """A non-submit operator turn (message/fix) derives via the capture funnel
+    (the derive rides ingest_turn, not only POST /turn)."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "assist_unified_memory_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "assist_umem_capture", True, raising=False)
+    sched = MagicMock()
+    with patch.object(assist_agent, "schedule_derive_turn_memory", new=sched):
+        ok = await assist_agent.ingest_turn(
+            session_id="s1", role="operator", kind="message",
+            content="I only have 2 NICs on this box", node_key="T3", db=AsyncMock())
+    assert ok is True
+    sched.assert_called_once()
+    assert sched.call_args.kwargs["message"] == "I only have 2 NICs on this box"
+    assert sched.call_args.kwargs["node_key"] == "T3"
+
+
+@pytest.mark.asyncio
+async def test_ingest_turn_submit_does_not_schedule_derive(monkeypatch):
+    """§17.854 (audit C4) — a 'submit' turn does NOT schedule the background
+    derive; the /submit endpoint's capture_session_facts is the sole (and
+    supersession-aware) fact extractor for it, avoiding two prompts per submit."""
     from app.config import settings
     monkeypatch.setattr(settings, "assist_unified_memory_enabled", True, raising=False)
     monkeypatch.setattr(settings, "assist_umem_capture", True, raising=False)
@@ -555,9 +574,7 @@ async def test_ingest_turn_schedules_derive_for_operator(monkeypatch):
             session_id="s1", role="operator", kind="submit",
             content="qm create 100 done, VM boots", node_key="T3", db=AsyncMock())
     assert ok is True
-    sched.assert_called_once()
-    assert sched.call_args.kwargs["message"] == "qm create 100 done, VM boots"
-    assert sched.call_args.kwargs["node_key"] == "T3"
+    sched.assert_not_called()
 
 
 @pytest.mark.asyncio

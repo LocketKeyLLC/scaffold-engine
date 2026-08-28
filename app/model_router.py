@@ -1114,6 +1114,11 @@ async def validate_models(overrides: dict | None = None) -> Optional[list[str]]:
         "model_general", "model_verifier", "model_coder",
         "model_router", "model_fallback", "model_cloud_alt",
         "model_research_extract",
+        # §17.854 (audit B8) — model_triage backs the native /v1 chat surface and
+        # /go synthesis; omitting it let a fresh install pass the gate then fail
+        # at first triage dispatch with a much less actionable error than the 422
+        # this gate exists to produce. Validated only when routed to Ollama.
+        "model_triage",
     ]
 
     # §17.596 — only validate roles actually routed to Ollama. A role bound to

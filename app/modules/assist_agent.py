@@ -2445,7 +2445,15 @@ async def ingest_turn(
         # skipped). schedule_derive_turn_memory gates on its own valves and
         # dedupes recent content, so NL turns that reach the funnel twice
         # (message + submit/fix double-record) derive once.
-        if recorded and (role or "").strip().lower() == "operator":
+        # §17.854 (audit C4) — a 'submit' turn's durable facts are extracted by
+        # the /submit endpoint's own capture_session_facts (supersession-aware,
+        # the specific extractor for evidence). Scheduling derive_turn_memory too
+        # meant TWO different fact-extraction prompts per submit whose near-dup
+        # facts slipped past set_environment's exact-text dedup and bloated the
+        # ledger (which consolidate_facts then paid a THIRD call to mop up). Skip
+        # the background derive for submits; message/fix turns are unaffected.
+        if (recorded and (role or "").strip().lower() == "operator"
+                and kind != "submit"):
             schedule_derive_turn_memory(
                 session_id=session_id, node_key=node_key, message=content or "",
             )
@@ -3768,18 +3776,35 @@ async def sweep_superseded_facts(*, session_id: str, note_text: str, db) -> dict
 
 async def record_note(
     *, session_id: str, text_: str, kind: str = "note",
-    node_key: str | None = None, db,
+    node_key: str | None = None, dedupe: bool = False, db,
 ) -> dict | None:
     """§17.654 — append a session-level note/addition. Project-scoped (not tied
     to a step's lifecycle like friction): a new requirement or constraint the
     operator raises should outlive the step it came up on and feed forward into
     every later step's guidance. Appends to ``assist_sessions.notes`` (JSONB
     array). Returns the stored note dict, or None on empty text / missing
-    session. Single-statement append; the whole array is re-read cheaply."""
+    session. Single-statement append; the whole array is re-read cheaply.
+
+    §17.854 (audit C4) — ``dedupe`` skips the append if an identical (kind,text)
+    note already exists. Used by the pivot path (detect_reroute), where a
+    re-sent already-dismissed pivot message otherwise re-recorded the SAME
+    decision note every turn — and every note thereafter rides every prompt."""
     note_text = (text_ or "").strip()
     if not note_text:
         return None
     k = kind if kind in _NOTE_KINDS else "note"
+    if dedupe:
+        existing = (await db.execute(
+            text("""
+                SELECT 1 FROM assist_sessions,
+                     jsonb_array_elements(COALESCE(notes, '[]'::jsonb)) AS n
+                 WHERE id = :sid AND n->>'text' = :txt AND n->>'kind' = :kind
+                 LIMIT 1
+            """),
+            {"sid": session_id, "txt": note_text, "kind": k},
+        )).first()
+        if existing is not None:
+            return {"kind": k, "node_key": node_key, "text": note_text, "deduped": True}
     # Build the note server-side so the timestamp comes from the DB clock (no
     # datetime import here) and the append stays a single statement.
     res = (await db.execute(
@@ -4102,8 +4127,18 @@ async def detect_reroute(
     try:
         await record_note(
             session_id=session_id, text_=message, kind="decision",
-            node_key=None, db=db,
+            node_key=None, dedupe=True, db=db,  # §17.854 C4 — no re-record on resend
         )
+        # §17.854 (audit C2) — a reset/rebuild reached via a PIVOT message (not
+        # the /note endpoint) must also sweep the abandoned-system facts, else
+        # the append-only ledger keeps dragging dead state forward and
+        # render_session_memory frames the whole ledger as "previous approach".
+        # The sweep is valve-gated + fail-soft; harmless when not a reset.
+        from app.modules import assist_guide as _ag
+        if _ag._operator_reset_intent([{"kind": "decision", "text": message}]):
+            await sweep_superseded_facts(
+                session_id=session_id, note_text=message, db=db,
+            )
     except Exception as e:  # noqa: BLE001 — the replan is what matters
         logger.warning("detect_reroute_note_failed session_id=%s err=%r", session_id, e)
     return await _stage_replan_proposal(

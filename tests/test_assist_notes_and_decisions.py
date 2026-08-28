@@ -99,6 +99,44 @@ async def test_record_note_appends_and_commits():
 
 
 @pytest.mark.asyncio
+async def test_record_note_dedupe_skips_existing():
+    """§17.854 (audit C4) — dedupe=True skips the append when an identical
+    (kind, text) note already exists (the re-sent-pivot case)."""
+    db = AsyncMock()
+    # first execute = existence check → a row (duplicate exists)
+    db.execute = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=(1,))))
+    db.commit = AsyncMock()
+    note = await assist_agent.record_note(
+        session_id="s", text_="switch to Debian", kind="decision", dedupe=True, db=db,
+    )
+    assert note.get("deduped") is True
+    db.execute.assert_awaited_once()   # only the existence check, no append
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_record_note_dedupe_appends_when_new():
+    """dedupe=True still appends when no identical note exists."""
+    calls = []
+
+    async def _exec(_sql, params):
+        calls.append(str(_sql))
+        # existence check (has jsonb_array_elements) → no row; append → a row
+        exists = "jsonb_array_elements" in str(_sql)
+        return MagicMock(first=MagicMock(return_value=None if exists else ("s",)))
+
+    db = AsyncMock()
+    db.execute = _exec
+    db.commit = AsyncMock()
+    note = await assist_agent.record_note(
+        session_id="s", text_="new note", kind="decision", dedupe=True, db=db,
+    )
+    assert note.get("deduped") is not True and note["text"] == "new note"
+    db.commit.assert_awaited_once()
+    assert len(calls) == 2  # existence check + append
+
+
+@pytest.mark.asyncio
 async def test_record_note_empty_text_is_noop():
     db = AsyncMock()
     db.execute = AsyncMock()
