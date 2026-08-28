@@ -7065,7 +7065,7 @@ class Pipeline:
                 continue
             total = len(body)
             if total > cap:
-                body = body[:cap] + f"\n\n… [{total - cap} more chars — see /web/jobs/{job_id}]"
+                body = body[:cap] + f"\n\n… [{total - cap} more chars — see /ui/#/output/{job_id}]"
             lines.append(body)
             lines.append("")
 
@@ -8333,4 +8333,4 @@ _Lost? Just type `/here`. Want the full ~50-command surface? `/advanced on`._"""
 
 ---
 
-*Native web UI: `http://<host>:8000/web/jobs`. Full reference: README.md + USER_GUIDE.md in the repo.*"""
+*Native operator UI: `http://<host>:8000/ui`. Full reference: README.md + USER_GUIDE.md in the repo.*"""
