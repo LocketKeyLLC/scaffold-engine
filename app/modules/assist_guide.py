@@ -375,6 +375,142 @@ _DECISION_SUGGESTION_SYSTEM = (
     "options given; do not invent a new one. Call recommend_option once."
 )
 
+# ── §17.851 — code-enforced placeholder resolution ─────────────────────────
+# The §17.850 prompt rules alone did NOT stick (live evidence: the facts held
+# "https://192.168.1.156:8006" verbatim and the walkthrough still emitted
+# <PROXMOX_HOST_IP>) — the §17.668 lesson again: LLMs ignore prompt rules, so
+# enforce in code. After generation: Layer 1 substitutes pinned values
+# deterministically; Layer 2 maps leftovers against the facts ledger via one
+# small tool-call (known value / suggested free-choice name / unknown);
+# resolved values are AUTO-PINNED so the next run is Layer-1 deterministic and
+# the operator sees + can edit them in the Pinned values panel. Fail-soft at
+# every stage: worst case the original text ships unchanged.
+
+_PLACEHOLDER_TOKEN_RE = re.compile(r"<([A-Z][A-Z0-9_\-]{1,48})>")
+
+_PLACEHOLDER_RESOLVER_TOOL = model_router.Tool(
+    name="resolve_placeholders",
+    description=(
+        "Map each placeholder token to a concrete value from the operator's "
+        "known facts, or a suggested fitting name for free-choice identifiers, "
+        "or mark it unknown."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "resolutions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "token": {"type": "string", "description": "The placeholder name WITHOUT angle brackets."},
+                        "value": {"type": "string", "description": "Concrete value, or empty when unknown."},
+                        "kind": {"type": "string", "enum": ["known", "suggested", "unknown"],
+                                 "description": "known = stated in the facts/profile; suggested = a free-choice name you propose; unknown = only the operator can supply it."},
+                    },
+                    "required": ["token", "kind"],
+                },
+            },
+        },
+        "required": ["resolutions"],
+    },
+)
+
+_PLACEHOLDER_RESOLVER_SYSTEM = (
+    "You resolve placeholder tokens in an operator walkthrough. For each token: "
+    "if the operator's facts/profile state the actual value (an IP, URL, hostname, "
+    "storage name, interface), return it EXACTLY as stated with kind=known. If the "
+    "token names something NEW the operator is free to name (a new VM/container "
+    "name, VMID, dataset, service user), propose ONE short fitting name for THIS "
+    "project with kind=suggested. Only when neither applies (secrets, passwords, "
+    "values truly not in the facts) use kind=unknown with an empty value. Never "
+    "invent a kind=known value that is not literally supported by the facts. "
+    "Each value must be ONLY that token's own part — when tokens compose (e.g. "
+    "<POOL>/<DATASET>), never return a value that already includes a "
+    "neighboring token's value."
+)
+
+
+async def resolve_placeholders(
+    *, text: str, session_id: str, environment: Optional[dict],
+    step_title: str = "", role: str = "model_general", db=None,
+) -> tuple[str, dict]:
+    """§17.851 — substitute <PLACEHOLDER> tokens in generated guidance.
+
+    Returns ``(new_text, applied)`` where ``applied`` maps token →
+    ``{"value": ..., "kind": known|suggested}``. Unknown tokens stay in the
+    text. Fail-soft: any error returns the original text and ``{}``.
+    """
+    try:
+        tokens = list(dict.fromkeys(_PLACEHOLDER_TOKEN_RE.findall(text or "")))
+        if not tokens:
+            return text, {}
+        env = environment or {}
+        subs = {str(k).upper(): str(v) for k, v in (env.get("substitutions") or {}).items() if str(v).strip()}
+        applied: dict = {}
+        out = text
+        # Layer 1 — deterministic: pinned values win, no model involved.
+        for tok in list(tokens):
+            v = subs.get(tok.upper())
+            if v:
+                out = out.replace(f"<{tok}>", v)
+                applied[tok] = {"value": v, "kind": "known"}
+                tokens.remove(tok)
+        # Layer 2 — model-mapped against the facts ledger.
+        facts = [str(f).strip() for f in (env.get("facts") or []) if str(f).strip()]
+        if tokens and (facts or env.get("profile")):
+            user = (
+                (f"Step: {step_title}\n\n" if step_title else "")
+                + "Operator facts:\n" + "\n".join(f"- {f}" for f in facts[:40])
+                + (f"\n\nOperator profile: {env.get('profile')}" if env.get("profile") else "")
+                + "\n\nPlaceholder tokens to resolve:\n"
+                + "\n".join(f"- {t}" for t in tokens)
+                + "\n\nCall resolve_placeholders with one entry per token."
+            )
+            resp = await model_router.tool_call(
+                [
+                    {"role": "system", "content": _PLACEHOLDER_RESOLVER_SYSTEM},
+                    {"role": "user", "content": user},
+                ],
+                [_PLACEHOLDER_RESOLVER_TOOL],
+                role=role,
+                temperature=0.1,
+                max_tokens=1024,
+                tool_choice="auto",
+            )
+            if resp.success and resp.tool_calls:
+                for r in (resp.tool_calls[0].arguments or {}).get("resolutions") or []:
+                    tok = str(r.get("token") or "").strip().strip("<>")
+                    val = str(r.get("value") or "").strip()
+                    kind = r.get("kind")
+                    if (tok in tokens and kind in ("known", "suggested") and val
+                            and len(val) <= 200 and "<" not in val and "\n" not in val):
+                        out = out.replace(f"<{tok}>", val)
+                        applied[tok] = {"value": val, "kind": kind}
+        if applied:
+            notes = []
+            for tok, r in applied.items():
+                src = "from your environment" if r["kind"] == "known" else "suggested — rename if you like"
+                notes.append(f"- `{tok}` → `{r['value']}` ({src})")
+            out = out.rstrip() + "\n\n---\n**Values filled in:**\n" + "\n".join(notes)
+            # Auto-pin so the next generation is deterministic and the operator
+            # can see/edit these in the Pinned values panel.
+            if db is not None:
+                try:
+                    from app.modules import assist_agent
+                    await assist_agent.set_environment(
+                        session_id=session_id,
+                        substitutions={t: r["value"] for t, r in applied.items()},
+                        db=db,
+                    )
+                except Exception:
+                    logger.warning("assist_placeholder_autopin_failed session=%s", session_id)
+        return out, applied
+    except Exception as exc:
+        logger.warning("assist_placeholder_resolver_failed: %s", exc)
+        return text, {}
+
+
 _DECISION_SUGGESTION_TOOL = model_router.Tool(
     name="recommend_option",
     description=(
@@ -3536,6 +3672,15 @@ async def ensure_guidance(
         is_decision=is_decision,
         conversation=conversation,
     )
+    # §17.851 — code-enforced placeholder resolution (see resolve_placeholders).
+    from app.config import settings as _settings
+    if res.get("guidance") and _settings.assist_placeholder_resolver_enabled:
+        resolved, resolved_map = await resolve_placeholders(
+            text=res["guidance"], session_id=session_id, environment=environment,
+            step_title=ctx.title, db=db,
+        )
+        res["guidance"] = resolved
+        (res.setdefault("guidance_meta", {}))["placeholders_resolved"] = resolved_map
     await persist_guidance(
         session_id=session_id,
         node_key=node_key,
@@ -3659,6 +3804,17 @@ async def generate_guidance_stream(
         if text_out:
             yield {"type": "delta", "text": text_out}
 
+    # §17.851 — code-enforced placeholder resolution before persist: the
+    # DURABLE copy (what load() re-renders and future reads serve) carries
+    # concrete values; the live-streamed raw text is replaced on the client's
+    # post-stream reload.
+    resolved_map: dict = {}
+    if text_out and settings.assist_placeholder_resolver_enabled:
+        text_out, resolved_map = await resolve_placeholders(
+            text=text_out, session_id=session_id, environment=environment,
+            step_title=ctx.title, role=role, db=db,
+        )
+
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
         "model": model_used,
@@ -3667,6 +3823,7 @@ async def generate_guidance_stream(
         "refine_hint": refine_hint,
         "status": status,
         "generated_at": _utcnow_iso(),
+        "placeholders_resolved": resolved_map,
         "destructive": scan_destructive(text_out) if settings.assist_destructive_scan else [],
     }
     if status == "failed":
