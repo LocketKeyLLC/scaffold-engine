@@ -53,7 +53,11 @@ async def test_node_delete_threads_attribution():
     client value."""
     p = Principal(identity="alice", role=ROLE_USER, key_id=7)
     ed = AsyncMock(return_value={"ok": True})
-    with patch.object(nodes.node_editor, "delete_node", new=ed):
+    # §17.854 (audit A2) — the endpoints now ownership-gate via assert_visible;
+    # stub it here since this test targets attribution threading, not the gate
+    # (the gate itself is covered by test_nodes_router_authz.py).
+    with patch.object(nodes.node_editor, "delete_node", new=ed), \
+         patch.object(nodes, "assert_visible", new=AsyncMock()):
         await nodes.node_delete(
             "91a94870-f38c-48e3-877a-225766039969", "T1",
             edited_by="operator", db=AsyncMock(), principal=p)
