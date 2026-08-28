@@ -102,3 +102,52 @@ class TestAllNodesDoneRegressionGuard:
             "(e.g. only excluding 'pending') would silently re-introduce the "
             "auto-complete bug."
         )
+
+
+# ---------------------------------------------------------------------------
+# §17.854 (audit A1/A5) — guarded job-status flip helpers: never resurrect a
+# terminal job, never block a job with a still-running node.
+# ---------------------------------------------------------------------------
+
+def _make_flip_db(returned_id):
+    """db.execute(...).fetchone() → returned_id (a row or None); records SQL."""
+    db = AsyncMock()
+    result = MagicMock()
+    result.fetchone.return_value = returned_id
+    db.execute.return_value = result
+    db.commit = AsyncMock()
+    return db, result
+
+
+@pytest.mark.smoke
+class TestGuardedJobFlips:
+    async def test_flip_completed_returns_true_when_row_flipped(self):
+        from app.modules.execution_agent import _flip_job_completed
+        db, _ = _make_flip_db(("job-1",))
+        assert await _flip_job_completed(db, "job-1") is True
+
+    async def test_flip_completed_returns_false_when_guard_blocks(self):
+        """A terminal job (cancelled/failed) → UPDATE matches 0 rows → False."""
+        from app.modules.execution_agent import _flip_job_completed
+        db, _ = _make_flip_db(None)
+        assert await _flip_job_completed(db, "job-1") is False
+
+    async def test_flip_completed_sql_excludes_terminal_states(self):
+        """The predicate must exclude cancelled+failed so an orphaned executor
+        cannot resurrect a cancelled job to 'completed' (the A1 bug)."""
+        from app.modules.execution_agent import _flip_job_completed
+        db, _ = _make_flip_db(None)
+        await _flip_job_completed(db, "job-1")
+        sql = str(db.execute.call_args.args[0])
+        assert "cancelled" in sql and "failed" in sql
+        assert "status != 'completed'" not in sql  # the old, unsafe predicate
+
+    async def test_flip_blocked_sql_guards_running_node(self):
+        """The blocked flip must not fire while a sibling node is 'running'
+        (the A5 concurrent-execute bug)."""
+        from app.modules.execution_agent import _flip_job_blocked
+        db, _ = _make_flip_db(None)
+        await _flip_job_blocked(db, "job-1")
+        sql = str(db.execute.call_args.args[0])
+        assert "NOT EXISTS" in sql and "status = 'running'" in sql
+        assert "cancelled" in sql and "failed" in sql

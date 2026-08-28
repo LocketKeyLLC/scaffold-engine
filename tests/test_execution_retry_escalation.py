@@ -105,3 +105,32 @@ async def test_exhausted_assist_off_normal_error(monkeypatch):
     db = _build_db(_row(node_key="T1", status="failed", retry_count=3, max_retries=3), [])
     res = await er.retry_failed_node("j", "T1", db)
     assert res["status"] == "error" and "exhausted" in res["message"]
+
+
+# ---------------------------------------------------------------------------
+# §17.854 (audit A6) — Stage 5 reset re-asserts status='failed'; a node
+# re-claimed between validate and reset makes the reset a no-op (RETURNING
+# None) and retry_failed_node returns an error instead of double-resetting.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_retry_reset_noop_when_node_changed_status(monkeypatch):
+    monkeypatch.setattr(settings, "node_escalation_enabled", False)
+    # queue: (1) Stage-1 validate sees 'failed', (2) Stage-2 topology,
+    # (3) Stage-5 reset UPDATE...RETURNING → fetchone None (lost the race).
+    validate = _result_one(_row(node_key="T1", status="failed",
+                                retry_count=0, max_retries=3))
+    topology = _result_all([_row(node_key="T1", status="failed", depends_on=[])])
+    reset_lost = _result_one(None)
+    queue = [validate, topology, reset_lost]
+
+    def _side_effect(*a, **k):
+        return queue.pop(0) if queue else MagicMock()
+
+    db = AsyncMock()
+    db.commit = AsyncMock()
+    db.execute = AsyncMock(side_effect=_side_effect)
+
+    res = await er.retry_failed_node("j", "T1", db)
+    assert res["status"] == "error"
+    assert "changed status" in res["message"]

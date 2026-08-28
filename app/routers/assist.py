@@ -215,7 +215,29 @@ class AssistEnvInput(BaseModel):
 
 
 @router.put("/assist/_chatmap/{chat_id}")
-async def assist_chatmap_put(chat_id: str, body: AssistChatMapInput, db=Depends(get_db)):
+async def assist_chatmap_put(
+    chat_id: str, body: AssistChatMapInput, db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    # §17.854 (audit C7) — the router-level visibility guard keys on the
+    # `session_id` PATH param; this route's session id is in the BODY, so the
+    # guard no-ops here. Without this, a non-admin scoped key could bind ANY
+    # session_id to a chat it controls (and the GET below would then leak that
+    # session's status). Check the body's session_id explicitly. Admin /
+    # single-user no-op, matching _require_assist_session_visible.
+    if not principal.is_admin:
+        try:
+            UUID(str(body.session_id))
+            await assert_visible_by_query(
+                db, principal,
+                "SELECT j.owner FROM assist_sessions s JOIN jobs j "
+                "ON j.id = s.job_id WHERE s.id = :sid",
+                {"sid": str(body.session_id)},
+                detail=f"assist session not found: {body.session_id}",
+            )
+        except (ValueError, AttributeError, TypeError):
+            # Malformed session id can't own anything → let remember() handle it.
+            pass
     await assist_session_map.remember(
         chat_id, session_id=body.session_id, last_node_key=body.last_node_key,
     )

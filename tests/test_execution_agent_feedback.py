@@ -166,6 +166,55 @@ async def test_set_node_status_passes_none_when_caller_omits_reason():
 
 
 # ---------------------------------------------------------------------------
+# §17.854 (audit A1) — expected_status guard on _set_node_status stops an
+# orphaned executor from overwriting a cleanup-marked node.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_set_node_status_default_has_no_status_predicate():
+    """Without expected_status the write is byte-compatible: no status guard,
+    no bind param — every existing caller is unchanged."""
+    from unittest.mock import MagicMock
+    db = AsyncMock()
+    db.commit = AsyncMock()
+    res = MagicMock()
+    res.fetchone.return_value = ("node-uuid",)
+    db.execute.return_value = res
+
+    updated = await _set_node_status(db, "node-uuid", "done", output="x")
+
+    args, _ = db.execute.call_args
+    sql_obj, params = args
+    assert "AND status = :expected" not in str(sql_obj)
+    assert "expected" not in params
+    assert updated is True
+
+
+@pytest.mark.asyncio
+async def test_set_node_status_expected_status_blocks_stale_write():
+    """expected_status='running' + a node no longer running → 0 rows updated,
+    returns False, so the caller discards the stale result instead of flipping
+    a cleanup-marked 'failed' node back to 'done'."""
+    from unittest.mock import MagicMock
+    db = AsyncMock()
+    db.commit = AsyncMock()
+    res = MagicMock()
+    res.fetchone.return_value = None  # WHERE ... AND status='running' matched nothing
+    db.execute.return_value = res
+
+    updated = await _set_node_status(
+        db, "node-uuid", "done", output="stale", expected_status="running",
+    )
+
+    args, _ = db.execute.call_args
+    sql_obj, params = args
+    assert "AND status = :expected" in str(sql_obj)
+    assert params["expected"] == "running"
+    assert updated is False
+
+
+# ---------------------------------------------------------------------------
 # W.1 integration — `execute_next_node` wires retry state from the DB row
 # through `_build_prompt` and into the LLM call.
 # ---------------------------------------------------------------------------

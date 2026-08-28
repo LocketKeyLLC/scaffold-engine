@@ -544,7 +544,8 @@ async def _set_node_status(
     verification_reason: str | None = None,
     confidence: float | None = None,
     set_confidence: bool = False,
-) -> None:
+    expected_status: str | None = None,
+) -> bool:
     """Update node status. COALESCE preserves prior values when caller passes None.
 
     ``verification_reason`` writes to ``last_verification_reason``. When the
@@ -559,12 +560,23 @@ async def _set_node_status(
     CASE guard lets the verification path write ``None`` explicitly (skipped /
     zero-confidence nodes) while every other caller leaves the column untouched.
 
+    §17.854 (audit A1) — ``expected_status`` adds an ``AND status = :expected``
+    predicate so a write only lands if the row is still in the expected state.
+    Returns True iff a row was updated. Used by the post-execution persist to
+    stop an orphaned serial executor (whose run outlived a client-disconnect
+    cancel) from overwriting the cleanup task's ``running → failed`` mark with a
+    stale ``done``. Default None → no predicate, byte-identical to before, so
+    every other caller (skip, retry-reset, best-of-N) is unchanged.
+
     Migration 026 added ``last_verification_reason``; pre-026 deployments of
     this code path raise ``UndefinedColumn`` on the first call. Run migrations
     on startup (default) or via `make migrate` after deploy.
     """
-    await db.execute(
-        text("""
+    where = "WHERE id = :id"
+    if expected_status is not None:
+        where += " AND status = :expected"
+    res = await db.execute(
+        text(f"""
             UPDATE dag_nodes
             SET status = :status,
                 output_text = COALESCE(:output, output_text),
@@ -575,7 +587,8 @@ async def _set_node_status(
                              ELSE confidence END,
                 completed_at = CASE WHEN :status IN ('done','failed','skipped')
                                THEN NOW() ELSE completed_at END
-            WHERE id = :id
+            {where}
+            RETURNING id
         """),
         {
             "id": str(node_id),
@@ -585,9 +598,12 @@ async def _set_node_status(
             "verification_reason": verification_reason,
             "confidence": confidence,
             "set_confidence": set_confidence,
+            **({"expected": expected_status} if expected_status is not None else {}),
         },
     )
+    updated = res.fetchone() is not None
     await db.commit()
+    return updated
 
 async def _log_execution(
     db: AsyncSession,
@@ -621,6 +637,56 @@ async def _all_nodes_done(db: AsyncSession, job_id: str) -> bool:
         {"job_id": job_id},
     )
     return row.scalar() == 0
+
+
+# §17.854 (audit A1/A5) — terminal job-status flips funnel through these two
+# guarded helpers so the "don't overwrite a terminal state" predicate lives in
+# ONE place across the three autocomplete/blocked copies inside execute_next_node.
+_TERMINAL_JOB_STATUSES = ("completed", "cancelled", "failed")
+
+
+async def _flip_job_completed(db: AsyncSession, job_id: str) -> bool:
+    """Flip a job to 'completed', returning True iff THIS call won the flip.
+
+    Guard: never resurrect an already-terminal job. Before §17.854 the predicate
+    was ``status != 'completed'``, so an orphaned serial executor finishing after
+    a client-disconnect cancel (job → 'cancelled', node → 'failed' by the cleanup
+    task) would flip 'cancelled' → 'completed' and compile a deliverable for a job
+    the operator cancelled. ``NOT IN (completed,cancelled,failed)`` still permits
+    the legitimate running/executing/blocked → completed transitions (a retry that
+    finishes the last node of a blocked job).
+    """
+    res = await db.execute(
+        text(
+            "UPDATE jobs SET status = 'completed' "
+            "WHERE id = :jid AND status NOT IN ('completed','cancelled','failed') "
+            "RETURNING id"
+        ),
+        {"jid": job_id},
+    )
+    return res.fetchone() is not None
+
+
+async def _flip_job_blocked(db: AsyncSession, job_id: str) -> bool:
+    """Flip a job to 'blocked', returning True iff THIS call won the flip.
+
+    Guards: (a) never overwrite a terminal state; (b) never block a job that
+    still has a RUNNING node — a concurrent ``POST /execute`` against a streaming
+    ``/execute/all`` used to take the no-next-node path (its only pending
+    candidates dep on a running node) and flip the live job to 'blocked'
+    mid-run (§17.854 audit A5).
+    """
+    res = await db.execute(
+        text(
+            "UPDATE jobs SET status = 'blocked' "
+            "WHERE id = :jid AND status NOT IN ('completed','cancelled','failed','blocked') "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM dag_nodes WHERE job_id = :jid AND status = 'running') "
+            "RETURNING id"
+        ),
+        {"jid": job_id},
+    )
+    return res.fetchone() is not None
 
 # ---------------------------------------------------------------------------
 # Core execution
@@ -1075,17 +1141,9 @@ async def execute_next_node(
         )
         if node is None:
             if await _all_nodes_done(db, job_id):
-                result = await db.execute(
-                    text(
-                        "UPDATE jobs SET status = 'completed' "
-                        "WHERE id = :jid AND status != 'completed' "
-                        "RETURNING id"
-                    ),
-                    {"jid": job_id},
-                )
-                flipped = result.fetchone()
+                flipped = await _flip_job_completed(db, job_id)  # §17.854 (A1)
                 await db.commit()
-                if flipped is not None:
+                if flipped:
                     # X.2: _compile_output now returns (text, was_synthesized).
                     compiled, was_synthesized = await _compile_output(job_id, db)
                     if compiled:
@@ -1142,10 +1200,7 @@ async def execute_next_node(
                 cached_output = cached_row.scalar()
                 if cached_output:
                     partial_result = cached_output
-                    await db.execute(
-                        text("UPDATE jobs SET status = 'blocked' WHERE id = :jid AND status != 'blocked'"),
-                        {"jid": job_id},
-                    )
+                    await _flip_job_blocked(db, job_id)  # §17.854 (A5)
                     await db.commit()
                     logger.info("partial_compiled_cache_hit: job=%s chars=%s", job_id, len(partial_result))
                 else:
@@ -1153,16 +1208,19 @@ async def execute_next_node(
                     partial_result, partial_synthesized = await _compile_output(job_id, db)
                     if partial_result:
                         kind = await compute_deliverable_kind(job_id, db)  # §17.519
+                        # §17.854 (A5) — write the partial deliverable WITHOUT
+                        # touching status, then flip to 'blocked' through the
+                        # guarded helper (skips a terminal/still-running job).
                         await db.execute(
                             text(
                                 "UPDATE jobs SET compiled_output = :co, "
                                 "compiled_output_synthesized = :syn, "
-                                "deliverable_kind = :dk, "
-                                "status = 'blocked' WHERE id = :jid"
+                                "deliverable_kind = :dk WHERE id = :jid"
                             ),
                             {"co": partial_result, "syn": partial_synthesized,
                              "dk": kind, "jid": job_id},
                         )
+                        await _flip_job_blocked(db, job_id)
                         # §17.598 — commit the partial deliverable first, then
                         # persist artifacts in their own session (see the
                         # 'complete' path above for the isolation rationale).
@@ -1174,10 +1232,7 @@ async def execute_next_node(
                         except Exception:
                             logger.exception("persist_job_artifacts failed (blocked) job=%s", job_id)
                     else:
-                        await db.execute(
-                            text("UPDATE jobs SET status = 'blocked' WHERE id = :jid"),
-                            {"jid": job_id},
-                        )
+                        await _flip_job_blocked(db, job_id)  # §17.854 (A5)
                     await db.commit()
                     logger.info("partial_compiled: job=%s chars=%s", job_id, len(partial_result) if partial_result else 0)
             except Exception as exc:
@@ -1913,14 +1968,33 @@ async def execute_next_node(
         # so historical reasons stay readable in audits but aren't re-injected
         # (the retry-time read path is gated by retry_count).
         verify_reason_for_db = reason if final_status == "failed" else None
-        await _set_node_status(
+        # §17.854 (audit A1) — only persist if the node is STILL 'running'. An
+        # orphaned serial executor (its run outlived a client-disconnect cancel)
+        # would otherwise overwrite the cleanup task's 'running → failed' mark
+        # with a stale 'done', which then trips autocomplete on a cancelled job.
+        node_written = await _set_node_status(
             db, node_id, final_status,
             output=output,
             optimized_prompt=exec_prompt,
             verification_reason=verify_reason_for_db,
             confidence=db_confidence,
             set_confidence=True,
+            expected_status="running",
         )
+        if not node_written:
+            # The node was reclaimed/failed out from under us (cancel, reaper,
+            # or operator reset). Do not autocomplete or compile — abandon this
+            # stale result and let the current owner drive the node.
+            logger.warning(
+                "stale_node_write_skipped: job=%s node=%s (no longer 'running')",
+                job_id, node_key,
+            )
+            return {
+                "status": "stale",
+                "job_id": job_id,
+                "node_key": node_key,
+                "message": "node no longer running — stale executor result discarded",
+            }
         await _log_execution(
             db, job_id, node_id, "info" if verified else "warning",
             f"Node '{title}' -> {final_status}",
@@ -1943,17 +2017,9 @@ async def execute_next_node(
         # at L644 already uses this helper; sharing semantics across the two
         # autocomplete paths.
         if await _all_nodes_done(db, job_id):
-            auto = await db.execute(
-                text(
-                    "UPDATE jobs SET status = 'completed' "
-                    "WHERE id = :jid AND status != 'completed' "
-                    "RETURNING id"
-                ),
-                {"jid": job_id},
-            )
-            flipped = auto.fetchone()
+            flipped = await _flip_job_completed(db, job_id)  # §17.854 (A1)
             await db.commit()
-            if flipped is not None:
+            if flipped:
                 job_complete = True
                 logger.info("job_autocompleted: job=%s", job_id)
                 # X.2: _compile_output returns (text, was_synthesized).
@@ -2217,6 +2283,13 @@ async def _run_parallel_frontier(
             # 4. Emit + auto-retry. A retried node resets to 'pending' and is
             #    re-claimed on the next refill (no pop/continue needed).
             status = res.get("status", "unknown")
+            if status == "stale":
+                # §17.854 (audit A1) — the node changed status under the worker
+                # (reset/cancel); its result was discarded server-side. Drop it
+                # here too — the refill loop re-claims whatever is actually ready.
+                logger.info("parallel_stale_result_dropped: job=%s node=%s",
+                            job_id, res.get("node_key"))
+                continue
             if status == "done":
                 node_results.append(res)
                 _done_tool = (res.get("tool") or "").lower()
@@ -2599,6 +2672,20 @@ async def execute_all_nodes(
                 keepalive_stop.set()
                 hb_task.cancel()
                 ka_task.cancel()  # §17.261
+                # §17.854 (audit A1/D2) — cancel the node executor too. On a
+                # client disconnect a GeneratorExit unwinds this generator while
+                # exec_task is mid-LLM; without this the serial path left it
+                # running detached (the parallel frontier already cancels its
+                # inflight workers at R8), and its late writes would overwrite the
+                # cleanup task's cancel marks and could flip the job to
+                # 'completed'. On the normal path exec_task is already done, so
+                # this is a no-op. Mirror of the §17.812 M1 swallow.
+                if not exec_task.done():
+                    exec_task.cancel()
+                    try:
+                        await exec_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                 # §17.812 (audit M1) — swallow the children's own cancellation but
                 # re-raise a cancel delivered to THIS task (see helper docstring).
                 await _await_keepalives_cancelled(hb_task, ka_task)
@@ -2634,6 +2721,13 @@ async def execute_all_nodes(
                 result["duration_ms"] = elapsed_ms
                 yield _sse(status, result)
                 return
+
+            # §17.854 (audit A1) — the node was reclaimed/reset out from under
+            # this executor (its 'running' write was rejected). Don't append it
+            # to node_results or emit a frame; re-loop to claim whatever is next
+            # (or fall through to the terminal blocked/complete path).
+            if status == "stale":
+                continue
 
             # -- node executed --
             node_results.append(result)

@@ -168,7 +168,13 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
     ]
 
     # ---- Stage 5: Atomic reset ----
-    await db.execute(
+    # §17.854 (audit A6) — re-assert status='failed' in the WHERE so this reset
+    # is a no-op if the node was re-claimed to 'running' (or reset) between the
+    # Stage-1 validate and here (concurrent auto-retry + operator /exec retry, or
+    # a stream retry racing the frontier). Without it, two validators both reset
+    # → double retry_count bump, or a running node is flipped back to pending and
+    # claimed by a second executor while the first still writes.
+    reset_row = (await db.execute(
         text("""
             UPDATE dag_nodes
             SET status   = 'pending',
@@ -178,10 +184,17 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
                 retry_count  = retry_count + 1,
                 assigned_model = COALESCE(:esc_model, assigned_model),
                 updated_at   = now()
-            WHERE job_id = :jid AND node_key = :nk
+            WHERE job_id = :jid AND node_key = :nk AND status = 'failed'
+            RETURNING node_key
         """),
         {"jid": job_id, "nk": node_key, "esc_model": escalation_model},
-    )
+    )).fetchone()
+    if reset_row is None:
+        # Lost the race — another caller already claimed/reset this node.
+        return {
+            "status": "error",
+            "message": "Node %s changed status during retry; not reset" % node_key,
+        }
 
     if downstream_to_reset:
         await db.execute(

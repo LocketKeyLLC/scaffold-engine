@@ -237,31 +237,41 @@ async def _await_extract_with_fetch_progress(
     hb_interval = HEARTBEAT_INTERVAL_SECONDS
     last_done = -1
     since_heartbeat = 0.0
-    while not task.done():
-        await asyncio.wait({task}, timeout=_FETCH_PROGRESS_POLL_S)
-        if task.done():
-            break
-        done = fetch_progress.get("done", 0)
-        total = fetch_progress.get("total", 0)
-        if total and done != last_done:
-            last_done = done
-            since_heartbeat = 0.0
-            yield _sse("research_fetch", {
-                "iteration": iteration,
-                "fetched": done,
-                "total": total,
-                "ok": fetch_progress.get("ok", 0),
-                "failed": fetch_progress.get("failed", 0),
-                "failed_reasons": dict(fetch_progress.get("failed_reasons", {})),
-                "last_url": fetch_progress.get("last_url", ""),
-            })
-        else:
-            since_heartbeat += _FETCH_PROGRESS_POLL_S
-            if since_heartbeat >= hb_interval:
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=_FETCH_PROGRESS_POLL_S)
+            if task.done():
+                break
+            done = fetch_progress.get("done", 0)
+            total = fetch_progress.get("total", 0)
+            if total and done != last_done:
+                last_done = done
                 since_heartbeat = 0.0
-                yield _sse("heartbeat", heartbeat_payload)
-    if session_id is not None:
-        await _touch_last_activity(session_id)
+                yield _sse("research_fetch", {
+                    "iteration": iteration,
+                    "fetched": done,
+                    "total": total,
+                    "ok": fetch_progress.get("ok", 0),
+                    "failed": fetch_progress.get("failed", 0),
+                    "failed_reasons": dict(fetch_progress.get("failed_reasons", {})),
+                    "last_url": fetch_progress.get("last_url", ""),
+                })
+            else:
+                since_heartbeat += _FETCH_PROGRESS_POLL_S
+                if since_heartbeat >= hb_interval:
+                    since_heartbeat = 0.0
+                    yield _sse("heartbeat", heartbeat_payload)
+        if session_id is not None:
+            await _touch_last_activity(session_id)
+    finally:
+        # §17.854 (audit D1) — cancel the detached extract task if the consumer
+        # closed the generator (client disconnect). See _await_with_heartbeat.
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 # =============================================================================
