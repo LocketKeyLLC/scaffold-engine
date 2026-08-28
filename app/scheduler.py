@@ -359,6 +359,19 @@ def _add_job(
     )
 
 
+async def _jobstore(fn, *args):
+    """§17.855 (audit B6) — run a sync APScheduler jobstore op off the event loop.
+
+    ``SQLAlchemyJobStore`` is a SYNC engine, so ``add_job`` / ``get_job`` /
+    ``remove_job`` each do a blocking Postgres round-trip. Called straight from
+    async request handlers and coroutine job bodies (both on the single uvicorn
+    loop), a Postgres latency spike would stall EVERY in-flight request/SSE
+    stream, not just the caller. ``asyncio.to_thread`` keeps the async-first
+    invariant. (Startup rehydrate/reconcile stay inline — one-shot, pre-serving.)
+    """
+    return await asyncio.to_thread(fn, *args)
+
+
 async def add_schedule(
     db,
     schedule_id: int,
@@ -383,9 +396,9 @@ async def add_schedule(
         logger.warning('event="add_schedule_skipped" reason="scheduler_disabled"')
         return None
 
-    _add_job(schedule_id, topic, depth, cron_expr, tz, domain)
+    await _jobstore(_add_job, schedule_id, topic, depth, cron_expr, tz, domain)
     try:
-        job = _scheduler.get_job(f"schedule_{schedule_id}")
+        job = await _jobstore(_scheduler.get_job, f"schedule_{schedule_id}")
         next_run = job.next_run_time if job else None  # tz-aware datetime → TIMESTAMPTZ
         await db.execute(text(
             "UPDATE scheduled_jobs "
@@ -397,7 +410,7 @@ async def add_schedule(
         # Caller will roll back ``db``; unregister the APScheduler entry so
         # the runtime state matches the caller's view post-rollback.
         try:
-            _scheduler.remove_job(f"schedule_{schedule_id}")
+            await _jobstore(_scheduler.remove_job, f"schedule_{schedule_id}")
         except Exception as cleanup_exc:
             logger.warning(
                 'event="add_schedule_rollback_cleanup_failed" '
@@ -429,8 +442,8 @@ async def delete_schedule(db, schedule_id: int) -> bool:
 
     if _scheduler is not None:
         job_id = f"schedule_{schedule_id}"
-        if _scheduler.get_job(job_id):
-            _scheduler.remove_job(job_id)
+        if await _jobstore(_scheduler.get_job, job_id):
+            await _jobstore(_scheduler.remove_job, job_id)
 
     try:
         await db.execute(
@@ -442,7 +455,8 @@ async def delete_schedule(db, schedule_id: int) -> bool:
         # the caller's rollback will preserve.
         if _scheduler is not None:
             try:
-                _add_job(
+                await _jobstore(
+                    _add_job,
                     schedule_id, row["topic"], row["depth"],
                     row["cron_expression"], row["timezone"], row["domain"],
                 )
@@ -475,8 +489,8 @@ async def remove_schedule(schedule_id: int) -> None:
         )
         return
     job_id = f"schedule_{schedule_id}"
-    if _scheduler.get_job(job_id):
-        _scheduler.remove_job(job_id)
+    if await _jobstore(_scheduler.get_job, job_id):
+        await _jobstore(_scheduler.remove_job, job_id)
     else:
         logger.debug(
             'event="remove_schedule_noop" reason="job_not_registered" '
@@ -551,7 +565,7 @@ async def _execute_model_ab_job(schedule_id: int, topic: str, depth: str) -> Non
     finally:
         next_run: Optional[datetime] = None
         if _scheduler is not None:
-            job = _scheduler.get_job(f"schedule_{schedule_id}")
+            job = await _jobstore(_scheduler.get_job, f"schedule_{schedule_id}")
             if job is not None:
                 next_run = job.next_run_time
 
@@ -755,7 +769,7 @@ async def _execute_research_job(
     # → TIMESTAMPTZ type mismatch that the old subquery had).
     next_run: Optional[datetime] = None
     if _scheduler is not None:
-        job = _scheduler.get_job(f"schedule_{schedule_id}")
+        job = await _jobstore(_scheduler.get_job, f"schedule_{schedule_id}")
         if job is not None:
             next_run = job.next_run_time  # already a tz-aware datetime
 
