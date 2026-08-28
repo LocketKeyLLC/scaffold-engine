@@ -65,6 +65,9 @@ from app.modules.prompt_assembly import (  # noqa: F401  re-exported for callers
     EXECUTION_SYSTEM_LLM,
     EXECUTION_SYSTEM_CODEGEN,
     EXECUTION_SYSTEM_RUNBOOK,
+    build_base_prompt,
+    system_for_tool,
+    truncate_output,
 )
 from app.modules.artifacts import persist_job_artifacts  # §17.565
 from app.modules.rag_pipeline import query_rag
@@ -692,19 +695,11 @@ async def _flip_job_blocked(db: AsyncSession, job_id: str) -> bool:
 # Core execution
 # ---------------------------------------------------------------------------
 
-def _truncate_output(content: str, max_chars: int) -> str:
-    """Truncate content preserving first/last 20%, with a marker in the middle."""
-    if len(content) <= max_chars:
-        return content
-    keep = max_chars
-    head_len = int(keep * 0.2)
-    tail_len = int(keep * 0.2)
-    removed = len(content) - head_len - tail_len
-    return (
-        content[:head_len]
-        + f"\n[...truncated {removed} chars...]\n"
-        + content[-tail_len:]
-    )
+# §17.854 (audit A3) — was a byte-identical duplicate of
+# prompt_assembly.truncate_output; aliased to the single source so the two can't
+# drift. Name kept for the existing callers/tests that reference it here.
+_truncate_output = truncate_output
+
 
 async def _fetch_upstream_outputs(
     db, job_id: str, depends_on: list[str]
@@ -900,52 +895,27 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
         logger.warning("RAG grounding failed: %s", e)
         return ""
 
-def _system_for_tool(tool: str) -> str:
-    """Return the appropriate system prompt for a node tool type.
+# §17.854 (audit A3) — was a byte-identical duplicate of
+# prompt_assembly.system_for_tool; aliased to the single source. Name kept for
+# the callers/tests that reference execution_agent._system_for_tool.
+_system_for_tool = system_for_tool
 
-    Case-insensitive: VALID_TOOLS uses canonical casing ("CodeGen", "Shell")
-    but a hand-edited row carrying ``"codegen"`` / ``"shell"`` should still
-    get the right system prompt.
-
-    §17.359 — ``Shell`` tool routes here too. When ``shell_tool_enabled`` is
-    False (default), Shell nodes get the runbook prompt and dispatch via the
-    LLM executor — text-only output framed as "Run this:" for the human to
-    perform. When the flag is True, ``execute_next_node`` short-circuits to
-    a real shell backend (NotImplementedError until wired) before this
-    prompt is selected.
-    """
-    t = tool.lower()
-    if t == "codegen":
-        return EXECUTION_SYSTEM_CODEGEN
-    if t == "shell":
-        return EXECUTION_SYSTEM_RUNBOOK
-    return EXECUTION_SYSTEM_LLM
 
 def _build_prompt(node: dict, brief: dict) -> str:
     """Build execution prompt from node template + brief context.
 
-    Sprint W.1 — when ``retry_count > 0`` AND ``last_verification_reason``
-    is non-empty, a "Reviewer feedback" block is prepended so the LLM sees
-    the prior rejection before re-attempting. Without this loop a retry
-    sees the identical prompt and produces the identical rejected output.
+    §17.854 (audit A3) — delegates to ``prompt_assembly.build_base_prompt`` so
+    AUTONOMOUS node execution finally sees the §17.850 brief essentials
+    (constraints / inputs_available / operator answers) that the local duplicate
+    dropped — the exact §17.844/§17.845 blindness the shared module exists to
+    prevent, which had been closed for the assist funnel but not here. The two
+    prompt paths can no longer drift (a parity test guards it).
+
+    Sprint W.1 — when ``retry_count > 0`` AND ``last_verification_reason`` is
+    non-empty, a "Reviewer feedback" block is prepended (autonomous-only) so a
+    retry sees the prior rejection instead of re-emitting the identical output.
     """
-    template = node.get("prompt_template") or ""
-    title = node["title"]
-    goal = brief.get("description", "") if brief else ""
-    if not goal and brief:
-        goals = brief.get("goals", [])
-        goal = goals[0] if goals else ""
-
-    if template:
-        body = f"{template}\n\nContext: {goal}"
-    else:
-        body = (
-            f"Execute this task: {title}\n\n"
-            f"Project goal: {goal}\n\n"
-            f"Produce a complete, actionable output for this task. "
-            f"Base your response on the ground truth provided above where relevant."
-        )
-
+    body = build_base_prompt(node, brief)
     feedback = _format_reviewer_feedback(node)
     return f"{feedback}{body}" if feedback else body
 

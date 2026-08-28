@@ -389,3 +389,38 @@ async def test_execute_next_node_first_attempt_has_no_feedback_block():
     )
     assert "Reviewer feedback" not in user_msg
     assert "stale leftover" not in user_msg
+
+
+# ---------------------------------------------------------------------------
+# §17.854 (audit A3) — _build_prompt delegates to prompt_assembly so autonomous
+# nodes see the §17.850 brief essentials (constraints/inputs/answers), and the
+# two prompt paths can't drift.
+# ---------------------------------------------------------------------------
+
+def test_build_prompt_includes_brief_constraints():
+    """The autonomous path must now carry brief constraints — the §17.844/845
+    blindness the shared module was built to prevent."""
+    node = {"title": "Set up the server", "prompt_template": "Do the setup.",
+            "retry_count": 0, "last_verification_reason": None}
+    brief = {
+        "description": "Stand up a web app",
+        "constraints": ["PRESERVE the existing install", "do not reformat /dev/sda"],
+        "inputs_available": ["Proxmox host at 10.0.0.5"],
+        "user_feedback": "use the existing postgres, don't install a new one",
+    }
+    out = _build_prompt(node, brief)
+    assert "PRESERVE the existing install" in out
+    assert "Proxmox host at 10.0.0.5" in out
+    assert "use the existing postgres" in out
+
+
+def test_build_prompt_matches_prompt_assembly_plus_feedback():
+    """Parity guard: _build_prompt == build_base_prompt (+ optional reviewer
+    feedback prepend). If someone re-forks a local copy, this fails."""
+    from app.modules.prompt_assembly import build_base_prompt
+    from app.modules.execution_agent import _build_prompt as bp
+    node = {"title": "T", "prompt_template": "tpl", "retry_count": 0,
+            "last_verification_reason": None}
+    brief = {"description": "d", "constraints": ["c1"]}
+    # no reviewer feedback (retry_count 0) → identical to build_base_prompt
+    assert bp(node, brief) == build_base_prompt(node, brief)
