@@ -238,6 +238,25 @@ async def test_chat_completion_threads_extra_opts_to_payload(fake_client):
     assert "fallback" not in payload
 
 
+@pytest.mark.asyncio
+async def test_chat_completion_filters_ollama_think_opt(fake_client):
+    """§17.854 (audit B2) — ``think`` is Ollama-specific; leaking it into the
+    OpenAI payload makes the API reject the call with 400."""
+    fake_client.post.return_value = _resp(200, {
+        "model": "gpt-4o-mini",
+        "choices": [{"message": {"content": "x"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    })
+    p = OpenAIProvider()
+    await p.chat_completion(
+        "gpt-4o-mini",
+        [{"role": "user", "content": "x"}],
+        think=True,
+    )
+    payload = fake_client.post.call_args.kwargs["json"]
+    assert "think" not in payload
+
+
 # ---------------------------------------------------------------------------
 # embed — happy path + error handling + index sort
 # ---------------------------------------------------------------------------

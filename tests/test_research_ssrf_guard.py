@@ -68,6 +68,20 @@ class TestFetchShortCircuit:
         assert result is None
         client_mock.stream.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_robots_allowed_never_fetches_private_target(self):
+        """§17.854 (audit D2) — _robots_allowed must run the SSRF guard BEFORE
+        issuing the robots.txt GET; a private/link-local host is fail-open with
+        no HTTP call (URL mode calls this before the guarded page fetch)."""
+        from app.modules.research_extractors import _robots_allowed
+        client_mock = AsyncMock()
+        client_mock.get = AsyncMock()  # would fail the assert if called
+        with patch("app.modules.research_extractors._ra") as ra_mock:
+            ra_mock.return_value.get_generic_http_client.return_value = client_mock
+            allowed = await _robots_allowed("http://169.254.169.254/latest/meta-data")
+        assert allowed is True  # fail-open
+        client_mock.get.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # §17.612 (audit #6) — topic-mode fetch routes through the hardened helper

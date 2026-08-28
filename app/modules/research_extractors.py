@@ -428,6 +428,14 @@ async def _robots_allowed(url: str, user_agent: str = "ScaffoldEngine/1.0") -> b
     try:
         p = urlparse(url)
         robots_url = f"{p.scheme}://{p.netloc}/robots.txt"
+        # §17.854 (audit D2) — this fetch bypassed the §17.93 SSRF guard: URL
+        # mode calls _robots_allowed BEFORE the guarded page fetch, so a
+        # private/link-local target got a real GET (and an allow/deny oracle)
+        # here. Fail-open WITHOUT fetching: the main fetch's own guard rejects
+        # the private host right after, and no request is ever issued.
+        ok, _reason = await asyncio.to_thread(_is_public_host, robots_url)
+        if not ok:
+            return True
         client = _ra().get_generic_http_client()
         r = await client.get(robots_url, timeout=settings.research_fetch_timeout)
         if r.status_code >= 400:

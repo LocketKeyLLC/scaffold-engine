@@ -954,6 +954,7 @@ class Pipeline:
                 self.valves.dag_timeout,
             )
             self.valves.stream_timeout = self.valves.dag_timeout
+        self._warn_timeout_drift()
         # Embedder dimension probe (strict)
         ok, msg = self._probe_embedder_dim()
         if not ok:
@@ -1003,6 +1004,38 @@ class Pipeline:
             f"[scaffold_router] Seeded {live!r} from template "
             f"(was missing or empty {{}})."
         )
+
+    def _warn_timeout_drift(self) -> None:
+        """§17.854 (audit F1) — warn when the on-disk valves.json carries a
+        timeout wildly above the code default.
+
+        The shipped template once pinned ``triage_timeout``/``stream_timeout``
+        to 86400 s, silently defeating the §17.199 tightening (valves.json wins
+        over code defaults at load time) — a wedged Ollama could then block a
+        request thread for 24 h. Reads the FILE, not ``self.valves``, because
+        OWUI applies valves.json after ``__init__`` (the #8.8 lesson).
+        Warn-only: an operator may legitimately raise a timeout, but a >10×
+        excursion deserves a log line.
+        """
+        defaults = {"request_timeout": 30, "stream_timeout": 3600,
+                    "triage_timeout": 120}
+        here = os.path.dirname(os.path.abspath(__file__))
+        live = os.path.join(here, "scaffold_router", "valves.json")
+        try:
+            with open(live, "r") as fh:
+                data = json.load(fh) or {}
+        except Exception:
+            return
+        for field, default in defaults.items():
+            val = data.get(field)
+            if isinstance(val, (int, float)) and val > default * 10:
+                self.logger.warning(
+                    "[scaffold_router] valves.json %s=%s exceeds the code "
+                    "default (%s) by >10x — a wedged upstream will block "
+                    "request threads that long. Lower it in the OWUI valve "
+                    "UI unless this is deliberate.",
+                    field, val, default,
+                )
 
     def _apply_env_fallbacks(self) -> None:
         """Fill empty string-valued valves from environment variables.

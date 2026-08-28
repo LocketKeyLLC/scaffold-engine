@@ -48,6 +48,15 @@ def test_extract_pending_only_immediately_preceding_assistant():
     ("go ahead", True, False), ("no", False, True), ("nope", False, True),
     ("cancel that", False, True), ("maybe later", False, False),
     ("what jobs are running", False, False),
+    # §17.854 (audit G3) — first-word matching on broad verbs committed pending
+    # destructive cards on replies that were instructions, not consent.
+    ("go check the logs first", False, False),
+    ("correct the title first", False, False),
+    ("please list my jobs", False, False),
+    ("run the second one instead", False, False),
+    ("send it to the other session", False, False),
+    ("do we have a backup?", False, False),
+    ("yes please", True, False), ("Yes.", True, False), ("OK", True, False),
 ])
 def test_affirmative_negative(text, aff, neg):
     assert confirm_cards.is_affirmative(text) is aff

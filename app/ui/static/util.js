@@ -90,8 +90,12 @@ export function debounce(fn, ms = 250) {
  *  the HTML escape untouched, and the restore matches ONLY exact sentinels. */
 export function mdToHtml(src) {
   if (!src) return "";
+  // §17.854 — quotes MUST be escaped: the link rule below interpolates the
+  // captured URL into href="...", so an unescaped `"` in LLM-emitted text lets
+  // a crafted link inject attributes (e.g. override rel="noopener").
   const esc = (s) =>
-    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   // fenced code blocks — stashed on their own paragraph so the wrapper below
   // never buries a <pre> inside a <p>.
   const blocks = [];

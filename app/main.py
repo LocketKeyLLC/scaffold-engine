@@ -34,6 +34,7 @@ from sqlalchemy import text
 from app.model_router import close_client
 
 from app.auth import require_api_key
+from app.authz import require_admin
 from app.config import SWITCHABLE_ROLE_FIELDS, settings
 from app.modules.cleanup import start_cleanup_task, reap_stale_jobs
 from app.database import engine, async_session
@@ -266,6 +267,15 @@ async def lifespan(app: FastAPI):
     refactor stays as belt-and-suspenders.
     """
 
+    # §17.854 (audit B1) — init the shared HTTP clients FIRST. The Ollama probe
+    # below uses model_router._get_client(), which has NO lazy path; with the
+    # init sitting further down (§17.812 hoisted it above crash-resume only),
+    # this probe raised "client not initialized" on every boot and never once
+    # reported real Ollama health. init_clients() is a dependency-free
+    # singleton init — safe at the very top.
+    from app.utils.http_clients import init_clients
+    init_clients()
+
     # Verify Ollama — explicit 5 s cap overrides the client's default
     # local_timeout (1800 s, sized for actual LLM calls).
     try:
@@ -403,15 +413,11 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("runtime_profile_hook_failed: err=%s", exc)
 
-    # §17.812 (audit C6) — eager-init the shared HTTP clients BEFORE crash-resume.
-    # resume_orphaned_executions() spawns detached _drain_execution tasks that
-    # reach the first LLM/embedder call, and get_ollama_client() has NO lazy path
-    # (it raises if init_clients() hasn't run). This block used to sit after the
-    # await-heavy drift/warmup hooks below, so a drain could hit an uninitialized
-    # client during those awaits and spuriously FAIL a resumable job on cold
-    # start. init_clients() is a dependency-free singleton init — safe to hoist.
-    from app.utils.http_clients import init_clients
-    init_clients()
+    # §17.812 (audit C6) — the shared HTTP clients must be initialized BEFORE
+    # crash-resume: resume_orphaned_executions() spawns detached
+    # _drain_execution tasks that reach the first LLM/embedder call, and
+    # get_ollama_client() has no lazy path. init_clients() now runs at the very
+    # top of the lifespan (§17.854), which preserves this ordering.
 
     # §17.774 — Automatic crash-resume of jobs orphaned mid-execution. Must run
     # AFTER migrations (needs the 061 resume counters) and AFTER the node sweep
@@ -1338,7 +1344,11 @@ def _is_secret_field(name: str, value: object) -> bool:
     return False
 
 
-@app.get("/config", tags=["ops"], response_model=ConfigResponse)
+# §17.854 (audit B4) — ops surface is admin-only under MULTI_USER_ENABLED: a
+# scoped user key must not dump engine config or mutate the GLOBAL log level.
+# Single-user, every key resolves to ADMIN_PRINCIPAL → zero behavior change.
+@app.get("/config", tags=["ops"], response_model=ConfigResponse,
+         dependencies=[Depends(require_admin)])
 async def get_config():
     """Return the orchestrator's loaded Settings (audit item U.5).
 
@@ -1433,7 +1443,8 @@ async def get_log_level():
     return get_current_level()
 
 
-@app.patch("/config/log-level", tags=["ops"])
+@app.patch("/config/log-level", tags=["ops"],
+           dependencies=[Depends(require_admin)])  # §17.854 (audit B4)
 async def patch_log_level(body: _LogLevelPatchIn):
     """Override the root logger's level at runtime — survives until
     process restart OR ``POST /config/log-level/reset``.
@@ -1449,7 +1460,8 @@ async def patch_log_level(body: _LogLevelPatchIn):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.post("/config/log-level/reset", tags=["ops"])
+@app.post("/config/log-level/reset", tags=["ops"],
+          dependencies=[Depends(require_admin)])  # §17.854 (audit B4)
 async def reset_log_level():
     """Restore the root logger to the level the orchestrator booted with.
 
