@@ -23,6 +23,42 @@
         "title": "AccountSetup",
         "type": "object"
       },
+      "AdvanceInput": {
+        "description": "§17.855 (audit F6) — body for POST /jobs/{id}/advance (job_id is the path\nparam). The server-side auto-chain: confirm(research+compile) → plan(DAG) →\noptionally execute.",
+        "properties": {
+          "execute": {
+            "default": false,
+            "title": "Execute",
+            "type": "boolean"
+          },
+          "feedback": {
+            "anyOf": [
+              {
+                "maxLength": 50000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback"
+          },
+          "model_overrides": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Overrides"
+          }
+        },
+        "title": "AdvanceInput",
+        "type": "object"
+      },
       "ArtifactListResponse": {
         "properties": {
           "artifacts": {
@@ -7453,7 +7489,6 @@
     },
     "/health": {
       "get": {
-        "description": "Concurrent dependency health check — no auth required.",
         "operationId": "health_health_get",
         "responses": {
           "200": {
@@ -7922,6 +7957,62 @@
         "summary": "Rename Job",
         "tags": [
           "Management"
+        ]
+      }
+    },
+    "/jobs/{job_id}/advance": {
+      "post": {
+        "description": "§17.855 (audit F6) — server-side auto-chain, streamed as one SSE response:\nPhase 2 (research + ingest + compile) → plan (generate DAG) → optionally\nexecute. Gives curl / CLI / SDK the macro the OWUI pipeline composed\nCLIENT-side (`scaffold_router._handle_confirm`), so those surfaces no longer\nhave to call /ideate/confirm, /dag, /execute/all by hand and can't skip a\nstep. Ownership-gated up front; each phase runs in its OWN short-lived\nsession so no request-pool connection is pinned across the minutes-long run.\n\nEvents: ``advance_phase`` {phase: research|planning} before each phase,\n``error`` {phase, message} on a phase failure, then either the full\n``/execute/all`` stream (execute=true) or a terminal ``advance_complete``.",
+        "operationId": "advance_job_endpoint_jobs__job_id__advance_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdvanceInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Advance Job Endpoint",
+        "tags": [
+          "Workflow"
         ]
       }
     },

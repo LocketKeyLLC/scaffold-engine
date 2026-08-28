@@ -45,6 +45,7 @@ from app.modules.execution_agent import (
     skip_node,
     retry_failed_node,
     execute_all_nodes,
+    _sse_event,  # §17.855 (F6) — shared SSE frame formatter for /jobs/{id}/advance
 )
 from app.modules.execution_handler import execution_status, node_outputs
 from app.modules.idea_refinement import create_ideation_job, refine_idea
@@ -61,6 +62,7 @@ from app.modules.profiles import (  # §17.809 — per-job --quick
 )
 from app.modules.prompt_optimizer import optimize_prompt
 from app.schemas import (
+    AdvanceInput,
     ConfirmInput,
     DagInput,
     ExecRetryInput,
@@ -308,6 +310,73 @@ async def generate_dag_endpoint(
             detail=result["error"],
         )
     return result
+
+
+@router.post("/jobs/{job_id}/advance", tags=["Workflow"])
+async def advance_job_endpoint(
+    job_id: str,
+    body: AdvanceInput,
+    principal: Principal = Depends(get_principal),
+):
+    """§17.855 (audit F6) — server-side auto-chain, streamed as one SSE response:
+    Phase 2 (research + ingest + compile) → plan (generate DAG) → optionally
+    execute. Gives curl / CLI / SDK the macro the OWUI pipeline composed
+    CLIENT-side (`scaffold_router._handle_confirm`), so those surfaces no longer
+    have to call /ideate/confirm, /dag, /execute/all by hand and can't skip a
+    step. Ownership-gated up front; each phase runs in its OWN short-lived
+    session so no request-pool connection is pinned across the minutes-long run.
+
+    Events: ``advance_phase`` {phase: research|planning} before each phase,
+    ``error`` {phase, message} on a phase failure, then either the full
+    ``/execute/all`` stream (execute=true) or a terminal ``advance_complete``.
+    """
+    try:
+        UUID(job_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+    async with async_session() as _s:
+        await assert_visible(_s, principal, job_id, detail=f"job not found: {job_id}")
+    overrides = await resolve_job_overrides(job_id, body.model_overrides)
+    await _require_valid_models(overrides)
+    feedback = (body.feedback or "").strip() or None
+
+    async def _stream():
+        # Phase 2 — research → ingest → compile.
+        yield _sse_event("advance_phase", {"job_id": job_id, "phase": "research"})
+        async with async_session() as db:
+            res = await research_and_compile(
+                job_id, db, user_feedback=feedback, model_overrides=overrides,
+            )
+        if isinstance(res, dict) and "error" in res:
+            yield _sse_event("error", {
+                "job_id": job_id, "phase": "research",
+                "message": res["error"], "http_status": res.get("http_status", 500),
+            })
+            return
+        # Plan — generate the DAG (no execution).
+        yield _sse_event("advance_phase", {"job_id": job_id, "phase": "planning"})
+        async with async_session() as db:
+            dag = await _generate_dag(job_id, db, model_overrides=overrides)
+        if isinstance(dag, dict) and "error" in dag:
+            yield _sse_event("error", {
+                "job_id": job_id, "phase": "planning",
+                "message": dag["error"], "http_status": dag.get("http_status", 500),
+            })
+            return
+        if body.execute:
+            # execute_all_nodes yields fully-formed SSE frames itself.
+            async for chunk in execute_all_nodes(job_id, model_overrides=overrides):
+                yield chunk
+        else:
+            yield _sse_event("advance_complete", {
+                "job_id": job_id, "status": "planned",
+                "node_count": dag.get("node_count") if isinstance(dag, dict) else None,
+            })
+
+    return StreamingResponse(
+        _stream(), media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/exec/status/{job_id}")
