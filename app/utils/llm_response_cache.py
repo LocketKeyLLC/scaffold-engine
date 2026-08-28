@@ -188,3 +188,14 @@ def get_verifier_cache() -> VerifierCache:
     if _cache is None:
         _cache = VerifierCache()
     return _cache
+
+
+async def close_llm_response_cache() -> None:
+    """§17.855 (audit B7) — close the singleton's aioredis client at shutdown."""
+    global _cache
+    if _cache is not None and _cache._redis is not None:
+        try:
+            await _cache._redis.aclose()
+        except Exception:  # noqa: BLE001 — shutdown best-effort
+            pass
+        _cache._redis = None

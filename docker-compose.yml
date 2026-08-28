@@ -539,6 +539,12 @@ services:
       - COMMON_STORAGETYPE=local
     volumes:
       - milvus-data-v2:/var/lib/milvus
+      # §17.855 — pin embedded-etcd's data dir ONTO the volume (see the overlay
+      # file's header). Without this the etcd metadata lives on the ephemeral
+      # overlay layer and is destroyed by `docker compose down`, orphaning the
+      # segment files on the volume = the reproduced corpus-loss-on-down.
+      # ⚠ REQUIRES the one-time etcd migration (runbook) before first recreate.
+      - ./milvus-config/user.yaml:/milvus/configs/user.yaml:ro
     # §17.93 — bind to loopback only. The orchestrator reaches Milvus
     # via the bridge (`http://milvus-standalone:19530`). Port 9091 is
     # Milvus's healthcheck endpoint, also operator-only.

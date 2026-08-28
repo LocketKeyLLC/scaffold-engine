@@ -8,10 +8,14 @@
 #                                  (16 canonical fields; BM25 sparse regenerates)
 #   manifest.json                — row/entity counts to verify a restore against
 #
-# Postgres data survives `docker compose down` on its named volume; the Milvus
-# corpus does NOT (observed twice: segments orphaned despite the persistent
-# volume — use `docker compose restart`, never `down`, unless you have one of
-# these backups). Run me BEFORE any `down`, upgrade, or volume surgery.
+# Both Postgres and (since §17.855) the Milvus corpus survive `docker compose
+# down` on their named volumes — the corpus-loss-on-down bug (embedded etcd on
+# the ephemeral overlay) is fixed by pinning etcd onto the volume. Still run me
+# BEFORE any upgrade or volume surgery; it's the drill-verified recovery path.
+#
+# §17.855 — retention: keeps the newest BACKUP_RETENTION (default 7) timestamped
+# backups and prunes older ones (.backups shares the data-root fs, which has
+# filled before). See the tail of this script.
 #
 # Usage: scripts/backup.sh            (from the repo root; or `make backup`)
 set -euo pipefail
@@ -75,3 +79,13 @@ echo "✓ backup complete:"
 ls -lh "$DEST" | tail -n +2 | awk '{printf "    %s  %s\n", $5, $9}'
 echo "  manifest: jobs=$JOBS dag_nodes=$NODES research_sessions=$SESSIONS toon_v2=$ENTITIES"
 echo "  restore with: make restore BACKUP=$TS"
+
+# §17.855 — retention prune. Keep the newest N timestamped backups (this one
+# included), remove older. Matches ONLY the YYYYMMDD_HHMMSSZ dirs so ad-hoc
+# exports (e.g. eng_partition_pre_*.json) are never touched.
+RETENTION="${BACKUP_RETENTION:-7}"
+mapfile -t _old < <(ls -1d .backups/[0-9]*Z/ 2>/dev/null | sort -r | tail -n +$((RETENTION + 1)))
+if [ "${#_old[@]}" -gt 0 ]; then
+    echo "  retention (keep $RETENTION): pruning ${#_old[@]} older backup(s):"
+    for d in "${_old[@]}"; do rm -rf "$d" && echo "    removed ${d%/}"; done
+fi

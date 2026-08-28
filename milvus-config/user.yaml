@@ -1,0 +1,25 @@
+# §17.855 (audit H1 / corpus-loss root cause) — Milvus config OVERLAY.
+#
+# Milvus loads /milvus/configs/milvus.yaml (image default) then overlays
+# /milvus/configs/user.yaml. We override exactly ONE key: the embedded-etcd
+# data directory.
+#
+# ROOT CAUSE of corpus-loss-on-`docker compose down`:
+#   The image default is `etcd.data.dir: default.etcd` — a RELATIVE path, so the
+#   embedded etcd (which holds ALL collection metadata + segment references)
+#   writes to /milvus/default.etcd, i.e. the container's EPHEMERAL overlay layer,
+#   NOT the milvus-data-v2 volume. Consequences:
+#     - `docker restart`  → same container, overlay preserved → etcd survives → OK
+#     - `docker compose down`/`up` → container destroyed, overlay gone → etcd
+#       metadata LOST → the segment files on /var/lib/milvus/data are orphaned
+#       → the collection reads back empty ("corpus lost").
+#   (Confirmed by `df /milvus/default.etcd` → overlay, mtime current, while the
+#   on-volume /var/lib/milvus/etcd was a stale Apr-13 leftover.)
+#
+# FIX: put the etcd data dir ON the persistent volume so a full down/up survives.
+# MIGRATION (one-time, see the runbook): before the first recreate, copy the
+# CURRENT /milvus/default.etcd onto the volume at /var/lib/milvus/etcd, else the
+# recreate would read the stale/empty on-volume etcd and orphan the live corpus.
+etcd:
+  data:
+    dir: /var/lib/milvus/etcd

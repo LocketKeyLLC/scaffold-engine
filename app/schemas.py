@@ -599,6 +599,16 @@ class ConfirmInput(BaseModel):
     model_overrides: dict | None = None
 
 
+class AdvanceInput(BaseModel):
+    """§17.855 (audit F6) — body for POST /jobs/{id}/advance (job_id is the path
+    param). The server-side auto-chain: confirm(research+compile) → plan(DAG) →
+    optionally execute."""
+    model_config = ConfigDict(protected_namespaces=())
+    feedback: str | None = Field(default=None, max_length=MAX_LLM_TEXT_LEN)
+    execute: bool = False
+    model_overrides: dict | None = None
+
+
 class DagInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     job_id: str

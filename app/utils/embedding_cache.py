@@ -327,3 +327,13 @@ def get_cache() -> EmbeddingCache:
     if _cache is None:
         _cache = EmbeddingCache()
     return _cache
+
+
+async def close_embedding_cache() -> None:
+    """§17.855 (audit B7) — close the singleton's aioredis client at shutdown."""
+    global _cache
+    if _cache is not None:
+        try:
+            await _cache.close()
+        except Exception:  # noqa: BLE001 — shutdown best-effort
+            pass

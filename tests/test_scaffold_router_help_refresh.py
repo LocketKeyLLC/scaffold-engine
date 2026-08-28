@@ -214,11 +214,12 @@ class TestPreservedSurface:
             )
 
     def test_native_web_ui_footer_anchored(self, pipe):
-        """The footer that points operators at the native web UI is the
-        non-chat discovery exit — must survive the refresh."""
+        """The footer that points operators at the native operator UI is the
+        non-chat discovery exit — must survive the refresh. §17.855 — retargeted
+        from the retired /web surface to /ui."""
         out = pipe._help()
-        assert "web/jobs" in out, (
-            "§17.306: the native web UI footer reference is gone. "
+        assert "/ui" in out, (
+            "§17.306/§17.855: the native operator-UI footer reference is gone. "
             "Operators lose the non-chat discovery surface."
         )
 

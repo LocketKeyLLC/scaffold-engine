@@ -107,6 +107,11 @@ PIPELINE_COMPLETE = "pipeline_complete"
 DAG_GENERATED = "dag_generated"
 EXECUTION_FAILED = "execution_failed"
 BLOCKED = "blocked"
+# §17.855 (audit F6) — POST /jobs/{id}/advance (server-side auto-chain) frames.
+# advance_phase {phase: research|planning} precedes each phase; advance_complete
+# is the terminal frame when execute=false (execution replaces it otherwise).
+ADVANCE_PHASE = "advance_phase"
+ADVANCE_COMPLETE = "advance_complete"
 # §17.624 — the hands-on assist gate parked the job as a plan (predominantly
 # Shell/human DAG) instead of auto-executing it; a literal _sse("awaiting_assist"…).
 AWAITING_ASSIST = "awaiting_assist"
@@ -195,6 +200,8 @@ ALL_EVENT_NAMES = frozenset({
     AWAITING_REPLY, PIPELINE_COMPLETE,
     # DAG / job-terminal
     DAG_GENERATED, EXECUTION_FAILED, BLOCKED, AWAITING_ASSIST, BUDGET_EXHAUSTED,
+    # server-side auto-chain (§17.855)
+    ADVANCE_PHASE, ADVANCE_COMPLETE,
     # design
     STAGE_START, STAGE_DONE, STAGE_ERROR, CANCELLED,
     # consumer-synthesized
