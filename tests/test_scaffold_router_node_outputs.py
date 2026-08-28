@@ -90,7 +90,7 @@ class TestNodeOutputView:
             mg.return_value = _nodes_response([_node("T1", body=big)])
             out = pipe._handle_results(["/results", "job-1", "nodes"])
         assert "more chars" in out
-        assert "/web/jobs/job-1" in out
+        assert "/ui/#/output/job-1" in out  # §17.855 — retargeted from retired /web
         # Body was actually capped (not emitted in full).
         assert out.count("X") <= cap + 5
 
