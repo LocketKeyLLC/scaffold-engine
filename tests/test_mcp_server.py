@@ -66,6 +66,16 @@ class TestApiKeyGuard:
         assert app.called is False
         assert sent[0]["status"] == 401
 
+    async def test_non_ascii_key_401_not_500(self):
+        # §17.854 (audit B3) — secrets.compare_digest raises TypeError on a
+        # non-ASCII str; the guard must catch it and 401, not let it bubble to
+        # a 500 + error_logs row. A header byte >0x7F decodes (latin-1) to a
+        # non-ASCII presented string.
+        app = _StubApp()
+        sent = await _drive(ApiKeyASGIGuard(app, "secret"), _http_scope("këy—∆"))
+        assert app.called is False
+        assert sent[0]["status"] == 401
+
     async def test_non_http_scope_passes(self):
         app = _StubApp()
         await _drive(ApiKeyASGIGuard(app, "secret"), {"type": "lifespan"})

@@ -663,6 +663,22 @@ async def test_validate_models_returns_missing_list():
     assert len(missing) >= 1  # at least one role isn't qwen3:4b
 
 
+async def test_validate_models_covers_model_triage(monkeypatch):
+    """§17.854 (audit B8) — model_triage must be gated: a fresh install missing
+    the triage tag should surface at the 422 gate, not at first dispatch."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "model_triage_provider", "ollama", raising=False)
+    monkeypatch.setattr(settings, "model_triage", "triage-tag-not-pulled", raising=False)
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = {"models": [{"name": "qwen3:4b"}]}  # triage tag absent
+    fake_client = AsyncMock()
+    fake_client.get.return_value = resp
+    with patch.object(model_router, "_get_client", return_value=fake_client):
+        missing = await model_router.validate_models()
+    assert any("model_triage" in m for m in missing), missing
+
+
 # ---------------------------------------------------------------------------
 # Sprint E — ModelResponse stamps provider="ollama" on every path; the
 # canonical class is now app.providers.base.ModelResponse and the

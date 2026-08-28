@@ -25,11 +25,19 @@ _MARKER_PREFIX = "NL_CONFIRM:"
 # form for cross-compat with anything that still writes it.
 _MARKER_RE = re.compile(r"(?:\[nlc\]:\s*|<!--\s*)NL_CONFIRM:([A-Za-z0-9_-]+)")
 
-# First-word affirmatives / negatives. A pending confirm commits only on a clear
-# yes; a clear no cancels; anything else re-classifies as a fresh turn.
+# §17.854 (audit G3) — a pending confirm commits only when the ENTIRE reply is
+# an affirmative, not just its first word. First-word matching on a broad verb
+# set ("go", "correct", "run", …) meant "go check the logs first" committed a
+# pending delete. Negatives stay first-word: cancelling is the safe direction,
+# so "no, actually…" should still cancel.
 _AFFIRMATIVE = frozenset({
     "yes", "y", "yeah", "yep", "yup", "sure", "ok", "okay", "confirm", "confirmed",
-    "do", "go", "proceed", "please", "affirmative", "correct", "run", "send", "yes.",
+    "proceed", "affirmative",
+})
+# Short multi-word replies that read as a whole-message yes.
+_AFFIRMATIVE_PHRASES = frozenset({
+    "yes please", "go ahead", "do it", "yes do it", "ok go ahead", "sure go ahead",
+    "yes go ahead", "yes confirm",
 })
 _NEGATIVE = frozenset({
     "no", "n", "nope", "nah", "cancel", "stop", "abort", "don't", "dont", "never",
@@ -90,8 +98,17 @@ def _first_word(text: str) -> str:
     return re.split(r"[\s,.!?]+", stripped, maxsplit=1)[0]
 
 
+def _normalize_reply(text: str) -> str:
+    """Whole-reply normalization: lowercase, trailing punctuation off, commas
+    and runs of whitespace collapsed to single spaces."""
+    stripped = (text or "").strip().lower()
+    stripped = re.sub(r"[\s,.!]+$", "", stripped)
+    return re.sub(r"[\s,]+", " ", stripped)
+
+
 def is_affirmative(text: str) -> bool:
-    return _first_word(text) in _AFFIRMATIVE
+    norm = _normalize_reply(text)
+    return norm in _AFFIRMATIVE or norm in _AFFIRMATIVE_PHRASES
 
 
 def is_negative(text: str) -> bool:

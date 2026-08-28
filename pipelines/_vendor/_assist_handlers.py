@@ -905,6 +905,12 @@ def assist_start(
     orient = d.get("orientation") if isinstance(d, dict) else None
     if orient:
         yield render_reconnect_orientation(orient, sid, resp_job_id)
+        # §17.854 (audit F4) — the orientation text lacks the "Assist session
+        # started" phrase the history-recovery regex keys on, so a later plain
+        # message couldn't recover this session (OWUI delivers no chat_id on this
+        # host). Emit a hidden reference-link marker (renders as nothing in OWUI,
+        # §17.660) carrying the sid so recovery still works on the orient path.
+        yield f"\n\n[asess]: ASSIST_SESSION:{sid}\n"
     else:
         yield (
             f"🤝 **Assist session started** — `{sid}`\n\n"
@@ -1546,19 +1552,29 @@ def record_turn_bg(pipe, session_id: str, content: str, *,
     before any client-side routing, so the transcript is lossless even when a
     message is fast-verb'd or the classifier mislabels it. Fire-and-forget: a
     capture hiccup must never affect the conversation, and the endpoint is a
-    no-op server-side unless the unified-memory capture valve is on."""
+    no-op server-side unless the unified-memory capture valve is on.
+
+    §17.854 (audit F5) — this was a SYNCHRONOUS POST at the top of every NL turn
+    despite the "fire-and-forget" docstring, so a slow/timing-out orchestrator
+    added up to 10s of dead silence before any routing began. Now genuinely
+    off-thread (daemon), so the turn routes immediately; the capture lands (or
+    fails silently) in the background."""
     if not (content or "").strip():
         return
-    try:
-        _ss(pipe).post(
-            f"{pipe.valves.orchestrator_url}/assist/{session_id}/turn",
-            json={"role": "operator", "kind": kind, "content": content,
-                  "node_key": node_key},
-            headers=pipe._auth_headers(),
-            timeout=10,
-        )
-    except Exception:
-        pass
+
+    def _post():
+        try:
+            _ss(pipe).post(
+                f"{pipe.valves.orchestrator_url}/assist/{session_id}/turn",
+                json={"role": "operator", "kind": kind, "content": content,
+                      "node_key": node_key},
+                headers=pipe._auth_headers(),
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    _th.Thread(target=_post, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------

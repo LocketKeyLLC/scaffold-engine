@@ -7,6 +7,7 @@ import {
   loading,
   errorPanel,
   assistSessionFromActions,
+  makeClickable,
 } from "../components.js";
 
 const ACTIVE = new Set([
@@ -113,9 +114,10 @@ function recentRow(job) {
     el("td", { class: "mono", text: String(job.node_count ?? "—") }),
     el("td", { class: "faint", text: timeAgo(job.updated_at || job.created_at) })
   );
-  tr.addEventListener("click", () => {
+  // §17.854 (audit G6) — keyboard-reachable row navigation.
+  makeClickable(tr, () => {
     if (tr.dataset.href) location.hash = tr.dataset.href;
-  });
+  }, { role: "link", label: `Open ${job.title || "job"}` });
   return tr;
 }
 

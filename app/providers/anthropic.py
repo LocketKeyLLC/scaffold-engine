@@ -236,6 +236,9 @@ class AnthropicProvider(LLMProvider):
         reserved = {
             "fallback", "stream", "model", "messages", "max_tokens",
             "system", "temperature", "response_schema",
+            # §17.854 — Ollama-specific; the Anthropic API rejects unknown
+            # top-level params with 400.
+            "think",
         }
         for k, v in opts.items():
             if k in reserved:

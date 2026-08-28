@@ -5,7 +5,7 @@
 // they were display-only ("43 total jobs" had nowhere that showed 43 jobs).
 import * as api from "../api.js";
 import { el, mount, timeAgo } from "../util.js";
-import { statusBadge, loading, errorPanel } from "../components.js";
+import { statusBadge, loading, errorPanel, makeClickable } from "../components.js";
 
 const GROUPS = {
   attention: new Set(["awaiting_confirmation", "awaiting_assist", "assisted_paused", "blocked"]),
@@ -97,7 +97,8 @@ export default function jobs(container, params) {
       el("td", { class: "mono", text: String(job.node_count ?? "—") }),
       el("td", { class: "faint", text: timeAgo(job.updated_at || job.created_at) })
     );
-    tr.addEventListener("click", () => { location.hash = jobHref(job); });
+    makeClickable(tr, () => { location.hash = jobHref(job); },  // §17.854 G6
+      { role: "link", label: `Open ${job.title || "job"}` });
     return tr;
   }
 

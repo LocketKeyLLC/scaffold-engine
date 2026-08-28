@@ -20,7 +20,18 @@ export function execMode() {
 }
 
 export function setExecMode(mode) {
-  localStorage.setItem(KEY, mode === "auto" ? "auto" : "assist");
+  const m = mode === "auto" ? "auto" : "assist";
+  localStorage.setItem(KEY, m);
+  // §17.854 (audit S4) — notify open views (theater/plan run buttons) so their
+  // labels don't lie about what Execute will do after a sidebar toggle.
+  window.dispatchEvent(new CustomEvent("scaffold:execmode", { detail: m }));
+}
+
+/** Subscribe to exec-mode changes; returns an unsubscribe fn for view cleanup. */
+export function onExecModeChange(handler) {
+  const fn = (e) => handler(e.detail);
+  window.addEventListener("scaffold:execmode", fn);
+  return () => window.removeEventListener("scaffold:execmode", fn);
 }
 
 export function isAssist() {

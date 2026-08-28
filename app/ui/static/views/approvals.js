@@ -452,7 +452,18 @@ function renderDetail(container, jobId) {
           el("span", { class: "progress-msg", text: `The approve chain hit an error: ${e.detail || e.message}. Checking the job's actual state…` })
         );
         setBusy(false);
-        load();
+        // §17.854 (audit G4) — only REBUILD the panel (which discards the
+        // operator's typed answers + note) when the job actually ADVANCED past
+        // the gate — then the past-gate "Open plan editor" panel is what we want.
+        // If it's still awaiting_confirmation (the flaky-but-recoverable case),
+        // keep the filled-in inputs so the operator can just hit Approve again
+        // instead of retyping everything on the worst step to lose state.
+        let advanced = true;
+        try {
+          const job = await api.get(`/jobs/${jobId}`);
+          advanced = job.status !== "awaiting_confirmation";
+        } catch { /* status unknown → fall back to the reconcile rebuild */ }
+        if (advanced) load();
       }
     } finally {
       if (pollTimer) {

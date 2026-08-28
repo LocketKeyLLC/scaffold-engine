@@ -72,7 +72,7 @@ def _patch_rag_deps(
         meta = {"backend": "mock", "skipped_rerank": False, "warnings": []}
         return results, meta
 
-    async def mock_superseded(collection, ids):
+    async def mock_superseded(collection, ids, warnings=None):  # §17.854 E3b arg
         return set(superseded_ids or [])
 
     rerank_mock = (
@@ -1298,3 +1298,54 @@ class TestRerankDecisionLogContent:
         assert isinstance(r.rerank_doc_truncate, int)
         assert r.rerank_max_candidates is not None
         assert r.rerank_doc_truncate is not None
+
+
+# ---------------------------------------------------------------------------
+# §17.854 (audit E2) — a dead CrossEncoder falls back to RRF inside rerank();
+# _rerank must treat backend=="RRF" as unavailability (skipped_rerank + a
+# warning), not report reranked:true and let the confidence filter silently
+# truncate to top-3.
+# ---------------------------------------------------------------------------
+
+def test_rerank_rrf_backend_flagged_as_unavailable():
+    from app.modules.rag_pipeline import _rerank, RagResult
+    from app.rerankers import RerankResult, RerankedItem
+
+    docs = [RagResult(entry_id=f"e{i}", content=f"c{i}", rrf_score=0.016 - i * 0.001)
+            for i in range(6)]
+
+    # Dead CrossEncoder → rerank() returns RRF backend with FULL items (so the
+    # partial-count guard never fires) at RRF-scale scores.
+    def _fake(query, documents, top_k, max_pairs):
+        return RerankResult(
+            items=[RerankedItem(index=i, score=0.016, text="") for i in range(len(documents))],
+            backend="RRF", latency_ms=0.0,
+        )
+
+    with patch("app.modules.rag_pipeline.cross_encoder_rerank", _fake):
+        ranked, meta = _run(_rerank("q", docs, top_k=6))
+
+    assert meta["skipped_rerank"] is True
+    assert "reranker_unavailable" in meta["warnings"]
+    # full list preserved (not truncated to 3), sorted on the RRF scale
+    assert len(ranked) == 6
+
+
+def test_rerank_crossencoder_backend_not_flagged():
+    """A healthy CrossEncoder must NOT be flagged unavailable (no false positive)."""
+    from app.modules.rag_pipeline import _rerank, RagResult
+    from app.rerankers import RerankResult, RerankedItem
+
+    docs = [RagResult(entry_id=f"e{i}", content=f"c{i}", rrf_score=0.01) for i in range(4)]
+
+    def _fake(query, documents, top_k, max_pairs):
+        return RerankResult(
+            items=[RerankedItem(index=i, score=0.9 - i * 0.1, text="") for i in range(len(documents))],
+            backend="CrossEncoder", latency_ms=5.0,
+        )
+
+    with patch("app.modules.rag_pipeline.cross_encoder_rerank", _fake):
+        ranked, meta = _run(_rerank("q", docs, top_k=4))
+
+    assert meta.get("skipped_rerank") is not True
+    assert "reranker_unavailable" not in meta["warnings"]

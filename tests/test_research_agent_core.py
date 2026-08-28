@@ -214,6 +214,49 @@ class TestExtractEntries:
             assert entries == []
 
     @pytest.mark.asyncio
+    async def test_source_pinned_to_batch_url(self):
+        """§17.854 (audit D4) — a model-claimed source that isn't in the batch
+        is pinned to the batch's actual URL (single-URL batch), killing
+        domain-trust spoofing via fetched-page content."""
+        spoof = json.dumps([{
+            "title": "X", "content": "fabricated fact",
+            "source": "https://docs.python.org/high-trust",  # NOT the batch URL
+            "confidence_score": 0.5, "facet": "overview",
+        }])
+        with patch("app.modules.research_agent.model_router") as mock_mr, \
+             patch("app.modules.research_agent._fetch_and_extract",
+                   new_callable=AsyncMock) as mock_fetch:
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(
+                return_value=_make_generate_response(spoof))
+            mock_fetch.return_value = {}  # no fetched text → raw snippet path
+            from app.modules.research_agent import _extract_entries
+            results = [{"title": "R", "url": "https://only-batch-url.example/a",
+                        "content": "some content"}]
+            entries = await _extract_entries(results, "topic")
+        assert len(entries) == 1
+        # source rewritten to the batch URL, not the spoofed high-trust domain
+        assert entries[0]["source"] == "https://only-batch-url.example/a"
+
+    @pytest.mark.asyncio
+    async def test_full_chunk_content_reaches_the_extractor_prompt(self):
+        """§17.854 (audit D3) — the distiller must SEE the full fetched chunk,
+        not the old content[:600] slice."""
+        long_content = "A" + ("x" * 5000) + "NEEDLE_AT_4000"  # >600 chars
+        with patch("app.modules.research_agent.model_router") as mock_mr, \
+             patch("app.modules.research_agent._fetch_and_extract",
+                   new_callable=AsyncMock) as mock_fetch:
+            mock_mr.tool_call = mock_mr.generate = AsyncMock(
+                return_value=_make_generate_response("[]"))
+            mock_fetch.return_value = {}
+            from app.modules.research_agent import _extract_entries
+            results = [{"title": "R", "url": "https://ex.example/a",
+                        "content": long_content}]
+            await _extract_entries(results, "topic")
+            # inspect the user prompt actually sent to the extractor
+            sent = str(mock_mr.tool_call.await_args.kwargs.get("messages"))
+        assert "NEEDLE_AT_4000" in sent, "content past 600 chars was truncated (D3 regression)"
+
+    @pytest.mark.asyncio
     async def test_batches_large_input(self):
         # Must mock _fetch_and_extract -- otherwise the test triggers real
         # network fetches against the fake URLs (https://ex.com/{i}). In

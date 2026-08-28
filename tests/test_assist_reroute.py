@@ -57,7 +57,31 @@ async def test_reroute_stages_replan_when_steps_affected():
     assert out == {"proposals": affected}
     note.assert_awaited_once()                       # recorded as feed-forward
     assert note.call_args.kwargs["kind"] == "decision"
+    assert note.call_args.kwargs.get("dedupe") is True  # §17.854 C4
     stage.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reroute_reset_message_fires_facts_sweep():
+    """§17.854 (audit C2) — a reset/rebuild reached via a PIVOT message (not the
+    /note endpoint) also sweeps the abandoned-system facts."""
+    db = AsyncMock()
+    db.execute.return_value = _result(mappings_first={"job_id": "j1", "status": "active"})
+    affected = [{"node_key": "T3", "action": "drop", "current_assumption": "x",
+                 "proposed_change": "y"}]
+    with patch("app.modules.assist_replan.analyze_note_impact",
+               new=AsyncMock(return_value={"affected": affected})), \
+         patch.object(assist_agent, "record_note", new=AsyncMock(return_value={"kind": "decision"})), \
+         patch.object(assist_agent, "_stage_replan_proposal",
+                      new=AsyncMock(return_value={"proposals": affected})), \
+         patch.object(assist_agent, "sweep_superseded_facts",
+                      new=AsyncMock(return_value={"retracted": ["old fact"]})) as sweep:
+        await assist_agent.detect_reroute(
+            session_id="s1",
+            message="let's scrap this and rebuild the whole thing from scratch",
+            db=db,
+        )
+    sweep.assert_awaited_once()  # the reset message triggered the sweep
 
 
 @pytest.mark.asyncio

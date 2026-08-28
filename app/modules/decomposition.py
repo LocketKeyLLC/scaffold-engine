@@ -467,11 +467,19 @@ async def run_component_pipeline(
         async def _do_rollup() -> None:
             async with async_session() as rdb:
                 await _rollup_umbrella(rdb, umbrella_id)
+        # §17.854 (audit A8) — sem.release() MUST run in its own finally. A
+        # CancelledError delivered to this task while awaiting the shield
+        # re-raises out of the await (CancelledError is BaseException, not caught
+        # by `except Exception`), which previously skipped the release below and
+        # permanently shrank decompose_component_max_concurrent by one slot until
+        # process restart. The shielded rollup still completes; the release is
+        # now unconditional.
         try:
             await asyncio.shield(_do_rollup())
         except Exception:
             logger.exception("component_pipeline_rollup_failed: umbrella=%s", umbrella_id)
-        sem.release()  # §17.574 — free the component slot for a queued child
+        finally:
+            sem.release()  # §17.574 — free the component slot for a queued child
 
 
 def _spawn_component(

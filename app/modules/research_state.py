@@ -184,13 +184,28 @@ async def _await_with_heartbeat(
     (tests, future non-research uses).
     """
     ivl = interval or HEARTBEAT_INTERVAL_SECONDS
-    while not task.done():
-        done, _pending = await asyncio.wait({task}, timeout=ivl)
-        if task.done():
-            break
-        yield _sse("heartbeat", heartbeat_payload)
-    if session_id is not None:
-        await _touch_last_activity(session_id)
+    try:
+        while not task.done():
+            done, _pending = await asyncio.wait({task}, timeout=ivl)
+            if task.done():
+                break
+            yield _sse("heartbeat", heartbeat_payload)
+        if session_id is not None:
+            await _touch_last_activity(session_id)
+    finally:
+        # §17.854 (audit D1) — if the consumer closed the generator (client
+        # disconnect → GeneratorExit at the yield above), the wrapped task is
+        # still running detached: fetch fan-out, trafilatura parses, LLM
+        # batches, Milvus ingest all keep burning memory against a session the
+        # lifecycle wrapper is finalizing as 'cancelled', and the freed
+        # singleton slot lets a NEW session start concurrently (the §17.801 OOM
+        # window). Cancel it so generator close reaps the pipeline.
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 # =============================================================================
@@ -369,22 +384,38 @@ async def _load_session_for_resume(session_id: str) -> dict | None:
 
 
 async def _atomic_claim_for_resume(session_id: str, reply: str) -> bool:
-    """Atomic paused_awaiting_reply → running. Returns True if this caller won the race."""
+    """Atomic paused_awaiting_reply → running. Returns True if this caller won the race.
+
+    §17.854 (audit D5) — resuming a paused session flips it to 'running', which
+    trips the ``uq_research_sessions_single_running`` partial unique index if
+    ANOTHER session is already running (likely, given the 1-hour pause TTL). That
+    IntegrityError was unhandled and killed the SSE stream with a raw traceback;
+    catch it and return False so the caller renders the clean 409 (the same shape
+    as losing the paused→running race), leaving the session paused and resumable.
+    """
+    from sqlalchemy.exc import IntegrityError
     async with _ra().async_session() as db:
-        result = await db.execute(
-            text("""
-                UPDATE research_sessions
-                SET status = 'running',
-                    pause_reply = :reply,
-                    updated_at = NOW(),
-                    last_activity_at = NOW()
-                WHERE id = :sid
-                  AND status = 'paused_awaiting_reply'
-            """),
-            {"sid": session_id, "reply": reply},
-        )
-        await db.commit()
-        return result.rowcount == 1
+        try:
+            result = await db.execute(
+                text("""
+                    UPDATE research_sessions
+                    SET status = 'running',
+                        pause_reply = :reply,
+                        updated_at = NOW(),
+                        last_activity_at = NOW()
+                    WHERE id = :sid
+                      AND status = 'paused_awaiting_reply'
+                """),
+                {"sid": session_id, "reply": reply},
+            )
+            await db.commit()
+            return result.rowcount == 1
+        except IntegrityError:
+            await db.rollback()
+            logger.info(
+                "research_resume_blocked_by_running_singleton: session=%s", session_id,
+            )
+            return False
 
 
 def _rehydrate_state(row: dict) -> ResearchState:

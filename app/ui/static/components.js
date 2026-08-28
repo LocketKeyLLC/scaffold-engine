@@ -1,6 +1,27 @@
 // Reusable UI components shared across views.
 import { el } from "./util.js";
 
+/**
+ * §17.854 (audit G6) — make a non-button element behave like a button for
+ * KEYBOARD users. Click-only handlers on <tr>/<div> tiles left the app's
+ * carefully-defined :focus-visible rings as dead code and the elements
+ * unreachable without a mouse. Adds tabindex + role + Enter/Space activation.
+ * `role` defaults to "button"; pass "link" for row-navigations.
+ */
+export function makeClickable(node, handler, { role = "button", label } = {}) {
+  node.setAttribute("tabindex", "0");
+  node.setAttribute("role", role);
+  if (label) node.setAttribute("aria-label", label);
+  node.addEventListener("click", handler);
+  node.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handler(e);
+    }
+  });
+  return node;
+}
+
 /** Status pill. Adds `st-<status>` for the color mapping in app.css. */
 export function statusBadge(status) {
   const s = status || "unknown";
@@ -20,7 +41,8 @@ export function statTile(label, value, opts = {}) {
     val,
     el("div", { class: "stat-label", text: label })
   );
-  if (opts.onClick) tile.addEventListener("click", opts.onClick);
+  // §17.854 (audit G6) — keyboard-activatable when clickable.
+  if (opts.onClick) makeClickable(tile, opts.onClick, { label });
   return tile;
 }
 

@@ -377,3 +377,31 @@ class TestPauseSession:
         assert "q1" in snap["search_history"]
         assert "https://u" in snap["url_history"]
         fake_db.commit.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# §17.854 (audit D5) — resume that trips the single-running unique index
+# returns a clean False (→ 409), not a raw IntegrityError up the SSE stream.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.smoke
+def test_atomic_claim_for_resume_returns_false_on_integrity_error():
+    from sqlalchemy.exc import IntegrityError
+    from app.modules import research_state as rs
+
+    fake_db = MagicMock()
+    fake_db.execute = AsyncMock(
+        side_effect=IntegrityError("stmt", {}, Exception("uq_single_running"))
+    )
+    fake_db.commit = AsyncMock()
+    fake_db.rollback = AsyncMock()
+
+    class _AsyncCM:
+        async def __aenter__(self_inner): return fake_db
+        async def __aexit__(self_inner, *a): return False
+
+    with patch.object(ra, "async_session", lambda: _AsyncCM()):
+        claimed = _run(rs._atomic_claim_for_resume("s1", "reply"))
+
+    assert claimed is False          # not raised → caller renders the 409
+    fake_db.rollback.assert_awaited_once()

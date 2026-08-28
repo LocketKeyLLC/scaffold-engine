@@ -56,3 +56,22 @@ class TestModelRoleWarnings:
         assert len(warnings) == 1
         for role in SWITCHABLE_ROLE_FIELDS:
             assert role in warnings[0]
+
+    def test_latest_tag_is_normalized_not_warned(self):
+        """§17.854 (audit B6) — a role tag `qwen2.5` present on the daemon as
+        `qwen2.5:latest` must NOT warn (a lying health signal)."""
+        with patch.object(settings, "model_coder", "qwen2.5"):
+            pulled = {
+                (getattr(settings, role) if role != "model_coder" else "qwen2.5:latest")
+                for role in SWITCHABLE_ROLE_FIELDS
+            }
+            assert _model_role_warnings(pulled) == []
+
+    def test_latest_tag_reverse_normalized(self):
+        """The reverse: settings carries `x:latest`, daemon lists bare `x`."""
+        with patch.object(settings, "model_coder", "qwen2.5:latest"):
+            pulled = {
+                (getattr(settings, role) if role != "model_coder" else "qwen2.5")
+                for role in SWITCHABLE_ROLE_FIELDS
+            }
+            assert _model_role_warnings(pulled) == []

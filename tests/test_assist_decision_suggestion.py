@@ -138,3 +138,42 @@ async def test_enforce_failsoft_when_followup_returns_no_leaning():
     assert res["status"] == "ready"
     assert res["guidance_meta"]["suggestion_enforced"] is False
     assert "## My suggestion" not in res["guidance"]
+
+
+# ── §17.854 (audit C1) — enforcement now also fires on the STREAM path ────────
+
+@pytest.mark.asyncio
+async def test_stream_enforces_suggestion_on_miss():
+    """The streamed DECISION walkthrough must also get the "## My suggestion"
+    block appended (yielded as a delta + folded into the persisted meta) when
+    the model dropped it — parity with the non-stream path."""
+    async def _fake_stream(*a, **k):
+        for piece in _OPTIONS_NO_SUGGESTION.split("\n"):
+            yield piece + "\n"
+
+    persisted = {}
+    async def _fake_persist(**kw):
+        persisted.update(kw)
+
+    deltas = []
+    with patch.object(settings, "assist_decision_suggestion_enforce", True), \
+         patch.object(settings, "assist_placeholder_resolver_enabled", False), \
+         patch.object(assist_guide, "read_cached_guidance", new=AsyncMock(return_value=None)), \
+         patch.object(assist_guide, "persist_guidance", new=_fake_persist), \
+         patch.object(assist_guide.model_router, "stream_chat", new=_fake_stream), \
+         patch.object(assist_guide.model_router, "tool_call",
+                      new=AsyncMock(return_value=_tool_resp(
+                          {"leaning": "Jellyfin", "why": "FOSS, fits your box"}))):
+        gen = assist_guide.generate_guidance_stream(
+            session_id="s1", node_key="D2", ctx=_ctx(), research=False,
+            is_decision=True, db=MagicMock(),
+        )
+        done = None
+        async for ev in gen:
+            if ev["type"] == "delta":
+                deltas.append(ev["text"])
+            elif ev["type"] == "done":
+                done = ev
+    joined = "".join(deltas)
+    assert "## My suggestion" in joined
+    assert done and done["guidance_meta"]["suggestion_enforced"] is True

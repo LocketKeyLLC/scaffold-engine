@@ -219,10 +219,11 @@ class OpenAIProvider(LLMProvider):
         # json_schema, with strict enabled iff the schema qualifies.
         _apply_openai_response_format(payload, opts.get("response_schema"))
         # Pass through any caller extras (response_format, top_p, …) that the
-        # OpenAI API understands. ``fallback`` is Ollama-specific and is
-        # ignored here on purpose; ``response_schema`` is handled above.
+        # OpenAI API understands. ``fallback`` and ``think`` are Ollama-specific
+        # and are ignored here on purpose (§17.854 — the API rejects unknown
+        # top-level params with 400); ``response_schema`` is handled above.
         for k, v in opts.items():
-            if k in {"fallback", "response_schema"}:
+            if k in {"fallback", "response_schema", "think"}:
                 continue
             payload[k] = v
 
@@ -317,7 +318,7 @@ class OpenAIProvider(LLMProvider):
         # §17.789 — reasoning models need max_completion_tokens + no temperature.
         _apply_model_params(payload, model, temperature, max_tokens)
         for k, v in opts.items():
-            if k == "fallback":  # Ollama-specific; not part of OpenAI's API
+            if k in {"fallback", "think"}:  # Ollama-specific; not OpenAI API (§17.854)
                 continue
             payload[k] = v
 
@@ -428,7 +429,7 @@ class OpenAIProvider(LLMProvider):
         # §17.789 — reasoning models need max_completion_tokens + no temperature.
         _apply_model_params(payload, model, temperature, max_tokens)
         for k, v in opts.items():
-            if k == "fallback":
+            if k in {"fallback", "think"}:  # Ollama-specific; not OpenAI API (§17.854)
                 continue
             payload[k] = v
         effective_timeout = timeout if timeout != 600 else settings.openai_timeout

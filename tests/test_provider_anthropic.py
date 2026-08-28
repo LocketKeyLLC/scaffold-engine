@@ -200,6 +200,25 @@ async def test_chat_completion_passes_temperature_for_sonnet(fake_client):
 
 
 @pytest.mark.asyncio
+async def test_chat_completion_filters_ollama_think_opt(fake_client):
+    """§17.854 (audit B2) — ``think`` is Ollama-specific; the Anthropic API
+    rejects unknown top-level params with 400, so it must be filtered out."""
+    fake_client.post = AsyncMock(return_value=_resp(200, {
+        "id": "msg_01", "model": "claude-sonnet-4-6",
+        "content": [{"type": "text", "text": "ok"}],
+        "usage": {"input_tokens": 5, "output_tokens": 2},
+    }))
+    p = AnthropicProvider()
+    await p.chat_completion(
+        "claude-sonnet-4-6",
+        [{"role": "user", "content": "hi"}],
+        think=True,
+    )
+    sent = fake_client.post.call_args.kwargs["json"]
+    assert "think" not in sent
+
+
+@pytest.mark.asyncio
 async def test_chat_completion_applies_prompt_caching_when_enabled(fake_client):
     """When caching is on (default) and system is present, the system block
     must carry cache_control. This is the §17.345 high-volume-routing rationale."""

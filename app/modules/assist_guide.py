@@ -387,6 +387,12 @@ _DECISION_SUGGESTION_SYSTEM = (
 # every stage: worst case the original text ships unchanged.
 
 _PLACEHOLDER_TOKEN_RE = re.compile(r"<([A-Z][A-Z0-9_\-]{1,48})>")
+# §17.854 (audit C3) — a resolver value is substituted verbatim into guidance
+# that often becomes a shell command block, then auto-pinned and applied
+# DETERMINISTICALLY forever. Reject any value carrying a shell metacharacter so a
+# model (fed adversarial pasted output) can't inject e.g. `local-lvm; wipefs -a
+# /dev/sda`. Also excludes the pre-existing `<` (nested token) and newline bars.
+_UNSAFE_RESOLVER_VALUE_RE = re.compile(r"[;&|$`<>\n\r]")
 
 _PLACEHOLDER_RESOLVER_TOOL = model_router.Tool(
     name="resolve_placeholders",
@@ -454,7 +460,9 @@ async def resolve_placeholders(
             v = subs.get(tok.upper())
             if v:
                 out = out.replace(f"<{tok}>", v)
-                applied[tok] = {"value": v, "kind": "known"}
+                # source="operator" — an operator-set (or previously auto-pinned)
+                # value, distinct from a fresh model suggestion (§17.854 C3).
+                applied[tok] = {"value": v, "kind": "known", "source": "operator"}
                 tokens.remove(tok)
         # Layer 2 — model-mapped against the facts ledger.
         facts = [str(f).strip() for f in (env.get("facts") or []) if str(f).strip()]
@@ -484,9 +492,13 @@ async def resolve_placeholders(
                     val = str(r.get("value") or "").strip()
                     kind = r.get("kind")
                     if (tok in tokens and kind in ("known", "suggested") and val
-                            and len(val) <= 200 and "<" not in val and "\n" not in val):
+                            and len(val) <= 200
+                            and not _UNSAFE_RESOLVER_VALUE_RE.search(val)):
                         out = out.replace(f"<{tok}>", val)
-                        applied[tok] = {"value": val, "kind": kind}
+                        # source="model" — a model-suggested value; tagged so the
+                        # SPA pin editor / meta can flag it as not operator-set
+                        # (§17.854 C3), even after auto-pin makes it deterministic.
+                        applied[tok] = {"value": val, "kind": kind, "source": "model"}
         if applied:
             notes = []
             for tok, r in applied.items():
@@ -3712,7 +3724,14 @@ async def ensure_guidance(
             step_title=ctx.title, db=db,
         )
         res["guidance"] = resolved
-        (res.setdefault("guidance_meta", {}))["placeholders_resolved"] = resolved_map
+        meta = res.setdefault("guidance_meta", {})
+        meta["placeholders_resolved"] = resolved_map
+        # §17.854 (audit C3) — generate_guidance scanned the PRE-resolution text,
+        # so a value substituted in here (e.g. a pinned "local-lvm; wipefs …")
+        # was never re-scanned. Re-run the destructive scan on the resolved text
+        # so the meta the SPA reads reflects what will actually be shown/run.
+        if _settings.assist_destructive_scan:
+            meta["destructive"] = scan_destructive(resolved)
     await persist_guidance(
         session_id=session_id,
         node_key=node_key,
@@ -3778,6 +3797,11 @@ async def generate_guidance_stream(
             task_text=ctx.base_prompt, tool=ctx.tool, role=role,
             max_queries=settings.assist_guide_max_research_queries,
             node_key=node_key, domain=domain,
+            # §17.854 (audit C1) — the STREAM path had dropped the §17.771
+            # environment grounding the non-stream path passes, so a streamed
+            # DECISION step (the SPA path) researched generic textbook options
+            # instead of system-specific ones. Restored to parity.
+            environment_block=render_environment_block(environment),
         )
 
     system = apply_verbosity(
@@ -3840,6 +3864,25 @@ async def generate_guidance_stream(
         if text_out:
             yield {"type": "delta", "text": text_out}
 
+    # §17.854 (audit C1) — decision-suggestion enforcement was ONLY on the
+    # non-stream path, so a streamed DECISION walkthrough that dropped the
+    # "## My suggestion" lean shipped un-enforced even with the valve on. Run the
+    # same guard here; the appended block is yielded as a delta AND folded into
+    # the durable copy the client reloads post-stream. Fail-soft.
+    suggestion_enforced = False
+    if (is_decision and text_out
+            and settings.assist_decision_suggestion_enforce
+            and not _has_decision_suggestion(text_out)):
+        block = await _generate_decision_suggestion(
+            title=ctx.title, task_prompt=ctx.base_prompt, options_text=text_out,
+            environment=environment, role=role,
+        )
+        if block:
+            yield {"type": "delta", "text": f"\n\n{block}"}
+            text_out = f"{text_out}\n\n{block}"
+            suggestion_enforced = True
+            logger.info("assist_decision_suggestion_enforced(stream) node_key=%s", node_key)
+
     # §17.851 — code-enforced placeholder resolution before persist: the
     # DURABLE copy (what load() re-renders and future reads serve) carries
     # concrete values; the live-streamed raw text is replaced on the client's
@@ -3857,9 +3900,13 @@ async def generate_guidance_stream(
         "tool": ctx.tool,
         "research_sources": [{"query": s["query"], "kind": s["kind"]} for s in sources],
         "refine_hint": refine_hint,
+        "suggestion_enforced": suggestion_enforced,
         "status": status,
         "generated_at": _utcnow_iso(),
         "placeholders_resolved": resolved_map,
+        # §17.854 (audit C3) — scan runs on the POST-resolution text (matches the
+        # ensure_guidance rescan on the non-stream path), so substituted values
+        # that introduce a destructive command are caught.
         "destructive": scan_destructive(text_out) if settings.assist_destructive_scan else [],
     }
     if status == "failed":

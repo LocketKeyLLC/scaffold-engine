@@ -69,6 +69,38 @@ async def test_bad_model_values_are_rejected():
     assert out == text and applied == {}
 
 
+async def test_shell_metachar_values_rejected():
+    """§17.854 (audit C3) — a value carrying a shell metacharacter must not be
+    substituted (it would land verbatim in a command block and auto-pin forever)."""
+    text = "storage: <POOL>"
+    resp = SimpleNamespace(success=True, tool_calls=[SimpleNamespace(arguments={
+        "resolutions": [
+            {"token": "POOL", "value": "local-lvm; wipefs -a /dev/sda", "kind": "suggested"},
+        ],
+    })])
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock(return_value=resp)):
+        out, applied = await assist_guide.resolve_placeholders(
+            text=text, session_id="s1", environment=_env(facts=["f"]),
+        )
+    assert out == text and "POOL" not in applied  # rejected, placeholder stays
+
+
+async def test_resolved_values_carry_source_tag():
+    """§17.854 (audit C3) — operator (Layer 1) vs model (Layer 2) provenance so
+    the SPA can flag model-suggested pins."""
+    text = "ip <HOST_IP> vm <VM_NAME>"
+    resp = SimpleNamespace(success=True, tool_calls=[SimpleNamespace(arguments={
+        "resolutions": [{"token": "VM_NAME", "value": "jellyfin", "kind": "suggested"}],
+    })])
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock(return_value=resp)):
+        out, applied = await assist_guide.resolve_placeholders(
+            text=text, session_id="s1",
+            environment=_env(subs={"HOST_IP": "10.0.0.5"}, facts=["f"]),
+        )
+    assert applied["HOST_IP"]["source"] == "operator"   # pinned/deterministic
+    assert applied["VM_NAME"]["source"] == "model"       # model-suggested
+
+
 async def test_fail_soft_returns_original_on_error():
     text = "use <SOME_KEY>"
     with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock(side_effect=RuntimeError("boom"))):

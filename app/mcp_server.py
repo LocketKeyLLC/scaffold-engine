@@ -321,7 +321,14 @@ class ApiKeyASGIGuard:
 
         headers = dict(scope.get("headers") or [])
         presented = headers.get(b"x-api-key", b"").decode("latin-1")
-        if self._key and secrets.compare_digest(presented, self._key):
+        # §17.854 — compare_digest raises TypeError on non-ASCII str input; a
+        # header byte >0x7F must yield a 401, not a 500 + error_logs row (the
+        # §17.596 hardening in app/auth.py, mirrored here).
+        try:
+            matched = bool(self._key) and secrets.compare_digest(presented, self._key)
+        except TypeError:
+            matched = False
+        if matched:
             await self.app(scope, receive, send)
             return
         await _send_401(send)

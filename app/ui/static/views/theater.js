@@ -5,9 +5,9 @@
 // absent we simply show each node's full output on node_done.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, mdToHtml, fmtNum } from "../util.js";
-import { statusBadge, loading, errorPanel, emptyState } from "../components.js";
+import { statusBadge, loading, errorPanel, emptyState, makeClickable } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
-import { isAssist, startAssistFor } from "../exec_mode.js";
+import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
 import { toast } from "../components.js";
 
 const TERMINAL = new Set(["pipeline_complete", "execution_failed", "error", "budget_exhausted", "awaiting_assist"]);
@@ -86,19 +86,36 @@ function renderTheater(container, jobId) {
   let currentKey = null;
 
   const runBtn = el("button", { class: "btn btn-primary", text: isAssist() ? "✦ Start assist" : "▶ Run all", onClick: () => toggleRun() });
+  // §17.854 (audit S4) — keep the run button honest if the mode toggles while
+  // the theater is open (only when idle; a running label reads "■ Stop").
+  const offExecMode = onExecModeChange(() => {
+    if (!running) runBtn.textContent = isAssist() ? "✦ Start assist" : "▶ Run all";
+  });
   const statusPill = el("span", {});
+
+  // §17.854 (audit G2) — navigating away from a live run silently cancels it
+  // (the server treats a client disconnect from /execute/all as a cancel by
+  // design). Guard the in-header links so a glance at the DAG mid-run doesn't
+  // kill the job, and warn the browser on tab-close/reload.
+  function guardNav(e) {
+    if (running && !confirm(
+        "A run is streaming. Leaving this page STOPS it. Leave anyway?")) {
+      e.preventDefault();
+    }
+  }
+  function beforeUnload(e) {
+    if (running) { e.preventDefault(); e.returnValue = ""; return ""; }
+  }
+  const jobsLink = el("a", { class: "btn btn-sm btn-ghost", href: "#/theater", text: "← Jobs" });
+  const dagLink = el("a", { class: "btn btn-sm btn-ghost", href: `#/dag/${jobId}`, text: "⬡ DAG" });
+  jobsLink.addEventListener("click", guardNav);
+  dagLink.addEventListener("click", guardNav);
+
   const header = el(
     "div",
     { class: "view-header" },
     el("div", {}, el("h1", { text: "Execution Theater" }), el("div", { class: "sub mono", text: shortId(jobId) })),
-    el(
-      "div",
-      { class: "header-actions" },
-      el("a", { class: "btn btn-sm btn-ghost", href: "#/theater", text: "← Jobs" }),
-      el("a", { class: "btn btn-sm btn-ghost", href: `#/dag/${jobId}`, text: "⬡ DAG" }),
-      statusPill,
-      runBtn
-    )
+    el("div", { class: "header-actions" }, jobsLink, dagLink, statusPill, runBtn)
   );
 
   // §17.818 (plan 5.6) — the §17.811 progress/ETA signal, previously
@@ -168,7 +185,8 @@ function renderTheater(container, jobId) {
           el("span", { class: "tn-title", text: n.title || "" }),
           statusBadge(n.status)
         );
-        row.addEventListener("click", () => showNode(key));
+        makeClickable(row, () => showNode(key),  // §17.854 G6
+          { label: `View node ${key}` });
         return row;
       })
     );
@@ -182,6 +200,22 @@ function renderTheater(container, jobId) {
     mount(stageTitle, el("span", { class: "mono", text: key }), el("span", { text: " · " + (n.title || "") }), statusBadge(n.status));
     mount(stageBody, n.output ? el("div", { class: "md", html: mdToHtml(n.output) }) : el("div", { class: "dim", text: n.status === "running" ? "Running…" : "No output yet." }));
     renderNodes();
+  }
+
+  // §17.854 (audit G8) — coalesce streamed-token re-renders into one per
+  // animation frame. The per-token path re-ran mdToHtml over the WHOLE
+  // accumulated output and replaced stageBody on every delta (O(n²), and it
+  // reset scroll + killed text selection mid-stream). rAF batching renders at
+  // most ~60fps regardless of token rate.
+  let _stageRenderPending = false;
+  function scheduleStageRender(key) {
+    if (key !== currentKey || _stageRenderPending) return;
+    _stageRenderPending = true;
+    requestAnimationFrame(() => {
+      _stageRenderPending = false;
+      const n = nodeState.get(currentKey);
+      if (n && !disposed) mount(stageBody, el("div", { class: "md", html: mdToHtml(n.output || "") }));
+    });
   }
 
   async function loadInitial() {
@@ -227,6 +261,7 @@ function renderTheater(container, jobId) {
 
   async function startRun() {
     running = true;
+    window.addEventListener("beforeunload", beforeUnload);  // §17.854 G2
     summaryEl.classList.add("hidden");
     runBtn.textContent = "■ Stop";
     runBtn.classList.remove("btn-primary");
@@ -256,6 +291,7 @@ function renderTheater(container, jobId) {
 
   function finishRun() {
     running = false;
+    window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     abort = null;
     currentKey = null;
     runBtn.textContent = "▶ Run all";
@@ -290,7 +326,7 @@ function renderTheater(container, jobId) {
       case "node_token": {
         const n = nodeState.get(data.node_key) || {};
         ensureNode(data.node_key, { output: (n.output || "") + (data.delta || "") });
-        if (data.node_key === currentKey) mount(stageBody, el("div", { class: "md", html: mdToHtml(nodeState.get(data.node_key).output) }));
+        scheduleStageRender(data.node_key);  // §17.854 G8 — rAF-coalesced
         break;
       }
       case "node_done":
@@ -367,6 +403,8 @@ function renderTheater(container, jobId) {
 
   return () => {
     disposed = true;
+    offExecMode();  // §17.854 S4
+    window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     if (abort) abort.abort();
   };
 }

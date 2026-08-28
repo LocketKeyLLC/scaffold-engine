@@ -68,6 +68,25 @@ class TestAwaitWithHeartbeat:
 
         assert yields == []
 
+    # §17.854 (audit D1) — generator close (client disconnect) must cancel the
+    # still-running wrapped task, not leak it.
+    @pytest.mark.asyncio
+    async def test_closing_generator_cancels_wrapped_task(self):
+        from app.modules.research_agent import _await_with_heartbeat
+
+        async def _long():
+            await asyncio.sleep(3600)   # the detached fetch/parse/LLM pipeline
+            return "never"
+
+        task = asyncio.create_task(_long())
+        gen = _await_with_heartbeat(task, {"status": "working"}, interval=0)
+        await gen.__anext__()          # get one heartbeat → task is mid-flight
+        await gen.aclose()             # consumer disconnects
+
+        # The finally cancels+awaits the task, so it's done and cancelled.
+        assert task.done()
+        assert task.cancelled()
+
     # §17.167 — last_activity_at touch on task completion
     @pytest.mark.asyncio
     async def test_touches_last_activity_when_session_id_provided(self):

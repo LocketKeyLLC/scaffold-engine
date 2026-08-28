@@ -719,9 +719,18 @@ async def _rerank(
     # and sort by that — guarantees single-scale ordering.
     # Uses dataclasses.replace to honor _rrf_fuse's no-mutation contract:
     # callers may hold references to results that pre-date this rerank.
-    if docs and len(rr.items) < len(docs):
+    # §17.854 (audit E2) — a DEAD CrossEncoder falls back to RRF *inside*
+    # rerank(), returning len(docs) items (so the partial guard never fires)
+    # with RRF-scale scores (~0.016). The confidence filter (0.8) then empties
+    # and silently truncates to top-3 while metadata still claims reranked:true.
+    # Treat an RRF backend as unavailability: take the same full-degraded path so
+    # the confidence gate steps aside (skipped_rerank), the response is honest +
+    # uncacheable (a warning), and the caller still gets a full top_k.
+    rrf_backend = str(meta["backend"] or "").upper() == "RRF"
+    if docs and (rrf_backend or len(rr.items) < len(docs)):
         warning_kind = (
-            "reranker_returned_no_items" if not rr.items
+            "reranker_unavailable" if rrf_backend
+            else "reranker_returned_no_items" if not rr.items
             else f"reranker_returned_partial_{len(rr.items)}_of_{len(docs)}"
         )
         logger.warning(
@@ -794,7 +803,8 @@ async def _rerank(
 # ---------------------------------------------------------------------------
 
 async def _lookup_superseded(
-    collection: "MilvusClient", entry_ids: list[str]
+    collection: "MilvusClient", entry_ids: list[str],
+    warnings: list[str] | None = None,
 ) -> set[str]:
     """Return the subset of entry_ids that are superseded by some other row.
 
@@ -805,6 +815,12 @@ async def _lookup_superseded(
     (default 128) so a brief-flood scenario can't unboundedly inflate the
     Milvus query. When the cap fires a structured log line surfaces so an
     operator can decide whether to raise the cap.
+
+    §17.854 (audit E3b) — on a Milvus error the sweep returns ``set()`` (so
+    superseded ancestors would be silently SERVED). When a ``warnings`` list is
+    passed, a ``supersedes_sweep_failed`` entry is appended so the caller can
+    mark the response degraded and uncacheable (matching every other
+    degradation). Default None keeps the old callers/tests byte-compatible.
     """
     if not entry_ids:
         return set()
@@ -832,6 +848,8 @@ async def _lookup_superseded(
             return {r.get("supersedes_id", "") for r in rows if r.get("supersedes_id")}
         except Exception as e:
             logger.warning("supersedes_lookup_failed: %s", e)
+            if warnings is not None and "supersedes_sweep_failed" not in warnings:
+                warnings.append("supersedes_sweep_failed")
             return set()
 
     loop = asyncio.get_running_loop()
@@ -988,7 +1006,7 @@ async def query_rag(
     if not include_history and filtered:
         entry_ids = [r.entry_id for r in filtered if r.entry_id]
         if entry_ids:
-            superseded = await _lookup_superseded(collection, entry_ids)
+            superseded = await _lookup_superseded(collection, entry_ids, warnings)
             if superseded:
                 pre_sweep_len = len(filtered)
                 filtered = [r for r in filtered if r.entry_id not in superseded]
@@ -1513,7 +1531,7 @@ async def ingest_entries(
                             "source_type": p["source_type"],
                             "source_url": p["source_url"],
                             "content_hash": p["ch"],
-                            "model_id": settings.model_embedder_id,
+                            "model_id": settings.model_embedder_pipeline,  # §17.854 (E4): the ACTUAL vector-producing model, not the static label
                             "version": new_version,
                             "supersedes_id": new_supersedes,
                             "created_at": now,
@@ -1565,7 +1583,7 @@ async def ingest_entries(
             "source_type": p["source_type"],
             "source_url": p["source_url"],
             "content_hash": p["ch"],
-            "model_id": settings.model_embedder_id,
+            "model_id": settings.model_embedder_pipeline,  # §17.854 (E4): the ACTUAL vector-producing model, not the static label
             "version": new_version,
             "supersedes_id": new_supersedes,
             "created_at": now,

@@ -97,3 +97,38 @@ async def test_component_sem_serial_when_cap_one(monkeypatch):
     release.set()
     await asyncio.gather(*tasks)
     assert peak == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_component_releases_slot(monkeypatch):
+    """§17.854 (audit A8) — a CancelledError propagating out of the shielded
+    rollup in the finally must NOT leak the semaphore slot. Before the fix the
+    release sat after an `except Exception` that can't catch CancelledError, so
+    the slot was lost until process restart. We drive the exact path by having
+    the rollup raise CancelledError (as a real cancel-during-await would)."""
+    monkeypatch.setattr(settings, "decompose_component_max_concurrent", 1)
+    dec._reset_component_sem()
+
+    async def fake_phase1(*a, **k):
+        return {"status": "failed"}   # early return → straight to the finally
+
+    async def cancelling_rollup(*a, **k):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(dec, "analyze_and_confirm", fake_phase1)
+    monkeypatch.setattr(dec, "async_session", lambda: _DummyCtx())
+    monkeypatch.setattr(dec, "get_ideation_slot_sem", lambda: asyncio.Semaphore(100))
+    monkeypatch.setattr(dec, "_rollup_umbrella", cancelling_rollup)
+
+    task = asyncio.create_task(dec.run_component_pipeline(
+        "c0", "idea", domain=None, research_queries=None,
+        model_overrides=None, umbrella_id="u",
+    ))
+    # The CancelledError from the shielded rollup re-raises out of the pipeline.
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The slot must be free despite the cancellation: a fresh acquire is instant.
+    sem = dec.get_component_sem()
+    await asyncio.wait_for(sem.acquire(), timeout=1.0)
+    sem.release()

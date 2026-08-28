@@ -15,7 +15,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.authz import Principal, get_principal
+from app.authz import Principal, assert_visible, get_principal
 from app.database import get_db
 from app.modules import node_editor
 from app.schemas import (
@@ -44,6 +44,21 @@ def _valid_uuid(job_id: str) -> None:
         raise HTTPException(status_code=400, detail="Invalid job_id format")
 
 
+async def _guard(db: AsyncSession, principal: Principal, job_id: str) -> None:
+    """§17.854 (audit A2) — validate + ownership-gate in one step.
+
+    The node CRUD surface is the highest-privilege mutation path in the engine
+    (edit prompt templates, delete nodes, reset a completed job back to
+    executing) and was the ONE router taking a principal purely for edit
+    attribution while doing no visibility check — a non-admin scoped key that
+    learned another owner's job UUID could read/edit/delete its nodes. 404 (not
+    403) so a non-owner's job is indistinguishable from a missing one, matching
+    jobs.py / workflow.py / status.py.
+    """
+    _valid_uuid(job_id)
+    await assert_visible(db, principal, job_id, detail=f"Job {job_id} not found")
+
+
 def _attributed(principal: Principal, client_value: str | None) -> str:
     """§17.815 (plan 5.3) — server-derived edit attribution.
 
@@ -60,7 +75,10 @@ def _attributed(principal: Principal, client_value: str | None) -> str:
 
 
 @router.get("/nodes/{job_id}")
-async def node_list(job_id: str, db: AsyncSession = Depends(get_db)):
+async def node_list(
+    job_id: str, db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
     """Full editable node list for the /ui plan editor.
 
     Returns ``{job_id, job_status, nodes:[{node_key, title, description, status,
@@ -68,7 +86,7 @@ async def node_list(job_id: str, db: AsyncSession = Depends(get_db)):
     tool, is_deliverable, tool_config}]}`` — exactly the columns the PATCH
     surface accepts, plus ``edit_version`` for the optimistic-lock round-trip.
     """
-    _valid_uuid(job_id)
+    await _guard(db, principal, job_id)
     return _dispatch(await node_editor.list_nodes(job_id, db))
 
 
@@ -78,7 +96,7 @@ async def node_edit(
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
-    _valid_uuid(job_id)
+    await _guard(db, principal, job_id)
     data = body.model_dump(exclude_unset=True)
     expected_version = data.pop("expected_version", None)
     edited_by = _attributed(principal, data.pop("edited_by", None))
@@ -93,7 +111,7 @@ async def node_insert(
     job_id: str, body: NodeInsertInput, db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
-    _valid_uuid(job_id)
+    await _guard(db, principal, job_id)
     spec = body.model_dump(exclude_unset=False)
     edited_by = _attributed(principal, spec.pop("edited_by", None))
     return _dispatch(await node_editor.insert_node(
@@ -107,7 +125,7 @@ async def node_delete(
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
-    _valid_uuid(job_id)
+    await _guard(db, principal, job_id)
     return _dispatch(await node_editor.delete_node(
         job_id, node_key, edited_by=_attributed(principal, edited_by), db=db,
     ))
@@ -118,7 +136,7 @@ async def node_reorder(
     job_id: str, body: NodeReorderInput, db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
-    _valid_uuid(job_id)
+    await _guard(db, principal, job_id)
     return _dispatch(await node_editor.reorder_nodes(
         job_id, body.ordered_keys,
         edited_by=_attributed(principal, body.edited_by), db=db,
@@ -131,7 +149,7 @@ async def node_reset(
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
-    _valid_uuid(job_id)
+    await _guard(db, principal, job_id)
     edited_by = _attributed(principal, body.edited_by if body else None)
     return _dispatch(await node_editor.reset_node(
         job_id, node_key, edited_by=edited_by, db=db,

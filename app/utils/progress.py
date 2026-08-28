@@ -242,7 +242,10 @@ class ProgressTracker:
             resp = await model_router.generate(
                 prompt, role=role, temperature=0.3, max_tokens=80
             )
-            text = (getattr(resp, "content", None) or "").strip()
+            # §17.854 (audit B5) — ModelResponse exposes `.text`, not `.content`;
+            # the old attribute meant this (currently caller-less) narrator would
+            # always return None even if wired. Fixed so the valve isn't a trap.
+            text = (getattr(resp, "text", None) or "").strip()
             try:
                 from app.utils.llm_parsing import strip_think_tags
 

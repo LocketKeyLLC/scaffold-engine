@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
+from app.authz import ADMIN_PRINCIPAL
 from app.routers import assist as assist_router
 
 
@@ -113,7 +114,7 @@ async def test_put_persists_chat_id_durably():
     db = _FakeDB(rows=[None])
     with patch.object(assist_router.assist_session_map, "remember",
                       AsyncMock()) as remember:
-        out = await assist_router.assist_chatmap_put("chat-1", body, db=db)
+        out = await assist_router.assist_chatmap_put("chat-1", body, db=db, principal=ADMIN_PRINCIPAL)
     assert out == {"chat_id": "chat-1", "stored": True}
     remember.assert_awaited_once()                       # Redis still set
     assert db.commits == 1                                # durable write committed
@@ -129,7 +130,7 @@ async def test_put_durable_write_failure_is_soft():
     body = assist_router.AssistChatMapInput(session_id="s1", last_node_key=None)
     db = _FakeDB(raises=True)
     with patch.object(assist_router.assist_session_map, "remember", AsyncMock()):
-        out = await assist_router.assist_chatmap_put("chat-1", body, db=db)
+        out = await assist_router.assist_chatmap_put("chat-1", body, db=db, principal=ADMIN_PRINCIPAL)
     assert out == {"chat_id": "chat-1", "stored": True}
     assert db.rollbacks == 1
     assert db.commits == 0
