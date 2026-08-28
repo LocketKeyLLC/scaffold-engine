@@ -21,11 +21,24 @@ function forDisplay(s) {
   return (s || "").replace(MARKER_RE, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+// §17.854 (audit G8) — native chat history was view-local, so switching views
+// (or an accidental palette nav) destroyed the whole conversation, including any
+// pending confirm-card the engine embedded. Persist per-tab in sessionStorage.
+const CHAT_STORE_KEY = "scaffold_chat_history";
+function loadChatHistory() {
+  try { return JSON.parse(sessionStorage.getItem(CHAT_STORE_KEY)) || []; }
+  catch { return []; }
+}
+function saveChatHistory(messages) {
+  try { sessionStorage.setItem(CHAT_STORE_KEY, JSON.stringify(messages)); }
+  catch { /* quota / private mode — degrade to in-memory only */ }
+}
+
 export default function chat(container) {
   let disposed = false;
   let streaming = false;
   let abort = null;
-  const messages = []; // {role, content} — OpenAI history (raw; markers kept)
+  const messages = loadChatHistory(); // {role, content} — restored per-tab
 
   const transcript = el("div", { class: "chat-transcript" });
   const input = el("textarea", {
@@ -56,6 +69,7 @@ export default function chat(container) {
       onClick: () => {
         if (streaming && abort) abort.abort();
         messages.length = 0;
+        saveChatHistory(messages);  // §17.854 G8 — clear the persisted copy too
         render();
         input.focus();
       },
@@ -114,6 +128,7 @@ export default function chat(container) {
     if (!text || streaming) return;
     input.value = "";
     messages.push({ role: "user", content: text });
+    saveChatHistory(messages);  // §17.854 G8
     render();
 
     streaming = true;
@@ -126,6 +141,19 @@ export default function chat(container) {
     transcript.scrollTop = transcript.scrollHeight;
 
     let acc = "";
+    // §17.854 (audit G8) — rAF-coalesce the per-token markdown re-render
+    // (was re-running mdToHtml over the whole accumulated reply every delta).
+    let renderPending = false;
+    const scheduleRender = () => {
+      if (renderPending) return;
+      renderPending = true;
+      requestAnimationFrame(() => {
+        renderPending = false;
+        if (disposed) return;
+        body.innerHTML = mdToHtml(forDisplay(acc));
+        transcript.scrollTop = transcript.scrollHeight;
+      });
+    };
     try {
       for await (const { data } of api.stream("/v1/chat/completions", {
         body: { model: MODEL, stream: true, messages: messages.map((m) => ({ role: m.role, content: m.content })) },
@@ -137,18 +165,18 @@ export default function chat(container) {
         const piece = delta && delta.content;
         if (piece) {
           acc += piece;
-          body.innerHTML = mdToHtml(forDisplay(acc));
-          transcript.scrollTop = transcript.scrollHeight;
+          scheduleRender();
         }
       }
       messages.push({ role: "assistant", content: acc });
+      saveChatHistory(messages);  // §17.854 G8
     } catch (e) {
       if (e.name !== "AbortError") {
         const msg = e.status === 404
           ? "Native chat is off. Set NATIVE_OPENAI_ENABLED=true and restart the orchestrator — or check [Settings](#/settings) for the effective config."
           : e.detail || e.message || "stream error";
         body.innerHTML = mdToHtml(`⚠ ${msg}`);
-        if (acc) messages.push({ role: "assistant", content: acc });
+        if (acc) { messages.push({ role: "assistant", content: acc }); saveChatHistory(messages); }
       }
     } finally {
       streaming = false;

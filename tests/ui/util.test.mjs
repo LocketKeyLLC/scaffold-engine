@@ -52,6 +52,25 @@ test("prose HTML is escaped", () => {
   assert.ok(!out.includes("<img"));
 });
 
+test("ordered lists render as <ol> (§17.854 G8)", () => {
+  const out = mdToHtml("Steps:\n\n1. first\n2. second\n3. third");
+  assert.ok(out.includes("<ol>"));
+  assert.ok(out.includes("<li>first</li>"));
+  assert.ok(out.includes("<li>third</li>"));
+  assert.ok(!out.includes("1. first")); // the numeral marker is stripped
+});
+
+test("ordered list is not wrapped in a paragraph (§17.854 G8)", () => {
+  const out = mdToHtml("before\n\n1. a\n2. b\n\nafter");
+  assert.ok(!/<p>\s*<ol/.test(out));
+  assert.ok(out.includes("<ol>"));
+});
+
+test("unordered lists still render as <ul>", () => {
+  const out = mdToHtml("- one\n- two");
+  assert.ok(out.includes("<ul>") && out.includes("<li>one</li>"));
+});
+
 test("link URL cannot break out of href and inject attributes (§17.854)", () => {
   const out = mdToHtml('[click me](https://x.example/a" onmouseover="alert(1))');
   // the quote must arrive entity-escaped, so the raw breakout sequence and the

@@ -9,7 +9,9 @@
   --border-strong: #3a4452;
   --text: #e6edf3;
   --text-dim: #9aa7b4;
-  --text-faint: #6b7683;
+  /* §17.854 (audit G9) — was #6b7683 (~4.0:1 on --bg, below WCAG AA at the
+     10.5–12px it decorates). Lightened to clear AA. */
+  --text-faint: #7f8b99;
   /* Accent — violet (operator pick, UI design phase). --accent is for links,
      active states, focus; --accent-btn is the deeper solid fill that keeps
      white button text readable. */
@@ -106,7 +108,7 @@
     --border-strong: #c0c8d4;
     --text: #1a2029;
     --text-dim: #55606d;
-    --text-faint: #8a94a1;
+    --text-faint: #6b7480;  /* §17.854 G9 — was #8a94a1 (~2.9:1 on light bg, fails AA); darkened */
     --accent: #6d4ddd;
     --accent-btn: #6d4ddd;
     --accent-btn-hover: #5b3ec7;
@@ -125,7 +127,7 @@
   --border-strong: #c0c8d4;
   --text: #1a2029;
   --text-dim: #55606d;
-  --text-faint: #8a94a1;
+  --text-faint: #6b7480;  /* §17.854 G9 — was #8a94a1 (~2.9:1 on light bg, fails AA); darkened */
   --accent: #6d4ddd;
   --accent-btn: #6d4ddd;
   --accent-btn-hover: #5b3ec7;
@@ -542,6 +544,30 @@ select.input:focus-visible,
    mode); auto renders warn-tinted as the "engine runs it" signal. */
 .exec-mode-toggle { color: var(--accent); font-weight: var(--fw-semi); }
 .exec-mode-toggle.mode-auto { color: var(--warn, #d29922); }
+
+/* §17.854 (audit G7) — the promoted, labeled exec-mode block. Readable size,
+   its own section under the nav — signals "mode", not "cosmetic preference". */
+.exec-mode-block {
+  padding: 10px 12px;
+  margin: 4px 8px 0;
+  border-top: 1px solid var(--border, #21262d);
+}
+.exec-mode-heading {
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+.exec-mode-block .exec-mode-toggle {
+  width: 100%;
+  font-size: var(--fs-sm, 13px);
+  padding: 7px 10px;
+  text-align: left;
+}
+.exec-mode-block .exec-mode-toggle.mode-auto {
+  background: color-mix(in srgb, var(--warn, #d29922) 12%, transparent);
+}
 
 /* §17.847 — flow guide stepper */
 .flow-guide { padding: 10px 16px; margin-bottom: 12px; }

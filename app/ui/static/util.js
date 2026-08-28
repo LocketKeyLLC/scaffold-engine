@@ -126,6 +126,14 @@ export function mdToHtml(src) {
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
     .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" rel="noopener" target="_blank">$1</a>');
+  // ordered lists (§17.854 audit G8 — assist guidance arrives as `1. … 2. …`
+  // numbered steps; without this they flattened to <p> with <br>, losing the
+  // step structure in the surface most dependent on it). Runs BEFORE unordered
+  // so a `1.` line isn't consumed by the bullet rule.
+  text = text.replace(/(?:^|\n)((?:\d+\. .*(?:\n|$))+)/g, (m, list) => {
+    const items = list.trim().split(/\n/).map((li) => `<li>${li.replace(/^\d+\. /, "")}</li>`).join("");
+    return `\n<ol>${items}</ol>`;
+  });
   // unordered lists
   text = text.replace(/(?:^|\n)((?:[-*] .*(?:\n|$))+)/g, (m, list) => {
     const items = list.trim().split(/\n/).map((li) => `<li>${li.replace(/^[-*] /, "")}</li>`).join("");
@@ -134,7 +142,7 @@ export function mdToHtml(src) {
   // paragraphs / line breaks (a stashed fence stands alone — never wrapped)
   text = text
     .split(/\n{2,}/)
-    .map((p) => (/^\s*(\x00MD\d+\x00|<(h\d|ul|pre|blockquote))/.test(p) ? p : `<p>${p.replace(/\n/g, "<br>")}</p>`))
+    .map((p) => (/^\s*(\x00MD\d+\x00|<(h\d|ul|ol|pre|blockquote))/.test(p) ? p : `<p>${p.replace(/\n/g, "<br>")}</p>`))
     .join("\n");
   text = text.replace(/\x00MD(\d+)\x00/g, (_, i) => blocks[Number(i)] ?? "");
   return text;

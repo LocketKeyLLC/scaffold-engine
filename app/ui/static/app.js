@@ -67,6 +67,13 @@ document.addEventListener("click", async (e) => {
 const root = document.getElementById("root");
 let outlet = null; // the content container the active view renders into
 let cleanup = () => {}; // teardown hook returned by the active view
+// §17.854 (audit G5) — chrome is rebuilt on every gate→boot cycle (mid-session
+// 401 → connectGate → boot()). These module-scope handles let each rebuild
+// REPLACE rather than ACCUMULATE its health poller + document keydown listener,
+// which previously leaked one interval (fetching /health forever against a
+// detached DOM) and one duplicate Escape handler per re-auth.
+let healthTimer = null;
+let escHandler = null;
 
 // ── Auth / connect gate ───────────────────────────────────────────────
 function gateStep(n, title, ...body) {
@@ -247,9 +254,9 @@ function buildChrome() {
       )
     );
     navLinks.push(...links);
-    // Collapsible group (operator request: keep the sections, don't overwhelm
-    // — collapsed by default, except the group that owns the active view).
-    const open = navOpenGroups().has(g.label) || items.some((n) => n.id === topSegment(router.currentPath() || "/"));
+    // Collapsible group. §17.854 (G7) — OPEN by default (unless the operator
+    // explicitly collapsed it), and always open when it owns the active view.
+    const open = !navClosedGroups().has(g.label) || items.some((n) => n.id === topSegment(router.currentPath() || "/"));
     const group = el(
       "div",
       { class: "nav-group" + (open ? "" : " collapsed"), dataset: { group: g.label } },
@@ -259,9 +266,9 @@ function buildChrome() {
           class: "nav-group-label nav-group-toggle",
           onClick: () => {
             const collapsed = group.classList.toggle("collapsed");
-            const set = navOpenGroups();
-            collapsed ? set.delete(g.label) : set.add(g.label);
-            saveNavOpenGroups(set);
+            const set = navClosedGroups();
+            collapsed ? set.add(g.label) : set.delete(g.label);
+            saveNavClosedGroups(set);
           },
         },
         el("span", { class: "nav-group-chevron", text: "▸" }),
@@ -285,6 +292,16 @@ function buildChrome() {
       el("span", { class: "brand-name", text: "Scaffold" })
     ),
     el("nav", { class: "nav" }, ...navGroups),
+    // §17.854 (audit G7) — the Auto/Assist switch changes what "Execute" MEANS
+    // everywhere, yet it lived in .foot-controls at 11.5px styled like the theme
+    // toggle (a "preference", not a safety-relevant mode). Promoted to its own
+    // labeled block at readable size, directly under the nav.
+    el(
+      "div",
+      { class: "exec-mode-block" },
+      el("div", { class: "exec-mode-heading", text: "Execution mode" }),
+      execModeToggle()
+    ),
     el(
       "div",
       { class: "sidebar-foot" },
@@ -298,7 +315,7 @@ function buildChrome() {
             el("span", { class: "identity-role", text: ` (${p.role})` })
           )
         : null,
-      el("div", { class: "foot-controls" }, execModeToggle(), themeToggle(), densityToggle()),
+      el("div", { class: "foot-controls" }, themeToggle(), densityToggle()),
       el("div", { class: "health" }, healthDot, healthText, el("span", { class: "faint mono ui-build", text: ` · ui ${UI_BUILD}` })),
       el("button", {
         class: "btn btn-ghost btn-sm",
@@ -342,9 +359,11 @@ function buildChrome() {
   );
   // Tapping a destination navigates → close the drawer; Escape closes too.
   navLinks.forEach((a) => a.addEventListener("click", closeNav));
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeNav();
-  });
+  // §17.854 (audit G5) — replace, don't stack, the document-level Escape handler
+  // across chrome rebuilds.
+  if (escHandler) document.removeEventListener("keydown", escHandler);
+  escHandler = (e) => { if (e.key === "Escape") closeNav(); };
+  document.addEventListener("keydown", escHandler);
 
   mount(root, el("div", { class: "shell" }, topbar, sidebar, scrim, outlet));
   mountCommandPalette(); // idempotent; overlay lives on document.body
@@ -434,13 +453,18 @@ function densityToggle() {
 // Collapsed-group persistence: the OPEN set survives reloads; no stored
 // value means "everything collapsed" (the active view's group still
 // auto-expands so the operator always sees where they are).
-const NAV_OPEN_KEY = "scaffold_nav_open";
-function navOpenGroups() {
-  try { return new Set(JSON.parse(localStorage.getItem(NAV_OPEN_KEY)) || []); }
+// §17.854 (audit G7) — store the CLOSED set, not the open set. The old
+// "scaffold_nav_open" default (no stored value → empty set → EVERY group
+// collapsed) hid Research/Library/Schedules/Costs from a first-time operator,
+// whose main problem is knowing the views exist. Inverted: default (empty
+// closed set) → everything open; the operator collapses what they don't want.
+const NAV_CLOSED_KEY = "scaffold_nav_closed";
+function navClosedGroups() {
+  try { return new Set(JSON.parse(localStorage.getItem(NAV_CLOSED_KEY)) || []); }
   catch { return new Set(); }
 }
-function saveNavOpenGroups(set) {
-  localStorage.setItem(NAV_OPEN_KEY, JSON.stringify([...set]));
+function saveNavClosedGroups(set) {
+  localStorage.setItem(NAV_CLOSED_KEY, JSON.stringify([...set]));
 }
 
 function highlightNav(path) {
@@ -478,7 +502,10 @@ async function startHealthPolling(dot, text) {
     }
   }
   await tick();
-  setInterval(() => { if (!document.hidden) tick(); }, 15000); // §17.818 — skip hidden tabs
+  // §17.854 (audit G5) — clear any prior poller so a chrome rebuild doesn't
+  // accumulate intervals hitting /health against detached nodes forever.
+  if (healthTimer) clearInterval(healthTimer);
+  healthTimer = setInterval(() => { if (!document.hidden) tick(); }, 15000); // §17.818 — skip hidden tabs
 }
 
 // ── View lifecycle ────────────────────────────────────────────────────
@@ -529,8 +556,17 @@ const VIEWS = {
   alerts: lazy("alerts", "Alerts"),
 };
 
+// §17.854 (audit G5) — monotonically-increasing nav token. Two quick
+// navigations (first visit to each view, so the dynamic import actually hits the
+// network) can resolve out of order; without a sequence check the earlier
+// route's module could resolve LAST, tear down the newer view, and render the
+// stale one while the hash points elsewhere. Each call stamps a token and bails
+// if a newer navigation superseded it before its import resolved.
+let navSeq = 0;
 async function loadAndRender(name, params, path) {
+  const token = ++navSeq;
   const mod = await VIEWS[name]();
+  if (token !== navSeq) return; // a newer navigation won; drop this stale render
   renderView(mod.default, params, path);
 }
 

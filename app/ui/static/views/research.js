@@ -3,7 +3,7 @@
 // pause/reply channel (POST /research/reply). Reuses the fetch SSE reader.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, fmtNum, mdToHtml } from "../util.js";
-import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, emptyState, makeClickable } from "../components.js";
 
 const RESEARCH_ICON = {
   research_started: "◎",
@@ -27,6 +27,11 @@ export default function research(container, params) {
   let disposed = false;
   let running = false;
   let abort = null;
+  // §17.854 (audit G2) — a research stream is cancel-on-disconnect too; warn on
+  // tab-close/reload while one is live.
+  function beforeUnload(e) {
+    if (running) { e.preventDefault(); e.returnValue = ""; return ""; }
+  }
   let activeSession = null;
 
   // ── New-research runner ────────────────────────────────────────────
@@ -96,6 +101,7 @@ export default function research(container, params) {
 
   async function startRun(topic) {
     running = true;
+    window.addEventListener("beforeunload", beforeUnload);  // §17.854 G2
     activeSession = null;
     feed.replaceChildren();
     feed.classList.remove("hidden");
@@ -124,6 +130,7 @@ export default function research(container, params) {
 
   function finishRun() {
     running = false;
+    window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     abort = null;
     runBtn.textContent = "◎ Run research";
     runBtn.classList.replace("btn-danger", "btn-primary");
@@ -134,6 +141,7 @@ export default function research(container, params) {
     if (!activeSession) return;
     replyBox.classList.add("hidden");
     running = true;
+    window.addEventListener("beforeunload", beforeUnload);  // §17.854 G2
     runBtn.textContent = "■ Stop";
     runBtn.classList.replace("btn-primary", "btn-danger");
     abort = new AbortController();
@@ -295,7 +303,8 @@ export default function research(container, params) {
       el("td", { class: "mono", text: s.coverage_pct != null ? Math.round(s.coverage_pct) + "%" : "—" }),
       el("td", { class: "faint", text: timeAgo(s.updated_at || s.created_at) })
     );
-    tr.addEventListener("click", () => (location.hash = `#/research/${s.id}`));
+    makeClickable(tr, () => (location.hash = `#/research/${s.id}`),  // §17.854 G6
+      { role: "link", label: `Open research ${s.topic || ""}` });
     return tr;
   }
 
@@ -344,6 +353,7 @@ export default function research(container, params) {
 
   return () => {
     disposed = true;
+    window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     if (abort) abort.abort();
   };
 }
