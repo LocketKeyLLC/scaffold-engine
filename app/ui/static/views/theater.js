@@ -7,6 +7,8 @@ import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, mdToHtml, fmtNum } from "../util.js";
 import { statusBadge, loading, errorPanel, emptyState } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
+import { isAssist, startAssistFor } from "../exec_mode.js";
+import { toast } from "../components.js";
 
 const TERMINAL = new Set(["pipeline_complete", "execution_failed", "error", "budget_exhausted", "awaiting_assist"]);
 
@@ -83,7 +85,7 @@ function renderTheater(container, jobId) {
   const nodeState = new Map(); // node_key -> {status, title, tool, output}
   let currentKey = null;
 
-  const runBtn = el("button", { class: "btn btn-primary", text: "▶ Run all", onClick: () => toggleRun() });
+  const runBtn = el("button", { class: "btn btn-primary", text: isAssist() ? "✦ Start assist" : "▶ Run all", onClick: () => toggleRun() });
   const statusPill = el("span", {});
   const header = el(
     "div",
@@ -211,6 +213,13 @@ function renderTheater(container, jobId) {
   function toggleRun() {
     if (running) {
       if (abort) abort.abort();
+      return;
+    }
+    // §17.853 — the global mode gate: in Assist mode, Run means "start the
+    // guided session", never autonomous /execute/all. Every path into the
+    // theater's run action (button, approve auto-run intent) passes here.
+    if (isAssist()) {
+      startAssistFor(api, jobId, toast);
       return;
     }
     startRun();

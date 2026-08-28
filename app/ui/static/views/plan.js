@@ -10,6 +10,7 @@ import { statusBadge, loading, errorPanel, toast } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
 import { briefPanel } from "./brief_panel.js";
 import { flowGuide } from "./flow_guide.js";
+import { isAssist, startAssistFor } from "../exec_mode.js";
 
 // §17.815 — edit attribution is SERVER-derived from the API key (audit-trail
 // integrity); the client no longer sends a spoofable label.
@@ -34,7 +35,16 @@ function renderPlan(container, jobId) {
   const warning = el("div", { class: "plan-warning hidden" });
   const insertBtn = el("button", { class: "btn btn-sm", text: "＋ Insert node", onClick: () => openInsertDrawer() });
   const reorderBtn = el("button", { class: "btn btn-sm", text: "↕ Reorder", onClick: () => toggleReorder() });
-  const executeBtn = el("a", { class: "btn btn-sm btn-primary", href: `#/theater/${jobId}`, text: "▶ Execute plan" });
+  // §17.853 — mode-aware primary: Assist starts the guided session; Auto
+  // hands off to the theater's autonomous runner.
+  const executeBtn = el("button", {
+    class: "btn btn-sm btn-primary",
+    text: isAssist() ? "✦ Start assist mode" : "▶ Execute plan",
+    onClick: () => {
+      if (isAssist()) startAssistFor(api, jobId, toast);
+      else location.hash = `#/theater/${jobId}`;
+    },
+  });
 
   const header = el(
     "div",
@@ -69,7 +79,7 @@ function renderPlan(container, jobId) {
     "div",
     { class: "card card-pad plan-guidance" },
     el("p", {
-      text: "Research is done and this plan was drawn from your brief plus what it found. Nothing has run yet — every node is a proposed step, executed in dependency order only after you press Execute plan.",
+      text: "Research is done and this plan was drawn from your brief plus what it found. Nothing has run yet — every node is a proposed step, executed in dependency order only when you start it: ✦ Assist mode walks YOU through each step; ▶ Auto mode has the engine work them itself (it produces runbooks and files — it never touches your machines). Switch modes in the sidebar.",
     }),
     el("p", {
       class: "dim",

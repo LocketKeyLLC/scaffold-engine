@@ -6,6 +6,7 @@ import { placeholder } from "./views/placeholder.js";
 import { mountCommandPalette } from "./command_palette.js";
 import { toast } from "./components.js";
 import { NAV, NAV_GROUPS } from "./nav.js";
+import { execMode, setExecMode } from "./exec_mode.js";
 
 // Visible build stamp (sidebar foot). Bump per UI change round — it exists so
 // "is my tab running the latest UI?" is answerable at a glance instead of by
@@ -297,7 +298,7 @@ function buildChrome() {
             el("span", { class: "identity-role", text: ` (${p.role})` })
           )
         : null,
-      el("div", { class: "foot-controls" }, themeToggle(), densityToggle()),
+      el("div", { class: "foot-controls" }, execModeToggle(), themeToggle(), densityToggle()),
       el("div", { class: "health" }, healthDot, healthText, el("span", { class: "faint mono ui-build", text: ` · ui ${UI_BUILD}` })),
       el("button", {
         class: "btn btn-ghost btn-sm",
@@ -380,6 +381,31 @@ function themeToggle() {
       document.documentElement.dataset.theme = next;
     }
     btn.textContent = THEME_LABELS[next];
+  });
+  return btn;
+}
+
+// §17.853 — global Auto/Assist execution mode toggle. Read by every execution
+// entry point (plan editor, theater Run, approve auto-run, flow guide).
+function execModeToggle() {
+  const label = () => (execMode() === "auto" ? "▶ Auto" : "✦ Assist");
+  const btn = el("button", {
+    class: "btn btn-ghost exec-mode-toggle",
+    title: "Execution mode — Assist: you run each step on your machines with the engine guiding (it never touches your hardware). Auto: the engine works every step itself, producing runbooks/configs/code autonomously.",
+    text: label(),
+  });
+  btn.classList.toggle("mode-auto", execMode() === "auto");
+  btn.addEventListener("click", () => {
+    const next = execMode() === "auto" ? "assist" : "auto";
+    setExecMode(next);
+    btn.textContent = label();
+    btn.classList.toggle("mode-auto", next === "auto");
+    toast(
+      next === "auto"
+        ? "▶ Auto mode: Execute runs the engine autonomously (it produces artifacts — it never connects to your machines)."
+        : "✦ Assist mode: Execute starts a guided session — you drive each step.",
+      "ok"
+    );
   });
   return btn;
 }
