@@ -100,7 +100,8 @@ if os.environ.get("SCAFFOLD_CI_SMOKE_MODE"):
         "test_retrieval_golden.py",
         "test_score_retrieval.py",
         "test_verify_extraction.py",
-        "test_web_ui.py",
+        # §17.854 (audit H7) — test_web_ui.py removed (web surface retired §17.820);
+        # a dead entry camouflages a typo in a live one, so pruned.
     ]
 
 
@@ -219,3 +220,21 @@ def _init_shared_http_clients():
     http_clients._clients.clear()
     http_clients.init_clients()
     yield
+
+
+@pytest.fixture
+def realistic_settings():
+    """§17.854 (audit H4) — a REAL, isolated Settings object for patching a
+    module's ``settings`` reference. Use it INSTEAD of a bare
+    ``patch("mod.settings")`` (which installs a MagicMock whose every unpinned
+    valve reads truthy — the trap that's bitten this suite three times):
+
+        def test_x(realistic_settings, monkeypatch):
+            realistic_settings.some_valve = True   # pin only what you test
+            monkeypatch.setattr(mod, "settings", realistic_settings)
+
+    Unpinned valves keep their real defaults, so the test exercises a
+    configuration that actually exists. A deep copy of the live singleton so
+    mutations never leak across tests."""
+    from app.config import settings as _live
+    return _live.model_copy(deep=True)

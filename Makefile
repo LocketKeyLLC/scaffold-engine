@@ -15,7 +15,10 @@ API_KEY   ?= $(SCAFFOLD_API_KEY)
 COVERAGE_MIN ?= 77
 API_URL   ?= http://localhost:8000
 
-.PHONY: _ensure_dev test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-embed bench-check-pipeline build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
+# §17.854 (audit H7) — completed the phony list: coverage/backup/restore/rebaseline/ci-smoke/
+# test-ui/lint-migrations/check-env-example/check-version/clean-pyc/bench-check-rag-* were real
+# targets missing here, so a same-named file at repo root would make them silently no-op.
+.PHONY: _ensure_dev test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -152,9 +155,14 @@ ci-smoke: ## Cloud-CI smoke tests — host pytest on `-m smoke`, no docker, no l
 	# smoke tests, so prewarm is pure waste.
 	SCAFFOLD_CI_SMOKE_MODE=1 SCAFFOLD_PREWARM_RERANKER=false pytest tests/ -m smoke --timeout=30 -v
 
-ci: _ensure_dev ## Run CI-safe tests (no live services; dev image) + bench regression gates (skip on missing/sparse history)
+ci: _ensure_dev ## Run CI-safe tests (no live services; dev image): core lane + pipeline lane (--noconftest) + bench regression gates. Mirrors what GitHub's test.yml runs.
 	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v \
-		-m "not validate"
+		-m "not validate" --ignore-glob='*/test_scaffold_router_*'
+	@printf '\n--- pipeline lane (--noconftest, §17.807) ---\n'
+	# §17.854 (audit H6) — `make ci` previously skipped the 1,100+ pipeline tests
+	# that GitHub's test.yml runs, so it over-sold itself as a local gate. Run
+	# them here too (they need --noconftest: tests/conftest.py eager-loads app).
+	docker exec $(CONTAINER) sh -c 'cd /code && pytest tests/test_scaffold_router_*.py --noconftest --timeout=30 -q'
 	@printf '\n--- Audit I4: bench regression gates ---\n'
 	$(MAKE) bench-check
 
@@ -170,12 +178,13 @@ test-ui: ## §17.814 — SPA JS unit tests (node --test; dev-only, zero runtime 
 check-env-example: ## §17.823 (M15) — every compose ${VAR} must be documented in .env.example. Static, no docker. Part of ci-tier-0.
 	@python3 scripts/check_env_example.py
 
-ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift lint-migrations check-env-example ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The 6 prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
+ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift check-version lint-migrations check-env-example ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
 	@printf '\033[1m▶ static-scan inventory tests (host pytest, --noconftest)\033[0m\n'
 	@if command -v pytest >/dev/null 2>&1; then \
 		PYTHONPATH=$(CURDIR):$(CURDIR)/sdk pytest \
 			tests/test_sse_event_inventory.py \
 			tests/test_sdk_schema_parity.py \
+			tests/test_settings_patch_scan.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
 	else \
 		printf '\033[1;33m⚠ host pytest not found — skipped the 2 inventory scans (byte-equal gates above still ran). Full coverage: make test\033[0m\n'; \
@@ -430,6 +439,29 @@ check-rerank-drift: ## §17.245 — Verify MODEL_RERANKER default matches across
 		printf '  config.py   : %s\n' "$$CFG"; \
 		printf '  .env.example: %s\n' "$$ENV"; \
 		printf '\033[1;33m  Fix: pick the canonical value (typically settings.model_reranker in app/config.py:173) and update the other 2.\033[0m\n'; \
+		exit 1; \
+	fi
+
+check-version: ## §17.854 (audit H2) — Verify the version agrees across pyproject.toml ↔ app/main.py ↔ sdk/pyproject.toml (CI gate; root pyproject had silently lagged at 1.2.0 while the app+sdk were 1.4.0).
+	@PP=$$(grep -E '^version = ' pyproject.toml | head -1 | sed 's/^version = "\(.*\)"$$/\1/'); \
+	APP=$$(grep -E '^    version="' app/main.py | head -1 | sed 's/^    version="\(.*\)",$$/\1/'); \
+	SDK=$$(grep -E '^version = ' sdk/pyproject.toml | head -1 | sed 's/^version = "\(.*\)"$$/\1/'); \
+	if [ -z "$$PP" ] || [ -z "$$APP" ] || [ -z "$$SDK" ]; then \
+		printf '\033[1;31m✗ failed to extract version from one of the 3 sites:\033[0m\n'; \
+		printf '  pyproject.toml    : [%s]\n' "$$PP"; \
+		printf '  app/main.py       : [%s]\n' "$$APP"; \
+		printf '  sdk/pyproject.toml: [%s]\n' "$$SDK"; \
+		printf '\033[1;33m  Fix: a grep regex has drifted; restore the canonical line shape or update this make target.\033[0m\n'; \
+		exit 1; \
+	fi; \
+	if [ "$$PP" = "$$APP" ] && [ "$$APP" = "$$SDK" ]; then \
+		printf '✓ version agrees across 3 sites: %s\n' "$$PP"; \
+	else \
+		printf '\033[1;31m✗ version drift across 3 sites:\033[0m\n'; \
+		printf '  pyproject.toml    : %s\n' "$$PP"; \
+		printf '  app/main.py       : %s\n' "$$APP"; \
+		printf '  sdk/pyproject.toml: %s\n' "$$SDK"; \
+		printf '\033[1;33m  Fix: pick the release version (typically the latest git tag) and update all 3.\033[0m\n'; \
 		exit 1; \
 	fi
 

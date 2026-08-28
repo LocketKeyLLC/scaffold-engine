@@ -28,10 +28,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          # §17.534 — pin the patch version to match the 3.12.13 used by every
-          # other workflow + the Dockerfile base, so a floating 3.12.x bump can't
-          # silently change behavior under this gate.
-          python-version: '3.12.13'
+          # §17.534 / §17.854 (audit H3) — pin the patch version to match the
+          # Dockerfile base (python:3.14.7) and ci.yml, so a floating 3.x bump
+          # can't silently change behavior and the gate runs the interpreter
+          # prod uses. (The old comment claimed 3.12.13 matched the Dockerfile —
+          # it didn't; the Dockerfile was already 3.14.7.)
+          python-version: '3.14.7'
 
       # §17.432 — install requirements-ci.txt, not a bare `pytest pytest-asyncio`.
       # Both target tests import the app (conftest.py eager-imports

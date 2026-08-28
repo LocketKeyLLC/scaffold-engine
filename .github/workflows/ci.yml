@@ -20,7 +20,11 @@ on:
     paths-ignore: ['**.md']
 
 env:
-  PYTHON_VERSION: "3.12.13"
+  # §17.854 (audit H3) — match the runtime image (Dockerfile `python:3.14.7`).
+  # The smoke lane previously ran 3.12.13 while prod ran 3.14.7, so a
+  # 3.14-only regression could pass the fast PR gate and only surface in the
+  # heavy image lane. Aligned so the fast gate tests the interpreter prod uses.
+  PYTHON_VERSION: "3.14.7"
 
 # ──────────────────────────────────────────────────────────
 # Tier 1: Cloud-safe smoke tests (no Milvus, no Postgres, no Ollama)
@@ -56,8 +60,9 @@ jobs:
           pip install --upgrade pip
           pip install pytest==9.1.1 pytest-timeout==2.4.0 structlog==26.1.0
 
-          # Install app dependencies needed by unit tests (no torch, no pymilvus)
-          # The extraction tests import from app.modules — install the minimal set
+          # Install app dependencies needed by unit tests (no torch; pymilvus IS
+          # in requirements-ci.txt — §17.854 audit H11 fixed the stale "no
+          # pymilvus" note). The extraction tests import from app.modules.
           if [ -f requirements-ci.txt ]; then
             pip install -r requirements-ci.txt
           fi
