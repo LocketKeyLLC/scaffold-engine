@@ -1910,3 +1910,36 @@ def test_problem_solving_has_accept_goal_met_alternative_principle():
     f = assist_guide._PROBLEM_SOLVING_FRAMING
     assert "WHEN THE LITERAL APPROACH IS BLOCKED BY A HARD CONSTRAINT" in f
     assert "ACCEPT IT AND MOVE ON" in f
+
+
+@pytest.mark.asyncio
+async def test_stream_prepass_passes_environment_block():
+    """§17.854 (audit C1) — the STREAM path had dropped the §17.771 environment
+    grounding; it must now pass environment_block to _research_prepass like the
+    non-stream path (so streamed DECISION options are system-specific)."""
+    captured = {}
+
+    async def _capture_prepass(**kw):
+        captured.update(kw)
+        return []
+
+    async def _empty_stream(*a, **k):
+        if False:
+            yield ""  # make it an async generator that yields nothing
+
+    with patch.object(assist_guide, "_research_prepass", new=_capture_prepass), \
+         patch.object(assist_guide, "read_cached_guidance", new=AsyncMock(return_value=None)), \
+         patch.object(assist_guide, "persist_guidance", new=AsyncMock()), \
+         patch.object(assist_guide, "resolve_placeholders",
+                      new=AsyncMock(side_effect=lambda **kw: (kw["text"], {}))), \
+         patch.object(assist_guide.model_router, "stream_chat", new=_empty_stream), \
+         patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp("guided"))):
+        gen = assist_guide.generate_guidance_stream(
+            session_id="s1", node_key="T3", ctx=_ctx("shell"), research=True,
+            environment={"profile": "Proxmox 8", "facts": ["host is 10.0.0.5"]},
+            db=MagicMock(),
+        )
+        async for _ in gen:
+            pass
+    assert "environment_block" in captured, "stream prepass dropped environment_block (C1)"
