@@ -223,3 +223,19 @@ def get_fetch_cache() -> FetchCache:
     if _cache is None:
         _cache = FetchCache()
     return _cache
+
+
+async def close_fetch_cache() -> None:
+    """§17.855 (audit B7) — close the singleton's aioredis client at shutdown.
+
+    The four Redis-backed caches each hold a lazily-opened aioredis connection
+    that was never closed (harmless on process exit, but a leak in tests /
+    reloads and an unclean-shutdown warning). The lifespan now closes all four.
+    """
+    global _cache
+    if _cache is not None and _cache._redis is not None:
+        try:
+            await _cache._redis.aclose()
+        except Exception:  # noqa: BLE001 — shutdown best-effort
+            pass
+        _cache._redis = None

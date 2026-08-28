@@ -325,3 +325,14 @@ def get_rag_result_cache() -> RagResultCache:
     if _cache is None:
         _cache = RagResultCache()
     return _cache
+
+
+async def close_rag_result_cache() -> None:
+    """§17.855 (audit B7) — close the singleton's aioredis client at shutdown."""
+    global _cache
+    if _cache is not None and _cache._redis is not None:
+        try:
+            await _cache._redis.aclose()
+        except Exception:  # noqa: BLE001 — shutdown best-effort
+            pass
+        _cache._redis = None

@@ -611,6 +611,20 @@ async def lifespan(app: FastAPI):
     await close_client()
     from app.utils.http_clients import close_clients
     await close_clients()
+    # §17.855 (audit B7) — close the four Redis-backed caches' aioredis clients.
+    # Each held a lazily-opened connection that shutdown never closed (harmless
+    # on process exit, but a leak under test/reload and an unclean-close warning).
+    for _closer_mod, _closer_fn in (
+        ("app.utils.embedding_cache", "close_embedding_cache"),
+        ("app.utils.fetch_cache", "close_fetch_cache"),
+        ("app.utils.llm_response_cache", "close_llm_response_cache"),
+        ("app.utils.rag_result_cache", "close_rag_result_cache"),
+    ):
+        try:
+            _mod = __import__(_closer_mod, fromlist=[_closer_fn])
+            await getattr(_mod, _closer_fn)()
+        except Exception as exc:  # noqa: BLE001 — shutdown best-effort
+            logger.warning('event="cache_close_failed" cache=%s error=%s', _closer_mod, exc)
     # MilvusClient.close() is sync; wrap on the same async-first principle
     # as the startup connect above (§17.591).
     try:
