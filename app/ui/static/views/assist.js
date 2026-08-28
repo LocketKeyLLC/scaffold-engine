@@ -586,6 +586,30 @@ function renderChat(container, sessionId) {
         }
       } catch { note.remove(); }
     }
+    // §17.852 — QUESTIONS get ANSWERS, not walkthrough reruns. Chat had only
+    // two outcomes (advance / regenerate the walkthrough), so a question like
+    // "can you keep track of the names…" earned the same step text again —
+    // the live T7 repeat. Question-shaped messages route to the job-aware
+    // ask path (§17.650, placeholder-resolved §17.851b); everything else
+    // still gets the guidance stream.
+    const QUESTION_RE = /\?\s*$|^(can|could|how|what|why|where|which|who|should|is|are|do|does|will|would)\b/i;
+    if (session?.current_node_key && QUESTION_RE.test(text)) {
+      const note = el("div", { class: "msg sys" }, el("div", { class: "msg-body dim", text: "…thinking about your question" }));
+      transcript.append(note);
+      transcript.scrollTop = transcript.scrollHeight;
+      try {
+        const res = await api.post(`/assist/${sessionId}/research`, {
+          question: text, node_key: session.current_node_key, history: historyForGuide(),
+        });
+        note.remove();
+        if ((res?.answer || "").trim()) {
+          appendBubble("assistant", "ask", res.answer);
+          load();
+          return;
+        }
+      } catch { note.remove(); }
+      // Fall through to guidance if the ask path had nothing.
+    }
     // Ask the assistant to respond via a fresh step-guidance stream.
     guideCurrent(text);
   }
