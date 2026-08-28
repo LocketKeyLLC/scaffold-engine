@@ -143,6 +143,14 @@ def relevant_search_results(
 _EXTRACT_BATCH_FULL_PAGE = 5
 _EXTRACT_BATCH_SNIPPET = 10
 
+# §17.854 (audit D3) — per-entry char budget the distiller actually SEES. The old
+# extract loops sliced ``content[:600]`` while ``_chunk_text`` produces chunks up
+# to ``1500*4 = 6000`` chars, so the LLM distiller saw ~10% of each fetched chunk
+# (the non-LLM bypass path ingested the FULL chunk — the fallback was better
+# grounded than the primary path). Matched to the chunk bound so a full chunk
+# passes through untruncated; short SearXNG snippets are unaffected (< budget).
+_EXTRACT_CONTENT_CHARS = 6000
+
 
 # =============================================================================
 # Helpers: source scoring, domain detection, confidence resolution

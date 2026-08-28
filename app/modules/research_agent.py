@@ -47,6 +47,7 @@ from app.modules.research_extractors import (
     DEFAULT_SOURCE_SCORE,
     _EXTRACT_BATCH_FULL_PAGE,
     _EXTRACT_BATCH_SNIPPET,
+    _EXTRACT_CONTENT_CHARS,
     SEARXNG_CACHE_TTL_SECONDS,
     _chunk_text,
     _detect_domain,
@@ -778,7 +779,12 @@ async def _search_queries(
                 state.search_degraded = True
             except Exception as e:
                 # Exception leaves query_key un-added so a later iteration may retry.
+                # §17.854 (audit D6) — flag degradation like the non-200 branch
+                # above; a fully-dead/refusing SearXNG used to yield a silent
+                # 'no_results' iteration break with no `search_degraded` SSE
+                # warning, so the operator saw an unexplained empty run.
                 logger.warning("research_search_failed: query='%s' error=%s", query_text, e)
+                state.search_degraded = True
             finally:
                 await asyncio.sleep(settings.research_searxng_delay)
         return q.get("facet", ""), []
@@ -904,7 +910,7 @@ async def _extract_entries(
     for i in range(0, len(expanded_results), batch_size):
         batch = expanded_results[i:i + batch_size]
         results_text = "\n\n".join(
-            f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content'][:600]}"
+            f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['content'][:_EXTRACT_CONTENT_CHARS]}"
             for r in batch
         )
         resp = await _bounded_tool_call(
@@ -922,8 +928,20 @@ async def _extract_entries(
         if parsed_args and isinstance(parsed_args.get("entries"), list):
             entries = [e for e in parsed_args["entries"] if isinstance(e, dict)]
             if entries:
+                # §17.854 (audit D4) — the model chooses `source` per entry, and
+                # _resolve_confidence then TRUSTS that URL's domain (docs.python.org
+                # → 0.90). Fetched-page content can instruct the model to attribute
+                # a fabricated fact to a high-trust URL that wasn't even in the
+                # batch. Pin every source to a URL actually present in this batch:
+                # one-URL batch → that URL; otherwise blank it (no domain boost, so
+                # the confidence falls back to the model's own claim, not a spoof).
+                batch_urls = {r.get("url", "") for r in batch if r.get("url")}
+                sole_batch_url = next(iter(batch_urls)) if len(batch_urls) == 1 else ""
                 for entry in entries:
                     src_url = entry.get("source", "")
+                    if src_url not in batch_urls:
+                        src_url = sole_batch_url
+                        entry["source"] = src_url
                     if src_url:
                         entry["confidence_score"] = _resolve_confidence(
                             entry.get("confidence_score"), src_url,
@@ -2254,7 +2272,7 @@ async def _run_research_url_mode(
             batch_idx, total_batches, len(batch_chunks),
         )
         results_text = "\n\n".join(
-            f"Title: {page_title}\nURL: {url}\nSnippet: {c[:600]}"
+            f"Title: {page_title}\nURL: {url}\nSnippet: {c[:_EXTRACT_CONTENT_CHARS]}"
             for c in batch_chunks
         )
         # §17.209 — pass session_id to _bounded_tool_call (touch gated on
@@ -2435,7 +2453,7 @@ async def _run_research_pdf_mode(
         # #59: label clarifies meaning (total pages, not page marker)
         results_text = "\n\n".join(
             f"Title: {filename} (total pages: {page_count})\n"
-            f"URL: {virtual_url}\nSnippet: {c[:600]}"
+            f"URL: {virtual_url}\nSnippet: {c[:_EXTRACT_CONTENT_CHARS]}"
             for c in batch_chunks
         )
         # §17.209 — same gating as URL-mode (§17.208 + comment at line 1840).

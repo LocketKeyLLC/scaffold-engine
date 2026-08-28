@@ -93,13 +93,57 @@ def _domain_expr_clause(d: str) -> str:
     return f'domain == "{d}"'
 
 
-def _supersede_clause(include_history: bool) -> str:
-    """Return the Milvus expression fragment that hides superseded entries.
+def _q(s: str) -> str:
+    """Escape a string for a Milvus double-quoted expression literal."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
 
-    Milvus expression syntax: `supersedes_id == ""` keeps only originals
-    (entries that do not chain off a prior version).
+
+# §17.854 (audit E1) — safety cap on the global superseded-id scan. A corpus
+# with more distinct chains than this could leak a few stale entries into the
+# default view (never the reverse — over-inclusion, not the old inversion).
+_SUPERSEDED_SCAN_CAP = 4096
+
+
+def _fetch_superseded_id_set(col) -> set[str]:
+    """entry_ids that some NEWER row supersedes — i.e. the stale ancestors.
+
+    An entry is stale iff another row points at it via ``supersedes_id``. The
+    latest version of every chain is exactly the row whose id is NOT in this
+    set. Mirrors the post-query sweep in rag_pipeline._lookup_superseded, but
+    computed collection-wide so the browse filter (and its count/pagination)
+    can be expressed as a single ``entry_id not in [...]`` predicate.
     """
-    return "" if include_history else 'supersedes_id == ""'
+    try:
+        rows = col.query(
+            collection_name=COLLECTION_NAME,
+            filter='supersedes_id != ""',
+            output_fields=["supersedes_id"],
+            limit=_SUPERSEDED_SCAN_CAP,
+        )
+    except Exception as e:  # fail-open: better to show everything than to invert
+        logger.warning("gt_superseded_scan_failed: %s", e)
+        return set()
+    if len(rows) >= _SUPERSEDED_SCAN_CAP:
+        logger.warning(
+            "gt_superseded_scan_cap_fired: rows=%d cap=%d — a few stale entries "
+            "may remain visible in the default view", len(rows), _SUPERSEDED_SCAN_CAP,
+        )
+    return {r.get("supersedes_id", "") for r in rows if r.get("supersedes_id")}
+
+
+def _latest_only_clause(superseded_ids: set[str]) -> str:
+    """Milvus fragment that keeps only the LATEST version of each chain.
+
+    §17.854 (audit E1) — the old ``_supersede_clause`` returned
+    ``supersedes_id == ""``, which keeps v1 ROOTS and hides every correction,
+    so ``/gt`` served the STALEST version by default (the exact inverse of
+    intent). Latest = an entry no newer row supersedes, i.e. ``entry_id`` not in
+    the pointed-at set. Empty set (or include_history) → no filter.
+    """
+    if not superseded_ids:
+        return ""
+    quoted = ", ".join(f'"{_q(s)}"' for s in sorted(superseded_ids))
+    return f"entry_id not in [{quoted}]"
 
 
 def _join_expr(*parts: str) -> str:
@@ -139,10 +183,11 @@ async def gt_list(
         col = _get_client()
         offset = (page - 1) * per_page
 
+        superseded = set() if include_history else _fetch_superseded_id_set(col)
         expr = _join_expr(
             "entry_id != ''",
             _domain_expr_clause(domain) if domain else "",
-            _supersede_clause(include_history),
+            _latest_only_clause(superseded),
         )
         # §17.611 (audit #8) — count with the SAME filter as the page, else
         # total/total_pages overstate visible rows (superseded versions in the
@@ -209,11 +254,13 @@ async def gt_search(
     def _sync() -> dict:
         col = _get_client()
         search_params = {"metric_type": "COSINE", "params": {"ef": 128, "refine_k": 2}}
+        superseded = set() if include_history else _fetch_superseded_id_set(col)
+        latest_clause = _latest_only_clause(superseded)
         merged: dict[str, dict] = {}
         for d in domains_to_search:
             expr = _join_expr(
                 _domain_expr_clause(d),
-                _supersede_clause(include_history),
+                latest_clause,
             )
             results = col.search(
                 collection_name=COLLECTION_NAME,
