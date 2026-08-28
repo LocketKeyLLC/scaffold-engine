@@ -1022,6 +1022,11 @@ class Settings(BaseSettings):
     # on_step (never traps the turn or mutates the plan on a guess). Code default
     # off; live via compose.
     assist_progress_tracker_enabled: bool = False
+    # §17.851 — code-enforced placeholder resolution on generated guidance
+    # (§17.668 lesson: prompt rules alone don't stick). Default ON by operator
+    # decision: fail-soft at every layer (worst case the text ships unchanged),
+    # and the resolved values auto-pin to the visible/editable substitutions.
+    assist_placeholder_resolver_enabled: bool = True
     assist_tracker_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     # §17.755 — on a reset/rebuild note (§17.714), auto-RETRACT the facts that
     # describe the abandoned system (an LLM pass keeps durable host/network/storage/
