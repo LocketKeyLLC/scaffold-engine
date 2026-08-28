@@ -1145,6 +1145,15 @@ async def run_step_research(
         question=question, node_key=nk or "?", domain=domain,
         job_context=job_context, context_hint=_kb_hint_from(brief, environment),
     )
+    # §17.851b — research how-to answers carry commands too: same
+    # code-enforced placeholder resolution as walkthroughs and fixes.
+    from app.config import settings as _settings
+    if (res.get("answer") or "").strip() and _settings.assist_placeholder_resolver_enabled:
+        resolved, _rmap = await assist_guide.resolve_placeholders(
+            text=res["answer"], session_id=session_id, environment=environment,
+            step_title=nk or "", db=db,
+        )
+        res["answer"] = resolved
     # §17.726 — the answer is what the engine told the operator; record it.
     if (res.get("answer") or "").strip():
         await capture_assistant_reply(
@@ -1221,6 +1230,16 @@ async def run_step_fix(
         operator_notes=mem.operator_notes,  # §17.745 — notes + reset supersession
         conversation=mem.conversation,  # §17.687 + §17.738 recap
     )
+    # §17.851b — fix commands get the same code-enforced placeholder
+    # resolution as walkthroughs (carry-through: every operator-facing
+    # command surface, not just /guide).
+    from app.config import settings as _settings
+    if (res.get("fix") or "").strip() and _settings.assist_placeholder_resolver_enabled:
+        resolved, _rmap = await assist_guide.resolve_placeholders(
+            text=res["fix"], session_id=session_id, environment=mem.environment,
+            step_title=ctx.title, db=db,
+        )
+        res["fix"] = resolved
     # §17.726 — record the corrective steps the engine gave the operator.
     if (res.get("fix") or "").strip():
         await capture_assistant_reply(
