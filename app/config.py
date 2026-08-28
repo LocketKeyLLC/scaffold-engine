@@ -1027,6 +1027,9 @@ class Settings(BaseSettings):
     # decision: fail-soft at every layer (worst case the text ships unchanged),
     # and the resolved values auto-pin to the visible/editable substitutions.
     assist_placeholder_resolver_enabled: bool = True
+    # §17.852 — mandatory "📍 On: <machine/shell>" banner + explicit switch
+    # callouts in walkthrough/fix prompts. Prompt-only, fail-safe, default ON.
+    assist_location_callout_enabled: bool = True
     assist_tracker_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     # §17.755 — on a reset/rebuild note (§17.714), auto-RETRACT the facts that
     # describe the abandoned system (an LLM pass keeps durable host/network/storage/

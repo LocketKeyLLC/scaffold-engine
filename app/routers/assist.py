@@ -991,22 +991,33 @@ async def assist_reroute(session_id: str, body: AssistInterpretInput, db=Depends
             "proposal": proposal}
 
 
-async def _retire_step_mirrored(*, db, job_id: str, session_id: str, node_key: str) -> None:
-    """§17.754 — mark a step terminal ('skipped') on BOTH dag_nodes and assist_steps
-    in one commit (mirror invariant §17.286), so the operator is not looped back to a
-    step they've already finished. 'skipped' is the safe terminal state (excluded from
-    output compilation) and records why."""
-    _note = ("Auto-retired by the progress tracker (§17.754): operator completed this "
-             "and moved on.")
+async def _retire_step_mirrored(
+    *, db, job_id: str, session_id: str, node_key: str, evidence: str | None = None,
+) -> None:
+    """§17.754/§17.852 — mark a tracker-verified step DONE on BOTH dag_nodes and
+    assist_steps in one commit (mirror invariant §17.286).
+
+    Was 'skipped' ("the safe terminal state") — but the tracker only retires a
+    step it is CONFIDENT the operator completed, and 'skipped' erased that work
+    from the completed-work digest: downstream guidance believed the early
+    steps never happened and re-prescribed them (live symptom: "the engine
+    appears to be repeating the first step"). Done-with-evidence is the truth;
+    the operator's own words become the node output so digests/recaps carry
+    what actually happened. The ⏩ Skip verb (deliberate skip, work NOT done)
+    still writes 'skipped' via the submit path — the two are semantically
+    different and now recorded differently."""
+    note = "Completed by the operator in assist mode (progress-tracker verified, §17.754)."
+    if (evidence or "").strip():
+        note += f"\nOperator's account: {evidence.strip()[:600]}"
     await db.execute(
-        text("UPDATE dag_nodes SET status='skipped', "
+        text("UPDATE dag_nodes SET status='done', "
              "output_text=COALESCE(NULLIF(output_text,''), :n), "
              "completed_at=NOW(), updated_at=NOW() "
              "WHERE job_id=:jid AND node_key=:nk AND status NOT IN ('done','skipped')"),
-        {"n": _note, "jid": job_id, "nk": node_key},
+        {"n": note, "jid": job_id, "nk": node_key},
     )
     await db.execute(
-        text("UPDATE assist_steps SET status='skipped', updated_at=NOW() "
+        text("UPDATE assist_steps SET status='committed', updated_at=NOW() "
              "WHERE session_id=:sid AND node_key=:nk AND status NOT IN ('committed','skipped')"),
         {"sid": session_id, "nk": node_key},
     )
@@ -1063,7 +1074,8 @@ async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(g
             # plan would loop the operator back to a step they've finished.
             if verdict.get("current_step_done") and prior_nk and prior_nk != (step or {}).get("node_key"):
                 await _retire_step_mirrored(
-                    db=db, job_id=job_id, session_id=session_id, node_key=prior_nk)
+                    db=db, job_id=job_id, session_id=session_id, node_key=prior_nk,
+                    evidence=body.message)
                 out["retired_prior_step"] = prior_nk
         except ValueError as exc:
             # A bad add (e.g. terminal session) must not 500 the tracker — fall
@@ -1075,7 +1087,8 @@ async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(g
         # next work is an EXISTING pending step. Retire the current step (mirror
         # §17.286) so the next claimable step advances; the caller presents it.
         await _retire_step_mirrored(
-            db=db, job_id=job_id, session_id=session_id, node_key=prior_nk)
+            db=db, job_id=job_id, session_id=session_id, node_key=prior_nk,
+            evidence=body.message)
         out["action"] = "advanced"
         out["retired_prior_step"] = prior_nk
         # §17.766 — retiring the step via the tracker must be able to FINALIZE the

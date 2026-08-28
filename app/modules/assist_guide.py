@@ -2745,6 +2745,32 @@ def apply_screen_grounding(system: str, *, is_decision: bool, enabled: bool) -> 
     return system + _SCREEN_GROUNDING_DIRECTIVE
 
 
+# §17.852 — every command block must say WHERE it runs, and every device/
+# shell/console switch must be announced (operator: guidance hopped from the
+# pve host shell to the workstation terminal mid-step with no callout).
+_LOCATION_CALLOUT_DIRECTIVE = (
+    "\n\nLOCATION BANNER (mandatory): open with ONE line naming exactly where "
+    "these commands run — machine, shell/console/UI, and user when known, e.g. "
+    "`📍 On: the Proxmox host shell (root@pve)` / `📍 On: your workstation "
+    "terminal (aedefruscio@pop-os)` / `📍 In: the Proxmox web UI at "
+    "https://…`. When this location differs from where the operator's LAST "
+    "pasted command ran (read the execution context and the conversation), "
+    "announce the SWITCH explicitly before any command: what they're leaving, "
+    "what they're moving to, and how to get there (new terminal? ssh from "
+    "where? browser tab?). If the step itself moves between locations, label "
+    "each command block with its own `📍 On:` line. A command block's location "
+    "must never be implicit."
+)
+
+
+def apply_location_callout(system: str, *, is_decision: bool, enabled: bool) -> str:
+    """§17.852 — append the location-banner discipline (see directive above).
+    No-op for decision nodes (no commands) and when the valve is off."""
+    if not enabled or is_decision:
+        return system
+    return system + _LOCATION_CALLOUT_DIRECTIVE
+
+
 # ── Draft an inserted step (§17.736 — turn a foundational gap into a step) ──
 
 _DRAFT_STEP_TOOL = model_router.Tool(
@@ -3423,6 +3449,10 @@ async def generate_guidance(
         system, is_decision=is_decision,
         enabled=settings.assist_screen_grounding_enabled,
     )
+    system = apply_location_callout(  # §17.852 — say WHERE, announce switches
+        system, is_decision=is_decision,
+        enabled=settings.assist_location_callout_enabled,
+    )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
@@ -3535,15 +3565,17 @@ async def generate_fix(
     resp = await chat_until_nonempty(
         model_router.chat,
         [
-            {"role": "system", "content": apply_screen_grounding(  # §17.758
-                apply_ground_or_ask(  # §17.756
-                    apply_problem_solving(  # §17.742
-                        apply_next_callout(  # §17.741
-                            apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
-                            is_decision=False, enabled=settings.assist_next_callout_enabled),
-                        enabled=settings.assist_problem_solving_enabled),
-                    is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
-                is_decision=False, enabled=settings.assist_screen_grounding_enabled)},
+            {"role": "system", "content": apply_location_callout(  # §17.852
+                apply_screen_grounding(  # §17.758
+                    apply_ground_or_ask(  # §17.756
+                        apply_problem_solving(  # §17.742
+                            apply_next_callout(  # §17.741
+                                apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
+                                is_decision=False, enabled=settings.assist_next_callout_enabled),
+                            enabled=settings.assist_problem_solving_enabled),
+                        is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
+                    is_decision=False, enabled=settings.assist_screen_grounding_enabled),
+                is_decision=False, enabled=settings.assist_location_callout_enabled)},
             {"role": "user", "content": user},
         ],
         {"role": role},
@@ -3765,6 +3797,10 @@ async def generate_guidance_stream(
     system = apply_screen_grounding(  # §17.758 — confirm the on-screen state first
         system, is_decision=is_decision,
         enabled=settings.assist_screen_grounding_enabled,
+    )
+    system = apply_location_callout(  # §17.852 — say WHERE, announce switches
+        system, is_decision=is_decision,
+        enabled=settings.assist_location_callout_enabled,
     )
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
