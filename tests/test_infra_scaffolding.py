@@ -25,9 +25,10 @@ import pytest
 # =====================================================================
 # Task #13 - Milvus Health Latency (AST-based source inspection)
 # =====================================================================
-# #9.14 note: The real _check_milvus is a closure inside app.main.health(),
-# so it cannot be imported and called directly. A true behavioral test would
-# need to exercise the full /health endpoint with a live Milvus container.
+# #9.14 note: The real _check_milvus is a closure inside
+# app.health.build_health_response() (moved from app.main in §17.855), so it
+# cannot be imported and called directly. A true behavioral test would need to
+# exercise the full /health endpoint with a live Milvus container.
 # For unit tests, we parse app/main.py via AST and inspect the function body
 # as a structured tree (not a regex over source text). This catches the same
 # regressions the original grep tests did, but via AST traversal.
@@ -36,14 +37,18 @@ class TestMilvusHealthBehavior:
 
     @pytest.fixture(scope="class")
     def check_milvus_fn(self):
-        """Return the ast.AsyncFunctionDef node for _check_milvus."""
+        """Return the ast.AsyncFunctionDef node for _check_milvus.
+
+        §17.855 — the /health probe body (incl. the _check_milvus closure) moved
+        from app/main.py to app/health.py::build_health_response; ast.walk still
+        recurses into the nested closure there."""
         import ast
-        main_path = Path(__file__).resolve().parent.parent / "app" / "main.py"
-        tree = ast.parse(main_path.read_text())
+        health_path = Path(__file__).resolve().parent.parent / "app" / "health.py"
+        tree = ast.parse(health_path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.AsyncFunctionDef) and node.name == "_check_milvus":
                 return node
-        pytest.fail("_check_milvus function not found in app/main.py")
+        pytest.fail("_check_milvus function not found in app/health.py")
 
     def test_no_flush_call(self, check_milvus_fn):
         """Body must not contain any .flush() attribute access."""
