@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.modules import assist_agent
+from app.modules import assist_turns
 from app.modules import assist_environment
 
 
@@ -317,7 +318,7 @@ async def test_derive_turn_memory_supersede_valve_off_ignores_retractions():
 
 @pytest.mark.asyncio
 async def test_capture_assistant_reply_ingests_as_assistant_role():
-    with patch.object(assist_agent, "ingest_turn",
+    with patch.object(assist_turns, "ingest_turn",
                       new=AsyncMock(return_value=True)) as ing:
         ok = await assist_agent.capture_assistant_reply(
             session_id="s1", node_key="T2", kind="guide",
@@ -329,7 +330,7 @@ async def test_capture_assistant_reply_ingests_as_assistant_role():
 
 @pytest.mark.asyncio
 async def test_capture_assistant_reply_bounds_content():
-    with patch.object(assist_agent, "ingest_turn",
+    with patch.object(assist_turns, "ingest_turn",
                       new=AsyncMock(return_value=True)) as ing:
         await assist_agent.capture_assistant_reply(
             session_id="s1", node_key=None, kind="ask",
@@ -482,7 +483,7 @@ async def test_capture_assistant_reply_dedupes_backtoback_replay():
     db.execute = AsyncMock(return_value=scal)
     with patch.object(settings, "assist_unified_memory_enabled", True), \
          patch.object(settings, "assist_umem_capture", True), \
-         patch.object(assist_agent, "ingest_turn",
+         patch.object(assist_turns, "ingest_turn",
                       new=AsyncMock(return_value=True)) as ing:
         ok = await assist_agent.capture_assistant_reply(
             session_id="s1", node_key="T2", kind="guide",
@@ -502,7 +503,7 @@ async def test_capture_assistant_reply_replay_after_other_turns_records():
     db.execute = AsyncMock(return_value=scal)
     with patch.object(settings, "assist_unified_memory_enabled", True), \
          patch.object(settings, "assist_umem_capture", True), \
-         patch.object(assist_agent, "ingest_turn",
+         patch.object(assist_turns, "ingest_turn",
                       new=AsyncMock(return_value=True)) as ing:
         ok = await assist_agent.capture_assistant_reply(
             session_id="s1", node_key="T2", kind="guide",

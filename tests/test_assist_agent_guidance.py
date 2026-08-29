@@ -10,6 +10,7 @@ import pytest
 
 from app.config import settings as _settings
 from app.modules import assist_agent
+from app.modules import assist_turns
 from app.modules import assist_environment
 from app.modules.prompt_assembly import StepContext
 
@@ -914,7 +915,7 @@ async def test_generate_step_guidance_history_falls_back_to_transcript():
     with patch.object(_settings, "assist_unified_memory_enabled", True), \
          patch.object(assist_agent, "_assemble_ctx_for_node",
                       new=AsyncMock(return_value=({"description": "d", "domain": None}, _ctx()))), \
-         patch.object(assist_agent, "history_from_turns",
+         patch.object(assist_turns, "history_from_turns",
                       new=AsyncMock(return_value=rebuilt)) as hft, \
          patch.object(assist_agent, "_conversation_block_for",
                       return_value="") as conv, \
