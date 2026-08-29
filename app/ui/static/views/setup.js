@@ -261,7 +261,11 @@ export default function setup(container) {
         status.textContent = " probing…";
         try {
           const res = await api.post("/models/probe", { model: sel.value });
-          status.textContent = res.ok ? ` ✓ live (${res.latency_ms} ms)` : ` ✗ ${String(res.error || "").slice(0, 90)}`;
+          // §17.858 — a local tag over the warm-probe threshold gets an
+          // honest "slow for this box" tag right on the row.
+          status.textContent = res.ok
+            ? ` ✓ live (${res.latency_ms} ms${res.slow ? " — slow for this box" : ""})`
+            : ` ✗ ${String(res.error || "").slice(0, 90)}`;
         } catch (e) {
           status.textContent = ` ✗ ${e.detail || e.message}`;
         } finally {
@@ -299,7 +303,9 @@ export default function setup(container) {
         applyBtn.disabled = false;
         return;
       }
-      stepHealth();
+      // §17.858 — hand the applied picks to the health step so it can run
+      // the slow-box check against what the engine will actually use.
+      stepHealth(Object.fromEntries(roles.map((r) => [r.role, selects[r.role].value])));
     });
     mount(
       body,
@@ -320,7 +326,46 @@ export default function setup(container) {
   }
 
   // ── Step 4: health board ────────────────────────────────────────────
-  async function stepHealth() {
+  // §17.858 — appliedPlan (role → model, what Step 3 just applied) drives the
+  // slow-box check: probe the applied model_general when it's LOCAL and, if
+  // the server flags it slow, surface the honest warning HERE — the "green
+  // board means go" moment is exactly where false confidence forms. The
+  // §17.841 fresh-install E2E showed a 15-16 GB box burns 43 min of node
+  // retries against the 600s default with nothing telling the operator why.
+  const isCloudTag = (t) => t.endsWith(":cloud") || t.endsWith("-cloud");
+
+  function slowBoxCheck(appliedPlan) {
+    const general = appliedPlan && appliedPlan.model_general;
+    if (!general || isCloudTag(general)) return null;
+    const box = el("div", { class: "card card-pad setup-slowbox" },
+      el("p", { class: "faint", text: `Measuring local model speed (${general})…` }));
+    api.post("/models/probe", { model: general }).then((res) => {
+      if (disposed) return;
+      if (!res.ok || !res.slow) { box.remove(); return; }
+      const warm = res.warm_latency_ms != null ? res.warm_latency_ms : res.latency_ms;
+      mount(
+        box,
+        el("h3", { text: "⚠ This box looks too slow for local models" }),
+        el("p", {
+          text:
+            `A tiny 8-token test generation on ${general} took ` +
+            `${(warm / 1000).toFixed(1)}s even warmed up (healthy is under ` +
+            `${(res.slow_threshold_ms / 1000).toFixed(0)}s). Real jobs make several much ` +
+            `longer calls per step and will likely exceed the ` +
+            `${res.node_timeout_seconds}s per-step timeout — they'll retry, then fail.`,
+        }),
+        el("p", {
+          text:
+            "Two ways out: go back a step and pick the Ollama Cloud preset " +
+            "(fast, needs an Ollama Cloud account), or raise NODE_TIMEOUT_SECONDS " +
+            "in .env and accept multi-hour steps.",
+        })
+      );
+    }).catch(() => box.remove());
+    return box;
+  }
+
+  async function stepHealth(appliedPlan) {
     mount(container, header(stepLabel(4, "green board means go")), body);
     mount(body, loading("Checking the stack…"));
     let h = null;
@@ -348,6 +393,7 @@ export default function setup(container) {
     const allUp = h && h.status === "healthy";
     mount(
       body,
+      slowBoxCheck(appliedPlan),
       el("div", { class: "grid grid-3 setup-health" }, ...cards),
       el(
         "div",

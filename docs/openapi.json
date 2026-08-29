@@ -8875,7 +8875,7 @@
     },
     "/models/probe": {
       "post": {
-        "description": "Explicit generate-based liveness probe (the wizard's \"test\" button).\n\nAlways generates — the caller opted into the latency, and for a LOCAL tag\nthat first call is also what a real request would pay (model load).",
+        "description": "Explicit generate-based liveness probe (the wizard's \"test\" button).\n\nAlways generates — the caller opted into the latency, and for a LOCAL tag\nthat first call is also what a real request would pay (model load).\n\n§17.858 — slow-box honesty: a successful LOCAL probe additionally carries\n``slow`` (bool). A first result over ``slow_box_probe_warn_ms`` may just be\nthe one-time model load (disk speed ≠ inference speed), so it triggers ONE\nwarm re-probe (reported as ``warm_latency_ms``) and the flag sticks only if\nthe warm number is also over. A slow probe adds ``slow_threshold_ms`` +\n``node_timeout_seconds`` so the client can render an honest warning.\nCloud tags are never assessed — their latency is network, not this box.",
         "operationId": "probe_model_models_probe_post",
         "requestBody": {
           "content": {

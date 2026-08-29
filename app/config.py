@@ -1179,6 +1179,19 @@ class Settings(BaseSettings):
 
     # Execution agent tuning
     node_timeout_seconds: int = Field(default=600, ge=1, le=86400)
+    # §17.858 — slow-box honesty (v1.5 queue item 2). The §17.841 fresh-install
+    # E2E showed a memory-contended 15-16 GB box cannot finish a DAG node on
+    # local models inside the 600s default above (a single real 7b call ran
+    # 200s+ p95, and a node makes several) — the job burns every retry and
+    # fails, with nothing telling the operator WHY. /models/probe therefore
+    # flags a LOCAL tag as `slow` when its warm 8-token generate probe exceeds
+    # this many ms, and the wizard's health step surfaces the warning with the
+    # two escape hatches (cloud preset / raise NODE_TIMEOUT_SECONDS). Advisory
+    # only — nothing blocks. 5s is far above a healthy warm CPU probe (<3s for
+    # a 7b) and well below the struggling-box regime; the first probe may pay
+    # the one-time model load, so a slow FIRST result triggers one warm
+    # re-probe before the flag sticks (disk speed ≠ inference speed).
+    slow_box_probe_warn_ms: int = Field(default=5000, ge=1, le=120000)
     # §17.465 — token budget for a node's generation call. The default
     # model_router.chat() cap is 4096; for a thinking model (qwen3.5:397b-cloud,
     # the cloud default since §17.440) num_predict is a SHARED budget for

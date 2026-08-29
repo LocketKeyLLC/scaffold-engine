@@ -6,6 +6,10 @@ Day-to-day development is tracked at sprint granularity in the commit log (`fix(
 
 ## [Unreleased]
 
+### Added
+
+- **Slow-box warning in the setup wizard.** Fresh installs on memory-tight boxes (15–16 GB) can't finish a DAG step on local models inside the 600s default `NODE_TIMEOUT_SECONDS` — jobs would burn every retry and fail with nothing saying why. `/models/probe` now flags local tags whose warm 8-token test generation exceeds `SLOW_BOX_PROBE_WARN_MS` (default 5s; a slow first probe gets one warm re-probe so one-time model load doesn't false-flag), and the wizard's health step probes the applied `model_general` and surfaces an advisory warning with the two ways out: the Ollama Cloud preset, or raising `NODE_TIMEOUT_SECONDS`. Per-role Probe buttons show the same "slow for this box" tag (§17.858).
+
 ### Removed
 
 - **The `/web` console's redirect stubs and support scaffolding.** v1.4.0 retired the server-rendered htmx console to permanent redirects as a one-release grace period; this release deletes the remainder: the `/web/*` redirect routes, the htmx templates and vendored assets, the root `/static` mount (it served only `/web` assets — the SPA's assets live under `/ui/static/`), the CSRF middleware that existed for the console's auth-exempt forms, and the `/web/` + `/static/` auth exemptions. Old `/web` bookmarks now 404 — use the `/ui` SPA. No API surface changes (the routes were never in the OpenAPI contract) (§17.857).
