@@ -833,6 +833,16 @@ class Settings(BaseSettings):
     # — is historical.) Default OFF so tests + fresh installs keep the legacy path.
     assist_unified_decision_enabled: bool = False
     assist_decide_model_role: str = "model_general"
+    # §17.855 (audit "policy migration") — fold the deterministic phrase gates
+    # (pivot / help / how-to / shell-result) into the SERVER `/decide` path as a
+    # post-filter (`assist_policy.apply_deterministic_overrides`), so the CONFIDENT
+    # decision honours the same high-precision vetoes the client cascade applies on
+    # fall-through (§17.679 "deterministic gate over the LLM", uniformly). Default
+    # OFF: it changes confident-path routing on the assist hot path, so it ships
+    # dark and gets a live assist A/B before the flip — same discipline as every
+    # other assist behavioral valve on this box. Killable instantly if live
+    # regresses. The client cascade stays the /decide-unavailable fallback.
+    assist_decide_deterministic_overrides: bool = False
     # §17.771 (post-verify) — the Phase-1 SHADOW logger, now DECOUPLED from the
     # authority valve above. Once the unified decision is the live authority, the
     # shadow's data-gathering purpose is done: it just fires a redundant

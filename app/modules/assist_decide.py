@@ -42,6 +42,7 @@ from sqlalchemy import text
 from app import model_router
 from app.config import settings
 from app.modules import assist_guide
+from app.modules import assist_policy
 from app.modules.assist_guide import ASSIST_INTENTS
 
 logger = logging.getLogger("scaffold")
@@ -360,7 +361,7 @@ async def decide_turn(
         sugg = {"leaning": leaning, "why": (sugg.get("why") or "").strip()} if leaning else None
     else:
         sugg = None
-    return {
+    decision = {
         "action": action,
         "evidence": (args.get("evidence") or "").strip(),
         "error_text": (args.get("error_text") or "").strip(),
@@ -377,6 +378,21 @@ async def decide_turn(
         "signals": signals,
         "unavailable": False,
     }
+    # §17.855 (audit "policy migration") — re-apply the deterministic phrase gates
+    # as a post-filter so the CONFIDENT decision honours the same high-precision
+    # vetoes the client cascade only gets to apply on fall-through. Default OFF
+    # (ships dark; changes confident-path routing → wants a live A/B). When a gate
+    # fires it stamps `override` and bumps confidence to high so the caller
+    # dispatches it instead of falling to its own (now redundant) cascade copy.
+    if settings.assist_decide_deterministic_overrides:
+        before = decision["action"]
+        decision = assist_policy.apply_deterministic_overrides(decision, message)
+        if decision.get("override"):
+            logger.info(
+                "decide_turn_override session=%s %s->%s reason=%s",
+                session_id, before, decision["action"], decision["override"],
+            )
+    return decision
 
 
 # ── Shadow mode (Phase 1) — fire-and-forget parity capture ────────────────────
