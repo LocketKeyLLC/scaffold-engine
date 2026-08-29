@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.modules import assist_agent
+from app.modules import assist_memory
 from app.modules import assist_turns
 from app.modules import assist_environment
 
@@ -602,7 +603,7 @@ async def test_schedule_derive_dedupes_recent_content(monkeypatch):
     monkeypatch.setattr(settings, "assist_umem_derive", True, raising=False)
     assist_agent._RECENT_DERIVES.clear()
     bg = AsyncMock()
-    with patch.object(assist_agent, "_derive_turn_memory_bg", new=bg):
+    with patch.object(assist_memory, "_derive_turn_memory_bg", new=bg):
         assist_agent.schedule_derive_turn_memory(
             session_id="s1", node_key="T1", message="the pool is created")
         assist_agent.schedule_derive_turn_memory(
