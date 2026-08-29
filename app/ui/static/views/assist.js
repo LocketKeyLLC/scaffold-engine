@@ -591,67 +591,89 @@ export function renderChat(container, sessionId) {
   // also remains the path when /decide is disabled or unsure).
   async function decideAndDispatch(text) {
     let d = null;
-    const thinking = el("div", { class: "msg sys" }, el("div", { class: "msg-body dim", text: "…deciding how to act on that" }));
+    // §17.862 — one PERSISTENT status bubble for the whole dispatch. The first
+    // cut removed the "…deciding" note once /decide returned and then ran the
+    // dispatched call in silence — the ask path's research pass runs 30-120s
+    // (reranker prepass, §17.704), and the live operator read the dead air as
+    // "it stopped working" and reloaded mid-flight. Same lesson as the
+    // pipeline's "🔎 Preparing…" trail: never silent before the first token.
+    const statusText = el("div", { class: "msg-body dim", text: "…deciding how to act on that" });
+    const thinking = el("div", { class: "msg sys" }, statusText);
+    const setStatus = (t) => {
+      statusText.textContent = t;
+      transcript.scrollTop = transcript.scrollHeight;
+    };
     transcript.append(thinking);
     transcript.scrollTop = transcript.scrollHeight;
     try {
-      d = await api.post(`/assist/${sessionId}/decide`, {
-        message: text, node_key: session.current_node_key, history: historyForGuide(),
-      });
-    } catch {
-      /* 404 (valve off) or transient — the fallback chain handles the turn */
-    }
-    thinking.remove();
-    if (!d || !d.action || (d.confidence || "low") === "low") return false;
-    const impact = d.plan_impact || "none";
-    const surfaceHint = () => {
-      if (impact === "surface")
+      try {
+        d = await api.post(`/assist/${sessionId}/decide`, {
+          message: text, node_key: session.current_node_key, history: historyForGuide(),
+        });
+      } catch {
+        /* 404 (valve off) or transient — the fallback chain handles the turn */
+      }
+      if (!d || !d.action || (d.confidence || "low") === "low") return false;
+      const impact = d.plan_impact || "none";
+      const surfaceHint = () => {
+        if (impact === "surface")
+          appendBubble("assistant", "note",
+            "📌 Heads-up: what you just told me might affect a later step. Add it as a note if you'd like me to reassess the plan.");
+      };
+      if (d.action === "note" || impact === "reshape") {
+        setStatus("📝 Recording that and checking whether it changes the plan…");
+        const kind = d.note_kind || (impact === "reshape" ? "decision" : "note");
+        const res = await api.post(`/assist/${sessionId}/note`, {
+          text: d.note_text || text, kind, node_key: session.current_node_key,
+        });
         appendBubble("assistant", "note",
-          "📌 Heads-up: what you just told me might affect a later step. Add it as a note if you'd like me to reassess the plan.");
-    };
-    if (d.action === "note" || impact === "reshape") {
-      const kind = d.note_kind || (impact === "reshape" ? "decision" : "note");
-      const res = await api.post(`/assist/${sessionId}/note`, {
-        text: d.note_text || text, kind, node_key: session.current_node_key,
-      });
-      appendBubble("assistant", "note",
-        `📝 Noted (${kind}).` +
-        (res?.retracted_facts?.length ? ` Retracted ${res.retracted_facts.length} stale fact(s).` : ""));
-      if (res?.replan_proposal) renderReplanProposal(res.replan_proposal);
-      else load();
-      return true;
-    }
-    if (d.action === "submit") {
-      await submitEvidence(session.current_node_key, d.evidence || text);
-      surfaceHint();
-      return true;
-    }
-    if (d.action === "fix") {
-      const res = await api.post(`/assist/${sessionId}/fix`, {
-        error: d.error_text || text, node_key: session.current_node_key, history: historyForGuide(),
-      });
-      appendBubble("assistant", "fix", res.fix || "(no fix returned)");
-      surfaceHint();
-      load();
-      return true;
-    }
-    if (d.action === "ask" || d.action === "question") {
-      const res = await api.post(`/assist/${sessionId}/research`, {
-        question: d.query || text, node_key: session.current_node_key, history: historyForGuide(),
-      });
-      if ((res?.answer || "").trim()) {
-        appendBubble("assistant", "ask", res.answer);
+          `📝 Noted (${kind}).` +
+          (res?.retracted_facts?.length ? ` Retracted ${res.retracted_facts.length} stale fact(s).` : ""));
+        if (res?.replan_proposal) renderReplanProposal(res.replan_proposal);
+        else load();
+        return true;
+      }
+      if (d.action === "submit") {
+        setStatus("✓ Recording the result and verifying the step…");
+        await submitEvidence(session.current_node_key, d.evidence || text);
+        surfaceHint();
+        return true;
+      }
+      if (d.action === "fix") {
+        setStatus("🔧 Diagnosing the error for your environment…");
+        const res = await api.post(`/assist/${sessionId}/fix`, {
+          error: d.error_text || text, node_key: session.current_node_key, history: historyForGuide(),
+        });
+        appendBubble("assistant", "fix", res.fix || "(no fix returned)");
         surfaceHint();
         load();
         return true;
       }
-      return false;
+      if (d.action === "ask" || d.action === "question") {
+        setStatus("🔎 Researching your question against the project's current state — this can take a minute or two. The answer also lands in the transcript, so it survives a reload…");
+        const res = await api.post(`/assist/${sessionId}/research`, {
+          question: d.query || text, node_key: session.current_node_key, history: historyForGuide(),
+        });
+        if ((res?.answer || "").trim()) {
+          appendBubble("assistant", "ask", res.answer);
+          surfaceHint();
+          load();
+          return true;
+        }
+        // §17.862 — terminal even when empty: returning false here would send
+        // the turn down the §17.852 question-regex path, which fires the SAME
+        // research call again (a duplicate multi-minute pass for nothing).
+        appendBubble("assistant", "ask", "I couldn't put together a useful answer for that — try rephrasing, or press ✦ Guide me for the current step.");
+        return true;
+      }
+      if (d.action === "advance") {
+        await doneNext(text);
+        return true;
+      }
+      return false; // skip/status/set_env/… — rare via free text; fallback chain
+    } finally {
+      thinking.remove();
     }
-    if (d.action === "advance") {
-      await doneNext(text);
-      return true;
-    }
-    return false; // skip/status/set_env/… — rare via free text; fallback chain
   }
 
   async function sendMessage() {
