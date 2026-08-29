@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.config import settings
-from app.modules import assist_agent, assist_guide
+from app.modules import assist_agent, assist_guide, assist_memory
 from app.providers.base import ToolCall
 
 
@@ -104,7 +104,7 @@ async def test_sibling_facts_uses_durable_subset(monkeypatch):
         _Rows([]),                                        # parent lookup (.scalar())
         _Rows([{"id": "sib1", "metadata": {"environment": {"facts": ["x"]}}}]),  # siblings
     ])
-    with patch.object(assist_agent, "_durable_facts_for_session",
+    with patch.object(assist_memory, "_durable_facts_for_session",
                       new=AsyncMock(return_value=["host CPU is Xeon"])) as durable:
         out = await assist_agent._sibling_facts(job_id="me", db=db)
     assert out == ["host CPU is Xeon"]
