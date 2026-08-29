@@ -127,6 +127,16 @@ def test_override_pivot_forces_note():
     assert "ZFS" in out["note_text"]
 
 
+def test_override_pivot_fires_from_ask():
+    # §17.855 live-A/B fix — the /decide model routes a question-framed pivot to
+    # `ask`; the pivot gate must still catch it (skip/question alone let it escape)
+    d = _decision("ask")
+    out = P.apply_deterministic_overrides(
+        d, "can't we just clean the existing install instead of wiping it?")
+    assert out["action"] == "note"
+    assert out["override"] == "pivot"
+
+
 def test_override_help_question_forces_ask():
     d = _decision("question")
     out = P.apply_deterministic_overrides(d, "help me get the bridge up")

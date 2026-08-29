@@ -166,9 +166,15 @@ def _override(action: str, message: str, signals: dict) -> tuple[str, str | None
             return "submit", "shell_result", {"evidence": msg.strip()}
         return action, None, {}
     # 2. A declarative or question-framed pivot reshapes the plan → note (§17.679/
-    #    §17.691). Only overrides skip/question — the same actions the cascade
-    #    gates on — so a confident submit/ask is left alone.
-    if action in ("skip", "question") and looks_like_pivot(msg):
+    #    §17.691). Fires on skip/question/ask: the live A/B (§17.855) showed the
+    #    /decide model routes QUESTION-FRAMED pivots ("can't we just … instead?")
+    #    to `ask` more often than the old client classifier did, so gating on
+    #    skip/question alone (as the cascade does) let real pivots escape to
+    #    research. `_QUESTION_PIVOT_RE` is anchored on pivot framing ("can't I
+    #    just", "why not just", "isn't it easier", "do I even need"), distinct
+    #    from a plain how-to, so widening to `ask` stays precise. A confident
+    #    submit is still left alone (a completion is not a pivot).
+    if action in ("skip", "question", "ask") and looks_like_pivot(msg):
         return "note", "pivot", {
             "note_text": msg.strip(),
             "note_kind": pivot_kind(msg),
