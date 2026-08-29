@@ -105,141 +105,10 @@ _DECISION_SUGGESTION_SYSTEM = (
 # the operator sees + can edit them in the Pinned values panel. Fail-soft at
 # every stage: worst case the original text ships unchanged.
 
-_PLACEHOLDER_TOKEN_RE = re.compile(r"<([A-Z][A-Z0-9_\-]{1,48})>")
-# §17.854 (audit C3) — a resolver value is substituted verbatim into guidance
-# that often becomes a shell command block, then auto-pinned and applied
-# DETERMINISTICALLY forever. Reject any value carrying a shell metacharacter so a
-# model (fed adversarial pasted output) can't inject e.g. `local-lvm; wipefs -a
-# /dev/sda`. Also excludes the pre-existing `<` (nested token) and newline bars.
-_UNSAFE_RESOLVER_VALUE_RE = re.compile(r"[;&|$`<>\n\r]")
-
-_PLACEHOLDER_RESOLVER_TOOL = model_router.Tool(
-    name="resolve_placeholders",
-    description=(
-        "Map each placeholder token to a concrete value from the operator's "
-        "known facts, or a suggested fitting name for free-choice identifiers, "
-        "or mark it unknown."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "resolutions": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "token": {"type": "string", "description": "The placeholder name WITHOUT angle brackets."},
-                        "value": {"type": "string", "description": "Concrete value, or empty when unknown."},
-                        "kind": {"type": "string", "enum": ["known", "suggested", "unknown"],
-                                 "description": "known = stated in the facts/profile; suggested = a free-choice name you propose; unknown = only the operator can supply it."},
-                    },
-                    "required": ["token", "kind"],
-                },
-            },
-        },
-        "required": ["resolutions"],
-    },
-)
-
-_PLACEHOLDER_RESOLVER_SYSTEM = (
-    "You resolve placeholder tokens in an operator walkthrough. For each token: "
-    "if the operator's facts/profile state the actual value (an IP, URL, hostname, "
-    "storage name, interface), return it EXACTLY as stated with kind=known. If the "
-    "token names something NEW the operator is free to name (a new VM/container "
-    "name, VMID, dataset, service user), propose ONE short fitting name for THIS "
-    "project with kind=suggested. Only when neither applies (secrets, passwords, "
-    "values truly not in the facts) use kind=unknown with an empty value. Never "
-    "invent a kind=known value that is not literally supported by the facts. "
-    "Each value must be ONLY that token's own part — when tokens compose (e.g. "
-    "<POOL>/<DATASET>), never return a value that already includes a "
-    "neighboring token's value."
-)
 
 
-async def resolve_placeholders(
-    *, text: str, session_id: str, environment: Optional[dict],
-    step_title: str = "", role: str = "model_general", db=None,
-) -> tuple[str, dict]:
-    """§17.851 — substitute <PLACEHOLDER> tokens in generated guidance.
 
-    Returns ``(new_text, applied)`` where ``applied`` maps token →
-    ``{"value": ..., "kind": known|suggested}``. Unknown tokens stay in the
-    text. Fail-soft: any error returns the original text and ``{}``.
-    """
-    try:
-        tokens = list(dict.fromkeys(_PLACEHOLDER_TOKEN_RE.findall(text or "")))
-        if not tokens:
-            return text, {}
-        env = environment or {}
-        subs = {str(k).upper(): str(v) for k, v in (env.get("substitutions") or {}).items() if str(v).strip()}
-        applied: dict = {}
-        out = text
-        # Layer 1 — deterministic: pinned values win, no model involved.
-        for tok in list(tokens):
-            v = subs.get(tok.upper())
-            if v:
-                out = out.replace(f"<{tok}>", v)
-                # source="operator" — an operator-set (or previously auto-pinned)
-                # value, distinct from a fresh model suggestion (§17.854 C3).
-                applied[tok] = {"value": v, "kind": "known", "source": "operator"}
-                tokens.remove(tok)
-        # Layer 2 — model-mapped against the facts ledger.
-        facts = [str(f).strip() for f in (env.get("facts") or []) if str(f).strip()]
-        if tokens and (facts or env.get("profile")):
-            user = (
-                (f"Step: {step_title}\n\n" if step_title else "")
-                + "Operator facts:\n" + "\n".join(f"- {f}" for f in facts[:40])
-                + (f"\n\nOperator profile: {env.get('profile')}" if env.get("profile") else "")
-                + "\n\nPlaceholder tokens to resolve:\n"
-                + "\n".join(f"- {t}" for t in tokens)
-                + "\n\nCall resolve_placeholders with one entry per token."
-            )
-            resp = await model_router.tool_call(
-                [
-                    {"role": "system", "content": _PLACEHOLDER_RESOLVER_SYSTEM},
-                    {"role": "user", "content": user},
-                ],
-                [_PLACEHOLDER_RESOLVER_TOOL],
-                role=role,
-                temperature=0.1,
-                max_tokens=1024,
-                tool_choice="auto",
-            )
-            if resp.success and resp.tool_calls:
-                for r in (resp.tool_calls[0].arguments or {}).get("resolutions") or []:
-                    tok = str(r.get("token") or "").strip().strip("<>")
-                    val = str(r.get("value") or "").strip()
-                    kind = r.get("kind")
-                    if (tok in tokens and kind in ("known", "suggested") and val
-                            and len(val) <= 200
-                            and not _UNSAFE_RESOLVER_VALUE_RE.search(val)):
-                        out = out.replace(f"<{tok}>", val)
-                        # source="model" — a model-suggested value; tagged so the
-                        # SPA pin editor / meta can flag it as not operator-set
-                        # (§17.854 C3), even after auto-pin makes it deterministic.
-                        applied[tok] = {"value": val, "kind": kind, "source": "model"}
-        if applied:
-            notes = []
-            for tok, r in applied.items():
-                src = "from your environment" if r["kind"] == "known" else "suggested — rename if you like"
-                notes.append(f"- `{tok}` → `{r['value']}` ({src})")
-            out = out.rstrip() + "\n\n---\n**Values filled in:**\n" + "\n".join(notes)
-            # Auto-pin so the next generation is deterministic and the operator
-            # can see/edit these in the Pinned values panel.
-            if db is not None:
-                try:
-                    from app.modules import assist_agent
-                    await assist_agent.set_environment(
-                        session_id=session_id,
-                        substitutions={t: r["value"] for t, r in applied.items()},
-                        db=db,
-                    )
-                except Exception:
-                    logger.warning("assist_placeholder_autopin_failed session=%s", session_id)
-        return out, applied
-    except Exception as exc:
-        logger.warning("assist_placeholder_resolver_failed: %s", exc)
-        return text, {}
+
 
 
 _DECISION_SUGGESTION_TOOL = model_router.Tool(
@@ -365,6 +234,39 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     _GROUND_OR_ASK_DIRECTIVE,
     _SCREEN_GROUNDING_DIRECTIVE,
     _LOCATION_CALLOUT_DIRECTIVE,
+)
+
+# §17.856 — the block renderers moved to app/modules/assist_render.py;
+# re-exported so assist_guide.<NAME> and the external callers keep resolving.
+from app.modules.assist_render import (  # noqa: F401,E402
+    render_environment_block,
+    render_facts_block,
+    render_operator_notes_block,
+    _operator_reset_intent,
+    render_session_memory,
+    _render_memory_or_legacy,
+    render_conversation_block,
+    render_step_recap_block,
+    render_project_recap_block,
+    _recap_add,
+    parse_recap,
+    render_status_panel,
+    _RESET_INTENT_PATTERNS,
+    _RECAP_LABELS,
+)
+
+# §17.856 — placeholder resolution moved to app/modules/assist_placeholders.py;
+# re-exported so assist_guide.<NAME> keeps resolving.
+from app.modules.assist_placeholders import (  # noqa: F401,E402
+    resolve_placeholders,
+    find_placeholders,
+    extract_substitutions,
+    _PLACEHOLDER_TOKEN_RE,
+    _UNSAFE_RESOLVER_VALUE_RE,
+    _PLACEHOLDER_RESOLVER_TOOL,
+    _PLACEHOLDER_RESOLVER_SYSTEM,
+    _PLACEHOLDER_RE,
+    _LEARN_SUBS_TOOL,
 )
 
 
@@ -615,141 +517,14 @@ def _render_research_block(sources: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def render_environment_block(environment: dict | None) -> str:
-    """§17.487 — the operator's environment so the model emits concrete commands.
-
-    ``environment`` = ``{"profile": str, "substitutions": {KEY: value}}`` (stored on
-    ``assist_sessions.metadata.environment``). Returns "" when empty so callers no-op.
-    """
-    if not environment:
-        return ""
-    profile = (environment.get("profile") or "").strip()
-    subs = environment.get("substitutions") or {}
-    facts = [str(f).strip() for f in (environment.get("facts") or []) if str(f).strip()]
-    if not profile and not subs and not facts:
-        return ""
-    parts = [
-        "## Operator environment (use these concrete values; emit a <PLACEHOLDER> "
-        "ONLY for values not given here)"
-    ]
-    if profile:
-        parts.append(profile)
-    if subs:
-        parts.append("\n".join(f"- {k} = {v}" for k, v in subs.items()))
-    # §17.709 — durable facts observed about the operator's ACTUAL system. Ground
-    # on these; never assume a fresh/empty system when facts describe an existing
-    # one (or say a check was inconclusive).
-    if facts:
-        parts.append(
-            "### Known facts about the operator's system (OBSERVED — ground on "
-            "these; do NOT assume a fresh/empty system, and treat anything marked "
-            "unknown/unverified as still open):\n"
-            + "\n".join(f"- {f}" for f in facts)
-        )
-    return "\n\n".join(parts)
 
 
-def render_facts_block(environment: dict | None, *, max_chars: int = 4000) -> str:
-    """§17.752 — just the durable observed facts (§17.709) as a compact block, for
-    prompts that ground on the operator's ACTUAL system state (the recap, the
-    note-impact analyzer) without the full environment/substitutions framing.
-    Returns "" when there are no facts so callers thread it unconditionally.
-    §17.812 — budget-capped: the ledger itself is trimmed newest-kept (§17.722)
-    but grows to dozens of long facts on a real build; an uncapped render let it
-    crowd out the transcript/recap in every prompt that threads it. Keeps the
-    NEWEST facts (tail) within ``max_chars``, preserving order."""
-    facts = [str(f).strip() for f in ((environment or {}).get("facts") or []) if str(f).strip()]
-    if not facts:
-        return ""
-    kept: list[str] = []
-    total = 0
-    for f in reversed(facts):          # newest last → walk from the tail
-        line_len = len(f) + 3          # "- " + newline
-        if kept and total + line_len > max_chars:
-            break
-        kept.append(f)
-        total += line_len
-    kept.reverse()
-    return "Known facts about the operator's system (observed):\n" + "\n".join(
-        f"- {f}" for f in kept
-    )
 
 
-def render_operator_notes_block(notes: list[dict] | None) -> str:
-    """§17.654 — the operator's captured notes & additions, threaded into every
-    later step's guidance so the engine respects what they raised and stops
-    re-assuming. ``notes`` = list of ``{ts, kind, node_key, text}``. Returns ""
-    when empty so callers can thread it unconditionally.
-    """
-    if not notes:
-        return ""
-    lines: list[str] = []
-    for n in notes:
-        text_ = (n.get("text") or "").strip() if isinstance(n, dict) else ""
-        if not text_:
-            continue
-        kind = (n.get("kind") or "note").strip() if isinstance(n, dict) else "note"
-        lines.append(f"- ({kind}) {text_}")
-    if not lines:
-        return ""
-    return (
-        "## Operator notes & additions (things the operator has raised for THIS "
-        "project — honor them; do not contradict or re-assume around them)\n"
-        + "\n".join(lines)
-    )
 
 
-# §17.714 — deterministic "operator has changed direction / wants a fresh
-# start" detection. The facts ledger is append-only (``set_environment`` never
-# retracts), and the "never assume a fresh system" grounding rule (§17.709) was
-# built for the OPPOSITE failure (the model fabricating a fresh install when one
-# already existed). So once the operator EXPLICITLY decides to reinstall /
-# rebuild / start over, the earlier-gathered facts describe an abandoned
-# approach and the anti-fresh rule actively fights the operator's stated intent
-# — the recurring "it's not following the conversation" report. Detect the reset
-# intent and let the renderer foreground the decision + suspend the anti-fresh
-# rule (§17.679 lesson: deterministic gate, don't re-tune an LLM). Patterns are
-# reset/rebuild-anchored — a bare "install" or "clean" must NOT trip them.
-_RESET_INTENT_PATTERNS: tuple[re.Pattern, ...] = (
-    re.compile(r"\bre-?install(ing|ed)?\b", re.I),
-    re.compile(r"\bre-?imag(e|ing|ed)\b", re.I),
-    re.compile(r"\bfresh\b.{0,24}\binstall\b", re.I),
-    re.compile(r"\bclean\s+install\b", re.I),
-    re.compile(r"\bstart(ing)?\s+(over|fresh|clean|from\s+scratch)\b", re.I),
-    re.compile(r"\bfrom\s+scratch\b", re.I),
-    re.compile(r"\brebuild(ing|s)?\b", re.I),
-    re.compile(r"\bbare[-\s]?metal\s+(install|reinstall|rebuild)\b", re.I),
-    re.compile(r"\bwipe\b.{0,30}\b(install|reinstall|reimage|rebuild)\b", re.I),
-    re.compile(r"\babandon\b.{0,48}\binstead\b", re.I),
-    # §17.720 — the live pivot said none of the above. The operator announced an
-    # OS install from removable media / a new ISO / an in-progress installer
-    # ("set up the new Proxmox ISO first", "i am currently installing it",
-    # "options from the USB they are to install") and every pattern missed, so
-    # the answers kept arguing them back to the in-place plan. Installing an OS
-    # image from boot media over a system the plan calls existing IS a fresh
-    # start — anchor on the media/ISO + install pairing so a bare "install
-    # nginx" still cannot trip it.
-    re.compile(
-        r"\b(currently|now|in\s+the\s+middle\s+of|busy)\s+(re)?installing\s+"
-        r"(it|the\s+(os|operating\s+system|system))\b", re.I),
-    re.compile(r"\binstall(ing|er|ation)?\b.{0,50}\b(usb|flash\s*drive|bootable|installation\s+media)\b", re.I),
-    re.compile(r"\b(usb|flash\s*drive|bootable\s+media)\b.{0,50}\binstall", re.I),
-    re.compile(r"\bnew\b.{0,24}\biso\b", re.I),
-    re.compile(r"\bboot(ing|ed)?\s+(from|into|off)\s+(the\s+)?(usb|flash|installer|iso)\b", re.I),
-)
 
 
-def _operator_reset_intent(notes: list[dict] | None) -> bool:
-    """§17.714 — True when an operator note/decision declares a fresh start or
-    rebuild that supersedes previously-gathered system state. Deterministic on
-    the note text (any kind — a pivot lands as ``kind='decision'`` via §17.693,
-    but honor it wherever it was recorded)."""
-    for n in notes or []:
-        if not isinstance(n, dict):
-            continue
-        if any(p.search(n.get("text") or "") for p in _RESET_INTENT_PATTERNS):
-            return True
-    return False
 
 
 _FACTS_SWEEP_SYSTEM = (
@@ -913,234 +688,10 @@ async def classify_durable_facts(
     return sorted({i for i in idxs if isinstance(i, int) and 0 <= i < len(facts)})
 
 
-def render_session_memory(
-    environment: dict | None, operator_notes: list[dict] | None = None,
-    *, budget: int | None = None,
-) -> str:
-    """§17.710b — ONE consolidated session-memory block: execution context +
-    observed facts + provided values + operator notes, in priority order and
-    truncated to ``budget`` chars. This is the single injection path that
-    replaces the separate env + notes blocks when ``assist_umem_inject`` is on,
-    so every prompt (guidance / deliberation / verify) grounds on the same
-    memory through one renderer. Grounding rule is baked in: never assume a
-    fresh/empty system; treat anything marked unknown as still open.
-
-    §17.714 — SUPERSESSION: when an operator note declares a fresh start /
-    rebuild (``_operator_reset_intent``), lead with that decision, DEMOTE the
-    now-superseded facts to "earlier observations (re-verify)", and SUSPEND the
-    anti-fresh rule — the append-only facts ledger otherwise keeps injecting the
-    abandoned approach as authoritative ground truth on every later step."""
-    environment = environment or {}
-    profile = (environment.get("profile") or "").strip()
-    facts = [str(f).strip() for f in (environment.get("facts") or []) if str(f).strip()]
-    subs = environment.get("substitutions") or {}
-    notes = [
-        n for n in (operator_notes or [])
-        if isinstance(n, dict) and (n.get("text") or "").strip()
-    ]
-    if not (profile or facts or subs or notes):
-        return ""
-
-    # §17.722 — the facts section is ELASTIC under budget pressure: the ledger
-    # is append-only and grows without bound, while every other section stays
-    # small. Track where it sits so the trim below can shrink the facts LIST
-    # (oldest dropped — the newest facts describe the system's current state)
-    # instead of popping whole sections.
-    facts_idx: int | None = None
-    direction_idx: int | None = None  # §17.714 reset-mode direction — never dropped
-    facts_header = ""
-
-    def _facts_section(header_: str, items: list[str], omitted: int) -> str:
-        marker = (
-            f"\n(… {omitted} older facts omitted to fit the memory budget — newest kept)"
-            if omitted else ""
-        )
-        return header_ + marker + "\n" + "\n".join(f"- {f}" for f in items)
-
-    if _operator_reset_intent(notes):
-        # §17.714 — operator has explicitly chosen a fresh start. Direction
-        # first (protected from budget-trim by the >2 guard below), facts
-        # demoted + reframed, anti-fresh rule suspended.
-        header = (
-            "## Session memory — the operator has CHANGED DIRECTION (read this first)\n"
-            "The operator has decided to start fresh / rebuild. Their **current "
-            "direction** below SUPERSEDES the earlier gathered state AND any "
-            "project goal / brief wording elsewhere in this prompt that conflicts "
-            "with it — follow it: do NOT keep operating against the prior system, "
-            "argue them back to it, or restate the old plan as what they should "
-            "be doing. For THIS session the usual \"never assume a fresh system\" "
-            "rule is SUSPENDED — they have explicitly chosen a fresh start; still "
-            "treat anything unknown/unverified as open and ask."
-        )
-        sections: list[str] = [header]
-        if notes:
-            direction_idx = len(sections)
-            sections.append(
-                "**Operator's current direction (latest decision — supersedes the state below):**\n"
-                + "\n".join(f"- [{(n.get('kind') or 'note')}] {n['text'].strip()}" for n in notes)
-            )
-        if facts:
-            facts_header = (
-                "**Earlier observations (gathered during the PREVIOUS approach the "
-                "operator has since abandoned — re-verify before relying on any of "
-                "them; most will not hold after the fresh start):**"
-            )
-            facts_idx = len(sections)
-            sections.append(_facts_section(facts_header, facts, 0))
-        if subs:
-            sections.append("**Provided values:**\n" + "\n".join(f"- {k} = {v}" for k, v in subs.items()))
-        if profile:
-            sections.append(
-                "**Execution context (re-confirm the host/hostname after a rebuild):** " + profile
-            )
-    else:
-        header = (
-            "## Session memory — what's known so far (ground on this; do NOT assume a "
-            "fresh/empty system, and treat anything marked unknown/unverified as still open)"
-        )
-        # Priority order: context + facts are load-bearing for grounding; provided
-        # values next; notes last. Under budget pressure the facts LIST trims
-        # first (newest kept); whole sections drop from the tail only when even
-        # that isn't enough.
-        sections = [header]
-        if profile:
-            sections.append(f"**Execution context:** {profile}")
-        if facts:
-            facts_header = "**Observed facts:**"
-            facts_idx = len(sections)
-            sections.append(_facts_section(facts_header, facts, 0))
-        if subs:
-            sections.append("**Provided values:**\n" + "\n".join(f"- {k} = {v}" for k, v in subs.items()))
-        if notes:
-            sections.append(
-                "**Operator notes / requirements (carry forward):**\n"
-                + "\n".join(f"- [{(n.get('kind') or 'note')}] {n['text'].strip()}" for n in notes)
-            )
-    block = "\n\n".join(sections)
-    if budget and len(block) > budget:
-        # §17.722 — trim the facts LIST first, whole sections only as a last
-        # resort. The old logic popped whole sections from the tail (notes →
-        # values → the ENTIRE facts section), so the moment a session's ledger
-        # outgrew the budget the injected memory collapsed to just the header +
-        # execution profile — the live "worked great, then suddenly stopped
-        # retaining anything" cliff (facts, VMID/VM_NAME values, and the
-        # operator's own notes all silently vanished from every prompt).
-        if facts_idx is None:
-            # No facts section — the old behavior (pop tail, keep the header +
-            # the load-bearing second section) is still right.
-            while len(sections) > 2 and len("\n\n".join(sections)) > budget:
-                sections.pop()
-        else:
-            while True:
-                overhead = sum(
-                    len(s) + 2 for i, s in enumerate(sections) if i != facts_idx
-                )
-                # Room for the facts section, reserving space for the
-                # omitted-count marker line.
-                room = budget - overhead - 80
-                kept: list[str] = []
-                used = len(facts_header)
-                for f in reversed(facts):
-                    line = len(f) + 3  # "- " prefix + newline
-                    if used + line > room:
-                        break
-                    kept.append(f)
-                    used += line
-                kept.reverse()
-                if kept:
-                    sections[facts_idx] = _facts_section(
-                        facts_header, kept, len(facts) - len(kept)
-                    )
-                    break
-                # Not even one (newest) fact fits — drop the lowest-priority
-                # section and retry with the freed room. The header, the facts
-                # slot, and a §17.714 direction section are never dropped.
-                droppable = [
-                    i for i in range(len(sections))
-                    if i not in (0, facts_idx, direction_idx)
-                ]
-                if not droppable:
-                    del sections[facts_idx]
-                    break
-                drop = max(droppable)
-                del sections[drop]
-                if drop < facts_idx:
-                    facts_idx -= 1
-        block = "\n\n".join(sections)
-        if len(block) > budget:
-            block = block[:budget].rstrip() + "\n… (memory truncated)"
-    return block
 
 
-def _render_memory_or_legacy(
-    environment: dict | None, operator_notes: list[dict] | None,
-) -> list[str]:
-    """§17.710b — the single decision point for memory injection. When
-    ``assist_umem_inject`` is on, return the unified ``render_session_memory``
-    block; else the legacy separate environment + notes blocks (byte-identical
-    to pre-§17.710b). Returns the non-empty parts to append to a prompt."""
-    if settings.assist_unified_memory_enabled and settings.assist_umem_inject:
-        mem = render_session_memory(
-            environment, operator_notes, budget=settings.assist_umem_max_chars,
-        )
-        return [mem] if mem else []
-    out: list[str] = []
-    env_block = render_environment_block(environment)
-    if env_block:
-        out.append(env_block)
-    notes_block = render_operator_notes_block(operator_notes)
-    if notes_block:
-        out.append(notes_block)
-    return out
 
 
-def render_conversation_block(
-    history: list[dict] | None, *, max_chars: int = 4000,
-) -> str:
-    """§17.687 — the recent OWUI back-and-forth (you ⇄ operator) so a follow-up
-    that refers back to something either of you just said resolves.
-
-    ``history`` = list of ``{role, content}`` (oldest first). The CURRENT
-    operator message is NOT included here — it's threaded separately as the
-    refine / question / error. Keeps the MOST RECENT turns within ``max_chars``
-    (drops oldest first) and returns "" when empty so callers thread it
-    unconditionally. Fail-soft on malformed items.
-    """
-    if not history or max_chars <= 0:
-        return ""
-    rendered: list[str] = []
-    for m in history:
-        if not isinstance(m, dict):
-            continue
-        role = (m.get("role") or "").strip().lower()
-        content = (m.get("content") or "").strip()
-        if not content:
-            continue
-        # Guard a single runaway turn (a huge pasted walkthrough) so one message
-        # can't blow the whole budget; keep the head (the suggestion/decision
-        # framing lives up top per the brevity floor §17.643).
-        if len(content) > max_chars:
-            content = content[:max_chars].rstrip() + " …[truncated]"
-        who = "Operator" if role == "user" else "You (assistant)"
-        rendered.append(f"{who}: {content}")
-    if not rendered:
-        return ""
-    kept: list[str] = []
-    total = 0
-    for line in reversed(rendered):
-        cost = len(line) + 2  # +2 for the blank-line join
-        if kept and total + cost > max_chars:
-            break
-        kept.append(line)
-        total += cost
-    kept.reverse()
-    return (
-        "## Recent conversation (you ⇄ the operator, most recent last) — the "
-        "operator may refer back to something either of you just said (\"that "
-        "one\", \"the program you suggested\", \"yes, do it\"); honor it and stay "
-        "consistent with what you already told them\n"
-        + "\n\n".join(kept)
-    )
 
 
 # ── Success verification (§17.487 — did the submitted step actually work?) ─
@@ -1739,93 +1290,11 @@ async def classify_turn(
 
 # ── Auto-learn substitutions (§17.490 — concrete values from evidence) ─────
 
-# A walkthrough emits operator-supplied slots as <SCREAMING_SNAKE> (or
-# <kebab>) placeholders (prompt_assembly §17.361). 2+ chars to avoid matching
-# stray "<x>" in pasted output.
-_PLACEHOLDER_RE = re.compile(r"<([A-Za-z][A-Za-z0-9_-]{1,})>")
-
-_LEARN_SUBS_TOOL = model_router.Tool(
-    name="report_values",
-    description=(
-        "Report the concrete value the operator actually used for each named "
-        "placeholder, read from their pasted command output / evidence. Include "
-        "a placeholder ONLY if its value is clearly present in the evidence; "
-        "omit any you cannot determine with confidence. Do NOT guess."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "values": {
-                "type": "object",
-                "description": "Map of PLACEHOLDER name (no angle brackets) → concrete value.",
-                "additionalProperties": {"type": "string"},
-            }
-        },
-        "required": ["values"],
-    },
-)
 
 
-def find_placeholders(text: str) -> list[str]:
-    """Distinct placeholder names (no brackets) in a walkthrough, order-preserved."""
-    seen: dict[str, None] = {}
-    for m in _PLACEHOLDER_RE.findall(text or ""):
-        seen.setdefault(m, None)
-    return list(seen.keys())
 
 
-async def extract_substitutions(
-    *, guidance_text: str, evidence: str, role: str | None = None,
-) -> dict:
-    """Learn concrete values the operator used for the walkthrough's placeholders.
 
-    Cheap gate: if the guidance emitted no placeholders, return {} WITHOUT an
-    LLM call. Otherwise a single tool_call fills the placeholders it can read
-    from the evidence. Fail-soft → {}.
-    """
-    placeholders = find_placeholders(guidance_text)
-    if not placeholders:
-        return {}
-    role = role or settings.assist_guide_model_role
-    try:
-        resp = await model_router.tool_call(
-            [
-                {"role": "system", "content": (
-                    "You extract the concrete values an operator used, from the "
-                    "command output they pasted. Only report a value you can see "
-                    "in the evidence; omit the rest. Never guess."
-                )},
-                {"role": "user", "content": (
-                    f"Placeholders to fill (omit any you can't determine): "
-                    f"{', '.join(placeholders)}\n\n"
-                    f"Operator evidence:\n{evidence[:6000]}\n\n"
-                    "Call report_values."
-                )},
-            ],
-            [_LEARN_SUBS_TOOL],
-            role=role,
-            temperature=0.0,
-            max_tokens=1024,
-            tool_choice="auto",
-        )
-    except Exception as exc:
-        logger.warning("assist_learn_extract_failed: %s", exc)
-        return {}
-    if not resp.success or not resp.tool_calls:
-        return {}
-    raw = (resp.tool_calls[0].arguments or {}).get("values") or {}
-    if not isinstance(raw, dict):
-        return {}
-    # Keep only placeholders we actually asked about, with non-empty string
-    # values; strip stray angle brackets the model may echo.
-    allowed = set(placeholders)
-    out: dict[str, str] = {}
-    for k, v in raw.items():
-        key = str(k).strip().strip("<>")
-        val = str(v).strip()
-        if key in allowed and val:
-            out[key] = val
-    return out
 
 
 # ── Session facts ledger (§17.709 — durable observed system state) ──────────
@@ -2080,23 +1549,6 @@ async def summarize_step_progress(
     return ""
 
 
-def render_step_recap_block(recap: str | None) -> str:
-    """§17.738 — the running recap as a prompt block. The assistant grounds on it
-    so it doesn't re-suggest resolved fixes or forget which machine we're on."""
-    r = (recap or "").strip()
-    if not r:
-        return ""
-    return (
-        "## Where we are on this step (running recap — the AUTHORITATIVE current "
-        "state of the work; ground on this). It reflects what is TRUE RIGHT NOW, "
-        "including rework the operator has done. If an earlier completed-step / "
-        "upstream output above (even one marked MANDATORY) claims something is "
-        "already done, but this recap's OPEN says it is NOT yet working, TRUST "
-        "THIS RECAP — the operator likely redid or undid that work (e.g. rebuilt "
-        "a machine), so the older output is stale. Do NOT re-suggest anything "
-        "under DONE, do NOT push ahead to later work while an OPEN item blocks "
-        "it, and keep straight which machine the next commands run on.\n" + r
-    )
 
 
 # ── §17.753 — the cross-step "living project recap" (§17.679) ───────────────
@@ -2174,19 +1626,6 @@ async def summarize_project_progress(
     return ""
 
 
-def render_project_recap_block(recap: str | None) -> str:
-    """§17.753 — the whole-project recap as a prompt block, prepended to the raw
-    job digest (§17.650) so every generation site leads with the distilled arc."""
-    r = (recap or "").strip()
-    if not r:
-        return ""
-    return (
-        "## Whole-project state (distilled — where this build stands ACROSS all "
-        "steps; ground on it for the arc: what earlier steps decided, what remains, "
-        "and the project-wide constraints/system facts. It complements the raw "
-        "per-step outputs below — trust it for the big picture and stay consistent "
-        "with the DECISIONS/CONSTRAINTS it lists).\n" + r
-    )
 
 
 # ── Operator-facing status panel + "do this next" callout (§17.741) ─────────
@@ -2196,74 +1635,12 @@ def render_project_recap_block(recap: str | None) -> str:
 # long problem-solving step reads as tracked rather than lost, and mandate a
 # leading "👉 Do this next" section so the single immediate action draws the eye.
 
-_RECAP_LABELS = ("GOAL", "DONE", "OPEN", "CONSTRAINTS", "NEXT", "CONTEXT")
 
 
-def _recap_add(out: dict[str, Any], field: str, text_: str) -> None:
-    text_ = text_.strip()
-    if not text_:
-        return
-    if field in ("done", "open", "constraints"):
-        out[field].append(text_)
-    else:  # goal / next / context are single-valued
-        out[field] = (out[field] + " " + text_).strip() if out[field] else text_
 
 
-def parse_recap(recap: str | None) -> dict[str, Any]:
-    """§17.741 — parse a labeled recap into ``{goal, done[], open[],
-    constraints[], next, context}``. The recap is line-oriented (``LABEL:`` leads
-    a line, optionally with inline text, then bullet fragments). Tolerant of
-    markdown bullets, missing labels, and free spacing. Blank/unparseable → empty
-    fields; never raises. (§17.742 added ``constraints``.)"""
-    out: dict[str, Any] = {"goal": "", "done": [], "open": [], "constraints": [], "next": "", "context": ""}
-    r = (recap or "").strip()
-    if not r:
-        return out
-    current: Optional[str] = None
-    for raw_line in r.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        stripped = line.lstrip("#*-•> ").strip()
-        matched = None
-        for lab in _RECAP_LABELS:
-            up = stripped.upper()
-            if up.startswith(lab + ":") or up == lab:
-                matched = lab
-                # tolerate a bold label ("**GOAL:** x" → the "**" after the
-                # colon) as well as the plain "GOAL: x" the recap prompt emits.
-                rest = stripped[len(lab):].lstrip(": *").strip()
-                break
-        if matched is not None:
-            current = matched.lower()
-            if rest:
-                _recap_add(out, current, rest)
-            continue
-        if current:  # continuation / bullet under the current label
-            _recap_add(out, current, stripped)
-    return out
 
 
-def render_status_panel(recap: str | None) -> str:
-    """§17.741 — the operator-facing "📍 Where we are" panel, built from the
-    §17.738 recap. Returns "" unless the recap carries REAL progress (at least
-    one DONE / OPEN / NEXT item): a goal-only recap (turn 1, nothing done yet)
-    is not worth a panel and would just be noise. Never raises."""
-    p = parse_recap(recap)
-    if not (p["done"] or p["open"] or p["next"] or p["constraints"]):
-        return ""
-    lines = ["**📍 Where we are on this step**", ""]
-    if p["goal"]:
-        lines.append(f"- **Goal:** {p['goal']}")
-    if p["done"]:
-        lines.append("- ✅ **Done:** " + " · ".join(p["done"]))
-    if p["open"]:
-        lines.append("- ⬜ **Still open:** " + " · ".join(p["open"]))
-    if p["constraints"]:  # §17.742 — the limits/ruled-out approaches govern the next move
-        lines.append("- ⚠️ **Constraints:** " + " · ".join(p["constraints"]))
-    if p["next"]:
-        lines.append("- 👉 **Next:** " + p["next"])
-    return "\n".join(lines) + "\n"
 
 
 # ── Draft an inserted step (§17.736 — turn a foundational gap into a step) ──
