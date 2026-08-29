@@ -199,9 +199,30 @@ async def probe_model(body: ProbeInput) -> dict:
     """Explicit generate-based liveness probe (the wizard's "test" button).
 
     Always generates — the caller opted into the latency, and for a LOCAL tag
-    that first call is also what a real request would pay (model load)."""
+    that first call is also what a real request would pay (model load).
+
+    §17.858 — slow-box honesty: a successful LOCAL probe additionally carries
+    ``slow`` (bool). A first result over ``slow_box_probe_warn_ms`` may just be
+    the one-time model load (disk speed ≠ inference speed), so it triggers ONE
+    warm re-probe (reported as ``warm_latency_ms``) and the flag sticks only if
+    the warm number is also over. A slow probe adds ``slow_threshold_ms`` +
+    ``node_timeout_seconds`` so the client can render an honest warning.
+    Cloud tags are never assessed — their latency is network, not this box."""
     model = (body.model or "").strip()
     if not model:
         raise HTTPException(status_code=422, detail="model tag is empty")
     result = await _generate_probe(model, timeout=120.0)
-    return {"model": model, **result}
+    out = {"model": model, **result}
+    if result["ok"] and not _is_cloud_tag(model):
+        warn_ms = settings.slow_box_probe_warn_ms
+        slow = result["latency_ms"] > warn_ms
+        if slow:
+            warm = await _generate_probe(model, timeout=120.0)
+            if warm["ok"]:
+                out["warm_latency_ms"] = warm["latency_ms"]
+                slow = warm["latency_ms"] > warn_ms
+        out["slow"] = slow
+        if slow:
+            out["slow_threshold_ms"] = warn_ms
+            out["node_timeout_seconds"] = settings.node_timeout_seconds
+    return out

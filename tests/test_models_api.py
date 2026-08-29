@@ -163,6 +163,81 @@ async def test_probe_endpoint_returns_result():
                    "error": None}
 
 
+# ── §17.858 — slow-box assessment on local probes ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_probe_local_fast_is_not_slow_no_reprobe():
+    """A local tag under the threshold: slow=False, single probe, no
+    threshold/timeout fields (nothing to warn about)."""
+    probe = AsyncMock(return_value={"ok": True, "latency_ms": 800, "error": None})
+    with patch.object(m, "_generate_probe", new=probe), \
+         patch.object(m.settings, "slow_box_probe_warn_ms", 5000):
+        out = await m.probe_model(m.ProbeInput(model="qwen2.5:7b"))
+    assert out["slow"] is False
+    assert "slow_threshold_ms" not in out and "node_timeout_seconds" not in out
+    probe.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_probe_local_cold_slow_warm_fast_is_not_slow():
+    """A slow FIRST probe may just be the one-time model load — the warm
+    re-probe clears the flag, and both latencies are reported (latency_ms
+    stays the first call's number: that's what a real first request pays)."""
+    probe = AsyncMock(side_effect=[
+        {"ok": True, "latency_ms": 22000, "error": None},
+        {"ok": True, "latency_ms": 1100, "error": None},
+    ])
+    with patch.object(m, "_generate_probe", new=probe), \
+         patch.object(m.settings, "slow_box_probe_warn_ms", 5000):
+        out = await m.probe_model(m.ProbeInput(model="qwen2.5:7b"))
+    assert out["slow"] is False
+    assert out["latency_ms"] == 22000 and out["warm_latency_ms"] == 1100
+    assert probe.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_probe_local_slow_even_warm_flags_with_context():
+    """Slow on BOTH probes → slow=True plus the threshold and the node
+    timeout, so the client can render an honest warning with real numbers."""
+    probe = AsyncMock(side_effect=[
+        {"ok": True, "latency_ms": 30000, "error": None},
+        {"ok": True, "latency_ms": 12000, "error": None},
+    ])
+    with patch.object(m, "_generate_probe", new=probe), \
+         patch.object(m.settings, "slow_box_probe_warn_ms", 5000), \
+         patch.object(m.settings, "node_timeout_seconds", 600):
+        out = await m.probe_model(m.ProbeInput(model="qwen2.5:7b"))
+    assert out["slow"] is True
+    assert out["warm_latency_ms"] == 12000
+    assert out["slow_threshold_ms"] == 5000
+    assert out["node_timeout_seconds"] == 600
+
+
+@pytest.mark.asyncio
+async def test_probe_cloud_tag_never_assessed():
+    """Cloud latency is network, not this box — no slow key, no re-probe,
+    even way over the threshold."""
+    probe = AsyncMock(return_value={"ok": True, "latency_ms": 30000, "error": None})
+    with patch.object(m, "_generate_probe", new=probe), \
+         patch.object(m.settings, "slow_box_probe_warn_ms", 5000):
+        out = await m.probe_model(m.ProbeInput(model="kimi-k2.6:cloud"))
+    assert "slow" not in out
+    probe.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_probe_failed_local_not_assessed():
+    """A failed probe reports the failure, not a slowness verdict."""
+    probe = AsyncMock(return_value={"ok": False, "latency_ms": 60000,
+                                    "error": "timeout"})
+    with patch.object(m, "_generate_probe", new=probe), \
+         patch.object(m.settings, "slow_box_probe_warn_ms", 5000):
+        out = await m.probe_model(m.ProbeInput(model="qwen2.5:7b"))
+    assert "slow" not in out
+    probe.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_generate_probe_is_direct_and_surfaces_410():
     """The probe is a DIRECT /api/generate call (model_router.generate's
