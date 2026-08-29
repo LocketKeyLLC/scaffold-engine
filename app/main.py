@@ -601,7 +601,7 @@ app = FastAPI(
     # /device-sizings/*/report, /digital-sizings/*/report). The §17.174
     # router refactor itself introduces no OpenAPI changes — paths,
     # function names, tags, response_models all preserved verbatim.
-    version="1.4.0",
+    version="1.5.0",
     lifespan=lifespan,
 )
 

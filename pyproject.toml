@@ -3,7 +3,7 @@ name = "scaffold-engine"
 # §17.854 (audit H2) — kept in lockstep with app/main.py FastAPI version + the
 # latest git tag. The check-version static gate (make check-version) fails if
 # these drift.
-version = "1.4.0"
+version = "1.5.0"
 description = "Self-hosted DAG orchestration engine for multi-step LLM workflows."
 requires-python = ">=3.11"
 # The server (this repository root) is source-available under the Business
