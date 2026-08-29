@@ -10,6 +10,7 @@ import pytest
 
 from app.config import settings as _settings
 from app.modules import assist_agent
+from app.modules import assist_environment
 from app.modules.prompt_assembly import StepContext
 
 
@@ -457,7 +458,7 @@ async def test_learn_from_submit_nothing_new_skips_write():
 def _capture_env(profile: str):
     """Patch get_environment to a session whose profile is `profile`."""
     return patch.object(
-        assist_agent, "get_environment",
+        assist_environment, "get_environment",
         new=AsyncMock(return_value={"profile": profile, "substitutions": {}}),
     )
 
@@ -466,7 +467,7 @@ def _capture_env(profile: str):
 async def test_capture_execution_context_captures_when_empty():
     db = AsyncMock()
     with _capture_env(""), \
-         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+         patch.object(assist_environment, "set_environment", new=AsyncMock()) as setenv:
         out = await assist_agent.capture_execution_context(
             session_id="s", evidence="root@pve:~# ls -la", db=db,
         )
@@ -483,7 +484,7 @@ async def test_capture_execution_context_captures_from_failed_paste():
     db = AsyncMock()
     evidence = "root@pve:/etc/pve# systemctl start x\nJob failed. See systemctl status."
     with _capture_env(""), \
-         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+         patch.object(assist_environment, "set_environment", new=AsyncMock()) as setenv:
         out = await assist_agent.capture_execution_context(
             session_id="s", evidence=evidence, db=db,
         )
@@ -494,8 +495,8 @@ async def test_capture_execution_context_captures_from_failed_paste():
 @pytest.mark.asyncio
 async def test_capture_execution_context_no_prompt_is_noop():
     db = AsyncMock()
-    with patch.object(assist_agent, "get_environment", new=AsyncMock()) as getenv, \
-         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+    with patch.object(assist_environment, "get_environment", new=AsyncMock()) as getenv, \
+         patch.object(assist_environment, "set_environment", new=AsyncMock()) as setenv:
         out = await assist_agent.capture_execution_context(
             session_id="s", evidence="I finished the step, it worked", db=db,
         )
@@ -509,7 +510,7 @@ async def test_capture_execution_context_same_host_noop():
     db = AsyncMock()
     prior = assist_agent._exec_context_profile("root", "pve")
     with _capture_env(prior), \
-         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+         patch.object(assist_environment, "set_environment", new=AsyncMock()) as setenv:
         out = await assist_agent.capture_execution_context(
             session_id="s", evidence="root@pve:~# whoami", db=db,
         )
@@ -522,7 +523,7 @@ async def test_capture_execution_context_switch_updates():
     db = AsyncMock()
     prior = assist_agent._exec_context_profile("root", "pve")
     with _capture_env(prior), \
-         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+         patch.object(assist_environment, "set_environment", new=AsyncMock()) as setenv:
         out = await assist_agent.capture_execution_context(
             session_id="s", evidence="root@ct100:~# uname -a", db=db,
         )
@@ -534,7 +535,7 @@ async def test_capture_execution_context_switch_updates():
 async def test_capture_execution_context_respects_operator_profile():
     db = AsyncMock()
     with _capture_env("I run ansible from a laptop across 3 nodes"), \
-         patch.object(assist_agent, "set_environment", new=AsyncMock()) as setenv:
+         patch.object(assist_environment, "set_environment", new=AsyncMock()) as setenv:
         out = await assist_agent.capture_execution_context(
             session_id="s", evidence="root@pve:~# ls", db=db,
         )
@@ -547,7 +548,7 @@ async def test_capture_execution_context_fail_soft():
     # A raising set_environment must not propagate out of the monitor.
     db = AsyncMock()
     with _capture_env(""), \
-         patch.object(assist_agent, "set_environment",
+         patch.object(assist_environment, "set_environment",
                       new=AsyncMock(side_effect=RuntimeError("db down"))):
         out = await assist_agent.capture_execution_context(
             session_id="s", evidence="root@pve:~# ls", db=db,
