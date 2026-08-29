@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.modules import assist_guide
+from app.modules import assist_research_lib
 from app.modules.prompt_assembly import (
     EXECUTION_SYSTEM_RUNBOOK,
     StepContext,
@@ -413,7 +414,7 @@ async def test_research_one_returns_sources_and_answer():
     # snippet path) so the test stays hermetic.
     with patch("app.modules.execution_agent._milvus_search",
                new=AsyncMock(return_value="No knowledge base results found.")), \
-         patch.object(assist_guide, "_deep_web_sources",
+         patch.object(assist_research_lib, "_deep_web_sources",
                       new=AsyncMock(return_value=[
                           {"query": "what flag?", "kind": "web",
                            "text": "the --flag enables it", "url": "https://docs/x"}])), \
@@ -432,7 +433,7 @@ async def test_research_one_no_sources_no_synthesis():
     # deep fetch finds nothing AND the snippet fallback is empty → 0 sources.
     with patch("app.modules.execution_agent._milvus_search",
                new=AsyncMock(return_value="No knowledge base results found.")), \
-         patch.object(assist_guide, "_deep_web_sources", new=AsyncMock(return_value=[])), \
+         patch.object(assist_research_lib, "_deep_web_sources", new=AsyncMock(return_value=[])), \
          patch("app.modules.execution_agent._searxng_search",
                new=AsyncMock(return_value="No search results found.")), \
          patch.object(assist_guide.model_router, "chat", new=AsyncMock()) as chat:
@@ -449,10 +450,10 @@ async def test_research_one_synthesizes_from_job_context_without_web_sources():
     # and the project context must be folded into the synthesis prompt.
     with patch("app.modules.execution_agent._milvus_search",
                new=AsyncMock(return_value="No knowledge base results found.")), \
-         patch.object(assist_guide, "_deep_web_sources", new=AsyncMock(return_value=[])), \
+         patch.object(assist_research_lib, "_deep_web_sources", new=AsyncMock(return_value=[])), \
          patch("app.modules.execution_agent._searxng_search",
                new=AsyncMock(return_value="No search results found.")), \
-         patch.object(assist_guide, "_focus_web_query",
+         patch.object(assist_research_lib, "_focus_web_query",
                       new=AsyncMock(return_value="connect two computers")), \
          patch.object(assist_guide.model_router, "chat",
                       new=AsyncMock(return_value=_resp("Use HOST_A=10.0.0.1"))) as chat:
@@ -1467,7 +1468,7 @@ async def test_deep_web_sources_fetches_and_extracts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_deep_web_sources_empty_on_no_results(monkeypatch):
-    with patch.object(assist_guide, "_searxng_structured", new=AsyncMock(return_value=[])):
+    with patch.object(assist_research_lib, "_searxng_structured", new=AsyncMock(return_value=[])):
         assert await assist_guide._deep_web_sources("q", top_n=2) == []
 
 
@@ -1476,7 +1477,7 @@ async def test_confirm_query_deep_uses_pages_then_skips_snippet(monkeypatch):
     monkeypatch.setattr(assist_guide.settings, "assist_research_fetch_top_n", 2)
     with patch("app.modules.execution_agent._milvus_search",
                new=AsyncMock(return_value="No knowledge base results found.")), \
-         patch.object(assist_guide, "_deep_web_sources",
+         patch.object(assist_research_lib, "_deep_web_sources",
                       new=AsyncMock(return_value=[{"query": "q", "kind": "web",
                                                    "text": "page", "url": "https://a"}])), \
          patch("app.modules.execution_agent._searxng_search",
@@ -1491,7 +1492,7 @@ async def test_confirm_query_deep_falls_back_to_snippet_when_no_pages(monkeypatc
     monkeypatch.setattr(assist_guide.settings, "assist_research_fetch_top_n", 2)
     with patch("app.modules.execution_agent._milvus_search",
                new=AsyncMock(return_value="No knowledge base results found.")), \
-         patch.object(assist_guide, "_deep_web_sources", new=AsyncMock(return_value=[])), \
+         patch.object(assist_research_lib, "_deep_web_sources", new=AsyncMock(return_value=[])), \
          patch("app.modules.execution_agent._searxng_search",
                new=AsyncMock(return_value="[1] snippet body")):
         out = await assist_guide._confirm_query("q", node_key="T1", domain=None, deep=True)
@@ -1608,9 +1609,9 @@ async def test_research_one_searches_focused_query_not_raw_question():
         captured["web_q"] = kw.get("web_query")  # §17.729 focused web query
         return [{"query": q, "kind": "web", "text": "docs", "url": "https://d"}]
 
-    with patch.object(assist_guide, "_focus_web_query",
+    with patch.object(assist_research_lib, "_focus_web_query",
                       new=AsyncMock(return_value="ubuntu server latest lts iso")), \
-         patch.object(assist_guide, "_confirm_query", new=_fake_confirm), \
+         patch.object(assist_research_lib, "_confirm_query", new=_fake_confirm), \
          patch.object(assist_guide.model_router, "chat",
                       new=AsyncMock(return_value=_resp("answer"))) as chat:
         res = await assist_guide.research_one(
