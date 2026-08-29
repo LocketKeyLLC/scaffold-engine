@@ -590,15 +590,52 @@ export function renderChat(container, sessionId) {
       el("strong", { text: "📋 What you've told me affects the plan — proposed changes:" }),
       el("ul", { class: "brief-list" }, ...items),
       el("div", { class: "row" }, applyBtn, discardBtn));
+    // §17.865 — the click must be unmistakable (live operator: applied a
+    // 13-change proposal and saw "nothing"). The card flips to a live
+    // progress state the moment a button is pressed, the outcome lands as a
+    // brief centered popup with the REAL counts, and an apply flows straight
+    // into the revised plan (load + claim-and-guide) — acknowledgment AND
+    // movement, not a corner toast.
+    const ackPopup = (icon, title, body) => {
+      const overlay = el("div", { class: "ack-overlay" },
+        el("div", { class: "card ack-card" },
+          el("span", { class: "ack-icon", text: icon }),
+          el("strong", { text: title }),
+          body ? el("p", { class: "dim", text: body }) : null));
+      overlay.addEventListener("click", () => overlay.remove());
+      document.body.append(overlay);
+      setTimeout(() => overlay.remove(), 2600);
+    };
     const resolve = async (decision) => {
-      applyBtn.disabled = discardBtn.disabled = true;
+      const n = (p.proposals || []).length;
+      mount(replanSlot, el("div", { class: "card card-pad replan-card" },
+        el("div", { class: "row" },
+          el("span", { class: "spin" }),
+          el("strong", { text: decision === "apply"
+            ? ` Applying ${n} change(s) to the plan…`
+            : " Discarding the proposal…" }))));
       try {
-        await api.post(`/assist/${sessionId}/replan/apply`, { decision });
-        toast(decision === "apply" ? "Plan updated." : "Proposal discarded.", "ok");
+        const res = await api.post(`/assist/${sessionId}/replan/apply`, { decision });
+        mount(replanSlot);
+        if (decision === "apply") {
+          const rev = (res.revised || []).length;
+          const drop = (res.dropped || []).length;
+          ackPopup("✅", "Plan updated",
+            `${rev} step(s) revised, ${drop} dropped. Continuing on the revised plan…`);
+          toast(`Plan updated — ${rev} revised, ${drop} dropped.`, "ok");
+          await load();
+          await claimAndGuideNext();
+          return;
+        }
+        ackPopup("👍", "Proposal discarded", "The plan is unchanged. I won't re-suggest this one.");
+        toast("Proposal discarded.", "ok");
       } catch (e) {
+        // Restore the card so the operator can retry; the proposal is still
+        // staged server-side when apply failed.
         toast(errText(e), "err");
+        renderReplanProposal(p);
+        return;
       }
-      mount(replanSlot);
       load();
     };
     applyBtn.addEventListener("click", () => resolve("apply"));

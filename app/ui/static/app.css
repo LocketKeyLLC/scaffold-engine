@@ -1183,3 +1183,19 @@ a.strip-item:hover { background: var(--bg-elev-2); }
   font-weight: 600;
 }
 .theater-toolbar, .plan-toolbar, .traces-toolbar { margin-bottom: 12px; gap: 8px; }
+
+/* ── §17.865 — re-plan acknowledgment popup ─────────────────────────── */
+.ack-overlay {
+  position: fixed; inset: 0; z-index: 70;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex; align-items: center; justify-content: center;
+  animation: ack-fade-in 0.15s ease-out;
+}
+.ack-card {
+  max-width: 420px; text-align: center;
+  padding: 22px 28px;
+  animation: ack-pop 0.18s ease-out;
+}
+.ack-card .ack-icon { font-size: 28px; display: block; margin-bottom: 8px; }
+@keyframes ack-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ack-pop { from { transform: scale(0.92); opacity: 0; } to { transform: scale(1); opacity: 1; } }
