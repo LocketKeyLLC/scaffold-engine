@@ -4,7 +4,13 @@ Notable changes to scaffold-engine. Format follows [Keep a Changelog](https://ke
 
 Day-to-day development is tracked at sprint granularity in the commit log (`fix(§X.Y)` / `feat(§X.Y)` references). This file records the release-level view.
 
-## [Unreleased]
+## [1.5.0] — 2026-08-29
+
+UI consolidation lands its second act: the job hub gives every job one URL, the retired `/web` console's grace-period redirects are removed, and fresh installs on underpowered hardware get an honest warning instead of a mystery failure (§17.857–§17.859, PRs #297–#299).
+
+### Changed
+
+- **The job hub — one job, one URL.** `#/job/:id` replaces the six peer views a job's life used to span (approval gate, plan editor, DAG canvas, execution theater, output viewer, trace browser — each with its own copy-pasted job picker). A persistent header strip (title · status · Compare) sits over six tabs: Overview · Plan · Run · Output · Traces · Costs. Overview *is* the approval gate while the job awaits confirmation; Run embeds the assist walkthrough for assist-mode jobs and the autonomous theater otherwise, and warns before navigating away from a streaming run. The old `#/theater`, `#/output`, `#/plan`, `#/dag`, `#/approvals/:id`, and `#/traces/:id` routes are removed (hard switch); the sidebar's Operate group shrinks to Dashboard / Jobs / Approvals / Compare. Per-job costs get a first-class surface (totals, by-model and by-kind breakdowns, budget status) (§17.859).
 
 ### Added
 
