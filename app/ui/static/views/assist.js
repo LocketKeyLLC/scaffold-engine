@@ -545,6 +545,115 @@ export function renderChat(container, sessionId) {
   // message and takes the normal guidance path.
   const ADVANCE_RE = /^(next( step)?|done|finished|complete(d)?|continue|move on|it worked|works|all set|step (is )?done)[.! ]*$/i;
 
+  // §17.861 — render the §17.677 note-triggered re-plan proposal with
+  // apply/discard controls (the OWUI pipeline renders this as a confirm card;
+  // the SPA previously had NO surface for it, so plan-affecting corrections
+  // silently changed nothing — the home-lab "not listening" loop).
+  function renderReplanProposal(p) {
+    const items = (p.proposals || []).map((ch) =>
+      el("li", {},
+        el("span", { class: "mono", text: ch.node_key || "" }),
+        ch.action ? el("span", { class: "tag", text: ch.action }) : null,
+        el("span", { text: ` ${ch.proposed_change || ch.summary || ch.change || ch.reason || JSON.stringify(ch).slice(0, 200)}` })));
+    const applyBtn = el("button", { class: "btn btn-sm btn-primary", text: "Apply re-plan" });
+    const discardBtn = el("button", { class: "btn btn-sm btn-ghost", text: "Keep plan as-is" });
+    const card = el("div", { class: "msg sys" },
+      el("div", { class: "msg-body" },
+        el("strong", { text: "📋 What you said affects the plan — proposed changes:" }),
+        el("ul", { class: "brief-list" }, ...items),
+        el("div", { class: "row" }, applyBtn, discardBtn)));
+    const resolve = async (decision) => {
+      applyBtn.disabled = discardBtn.disabled = true;
+      try {
+        await api.post(`/assist/${sessionId}/replan/apply`, { decision });
+        toast(decision === "apply" ? "Plan updated." : "Proposal discarded.", "ok");
+      } catch (e) {
+        toast(e.detail || e.message, "err");
+      }
+      card.remove();
+      load();
+    };
+    applyBtn.addEventListener("click", () => resolve("apply"));
+    discardBtn.addEventListener("click", () => resolve("discard"));
+    transcript.append(card);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  // §17.861 — the unified /decide dispatch (§17.771 + §17.855 deterministic
+  // overrides), previously OWUI-pipeline-only. Without it, a corrective or
+  // plan-affecting message in the SPA was captured into the facts ledger but
+  // never ACTED on — no note, no impact assessment, no re-plan — so guidance
+  // re-prescribed the same step forever (live home-lab T8 loop: operator
+  // stated "the modem has no LAN port" three ways; the step goal never moved).
+  // Third bite of the pipeline/SPA drift class (§17.849 track, §17.852 ask) —
+  // this one delegates the ROUTING itself to the server. Returns true when the
+  // turn was dispatched; false falls through to the §17.849/852 chain (which
+  // also remains the path when /decide is disabled or unsure).
+  async function decideAndDispatch(text) {
+    let d = null;
+    const thinking = el("div", { class: "msg sys" }, el("div", { class: "msg-body dim", text: "…deciding how to act on that" }));
+    transcript.append(thinking);
+    transcript.scrollTop = transcript.scrollHeight;
+    try {
+      d = await api.post(`/assist/${sessionId}/decide`, {
+        message: text, node_key: session.current_node_key, history: historyForGuide(),
+      });
+    } catch {
+      /* 404 (valve off) or transient — the fallback chain handles the turn */
+    }
+    thinking.remove();
+    if (!d || !d.action || (d.confidence || "low") === "low") return false;
+    const impact = d.plan_impact || "none";
+    const surfaceHint = () => {
+      if (impact === "surface")
+        appendBubble("assistant", "note",
+          "📌 Heads-up: what you just told me might affect a later step. Add it as a note if you'd like me to reassess the plan.");
+    };
+    if (d.action === "note" || impact === "reshape") {
+      const kind = d.note_kind || (impact === "reshape" ? "decision" : "note");
+      const res = await api.post(`/assist/${sessionId}/note`, {
+        text: d.note_text || text, kind, node_key: session.current_node_key,
+      });
+      appendBubble("assistant", "note",
+        `📝 Noted (${kind}).` +
+        (res?.retracted_facts?.length ? ` Retracted ${res.retracted_facts.length} stale fact(s).` : ""));
+      if (res?.replan_proposal) renderReplanProposal(res.replan_proposal);
+      else load();
+      return true;
+    }
+    if (d.action === "submit") {
+      await submitEvidence(session.current_node_key, d.evidence || text);
+      surfaceHint();
+      return true;
+    }
+    if (d.action === "fix") {
+      const res = await api.post(`/assist/${sessionId}/fix`, {
+        error: d.error_text || text, node_key: session.current_node_key, history: historyForGuide(),
+      });
+      appendBubble("assistant", "fix", res.fix || "(no fix returned)");
+      surfaceHint();
+      load();
+      return true;
+    }
+    if (d.action === "ask" || d.action === "question") {
+      const res = await api.post(`/assist/${sessionId}/research`, {
+        question: d.query || text, node_key: session.current_node_key, history: historyForGuide(),
+      });
+      if ((res?.answer || "").trim()) {
+        appendBubble("assistant", "ask", res.answer);
+        surfaceHint();
+        load();
+        return true;
+      }
+      return false;
+    }
+    if (d.action === "advance") {
+      await doneNext(text);
+      return true;
+    }
+    return false; // skip/status/set_env/… — rare via free text; fallback chain
+  }
+
   async function sendMessage() {
     const text = composerText.value.trim();
     if (!text || guiding) return;
@@ -559,6 +668,15 @@ export function renderChat(container, sessionId) {
     if (ADVANCE_RE.test(text) && session?.current_node_key) {
       await doneNext(text);
       return;
+    }
+    // §17.861 — unified decision first (server /decide); regex chain below is
+    // the fallback, exactly mirroring the OWUI pipeline's primary/fallback split.
+    if (session?.current_node_key && text.length >= 12) {
+      try {
+        if (await decideAndDispatch(text)) return;
+      } catch (e) {
+        toast(`Routing failed (${e.detail || e.message}) — falling back.`, "err");
+      }
     }
     // §17.849 — run the §17.754 progress tracker on EVERY substantive message
     // BEFORE guidance (the OWUI pipeline's behavior, missing from the SPA).
