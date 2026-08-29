@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.modules import assist_agent
+from app.modules import assist_environment
 
 
 def _result(mappings_first=None, mappings_all=None):
@@ -189,9 +190,9 @@ async def test_derive_turn_memory_dedups_and_records_new():
 async def test_apply_shell_context_switches_auto_captured_host():
     db = AsyncMock()
     prior = assist_agent._EXEC_CTX_SENTINEL + "root@pve in ONE interactive shell …"
-    with patch.object(assist_agent, "get_environment",
+    with patch.object(assist_environment, "get_environment",
                       new=AsyncMock(return_value={"profile": prior})), \
-         patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+         patch.object(assist_environment, "set_environment", new=AsyncMock()) as se:
         out = await assist_agent._apply_shell_context(
             session_id="s1", user="root", host="DeFruscio-HomeLab", db=db)
     assert out["changed"] is True
@@ -202,9 +203,9 @@ async def test_apply_shell_context_switches_auto_captured_host():
 @pytest.mark.asyncio
 async def test_apply_shell_context_respects_operator_set_profile():
     db = AsyncMock()
-    with patch.object(assist_agent, "get_environment",
+    with patch.object(assist_environment, "get_environment",
                       new=AsyncMock(return_value={"profile": "I use tmux with 3 panes"})), \
-         patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+         patch.object(assist_environment, "set_environment", new=AsyncMock()) as se:
         out = await assist_agent._apply_shell_context(
             session_id="s1", user="root", host="pve2", db=db)   # no sentinel → sacred
     assert out is None
@@ -214,7 +215,7 @@ async def test_apply_shell_context_respects_operator_set_profile():
 @pytest.mark.asyncio
 async def test_apply_shell_context_rejects_garbage_host():
     db = AsyncMock()
-    with patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+    with patch.object(assist_environment, "set_environment", new=AsyncMock()) as se:
         out = await assist_agent._apply_shell_context(
             session_id="s1", user="root", host="not a host!", db=db)
     assert out is None
