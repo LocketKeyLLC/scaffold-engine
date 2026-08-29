@@ -424,6 +424,13 @@ services:
       # pipelines/scaffold_router/valves.json → assist_unified_decision_enabled
       # (both must be on). Also enables the §17.771 Phase-1 shadow on fall-through.
       ASSIST_UNIFIED_DECISION_ENABLED: "${ASSIST_UNIFIED_DECISION_ENABLED:-true}"
+      # §17.855 (audit "policy migration") — re-apply the deterministic phrase
+      # gates (pivot/help/how-to/shell-result, `assist_policy`) as a post-filter
+      # on the /decide result, so the CONFIDENT decision honours the same
+      # high-precision vetoes the cascade only gets on fall-through. Code default
+      # off (fresh installs conservative); live here after the §17.855 A/B (which
+      # corrected real confident-path misroutes + closed the ask-framed-pivot gap).
+      ASSIST_DECIDE_DETERMINISTIC_OVERRIDES: "${ASSIST_DECIDE_DETERMINISTIC_OVERRIDES:-false}"
       # §17.771 (deferred, now done) — guarantee a "## My suggestion" lean on a
       # decision step's first view; on a miss, generate + append it. Code default
       # off (tests/fresh installs); live here. Fires only on a decision + miss.
