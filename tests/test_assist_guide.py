@@ -476,7 +476,7 @@ async def test_research_one_context_hint_biases_kb_only():
     # web query (open-web results must not be polluted with project entities).
     milvus = AsyncMock(return_value="No knowledge base results found.")
     with patch("app.modules.execution_agent._milvus_search", new=milvus), \
-         patch.object(assist_guide, "_deep_web_sources", new=AsyncMock(return_value=[])), \
+         patch.object(assist_research_lib, "_deep_web_sources", new=AsyncMock(return_value=[])), \
          patch("app.modules.execution_agent._searxng_search",
                new=AsyncMock(return_value="No search results found.")), \
          patch.object(assist_guide.model_router, "chat", new=AsyncMock(return_value=_resp("x"))):
@@ -1456,7 +1456,7 @@ async def test_generate_fix_threads_verbosity_into_system():
 @pytest.mark.asyncio
 async def test_deep_web_sources_fetches_and_extracts(monkeypatch):
     monkeypatch.setattr(assist_guide.settings, "assist_research_fetch_top_n", 2)
-    with patch.object(assist_guide, "_searxng_structured",
+    with patch.object(assist_research_lib, "_searxng_structured",
                       new=AsyncMock(return_value=[
                           {"title": "t", "content": "snip", "url": "https://a"},
                           {"title": "t2", "content": "snip2", "url": "https://b"}])), \
@@ -1503,7 +1503,7 @@ async def test_confirm_query_deep_falls_back_to_snippet_when_no_pages(monkeypatc
 async def test_confirm_query_shallow_never_fetches(monkeypatch):
     with patch("app.modules.execution_agent._milvus_search",
                new=AsyncMock(return_value="No knowledge base results found.")), \
-         patch.object(assist_guide, "_deep_web_sources", new=AsyncMock()) as deep, \
+         patch.object(assist_research_lib, "_deep_web_sources", new=AsyncMock()) as deep, \
          patch("app.modules.execution_agent._searxng_search",
                new=AsyncMock(return_value="[1] snippet")):
         out = await assist_guide._confirm_query("q", node_key="T1", domain=None, deep=False)
