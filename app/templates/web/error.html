@@ -1,9 +1,0 @@
-{% extends "web/_layout.html" %}
-{% block title %}{{ title or "Error" }} · Scaffold Engine{% endblock %}
-{% block content %}
-<section class="error-page">
-  <h1>{{ title or "Something went wrong" }}</h1>
-  <pre class="error-body">{{ error }}</pre>
-  <p><a href="/web/jobs">← Back to jobs</a></p>
-</section>
-{% endblock %}

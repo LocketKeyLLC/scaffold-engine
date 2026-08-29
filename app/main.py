@@ -44,7 +44,6 @@ from app.middleware.error_logging import ErrorLoggingMiddleware
 from app.middleware.performance import PerformanceMiddleware
 from app.middleware.request_id import RequestIdMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
-from app.middleware.web_csrf import WebCsrfMiddleware
 from app.routers.alerts import router as alerts_router
 from app.routers.assist import router as assist_router
 from app.routers.observability import router as observability_router
@@ -622,12 +621,9 @@ app.add_middleware(RequestIdMiddleware)
 # §17.97 — SecurityHeaders is OUTERMOST so CSP + nosniff + Referrer-Policy
 # wrap the final response right before client send. Set-here-only semantics
 # (uses setdefault) so a future per-endpoint header override still wins.
+# (§17.857 — WebCsrfMiddleware was registered after this one; it died with
+# the /web console, whose auth-exempt HTML forms were its only reason.)
 app.add_middleware(SecurityHeadersMiddleware)
-# §17.812 (audit C9) — outermost: refuse cross-origin state-changing requests to
-# the auth-exempt /web UI (CSRF stopgap) before any handler or body processing.
-# Passes non-/web and same-origin requests straight through, so SecurityHeaders
-# (registered just before → second-outermost) still wraps every real response.
-app.add_middleware(WebCsrfMiddleware)
 
 # §17.438 — OTel FastAPI instrumentation MUST attach at app-build time, not in
 # lifespan: it adds a middleware, and Starlette forbids that once the app has
@@ -729,13 +725,10 @@ async def metrics_endpoint(request: Request):
     from app.observability.metrics import expose
     return await expose(request)
 
-# Sprint J.2.a — native single-page web UI. Auth-bypassed so a browser
-# hitting localhost:8000/web/jobs works without sending headers; the
-# embedded SDK Client carries settings.scaffold_api_key for the loopback
-# request to the same orchestrator's API surface.
-from app.web.routes import router as web_router  # noqa: E402
-app.include_router(web_router, dependencies=[])
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+# §17.857 — the retired /web console (Sprint J.2.a htmx UI → §17.820 redirect
+# stubs) is deleted after its one grace release (v1.4.0). The root /static
+# mount served only its assets (web.css + vendored htmx) and went with it —
+# the SPA serves its own assets under /ui/static/ via the /ui mount below.
 
 # Standalone operator SPA (no-build vanilla ES modules). Auth-bypassed at the
 # browser layer (see app/auth.py _AUTH_EXEMPT_PREFIXES) so a browser can load
@@ -774,10 +767,8 @@ if settings.native_openai_enabled:
 async def web_root_redirect():
     """Redirect ``GET /`` to the standalone operator SPA at ``/ui/``.
 
-    (Was ``/web/jobs`` before the SPA landed; the legacy HTMX UI still
-    lives at ``/web/*``.) Excluded from OpenAPI
-    (``include_in_schema=False``) because it's a convenience landing for
-    browsers, not a stable API contract.
+    Excluded from OpenAPI (``include_in_schema=False``) because it's a
+    convenience landing for browsers, not a stable API contract.
     """
     return RedirectResponse(url="/ui/", status_code=302)
 
@@ -974,7 +965,7 @@ async def reset_log_level():
 # GET /exec/*, POST /optimize, POST /execute, POST /execute/all) have
 # been moved into per-domain routers under app/routers/. main.py keeps
 # only the lifespan + middleware + system endpoints (/health, /config,
-# /metrics, /, /web). See app/routers/{workflow,research,jobs,
+# /metrics, /). See app/routers/{workflow,research,jobs,
 # schedule,gt,prompts,rag}.py for the moved endpoints. The OpenAPI
 # snapshot is unchanged (function names, paths, tags, response_models
 # all preserved verbatim across the move).

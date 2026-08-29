@@ -1,7 +1,7 @@
 """§17.97 — SecurityHeadersMiddleware + BodySizeLimitMiddleware.
 
 Coverage:
-  - SecurityHeaders sets CSP/nosniff/Referrer-Policy on /web/* and
+  - SecurityHeaders sets CSP/nosniff/Referrer-Policy on /ui* and
     /research/pdf responses; skips other routes (API JSON, /health,
     /metrics — CSP has no meaning for non-HTML).
   - BodySize rejects requests whose Content-Length exceeds
@@ -31,9 +31,11 @@ def _build_app() -> FastAPI:
     app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
 
-    @app.get("/web/jobs", response_class=HTMLResponse)
-    async def web_jobs():
-        return "<html><body>jobs</body></html>"
+    @app.get("/ui/", response_class=HTMLResponse)
+    async def ui_index():
+        # Stands in for the /ui StaticFiles mount — the middleware keys on
+        # the path prefix, not the responder.
+        return "<html><body>spa</body></html>"
 
     @app.get("/research/pdf", response_class=HTMLResponse)
     async def pdf_page():
@@ -72,8 +74,8 @@ def client():
 # ---------------------------------------------------------------------------
 
 class TestSecurityHeaders:
-    def test_web_route_gets_csp(self, client):
-        r = client.get("/web/jobs")
+    def test_ui_route_gets_csp(self, client):
+        r = client.get("/ui/")
         assert r.status_code == 200
         csp = r.headers.get("Content-Security-Policy")
         assert csp and "script-src 'self' 'nonce-" in csp
@@ -111,8 +113,8 @@ class TestSecurityHeaders:
         assert "frame-ancestors 'none'" in csp
 
     def test_csp_self_hosts_scripts_no_external_cdn(self):
-        """§17.459 — HTMX is vendored under /static/vendor/, so script-src is
-        'self'; the unpkg.com origin must be gone (airgap + tighter CSP)."""
+        """§17.459 — script-src is 'self' only; no CDN origin may appear
+        (airgap + tighter CSP)."""
         csp = _build_csp("nonce123")
         assert "https://unpkg.com" not in csp
         assert "script-src 'self'" in csp
@@ -128,8 +130,8 @@ class TestSecurityHeaders:
     def test_csp_nonce_is_per_request(self, client):
         """Each response carries a fresh nonce (replay/guessing defense)."""
         import re
-        c1 = client.get("/web/jobs").headers["Content-Security-Policy"]
-        c2 = client.get("/web/jobs").headers["Content-Security-Policy"]
+        c1 = client.get("/ui/").headers["Content-Security-Policy"]
+        c2 = client.get("/ui/").headers["Content-Security-Policy"]
         n1 = re.search(r"nonce-([\w-]+)", c1).group(1)
         n2 = re.search(r"nonce-([\w-]+)", c2).group(1)
         assert n1 and n2 and n1 != n2

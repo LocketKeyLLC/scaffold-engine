@@ -1,7 +1,0 @@
-{% extends "web/_layout.html" %}
-{% block title %}{{ job.job_title or "Job" }} · Scaffold Engine{% endblock %}
-{% block content %}
-{# §17.455 — body extracted to _job_detail_root.html so the same markup serves
-   the full page and the htmx poll fragment. #}
-{% include "web/_job_detail_root.html" %}
-{% endblock %}

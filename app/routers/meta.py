@@ -22,10 +22,10 @@ router = APIRouter(tags=["Meta"])
 _FLAG = "first_run_completed"
 
 # §17.818 (plan 5.8) — the user-selectable ingest/build domains. Single source
-# for every client picker (SPA compose/rag/schedules/library, /web/new) — the
-# audit found the list duplicated as constants in four SPA views + the web
-# template. Mirrors app/web/routes.py::_ALLOWED_DOMAINS (the user-facing six;
-# VALID_DOMAINS' code/qa are internal-only partitions).
+# for every client picker (SPA compose/rag/schedules/library) — the audit
+# found the list duplicated as constants in four SPA views + the retired /web
+# template. The user-facing six; VALID_DOMAINS' code/qa are internal-only
+# partitions.
 _USER_DOMAINS = ("prompt", "rag", "llm", "spec", "eng", "eng_design")
 
 

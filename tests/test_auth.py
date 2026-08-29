@@ -127,36 +127,24 @@ async def test_explicit_auth_disabled_returns_empty(_api_key_unset):
 # §17.266 — _AUTH_EXEMPT_PREFIXES regression tests (test-gap from §17.258)
 # ===========================================================================
 #
-# The /web/ + /static/ prefix bypass is security-sensitive: any future
-# change that adds /admin/* or drops a trailing slash would silently
-# expose authenticated endpoints. Pre-§17.266 the prefix logic at
-# auth.py:54 had no test coverage — only the exact-path /health bypass
-# was guarded.
+# The /ui/ prefix bypass is security-sensitive: any future change that
+# adds /admin/* or drops a trailing slash would silently expose
+# authenticated endpoints. Pre-§17.266 the prefix logic had no test
+# coverage — only the exact-path /health bypass was guarded.
+# (§17.857 — the /web/ + /static/ entries died with the /web console.)
 
 
 @pytest.mark.smoke
 @pytest.mark.parametrize("path", [
-    "/web/",                # bare prefix
-    "/web/index.html",      # one segment
-    "/web/static/css/main.css",  # nested
-    "/static/",             # bare prefix
-    "/static/css/app.css",  # nested
-    "/static/js/bundle.min.js",
     "/ui/",                 # §17.778 — standalone operator SPA (bare prefix)
     "/ui/index.html",       # SPA entry
     "/ui/static/app.js",    # SPA asset (nested)
     "/ui/static/views/dag.js",
 ])
-async def test_exempt_prefix_paths_bypass_without_key(_api_key_set, path, monkeypatch):
-    """Every path under /web/, /static/, /ui/ must bypass auth WITHOUT a key.
-    The native web UI and its CSS load from a browser that doesn't carry
-    the X-API-Key header — embedded SDK Client supplies the key on the
-    loopback HTTP call to the real endpoints.
-
-    §17.812 — /web exemption is single-user-only, so pin the mode explicitly
-    (the ambient container may run MULTI_USER_ENABLED=true)."""
-    import app.config
-    monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
+async def test_exempt_prefix_paths_bypass_without_key(_api_key_set, path):
+    """Every path under /ui/ must bypass auth WITHOUT a key — the SPA's
+    assets load from a browser that doesn't carry the X-API-Key header;
+    the SPA itself supplies the key on every API call."""
     result = await _api_key_set.require_api_key(_mk_request(path), key=None)
     assert result == "", f"path {path!r} must bypass auth without a key"
 
@@ -164,20 +152,18 @@ async def test_exempt_prefix_paths_bypass_without_key(_api_key_set, path, monkey
 @pytest.mark.smoke
 @pytest.mark.parametrize("path", [
     # §17.266 — prefix-confusable paths that must NOT bypass. If someone
-    # ever changes _AUTH_EXEMPT_PREFIXES to ("/web", "/static") (dropping
-    # the trailing slash), every entry below would slip through.
-    "/webhook",                  # starts with /web but is a real endpoint
-    "/webhooks/incoming",        # /webhooks plural
-    "/staticfile",               # starts with /static but is a real endpoint
-    "/statics",                  # /statics plural (hypothetical)
-    "/admin/web/",               # /web appears mid-path
-    "/admin/static/",            # /static appears mid-path
-    "/api/v1/web",               # /web as a final segment, no trailing slash
+    # ever changes _AUTH_EXEMPT_PREFIXES to ("/ui",) (dropping the
+    # trailing slash), the /ui-prefixed entries below would slip through.
+    "/uikit",                    # starts with /ui but is not the SPA
+    "/uix/panel",                # /ui-prefixed segment
+    "/admin/ui/",                # /ui appears mid-path
+    "/api/v1/ui",                # /ui as a final segment, no trailing slash
+    "/webhook",                  # §17.857 — /web prefix withdrawn with the console
 ])
 async def test_prefix_confusable_paths_require_key(_api_key_set, path):
     """Paths that LOOK like they might bypass but don't. Guards against
     a future maintainer dropping the trailing slash on the exempt prefix
-    tuple — which would silently exempt /webhook, /staticfile, etc."""
+    tuple — which would silently exempt /uikit etc."""
     with pytest.raises(HTTPException) as exc_info:
         await _api_key_set.require_api_key(_mk_request(path), key=None)
     assert exc_info.value.status_code == 401, (
@@ -187,16 +173,12 @@ async def test_prefix_confusable_paths_require_key(_api_key_set, path):
 
 
 @pytest.mark.smoke
-async def test_exempt_prefix_does_not_validate_key_when_present(_api_key_set, monkeypatch):
+async def test_exempt_prefix_does_not_validate_key_when_present(_api_key_set):
     """A request that hits an exempt prefix WITH a (wrong) key still
     bypasses — the prefix check fires before key validation. Locks in
-    that the exempt prefixes are unconditional, not "exempt-if-no-key".
-
-    §17.812 — /web is single-user-exempt, so pin single-user mode."""
-    import app.config
-    monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
+    that the exempt prefixes are unconditional, not "exempt-if-no-key"."""
     result = await _api_key_set.require_api_key(
-        _mk_request("/web/index.html"), key="totally-wrong-key",
+        _mk_request("/ui/index.html"), key="totally-wrong-key",
     )
     assert result == "", "exempt prefix must bypass even when a wrong key is supplied"
 
@@ -366,48 +348,42 @@ async def test_exempt_prefixes_set_shape_is_loadable(_api_key_set):
         assert isinstance(p, str), f"prefix {p!r} is not a string"
         assert p.endswith("/"), (
             f"prefix {p!r} missing trailing '/' — would match too broadly "
-            f"(e.g. /web matches /webhook). See §17.266."
+            f"(e.g. /ui matches /uikit). See §17.266."
         )
 
 
 # ===========================================================================
-# §17.820b — /web is exempt in EVERY mode (the §17.812 multi-user gate is gone)
+# §17.857 — /web + /static exemptions are WITHDRAWN with the console deletion
 # ===========================================================================
 #
-# The §17.812 (audit C9) gate existed because /web served admin-view HTML
-# whose loopback re-authed as master — under MULTI_USER_ENABLED an
-# unauthenticated browser saw every user's jobs. Post-§17.820 retirement,
-# /web is 301 redirects only (static SPA Locations, zero data), so old
-# bookmarks must land on the SPA login in every mode, never a bare 401.
+# The §17.820 redirect stubs (and the root /static mount that served only
+# /web assets) are gone after their one grace release (v1.4.0). Their
+# auth-exempt entries must go with them — a lingering exemption on an
+# unmounted prefix is dead attack surface waiting for a future route to
+# land under it.
 
 
 @pytest.mark.smoke
-async def test_web_prefix_exempt_single_user(_api_key_set, monkeypatch):
-    """Single-user: /web stays exempt — no regression from §17.266."""
-    import app.config
-    monkeypatch.setattr(app.config.settings, "multi_user_enabled", False)
-    result = await _api_key_set.require_api_key(_mk_request("/web/index.html"), key=None)
-    assert result == "", "/web must stay exempt in single-user mode"
+@pytest.mark.parametrize("path", [
+    "/web/", "/web/jobs", "/web/index.html",
+    "/static/", "/static/css/app.css",
+])
+async def test_web_and_static_prefixes_no_longer_exempt(_api_key_set, path):
+    """A keyless request to the retired prefixes is a plain 401 — the
+    routes 404 anyway (nothing is mounted there), but the auth layer must
+    not silently exempt them."""
+    with pytest.raises(HTTPException) as exc_info:
+        await _api_key_set.require_api_key(_mk_request(path), key=None)
+    assert exc_info.value.status_code == 401
 
 
 @pytest.mark.smoke
-async def test_web_prefix_exempt_under_multi_user(_api_key_set, monkeypatch):
-    """Multi-user: an unauthenticated /web request bypasses too — the route
-    is a data-free 301 to the SPA, and a keyless browser following an old
-    bookmark must reach the SPA login."""
-    import app.config
-    monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
-    result = await _api_key_set.require_api_key(_mk_request("/web/index.html"), key=None)
-    assert result == "", "/web must stay exempt under MULTI_USER_ENABLED"
-
-
-@pytest.mark.smoke
-async def test_ui_and_static_stay_exempt_under_multi_user(_api_key_set, monkeypatch):
-    """The /ui SPA + /static assets stay exempt even in multi-user mode — the
-    SPA sends its own X-API-Key on API calls; only /web is withdrawn."""
+async def test_ui_stays_exempt_under_multi_user(_api_key_set, monkeypatch):
+    """The /ui SPA stays exempt even in multi-user mode — a keyless browser
+    must reach the SPA login; the SPA sends its own X-API-Key on API calls."""
     import app.config
     monkeypatch.setattr(app.config.settings, "multi_user_enabled", True)
-    for path in ("/ui/index.html", "/ui/static/app.js", "/static/css/app.css"):
+    for path in ("/ui/index.html", "/ui/static/app.js"):
         result = await _api_key_set.require_api_key(_mk_request(path), key=None)
         assert result == "", f"{path} must stay exempt in multi-user mode"
 

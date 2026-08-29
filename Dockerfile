@@ -99,7 +99,7 @@ RUN groupadd --system --gid 10001 scaffold \
 ENV VIRTUAL_ENV=/opt/venv
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-# Image-intrinsic so `from scaffold_client import ...` (app/web/routes.py)
+# Image-intrinsic so `from scaffold_client import ...` (cli/scaffold_cli)
 # and `cd /code/cli && python -m scaffold_cli ...` work without compose
 # having to re-declare them on every service.
 ENV PYTHONPATH="/code:/code/sdk"
@@ -124,7 +124,8 @@ COPY --from=builder --chown=scaffold:scaffold /code/.cache /code/.cache
 COPY --chown=root:root app/                       /code/app/
 COPY --chown=root:root scripts/                   /code/scripts/
 COPY --chown=root:root db/                        /code/db/
-# sdk/scaffold_client is imported at runtime by app/web/routes.py.
+# sdk/scaffold_client is imported at runtime by cli/scaffold_cli (the
+# host-side make targets shell into the container and drive the API with it).
 COPY --chown=root:root sdk/scaffold_client/       /code/sdk/scaffold_client/
 # cli/scaffold_cli backs the host-side make targets that shell into the
 # running container.

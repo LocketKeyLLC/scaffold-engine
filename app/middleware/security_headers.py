@@ -1,23 +1,21 @@
 """§17.97 — security response headers for HTML-serving routes.
 
 Adds a Content-Security-Policy header to every response on
-``/web/*``, ``/research/pdf``, and ``/ui*`` (the HTML-serving prefixes;
-``/ui`` is the standalone operator SPA — all-external JS/CSS, no inline,
-so ``script-src 'self'``/``style-src 'self'`` pass without a nonce).
+``/research/pdf`` and ``/ui*`` (the HTML-serving prefixes; ``/ui`` is
+the standalone operator SPA — all-external JS/CSS, no inline, so
+``script-src 'self'``/``style-src 'self'`` pass without a nonce).
 Non-HTML responses (JSON API, SSE streams, /metrics, /health) are
 left alone — CSP only meaningfully constrains how a BROWSER renders
 a response, so attaching it to API responses is noise.
 
-The policy is strict — no ``'unsafe-inline'`` anywhere:
-  * ``script-src 'self' 'nonce-<n>'`` — §17.459 self-hosted HTMX + the
-    SSE extension under ``/static/vendor/`` (was unpkg.com); §17.460
-    replaced 'unsafe-inline' with a per-request nonce. Inline ``<script>``
-    elements must carry ``nonce="{{ request.state.csp_nonce }}"``.
-  * ``style-src 'self' 'nonce-<n>'`` — external CSS (web.css) + nonce'd
-    inline ``<style>`` elements only. Inline ``style=`` attributes are NOT
+The policy is strict — no ``'unsafe-inline'`` anywhere (§17.459/460 —
+no CDN origins, nonces instead of 'unsafe-inline'):
+  * ``script-src 'self' 'nonce-<n>'`` — self-hosted assets only. Inline
+    ``<script>`` elements (research_pdf_upload.html) must carry
+    ``nonce="{{ csp_nonce() }}"``.
+  * ``style-src 'self' 'nonce-<n>'`` — external CSS + nonce'd inline
+    ``<style>`` elements only. Inline ``style=`` attributes are NOT
     permitted (a nonce can't cover an attribute) — use classes instead.
-    HTMX's auto-injected indicator ``<style>`` is disabled via the
-    ``htmx-config`` meta in _layout.html so it doesn't trip the policy.
   * ``img-src 'self' data:`` — data URIs for embedded SVG icons.
   * ``object-src 'none'`` — kills Flash/embed/object surface.
   * ``frame-ancestors 'none'`` — clickjacking defense; the UI
@@ -43,7 +41,7 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 
-_HTML_PREFIXES = ("/web/", "/research/pdf", "/ui")
+_HTML_PREFIXES = ("/research/pdf", "/ui")
 
 # §17.460 — per-request CSP nonce carried in a ContextVar. Set in dispatch
 # BEFORE call_next, so anyio copies it into the endpoint's task context and the
@@ -108,7 +106,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             # plain reload kept running stale UI after a deploy (bit the
             # operator twice: §17.840 round 7 and again post-release).
             # no-cache = always revalidate (304 when unchanged), never stale.
-            if request.url.path.startswith(("/ui/", "/static/")):
+            if request.url.path.startswith("/ui/"):
                 response.headers.setdefault("Cache-Control", "no-cache")
             return response
         finally:
