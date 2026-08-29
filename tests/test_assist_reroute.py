@@ -17,6 +17,7 @@ import pytest
 
 from app.config import settings as _settings
 from app.modules import assist_agent
+from app.modules import assist_notes
 
 
 def _result(mappings_first=None):
@@ -45,9 +46,9 @@ async def test_reroute_stages_replan_when_steps_affected():
     ]
     with patch("app.modules.assist_replan.analyze_note_impact",
                new=AsyncMock(return_value={"affected": affected})), \
-         patch.object(assist_agent, "record_note",
+         patch.object(assist_notes, "record_note",
                       new=AsyncMock(return_value={"kind": "decision"})) as note, \
-         patch.object(assist_agent, "_stage_replan_proposal",
+         patch.object(assist_notes, "_stage_replan_proposal",
                       new=AsyncMock(return_value={"proposals": affected})) as stage:
         out = await assist_agent.detect_reroute(
             session_id="s1",
