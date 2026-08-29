@@ -378,6 +378,15 @@ async def assist_get_session(session_id: str, db=Depends(get_db)):
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     if not sess:
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    # §17.863 — expose the un-resolved §17.677 note-replan proposal so clients
+    # can re-render its apply/discard card after a reload (it previously lived
+    # only in session metadata; a proposal surfaced mid-conversation was LOST
+    # to any navigation until the next note happened to stage a new one).
+    try:
+        sess["pending_replan"] = await assist_agent.get_pending_replan(
+            session_id=session_id, db=db)
+    except Exception:  # noqa: BLE001 — additive field, never break the session read
+        sess["pending_replan"] = None
     return sess
 
 

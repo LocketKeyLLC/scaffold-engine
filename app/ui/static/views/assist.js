@@ -141,6 +141,9 @@ export function renderChat(container, sessionId) {
   const sendBtn = el("button", { class: "btn btn-sm btn-primary", text: "Send", onClick: () => sendMessage() });
   // Current-step hero — the persistent status layer over the conversation.
   const stepHero = el("div", { class: "card card-pad step-hero hidden" });
+  // §17.863 — pending re-plan proposal card slot (declared HERE, above the
+  // chrome mount that references it — const does not hoist).
+  const replanSlot = el("div", {});
   // §17.816 (plan 5.4h) — step verbs, previously slash/OWUI-only. Submit and
   // Fix consume the composer text (evidence / error report); the server side
   // captures + derives it (§17.812 3E) and verifies submits (§17.731).
@@ -314,7 +317,7 @@ export function renderChat(container, sessionId) {
   // §17.845 — the editable living brief rides with the session (mounted once
   // the session tells us its job).
   const briefSlot = el("div", { class: "assist-brief-slot" });
-  mount(container, header, contractCard(), stepHero, main, briefSlot, belowGrid);
+  mount(container, header, contractCard(), replanSlot, stepHero, main, briefSlot, belowGrid);
   let briefMounted = false;
 
   // 📍 Current-step hero — where am I, what's the loop position (§17.738/741
@@ -524,6 +527,11 @@ export function renderChat(container, sessionId) {
         briefMounted = true;
         mount(briefSlot, briefPanel(String(s.job_id)));
       }
+      // §17.863 — a stashed-but-unresolved re-plan proposal re-renders after
+      // any reload (the server now exposes it on the session read); resolving
+      // it clears the slot.
+      if (s.pending_replan) renderReplanProposal(s.pending_replan);
+      else mount(replanSlot);
       renderStepHero();
       renderTranscript();
       renderChecklist();
@@ -545,10 +553,20 @@ export function renderChat(container, sessionId) {
   // message and takes the normal guidance path.
   const ADVANCE_RE = /^(next( step)?|done|finished|complete(d)?|continue|move on|it worked|works|all set|step (is )?done)[.! ]*$/i;
 
+  // §17.862/863 — readable error text. FastAPI error `detail` can be an
+  // object or a 422 validation ARRAY; template-stringing those printed
+  // "[object Object]" at the live operator.
+  function errText(e) {
+    const d = e?.detail;
+    if (typeof d === "string" && d) return d;
+    if (d != null) { try { return JSON.stringify(d).slice(0, 300); } catch { /* fall through */ } }
+    return e?.message || String(e);
+  }
+
   // §17.861 — render the §17.677 note-triggered re-plan proposal with
-  // apply/discard controls (the OWUI pipeline renders this as a confirm card;
-  // the SPA previously had NO surface for it, so plan-affecting corrections
-  // silently changed nothing — the home-lab "not listening" loop).
+  // apply/discard controls. §17.863 — into the dedicated slot (idempotent:
+  // load() re-renders the session's PENDING proposal after any reload, so a
+  // surfaced proposal can no longer be lost to navigation).
   function renderReplanProposal(p) {
     const items = (p.proposals || []).map((ch) =>
       el("li", {},
@@ -557,26 +575,45 @@ export function renderChat(container, sessionId) {
         el("span", { text: ` ${ch.proposed_change || ch.summary || ch.change || ch.reason || JSON.stringify(ch).slice(0, 200)}` })));
     const applyBtn = el("button", { class: "btn btn-sm btn-primary", text: "Apply re-plan" });
     const discardBtn = el("button", { class: "btn btn-sm btn-ghost", text: "Keep plan as-is" });
-    const card = el("div", { class: "msg sys" },
-      el("div", { class: "msg-body" },
-        el("strong", { text: "📋 What you said affects the plan — proposed changes:" }),
-        el("ul", { class: "brief-list" }, ...items),
-        el("div", { class: "row" }, applyBtn, discardBtn)));
+    const card = el("div", { class: "card card-pad replan-card" },
+      el("strong", { text: "📋 What you've told me affects the plan — proposed changes:" }),
+      el("ul", { class: "brief-list" }, ...items),
+      el("div", { class: "row" }, applyBtn, discardBtn));
     const resolve = async (decision) => {
       applyBtn.disabled = discardBtn.disabled = true;
       try {
         await api.post(`/assist/${sessionId}/replan/apply`, { decision });
         toast(decision === "apply" ? "Plan updated." : "Proposal discarded.", "ok");
       } catch (e) {
-        toast(e.detail || e.message, "err");
+        toast(errText(e), "err");
       }
-      card.remove();
+      mount(replanSlot);
       load();
     };
     applyBtn.addEventListener("click", () => resolve("apply"));
     discardBtn.addEventListener("click", () => resolve("discard"));
-    transcript.append(card);
-    transcript.scrollTop = transcript.scrollHeight;
+    mount(replanSlot, card);
+    replanSlot.scrollIntoView({ block: "nearest" });
+  }
+
+  // §17.863 — plan_impact=surface, made ACTIONABLE. The §17.861 heads-up
+  // bubble told the operator their info "might affect a later step" and left
+  // it there — in the live home-lab session the direction changed (abandon
+  // VLANs) while the plan kept marching through stale switch steps. Now a
+  // surface-flagged dispatch ALSO records the note and runs the §17.677
+  // impact pass; a concrete proposal renders the apply/discard card, and
+  // silence stays silent (no proposal → just the gentle bubble, anti-thrash
+  // per §17.742 — the turn's main answer always renders first).
+  async function surfaceImpact(d, text) {
+    try {
+      const res = await api.post(`/assist/${sessionId}/note`, {
+        text: d.note_text || text, kind: d.note_kind || "note",
+        node_key: d.node_key || session?.current_node_key || null,
+      });
+      if (res?.replan_proposal) { renderReplanProposal(res.replan_proposal); return; }
+    } catch { /* fall through to the gentle hint */ }
+    appendBubble("assistant", "note",
+      "📌 Heads-up: what you just told me might affect a later step. Add it as a note if you'd like me to reassess the plan.");
   }
 
   // §17.861 — the unified /decide dispatch (§17.771 + §17.855 deterministic
@@ -615,16 +652,17 @@ export function renderChat(container, sessionId) {
       }
       if (!d || !d.action || (d.confidence || "low") === "low") return false;
       const impact = d.plan_impact || "none";
-      const surfaceHint = () => {
-        if (impact === "surface")
-          appendBubble("assistant", "note",
-            "📌 Heads-up: what you just told me might affect a later step. Add it as a note if you'd like me to reassess the plan.");
-      };
+      // §17.863 (mirrors pipeline §17.812 I-4) — prefer the node the /decide
+      // call resolved server-side: dispatching the session's CURRENT node when
+      // the decision reasoned about a different one is how the live retest's
+      // submit hit a 409 and aborted the whole dispatch.
+      const nk = d.node_key || session.current_node_key;
+      const surfaceHint = async () => { if (impact === "surface") await surfaceImpact(d, text); };
       if (d.action === "note" || impact === "reshape") {
         setStatus("📝 Recording that and checking whether it changes the plan…");
         const kind = d.note_kind || (impact === "reshape" ? "decision" : "note");
         const res = await api.post(`/assist/${sessionId}/note`, {
-          text: d.note_text || text, kind, node_key: session.current_node_key,
+          text: d.note_text || text, kind, node_key: nk,
         });
         appendBubble("assistant", "note",
           `📝 Noted (${kind}).` +
@@ -635,28 +673,36 @@ export function renderChat(container, sessionId) {
       }
       if (d.action === "submit") {
         setStatus("✓ Recording the result and verifying the step…");
-        await submitEvidence(session.current_node_key, d.evidence || text);
-        surfaceHint();
+        try {
+          await submitEvidence(nk, d.evidence || text);
+        } catch (e) {
+          // §17.863 — a refused submit (409: step not claimable / wrong state)
+          // must NOT kill the turn. Say why, then let the fallback chain (the
+          // §17.849 tracker) handle the message its own way.
+          appendBubble("assistant", "note", `That looked like a step result, but the step wouldn't accept it (${errText(e)}). Checking progress the usual way…`);
+          return false;
+        }
+        await surfaceHint();
         return true;
       }
       if (d.action === "fix") {
         setStatus("🔧 Diagnosing the error for your environment…");
         const res = await api.post(`/assist/${sessionId}/fix`, {
-          error: d.error_text || text, node_key: session.current_node_key, history: historyForGuide(),
+          error: d.error_text || text, node_key: nk, history: historyForGuide(),
         });
         appendBubble("assistant", "fix", res.fix || "(no fix returned)");
-        surfaceHint();
+        await surfaceHint();
         load();
         return true;
       }
       if (d.action === "ask" || d.action === "question") {
         setStatus("🔎 Researching your question against the project's current state — this can take a minute or two. The answer also lands in the transcript, so it survives a reload…");
         const res = await api.post(`/assist/${sessionId}/research`, {
-          question: d.query || text, node_key: session.current_node_key, history: historyForGuide(),
+          question: d.query || text, node_key: nk, history: historyForGuide(),
         });
         if ((res?.answer || "").trim()) {
           appendBubble("assistant", "ask", res.answer);
-          surfaceHint();
+          await surfaceHint();
           load();
           return true;
         }
@@ -697,7 +743,7 @@ export function renderChat(container, sessionId) {
       try {
         if (await decideAndDispatch(text)) return;
       } catch (e) {
-        toast(`Routing failed (${e.detail || e.message}) — falling back.`, "err");
+        toast(`Routing failed (${errText(e)}) — falling back.`, "err");
       }
     }
     // §17.849 — run the §17.754 progress tracker on EVERY substantive message
