@@ -46,7 +46,8 @@ export async function startAssistFor(api, jobId, toast) {
     const sid = s.session_id || s.id;
     if (sid) {
       toast?.("Assist mode — the engine guides, you drive.", "ok");
-      location.hash = `#/assist/${sid}`;
+      // §17.859 — land in the job hub's Run tab (it embeds the walkthrough).
+      location.hash = `#/job/${jobId}/run`;
       return true;
     }
   } catch (e) {

@@ -23,9 +23,8 @@ export const NAV_GROUPS = [
       { id: "dashboard", path: "/", label: "Dashboard", icon: "◈" },
       { id: "jobs", path: "/jobs", label: "Jobs", icon: "▣" },
       { id: "approvals", path: "/approvals", label: "Approvals", icon: "⏻" },
-      { id: "dag", path: "/dag", label: "DAG Canvas", icon: "⬡" },
-      { id: "theater", path: "/theater", label: "Execution", icon: "▶" },
-      { id: "output", path: "/output", label: "Outputs", icon: "▤" },
+      // §17.859 — DAG Canvas / Execution / Outputs collapsed into the job
+      // hub's tabs (#/job/:id) — one job, one URL. Operate = pick a job.
       { id: "compare", path: "/compare", label: "Compare", icon: "⇄" },
     ],
   },

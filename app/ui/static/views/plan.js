@@ -4,8 +4,7 @@
 // optimistic-lock (edit_version) 409 handling. "Execute plan" hands off to the
 // execution theater. Reached via the approval gate's Approve chain.
 import * as api from "../api.js";
-import * as router from "../router.js";
-import { el, mount, moveItem, shortId } from "../util.js";
+import { el, mount, moveItem } from "../util.js";
 import { statusBadge, loading, errorPanel, toast } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
 import { briefPanel } from "./brief_panel.js";
@@ -25,7 +24,10 @@ function field(label, control, hint) {
   );
 }
 
-function renderPlan(container, jobId) {
+// §17.859 — embedded as the job hub's Plan tab (standalone route died with
+// the hub). The read-only DAG canvas view folded in here too — this editor
+// already renders the same graph via dag_render.js.
+export function renderPlan(container, jobId) {
   let disposed = false;
   let nodes = [];
   let byKey = {};
@@ -42,24 +44,19 @@ function renderPlan(container, jobId) {
     text: isAssist() ? "✦ Start assist mode" : "▶ Execute plan",
     onClick: () => {
       if (isAssist()) startAssistFor(api, jobId, toast);
-      else location.hash = `#/theater/${jobId}`;
+      else location.hash = `#/job/${jobId}/run`;
     },
   });
 
   const header = el(
     "div",
-    { class: "view-header" },
-    el("div", {}, el("h1", { text: "Plan Editor" }), el("div", { class: "sub mono", text: shortId(jobId) })),
-    el(
-      "div",
-      { class: "header-actions" },
-      el("a", { class: "btn btn-sm btn-ghost", href: "#/approvals", text: "← Approvals" }),
-      el("button", { class: "btn btn-sm", text: "Fit", onClick: () => graph.fit() }),
-      el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => load() }),
-      insertBtn,
-      reorderBtn,
-      executeBtn
-    )
+    { class: "row row-wrap plan-toolbar" },
+    el("span", { class: "spacer" }),
+    el("button", { class: "btn btn-sm", text: "Fit", onClick: () => graph.fit() }),
+    el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => load() }),
+    insertBtn,
+    reorderBtn,
+    executeBtn
   );
 
   const canvas = el("div", { class: "dag-canvas" });
@@ -103,7 +100,7 @@ function renderPlan(container, jobId) {
   // §17.847 — flow guide (where am I → what next), filled once the job loads.
   const flowSlot = el("div", {});
   api.get(`/jobs/${jobId}`).then((job) => {
-    const fg = flowGuide(job, { here: `#/plan/` });
+    const fg = flowGuide(job, { here: `#/job/${jobId}/plan` });
     if (fg) mount(flowSlot, fg);
   }).catch(() => {});
   mount(container, header, flowSlot, mobileNote, guidance, briefPanel(jobId), warning, reorderPanel, stage);
@@ -418,9 +415,4 @@ function renderPlan(container, jobId) {
     disposed = true;
     graph.destroy();
   };
-}
-
-export default function plan(container, params) {
-  if (params && params.jobId) return renderPlan(container, params.jobId);
-  return renderPlan(container, null);
 }

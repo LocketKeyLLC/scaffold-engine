@@ -4,8 +4,8 @@
 // / pipeline_complete. node_token streaming is valve-gated (default OFF) — when
 // absent we simply show each node's full output on node_done.
 import * as api from "../api.js";
-import { el, mount, shortId, timeAgo, mdToHtml, fmtNum } from "../util.js";
-import { statusBadge, loading, errorPanel, emptyState, makeClickable } from "../components.js";
+import { el, mount, shortId, mdToHtml, fmtNum } from "../util.js";
+import { statusBadge, loading, errorPanel, makeClickable } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
 import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
 import { toast } from "../components.js";
@@ -31,54 +31,12 @@ function eventIcon(ev) {
   );
 }
 
-// ── Picker ────────────────────────────────────────────────────────────
-function renderPicker(container) {
-  let disposed = false;
-  const outlet = el("div", { class: "picker-outlet" }, loading("Loading jobs…"));
-  mount(
-    container,
-    el("div", { class: "view-header" }, el("div", {}, el("h1", { text: "Execution Theater" }), el("div", { class: "sub", text: "Pick a job to run and watch live" }))),
-    outlet
-  );
-  (async () => {
-    try {
-      const res = await api.get("/jobs", { query: { limit: 100 } });
-      if (disposed) return;
-      const jobs = (res.jobs || []).filter((j) => (j.node_count || 0) > 0);
-      if (!jobs.length) {
-        mount(outlet, emptyState({
-          icon: "▶",
-          title: "Nothing to watch yet",
-          body: "Once a job has an approved plan and starts executing, its live run streams here node by node.",
-          action: { label: "＋ New idea", href: "#/new" },
-        }));
-        return;
-      }
-      mount(
-        outlet,
-        el(
-          "div",
-          { class: "grid grid-3" },
-          ...jobs.map((j) =>
-            el(
-              "a",
-              { class: "card card-pad picker-card", href: `#/theater/${j.id}` },
-              el("div", { class: "row row-wrap" }, statusBadge(j.status), el("span", { class: "spacer" }), el("span", { class: "faint mono", text: `${j.node_count} nodes` })),
-              el("div", { class: "work-title", text: j.title || "(untitled)" }),
-              el("div", { class: "faint", text: timeAgo(j.updated_at || j.created_at) })
-            )
-          )
-        )
-      );
-    } catch (e) {
-      if (!disposed) mount(outlet, errorPanel(e));
-    }
-  })();
-  return () => (disposed = true);
-}
-
 // ── Theater for one job ──────────────────────────────────────────────
-function renderTheater(container, jobId) {
+// §17.859 — embedded as the job hub's Run tab (the picker + standalone
+// route died with the hub). `ctx.setNavGuard(msg|null)` tells the hub to
+// confirm before tab/back navigation while a run is streaming (G2: leaving
+// the surface disconnects the SSE stream = cancel-by-design).
+export function renderTheater(container, jobId, ctx = {}) {
   let disposed = false;
   let running = false;
   let abort = null;
@@ -93,29 +51,20 @@ function renderTheater(container, jobId) {
   });
   const statusPill = el("span", {});
 
-  // §17.854 (audit G2) — navigating away from a live run silently cancels it
-  // (the server treats a client disconnect from /execute/all as a cancel by
-  // design). Guard the in-header links so a glance at the DAG mid-run doesn't
-  // kill the job, and warn the browser on tab-close/reload.
-  function guardNav(e) {
-    if (running && !confirm(
-        "A run is streaming. Leaving this page STOPS it. Leave anyway?")) {
-      e.preventDefault();
-    }
-  }
+  // §17.854 (audit G2) — a live run dies with the SSE stream, so the hub is
+  // told to confirm on tab/back navigation (ctx.setNavGuard) and the browser
+  // warns on tab-close/reload.
+  const GUARD_MSG = "A run is streaming. Leaving this page STOPS it. Leave anyway?";
   function beforeUnload(e) {
     if (running) { e.preventDefault(); e.returnValue = ""; return ""; }
   }
-  const jobsLink = el("a", { class: "btn btn-sm btn-ghost", href: "#/theater", text: "← Jobs" });
-  const dagLink = el("a", { class: "btn btn-sm btn-ghost", href: `#/dag/${jobId}`, text: "⬡ DAG" });
-  jobsLink.addEventListener("click", guardNav);
-  dagLink.addEventListener("click", guardNav);
 
   const header = el(
     "div",
-    { class: "view-header" },
-    el("div", {}, el("h1", { text: "Execution Theater" }), el("div", { class: "sub mono", text: shortId(jobId) })),
-    el("div", { class: "header-actions" }, jobsLink, dagLink, statusPill, runBtn)
+    { class: "row row-wrap theater-toolbar" },
+    el("span", { class: "spacer" }),
+    statusPill,
+    runBtn
   );
 
   // §17.818 (plan 5.6) — the §17.811 progress/ETA signal, previously
@@ -156,7 +105,7 @@ function renderTheater(container, jobId) {
   // §17.850 — flow guide on the Run surface too (carry-through sweep).
   const flowSlot = el("div", {});
   api.get(`/jobs/${jobId}`).then((job) => {
-    const fg = flowGuide(job, { here: "#/theater/" });
+    const fg = flowGuide(job, { here: `#/job/${jobId}/run` });
     if (fg) mount(flowSlot, fg);
   }).catch(() => {});
   mount(container, header, flowSlot, progressBar, grid);
@@ -222,7 +171,6 @@ function renderTheater(container, jobId) {
     try {
       const data = await api.get(`/exec/status/${jobId}`);
       if (disposed) return;
-      header.querySelector(".sub").textContent = data.job_title || shortId(jobId);
       setStatusPill(data.job_status);
       nodeState.clear();
       for (const n of data.nodes || []) nodeState.set(n.node_key, { status: n.status, title: n.title, tool: n.tool, order: n.execution_order, output: "" });
@@ -261,6 +209,7 @@ function renderTheater(container, jobId) {
 
   async function startRun() {
     running = true;
+    if (ctx.setNavGuard) ctx.setNavGuard(GUARD_MSG);  // §17.859 — hub tabs ask first
     window.addEventListener("beforeunload", beforeUnload);  // §17.854 G2
     summaryEl.classList.add("hidden");
     runBtn.textContent = "■ Stop";
@@ -291,6 +240,7 @@ function renderTheater(container, jobId) {
 
   function finishRun() {
     running = false;
+    if (ctx.setNavGuard) ctx.setNavGuard(null);  // §17.859
     window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     abort = null;
     currentKey = null;
@@ -404,12 +354,8 @@ function renderTheater(container, jobId) {
   return () => {
     disposed = true;
     offExecMode();  // §17.854 S4
+    if (ctx.setNavGuard) ctx.setNavGuard(null);  // §17.859
     window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     if (abort) abort.abort();
   };
-}
-
-export default function theater(container, params) {
-  if (params && params.jobId) return renderTheater(container, params.jobId);
-  return renderPicker(container);
 }

@@ -1,17 +1,16 @@
-// §17.816 (plan 5.4e) — Traces view: browse a job's LLM request/response
-// content (llm_traces, mig 063 / §17.786-787). First UI anywhere for this
-// sink. Job picker → call-ordered rows with expandable prompt/response;
-// honest empty state distinguishes capture-off from no-calls.
+// §17.816 (plan 5.4e) — Traces: browse a job's LLM request/response content
+// (llm_traces, mig 063 / §17.786-787). §17.859 — split for the job hub: the
+// per-job browser is the hub's Traces tab (renderJobTraces); this view keeps
+// only the global picker, and its rows deep-link into the hub.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo } from "../util.js";
 import { emptyState, errorPanel, loading } from "../components.js";
-import * as router from "../router.js";
 
 const KINDS = ["", "generate", "chat", "tool_call", "embed"];
 
-export default function traces(container, params = {}) {
+// ── Per-job trace browser (the hub's Traces tab) ─────────────────────
+export function renderJobTraces(container, jobId) {
   let disposed = false;
-  const jobId = params.jobId || "";
 
   const kind = el(
     "select",
@@ -20,39 +19,13 @@ export default function traces(container, params = {}) {
   );
   const tracesBox = el("div", {});
 
-  async function pickJob() {
-    mount(tracesBox, loading("Loading recent jobs…"));
-    try {
-      const res = await api.get("/jobs", { query: { limit: 25 } });
-      const jobs = res.jobs || [];
-      if (!jobs.length) {
-        mount(tracesBox, emptyState({ icon: "▤", title: "No jobs yet" }));
-        return;
-      }
-      mount(
-        tracesBox,
-        el("div", { class: "faint traces-hint", text: "Pick a job to inspect its LLM calls:" }),
-        ...jobs.map((j) =>
-          el(
-            "div",
-            { class: "card card-pad traces-job-row" },
-            el("a", { href: `#/traces/${j.id}`, text: j.title || shortId(j.id) }),
-            el("span", { class: "badge", text: j.status }),
-            el("span", { class: "faint", text: timeAgo(j.updated_at || j.created_at) })
-          )
-        )
-      );
-    } catch (e) {
-      mount(tracesBox, errorPanel(e, pickJob));
-    }
-  }
-
   async function loadTraces() {
     mount(tracesBox, loading("Loading traces…"));
     try {
       const res = await api.get(`/trace/${jobId}`, {
         query: { limit: 100, kind: kind.value || null },
       });
+      if (disposed) return;
       const rows = res.traces || [];
       if (!rows.length) {
         mount(
@@ -92,7 +65,7 @@ export default function traces(container, params = {}) {
         )
       );
     } catch (e) {
-      mount(tracesBox, errorPanel(e, loadTraces));
+      if (!disposed) mount(tracesBox, errorPanel(e, loadTraces));
     }
   }
 
@@ -109,7 +82,47 @@ export default function traces(container, params = {}) {
     return (sys + (t.prompt || "")).slice(0, 8000);
   }
 
-  kind.addEventListener("change", () => jobId && loadTraces());
+  kind.addEventListener("change", loadTraces);
+  mount(container, el("div", { class: "row traces-toolbar" }, el("span", { class: "spacer" }), kind), tracesBox);
+  loadTraces();
+
+  return () => {
+    disposed = true;
+  };
+}
+
+// ── Global picker (#/traces) ─────────────────────────────────────────
+export default function traces(container) {
+  let disposed = false;
+  const tracesBox = el("div", {});
+
+  async function pickJob() {
+    mount(tracesBox, loading("Loading recent jobs…"));
+    try {
+      const res = await api.get("/jobs", { query: { limit: 25 } });
+      if (disposed) return;
+      const jobs = res.jobs || [];
+      if (!jobs.length) {
+        mount(tracesBox, emptyState({ icon: "▤", title: "No jobs yet" }));
+        return;
+      }
+      mount(
+        tracesBox,
+        el("div", { class: "faint traces-hint", text: "Pick a job to inspect its LLM calls:" }),
+        ...jobs.map((j) =>
+          el(
+            "div",
+            { class: "card card-pad traces-job-row" },
+            el("a", { href: `#/job/${j.id}/traces`, text: j.title || shortId(j.id) }),
+            el("span", { class: "badge", text: j.status }),
+            el("span", { class: "faint", text: timeAgo(j.updated_at || j.created_at) })
+          )
+        )
+      );
+    } catch (e) {
+      if (!disposed) mount(tracesBox, errorPanel(e, pickJob));
+    }
+  }
 
   mount(
     container,
@@ -124,17 +137,11 @@ export default function traces(container, params = {}) {
           class: "sub",
           text: "Full request/response content per job (llm_traces). Recorded only while trace capture is on.",
         })
-      ),
-      jobId
-        ? el("div", { class: "row" },
-            el("code", { text: shortId(jobId) }),
-            kind,
-            el("button", { class: "btn btn-ghost btn-sm", text: "All jobs", onClick: () => router.navigate("/traces") }))
-        : null
+      )
     ),
     tracesBox
   );
-  jobId ? loadTraces() : pickJob();
+  pickJob();
 
   return () => {
     disposed = true;

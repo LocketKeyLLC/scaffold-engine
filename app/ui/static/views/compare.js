@@ -199,7 +199,7 @@ function renderCompare(container, aId, bId) {
           el("div", { class: "row row-wrap" }, el("h2", { class: "compare-col-title", text: side.job.title || "(untitled)" })),
           el("div", { class: "faint mono", text: shortId(side.job.id) }),
           metrics(side),
-          el("div", { class: "compare-links" }, el("a", { class: "btn btn-xs", href: `#/output/${side.job.id}`, text: "Output" }), el("a", { class: "btn btn-xs", href: `#/dag/${side.job.id}`, text: "DAG" }))
+          el("div", { class: "compare-links" }, el("a", { class: "btn btn-xs", href: `#/job/${side.job.id}/output`, text: "Output" }), el("a", { class: "btn btn-xs", href: `#/job/${side.job.id}/plan`, text: "Plan" }))
         );
       mount(
         outlet,

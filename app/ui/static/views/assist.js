@@ -118,7 +118,9 @@ function contractCard(onDismiss) {
   );
 }
 
-function renderChat(container, sessionId) {
+// §17.859 — exported: the job hub's Run tab embeds the walkthrough for
+// assisted_* jobs (it resolves the session via the idempotent /assist/start).
+export function renderChat(container, sessionId) {
   let disposed = false;
   let guiding = false;
   let abort = null;
