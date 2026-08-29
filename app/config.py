@@ -1192,6 +1192,15 @@ class Settings(BaseSettings):
     # the one-time model load, so a slow FIRST result triggers one warm
     # re-probe before the flag sticks (disk speed ≠ inference speed).
     slow_box_probe_warn_ms: int = Field(default=5000, ge=1, le=120000)
+    # §17.864 — step-premise verification: on assist step claim, one model
+    # call judges the step against the CURRENT facts ledger + recap; a stale
+    # step surfaces (and stages, §17.677 surface-and-ask) a revision proposal
+    # BEFORE the operator is walked into abandoned work. The reactive loop
+    # (note-impact) only fires when the operator SAYS something — this is the
+    # proactive half (live home-lab failure: tracker advanced into retired
+    # switch/VLAN steps). Code default OFF (one extra model call per claim);
+    # live boxes opt in via env.
+    assist_step_premise_check_enabled: bool = False
     # §17.465 — token budget for a node's generation call. The default
     # model_router.chat() cap is 4096; for a thinking model (qwen3.5:397b-cloud,
     # the cloud default since §17.440) num_predict is a SHARED budget for

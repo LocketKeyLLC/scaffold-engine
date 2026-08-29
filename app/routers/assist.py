@@ -416,6 +416,15 @@ async def assist_next(session_id: str, db=Depends(get_db)):
     # sess counts are accurate for that decision.)
     if isinstance(step, dict):
         step["step_counts"] = sess.get("step_counts", {})
+        # §17.864 — verify the claimed step's premise against the current
+        # facts ledger BEFORE the operator walks into it. Valve-gated +
+        # fail-soft inside; additive field, old clients ignore it.
+        from app.modules import assist_premise
+        verdict = await assist_premise.check_step_premise(
+            session_id=session_id, step=step, db=db,
+        )
+        if verdict:
+            step["premise_check"] = verdict
     return step
 
 

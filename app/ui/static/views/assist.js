@@ -168,6 +168,17 @@ export function renderChat(container, sessionId) {
     try {
       const nxt = await api.get(`/assist/${sessionId}/next`);
       await load();
+      // §17.864 — the server verified the claimed step's premise against the
+      // current facts. A stale verdict warns FIRST (and load() above already
+      // rendered any staged revision proposal); guidance still runs — the
+      // operator decides, nothing is hijacked.
+      const pc = nxt && nxt.premise_check;
+      if (pc && pc.stale) {
+        appendBubble("assistant", "note",
+          `⚠ Before we walk into step ${nxt.node_key}: ${pc.reason || "its premise may be out of date."}` +
+          (pc.staged ? " I've proposed a revision above — apply it, or continue as-is." :
+            (pc.proposed_change ? ` Suggested: ${pc.proposed_change}` : "")));
+      }
       if (nxt && nxt.node_key) guideCurrent();
     } catch { await load(); }
   }
