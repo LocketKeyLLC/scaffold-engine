@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.modules import assist_agent
+from app.modules import assist_handoff
 
 
 def _result(rowcount: int = 0, mappings_first=None, mappings_all=None, scalar=None):
@@ -463,7 +464,7 @@ async def test_handoff_single_runs_only_one_node(monkeypatch):
     drains the whole remaining DAG — the original bug)."""
     rec: list = []
     monkeypatch.setattr(
-        assist_agent, "async_session", _fake_session_factory(rec),
+        assist_handoff, "async_session", _fake_session_factory(rec),
     )
 
     all_nodes_called = {"hit": False}
@@ -512,7 +513,7 @@ async def test_handoff_single_noop_when_node_not_pending(monkeypatch):
     returns nothing: emit a no-op and never invoke the executor."""
     rec: list = []
     monkeypatch.setattr(
-        assist_agent, "async_session", _fake_session_factory(rec, claimed=None),
+        assist_handoff, "async_session", _fake_session_factory(rec, claimed=None),
     )
 
     called = {"next": False}
@@ -539,7 +540,7 @@ async def test_handoff_all_remaining_uses_execute_all_nodes(monkeypatch):
     """all_remaining mode still delegates the whole rest of the DAG."""
     rec: list = []
     monkeypatch.setattr(
-        assist_agent, "async_session", _fake_session_factory(rec),
+        assist_handoff, "async_session", _fake_session_factory(rec),
     )
 
     all_called = {"hit": False}
@@ -579,7 +580,7 @@ async def test_handoff_finalizes_session_when_job_completes(monkeypatch):
     plain chat into a done session and the idle reaper doesn't mislabel it."""
     rec: list = []
     monkeypatch.setattr(
-        assist_agent, "async_session",
+        assist_handoff, "async_session",
         lambda: _FakeSession(rec, scalar_value="completed"),
     )
 
@@ -611,7 +612,7 @@ async def test_handoff_does_not_finalize_when_job_not_complete(monkeypatch):
     finalize the session (the operator continues in assist)."""
     rec: list = []
     monkeypatch.setattr(
-        assist_agent, "async_session",
+        assist_handoff, "async_session",
         lambda: _FakeSession(rec, scalar_value="active"),
     )
 
@@ -639,7 +640,7 @@ async def test_handoff_does_not_finalize_when_job_not_complete(monkeypatch):
 async def test_handoff_single_restores_assist_mode(monkeypatch):
     rec: list = []
     monkeypatch.setattr(
-        assist_agent, "async_session", _fake_session_factory(rec),
+        assist_handoff, "async_session", _fake_session_factory(rec),
     )
 
     async def _fake_exec_next(job_id, preclaimed_node=None):
@@ -670,7 +671,7 @@ async def test_handoff_single_restore_survives_cancellation(monkeypatch):
     # leave the job stranded in 'executing'.
     rec: list = []
     monkeypatch.setattr(
-        assist_agent, "async_session", _fake_session_factory(rec),
+        assist_handoff, "async_session", _fake_session_factory(rec),
     )
 
     async def _fake_exec_next(job_id, preclaimed_node=None):
