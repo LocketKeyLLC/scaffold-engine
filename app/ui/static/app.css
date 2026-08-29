@@ -1158,3 +1158,28 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 
 /* §17.818 — auto-run toggle */
 .autorun-toggle { gap: 5px; align-items: center; font-size: 12px; margin-left: 8px; }
+
+/* ── §17.859 — job hub tabs ─────────────────────────────────────────── */
+.job-hub-head .job-hub-title-row { gap: 12px; align-items: center; }
+.job-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin: 4px 0 16px;
+  overflow-x: auto;
+}
+.job-tab {
+  padding: 8px 14px;
+  color: var(--text-dim);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.job-tab:hover { color: var(--text); }
+.job-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.theater-toolbar, .plan-toolbar, .traces-toolbar { margin-bottom: 12px; gap: 8px; }

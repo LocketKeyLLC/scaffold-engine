@@ -35,12 +35,13 @@ function matches(job, filter) {
  * (/jobs items carry no next_actions, so assist statuses route to the
  * assistant list rather than a specific session.) */
 function jobHref(job) {
-  if (["awaiting_assist", "assisted_paused", "assisted_executing", "assisted_running"].includes(job.status)) return "#/assist";
-  if (job.status === "completed") return `#/output/${job.id}`;
-  if ((job.node_count || 0) > 0) return `#/theater/${job.id}`;
-  // Pre-DAG statuses (refining/awaiting_confirmation/…): the approvals
-  // detail renders a live refining state and the approve action.
-  return `#/approvals/${job.id}`;
+  // §17.859 — one job, one URL: the hub picks the right embedded surface
+  // (Overview embeds the approval gate pre-DAG; Run embeds assist for
+  // assisted_* statuses).
+  if (["awaiting_assist", "assisted_paused", "assisted_executing", "assisted_running"].includes(job.status)) return `#/job/${job.id}/run`;
+  if (job.status === "completed") return `#/job/${job.id}/output`;
+  if ((job.node_count || 0) > 0) return `#/job/${job.id}/plan`;
+  return `#/job/${job.id}`;
 }
 
 export default function jobs(container, params) {

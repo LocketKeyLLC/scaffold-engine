@@ -3,7 +3,7 @@
 // GET /logs/{id}?include_compiled=true&include_output=true and job metadata from
 // GET /jobs/{id}.
 import * as api from "../api.js";
-import { el, mount, shortId, timeAgo, mdToHtml, copy } from "../util.js";
+import { el, mount, mdToHtml, copy } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
 
 function download(filename, textContent) {
@@ -16,76 +16,13 @@ function download(filename, textContent) {
   URL.revokeObjectURL(url);
 }
 
-// ── Picker ───────────────────────────────────────────────────────────
-function renderPicker(container) {
-  let disposed = false;
-  const outlet = el("div", { class: "picker-outlet" }, loading("Loading completed jobs…"));
-  mount(
-    container,
-    el("div", { class: "view-header" }, el("div", {}, el("h1", { text: "Outputs" }), el("div", { class: "sub", text: "Pick a completed job to view its deliverable" }))),
-    outlet
-  );
-
-  (async () => {
-    try {
-      const res = await api.get("/jobs", { query: { status: "completed", limit: 100 } });
-      if (disposed) return;
-      const jobs = res.jobs || [];
-      if (!jobs.length) {
-        mount(outlet, emptyState({
-          icon: "▤",
-          title: "No outputs yet",
-          body: "Finished jobs and their compiled deliverables show up here. Start something to see its output.",
-          action: { label: "＋ New idea", href: "#/new" },
-        }));
-        return;
-      }
-      mount(
-        outlet,
-        el(
-          "div",
-          { class: "grid grid-3" },
-          ...jobs.map((j) =>
-            el(
-              "a",
-              { class: "card card-pad picker-card", href: `#/output/${j.id}` },
-              el("div", { class: "row row-wrap" }, statusBadge(j.status), el("span", { class: "spacer" }), el("span", { class: "faint mono", text: `${j.node_count || 0} nodes` })),
-              el("div", { class: "work-title", text: j.title || "(untitled)" }),
-              el("div", { class: "faint", text: timeAgo(j.completed_at || j.updated_at) })
-            )
-          )
-        )
-      );
-    } catch (e) {
-      if (!disposed) mount(outlet, errorPanel(e));
-    }
-  })();
-
-  return () => {
-    disposed = true;
-  };
-}
-
 // ── Detail ───────────────────────────────────────────────────────────
-function renderOutput(container, jobId) {
+// §17.859 — embedded as the job hub's Output tab (picker + standalone route
+// died with the hub; the hub header carries back/compare).
+export function renderOutput(container, jobId) {
   let disposed = false;
   const outlet = el("div", { class: "output-view" }, loading("Loading output…"));
-  mount(
-    container,
-    el(
-      "div",
-      { class: "view-header" },
-      el("div", {}, el("h1", { text: "Output" }), el("div", { class: "sub mono", text: shortId(jobId) })),
-      el(
-        "div",
-        { class: "header-actions" },
-        el("a", { class: "btn btn-sm btn-ghost", href: "#/output", text: "← Outputs" }),
-        el("a", { class: "btn btn-sm", href: `#/dag/${jobId}`, text: "DAG" }),
-        el("a", { class: "btn btn-sm", href: `#/compare/${jobId}`, text: "Compare" })
-      )
-    ),
-    outlet
-  );
+  mount(container, outlet);
 
   (async () => {
     try {
@@ -153,9 +90,4 @@ function renderOutput(container, jobId) {
   return () => {
     disposed = true;
   };
-}
-
-export default function output(container, params) {
-  if (params && params.jobId) return renderOutput(container, params.jobId);
-  return renderPicker(container);
 }

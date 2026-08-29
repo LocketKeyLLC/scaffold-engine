@@ -41,13 +41,14 @@ function jobLinks(job) {
   const sid = assistSessionFromActions(job.next_actions);
   if (sid) links.push({ label: "Assistant", href: `#/assist/${sid}` });
   else if (["awaiting_assist", "assisted_paused"].includes(job.status)) links.push({ label: "Assistant", href: "#/assist" });
-  if (job.status === "awaiting_confirmation") links.push({ label: "Approve", href: `#/approvals/${job.id}` });
+  // §17.859 — every job surface is a hub tab now.
+  if (job.status === "awaiting_confirmation") links.push({ label: "Approve", href: `#/job/${job.id}` });
   if ((job.node_count || 0) > 0) {
-    const dag = { label: "DAG", href: `#/dag/${job.id}` };
-    const theater = { label: "Execution", href: `#/theater/${job.id}` };
-    links.push(...(job.status === "blocked" ? [theater, dag] : [dag, theater]));
+    const plan = { label: "Plan", href: `#/job/${job.id}/plan` };
+    const run = { label: "Run", href: `#/job/${job.id}/run` };
+    links.push(...(job.status === "blocked" ? [run, plan] : [plan, run]));
   }
-  if (job.status === "completed") links.push({ label: "Output", href: `#/output/${job.id}` });
+  if (job.status === "completed") links.push({ label: "Output", href: `#/job/${job.id}/output` });
   return links;
 }
 
@@ -100,12 +101,12 @@ function progressChip(job) {
 }
 
 function recentRow(job) {
-  // Every row is clickable — pre-DAG jobs land on the approvals detail
-  // (live refining state + approve action) instead of being dead rows.
+  // Every row is clickable — §17.859: all roads lead to the job hub (its
+  // Overview embeds the approval gate for pre-DAG jobs).
   const recentHref =
-    job.status === "completed" ? `#/output/${job.id}`
-    : (job.node_count || 0) > 0 ? `#/dag/${job.id}`
-    : `#/approvals/${job.id}`;
+    job.status === "completed" ? `#/job/${job.id}/output`
+    : (job.node_count || 0) > 0 ? `#/job/${job.id}/plan`
+    : `#/job/${job.id}`;
   const tr = el(
     "tr",
     { class: "row-link", dataset: { href: recentHref } },
@@ -407,7 +408,7 @@ export default function dashboard(container) {
         { class: "section-head" },
         el("h2", { text: "Recent jobs" }),
         el("span", { class: "spacer" }),
-        el("a", { class: "btn btn-ghost btn-sm", href: "#/output", text: "All outputs →" })
+        el("a", { class: "btn btn-ghost btn-sm", href: "#/jobs", text: "All jobs →" })
       ),
       recent.length
         ? el(

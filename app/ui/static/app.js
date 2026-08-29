@@ -538,10 +538,9 @@ const VIEWS = {
   dashboard: lazy("dashboard", "Dashboard"),
   jobs: lazy("jobs", "Jobs"),
   approvals: lazy("approvals", "Approval Gate"),
-  dag: lazy("dag", "DAG Canvas"),
-  plan: lazy("plan", "Plan Editor"),
-  theater: lazy("theater", "Execution Theater"),
-  output: lazy("output", "Output"),
+  // §17.859 — the job hub replaced the standalone dag/plan/theater/output
+  // views; their renderers are imported by job_hub.js directly.
+  job_hub: lazy("job_hub", "Job"),
   compare: lazy("compare", "Compare Jobs"),
   research: lazy("research", "Research Explorer"),
   assist: lazy("assist", "Assistant"),
@@ -577,14 +576,11 @@ function registerRoutes() {
   router.route("/jobs", (p) => loadAndRender("jobs", p, router.currentPath()));
   router.route("/jobs/:filter", (p) => loadAndRender("jobs", p, router.currentPath()));
   router.route("/approvals", (p) => loadAndRender("approvals", p, router.currentPath()));
-  router.route("/approvals/:jobId", (p) => loadAndRender("approvals", p, router.currentPath()));
-  router.route("/dag", (p) => loadAndRender("dag", p, router.currentPath()));
-  router.route("/dag/:jobId", (p) => loadAndRender("dag", p, router.currentPath()));
-  router.route("/plan/:jobId", (p) => loadAndRender("plan", p, router.currentPath()));
-  router.route("/theater", (p) => loadAndRender("theater", p, router.currentPath()));
-  router.route("/theater/:jobId", (p) => loadAndRender("theater", p, router.currentPath()));
-  router.route("/output", (p) => loadAndRender("output", p, router.currentPath()));
-  router.route("/output/:jobId", (p) => loadAndRender("output", p, router.currentPath()));
+  // §17.859 (audit G7) — the job hub: one job, one URL, six tabs. The old
+  // per-view routes (#/theater/:id, #/output/:id, #/plan/:id, #/dag/:id,
+  // #/approvals/:id, #/traces/:id) are gone — hard switch, operator decision.
+  router.route("/job/:jobId", (p) => loadAndRender("job_hub", p, router.currentPath()));
+  router.route("/job/:jobId/:tab", (p) => loadAndRender("job_hub", p, router.currentPath()));
   router.route("/compare", (p) => loadAndRender("compare", p, router.currentPath()));
   router.route("/compare/:jobA/:jobB", (p) => loadAndRender("compare", p, router.currentPath()));
   router.route("/compare/:jobA", (p) => loadAndRender("compare", p, router.currentPath()));
@@ -600,7 +596,6 @@ function registerRoutes() {
   router.route("/library", (p) => loadAndRender("library", p, router.currentPath()));
   router.route("/costs", (p) => loadAndRender("costs", p, router.currentPath()));
   router.route("/traces", (p) => loadAndRender("traces", p, router.currentPath()));
-  router.route("/traces/:jobId", (p) => loadAndRender("traces", p, router.currentPath()));
   router.route("/alerts", (p) => loadAndRender("alerts", p, router.currentPath()));
   router.setNotFound(() => loadAndRender("dashboard", {}, "/"));
 }

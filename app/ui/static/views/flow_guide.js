@@ -13,24 +13,25 @@ export function flowState(job) {
   const st = job.status;
   const nodes = job.node_count || 0;
   const id = job.id;
+  // §17.859 — every action lands in the job hub (#/job/:id[/tab]).
   if (["pending", "refining"].includes(st))
-    return { i: 1, hint: "The engine is refining your idea — the approval gate opens next.", action: { label: "Watch the approval gate", href: `#/approvals/${id}` } };
+    return { i: 1, hint: "The engine is refining your idea — the approval gate opens next.", action: { label: "Watch the approval gate", href: `#/job/${id}` } };
   if (st === "awaiting_confirmation")
-    return { i: 1, hint: "Review the brief, answer what you can, then approve.", action: { label: "Open approval gate", href: `#/approvals/${id}` } };
+    return { i: 1, hint: "Review the brief, answer what you can, then approve.", action: { label: "Open approval gate", href: `#/job/${id}` } };
   if (["researching", "planning"].includes(st))
-    return { i: 2, hint: "Researching and drawing the plan — it lands in the plan editor.", action: { label: "Open plan editor", href: `#/plan/${id}` } };
+    return { i: 2, hint: "Researching and drawing the plan — it lands in the Plan tab.", action: { label: "Open plan", href: `#/job/${id}/plan` } };
   if (st === "executing" && nodes > 0)
-    return { i: 2, hint: "Plan ready, nothing run yet. Review or edit the steps, then execute — or drive it step-by-step with the assistant.", action: { label: "Review & edit plan", href: `#/plan/${id}` } };
+    return { i: 2, hint: "Plan ready, nothing run yet. Review or edit the steps, then execute — or drive it step-by-step with the assistant.", action: { label: "Review & edit plan", href: `#/job/${id}/plan` } };
   if (st === "running")
-    return { i: 3, hint: "Execution in flight.", action: { label: "Watch execution", href: `#/theater/${id}` } };
+    return { i: 3, hint: "Execution in flight.", action: { label: "Watch the run", href: `#/job/${id}/run` } };
   if (["assisted_executing", "assisted_running"].includes(st))
-    return { i: 3, hint: "Assist mode — you drive each step with the assistant guiding.", action: { label: "Open assistant", href: "#/assist" } };
+    return { i: 3, hint: "Assist mode — you drive each step with the assistant guiding.", action: { label: "Open the walkthrough", href: `#/job/${id}/run` } };
   if (st === "awaiting_assist" || st === "assisted_paused")
-    return { i: 3, hint: "Parked for assist mode — you drive each step with the assistant.", action: { label: "Open assistant", href: "#/assist" } };
+    return { i: 3, hint: "Parked for assist mode — you drive each step with the assistant.", action: { label: "Open the walkthrough", href: `#/job/${id}/run` } };
   if (st === "completed")
-    return { i: 4, hint: "Done — the compiled output is ready.", action: { label: "View output", href: `#/output/${id}` } };
+    return { i: 4, hint: "Done — the compiled output is ready.", action: { label: "View output", href: `#/job/${id}/output` } };
   if (["failed", "blocked", "cancelled"].includes(st))
-    return { i: 3, hint: `Job is ${st} — the execution theater has the recovery verbs (retry / skip).`, action: { label: "Open execution", href: `#/theater/${id}` } };
+    return { i: 3, hint: `Job is ${st} — the Run tab has the recovery verbs (retry / resume).`, action: { label: "Open the run", href: `#/job/${id}/run` } };
   return { i: 0, hint: "", action: null };
 }
 

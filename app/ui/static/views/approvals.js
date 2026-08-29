@@ -176,7 +176,7 @@ function renderList(container) {
           ...jobs.map((j) =>
             el(
               "a",
-              { class: "card card-pad picker-card", href: `#/approvals/${j.id}` },
+              { class: "card card-pad picker-card", href: `#/job/${j.id}` },
               el("div", { class: "row row-wrap" }, statusBadge(j.status), el("span", { class: "spacer" }), el("span", { class: "faint mono", text: shortId(j.id) })),
               el("div", { class: "work-title", text: j.title || "(untitled)" }),
               el("div", { class: "faint", text: timeAgo(j.updated_at || j.created_at) })
@@ -199,22 +199,16 @@ function renderList(container) {
 }
 
 // ── Detail (one job) ─────────────────────────────────────────────────
-function renderDetail(container, jobId) {
+// §17.859 — embedded in the job hub's Overview tab while the job sits at (or
+// before) the approval gate; the standalone #/approvals/:id route died with
+// the hub. The gate is a moment, not a place.
+export function renderApprovalDetail(container, jobId) {
   let disposed = false;
   let pollTimer = null;
   let busy = false;
 
   const outlet = el("div", { class: "approval-detail" }, loading("Loading job…"));
-  mount(
-    container,
-    el(
-      "div",
-      { class: "view-header" },
-      el("div", {}, el("h1", { text: "Approval Gate" }), el("div", { class: "sub mono", text: shortId(jobId) })),
-      el("div", { class: "header-actions" }, el("a", { class: "btn btn-sm btn-ghost", href: "#/approvals", text: "← Pending" }))
-    ),
-    outlet
-  );
+  mount(container, outlet);
 
   const progress = el("div", { class: "approval-progress hidden" });
   const approveBtn = el("button", { class: "btn btn-primary", text: "✓ Approve — research & plan", onClick: () => approve() });
@@ -260,7 +254,7 @@ function renderDetail(container, jobId) {
       if (st === "awaiting_confirmation") {
         stopWaitPoll();
         waitingShown = false;
-        const fg = flowGuide(job, { here: "#/approvals/" });
+        const fg = flowGuide(job, { here: `#/job/${jobId}` });
         const brief = job.refined_brief || {};
         const feas = job.feasibility || {};
         // Verdict chips: the go/no-go signal belongs at the top, not inside
@@ -367,9 +361,8 @@ function renderDetail(container, jobId) {
           el(
             "div",
             { class: "drawer-actions" },
-            (job.node_count || 0) > 0 ? el("a", { class: "btn btn-sm btn-primary", href: `#/plan/${jobId}`, text: "Open plan editor" }) : null,
-            job.has_compiled_output ? el("a", { class: "btn btn-sm", href: `#/output/${jobId}`, text: "View output" }) : null,
-            el("a", { class: "btn btn-sm btn-ghost", href: `#/dag/${jobId}`, text: "View DAG" })
+            (job.node_count || 0) > 0 ? el("a", { class: "btn btn-sm btn-primary", href: `#/job/${jobId}/plan`, text: "Open plan editor" }) : null,
+            job.has_compiled_output ? el("a", { class: "btn btn-sm", href: `#/job/${jobId}/output`, text: "View output" }) : null
           )
         )
       );
@@ -425,14 +418,14 @@ function renderDetail(container, jobId) {
       await api.post("/dag", { job_id: jobId });
       if (disposed) return;
       if (autoRun.checked) {
-        // §17.818 — hand off to the theater's runner (same /execute/all SSE
+        // §17.818 — hand off to the hub's Run tab (same /execute/all SSE
         // the manual Run uses; sessionStorage carries the one-shot intent).
         sessionStorage.setItem("scaffold_autorun", jobId);
         toast("Approved — plan generated. Starting execution…", "ok");
-        router.navigate(`/theater/${jobId}`);
+        router.navigate(`/job/${jobId}/run`);
       } else {
         toast("Approved — plan generated. Edit before executing.", "ok");
-        router.navigate(`/plan/${jobId}`);
+        router.navigate(`/job/${jobId}/plan`);
       }
     } catch (e) {
       if (!disposed) {
@@ -498,7 +491,6 @@ function renderDetail(container, jobId) {
   };
 }
 
-export default function approvals(container, params) {
-  if (params && params.jobId) return renderDetail(container, params.jobId);
+export default function approvals(container) {
   return renderList(container);
 }

@@ -33,12 +33,17 @@ test("ids and paths are unique; every entry is well-formed", () => {
 
 test("core destinations exist (easy access to all components)", () => {
   const ids = new Set(NAV.map((n) => n.id));
+  // §17.859 — dag/theater/output collapsed into the job hub's tabs
+  // (#/job/:id); they are deliberately ABSENT from the nav.
   for (const id of [
-    "new", "chat", "dashboard", "approvals", "dag", "theater", "output",
+    "new", "chat", "dashboard", "approvals",
     "compare", "research", "rag", "library", "assist", "schedules",
     "models", "costs", "traces", "alerts", "settings", "setup",
   ]) {
     assert.ok(ids.has(id), `missing nav entry: ${id}`);
+  }
+  for (const id of ["dag", "theater", "output"]) {
+    assert.ok(!ids.has(id), `${id} must stay retired from the nav (job hub owns it, §17.859)`);
   }
 });
 
@@ -48,7 +53,7 @@ test("admin-only surfaces keep their flags (§17.810/815/816/817)", () => {
     assert.equal(byId[id].adminOnly, true, `${id} must be adminOnly`);
   }
   // …and the everyday surfaces must NOT be admin-gated.
-  for (const id of ["new", "dashboard", "approvals", "theater", "research", "rag", "assist"]) {
+  for (const id of ["new", "dashboard", "approvals", "compare", "research", "rag", "assist"]) {
     assert.ok(!byId[id].adminOnly, `${id} must not be adminOnly`);
   }
 });
