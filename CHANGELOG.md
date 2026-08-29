@@ -6,6 +6,10 @@ Day-to-day development is tracked at sprint granularity in the commit log (`fix(
 
 ## [Unreleased]
 
+### Removed
+
+- **The `/web` console's redirect stubs and support scaffolding.** v1.4.0 retired the server-rendered htmx console to permanent redirects as a one-release grace period; this release deletes the remainder: the `/web/*` redirect routes, the htmx templates and vendored assets, the root `/static` mount (it served only `/web` assets — the SPA's assets live under `/ui/static/`), the CSRF middleware that existed for the console's auth-exempt forms, and the `/web/` + `/static/` auth exemptions. Old `/web` bookmarks now 404 — use the `/ui` SPA. No API surface changes (the routes were never in the OpenAPI contract) (§17.857).
+
 ### Fixed
 
 - **Milvus corpus-loss on `docker compose down` — root-caused and fixed.** The `toon_v2` knowledge corpus no longer comes back empty after a `down`/`up` cycle. The embedded etcd — which holds every collection's metadata and segment references — was configured with a *relative* data dir (`default.etcd`), so it wrote to the container's **ephemeral overlay layer** instead of the `milvus-data-v2` volume; a new container from `down`/`up` therefore started with no segment references and orphaned the segment files still sitting on the volume (`docker restart`, reusing the same container, masked this). `milvus-config/user.yaml` now pins the etcd data dir onto the volume, mounted read-only in compose. Applying it to an existing deployment needs a one-time etcd migration (copy the live ephemeral etcd onto the volume before the first recreate) — a backup-gated runbook is in `internal/milvus-etcd-migration-runbook.md`. Live-verified: a full `docker compose down`/`up` now preserves all entities. The long-standing `restart`-not-`down` operational constraint is **retired** — both are safe (§17.855).

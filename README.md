@@ -264,7 +264,7 @@ make key-revoke ID=3                   # revoke by id (or LABEL="alice laptop")
 
 Revocation is immediate — the next request with that key gets a 401.
 
-> **Admin-only surfaces.** The OpenAI-compatible `/v1` API, the MCP server at `/mcp`, and the server-rendered `/web` console accept only the **master admin key** and are not per-user. They reach the pipeline through an internal loopback that authenticates as the master key, so they operate with admin visibility by design. Per-user access is the JSON API and the `/ui` SPA (both send `X-API-Key` and are fully scoped). In a multi-user deployment, keep `/web` network-restricted (it's an operator console that shows all jobs).
+> **Admin-only surfaces.** The OpenAI-compatible `/v1` API and the MCP server at `/mcp` accept only the **master admin key** and are not per-user. They reach the pipeline through an internal loopback that authenticates as the master key, so they operate with admin visibility by design. Per-user access is the JSON API and the `/ui` SPA (both send `X-API-Key` and are fully scoped).
 
 > **What can go wrong:**
 > - Minted a key but the user still gets 401 → confirm `MULTI_USER_ENABLED=true` is actually set in the *running* container: `docker exec scaffold-orchestrator printenv MULTI_USER_ENABLED`. It's read at startup, so a `.env` edit needs `docker compose up -d`.
@@ -350,14 +350,14 @@ The default `docker compose up -d` brings up everything below — there's no opt
 
 - **Prometheus `/metrics`** (no auth). Set `METRICS_ENABLED=true` in `.env` (default on). The orchestrator emits counters/gauges for LLM calls (by provider/model/success), HTTP request RED metrics (by method/path/status), alert fire and suppression rates (by kind/severity), jobs by status, executor concurrency in-flight vs cap, and quarterly-calibration cron health. Sample scrape: `curl http://localhost:8000/metrics`. See [`docs/observability.md`](docs/observability.md) for the full metric inventory, recommended scrape config, and a 5-rule starter alert-rule pack.
 - **Simulation sidecars.** Three FastAPI services at `127.0.0.1:8001-8003` for hardware-design tasks: `scaffold-ngspice` (analog SPICE), `scaffold-verilator` (digital SystemVerilog), `scaffold-symbiyosys` (formal verification). The orchestrator invokes them via the `ai-network` bridge; they isolate untrusted simulator input from the orchestrator's process tree. Each has its own `/health`; the orchestrator's `/health` aggregates them. If you don't run hardware-design workflows you can comment out the three `scaffold-*` services in `docker-compose.yml` without losing other functionality.
-- **Native operator UI.** `http://localhost:8000/ui` is the front door: login with your API key (scoped keys supported in multi-user mode), first-run model wizard, compose/approve/watch/output views, DAG editing, assist walkthroughs, research, RAG search, models/settings/schedules/traces/alerts/costs. Zero runtime dependencies — plain ES modules served by the orchestrator. (The old server-rendered `/web/*` console is retired; its URLs 301-redirect to the SPA.)
+- **Native operator UI.** `http://localhost:8000/ui` is the front door: login with your API key (scoped keys supported in multi-user mode), first-run model wizard, compose/approve/watch/output views, DAG editing, assist walkthroughs, research, RAG search, models/settings/schedules/traces/alerts/costs. Zero runtime dependencies — plain ES modules served by the orchestrator. (The old server-rendered `/web/*` console is removed as of v1.5.0; update any `/web` bookmarks to the SPA.)
 - **Native OpenAI surface.** `POST /v1/chat/completions` + `GET /v1/models` (default on) let any OpenAI client — including the SPA's Chat view — talk to the engine directly with slash-commands intact.
 
 ---
 
 ## Status
 
-Actively developed. Latest release: v1.4.0 (2026-08-26) — see [CHANGELOG.md](./CHANGELOG.md). API contract at v1.4.0 (`docs/openapi.json`) — additive over v1.2.0 (auth/identity, model management, detached research, meta/trace endpoints, plus the `progress` and `research_fetch` SSE events); the retired `/web` HTML console now answers with permanent redirects to the `/ui` SPA. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
+Actively developed. Latest release: v1.4.0 (2026-08-26) — see [CHANGELOG.md](./CHANGELOG.md). API contract at v1.4.0 (`docs/openapi.json`) — additive over v1.2.0 (auth/identity, model management, detached research, meta/trace endpoints, plus the `progress` and `research_fetch` SSE events); the retired `/web` HTML console (redirects in v1.4.0) is removed. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
 
 ## License
 

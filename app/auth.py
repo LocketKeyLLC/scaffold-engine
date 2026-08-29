@@ -49,18 +49,15 @@ _AUTH_EXEMPT_PATHS = frozenset({
     "/auth/login", "/auth/account/status",
 })
 
-# Sprint J.2.a — prefix-based auth exemption. The native web UI lives at
-# ``/web/*`` and serves a browsable page (operators don't pass headers in
-# a browser); the /static mount serves the UI's CSS. The embedded SDK
-# Client carries the API key for the loopback HTTP call to the actual
-# orchestrator endpoints, so end-to-end auth is preserved — only the
-# browser-facing layer is exempt.
+# Prefix-based auth exemption. ``/ui/*`` is the standalone operator SPA
+# (no-build static assets). Only the asset-serving layer is exempt — the
+# SPA itself sends X-API-Key on every API call (it reads it from browser
+# localStorage), so the API surface behind it stays fully gated.
 #
-# ``/ui/*`` is the standalone operator SPA (no-build static assets). Only
-# the asset-serving layer is exempt — the SPA itself sends X-API-Key on
-# every API call (it reads it from browser localStorage), so the API
-# surface behind it stays fully gated, same guarantee as the /web loopback.
-_AUTH_EXEMPT_PREFIXES = ("/web/", "/static/", "/ui/")
+# §17.857 — the retired /web console's ``/web/`` + ``/static/`` entries are
+# gone with the module: the §17.820 redirect stubs served their one grace
+# release (v1.4.0), and the root /static mount carried only /web assets.
+_AUTH_EXEMPT_PREFIXES = ("/ui/",)
 
 
 async def require_api_key(
@@ -72,15 +69,9 @@ async def require_api_key(
     if path in _AUTH_EXEMPT_PATHS:
         return ""
     if any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
-        # §17.820b — the §17.812 (audit C9) multi-user gate on /web is gone
-        # WITH ITS REASON: /web served admin-view HTML whose loopback
-        # re-authenticated as the master key, so under MULTI_USER_ENABLED an
-        # unauthenticated browser saw every user's jobs. Since the §17.820
-        # retirement /web is 301 redirects ONLY (static SPA Locations, no
-        # data), so old bookmarks must land on the SPA login in every mode —
-        # not a bare 401. The whole /web/ prefix (and this exemption entry)
-        # is deleted one release after the redirects.
-        # /static + /ui asset serving stay exempt (the SPA sends its own key).
+        # /ui asset serving is exempt in EVERY mode (incl. multi-user) — a
+        # keyless browser must be able to load the SPA login; the SPA sends
+        # its own X-API-Key on every API call, so the API stays gated.
         return ""
 
     # Explicit opt-out only — empty key with no opt-out would have raised at import

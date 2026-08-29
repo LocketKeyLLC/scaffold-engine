@@ -76,7 +76,7 @@ def get_principal(request: Request) -> Principal:
     """Dependency: the current request's Principal.
 
     ``require_api_key`` attaches ``request.state.principal`` for every gated
-    request. Exempt/loopback routes (/health, /web/*, /static/*, /ui/*) and the
+    request. Exempt/loopback routes (/health, /ui/*) and the
     auth-disabled path never set it — those are trusted operator/probe surfaces,
     so they resolve to the admin principal (full visibility), preserving the
     pre-§17.810 behavior for the native console and health checks.
