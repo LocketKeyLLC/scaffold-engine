@@ -402,6 +402,10 @@ services:
       # §17.725 — retract contradicted facts as new evidence folds in (code
       # default off for tests; the raw transcript keeps everything).
       ASSIST_UMEM_SUPERSEDE: "${ASSIST_UMEM_SUPERSEDE:-true}"
+      # §17.881 — commit-time memory reconciliation + session playbook (retire
+      # outcome-contradicted facts; fold proven/ruled-out methods; one bg
+      # model call per step commit). Code default off (tests/fresh installs).
+      ASSIST_COMMIT_RECONCILE_ENABLED: "${ASSIST_COMMIT_RECONCILE_ENABLED:-true}"
       # §17.727 — merge redundant same-truth facts when the ledger grows
       # (background, debounced, lossless-by-construction application).
       ASSIST_UMEM_CONSOLIDATE: "${ASSIST_UMEM_CONSOLIDATE:-true}"

@@ -704,3 +704,186 @@ async def sweep_superseded_facts(*, session_id: str, note_text: str, db) -> dict
     except Exception as e:  # noqa: BLE001 — the sweep must never break note-taking
         logger.warning("assist_facts_sweep_failed session_id=%s err=%r", session_id, e)
         return {"retracted": []}
+
+
+# ── §17.881 — commit-time reconciliation + session playbook ─────────────────
+#
+# The "stops repeating what already failed" overhaul. Two structural gaps this
+# closes, both live-hit on the HomeLab session:
+#   1. The facts ledger accumulated the WHOLE troubleshooting saga as timeless
+#      truth — "prowlarr is not installed in container 102" still injected as
+#      OBSERVED fact hours after the successful install. Redundancy
+#      consolidation (§17.727) merges duplicates; nothing retired facts the
+#      committed OUTCOME contradicts.
+#   2. Hard-won method lessons ("<app>.servarr.com/v1/update/... updatefile
+#      works; apt.servarr.com is unreachable from these containers") lived as
+#      scattered prose, ranked no higher than model priors — the very next
+#      component install guessed fresh URLs from memory.
+# On EVERY step commit, one structured pass over (ledger + committed evidence)
+# returns: facts to retire, methods proven here, approaches ruled out here.
+# Retirements go through set_environment's retract path (transcript keeps the
+# raw text); the playbook persists in environment.playbook and renders as a
+# BINDING block in every generation (render_session_memory).
+
+_RECONCILE_SYSTEM = (
+    "A step of a multi-step infrastructure build just COMPLETED successfully. "
+    "You maintain the session's memory. Given the step's goal, the evidence of "
+    "its successful completion, and the current facts ledger, call "
+    "update_session_memory with:\n"
+    "- retire_facts: ledger entries (echoed VERBATIM) that describe transient "
+    "mid-troubleshooting states the completed outcome now CONTRADICTS (e.g. "
+    "'X is not installed' after X was installed; 'no Y.service unit exists' "
+    "after the unit was created). Durable infrastructure facts (hardware, "
+    "networks, credentials, versions) are NOT retired. When unsure, keep the "
+    "fact.\n"
+    "- proven_methods: concrete methods/commands/URL patterns this step PROVED "
+    "work on THIS system, stated so a later step can reuse them (e.g. "
+    "'Servarr apps install via https://<app>.servarr.com/v1/update/master/"
+    "updatefile?os=linux&runtime=netcore&arch=x64 tarball — worked for "
+    "Prowlarr'). Only what the evidence demonstrates; include the general "
+    "pattern when it clearly generalizes.\n"
+    "- ruled_out_approaches: approaches tried during this step that FAILED or "
+    "are unreachable/broken on this system, with the reason (e.g. "
+    "'apt.servarr.com apt repo — does not resolve from the LXC containers'). "
+    "Only what was actually attempted and failed; not hypotheticals."
+)
+
+_UPDATE_MEMORY_TOOL = None  # built lazily — model_router import stays deferred
+
+
+def _update_memory_tool():
+    global _UPDATE_MEMORY_TOOL
+    if _UPDATE_MEMORY_TOOL is None:
+        from app import model_router
+        _UPDATE_MEMORY_TOOL = model_router.Tool(
+            name="update_session_memory",
+            description=(
+                "Reconcile session memory with a step's successful completion: "
+                "retire contradicted facts, record proven methods and "
+                "ruled-out approaches."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "retire_facts": {"type": "array", "items": {"type": "string"}},
+                    "proven_methods": {"type": "array", "items": {"type": "string"}},
+                    "ruled_out_approaches": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["retire_facts", "proven_methods", "ruled_out_approaches"],
+            },
+        )
+    return _UPDATE_MEMORY_TOOL
+
+
+async def reconcile_on_commit(
+    *, session_id: str, node_key: str, evidence: str, db,
+) -> dict:
+    """§17.881 — one reconciliation pass after a step commits. Fail-soft."""
+    from app import model_router
+    from app.modules.assist_agent import get_environment, set_environment
+    from app.utils.tool_call_args import read_tool_args
+
+    result = {"retired": 0, "proven": 0, "ruled_out": 0}
+    if not settings.assist_commit_reconcile_enabled:
+        return result
+    try:
+        env = await get_environment(session_id=session_id, db=db) or {}
+        facts = [str(f) for f in (env.get("facts") or [])]
+        row = (await db.execute(
+            text("""
+                SELECT d.title, d.prompt_template
+                  FROM assist_steps s
+                  JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+                 WHERE s.session_id = :sid AND s.node_key = :nk
+            """),
+            {"sid": session_id, "nk": node_key},
+        )).mappings().first()
+        ledger_block = (
+            "CURRENT FACTS LEDGER:\n" + "\n".join(f"- {f}" for f in facts)
+            if facts else "CURRENT FACTS LEDGER: (empty)"
+        )
+        # §17.873 house pattern — keep the TAIL of long evidence (outcomes and
+        # final states live at the end of pasted output).
+        ev = evidence or ""
+        if len(ev) > 6000:
+            ev = "(earlier output truncated)\n…" + ev[-6000:]
+        user_msg = (
+            f"COMPLETED STEP: {(row or {}).get('title') or node_key}\n"
+            f"STEP TASK: {((row or {}).get('prompt_template') or '')[:1500]}\n\n"
+            f"{ledger_block}\n\n"
+            f"EVIDENCE OF SUCCESSFUL COMPLETION:\n{ev}\n\n"
+            "Call update_session_memory."
+        )
+        args = None
+        for _draw in range(3):  # §17.749 pattern — re-draw a missing tool call
+            resp = await model_router.tool_call(
+                messages=[
+                    {"role": "system", "content": _RECONCILE_SYSTEM},
+                    {"role": "user", "content": user_msg},
+                ],
+                tools=[_update_memory_tool()],
+                role=settings.assist_guide_model_role,
+                temperature=0.0,
+                tool_choice="auto",
+                max_tokens=8192,
+            )
+            args = read_tool_args(resp)
+            if args is not None:
+                break
+            logger.info("assist_reconcile_empty_redraw draw=%d/3", _draw + 1)
+        if args is None:
+            return result
+        # Retire only VERBATIM ledger echoes (same contract as §17.725).
+        ledger_lower = {f.strip().lower() for f in facts}
+        retire = [str(x).strip() for x in (args.get("retire_facts") or [])
+                  if str(x).strip().lower() in ledger_lower]
+        proven = [str(x).strip()[:300] for x in (args.get("proven_methods") or [])
+                  if str(x).strip()][:6]
+        ruled = [str(x).strip()[:300] for x in (args.get("ruled_out_approaches") or [])
+                 if str(x).strip()][:6]
+        if retire or proven or ruled:
+            await set_environment(
+                session_id=session_id,
+                retract_facts=retire or None,
+                playbook_proven=proven or None,
+                playbook_ruled_out=ruled or None,
+                db=db,
+            )
+        result.update(retired=len(retire), proven=len(proven), ruled_out=len(ruled))
+        logger.info(
+            "assist_commit_reconciled session_id=%s node_key=%s retired=%d proven=%d ruled_out=%d",
+            session_id, node_key, len(retire), len(proven), len(ruled),
+        )
+    except Exception as e:  # noqa: BLE001 — reconciliation must never break commit
+        logger.warning("assist_reconcile_on_commit_failed session_id=%s err=%r", session_id, e)
+    return result
+
+
+async def _reconcile_bg(*, session_id: str, node_key: str, evidence: str) -> None:
+    try:
+        async with async_session() as bg_db:
+            await reconcile_on_commit(
+                session_id=session_id, node_key=node_key, evidence=evidence, db=bg_db,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("assist_reconcile_bg_failed session_id=%s err=%r", session_id, e)
+
+
+_RECONCILE_TASKS: set = set()
+
+
+def schedule_reconcile_on_commit(
+    *, session_id: str, node_key: str, evidence: str,
+) -> None:
+    """§17.881 — fire-and-forget the commit reconciliation (mirrors the
+    consolidate/derive schedulers; strong-ref set keeps tasks alive)."""
+    if not settings.assist_commit_reconcile_enabled:
+        return
+    try:
+        task = asyncio.get_running_loop().create_task(
+            _reconcile_bg(session_id=session_id, node_key=node_key, evidence=evidence)
+        )
+        _RECONCILE_TASKS.add(task)
+        task.add_done_callback(_RECONCILE_TASKS.discard)
+    except RuntimeError:  # no running loop (sync test context) — skip
+        logger.debug("assist_reconcile_schedule_no_loop session_id=%s", session_id)

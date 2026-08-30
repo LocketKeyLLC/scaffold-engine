@@ -2151,6 +2151,8 @@ async def generate_fix(
     job_digest: Optional[str] = None,
     operator_notes: Optional[list[dict]] = None,
     conversation: Optional[str] = None,
+    failure_streak: int = 0,
+    failed_commands: Optional[str] = None,
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -2168,13 +2170,24 @@ async def generate_fix(
     if len(error_text or "") > 6000:
         error_text = "(earlier output truncated)\n…" + error_text[-6000:]
 
+    # §17.881 — repeat-failure escalation. At the streak threshold the current
+    # METHOD is failing, not just its last command: floor the research budget
+    # (a single generic query re-fed the same weak grounding three fixes in a
+    # row live) and demand a materially different approach below.
+    escalated = failure_streak >= settings.assist_fix_streak_threshold
     sources: list[dict] = []
     if research:
+        max_q = settings.assist_guide_max_research_queries
+        if escalated:
+            max_q = max(3, max_q)
         sources = await _research_prepass(
-            task_text=f"{ctx.base_prompt}\n\nOperator hit this error:\n{error_text}",
+            task_text=f"{ctx.base_prompt}\n\nOperator hit this error:\n{error_text}"
+                      + ("\n\n(Note: this is a REPEATED failure — previous fixes did "
+                         "not resolve it; look up the current OFFICIAL method, not "
+                         "variations of the failing one.)" if escalated else ""),
             tool=ctx.tool,
             role=role,
-            max_queries=settings.assist_guide_max_research_queries,
+            max_queries=max_q,
             node_key=node_key,
             domain=domain,
             deep=True,  # §17.500 — troubleshooting wants real doc content, not snippets
@@ -2194,6 +2207,19 @@ async def generate_fix(
     research_block = _render_research_block(sources)
     if research_block:
         parts.append(research_block)
+    if escalated and (failed_commands or "").strip():
+        # §17.881 — the commands already tried are placed LAST before the
+        # trailer (recency) with a hard directive: change the approach.
+        parts.append(
+            "## Fixes already prescribed for THIS problem that did NOT resolve it\n"
+            "The operator ran these (or was given them) and still hit the error. "
+            "Do NOT prescribe them again, and do not prescribe a trivial variation "
+            "of them. Produce a MATERIALLY DIFFERENT approach: prefer the session "
+            "playbook's proven-here methods; if the research or playbook shows the "
+            "whole method is wrong for this system, CHANGE THE METHOD — do not "
+            "retune the failing command.\n\n```\n"
+            + failed_commands.strip()[:3000] + "\n```"
+        )
     parts.append(_FIX_USER_TRAILER)
     user = "\n\n".join(parts)
 

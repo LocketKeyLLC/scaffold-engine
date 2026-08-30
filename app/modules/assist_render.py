@@ -192,7 +192,9 @@ def render_session_memory(
     # (oldest dropped — the newest facts describe the system's current state)
     # instead of popping whole sections.
     facts_idx: int | None = None
-    direction_idx: int | None = None  # §17.714 reset-mode direction — never dropped
+    # Never-dropped protected slot: §17.714 reset-mode direction (reset branch)
+    # or the §17.881 session playbook (normal branch) — one per render.
+    direction_idx: int | None = None
     facts_header = ""
 
     def _facts_section(header_: str, items: list[str], omitted: int) -> str:
@@ -250,6 +252,13 @@ def render_session_memory(
         sections = [header]
         if profile:
             sections.append(f"**Execution context:** {profile}")
+        # §17.881 — the playbook leads the facts: proven/ruled-out methods are
+        # the highest-leverage memory (they change WHAT the model prescribes,
+        # not just which values it fills in) and are never budget-dropped.
+        pb_block = render_playbook_block(environment)
+        if pb_block:
+            direction_idx = len(sections) if direction_idx is None else direction_idx
+            sections.append(pb_block)
         if facts:
             facts_header = "**Observed facts:**"
             facts_idx = len(sections)
@@ -317,6 +326,37 @@ def render_session_memory(
     return block
 
 
+def render_playbook_block(environment: dict | None) -> str:
+    """§17.881 — the session playbook as a BINDING block: methods PROVEN on
+    this system this session, and approaches that already FAILED here. Derived
+    at step-commit time (reconcile_on_commit); rendered into every generation
+    so the model prefers session-proven methods over its own priors — the live
+    failure this closes: the engine guessed fresh install URLs for component
+    N+1 while its own session had already proven the working pattern on
+    component N. Returns "" when the playbook is empty."""
+    pb = (environment or {}).get("playbook") or {}
+    proven = [str(x).strip() for x in (pb.get("proven") or []) if str(x).strip()]
+    ruled = [str(x).strip() for x in (pb.get("ruled_out") or []) if str(x).strip()]
+    if not proven and not ruled:
+        return ""
+    parts = [
+        "## Session playbook (BINDING — learned on THIS system, this session; "
+        "takes precedence over remembered or generic methods)"
+    ]
+    if proven:
+        parts.append(
+            "**Proven to work here — when a task matches, use these instead of "
+            "any method from memory:**\n" + "\n".join(f"- {p}" for p in proven)
+        )
+    if ruled:
+        parts.append(
+            "**Already failed here — do NOT prescribe these again (if truly "
+            "unavoidable, state explicitly why it will work this time):**\n"
+            + "\n".join(f"- {r}" for r in ruled)
+        )
+    return "\n\n".join(parts)
+
+
 def _render_memory_or_legacy(
     environment: dict | None, operator_notes: list[dict] | None,
 ) -> list[str]:
@@ -333,6 +373,9 @@ def _render_memory_or_legacy(
     env_block = render_environment_block(environment)
     if env_block:
         out.append(env_block)
+    pb_block = render_playbook_block(environment)  # §17.881 — both paths carry it
+    if pb_block:
+        out.append(pb_block)
     notes_block = render_operator_notes_block(operator_notes)
     if notes_block:
         out.append(notes_block)

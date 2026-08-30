@@ -274,6 +274,7 @@ Currency rule (§17.876) — verify the METHOD is still current, not just the co
 - If the research block cannot confirm it either way and the error pattern smells like a dead or wrong source (repeated 404s, missing Release file, a "GPG key" that downloads as HTML), the fix is to CONFIRM the source first: point the operator at the program's official install docs (name the page from research if it's there) rather than another retry of the unconfirmed method.
 
 Hard rules:
+- If a "Session playbook" block is present: its proven-here methods take precedence over anything you remember or research generically, and you must NEVER prescribe an approach it lists as already failed here (§17.881). If a proven method for a sibling component exists (e.g. an install pattern that worked for another app in the same family), adapt THAT pattern before inventing a new one.
 - Address the operator's ACTUAL blocker — which is usually this step's error, but per the root-cause rule may be a broken foundation underneath it. Don't restate the whole step from scratch unless the fix requires it.
 - Never write past-tense narration ("Fixed it", "Ran it and it worked"). The operator runs your commands.
 - Never invent concrete values for SYSTEM TRUTHS (versions, paths, package names, ports) absent from the task, the error, the environment, or the research block — use a <PLACEHOLDER>. Free-choice names the operator can pick get a concrete suggested default instead.
