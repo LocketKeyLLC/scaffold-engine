@@ -274,10 +274,19 @@ async def _run_turn_inner(
             handled["v"] = "submit"
             return
         if confident and action == "fix":
-            yield _ev(ASSIST_TURN_STATUS, {"text": "Diagnosing the error for your environment…"})
+            # §17.874 — fixes are RESEARCH-BACKED, unconditionally. The live
+            # incident: two consecutive fixes cycled GUESSED Servarr repo URLs
+            # from training memory while the operator's paste showed the
+            # keyring downloading as ASCII text (an error page) — the current
+            # correct apt instructions are a fact only live research can
+            # supply. The operator's standing requirement: unsure → research →
+            # derive from up-to-date information. Costs ~a minute; the status
+            # frame carries it.
+            yield _ev(ASSIST_TURN_STATUS, {"text": "Diagnosing the error — researching current, up-to-date fixes for it (this can take a minute or two)…"})
             fix = await assist_agent.run_step_fix(
                 session_id=session_id, node_key=nk,
-                error=(d.get("error_text") or text_), history=history, db=db,
+                error=(d.get("error_text") or text_), history=history,
+                research=True, db=db,
             )
             fix_text = (fix or {}).get("fix") or "(no fix returned)"
             yield _ev(ASSIST_ANSWER, {"kind": "fix", "text": fix_text})
