@@ -244,7 +244,8 @@ def test_environment_from_metadata_variants():
                          "facts": ["Existing PVE 9.2.6"]}}
     )
     assert got == {"profile": "Ubuntu", "substitutions": {"A": "1"},
-                   "facts": ["Existing PVE 9.2.6"]}
+                   "facts": ["Existing PVE 9.2.6"],
+                   "playbook": {}}  # §17.881b — playbook round-trips
     # tolerates a JSON string body
     got2 = assist_agent._environment_from_metadata('{"environment": {"profile": "X"}}')
     assert got2["profile"] == "X"
@@ -332,7 +333,8 @@ async def test_get_environment_returns_shape():
         _result({"metadata": {"environment": {"profile": "P", "substitutions": {}}}}),
     ])
     out = await assist_agent.get_environment(session_id="s", db=db)
-    assert out == {"profile": "P", "substitutions": {}, "facts": [], "verbosity": "normal"}
+    assert out == {"profile": "P", "substitutions": {}, "facts": [],
+                   "playbook": {}, "verbosity": "normal"}  # §17.881b
 
 
 # ── §17.487: verify_submit_outcome ─────────────────────────────────────────
