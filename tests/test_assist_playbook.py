@@ -20,17 +20,36 @@ async def test_set_environment_merges_playbook_deduped():
     db = AsyncMock()
     row = MagicMock()
     row.mappings.return_value.first.return_value = {"metadata": {
-        "environment": {"playbook": {"proven": ["tarball via servarr.com works"]}}}}
+        "environment": {"playbook": {"proven": ["EXISTING entry from an earlier step"]}}}}
     db.execute = AsyncMock(return_value=row)
     env = await set_environment(
         session_id="s",
-        playbook_proven=["tarball via servarr.com works", "systemd unit pattern X"],
+        playbook_proven=["tarball via servarr.com works"],
         playbook_ruled_out=["apt.servarr.com repo — unreachable from LXC"],
         db=db,
     )
     pb = env["playbook"]
-    assert pb["proven"] == ["tarball via servarr.com works", "systemd unit pattern X"]
+    # §17.881b — the pre-existing entry MUST survive the merge (the first cut's
+    # deserializer dropped `playbook`, so every later write clobbered it; this
+    # assertion is deliberately on an entry NOT present in the adds).
+    assert pb["proven"] == ["EXISTING entry from an earlier step",
+                            "tarball via servarr.com works"]
     assert pb["ruled_out"] == ["apt.servarr.com repo — unreachable from LXC"]
+
+
+async def test_playbook_survives_a_plain_fact_fold():
+    """§17.881b — a facts-only set_environment call (the every-submit path)
+    must not erase the playbook."""
+    from app.modules.assist_environment import set_environment
+    db = AsyncMock()
+    row = MagicMock()
+    row.mappings.return_value.first.return_value = {"metadata": {
+        "environment": {"facts": ["old fact"],
+                        "playbook": {"proven": ["servarr updatefile pattern"]}}}}
+    db.execute = AsyncMock(return_value=row)
+    env = await set_environment(session_id="s", facts=["new fact"], db=db)
+    assert env["playbook"] == {"proven": ["servarr updatefile pattern"]}
+    assert "new fact" in env["facts"]
 
 
 # ── renderer ─────────────────────────────────────────────────────────────

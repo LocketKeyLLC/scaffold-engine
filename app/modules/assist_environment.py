@@ -42,11 +42,18 @@ def _environment_from_metadata(metadata: Any) -> dict:
     if not isinstance(env, dict):
         return {"profile": "", "substitutions": {}, "facts": []}
     facts = env.get("facts")
+    playbook = env.get("playbook")
     return {
         "profile": env.get("profile") or "",
         "substitutions": env.get("substitutions") or {},
         # §17.709 — durable observed facts about the operator's system.
         "facts": facts if isinstance(facts, list) else [],
+        # §17.881b — the session playbook MUST round-trip through this
+        # deserializer: set_environment writes the WHOLE env dict back, so a
+        # key dropped here is erased by the very next fact fold (live: T14's
+        # proven servarr pattern derived, then clobbered by T13's write
+        # seconds later — only the last step's entries survived).
+        "playbook": playbook if isinstance(playbook, dict) else {},
     }
 
 
