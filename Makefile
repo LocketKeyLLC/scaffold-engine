@@ -469,7 +469,13 @@ check-version: ## §17.854 (audit H2) — Verify the version agrees across pypro
 ## Build & Ops
 ## ──────────────────────────────────────────────
 
-build: ## Rebuild scaffold-engine:${SCAFFOLD_IMAGE_TAG:-local} (prod) and restart orchestrator. Explicit rebuild gate — `compose up` no longer auto-rebuilds.
+build: ## Rebuild scaffold-engine:${SCAFFOLD_IMAGE_TAG:-local} (prod) and restart orchestrator. Explicit rebuild gate — `compose up` no longer auto-rebuilds. §17.875: refuses while assist turns are IN FLIGHT (a restart kills their background drivers mid-conversation); override with FORCE_BUILD=1.
+	@RUNNING=$$(docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -t -A -c "SELECT count(*) FROM assist_turn_runs WHERE status='running'" 2>/dev/null || echo 0); \
+	if [ "$$RUNNING" != "0" ] && [ "$$RUNNING" != "" ] && [ -z "$$FORCE_BUILD" ]; then \
+		printf '\033[1;31m✗ %s assist turn(s) IN FLIGHT — deploying now would kill them mid-conversation (§17.875).\033[0m\n' "$$RUNNING"; \
+		printf '  Wait for them to finish, or FORCE_BUILD=1 make build.\n'; \
+		exit 1; \
+	fi
 	$(COMPOSE) up -d --build $(CONTAINER)
 
 build-dev: ## Rebuild scaffold-engine:dev and restart orchestrator under the dev overlay.

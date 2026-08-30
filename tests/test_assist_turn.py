@@ -235,3 +235,62 @@ async def test_fix_dispatch_is_research_backed():
     assert fixer.await_args.kwargs.get("research") is True
     ans = next(d for n, d in ev if n == "assist_answer")
     assert ans["text"] == "researched fix"
+
+
+# ── §17.875 — zombie sweep + tail stall cap ──────────────────────────────────
+
+
+async def test_sweep_zombie_runs_marks_dead():
+    """A restart leaves 'running' rows forever; the boot sweep must mark them
+    error with an honest terminal frame (so tails end and resume skips them)."""
+    from unittest.mock import MagicMock
+
+    executed = {}
+
+    def _mk():
+        db = AsyncMock()
+
+        async def _exec(sql, params=None):
+            executed["sql"] = str(sql)
+            executed["frames"] = params.get("f") if params else None
+            m = MagicMock()
+            m.rowcount = 3
+            return m
+        db.execute = AsyncMock(side_effect=_exec)
+        db.commit = AsyncMock()
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=db)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    with patch("app.database.async_session", new=_mk):
+        n = await assist_turn.sweep_zombie_runs()
+    assert n == 3
+    assert "status = 'running'" in executed["sql"]
+    assert "restarted mid-turn" in executed["frames"]
+
+
+async def test_tail_stall_cap_releases_screen():
+    """A 'running' row that never grows must not be followed forever — the
+    tail ends with an honest error + done after the stall window."""
+    from unittest.mock import MagicMock
+
+    rows = [{"status": "running",
+             "frames": [{"e": "assist_turn_status", "d": {"text": "a"}}]}] * 50
+
+    clock = {"t": 1000.0}
+
+    def _now():
+        clock["t"] += 100.0  # every poll advances 100s → stall cap hit fast
+        return clock["t"]
+
+    loop = MagicMock()
+    loop.time = _now
+    with patch("app.database.async_session", new=_fake_async_session(rows)), \
+         patch("asyncio.sleep", new=AsyncMock()), \
+         patch("asyncio.get_event_loop", return_value=loop):
+        out = [ev async for ev in assist_turn.tail_turn_run("wedged")]
+    names = [n for n, _ in out]
+    assert names[-1] == "assist_turn_done"
+    assert out[-1][1]["handled"] == "stalled_tail"
+    assert any("gone quiet" in (d.get("detail") or "") for n, d in out if n == "error")

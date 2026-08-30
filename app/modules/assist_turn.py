@@ -145,6 +145,7 @@ async def tail_turn_run(run_id: str) -> AsyncIterator[_Event]:
 
     yield _ev("assist_turn_started", {"run_id": run_id})
     sent = 0
+    last_growth = asyncio.get_event_loop().time()
     while True:
         async with async_session() as db:
             row = (await db.execute(
@@ -155,12 +156,47 @@ async def tail_turn_run(run_id: str) -> AsyncIterator[_Event]:
             yield _ev("error", {"detail": f"turn run not found: {run_id}"})
             return
         frames = row["frames"] or []
+        if len(frames) > sent:
+            last_growth = asyncio.get_event_loop().time()
         for f in frames[sent:]:
             yield _ev(f.get("e") or "error", f.get("d") or {})
         sent = len(frames)
         if row["status"] != "running":
             return
+        # §17.875 — stall cap: never follow a wedged run forever.
+        if (asyncio.get_event_loop().time() - last_growth) > _TAIL_STALL_SECONDS:
+            yield _ev("error", {"detail": "This turn has gone quiet for over 6 minutes — it may still finish in the background (check the transcript later), but I'm releasing your screen. You can resend your message."})
+            yield _ev(ASSIST_TURN_DONE, {"handled": "stalled_tail"})
+            return
         await asyncio.sleep(0.6)
+
+
+async def sweep_zombie_runs() -> int:
+    """§17.875 — called at startup: any row still 'running' predates this boot
+    (the drivers died with the old process) and can never finish. Mark it dead
+    with an honest terminal frame so tails end and resume skips it."""
+    from app.database import async_session
+
+    dead_frames = _json.dumps([
+        {"e": "error", "d": {"detail": "The engine restarted mid-turn — please resend your message."}},
+        {"e": ASSIST_TURN_DONE, "d": {"handled": "died"}},
+    ])
+    async with async_session() as db:
+        res = await db.execute(
+            _sqltext("UPDATE assist_turn_runs SET status = 'error', finished_at = now(), "
+                     "frames = frames || CAST(:f AS jsonb) WHERE status = 'running'"),
+            {"f": dead_frames},
+        )
+        await db.commit()
+    return res.rowcount or 0
+
+
+# §17.875 — tail stall cap: the longest legitimate frame gap is a research/
+# guide model call (~2-3 min). A tail that sees NO new frames for this long on
+# a still-'running' row is following something wedged — end honestly rather
+# than spin forever (the run may yet finish; its output lands in the
+# transcript via the §17.873 captures).
+_TAIL_STALL_SECONDS = 360
 
 
 async def get_active_run(session_id: str) -> str | None:

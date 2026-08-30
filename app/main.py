@@ -286,6 +286,21 @@ async def lifespan(app: FastAPI):
         # to reach.
         logger.warning("startup_sweep_failed: error=%s", exc)
 
+    # §17.875 — zombie turn-run sweep. A restart kills the §17.869 background
+    # drivers before any finalizer runs, leaving assist_turn_runs rows stuck
+    # 'running' FOREVER — the client's resume-on-load then re-attaches to a
+    # corpse and tails nothing indefinitely (live incident: a deploy landed
+    # mid-turn; the operator's retry re-attached to the zombie and "nothing
+    # showed"). Mark them dead with an honest terminal frame so tails end and
+    # resume skips them. Fail-soft; no-op before migration 071.
+    try:
+        from app.modules.assist_turn import sweep_zombie_runs
+        _swept = await sweep_zombie_runs()
+        if _swept:
+            logger.info("startup_turn_run_sweep: zombies_marked=%d", _swept)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("startup_turn_run_sweep_failed: error=%s", exc)
+
     # Run schema migrations before anything else touches the DB (#10).
     # Opt out with SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false (default: true).
     _run_migs = os.getenv("SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP", "true").strip().lower()
