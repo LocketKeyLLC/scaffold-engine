@@ -1146,9 +1146,22 @@ async def _retire_step_mirrored(
         {"n": note, "jid": job_id, "nk": node_key},
     )
     await db.execute(
-        text("UPDATE assist_steps SET status='committed', updated_at=NOW() "
+        text("UPDATE assist_steps SET status='committed', committed_at=NOW(), "
+             "updated_at=NOW() "
              "WHERE session_id=:sid AND node_key=:nk AND status NOT IN ('committed','skipped')"),
         {"sid": session_id, "nk": node_key},
+    )
+    # §17.880 — retiring a step must also MOVE the session pointer, exactly as
+    # the submit-commit path does. The live incident: the tracker retired T14
+    # here but current_node_key stayed on it, so every Guide/Done press
+    # re-resolved the finished step ("this node is done" on repeat). Point at
+    # the next claimable step (None when the plan is exhausted); the claim path
+    # re-sets it idempotently when the operator walks in.
+    nxt = await assist_agent._next_pending_node_key(session_id=session_id, db=db)
+    await db.execute(
+        text("UPDATE assist_sessions SET current_node_key = :nk, updated_at = NOW() "
+             "WHERE id = :sid AND status IN ('active', 'paused')"),
+        {"nk": nxt, "sid": session_id},
     )
     await db.commit()
 

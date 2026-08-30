@@ -529,12 +529,21 @@ async def _claim_and_guide(
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     nk = node_key or (sess or {}).get("current_node_key")
     if nk:
-        # §17.878 — mirror-invariant repair. A pointer moved without a formal
-        # claim (the tracker's advance path) leaves the step 'pending':
-        # guidance flows off the pointer, but any later submit 409s with
-        # must_claim_first (live: T14 ran a full day unclaimed). Claim at the
-        # guide chokepoint so the state the operator sees is the state the
-        # endpoints enforce. Fail-soft: repair must never block the walkthrough.
+        # §17.878/880 — pointer sanity at the guide chokepoint. Two live-hit
+        # stale-pointer shapes, both from paths that move state without full
+        # bookkeeping:
+        #   'pending'  — pointer moved without a formal claim → later submits
+        #                409 must_claim_first (§17.878: T14 ran a day unclaimed).
+        #                Repair: claim it.
+        #   terminal   — step retired (tracker advance / commit race) but the
+        #                pointer stayed → every Guide/Done press re-walks the
+        #                FINISHED step ("this node is done", §17.880 live
+        #                incident). Repair: announce + heal forward into the
+        #                normal claim path below (which claims the next step
+        #                and re-points the session).
+        # generate_step_guidance_stream's §17.639 guard can't cover this: we
+        # pass it an explicit node_key, which it honors by contract.
+        # Fail-soft: repair must never block the walkthrough.
         try:
             from sqlalchemy import text as _text
             st = (await db.execute(_text(
@@ -544,6 +553,13 @@ async def _claim_and_guide(
             if st == "pending":
                 logger.info("turn_loop_claim_repair sid=%s nk=%s", session_id, nk)
                 await assist_next(session_id, db=db)
+            elif st in assist_agent._TERMINAL_STEP_STATUSES:
+                logger.info("turn_loop_terminal_pointer_heal sid=%s nk=%s st=%s",
+                            session_id, nk, st)
+                yield _ev(ASSIST_TURN_STATUS, {
+                    "text": f"✅ Step {nk} is already done — moving on to the next step…",
+                })
+                nk = None
         except Exception as exc:  # noqa: BLE001
             logger.warning("turn_loop_claim_repair_failed sid=%s err=%r", session_id, exc)
     if not nk:
