@@ -854,6 +854,20 @@ async def reconcile_on_commit(
             "assist_commit_reconciled session_id=%s node_key=%s retired=%d proven=%d ruled_out=%d",
             session_id, node_key, len(retire), len(proven), len(ruled),
         )
+        # §17.882 — APPLY the lesson to the PLAN, not just to prompts: when a
+        # ruled-out approach is named in a still-pending step's task text, the
+        # plan itself is prescribing a known-dead method (live: every later
+        # *arr install step still said apt.servarr.com after T14 proved it
+        # unreachable). Deterministic domain/token match → stage a §17.677
+        # replan proposal (operator confirms; dismissal-suppressed).
+        if ruled:
+            try:
+                await _propose_plan_correction(
+                    session_id=session_id, ruled=ruled, proven=proven, db=db,
+                )
+            except Exception as e:  # noqa: BLE001 — proposal is an enhancement
+                logger.warning("assist_plan_correction_failed session_id=%s err=%r",
+                               session_id, e)
     except Exception as e:  # noqa: BLE001 — reconciliation must never break commit
         logger.warning("assist_reconcile_on_commit_failed session_id=%s err=%r", session_id, e)
     return result
@@ -887,3 +901,76 @@ def schedule_reconcile_on_commit(
         task.add_done_callback(_RECONCILE_TASKS.discard)
     except RuntimeError:  # no running loop (sync test context) — skip
         logger.debug("assist_reconcile_schedule_no_loop session_id=%s", session_id)
+
+
+_DOMAIN_RE = None
+
+
+def _lesson_tokens(entry: str) -> list[str]:
+    """§17.882 — matchable tokens from a ruled-out entry: domains/hosts (the
+    strongest deterministic signal — 'apt.servarr.com' naming a dead repo) and
+    backtick-quoted literals. Prose words are NOT tokens (too noisy)."""
+    global _DOMAIN_RE
+    import re as _re
+    if _DOMAIN_RE is None:
+        _DOMAIN_RE = _re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", _re.I)
+    toks = set(m.group(0).lower() for m in _DOMAIN_RE.finditer(entry or ""))
+    toks |= {q.strip().lower() for q in _re.findall(r"`([^`]{4,60})`", entry or "")}
+    # File-extension false positives (e.g. 'x.tar.gz' inside a lesson) stay —
+    # they simply won't match step prose; domains are the real hits.
+    return [t for t in toks if t]
+
+
+async def _propose_plan_correction(
+    *, session_id: str, ruled: list[str], proven: list[str], db,
+) -> None:
+    """§17.882 — stage a replan proposal for pending steps whose task text
+    names a ruled-out approach. Uses the §17.677 staging (operator-confirmed,
+    dismissal-suppressed) — the engine never rewrites the plan silently."""
+    from app.modules.assist_notes import _stage_replan_proposal
+
+    rows = (await db.execute(
+        text("""
+            SELECT s.node_key, d.prompt_template
+              FROM assist_steps s
+              JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid AND s.status = 'pending'
+        """),
+        {"sid": session_id},
+    )).mappings().all()
+    affected = []
+    hit_lessons: list[str] = []
+    for lesson in ruled:
+        toks = _lesson_tokens(lesson)
+        if not toks:
+            continue
+        for r in rows:
+            tpl = (r.get("prompt_template") or "").lower()
+            hit = next((t for t in toks if t in tpl), None)
+            if hit and all(a["node_key"] != r["node_key"] for a in affected):
+                affected.append({
+                    "node_key": r["node_key"],
+                    "current_assumption": f"uses {hit} (ruled out on this system: {lesson[:120]})",
+                    "required_change": (
+                        "Use the session-proven method instead"
+                        + (f": {proven[0][:160]}" if proven else " (see session playbook)")
+                    ),
+                })
+                if lesson not in hit_lessons:
+                    hit_lessons.append(lesson)
+    if not affected:
+        return
+    await _stage_replan_proposal(
+        session_id=session_id,
+        note_text=(
+            "Session lesson applies to the remaining plan: "
+            + " · ".join(hit_lessons[:3])
+        ),
+        note_kind="constraint",
+        affected=affected,
+        db=db,
+    )
+    logger.info(
+        "assist_plan_correction_proposed session_id=%s affected=%d",
+        session_id, len(affected),
+    )

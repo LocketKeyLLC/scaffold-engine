@@ -131,27 +131,158 @@ async def test_reconcile_valve_off_noop(monkeypatch):
 # ── failure streak ───────────────────────────────────────────────────────
 
 
-async def test_fix_failure_streak_counts_leading_fixes_and_extracts_commands():
+async def test_fix_failure_streak_counts_all_fixes_since_claim():
+    """§17.882 — an interleaved Guide press must NOT reset the count (live: 5
+    fixes, zero escalations, because a guide sat between them). The SQL filters
+    to kind='fix' since presented_at; streak = all of them."""
     db = AsyncMock()
-    row = MagicMock()
-    row.mappings.return_value.all.return_value = [
-        {"kind": "fix", "content": "## Fix\n```bash\ncurl -L https://bad.example\n```"},
-        {"kind": "fix", "content": "try\n```bash\ntar -xzf /tmp/x.tar.gz\n```"},
-        {"kind": "guide", "content": "walkthrough\n```bash\necho old\n```"},
-        {"kind": "fix", "content": "older fix beyond the break"},
+    presented = MagicMock(); presented.scalar.return_value = "2026-08-30T14:00:00Z"
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        {"content": "## Fix\n```bash\ncurl -L https://bad.example\n```"},
+        {"content": "try\n```bash\ntar -xzf /tmp/x.tar.gz\n```"},
+        {"content": "plain prose fix, no fence"},
     ]
-    db.execute = AsyncMock(return_value=row)
+    db.execute = AsyncMock(side_effect=[presented, rows])
     streak, cmds = await _fix_failure_streak(session_id="s", node_key="T16", db=db)
-    assert streak == 2
+    assert streak == 3
     assert "curl -L https://bad.example" in cmds and "tar -xzf" in cmds
-    assert "echo old" not in cmds
 
 
-async def test_fix_failure_streak_zero_when_latest_not_fix():
+async def test_fix_failure_streak_zero_when_no_fix_turns():
     db = AsyncMock()
-    row = MagicMock()
-    row.mappings.return_value.all.return_value = [
-        {"kind": "guide", "content": "x"}, {"kind": "fix", "content": "y"}]
-    db.execute = AsyncMock(return_value=row)
+    presented = MagicMock(); presented.scalar.return_value = None
+    rows = MagicMock(); rows.mappings.return_value.all.return_value = []
+    db.execute = AsyncMock(side_effect=[presented, rows])
     streak, cmds = await _fix_failure_streak(session_id="s", node_key="T16", db=db)
     assert streak == 0 and cmds == ""
+
+
+# ── §17.882 — code-enforced no-repeat gate ───────────────────────────────
+
+
+def test_find_repeated_failed_detects_command_and_url():
+    from app.modules.assist_guide import find_repeated_failed
+    failed = 'curl -L "https://radarr.video/api/v1/update/master/updatefile?os=linux&arch=x64" -o /tmp/Radarr.tar.gz'
+    out = ('## Fix\n```bash\ncurl -L "https://radarr.video/api/v1/update/master/'
+           'updatefile?os=linux&arch=x64" -o /tmp/Radarr.tar.gz\n```')
+    hits = find_repeated_failed(out, failed)
+    assert hits  # the identical dead command is caught deterministically
+
+
+def test_find_repeated_failed_clean_on_different_method():
+    from app.modules.assist_guide import find_repeated_failed
+    failed = 'curl -L "https://radarr.video/api/v1/update" -o /tmp/R.tar.gz'
+    out = ('```bash\ncurl -fsSL https://api.github.com/repos/Radarr/Radarr/'
+           'releases/latest\n```')
+    assert find_repeated_failed(out, failed) == []
+
+
+def test_error_focus_query_picks_error_line():
+    from app.modules.assist_guide import _error_focus_query
+    err = ("root@radarr:~# curl -L ...\n"
+           "  % Total ...\n"
+           "gzip: stdin: not in gzip format\n"
+           "tar: Child returned status 1\n")
+    q = _error_focus_query("Install Radarr in LXC 103", err)
+    assert "not in gzip format" in q and "Install Radarr" in q
+    assert len(q) <= 130
+
+
+
+
+def _fix_ctx():
+    from app.modules.assist_guide import StepContext
+    return StepContext(
+        node_key="T16", title="Install Radarr in LXC 103", tool="Shell",
+        domain=None, system_prompt="sys", base_prompt="install radarr",
+        upstream_outputs={}, upstream_truncated_keys=[], grounding="",
+        grounding_kind=None, assembled_prompt="## Task\ninstall radarr",
+    )
+
+@pytest.mark.asyncio
+async def test_generate_fix_regen_gate_blocks_repeat():
+    """First draw repeats the failed command → ONE regeneration; the clean
+    regen is returned with no warning banner."""
+    from app.modules import assist_guide
+    from app.modules.assist_guide import generate_fix, StepContext
+    failed = 'curl -L "https://radarr.video/api/v1/update" -o /tmp/R.tar.gz'
+    bad = f'## Fix\n```bash\n{failed}\n```'
+    good = '## Fix\n```bash\ncurl -fsSL https://api.github.com/repos/Radarr/Radarr/releases/latest\n```'
+    draws = [SimpleNamespace(text=bad, success=True, error=None, model="m", raw={}),
+             SimpleNamespace(text=good, success=True, error=None, model="m", raw={})]
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(side_effect=draws)) as chat:
+        res = await generate_fix(
+            ctx=_fix_ctx(), error_text="gzip: stdin: not in gzip format",
+            research=False, node_key="T16",
+            failure_streak=2, failed_commands=failed,
+        )
+    assert chat.await_count == 2
+    assert "api.github.com" in res["fix"]
+    assert "Repeat warning" not in res["fix"]
+    assert res["guidance_meta"]["repeat_violations"] == []
+
+
+@pytest.mark.asyncio
+async def test_generate_fix_warning_banner_when_regen_still_repeats():
+    from app.modules import assist_guide
+    from app.modules.assist_guide import generate_fix, StepContext
+    failed = 'curl -L "https://radarr.video/api/v1/update" -o /tmp/R.tar.gz'
+    bad = f'## Fix\n```bash\n{failed}\n```'
+    draws = [SimpleNamespace(text=bad, success=True, error=None, model="m", raw={}),
+             SimpleNamespace(text=bad, success=True, error=None, model="m", raw={})]
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(side_effect=draws)):
+        res = await generate_fix(
+            ctx=_fix_ctx(), error_text="gzip: stdin: not in gzip format",
+            research=False, node_key="T16",
+            failure_streak=1, failed_commands=failed,
+        )
+    assert res["fix"].startswith("⚠️ **Repeat warning:**")
+    assert res["guidance_meta"]["repeat_violations"]
+
+
+# ── §17.882 — plan correction from ruled-out lessons ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_plan_correction_stages_proposal_on_domain_match():
+    from app.modules.assist_memory import _propose_plan_correction
+    db = AsyncMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        {"node_key": "T17", "prompt_template": "Install Sonarr via the apt.servarr.com repository"},
+        {"node_key": "T18", "prompt_template": "Configure quality profiles in the UI"},
+    ]
+    db.execute = AsyncMock(return_value=rows)
+    staged = {}
+    async def fake_stage(**kw):
+        staged.update(kw)
+    with patch("app.modules.assist_notes._stage_replan_proposal", new=fake_stage):
+        await _propose_plan_correction(
+            session_id="s",
+            ruled=["apt.servarr.com apt repository — fails to resolve DNS inside the containers"],
+            proven=["GitHub tarball install to /opt with systemd unit"],
+            db=db,
+        )
+    assert [a["node_key"] for a in staged["affected"]] == ["T17"]
+    assert "GitHub tarball" in staged["affected"][0]["required_change"]
+    assert staged["note_kind"] == "constraint"
+
+
+@pytest.mark.asyncio
+async def test_plan_correction_silent_when_no_match():
+    from app.modules.assist_memory import _propose_plan_correction
+    db = AsyncMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        {"node_key": "T18", "prompt_template": "Configure quality profiles"}]
+    db.execute = AsyncMock(return_value=rows)
+    called = {}
+    async def fake_stage(**kw):
+        called["yes"] = True
+    with patch("app.modules.assist_notes._stage_replan_proposal", new=fake_stage):
+        await _propose_plan_correction(
+            session_id="s", ruled=["apt.servarr.com repo dead"], proven=[], db=db)
+    assert not called
