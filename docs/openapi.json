@@ -431,6 +431,55 @@
         "title": "AssistInterpretInput",
         "type": "object"
       },
+      "AssistMessageInput": {
+        "description": "§17.868 — one operator turn for the server-side turn loop.",
+        "properties": {
+          "command": {
+            "default": "message",
+            "description": "'message' runs the full loop; 'guide' goes straight to claim-and-guide.",
+            "enum": [
+              "message",
+              "guide"
+            ],
+            "title": "Command",
+            "type": "string"
+          },
+          "history": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The operator's message (command='message').",
+            "title": "Message"
+          },
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Defaults to the session's current step.",
+            "title": "Node Key"
+          }
+        },
+        "title": "AssistMessageInput",
+        "type": "object"
+      },
       "AssistNoteInput": {
         "properties": {
           "kind": {
@@ -5586,6 +5635,62 @@
           }
         ],
         "summary": "Assist Interpret",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/message": {
+      "post": {
+        "description": "§17.868 — the server-side turn loop: ONE stream owns capture → gates →\ndecide → dispatch → claim/premise → guidance, with a status frame at every\nstage (no silent phases). Clients render events; they never sequence the\nloop — the §17.861–867 seam-failure class ends here. Validates up front so\nbad input is an HTTP error, not a half-open stream.",
+        "operationId": "assist_message_assist__session_id__message_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistMessageInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Message",
         "tags": [
           "Assist"
         ]
