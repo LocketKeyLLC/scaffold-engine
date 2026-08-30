@@ -339,18 +339,40 @@ async def decide_turn(
             session_id, attempt,
         )
 
+    # §17.873 — the deterministic overrides run on EVERY return path, most of
+    # all the model-failure fallbacks. Live incident: the /decide model
+    # returned no tool call on a clean shell paste; the fallback "question"
+    # decision skipped the override block, so the §17.855 shell→submit gate —
+    # which exists precisely to compensate for model failures — never fired,
+    # and the operator's completed-step evidence earned yet another
+    # walkthrough rerun. §17.812-C2's lesson, inverted: gates must not depend
+    # on the classifier they compensate for SUCCEEDING either.
+    def _finalize(decision: dict) -> dict:
+        if settings.assist_decide_deterministic_overrides:
+            before = decision["action"]
+            decision = assist_policy.apply_deterministic_overrides(decision, message)
+            if decision.get("override"):
+                logger.info(
+                    "decide_turn_override session=%s %s->%s reason=%s",
+                    session_id, before, decision["action"], decision["override"],
+                )
+        return decision
+
     if resp is None:
-        return {**_fallback_decision("model_error"), "node_key": nk,
-                "title": ctx.title, "is_decision": is_decision, "signals": signals}
+        return _finalize({**_fallback_decision("model_error"), "node_key": nk,
+                          "title": ctx.title, "is_decision": is_decision,
+                          "signals": signals})
     if not resp.success or not resp.tool_calls:
-        return {**_fallback_decision("no_tool_call"), "node_key": nk,
-                "title": ctx.title, "is_decision": is_decision, "signals": signals}
+        return _finalize({**_fallback_decision("no_tool_call"), "node_key": nk,
+                          "title": ctx.title, "is_decision": is_decision,
+                          "signals": signals})
 
     args = resp.tool_calls[0].arguments or {}
     action = args.get("action")
     if action not in DECIDE_ACTIONS:
-        return {**_fallback_decision("bad_action"), "node_key": nk,
-                "title": ctx.title, "is_decision": is_decision, "signals": signals}
+        return _finalize({**_fallback_decision("bad_action"), "node_key": nk,
+                          "title": ctx.title, "is_decision": is_decision,
+                          "signals": signals})
 
     note_kind = (args.get("note_kind") or "note").strip()
     conf = (args.get("confidence") or "low").strip()
@@ -380,19 +402,9 @@ async def decide_turn(
     }
     # §17.855 (audit "policy migration") — re-apply the deterministic phrase gates
     # as a post-filter so the CONFIDENT decision honours the same high-precision
-    # vetoes the client cascade only gets to apply on fall-through. Default OFF
-    # (ships dark; changes confident-path routing → wants a live A/B). When a gate
-    # fires it stamps `override` and bumps confidence to high so the caller
-    # dispatches it instead of falling to its own (now redundant) cascade copy.
-    if settings.assist_decide_deterministic_overrides:
-        before = decision["action"]
-        decision = assist_policy.apply_deterministic_overrides(decision, message)
-        if decision.get("override"):
-            logger.info(
-                "decide_turn_override session=%s %s->%s reason=%s",
-                session_id, before, decision["action"], decision["override"],
-            )
-    return decision
+    # vetoes the client cascade only gets to apply on fall-through. §17.873 —
+    # _finalize applies them on the fallback paths above too.
+    return _finalize(decision)
 
 
 # ── Shadow mode (Phase 1) — fire-and-forget parity capture ────────────────────

@@ -208,3 +208,46 @@ async def test_decide_gives_up_after_two_no_tool_calls():
             session_id="S1", message="x", db=_db_with_session())
     assert r["unavailable"] is True and r["rationale"] == "no_tool_call"
     assert tc.await_count == 2  # one retry, then cascade fallback
+
+
+@pytest.mark.asyncio
+async def test_decide_model_failure_still_applies_shell_override():
+    """§17.873 — the live incident: the model returned NO tool call on a clean
+    shell paste, and the fallback skipped the §17.855 override block — the
+    shell→submit gate never fired and the operator's completed-step evidence
+    earned another walkthrough rerun. Overrides must run on EVERY return path."""
+    p_ctx, p_kind, p_mem = _patch_ctx_and_memory()
+    dead = MagicMock()
+    dead.success = False
+    dead.tool_calls = []
+    paste = "root@pve:~# pct start 102\nsleep 5\nroot@pve:~# pct exec 102 -- apt-get install -y curl\nGet:1 http://deb.debian.org bookworm InRelease"
+    from app.config import settings
+    with p_ctx, p_kind, p_mem, \
+         patch.object(settings, "assist_decide_deterministic_overrides", True), \
+         patch("app.modules.assist_decide.model_router.tool_call",
+               new=AsyncMock(return_value=dead)):
+        r = await assist_decide.decide_turn(
+            session_id="S1", message=paste, db=_db_with_session())
+    assert r["action"] == "submit"
+    assert r["override"] == "shell_result"
+    assert r["confidence"] == "high"
+    assert r["evidence"].startswith("root@pve")
+
+
+@pytest.mark.asyncio
+async def test_decide_model_failure_without_signals_stays_fallback():
+    """No deterministic signal → the fallback stays a low-confidence question
+    (the tracker chain handles it); overrides never invent a route."""
+    p_ctx, p_kind, p_mem = _patch_ctx_and_memory()
+    dead = MagicMock()
+    dead.success = False
+    dead.tool_calls = []
+    from app.config import settings
+    with p_ctx, p_kind, p_mem, \
+         patch.object(settings, "assist_decide_deterministic_overrides", True), \
+         patch("app.modules.assist_decide.model_router.tool_call",
+               new=AsyncMock(return_value=dead)):
+        r = await assist_decide.decide_turn(
+            session_id="S1", message="hmm let me think about the layout", db=_db_with_session())
+    assert r["confidence"] == "low"
+    assert not r.get("override")
