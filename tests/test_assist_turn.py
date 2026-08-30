@@ -166,3 +166,55 @@ async def test_decide_crash_still_reaches_fallback_guidance():
         ev = await _collect(message="here is some output from the run today")
     assert "assist_guide_delta" in _names(ev)
     assert ev[-1][0] == "assist_turn_done"
+
+
+# ── §17.869 — detached turn runs ─────────────────────────────────────────────
+
+
+def _fake_async_session(rows):
+    """Context-manager factory yielding a db whose execute() pops from rows."""
+    from unittest.mock import MagicMock
+
+    def _mk():
+        db = AsyncMock()
+
+        async def _exec(sql, params=None):
+            r = rows.pop(0)
+            m = MagicMock()
+            m.mappings.return_value.first.return_value = r
+            m.scalar.return_value = r.get("_scalar") if isinstance(r, dict) else r
+            return m
+        db.execute = AsyncMock(side_effect=_exec)
+        db.commit = AsyncMock()
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=db)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+    return _mk
+
+
+async def test_tail_replays_then_follows_until_done():
+    """A tail must (1) emit assist_turn_started, (2) replay frames from 0,
+    (3) keep polling while running, (4) end when the run finishes — this is
+    what makes a browser reload lossless."""
+    rows = [
+        {"status": "running", "frames": [{"e": "assist_turn_status", "d": {"text": "a"}}]},
+        {"status": "done", "frames": [
+            {"e": "assist_turn_status", "d": {"text": "a"}},
+            {"e": "assist_turn_done", "d": {"handled": "x"}},
+        ]},
+    ]
+    with patch("app.database.async_session", new=_fake_async_session(rows)), \
+         patch("asyncio.sleep", new=AsyncMock()):
+        out = []
+        async for ev in assist_turn.tail_turn_run("run-1"):
+            out.append(ev)
+    names = [n for n, _ in out]
+    assert names[0] == "assist_turn_started"
+    assert names[1:] == ["assist_turn_status", "assist_turn_done"]  # no re-replay
+
+
+async def test_tail_missing_run_errors_cleanly():
+    with patch("app.database.async_session", new=_fake_async_session([None])):
+        out = [ev async for ev in assist_turn.tail_turn_run("nope")]
+    assert out[-1][0] == "error" and "not found" in out[-1][1]["detail"]

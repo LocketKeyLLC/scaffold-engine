@@ -76,6 +76,9 @@ ASSIST_REPLAN_PROPOSAL = "assist_replan_proposal"  # {proposal}
 ASSIST_ANSWER = "assist_answer"                # {kind: ask|fix, text}
 ASSIST_STEP_OUTCOME = "assist_step_outcome"    # {node_key, status}
 ASSIST_TURN_DONE = "assist_turn_done"          # {handled} — terminal frame
+# §17.869 — detached turn runs: the loop runs as a background task writing
+# frames to assist_turn_runs; clients tail the row and RESUME after reload.
+ASSIST_TURN_STARTED = "assist_turn_started"    # {run_id} — first frame of a tail
 
 
 # ---------------------------------------------------------------------------

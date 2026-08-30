@@ -457,14 +457,57 @@ async def assist_message(
     from app.modules import assist_turn
     from app.utils.sse import _sse_with_disconnect_watch
 
+    # §17.869 — DETACHED: the loop runs as a background task writing frames to
+    # assist_turn_runs; this response only TAILS the row. A disconnect (reload,
+    # impatient navigation) kills the tail, never the turn — reconnecting via
+    # GET /message/active replays every frame and resumes live.
+    run_id = await assist_turn.start_turn_run(
+        session_id=session_id, message=body.message, command=body.command,
+        node_key=body.node_key, history=body.history,
+    )
+
     async def _gen():
         try:
-            async for name, data in assist_turn.run_turn(
-                session_id=session_id, message=body.message, command=body.command,
-                node_key=body.node_key, history=body.history, db=db,
-            ):
+            async for name, data in assist_turn.tail_turn_run(run_id):
                 yield assist_agent._sse(name, data)
-        except Exception as exc:  # surface mid-stream errors as an SSE frame
+        except Exception as exc:  # surface tail errors as an SSE frame
+            yield assist_agent._sse("error", {"detail": str(exc)})
+
+    return StreamingResponse(
+        _sse_with_disconnect_watch(request, _gen()),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/assist/{session_id}/message/active")
+async def assist_message_active(session_id: str, db=Depends(get_db)):
+    """§17.869 — the session's still-running turn (if any), for resume-on-load."""
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    from app.modules import assist_turn
+    run_id = await assist_turn.get_active_run(session_id)
+    return {"session_id": session_id, "run_id": str(run_id) if run_id else None}
+
+
+@router.get("/assist/{session_id}/message/{run_id}/tail")
+async def assist_message_tail(
+    session_id: str, run_id: str, request: Request, db=Depends(get_db),
+):
+    """§17.869 — (re)attach to a turn run: replays every frame from the start,
+    then follows live until the run finishes."""
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    from app.modules import assist_turn
+    from app.utils.sse import _sse_with_disconnect_watch
+
+    async def _gen():
+        try:
+            async for name, data in assist_turn.tail_turn_run(run_id):
+                yield assist_agent._sse(name, data)
+        except Exception as exc:
             yield assist_agent._sse("error", {"detail": str(exc)})
 
     return StreamingResponse(
