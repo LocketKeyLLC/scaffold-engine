@@ -132,6 +132,10 @@ async def ingest_turn(
             )
         return recorded
     except Exception as e:  # noqa: BLE001 — capture must never break the turn
+        try:  # §17.888(#14) — clear the poisoned tx so later writes survive
+            await db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
         logger.debug("ingest_turn_failed session_id=%s err=%r", session_id, e)
         return False
 

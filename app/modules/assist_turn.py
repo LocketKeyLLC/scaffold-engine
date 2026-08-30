@@ -36,6 +36,8 @@ from app.sse_events import (
     ASSIST_TURN_STATUS,
 )
 
+_TURN_TASKS: set = set()  # §17.888 — strong refs for detached drivers
+
 logger = logging.getLogger("scaffold.assist")
 
 _Event = tuple[str, dict]
@@ -76,20 +78,35 @@ async def start_turn_run(
         )).scalar()
         await db.commit()
     run_id = str(run_id)
-    asyncio.create_task(_drive_turn_run(
+    # §17.888 (audit #13) — hold a STRONG reference: a bare create_task can be
+    # GC'd mid-turn (never reaching its finalizer → §17.875-style zombie run).
+    task = asyncio.create_task(_drive_turn_run(
         run_id=run_id, session_id=session_id, message=message,
         command=command, node_key=node_key, history=history,
     ))
+    _TURN_TASKS.add(task)
+    task.add_done_callback(_TURN_TASKS.discard)
     return run_id
 
 
 async def _append_frames(run_id: str, frames: list[_Event], db) -> None:
     payload = _json.dumps([{"e": n, "d": d} for n, d in frames])
-    await db.execute(
-        _sqltext("UPDATE assist_turn_runs SET frames = frames || CAST(:f AS jsonb) WHERE id = :rid"),
-        {"rid": run_id, "f": payload},
-    )
-    await db.commit()
+    try:
+        await db.execute(
+            _sqltext("UPDATE assist_turn_runs SET frames = frames || CAST(:f AS jsonb) WHERE id = :rid"),
+            {"rid": run_id, "f": payload},
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 — §17.888(#14) chokepoint: a fail-soft
+        # somewhere upstream may have poisoned the shared transaction
+        # (InFailedSQLTransactionError); one rollback + retry saves the frame —
+        # and with it the generated answer — instead of erroring the whole run.
+        await db.rollback()
+        await db.execute(
+            _sqltext("UPDATE assist_turn_runs SET frames = frames || CAST(:f AS jsonb) WHERE id = :rid"),
+            {"rid": run_id, "f": payload},
+        )
+        await db.commit()
 
 
 async def _drive_turn_run(

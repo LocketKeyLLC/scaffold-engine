@@ -155,6 +155,10 @@ async def resolve_placeholders(
                     )
                 except Exception:
                     logger.warning("assist_placeholder_autopin_failed session=%s", session_id)
+                    try:  # §17.888(#14)
+                        await db.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
         return out, applied
     except Exception as exc:
         logger.warning("assist_placeholder_resolver_failed: %s", exc)

@@ -235,6 +235,10 @@ async def capture_session_facts(
         )
         return facts
     except Exception as e:  # noqa: BLE001 — fact capture must never break submit
+        try:  # §17.888(#14)
+            await db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
         logger.debug(
             "capture_session_facts_failed session_id=%s err=%r", session_id, e,
         )
@@ -279,6 +283,10 @@ async def check_submit_grounding(
             return {"reason": verdict.get("reason") or ""}
         return None
     except Exception as e:  # noqa: BLE001 — never block a submit on the gate
+        try:  # §17.888(#14)
+            await db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
         logger.debug(
             "check_submit_grounding_failed session_id=%s err=%r", session_id, e,
         )
