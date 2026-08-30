@@ -643,7 +643,12 @@ export function renderChat(container, sessionId) {
   // streams a status frame at EVERY stage; this function only renders frames.
   // A second trigger while a turn is active is an explicit Stop, with the
   // button visibly armed — never a silent kill.
-  async function runTurnStream(body) {
+  // §17.869 — the turn runs DETACHED server-side (assist_turn_runs); this
+  // consumer merely tails frames. `resumeRunId` re-attaches after a reload:
+  // the tail replays every missed frame, then follows live. Stopping the tail
+  // (■ Stop) stops WATCHING — the turn itself always completes server-side
+  // and lands in the transcript.
+  async function runTurnStream(body, resumeRunId) {
     if (guiding) {
       toast("Still working on the last turn — press ■ Stop first, or wait.", "");
       return;
@@ -674,13 +679,18 @@ export function renderChat(container, sessionId) {
       transcript.append(live);
       transcript.scrollTop = transcript.scrollHeight;
     };
+    const streamArgs = resumeRunId
+      ? [`/assist/${sessionId}/message/${resumeRunId}/tail`, { method: "GET", signal: abort.signal }]
+      : [`/assist/${sessionId}/message`, {
+          body: { history: historyForGuide(), node_key: session?.current_node_key || null, ...body },
+          signal: abort.signal,
+        }];
     try {
-      for await (const { event, data } of api.stream(`/assist/${sessionId}/message`, {
-        body: { history: historyForGuide(), node_key: session?.current_node_key || null, ...body },
-        signal: abort.signal,
-      })) {
+      for await (const { event, data } of api.stream(...streamArgs)) {
         if (disposed) break;
         switch (event) {
+          case "assist_turn_started":
+            break;
           case "assist_turn_status":
             setStatusLine(data?.text || "…");
             break;
@@ -734,6 +744,22 @@ export function renderChat(container, sessionId) {
     }
   }
 
+  // §17.869 — after any reload, re-attach to a still-running turn. The tail
+  // replays what was missed; the operator never loses an in-flight turn to
+  // navigation again.
+  let resumeChecked = false;
+  async function maybeResumeActiveTurn() {
+    if (guiding || resumeChecked) return;
+    resumeChecked = true;
+    try {
+      const act = await api.get(`/assist/${sessionId}/message/active`);
+      if (act?.run_id && !guiding) {
+        toast("Re-attaching to the turn that was still running…", "");
+        await runTurnStream(null, act.run_id);
+      }
+    } catch { /* older server or none active — nothing to resume */ }
+  }
+
   async function sendMessage() {
     const text = composerText.value.trim();
     if (!text || guiding) return;
@@ -759,7 +785,7 @@ export function renderChat(container, sessionId) {
     await runTurnStream({ command: "guide" });
   }
 
-  load();
+  load().then(maybeResumeActiveTurn);
 
   return () => {
     disposed = true;

@@ -45,6 +45,136 @@ def _ev(name: str, data: dict) -> _Event:
     return (name, data)
 
 
+# ── §17.869 — detached turn runs ─────────────────────────────────────────────
+# The §17.868 loop still died with the browser: a multi-minute turn (decide →
+# verify → premise → guide) was killed mid-flight when the operator reloaded
+# during a slow stage — the disconnect watch cancelled the generator, and the
+# remaining stages silently never ran (the live 02:09 incident). The loop now
+# runs as a BACKGROUND task appending every frame to ``assist_turn_runs``;
+# clients tail the row from frame 0, so a reload replays what was missed and
+# resumes live. The turn ALWAYS completes server-side. (Same detachment the
+# research agent got in §17.454/820.)
+
+import asyncio
+import json as _json
+
+from sqlalchemy import text as _sqltext
+
+
+async def start_turn_run(
+    *, session_id: str, message: str | None, command: str,
+    node_key: str | None, history: list[dict],
+) -> str:
+    """Create the durable run row and spawn the background driver. Returns the
+    run id immediately — the caller tails it."""
+    from app.database import async_session
+
+    async with async_session() as db:
+        run_id = (await db.execute(
+            _sqltext("INSERT INTO assist_turn_runs (session_id) VALUES (:sid) RETURNING id"),
+            {"sid": session_id},
+        )).scalar()
+        await db.commit()
+    run_id = str(run_id)
+    asyncio.create_task(_drive_turn_run(
+        run_id=run_id, session_id=session_id, message=message,
+        command=command, node_key=node_key, history=history,
+    ))
+    return run_id
+
+
+async def _append_frames(run_id: str, frames: list[_Event], db) -> None:
+    payload = _json.dumps([{"e": n, "d": d} for n, d in frames])
+    await db.execute(
+        _sqltext("UPDATE assist_turn_runs SET frames = frames || CAST(:f AS jsonb) WHERE id = :rid"),
+        {"rid": run_id, "f": payload},
+    )
+    await db.commit()
+
+
+async def _drive_turn_run(
+    *, run_id: str, session_id: str, message: str | None, command: str,
+    node_key: str | None, history: list[dict],
+) -> None:
+    """Run the loop to completion on its OWN session (§17.621 pattern),
+    appending frames as they happen. Guide deltas are coalesced (~0.7s) so a
+    long walkthrough doesn't hammer the row with per-token commits."""
+    from app.database import async_session
+
+    status = "done"
+    try:
+        async with async_session() as db:
+            buf: list[_Event] = []
+            last_flush = asyncio.get_event_loop().time()
+            async for ev in run_turn(
+                session_id=session_id, message=message, command=command,
+                node_key=node_key, history=history, db=db,
+            ):
+                buf.append(ev)
+                now = asyncio.get_event_loop().time()
+                if ev[0] != ASSIST_GUIDE_DELTA or (now - last_flush) >= 0.7:
+                    await _append_frames(run_id, buf, db)
+                    buf, last_flush = [], now
+            if buf:
+                await _append_frames(run_id, buf, db)
+    except Exception as exc:  # noqa: BLE001 — the run row carries the error
+        status = "error"
+        logger.exception("turn_run_failed run_id=%s", run_id)
+        try:
+            async with async_session() as db:
+                await _append_frames(run_id, [("error", {"detail": str(exc)})], db)
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        try:
+            async with async_session() as db:
+                await db.execute(
+                    _sqltext("UPDATE assist_turn_runs SET status = :st, finished_at = now() WHERE id = :rid"),
+                    {"rid": run_id, "st": status},
+                )
+                await db.commit()
+        except Exception:  # noqa: BLE001
+            logger.exception("turn_run_finalize_failed run_id=%s", run_id)
+
+
+async def tail_turn_run(run_id: str) -> AsyncIterator[_Event]:
+    """Yield the run's frames from the beginning, then follow until the run
+    finishes. Every poll uses its own short session — a slow tail must not pin
+    a connection. Reload-safe by construction: a fresh tail replays history."""
+    from app.database import async_session
+
+    yield _ev("assist_turn_started", {"run_id": run_id})
+    sent = 0
+    while True:
+        async with async_session() as db:
+            row = (await db.execute(
+                _sqltext("SELECT status, frames FROM assist_turn_runs WHERE id = :rid"),
+                {"rid": run_id},
+            )).mappings().first()
+        if not row:
+            yield _ev("error", {"detail": f"turn run not found: {run_id}"})
+            return
+        frames = row["frames"] or []
+        for f in frames[sent:]:
+            yield _ev(f.get("e") or "error", f.get("d") or {})
+        sent = len(frames)
+        if row["status"] != "running":
+            return
+        await asyncio.sleep(0.6)
+
+
+async def get_active_run(session_id: str) -> str | None:
+    """The newest still-running turn for the session, for resume-on-load."""
+    from app.database import async_session
+
+    async with async_session() as db:
+        return (await db.execute(
+            _sqltext("SELECT id FROM assist_turn_runs WHERE session_id = :sid "
+                     "AND status = 'running' ORDER BY created_at DESC LIMIT 1"),
+            {"sid": session_id},
+        )).scalar()
+
+
 async def run_turn(
     *, session_id: str, message: str | None, command: str,
     node_key: str | None, history: list[dict], db,
@@ -177,7 +307,32 @@ async def _run_turn_inner(
             handled["v"] = "status"
             return
 
-        # 5. Fallback (low confidence / unhandled action): the progress
+        # 5a. §17.869 (operator requirement) — UNSURE about a question means
+        # RESEARCH, not a walkthrough rerun. When the decision layer couldn't
+        # confidently route a question-shaped message, obtain the information
+        # instead of guessing: the job-aware research path (§17.650) grounds
+        # the answer in the project's own state + retrieval.
+        import re as _re
+        _questionish = _re.search(
+            r"\?\s*$|^(can|could|how|what|why|where|which|who|should|is|are|do|does|will|would)\b",
+            text_, _re.IGNORECASE)
+        if _questionish:
+            yield _ev(ASSIST_TURN_STATUS, {"text": "I'm not certain how to act on that — researching it against the project's current state…"})
+            try:
+                res = await assist_agent.run_step_research(
+                    session_id=session_id, node_key=nk, question=text_,
+                    history=history, db=db,
+                )
+                answer = (res or {}).get("answer") or ""
+                if answer.strip():
+                    yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": answer})
+                    handled["v"] = "research_fallback"
+                    return
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("turn_loop_research_fallback_failed sid=%s err=%r",
+                               session_id, exc)
+
+        # 5b. Fallback (low confidence / unhandled action): the progress
         # tracker, then guidance — the pre-§17.771 default, server-side.
         yield _ev(ASSIST_TURN_STATUS, {"text": "Checking step progress…"})
         advanced = False
