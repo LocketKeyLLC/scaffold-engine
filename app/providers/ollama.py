@@ -94,6 +94,14 @@ class OllamaProvider(LLMProvider):
             "stream": False,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
+        # §17.876 — optional thinking toggle, same semantics as ``generate``
+        # below (§17.683): num_predict is a SHARED thinking+content budget and
+        # only ``message.content`` is read, so a long chain-of-thought can
+        # consume the whole budget and return empty content. ``think=False``
+        # sends all tokens to content. Absent/None → unchanged model default.
+        think = opts.get("think")
+        if think is not None:
+            payload["think"] = think
         # §17.773 — grammar-constrained decoding. A JSON Schema in ``format``
         # makes Ollama constrain generation to schema-valid JSON (llama.cpp GBNF
         # for local models; cloud-proxied models vary — hence the default-off

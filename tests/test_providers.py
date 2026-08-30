@@ -707,3 +707,71 @@ def test_provider_name_literal_accepts_all_three_providers(monkeypatch):
         monkeypatch.setenv("MODEL_GENERAL_PROVIDER", prov)
         s = Settings()
         assert s.model_general_provider == prov
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_chat_no_think_key_by_default():
+    """§17.876 — chat_completion leaves the model's own thinking default when
+    think is not passed (parity with generate's §17.683 contract)."""
+    p = OllamaProvider()
+    fake = AsyncMock(return_value=ModelResponse(
+        text="hi", model="m", success=True, provider="ollama",
+    ))
+    from app import model_router
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        await p.chat_completion("m", [{"role": "user", "content": "u"}])
+    args, _ = fake.call_args
+    assert args[0] == "/api/chat"
+    assert "think" not in args[1]
+
+
+@pytest.mark.asyncio
+async def test_ollama_provider_chat_think_false_threads_into_payload():
+    """§17.876 — think=False must reach the /api/chat payload. Live incident:
+    the assist fix prompt drove chain-of-thought past the whole 8192 budget on
+    all draws → "(no fix returned)"; chat had no way to disable thinking."""
+    p = OllamaProvider()
+    fake = AsyncMock(return_value=ModelResponse(
+        text="hi", model="m", success=True, provider="ollama",
+    ))
+    from app import model_router
+    with patch.object(model_router, "_call_ollama", side_effect=fake):
+        await p.chat_completion("m", [{"role": "user", "content": "u"}], think=False)
+    payload = fake.call_args[0][1]
+    assert payload["think"] is False
+
+
+@pytest.mark.asyncio
+async def test_model_router_chat_think_threads_through_role_path():
+    """§17.876 — model_router.chat(role=..., think=False) forwards think to the
+    provider (the §17.876 think-off rescue in llm_retry relies on this)."""
+    from app import model_router
+    captured = {}
+
+    async def _fake_chat(model, messages, **kwargs):
+        captured.update(kwargs)
+        return ModelResponse(text="hi", model=model, success=True, provider="ollama")
+
+    fake_provider = MagicMock()
+    fake_provider.chat_completion = AsyncMock(side_effect=_fake_chat)
+    with patch.object(model_router, "_resolve_role",
+                      return_value=("some-model", fake_provider)):
+        await model_router.chat(
+            [{"role": "user", "content": "u"}], role="model_general", think=False,
+        )
+    assert captured.get("think") is False
+
+
+@pytest.mark.asyncio
+async def test_model_router_chat_legacy_path_threads_think():
+    """§17.876 — the legacy direct-Ollama chat path threads think too."""
+    from app import model_router
+    fake = AsyncMock(return_value=ModelResponse(
+        text="hi", model="m", success=True, provider="ollama",
+    ))
+    with patch.object(model_router, "_dispatch_with_retry", side_effect=fake):
+        await model_router.chat(
+            [{"role": "user", "content": "u"}], model="m", think=False,
+        )
+    payload = fake.call_args[0][1]
+    assert payload["think"] is False

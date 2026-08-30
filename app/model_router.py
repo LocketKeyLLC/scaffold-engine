@@ -674,9 +674,15 @@ async def chat(
     temperature: float = 0.7,
     max_tokens: int = 4096,
     fallback: str | None = None,
+    think: bool | None = None,
     response_schema: dict | str | None = None,
 ) -> ModelResponse:
     """Chat completion. ``role=`` routes via the provider abstraction.
+
+    §17.876 — ``think=False`` disables a reasoning model's chain-of-thought,
+    same semantics as ``generate`` (§17.683): the whole num_predict budget goes
+    to the answer. ``None`` leaves the model default untouched. Only the Ollama
+    provider honors it; other providers ignore it via ``**opts``.
 
     §17.773 — ``response_schema`` requests grammar-constrained decoding; see
     ``generate`` for semantics. Provider-aware gate: applied only when the master
@@ -694,7 +700,7 @@ async def chat(
             lambda: provider.chat_completion(
                 resolved_model, messages,
                 temperature=temperature, max_tokens=max_tokens,
-                fallback=fallback, response_schema=schema,
+                fallback=fallback, think=think, response_schema=schema,
             ),
             model=resolved_model,
         )
@@ -712,6 +718,8 @@ async def chat(
         "stream": False,
         "options": {"temperature": temperature, "num_predict": max_tokens},
     }
+    if think is not None:
+        payload["think"] = think
     if schema:
         payload["format"] = schema
     resp = await _dispatch_with_retry("/api/chat", payload, model, fallback)

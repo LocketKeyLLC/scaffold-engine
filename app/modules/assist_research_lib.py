@@ -137,7 +137,13 @@ async def _detect_unknowns(
                     "lookups that genuinely matter for correctness; prefer an "
                     "empty list over speculative queries. When the operator's "
                     "system is given, make each query SPECIFIC to it (their exact "
-                    "GPU/board/OS version) rather than generic."
+                    "GPU/board/OS version) rather than generic. §17.876: when the "
+                    "task (or its error) involves installing or configuring a "
+                    "NAMED third-party program from a repo/URL/script, ALWAYS "
+                    "include one query for that program's current officially "
+                    "recommended install method (its official docs) — repos move "
+                    "and methods get deprecated, and the fix must target the "
+                    "current standard, not a remembered one."
                 )},
                 {"role": "user", "content": (
                     f"Task tool: {tool}\n{env_line}\nTask:\n{task_text}\n\n"
@@ -359,6 +365,7 @@ async def _focus_web_query(question: str, *, role: str, hint: str = "") -> str:
             max_tokens=2048,
             draws=3,
             label="assist_focus_query",
+            think_off_rescue=True,  # §17.876
         )
     except Exception as exc:  # noqa: BLE001 — never block research on this
         logger.debug("assist_focus_web_query_failed: %s", exc)
@@ -424,6 +431,7 @@ async def research_one(
             max_tokens=8192,
             draws=3,
             label="assist_research",
+            think_off_rescue=True,  # §17.876
         )
         if resp and resp.success:
             answer = (resp.text or "").strip() or None

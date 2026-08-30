@@ -1293,6 +1293,7 @@ async def summarize_step_progress(
             max_tokens=2048,   # thinking model clears reasoning before the recap
             draws=2,
             label="assist_step_recap",
+            think_off_rescue=True,  # §17.876
         )
     except Exception as exc:  # noqa: BLE001 — a recap must never break the turn
         logger.warning("assist_summarize_step_progress_failed: %s", exc)
@@ -1370,6 +1371,7 @@ async def summarize_project_progress(
             max_tokens=2048,   # thinking model clears reasoning before the board
             draws=2,
             label="assist_project_recap",
+            think_off_rescue=True,  # §17.876
         )
     except Exception as exc:  # noqa: BLE001 — a recap must never break the turn
         logger.warning("assist_summarize_project_progress_failed: %s", exc)
@@ -2095,6 +2097,7 @@ async def generate_guidance(
         max_tokens=settings.assist_guide_max_tokens,
         draws=3,
         label="assist_guide",
+        think_off_rescue=True,  # §17.876
     )
 
     text_out = (resp.text or "").strip() if (resp and resp.success) else ""
@@ -2215,6 +2218,7 @@ async def generate_fix(
         max_tokens=settings.assist_guide_max_tokens,
         draws=3,
         label="assist_fix",
+        think_off_rescue=True,  # §17.876
     )
     text_out = (resp.text or "").strip() if (resp and resp.success) else ""
     status = "ready" if text_out else "failed"
@@ -2478,6 +2482,7 @@ async def generate_guidance_stream(
             model_router.chat, messages, {"role": role},
             temperature=0.3, max_tokens=settings.assist_guide_max_tokens,
             draws=3, label="assist_guide_stream_fallback",
+            think_off_rescue=True,  # §17.876
         )
         text_out = (resp.text or "").strip() if (resp and resp.success) else ""
         model_used = getattr(resp, "model", role) if resp else role

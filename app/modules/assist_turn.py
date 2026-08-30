@@ -324,7 +324,18 @@ async def _run_turn_inner(
                 error=(d.get("error_text") or text_), history=history,
                 research=True, db=db,
             )
-            fix_text = (fix or {}).get("fix") or "(no fix returned)"
+            # §17.876 — honest, actionable fallback. "(no fix returned)" was a
+            # dead end: it told the operator nothing and suggested nothing. The
+            # empty case is now rare (think-off rescue), but when it happens the
+            # operator should know it's a transient generation failure, not a
+            # verdict on their problem.
+            fix_text = (fix or {}).get("fix") or (
+                "I couldn't produce a fix this time — the model returned no "
+                "usable answer after several attempts. This is a generation "
+                "hiccup, not a verdict on your problem. Press Send again to "
+                "retry (research is re-run fresh), or paste just the last "
+                "~50 lines of the error output to tighten the context."
+            )
             yield _ev(ASSIST_ANSWER, {"kind": "fix", "text": fix_text})
             # §17.873 — the answer must outlive the run row: capture it as an
             # assistant turn (in-capture dedupe absorbs replays) so the
