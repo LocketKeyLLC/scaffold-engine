@@ -210,3 +210,75 @@ async def test_generate_think_off_rescue_fires_after_all_empty():
     assert mock.call_count == 4
     _, kwargs = mock.call_args
     assert kwargs["think"] is False
+
+
+# ---------------------------------------------------------------------------
+# §17.877 — thinking-squeezed truncation (non-empty but cut mid-answer)
+# ---------------------------------------------------------------------------
+
+
+def _trunc_resp(text, *, thinking="...long reasoning...", done_reason="length"):
+    return SimpleNamespace(
+        text=text, success=True, error=None, model="m",
+        raw={"done_reason": done_reason, "message": {"thinking": thinking}},
+    )
+
+
+@pytest.mark.smoke
+async def test_chat_truncated_by_thinking_triggers_rescue():
+    """Live incident: fix answer cut mid-command ("…/var/lib/prowl") because
+    reasoning ate the budget; non-empty passed the old guard. done_reason=length
+    + thinking present → reject the draw, rescue with think=False."""
+    mock = AsyncMock(side_effect=[
+        _trunc_resp("partial fix cut mid-com"),
+        _trunc_resp("partial again"),
+        _trunc_resp("partial again 2"),
+        _resp("complete fix"),
+    ])
+    resp = await chat_until_nonempty(
+        mock, _MESSAGES, {"role": "model_general"},
+        temperature=0.3, max_tokens=8192, label="assist_fix",
+        think_off_rescue=True,
+    )
+    assert resp.text == "complete fix"
+    assert mock.call_count == 4
+    _, kwargs = mock.call_args
+    assert kwargs["think"] is False
+
+
+@pytest.mark.smoke
+async def test_chat_length_stop_without_thinking_is_kept():
+    """A legitimately long answer that hits the cap WITHOUT thinking is not a
+    squeeze — keep it (redrawing would burn draws for an identical result)."""
+    mock = AsyncMock(side_effect=[_trunc_resp("long but real answer", thinking="")])
+    resp = await chat_until_nonempty(
+        mock, _MESSAGES, {"role": "model_general"},
+        temperature=0.3, max_tokens=8192, label="assist_fix",
+        think_off_rescue=True,
+    )
+    assert resp.text == "long but real answer"
+    assert mock.call_count == 1
+
+
+@pytest.mark.smoke
+async def test_chat_truncation_ignored_without_rescue_optin():
+    """Callers without the rescue keep pre-§17.877 behavior byte-identical —
+    rejecting a truncated draw with no remedy would only burn draws."""
+    mock = AsyncMock(side_effect=[_trunc_resp("partial")])
+    resp = await _chat_call(mock)
+    assert resp.text == "partial"
+    assert mock.call_count == 1
+
+
+@pytest.mark.smoke
+async def test_mock_resps_without_raw_are_never_squeezed():
+    """SimpleNamespace/mocks without .raw (and non-Ollama shapes) → fail-soft."""
+    from app.utils.llm_retry import _thinking_squeezed
+    assert _thinking_squeezed(_resp("ok")) is False
+    assert _thinking_squeezed(SimpleNamespace(text="x", success=True, raw=None)) is False
+    assert _thinking_squeezed(
+        SimpleNamespace(text="x", success=True,
+                        raw={"done_reason": "stop", "thinking": "hmm"})) is False
+    assert _thinking_squeezed(
+        SimpleNamespace(text="x", success=True,
+                        raw={"done_reason": "length", "thinking": "hmm"})) is True

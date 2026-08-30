@@ -51,7 +51,11 @@ document.addEventListener("click", async (e) => {
   const code = btn.closest(".md-pre")?.querySelector("code");
   if (!code) return;
   try {
-    await navigator.clipboard.writeText(code.textContent);
+    // §17.877 — strip the fence's trailing newline: copying a command WITH a
+    // trailing \n makes a terminal EXECUTE it on paste (operator report — every
+    // pasted command "pressed enter by itself"). The operator should always be
+    // the one who runs the command.
+    await navigator.clipboard.writeText(code.textContent.replace(/\s+$/, ""));
     const old = btn.textContent;
     btn.textContent = "✓ copied";
     btn.classList.add("copied");

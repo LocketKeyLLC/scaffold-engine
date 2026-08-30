@@ -1944,3 +1944,93 @@ async def test_stream_prepass_passes_environment_block():
         async for _ in gen:
             pass
     assert "environment_block" in captured, "stream prepass dropped environment_block (C1)"
+
+
+# ── §17.877 — stale-cache refresh (guide must not repeat itself) ─────────
+
+
+@pytest.mark.asyncio
+async def test_cached_guidance_is_stale_when_operator_turns_are_newer():
+    """Operator turns on the node newer than guidance_generated_at → stale."""
+    db = AsyncMock()
+    result = MagicMock()
+    result.scalar.return_value = 3
+    db.execute = AsyncMock(return_value=result)
+    assert await assist_guide.cached_guidance_is_stale(
+        session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z", db=db,
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_cached_guidance_is_stale_false_when_no_newer_turns():
+    db = AsyncMock()
+    result = MagicMock()
+    result.scalar.return_value = 0
+    db.execute = AsyncMock(return_value=result)
+    assert await assist_guide.cached_guidance_is_stale(
+        session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z", db=db,
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_cached_guidance_is_stale_false_without_generated_at():
+    """No timestamp (legacy rows / mocked caches) → serve cache, never probe."""
+    db = AsyncMock()
+    assert await assist_guide.cached_guidance_is_stale(
+        session_id="s", node_key="T3", generated_at=None, db=db,
+    ) is False
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cached_guidance_is_stale_valve_off_serves_cache():
+    db = AsyncMock()
+    with patch.object(assist_guide.settings, "assist_guide_stale_cache_refresh", False):
+        assert await assist_guide.cached_guidance_is_stale(
+            session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z", db=db,
+        ) is False
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ensure_guidance_stale_cache_regenerates():
+    """The live incident: 'Guide me' hours into troubleshooting re-served the
+    step-claim-time walkthrough. Stale cache → regenerate + persist."""
+    db = AsyncMock()
+    cached = {"guidance": "old walkthrough", "status": "ready", "cached": True,
+              "_generated_at_raw": "2026-08-29T00:00:00Z"}
+    with patch.object(assist_guide, "read_cached_guidance",
+                      new=AsyncMock(return_value=cached)), \
+         patch.object(assist_guide, "cached_guidance_is_stale",
+                      new=AsyncMock(return_value=True)), \
+         patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(return_value=_resp("fresh, current walkthrough"))), \
+         patch.object(assist_guide, "persist_guidance", new=AsyncMock()) as persist:
+        res = await assist_guide.ensure_guidance(
+            session_id="s", node_key="T3", ctx=_ctx("shell"),
+            research=False, force=False, db=db,
+        )
+    persist.assert_awaited_once()
+    assert res["cached"] is False
+    assert "fresh" in res["guidance"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_guidance_fresh_cache_served_without_sentinel():
+    """Non-stale cache is served as before, with the raw-timestamp sentinel
+    stripped (it's internal plumbing, not part of the API shape)."""
+    db = AsyncMock()
+    cached = {"guidance": "cached", "status": "ready", "cached": True,
+              "_generated_at_raw": "2026-08-29T00:00:00Z"}
+    with patch.object(assist_guide, "read_cached_guidance",
+                      new=AsyncMock(return_value=cached)), \
+         patch.object(assist_guide, "cached_guidance_is_stale",
+                      new=AsyncMock(return_value=False)), \
+         patch.object(assist_guide.model_router, "chat", new=AsyncMock()) as chat:
+        res = await assist_guide.ensure_guidance(
+            session_id="s", node_key="T3", ctx=_ctx("shell"),
+            research=False, force=False, db=db,
+        )
+    chat.assert_not_called()
+    assert res["cached"] is True
+    assert "_generated_at_raw" not in res

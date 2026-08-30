@@ -2293,7 +2293,36 @@ async def read_cached_guidance(
         "status": "ready",
         "cached": True,
         "generated_at": gen_at.isoformat() if hasattr(gen_at, "isoformat") else gen_at,
+        "_generated_at_raw": gen_at,
     }
+
+
+async def cached_guidance_is_stale(
+    *, session_id: str, node_key: str, generated_at, db,
+) -> bool:
+    """§17.877 — cached guidance predating operator work on the step is stale.
+
+    The live incident: "Guide me" hours into a troubleshooting marathon
+    re-served the walkthrough cached at step-claim time ("pct start 102" for an
+    already-running container) — the engine looked like it was repeating itself
+    and ignoring everything the operator had done since. Any operator turn on
+    the node NEWER than ``guidance_generated_at`` means the cached text was
+    written without knowledge of that work. Fail-soft → False (serve cache)."""
+    if not generated_at or not settings.assist_guide_stale_cache_refresh:
+        return False
+    try:
+        n = (await db.execute(
+            text("""
+                SELECT count(*) FROM assist_turns
+                 WHERE session_id = :sid AND node_key = :nk
+                   AND role = 'operator' AND created_at > :gen
+            """),
+            {"sid": session_id, "nk": node_key, "gen": generated_at},
+        )).scalar()
+        return bool(n)
+    except Exception as exc:  # noqa: BLE001 — staleness probe must not break guide
+        logger.warning("assist_guide_staleness_check_failed node_key=%s: %s", node_key, exc)
+        return False
 
 
 async def ensure_guidance(
@@ -2325,7 +2354,16 @@ async def ensure_guidance(
             session_id=session_id, node_key=node_key, db=db,
         )
         if cached:
-            return cached
+            # §17.877 — never re-serve a walkthrough that predates operator
+            # work on the step; regenerate from current session memory instead.
+            stale = await cached_guidance_is_stale(
+                session_id=session_id, node_key=node_key,
+                generated_at=cached.get("_generated_at_raw"), db=db,
+            )
+            if not stale:
+                cached.pop("_generated_at_raw", None)
+                return cached
+            logger.info("assist_guide_cache_stale_regen node_key=%s", node_key)
     res = await generate_guidance(
         ctx=ctx,
         node_description=node_description,
@@ -2403,16 +2441,29 @@ async def generate_guidance_stream(
     """
     role = settings.assist_guide_model_role
 
-    # (a) cache short-circuit — no stream.
+    # (a) cache short-circuit — no stream. §17.877: a cached walkthrough that
+    # predates operator work on the step is stale — regenerating (with a
+    # graceful explanation delta) replaces the "engine repeats itself" replay.
     if not force:
         cached = await read_cached_guidance(
             session_id=session_id, node_key=node_key, db=db,
         )
         if cached:
-            yield {"type": "delta", "text": cached["guidance"]}
-            yield {"type": "done", "status": "ready",
-                   "guidance_meta": cached.get("guidance_meta") or {}, "cached": True}
-            return
+            stale = await cached_guidance_is_stale(
+                session_id=session_id, node_key=node_key,
+                generated_at=cached.get("_generated_at_raw"), db=db,
+            )
+            if not stale:
+                yield {"type": "delta", "text": cached["guidance"]}
+                yield {"type": "done", "status": "ready",
+                       "guidance_meta": cached.get("guidance_meta") or {}, "cached": True}
+                return
+            logger.info("assist_guide_cache_stale_regen node_key=%s (stream)", node_key)
+            yield {"type": "delta", "text": (
+                "_The saved walkthrough for this step is from before your recent "
+                "work on it — writing a fresh one that picks up from where you "
+                "actually are (this can take a minute or two)…_\n\n"
+            )}
 
     # (b) research pre-pass (awaited, non-streamed).
     sources: list[dict] = []

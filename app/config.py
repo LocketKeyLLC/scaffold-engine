@@ -858,6 +858,14 @@ class Settings(BaseSettings):
     assist_divergence_model_role: str = "model_general"
     assist_guide_max_tokens: int = Field(default=8192, ge=512, le=16384)
     assist_guide_max_research_queries: int = Field(default=3, ge=0, le=8)
+    # §17.877 — cached guidance that predates operator work on the step is
+    # STALE: re-serving it verbatim ("pct start 102" hours into troubleshooting
+    # a running container — the live incident) reads as the engine repeating
+    # itself and ignoring everything since. When operator turns on the node are
+    # newer than guidance_generated_at, the cache is skipped and the walkthrough
+    # regenerates from current session memory. Default ON (correctness fix);
+    # disable to restore always-serve-cache.
+    assist_guide_stale_cache_refresh: bool = True
     # §17.487 — Tier 1 "close the loop". On /assist submit, judge whether the
     # pasted evidence shows the step actually succeeded (catches a pasted
     # error/traceback being recorded as success). Adds one sync tool_call per
