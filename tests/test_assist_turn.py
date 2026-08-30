@@ -109,7 +109,7 @@ async def test_submit_commits_then_claims_and_guides():
         ev = await _collect(message="ran the command, all good, output attached")
     names = _names(ev)
     outcome = next(d for n, d in ev if n == "assist_step_outcome")
-    assert outcome == {"node_key": "T4", "status": "committed"}
+    assert outcome["node_key"] == "T4" and outcome["status"] == "committed"
     assert "assist_guide_delta" in names  # walked into the next step
     assert ev[-1][1]["handled"] == "submit"
 
@@ -422,3 +422,56 @@ async def test_retire_step_mirrored_advances_pointer():
     assert ptr_call.args[1]["nk"] == "T15"
     step_update = next(u for u in updates if "assist_steps" in u)
     assert "committed_at=NOW()" in step_update
+
+
+# ── §17.884 — blocked submit continues into the fix flow ─────────────────
+
+
+async def test_incomplete_submit_continues_into_fix():
+    """Live incident: operator pasted the discovery output the engine asked
+    for; verifier said step_incomplete; the turn DEAD-ENDED. A blocked submit
+    must continue into a fix seeded with the evidence + verifier reason."""
+    fix_res = {"fix": "Now download using the URL from your output: curl -L <that url> -o /tmp/R.tar.gz"}
+    submit_res = {"status": "step_incomplete",
+                  "success_verdict": {"outcome": "incomplete",
+                                      "reason": "URL identified but Radarr not installed"}}
+    captured_error = {}
+    async def fake_fix(**kw):
+        captured_error.update(kw)
+        return fix_res
+    with patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "submit", "confidence": "high",
+                                           "node_key": "T16", "evidence": "found the url"})), \
+         patch("app.routers.assist.assist_submit",
+               new=AsyncMock(return_value=submit_res)), \
+         patch("app.modules.assist_agent.run_step_fix", new=fake_fix), \
+         patch("app.modules.assist_agent.capture_assistant_reply", new=AsyncMock()):
+        ev = await _collect(message="browser_download_url: https://github.com/R/R/releases/download/v5.27.5.10198/x.tar.gz")
+    names = _names(ev)
+    outcome = next(d for n, d in ev if n == "assist_step_outcome")
+    assert outcome["status"] == "step_incomplete"
+    answers = [d for n, d in ev if n == "assist_answer"]
+    assert answers and "curl -L" in answers[0]["text"]  # the continuation fix
+    assert "not complete" in captured_error["error"]
+    assert "Radarr not installed" in captured_error["error"]
+    assert ev[-1][1]["handled"] == "submit"
+
+
+async def test_committed_submit_still_advances_not_fixes():
+    """A committed submit keeps the §17.868 claim-and-guide advance."""
+    p1, p2 = _guide_patches(node_key=None)
+    nxt = {"node_key": "T17", "premise_check": {}}
+    fix = AsyncMock()
+    with p1, p2, \
+         patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "submit", "confidence": "high",
+                                           "node_key": "T16", "evidence": "done"})), \
+         patch("app.routers.assist.assist_submit",
+               new=AsyncMock(return_value={"status": "committed"})), \
+         patch("app.routers.assist.assist_next", new=AsyncMock(return_value=nxt)), \
+         patch("app.modules.assist_agent.run_step_fix", new=fix):
+        ev = await _collect(message="all done, service active")
+    fix.assert_not_awaited()
+    assert "assist_guide_delta" in _names(ev)
