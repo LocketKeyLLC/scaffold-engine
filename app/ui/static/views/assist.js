@@ -165,22 +165,11 @@ export function renderChat(container, sessionId) {
   }
   // §17.848 — advance to the next claimable step and stream its walkthrough.
   async function claimAndGuideNext() {
-    try {
-      const nxt = await api.get(`/assist/${sessionId}/next`);
-      await load();
-      // §17.864 — the server verified the claimed step's premise against the
-      // current facts. A stale verdict warns FIRST (and load() above already
-      // rendered any staged revision proposal); guidance still runs — the
-      // operator decides, nothing is hijacked.
-      const pc = nxt && nxt.premise_check;
-      if (pc && pc.stale) {
-        appendBubble("assistant", "note",
-          `⚠ Before we walk into step ${nxt.node_key}: ${pc.reason || "its premise may be out of date."}` +
-          (pc.staged ? " I've proposed a revision above — apply it, or continue as-is." :
-            (pc.proposed_change ? ` Suggested: ${pc.proposed_change}` : "")));
-      }
-      if (nxt && nxt.node_key) guideCurrent();
-    } catch { await load(); }
+    // §17.868 — claim + premise check + guidance are ONE server-side stream
+    // now; the server sends a status frame for every stage (including the
+    // §17.864 stale-premise warning), so nothing here sequences anything.
+    await load();
+    await runTurnStream({ command: "guide", node_key: null });
   }
 
   // §17.848 — evidence-in-box submit with honest per-outcome handling
@@ -270,9 +259,8 @@ export function renderChat(container, sessionId) {
     { class: "row row-wrap assist-verbs" },
     verb("✓ Done → next step", "Close out the current step (uses the box text as evidence when present, the conversation otherwise) and walk into the next one", () => doneNext()),
     verb("↻ Re-show step", "Re-present the current step's walkthrough", async () => {
-      await api.get(`/assist/${sessionId}/next`);
-      await load();
-      guideCurrent();
+      // §17.868 — one server-side stream (claim-if-needed + premise + guide).
+      await runTurnStream({ command: "guide" });
     }),
     verb("🔧 Fix error", "Paste the error in the box first — get a diagnosis for YOUR environment", async () => {
       const err = composerText.value.trim();
@@ -644,150 +632,105 @@ export function renderChat(container, sessionId) {
     replanSlot.scrollIntoView({ block: "nearest" });
   }
 
-  // §17.863 — plan_impact=surface, made ACTIONABLE. The §17.861 heads-up
-  // bubble told the operator their info "might affect a later step" and left
-  // it there — in the live home-lab session the direction changed (abandon
-  // VLANs) while the plan kept marching through stale switch steps. Now a
-  // surface-flagged dispatch ALSO records the note and runs the §17.677
-  // impact pass; a concrete proposal renders the apply/discard card, and
-  // silence stays silent (no proposal → just the gentle bubble, anti-thrash
-  // per §17.742 — the turn's main answer always renders first).
-  async function surfaceImpact(d, text) {
-    try {
-      const res = await api.post(`/assist/${sessionId}/note`, {
-        text: d.note_text || text, kind: d.note_kind || "note",
-        node_key: d.node_key || session?.current_node_key || null,
-      });
-      if (res?.replan_proposal) { renderReplanProposal(res.replan_proposal); return; }
-    } catch { /* fall through to the gentle hint */ }
-    appendBubble("assistant", "note",
-      "📌 Heads-up: what you just told me might affect a later step. Add it as a note if you'd like me to reassess the plan.");
-  }
 
-  // §17.867 — orientation: say where we are, then walk the current (or next)
-  // step. Used by the ORIENT_RE fast-path and the `status` decide action.
-  async function orientAndGuide() {
-    await load();
-    const nk = session?.current_node_key;
-    if (nk) {
-      const done = session?.step_counts?.committed || 0;
-      const total = Object.values(session?.step_counts || {}).reduce((a, b) => a + b, 0);
-      appendBubble("assistant", "status",
-        `📍 You're on step ${nk}${total ? ` (${done}/${total} done)` : ""}. Here's the current walkthrough:`);
-      guideCurrent();
-    } else {
-      await claimAndGuideNext();
+
+
+  // §17.868 — ONE stream consumer for the server-side turn loop. The night of
+  // §17.861–867 proved client-side sequencing (capture → decide → dispatch →
+  // claim → guide as separate calls with shared abort state) fails at every
+  // seam: an impatient click killed invisible in-flight chains and rendered
+  // nothing. The server now owns the loop (POST /assist/{sid}/message) and
+  // streams a status frame at EVERY stage; this function only renders frames.
+  // A second trigger while a turn is active is an explicit Stop, with the
+  // button visibly armed — never a silent kill.
+  async function runTurnStream(body) {
+    if (guiding) {
+      toast("Still working on the last turn — press ■ Stop first, or wait.", "");
+      return;
     }
-  }
-
-  // §17.861 — the unified /decide dispatch (§17.771 + §17.855 deterministic
-  // overrides), previously OWUI-pipeline-only. Without it, a corrective or
-  // plan-affecting message in the SPA was captured into the facts ledger but
-  // never ACTED on — no note, no impact assessment, no re-plan — so guidance
-  // re-prescribed the same step forever (live home-lab T8 loop: operator
-  // stated "the modem has no LAN port" three ways; the step goal never moved).
-  // Third bite of the pipeline/SPA drift class (§17.849 track, §17.852 ask) —
-  // this one delegates the ROUTING itself to the server. Returns true when the
-  // turn was dispatched; false falls through to the §17.849/852 chain (which
-  // also remains the path when /decide is disabled or unsure).
-  async function decideAndDispatch(text) {
-    let d = null;
-    // §17.862 — one PERSISTENT status bubble for the whole dispatch. The first
-    // cut removed the "…deciding" note once /decide returned and then ran the
-    // dispatched call in silence — the ask path's research pass runs 30-120s
-    // (reranker prepass, §17.704), and the live operator read the dead air as
-    // "it stopped working" and reloaded mid-flight. Same lesson as the
-    // pipeline's "🔎 Preparing…" trail: never silent before the first token.
-    const statusText = el("div", { class: "msg-body dim", text: "…deciding how to act on that" });
-    const thinking = el("div", { class: "msg sys" }, statusText);
-    const setStatus = (t) => {
-      statusText.textContent = t;
+    guiding = true;
+    guideBtn.textContent = "■ Stop";
+    sendBtn.disabled = true;
+    abort = new AbortController();
+    let statusEl = null;
+    const setStatusLine = (t) => {
+      if (!statusEl) {
+        statusEl = el("div", { class: "msg sys" }, el("div", { class: "msg-body dim" }));
+        transcript.append(statusEl);
+      }
+      statusEl.firstChild.textContent = t;
       transcript.scrollTop = transcript.scrollHeight;
     };
-    transcript.append(thinking);
-    transcript.scrollTop = transcript.scrollHeight;
+    const clearStatusLine = () => { if (statusEl) { statusEl.remove(); statusEl = null; } };
+    let live = null, liveBody = null, acc = "";
+    const ensureLive = () => {
+      if (live) return;
+      liveBody = el("div", { class: "msg-body md" }, el("span", { class: "spin" }));
+      live = el("div", { class: "msg as streaming" },
+        el("div", { class: "msg-meta" },
+          el("span", { class: "msg-role", text: "assistant" }),
+          el("span", { class: "msg-kind", text: "guiding" })),
+        liveBody);
+      transcript.append(live);
+      transcript.scrollTop = transcript.scrollHeight;
+    };
     try {
-      try {
-        d = await api.post(`/assist/${sessionId}/decide`, {
-          message: text, node_key: session.current_node_key, history: historyForGuide(),
-        });
-      } catch {
-        /* 404 (valve off) or transient — the fallback chain handles the turn */
-      }
-      if (!d || !d.action || (d.confidence || "low") === "low") return false;
-      const impact = d.plan_impact || "none";
-      // §17.863 (mirrors pipeline §17.812 I-4) — prefer the node the /decide
-      // call resolved server-side: dispatching the session's CURRENT node when
-      // the decision reasoned about a different one is how the live retest's
-      // submit hit a 409 and aborted the whole dispatch.
-      const nk = d.node_key || session.current_node_key;
-      const surfaceHint = async () => { if (impact === "surface") await surfaceImpact(d, text); };
-      if (d.action === "note" || impact === "reshape") {
-        setStatus("📝 Recording that and checking whether it changes the plan…");
-        const kind = d.note_kind || (impact === "reshape" ? "decision" : "note");
-        const res = await api.post(`/assist/${sessionId}/note`, {
-          text: d.note_text || text, kind, node_key: nk,
-        });
-        appendBubble("assistant", "note",
-          `📝 Noted (${kind}).` +
-          (res?.retracted_facts?.length ? ` Retracted ${res.retracted_facts.length} stale fact(s).` : ""));
-        if (res?.replan_proposal) renderReplanProposal(res.replan_proposal);
-        else load();
-        return true;
-      }
-      if (d.action === "submit") {
-        setStatus("✓ Recording the result and verifying the step…");
-        try {
-          await submitEvidence(nk, d.evidence || text);
-        } catch (e) {
-          // §17.863 — a refused submit (409: step not claimable / wrong state)
-          // must NOT kill the turn. Say why, then let the fallback chain (the
-          // §17.849 tracker) handle the message its own way.
-          appendBubble("assistant", "note", `That looked like a step result, but the step wouldn't accept it (${errText(e)}). Checking progress the usual way…`);
-          return false;
+      for await (const { event, data } of api.stream(`/assist/${sessionId}/message`, {
+        body: { history: historyForGuide(), node_key: session?.current_node_key || null, ...body },
+        signal: abort.signal,
+      })) {
+        if (disposed) break;
+        switch (event) {
+          case "assist_turn_status":
+            setStatusLine(data?.text || "…");
+            break;
+          case "assist_note_recorded":
+            clearStatusLine();
+            appendBubble("assistant", "note",
+              `📝 Noted (${data?.kind || "note"}).` +
+              (data?.retracted ? ` Retracted ${data.retracted} stale fact(s).` : ""));
+            break;
+          case "assist_replan_proposal":
+            if (data?.proposal) renderReplanProposal(data.proposal);
+            break;
+          case "assist_answer":
+            clearStatusLine();
+            appendBubble("assistant", data?.kind || "ask", data?.text || "");
+            break;
+          case "assist_step_outcome":
+            toast(`Step ${data?.node_key || ""}: ${data?.status || "recorded"}.`,
+              data?.status === "committed" ? "ok" : "");
+            break;
+          case "assist_guide_delta":
+            clearStatusLine();
+            ensureLive();
+            acc += (data && data.text) || "";
+            liveBody.innerHTML = mdToHtml(acc);
+            transcript.scrollTop = transcript.scrollHeight;
+            break;
+          case "assist_guide_done":
+            if (live) live.classList.remove("streaming");
+            break;
+          case "assist_turn_done":
+            break;
+          case "error":
+            clearStatusLine();
+            appendBubble("assistant", "note", `⚠ ${data?.detail || "turn error"}`);
+            break;
+          default:
+            break;
         }
-        await surfaceHint();
-        return true;
       }
-      if (d.action === "fix") {
-        setStatus("🔧 Diagnosing the error for your environment…");
-        const res = await api.post(`/assist/${sessionId}/fix`, {
-          error: d.error_text || text, node_key: nk, history: historyForGuide(),
-        });
-        appendBubble("assistant", "fix", res.fix || "(no fix returned)");
-        await surfaceHint();
-        load();
-        return true;
-      }
-      if (d.action === "ask" || d.action === "question") {
-        setStatus("🔎 Researching your question against the project's current state — this can take a minute or two. The answer also lands in the transcript, so it survives a reload…");
-        const res = await api.post(`/assist/${sessionId}/research`, {
-          question: d.query || text, node_key: nk, history: historyForGuide(),
-        });
-        if ((res?.answer || "").trim()) {
-          appendBubble("assistant", "ask", res.answer);
-          await surfaceHint();
-          load();
-          return true;
-        }
-        // §17.862 — terminal even when empty: returning false here would send
-        // the turn down the §17.852 question-regex path, which fires the SAME
-        // research call again (a duplicate multi-minute pass for nothing).
-        appendBubble("assistant", "ask", "I couldn't put together a useful answer for that — try rephrasing, or press ✦ Guide me for the current step.");
-        return true;
-      }
-      if (d.action === "advance") {
-        await doneNext(text);
-        return true;
-      }
-      if (d.action === "status") {
-        // §17.867 — orientation (incl. the server whats_next override).
-        await orientAndGuide();
-        return true;
-      }
-      return false; // skip/set_env/… — rare via free text; fallback chain
+    } catch (e) {
+      if (e.name !== "AbortError") toast(errText(e), "err");
     } finally {
-      thinking.remove();
+      guiding = false;
+      abort = null;
+      sendBtn.disabled = false;
+      guideBtn.textContent = "✦ Guide me";
+      clearStatusLine();
+      if (live) live.classList.remove("streaming");
+      load();
     }
   }
 
@@ -797,141 +740,23 @@ export function renderChat(container, sessionId) {
     composerText.value = "";
     turns.push({ role: "operator", kind: "message", content: text, created_at: new Date().toISOString() });
     renderTranscript();
-    try {
-      await api.post(`/assist/${sessionId}/turn`, { role: "operator", kind: "message", content: text, node_key: session?.current_node_key || null });
-    } catch (e) {
-      toast(`Could not persist message: ${e.detail || e.message}`, "err");
-    }
+    // Advance verbs stay a local fast-path (deterministic, closes the step
+    // through the verified submit/track flow). EVERYTHING else is one server
+    // turn — capture included (the server ingests the turn; no separate
+    // /turn call to race it).
     if (ADVANCE_RE.test(text) && session?.current_node_key) {
       await doneNext(text);
       return;
     }
-    // §17.867 — pure orientation ("whats next??", "what now", "where are we"):
-    // orient + guide immediately, zero model calls. Mirrors the server
-    // assist_policy._WHATS_NEXT_RE gate; the live /decide model routed this
-    // exact phrase to NOTE and recorded the question as ledger junk.
-    const ORIENT_RE = /^\s*((so|ok(ay)?)[,!\s]+)*(what('?s)?\s+(is\s+)?next|what\s+(do|should)\s+(i|we)\s+do(\s+(now|next))?|what\s+now|now\s+what|where\s+(are\s+we|am\s+i)(\s+at)?|next\s+steps?)\s*[?!.\s]*$/i;
-    if (ORIENT_RE.test(text)) {
-      await orientAndGuide();
-      return;
-    }
-    // §17.861 — unified decision first (server /decide); regex chain below is
-    // the fallback, exactly mirroring the OWUI pipeline's primary/fallback split.
-    if (session?.current_node_key && text.length >= 12) {
-      try {
-        if (await decideAndDispatch(text)) return;
-      } catch (e) {
-        toast(`Routing failed (${errText(e)}) — falling back.`, "err");
-      }
-    }
-    // §17.849 — run the §17.754 progress tracker on EVERY substantive message
-    // BEFORE guidance (the OWUI pipeline's behavior, missing from the SPA).
-    // Guidance has no authority to close a step: without this, an operator
-    // reporting completion evidence in plain words ("i just pasted it, there
-    // was no output") got the same walkthrough re-prescribed forever — the
-    // live T3 loop. Fail-soft: tracker error/low-confidence → normal guidance.
-    if (session?.current_node_key && text.length >= 12) {
-      const note = el("div", { class: "msg sys" }, el("div", { class: "msg-body dim", text: "…checking step progress" }));
-      transcript.append(note);
-      transcript.scrollTop = transcript.scrollHeight;
-      try {
-        const tr = await api.post(`/assist/${sessionId}/track`, {
-          message: text, node_key: session.current_node_key, history: historyForGuide(),
-        });
-        note.remove();
-        if (tr?.action === "advanced") {
-          toast(`✓ Step ${tr.retired_prior_step || ""} closed out.`, "ok");
-          await claimAndGuideNext();
-          return;
-        }
-        if (tr?.action === "added_step" && tr.step?.node_key) {
-          toast(`New step ${tr.step.node_key} added — walking you through it.`, "ok");
-          await load();
-          guideCurrent();
-          return;
-        }
-      } catch { note.remove(); }
-    }
-    // §17.852 — QUESTIONS get ANSWERS, not walkthrough reruns. Chat had only
-    // two outcomes (advance / regenerate the walkthrough), so a question like
-    // "can you keep track of the names…" earned the same step text again —
-    // the live T7 repeat. Question-shaped messages route to the job-aware
-    // ask path (§17.650, placeholder-resolved §17.851b); everything else
-    // still gets the guidance stream.
-    const QUESTION_RE = /\?\s*$|^(can|could|how|what|why|where|which|who|should|is|are|do|does|will|would)\b/i;
-    if (session?.current_node_key && QUESTION_RE.test(text)) {
-      const note = el("div", { class: "msg sys" }, el("div", { class: "msg-body dim", text: "…thinking about your question" }));
-      transcript.append(note);
-      transcript.scrollTop = transcript.scrollHeight;
-      try {
-        const res = await api.post(`/assist/${sessionId}/research`, {
-          question: text, node_key: session.current_node_key, history: historyForGuide(),
-        });
-        note.remove();
-        if ((res?.answer || "").trim()) {
-          appendBubble("assistant", "ask", res.answer);
-          load();
-          return;
-        }
-      } catch { note.remove(); }
-      // Fall through to guidance if the ask path had nothing.
-    }
-    // Ask the assistant to respond via a fresh step-guidance stream.
-    guideCurrent(text);
+    await runTurnStream({ message: text, command: "message" });
   }
 
-  async function guideCurrent(userMsg) {
+  async function guideCurrent() {
     if (guiding) {
-      if (abort) abort.abort();
+      if (abort) abort.abort();  // the button reads "■ Stop" — explicit stop
       return;
     }
-    // §17.866 — no current step (e.g. a re-plan apply just dropped it and
-    // cleared the pointer): claim the next one first, then guide. Without
-    // this, Guide me on a cleared pointer 409s ("no current step").
-    if (!session?.current_node_key) {
-      await claimAndGuideNext();
-      return;
-    }
-    guiding = true;
-    guideBtn.textContent = "■ Stop";
-    abort = new AbortController();
-    const history = historyForGuide();
-    if (userMsg) history.push({ role: "operator", content: userMsg });
-    // live assistant bubble that grows with deltas
-    const bodyEl = el("div", { class: "msg-body md" }, el("span", { class: "spin" }));
-    const live = el("div", { class: "msg as streaming" }, el("div", { class: "msg-meta" }, el("span", { class: "msg-role", text: "assistant" }), el("span", { class: "msg-kind", text: "guiding" })), bodyEl);
-    transcript.append(live);
-    transcript.scrollTop = transcript.scrollHeight;
-    let acc = "";
-    try {
-      for await (const { event, data } of api.stream(`/assist/${sessionId}/guide/stream`, {
-        body: { node_key: session?.current_node_key || null, force: true, history },
-        signal: abort.signal,
-      })) {
-        if (disposed) break;
-        if (event === "assist_guide_delta") {
-          acc += (data && data.text) || "";
-          bodyEl.innerHTML = mdToHtml(acc);
-          transcript.scrollTop = transcript.scrollHeight;
-        } else if (event === "assist_guide_done") {
-          if (data && data.guidance && !acc) bodyEl.innerHTML = mdToHtml(data.guidance);
-          live.classList.remove("streaming");
-          break;
-        } else if (event === "error") {
-          bodyEl.innerHTML = mdToHtml(`⚠ ${(data && (data.message || data.error)) || "guidance error"}`);
-          break;
-        }
-      }
-    } catch (e) {
-      if (e.name !== "AbortError") bodyEl.innerHTML = mdToHtml(`⚠ Stream error: ${e.message}`);
-    } finally {
-      guiding = false;
-      abort = null;
-      guideBtn.textContent = "✦ Guide current step";
-      live.classList.remove("streaming");
-      // reload authoritative turns (guidance is persisted server-side)
-      load();
-    }
+    await runTurnStream({ command: "guide" });
   }
 
   load();
