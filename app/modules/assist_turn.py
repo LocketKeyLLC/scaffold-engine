@@ -468,16 +468,47 @@ async def _surface(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterato
         logger.warning("turn_loop_surface_failed sid=%s err=%r", session_id, exc)
 
 
+def _is_must_claim_first(exc) -> bool:
+    """§17.878 — recognize the recoverable submit refusal (step never claimed)."""
+    detail = getattr(exc, "detail", None)
+    return "must_claim_first" in (
+        str(detail) if detail is not None else str(exc)
+    )
+
+
 async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> AsyncIterator[_Event]:
     yield _ev(ASSIST_TURN_STATUS, {"text": "Recording the result and verifying the step…"})
-    from app.routers.assist import AssistSubmitInput, assist_submit
-    try:
-        res = await assist_submit(
+    from app.routers.assist import AssistSubmitInput, assist_submit, assist_next
+
+    async def _try_submit():
+        return await assist_submit(
             session_id,
             AssistSubmitInput(node_key=nk, output=(d.get("evidence") or text_),
                               action="submit", history=history),
             db=db,
         )
+
+    try:
+        try:
+            res = await _try_submit()
+        except Exception as exc:  # noqa: BLE001
+            # §17.878 — SELF-HEAL the unclaimed-step trap. Live incident: the
+            # tracker committed T13 and moved the session pointer to T14 without
+            # a formal claim (presented_at NULL); guide/fix flowed all day off
+            # the pointer, then the operator's SUCCESSFUL install evidence hit
+            # the one endpoint that enforces the claim and was refused (409
+            # must_claim_first) — the step never committed and the walkthrough
+            # replayed ("it backlogged again"). must_claim_first is trivially
+            # recoverable: claim (assist_next presents the earliest claimable
+            # pending step — the pointer step) and retry ONCE. Any other
+            # refusal keeps the §17.863 explain-and-continue behavior.
+            if not _is_must_claim_first(exc):
+                raise
+            yield _ev(ASSIST_TURN_STATUS, {
+                "text": "The step wasn't formally claimed (a bookkeeping hiccup, not your result) — claiming it now and recording your result…",
+            })
+            await assist_next(session_id, db=db)
+            res = await _try_submit()
         yield _ev(ASSIST_STEP_OUTCOME, {
             "node_key": nk, "status": (res or {}).get("status") or "recorded",
         })
@@ -497,6 +528,24 @@ async def _claim_and_guide(
 
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     nk = node_key or (sess or {}).get("current_node_key")
+    if nk:
+        # §17.878 — mirror-invariant repair. A pointer moved without a formal
+        # claim (the tracker's advance path) leaves the step 'pending':
+        # guidance flows off the pointer, but any later submit 409s with
+        # must_claim_first (live: T14 ran a full day unclaimed). Claim at the
+        # guide chokepoint so the state the operator sees is the state the
+        # endpoints enforce. Fail-soft: repair must never block the walkthrough.
+        try:
+            from sqlalchemy import text as _text
+            st = (await db.execute(_text(
+                "SELECT status FROM assist_steps"
+                " WHERE session_id = :sid AND node_key = :nk"),
+                {"sid": session_id, "nk": nk})).scalar()
+            if st == "pending":
+                logger.info("turn_loop_claim_repair sid=%s nk=%s", session_id, nk)
+                await assist_next(session_id, db=db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("turn_loop_claim_repair_failed sid=%s err=%r", session_id, exc)
     if not nk:
         yield _ev(ASSIST_TURN_STATUS, {"text": "Finding the next step and verifying it against what we know…"})
         nxt = await assist_next(session_id, db=db)
