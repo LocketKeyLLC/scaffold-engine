@@ -239,7 +239,7 @@ async def test_generate_fix_warning_banner_when_regen_still_repeats():
             research=False, node_key="T16",
             failure_streak=1, failed_commands=failed,
         )
-    assert res["fix"].startswith("⚠️ **Repeat warning:**")
+    assert res["fix"].startswith("⚠️ **Caution:**")  # §17.883 unified banner
     assert res["guidance_meta"]["repeat_violations"]
 
 
@@ -298,3 +298,69 @@ def test_find_repeated_failed_ignores_local_verification_urls():
     out = ('```bash\ncurl -fsSL https://api.github.com/repos/Radarr/Radarr/releases/latest\n```\n'
            'then verify:\n```bash\ncurl -s -o /dev/null -w "%{http_code}" http://localhost:7878\n```')
     assert find_repeated_failed(out, failed) == []
+
+
+# ── §17.883 — URL provenance + variation skeletons ───────────────────────
+
+
+def test_url_skeleton_matches_version_guess_variations():
+    from app.modules.assist_guide import _url_skeleton
+    a = _url_skeleton("https://github.com/Radarr/Radarr/releases/latest/download/Radarr.master.linux-core-x64.tar.gz")
+    b = _url_skeleton("https://github.com/Radarr/Radarr/releases/download/v5.3.3/Radarr.master.linux-core-x64.tar.gz")
+    c = _url_skeleton("https://github.com/Radarr/Radarr/releases/download/v5.3.0/Radarr.master.linux-core-x64.tar.gz")
+    assert a == b == c
+    d = _url_skeleton("https://github.com/Sonarr/Sonarr/releases/latest/download/S.tar.gz")
+    assert d != a
+
+
+def test_find_repeated_failed_catches_version_variation():
+    """The live guess-cycle: three 'different' URLs, one failing endpoint
+    family — all now count as repeats."""
+    from app.modules.assist_guide import find_repeated_failed
+    failed = 'curl -L "https://github.com/Radarr/Radarr/releases/latest/download/Radarr.master.linux-core-x64.tar.gz" -o /tmp/R.tar.gz'
+    out = ('```bash\ncurl -L "https://github.com/Radarr/Radarr/releases/download/'
+           'v5.3.0/Radarr.master.linux-core-x64.tar.gz" -o /tmp/R.tar.gz\n```')
+    assert find_repeated_failed(out, failed)
+
+
+def test_find_novel_urls_flags_ungrounded_and_passes_grounded():
+    from app.modules.assist_guide import find_novel_urls
+    corpus = ("## Research\n[1] (web: https://wiki.servarr.com/radarr/installation) "
+              "query: install\nSome content mentioning "
+              "https://github.com/Radarr/Radarr/releases as the release page.")
+    draft = ("```bash\ncurl -L https://github.com/Radarr/Radarr/releases/download/"
+             "v9.9.9/invented.tar.gz -o /tmp/R.tar.gz\n```\n"
+             "```bash\ncurl -s https://api.github.com/repos/Radarr/Radarr/releases/latest | grep browser_download_url\n```\n"
+             "See https://wiki.servarr.com/radarr/installation "
+             "and check http://localhost:7878 after.")
+    novel = find_novel_urls(draft, corpus)
+    assert any("v9.9.9" in n for n in novel)          # invented + consumed → flagged
+    assert all("api.github.com" not in n for n in novel)  # read-only discovery → exempt
+    assert all("wiki.servarr.com" not in n for n in novel)  # grounded/prose → clean
+    assert all("localhost" not in n for n in novel)   # local → exempt
+
+
+@pytest.mark.asyncio
+async def test_generate_fix_novel_url_gate_regenerates():
+    """A draft with an invented URL at escalation triggers ONE regen; the
+    discovery-command regen (no external URLs) is returned clean."""
+    from app.modules import assist_guide
+    from app.modules.assist_guide import generate_fix
+    invented = '## Fix\n```bash\ncurl -L https://github.com/Radarr/Radarr/releases/download/v9.9.9/x.tar.gz -o /tmp/R.tar.gz\n```'
+    discovery = ('## Fix\n```bash\ncurl -s https://api.github.com/repos/Radarr/Radarr/releases/latest '
+                 '| grep browser_download_url\n```')
+    convo = ""  # §17.883b — read-only discovery needs no provenance
+    draws = [SimpleNamespace(text=invented, success=True, error=None, model="m", raw={}),
+             SimpleNamespace(text=discovery, success=True, error=None, model="m", raw={})]
+    with patch.object(assist_guide.model_router, "chat",
+                      new=AsyncMock(side_effect=draws)) as chat:
+        res = await generate_fix(
+            ctx=_fix_ctx(), error_text="tar: not in gzip format",
+            research=False, node_key="T16",
+            failure_streak=3, failed_commands="curl -L https://radarr.video/api/x -o /tmp/R.tar.gz",
+            conversation=convo,
+        )
+    assert chat.await_count == 2
+    assert "api.github.com" in res["fix"]
+    assert "Caution" not in res["fix"]
+    assert res["guidance_meta"]["novel_url_violations"] == []
