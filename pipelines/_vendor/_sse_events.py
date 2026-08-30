@@ -64,6 +64,19 @@ ASSIST_HANDOFF_NOOP = "assist_handoff_noop"
 ASSIST_GUIDE_DELTA = "assist_guide_delta"
 ASSIST_GUIDE_DONE = "assist_guide_done"
 
+# §17.868 — the server-side turn loop (POST /assist/{sid}/message): ONE stream
+# owns capture → deterministic gates → decide → dispatch → claim/premise →
+# guidance, with a status frame at every stage. Born from a night of client-
+# composed chains dying silently at their seams (§17.861–867): the client now
+# renders events; it never sequences the loop.
+ASSIST_TURN_STATUS = "assist_turn_status"      # {text} — progress line
+ASSIST_TURN_ROUTED = "assist_turn_routed"      # {action, override|null}
+ASSIST_NOTE_RECORDED = "assist_note_recorded"  # {kind, retracted, has_proposal}
+ASSIST_REPLAN_PROPOSAL = "assist_replan_proposal"  # {proposal}
+ASSIST_ANSWER = "assist_answer"                # {kind: ask|fix, text}
+ASSIST_STEP_OUTCOME = "assist_step_outcome"    # {node_key, status}
+ASSIST_TURN_DONE = "assist_turn_done"          # {handled} — terminal frame
+
 
 # ---------------------------------------------------------------------------
 # Research-agent events (app/modules/research_agent.py)

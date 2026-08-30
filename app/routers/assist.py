@@ -428,6 +428,52 @@ async def assist_next(session_id: str, db=Depends(get_db)):
     return step
 
 
+class AssistMessageInput(BaseModel):
+    """§17.868 — one operator turn for the server-side turn loop."""
+    message: Optional[str] = Field(default=None, description="The operator's message (command='message').")
+    command: Literal["message", "guide"] = Field(
+        default="message",
+        description="'message' runs the full loop; 'guide' goes straight to claim-and-guide.",
+    )
+    node_key: Optional[str] = Field(default=None, description="Defaults to the session's current step.")
+    history: list[dict] = Field(default_factory=list)
+
+
+@router.post("/assist/{session_id}/message")
+async def assist_message(
+    session_id: str, body: AssistMessageInput, request: Request, db=Depends(get_db),
+):
+    """§17.868 — the server-side turn loop: ONE stream owns capture → gates →
+    decide → dispatch → claim/premise → guidance, with a status frame at every
+    stage (no silent phases). Clients render events; they never sequence the
+    loop — the §17.861–867 seam-failure class ends here. Validates up front so
+    bad input is an HTTP error, not a half-open stream."""
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    if sess["status"] not in ("active", "paused"):
+        raise HTTPException(status_code=409, detail=f"session status {sess['status']!r} cannot take a turn")
+
+    from app.modules import assist_turn
+    from app.utils.sse import _sse_with_disconnect_watch
+
+    async def _gen():
+        try:
+            async for name, data in assist_turn.run_turn(
+                session_id=session_id, message=body.message, command=body.command,
+                node_key=body.node_key, history=body.history, db=db,
+            ):
+                yield assist_agent._sse(name, data)
+        except Exception as exc:  # surface mid-stream errors as an SSE frame
+            yield assist_agent._sse("error", {"detail": str(exc)})
+
+    return StreamingResponse(
+        _sse_with_disconnect_watch(request, _gen()),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no"},
+    )
+
+
 @router.post("/assist/{session_id}/guide")
 async def assist_guide(session_id: str, body: AssistGuideInput, db=Depends(get_db)):
     """Generate (or return cached) the human walkthrough for a step.
