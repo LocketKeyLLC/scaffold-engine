@@ -1178,36 +1178,21 @@ async def _fix_failure_streak(
     ``(streak, failed_commands_text)``. Fail-soft → (0, "")."""
     import re as _re
     try:
-        presented_at = (await db.execute(
+        # §17.886 (audit #6) — the streak is NODE-scoped, NOT claim-scoped.
+        # The previous `created_at >= presented_at` filter was zeroed every
+        # time a §17.878/880 claim-repair re-stamped presented_at mid-marathon,
+        # silently disarming the whole §17.881-883 enforcement stack. The
+        # node_key scope already isolates the step's troubleshooting history;
+        # re-claims of the same node are the same problem context.
+        rows = (await db.execute(
             text("""
-                SELECT presented_at FROM assist_steps
+                SELECT content FROM assist_turns
                  WHERE session_id = :sid AND node_key = :nk
+                   AND role = 'assistant' AND kind = 'fix'
+                 ORDER BY created_at DESC, id DESC LIMIT 12
             """),
             {"sid": session_id, "nk": node_key},
-        )).scalar()
-        # §17.882b — branch in PYTHON, not with the SQL null-trick:
-        # `(:since IS NULL OR created_at >= :since)` raises asyncpg
-        # AmbiguousParameterError (could not determine data type), and the
-        # fail-soft below turned that into a silent streak=0 that disabled the
-        # ENTIRE no-repeat enforcement stack on the live session.
-        if presented_at is not None:
-            q = text("""
-                SELECT content FROM assist_turns
-                 WHERE session_id = :sid AND node_key = :nk
-                   AND role = 'assistant' AND kind = 'fix'
-                   AND created_at >= :since
-                 ORDER BY created_at DESC, id DESC LIMIT 12
-            """)
-            params = {"sid": session_id, "nk": node_key, "since": presented_at}
-        else:
-            q = text("""
-                SELECT content FROM assist_turns
-                 WHERE session_id = :sid AND node_key = :nk
-                   AND role = 'assistant' AND kind = 'fix'
-                 ORDER BY created_at DESC, id DESC LIMIT 12
-            """)
-            params = {"sid": session_id, "nk": node_key}
-        rows = (await db.execute(q, params)).mappings().all()
+        )).mappings().all()
         streak = len(rows)
         cmds: list[str] = []
         for r in rows:

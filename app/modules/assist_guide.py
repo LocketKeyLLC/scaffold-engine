@@ -590,7 +590,7 @@ async def verify_step_success(
             "operator's answer must fully satisfy; later steps apply the concrete "
             f"details):\n{task_prompt}\n\n"
             + (f"{env_block}\n\n" if env_block else "")
-            + f"Operator's decision / message for this step:\n{evidence[:6000]}\n\n"
+            + f"Operator's decision / message for this step:\n{tail_keep(evidence)}\n\n"
             "Judge whether they made a clear, on-topic decision. Call judge_step_outcome."
         )
     else:
@@ -621,7 +621,7 @@ async def verify_step_success(
         user = (
             f"Task (this step's goal): {title}\n\n{task_prompt}\n\n"
             + (f"{env_block}\n\n" if env_block else "")
-            + f"Operator's pasted evidence / output for this step:\n{evidence[:6000]}\n\n"
+            + f"Operator's pasted evidence / output for this step:\n{tail_keep(evidence)}\n\n"
             "Does the evidence show THIS step's goal was achieved? Call judge_step_outcome."
         )
     try:
@@ -1167,7 +1167,7 @@ async def distill_facts(
         (f"STEP: {title}\n" if title else "")
         + (f"TASK: {task_prompt}\n\n" if task_prompt else "\n")
         + known_block
-        + f"Operator output:\n{evidence[:6000]}\n\nCall record_facts."
+        + f"Operator output:\n{tail_keep(evidence)}\n\nCall record_facts."
     )
     # §17.749 — model_general (deepseek-v4-pro) is a THINKING model: at
     # max_tokens=1024 it spends the whole budget reasoning and returns an EMPTY
@@ -1868,7 +1868,7 @@ async def check_grounding(
                 {"role": "system", "content": _GROUNDING_SYSTEM},
                 {"role": "user", "content": (
                     f"{memory}\n\n## Operator's result for this step\n"
-                    f"{evidence[:6000]}\n\nCall record_grounding."
+                    f"{tail_keep(evidence)}\n\nCall record_grounding."
                 )},
             ],
             tools=[_RECORD_GROUNDING_TOOL],
@@ -2137,6 +2137,18 @@ async def generate_guidance(
             node_key, ctx.tool, meta["error"],
         )
     return {"guidance": text_out, "guidance_meta": meta, "status": status}
+
+
+
+def tail_keep(text_: str, cap: int = 6000) -> str:
+    """§17.886 (audit #5) — the ONE evidence-truncation rule: keep the TAIL.
+    Outcomes, tracebacks, and final states live at the END of pasted output;
+    head-keep at these sites made the verifier judge download noise and miss
+    the 'Installation complete' (or the closing traceback) entirely."""
+    t = text_ or ""
+    if len(t) <= cap:
+        return t
+    return "(earlier output truncated)\n…" + t[-cap:]
 
 
 _LOCAL_HOST_RE = None

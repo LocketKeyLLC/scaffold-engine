@@ -136,14 +136,15 @@ async def test_fix_failure_streak_counts_all_fixes_since_claim():
     fixes, zero escalations, because a guide sat between them). The SQL filters
     to kind='fix' since presented_at; streak = all of them."""
     db = AsyncMock()
-    presented = MagicMock(); presented.scalar.return_value = "2026-08-30T14:00:00Z"
     rows = MagicMock()
     rows.mappings.return_value.all.return_value = [
         {"content": "## Fix\n```bash\ncurl -L https://bad.example\n```"},
         {"content": "try\n```bash\ntar -xzf /tmp/x.tar.gz\n```"},
         {"content": "plain prose fix, no fence"},
     ]
-    db.execute = AsyncMock(side_effect=[presented, rows])
+    # §17.886(#6) — ONE node-scoped query; no presented_at filter (claim-repair
+    # re-stamps must not zero the streak).
+    db.execute = AsyncMock(return_value=rows)
     streak, cmds = await _fix_failure_streak(session_id="s", node_key="T16", db=db)
     assert streak == 3
     assert "curl -L https://bad.example" in cmds and "tar -xzf" in cmds
@@ -151,9 +152,8 @@ async def test_fix_failure_streak_counts_all_fixes_since_claim():
 
 async def test_fix_failure_streak_zero_when_no_fix_turns():
     db = AsyncMock()
-    presented = MagicMock(); presented.scalar.return_value = None
     rows = MagicMock(); rows.mappings.return_value.all.return_value = []
-    db.execute = AsyncMock(side_effect=[presented, rows])
+    db.execute = AsyncMock(return_value=rows)
     streak, cmds = await _fix_failure_streak(session_id="s", node_key="T16", db=db)
     assert streak == 0 and cmds == ""
 
