@@ -128,7 +128,10 @@ export function renderChat(container, sessionId) {
   let turns = [];
   // §17.870 — current-turn output rendered live but not (yet) in the durable
   // transcript; renderTranscript re-appends it after every reconcile.
+  // §17.871 — turnStartedAt: only a durable turn captured DURING this turn may
+  // replace an ephemeral entry (see renderTranscript).
   let ephemeralTail = [];
+  let turnStartedAt = null;
 
   const transcript = el("div", { class: "chat-transcript" }, loading("Loading conversation…"));
   // Operator layout: no right sidebar. The input checklist docks LEFT of the
@@ -400,13 +403,19 @@ export function renderChat(container, sessionId) {
     // dedupe cached replays (§17.812) — and ERASED what the operator was
     // reading ("flashed an answer... but did nothing"). Entries drop out
     // automatically once an identical durable turn exists.
-    // Dedupe only against the NEWEST turns: a cached walkthrough replay also
-    // exists as an OLD captured turn far up in scrollback, but the operator
-    // pressed Guide NOW and expects it at the bottom — deduping against the
-    // whole history re-created the "vanished" effect with extra steps.
-    const newest = turns.slice(-2);
+    // §17.871 — dedupe by TIME, not proximity: only a durable turn captured
+    // DURING the current turn (i.e. this very turn's own server-side capture)
+    // may replace an ephemeral entry. Both earlier heuristics re-created the
+    // "pressed Guide, saw nothing" failure whenever identical content already
+    // existed in the transcript — full-history dedupe always, newest-2 dedupe
+    // exactly when the walkthrough had been shown just before the operator's
+    // last message (the live home-lab T14 case: the newest-2 turns WERE the
+    // old walkthrough + their paste).
+    const cutoff = turnStartedAt || "9999";
     for (const e of ephemeralTail) {
-      const dup = newest.some((t) => (t.content || "").trim() === e.content.trim());
+      const dup = turns.some((t) =>
+        (t.created_at || "") >= cutoff &&
+        (t.content || "").trim() === e.content.trim());
       if (!dup && e.content.trim()) transcript.append(bubble("assistant", e.kind, e.content, e.at));
     }
     transcript.scrollTop = transcript.scrollHeight;
@@ -677,6 +686,9 @@ export function renderChat(container, sessionId) {
     sendBtn.disabled = true;
     abort = new AbortController();
     ephemeralTail = [];  // §17.870 — fresh turn, fresh tail
+    // §17.871 — small slack for client/server clock skew; a capture stamped
+    // slightly "before" our local start must still count as ours.
+    turnStartedAt = new Date(Date.now() - 15000).toISOString();
     let statusEl = null;
     const setStatusLine = (t) => {
       if (!statusEl) {
