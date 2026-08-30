@@ -126,6 +126,9 @@ export function renderChat(container, sessionId) {
   let abort = null;
   let session = null;
   let turns = [];
+  // §17.870 — current-turn output rendered live but not (yet) in the durable
+  // transcript; renderTranscript re-appends it after every reconcile.
+  let ephemeralTail = [];
 
   const transcript = el("div", { class: "chat-transcript" }, loading("Loading conversation…"));
   // Operator layout: no right sidebar. The input checklist docks LEFT of the
@@ -390,6 +393,22 @@ export function renderChat(container, sessionId) {
       return;
     }
     mount(transcript, ...turns.map((t) => bubble(t.role, t.kind, t.content, t.created_at)));
+    // §17.870 — the ephemeral tail: output the CURRENT turn rendered live that
+    // is not (yet, or ever) in the durable transcript. The live incident: a
+    // cached walkthrough replay streamed to the screen, then the end-of-turn
+    // load() rebuilt the transcript from durable turns — which correctly
+    // dedupe cached replays (§17.812) — and ERASED what the operator was
+    // reading ("flashed an answer... but did nothing"). Entries drop out
+    // automatically once an identical durable turn exists.
+    // Dedupe only against the NEWEST turns: a cached walkthrough replay also
+    // exists as an OLD captured turn far up in scrollback, but the operator
+    // pressed Guide NOW and expects it at the bottom — deduping against the
+    // whole history re-created the "vanished" effect with extra steps.
+    const newest = turns.slice(-2);
+    for (const e of ephemeralTail) {
+      const dup = newest.some((t) => (t.content || "").trim() === e.content.trim());
+      if (!dup && e.content.trim()) transcript.append(bubble("assistant", e.kind, e.content, e.at));
+    }
     transcript.scrollTop = transcript.scrollHeight;
   }
 
@@ -657,6 +676,7 @@ export function renderChat(container, sessionId) {
     guideBtn.textContent = "■ Stop";
     sendBtn.disabled = true;
     abort = new AbortController();
+    ephemeralTail = [];  // §17.870 — fresh turn, fresh tail
     let statusEl = null;
     const setStatusLine = (t) => {
       if (!statusEl) {
@@ -694,18 +714,21 @@ export function renderChat(container, sessionId) {
           case "assist_turn_status":
             setStatusLine(data?.text || "…");
             break;
-          case "assist_note_recorded":
+          case "assist_note_recorded": {
             clearStatusLine();
-            appendBubble("assistant", "note",
-              `📝 Noted (${data?.kind || "note"}).` +
-              (data?.retracted ? ` Retracted ${data.retracted} stale fact(s).` : ""));
+            const noteMsg = `📝 Noted (${data?.kind || "note"}).` +
+              (data?.retracted ? ` Retracted ${data.retracted} stale fact(s).` : "");
+            appendBubble("assistant", "note", noteMsg);
+            ephemeralTail.push({ kind: "note", content: noteMsg, at: new Date().toISOString() });
             break;
+          }
           case "assist_replan_proposal":
             if (data?.proposal) renderReplanProposal(data.proposal);
             break;
           case "assist_answer":
             clearStatusLine();
             appendBubble("assistant", data?.kind || "ask", data?.text || "");
+            ephemeralTail.push({ kind: data?.kind || "ask", content: data?.text || "", at: new Date().toISOString() });
             break;
           case "assist_step_outcome":
             toast(`Step ${data?.node_key || ""}: ${data?.status || "recorded"}.`,
@@ -720,6 +743,7 @@ export function renderChat(container, sessionId) {
             break;
           case "assist_guide_done":
             if (live) live.classList.remove("streaming");
+            if (acc.trim()) ephemeralTail.push({ kind: "guide", content: acc, at: new Date().toISOString() });
             break;
           case "assist_turn_done":
             break;
