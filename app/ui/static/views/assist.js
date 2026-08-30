@@ -202,7 +202,7 @@ export function renderChat(container, sessionId) {
       return false;
     }
     if (st === "deliberating") {
-      appendBubble("assistant", "decision", res.message || "This step needs your input — see the question above and answer in the box.");
+      appendBubble("assistant", "decision", (res.decision_message || res.message) || "This step needs your input — see the question above and answer in the box.");
       load();
       return false;
     }

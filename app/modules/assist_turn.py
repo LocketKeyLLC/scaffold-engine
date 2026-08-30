@@ -656,10 +656,29 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
             # dispatch can CONTINUE a blocked submit instead of dead-ending.
             "verify_reason": (((res or {}).get("success_verdict") or {}).get("reason") or ""),
         })
+        # §17.889(#3) — a deliberating decision step computed a needs-input
+        # question and THREW IT AWAY (rendered as a bare toast). Surface +
+        # capture it like any other engine answer.
+        dm = (res or {}).get("decision_message") or ""
+        if dm.strip() and (res or {}).get("status") == "deliberating":
+            yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": dm})
+            try:
+                from app.modules import assist_agent as _aa
+                await _aa.capture_assistant_reply(
+                    session_id=session_id, node_key=nk, kind="ask", content=dm, db=db)
+            except Exception:  # noqa: BLE001
+                pass
     except Exception as exc:  # noqa: BLE001 — a refused submit must not kill the turn
-        yield _ev(ASSIST_TURN_STATUS, {
-            "text": f"That looked like a step result, but the step wouldn't accept it ({exc}). Continuing…",
-        })
+        # §17.889(#11) — durable answer (status lines vanish at turn end) and an
+        # actual continuation instead of a dangling "Continuing…".
+        msg = (f"I recorded what you pasted, but the step wouldn't accept it as a "
+               f"submission ({exc}). Here's where things stand instead:")
+        yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": msg})
+        try:
+            async for e in _claim_and_guide(session_id, nk, history, db, orient=True):
+                yield e
+        except Exception:  # noqa: BLE001 — orientation is best-effort here
+            logger.warning("turn_loop_refused_submit_orient_failed sid=%s", session_id)
 
 
 async def _claim_and_guide(
@@ -714,7 +733,22 @@ async def _claim_and_guide(
         if pc.get("stale"):
             yield _ev(ASSIST_TURN_STATUS, {"text": f"⚠ Before we walk into step {nk}: {pc.get('reason') or 'its premise may be out of date.'}"})
         if not nk:
-            yield _ev(ASSIST_TURN_STATUS, {"text": "No claimable step right now — the session may be waiting on a decision or already complete."})
+            # §17.889(#9) — say WHICH terminal state, not a shrug.
+            st = (nxt or {}).get("status") or ""
+            if st == "completed":
+                yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": "🎉 **Every step in this plan is done — the project is complete.** Open the session's Done view for the compiled summary of what you built."})
+            elif st == "paused":
+                yield _ev(ASSIST_TURN_STATUS, {"text": "⏸ This session is paused — say \"resume\" to pick up where you left off."})
+            else:
+                try:
+                    from app.modules.assist_notes import get_pending_replan
+                    pend = await get_pending_replan(session_id=session_id, db=db)
+                except Exception:  # noqa: BLE001
+                    pend = None
+                if pend:
+                    yield _ev(ASSIST_TURN_STATUS, {"text": "A plan-change proposal is waiting for your decision (see the card above) — answer it and we'll continue."})
+                else:
+                    yield _ev(ASSIST_TURN_STATUS, {"text": "No claimable step right now — a step may be mid-verification; try again in a moment or press Done if you believe the plan is finished."})
             return
     if orient:
         counts = (sess or {}).get("step_counts") or {}
@@ -730,6 +764,10 @@ async def _claim_and_guide(
         if ev.get("type") == "delta":
             yield _ev(ASSIST_GUIDE_DELTA, {"text": ev.get("text") or ""})
         else:
+            if ev.get("status") not in ("ready", "presented", None):
+                # §17.889(#12) — a failed generation rendered NOTHING in the
+                # SPA ("pressed Guide, saw nothing"). Honest fallback frame.
+                yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": "I couldn't generate the walkthrough just now (the model returned nothing usable). Press Guide again to retry — nothing is stuck."})
             yield _ev(ASSIST_GUIDE_DONE, {
                 "status": ev.get("status"), "node_key": nk,
                 "guidance_meta": ev.get("guidance_meta") or {},
