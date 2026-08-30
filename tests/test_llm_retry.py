@@ -134,3 +134,79 @@ async def test_chat_forwards_messages_and_budget():
     assert kwargs["temperature"] == 0.7
     assert kwargs["role"] == "model_coder"
     assert kwargs["overrides"] is None
+
+
+# ---------------------------------------------------------------------------
+# §17.876 — think-off rescue draw (opt-in last resort after all draws empty)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.smoke
+async def test_chat_think_off_rescue_fires_after_all_empty():
+    """Live incident: a big fix prompt drove near-deterministic chain-of-thought
+    past the budget on ALL draws (temp 0.3) → "(no fix returned)". The rescue
+    draw re-issues the call with think=False and its answer is returned."""
+    mock = AsyncMock(side_effect=[_resp(""), _resp(""), _resp(""), _resp("rescued")])
+    resp = await chat_until_nonempty(
+        mock, _MESSAGES, {"role": "model_general"},
+        temperature=0.3, max_tokens=8192, label="assist_fix",
+        think_off_rescue=True,
+    )
+    assert resp.text == "rescued"
+    assert mock.call_count == 4
+    _, kwargs = mock.call_args
+    assert kwargs["think"] is False
+
+
+@pytest.mark.smoke
+async def test_chat_think_off_rescue_not_fired_when_a_draw_lands():
+    """A usable normal draw wins — no rescue call, no think kwarg."""
+    mock = AsyncMock(side_effect=[_resp(""), _resp("real")])
+    resp = await chat_until_nonempty(
+        mock, _MESSAGES, {"role": "model_general"},
+        temperature=0.3, max_tokens=8192, label="assist_fix",
+        think_off_rescue=True,
+    )
+    assert resp.text == "real"
+    assert mock.call_count == 2
+    _, kwargs = mock.call_args
+    assert "think" not in kwargs
+
+
+@pytest.mark.smoke
+async def test_chat_rescue_empty_returns_original_last_draw():
+    """An unusable rescue must not change caller error semantics — the last
+    normal (empty) draw is returned, exactly as without the rescue."""
+    mock = AsyncMock(side_effect=[_resp(""), _resp(""), _resp(""), _resp("")])
+    resp = await chat_until_nonempty(
+        mock, _MESSAGES, {"role": "model_general"},
+        temperature=0.3, max_tokens=8192, label="assist_fix",
+        think_off_rescue=True,
+    )
+    assert (resp.text or "").strip() == ""
+    assert mock.call_count == 4
+
+
+@pytest.mark.smoke
+async def test_chat_default_has_no_rescue():
+    """Opt-in only: without think_off_rescue the behavior is byte-identical to
+    the pre-§17.876 guard (3 draws, no fourth call)."""
+    mock = AsyncMock(side_effect=[_resp(""), _resp(""), _resp("")])
+    resp = await _chat_call(mock)
+    assert (resp.text or "").strip() == ""
+    assert mock.call_count == 3
+
+
+@pytest.mark.smoke
+async def test_generate_think_off_rescue_fires_after_all_empty():
+    """generate_until_nonempty sibling gets the same opt-in rescue."""
+    mock = AsyncMock(side_effect=[_resp(""), _resp(""), _resp(""), _resp("rescued")])
+    resp = await generate_until_nonempty(
+        mock, "p", {"role": "model_general"},
+        system="s", temperature=0.3, max_tokens=8192, label="t",
+        think_off_rescue=True,
+    )
+    assert resp.text == "rescued"
+    assert mock.call_count == 4
+    _, kwargs = mock.call_args
+    assert kwargs["think"] is False

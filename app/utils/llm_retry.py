@@ -22,7 +22,7 @@ logger = logging.getLogger("scaffold.llm_retry")
 
 
 async def _redraw_until(call, is_usable, *, draws, label, detail,
-                        event="llm_empty_redraw"):
+                        event="llm_empty_redraw", rescue=None):
     """§17.582 — core retry-on-empty loop shared by the three public guards.
 
     ``call`` is a zero-arg coroutine factory that performs one draw; ``is_usable``
@@ -33,6 +33,15 @@ async def _redraw_until(call, is_usable, *, draws, label, detail,
     in ``generate_until_nonempty`` / ``chat_until_nonempty`` /
     ``tool_call_until_args`` (§17.464/465/581) so a future policy change (jitter,
     wall-time cap, metrics) lands in one place.
+
+    §17.876 — ``rescue`` (optional zero-arg coroutine factory): one LAST-RESORT
+    draw after all ``draws`` come back success-but-unusable. The live failure it
+    exists for: at low temperature a thinking model's chain-of-thought is nearly
+    DETERMINISTIC, so when reasoning alone overruns num_predict the redraws all
+    fail identically ("variance lands non-empty on a fresh draw" — the §17.465
+    premise — does not hold). The rescue changes the call (think=False) instead
+    of re-rolling it. Used only if usable: an unusable/failed rescue returns the
+    original last draw so caller error semantics are unchanged.
     """
     resp = None
     for d in range(draws):
@@ -44,6 +53,14 @@ async def _redraw_until(call, is_usable, *, draws, label, detail,
         logger.warning(
             "%s: label=%s draw=%d/%d (%s)", event, label or "?", d + 1, draws, detail,
         )
+    if rescue is not None:
+        logger.warning(
+            "llm_think_off_rescue: label=%s (all %d draws empty; final draw with "
+            "think=False, §17.876)", label or "?", draws,
+        )
+        rescued = await rescue()
+        if rescued.success and is_usable(rescued):
+            return rescued
     return resp
 
 
@@ -57,6 +74,7 @@ async def generate_until_nonempty(
     max_tokens: int,
     draws: int = 3,
     label: str = "",
+    think_off_rescue: bool = False,
 ):
     """Call ``generate``, re-drawing on a success+empty response.
 
@@ -75,6 +93,11 @@ async def generate_until_nonempty(
             is what makes them overrun into empty content.
         draws: Max independent attempts (default 3).
         label: Short tag for the redraw warning log line.
+        think_off_rescue: §17.876 — after all ``draws`` come back empty, make
+            ONE more draw with ``think=False`` (chain-of-thought disabled) so
+            the whole token budget goes to content. Opt-in: the injected
+            ``generate`` must accept ``think`` (``model_router.generate`` does;
+            non-Ollama providers ignore it).
 
     Returns:
         The last response. A hard failure (``success=False``) returns
@@ -89,6 +112,10 @@ async def generate_until_nonempty(
         lambda r: bool((r.text or "").strip()),
         draws=draws, label=label,
         detail="thinking-model empty content, §17.464",
+        rescue=(lambda: generate(
+            prompt, system=system, temperature=temperature,
+            max_tokens=max_tokens, think=False, **route_kwargs,
+        )) if think_off_rescue else None,
     )
 
 
@@ -101,6 +128,7 @@ async def chat_until_nonempty(
     max_tokens: int,
     draws: int = 3,
     label: str = "",
+    think_off_rescue: bool = False,
 ):
     """``chat()`` variant of :func:`generate_until_nonempty` (§17.465).
 
@@ -127,6 +155,13 @@ async def chat_until_nonempty(
             makes them overrun reasoning into empty/truncated content.
         draws: Max independent attempts (default 3).
         label: Short tag for the redraw warning log line.
+        think_off_rescue: §17.876 — after all ``draws`` come back empty, make
+            ONE more draw with ``think=False``. The live incident this guards:
+            a big fix prompt drove ~7.5k+ tokens of near-deterministic
+            chain-of-thought past the 8192 budget on ALL draws (temp 0.3) →
+            "(no fix returned)"; the same prompt with think=False answered in
+            880 tokens. Opt-in: the injected ``chat`` must accept ``think``
+            (``model_router.chat`` does; non-Ollama providers ignore it).
 
     Returns:
         The last response. A hard failure (``success=False``) returns
@@ -141,5 +176,9 @@ async def chat_until_nonempty(
         lambda r: bool((r.text or "").strip()),
         draws=draws, label=label,
         detail="thinking-model empty content, §17.465",
+        rescue=(lambda: chat(
+            messages=messages, temperature=temperature,
+            max_tokens=max_tokens, think=False, **route_kwargs,
+        )) if think_off_rescue else None,
     )
 

@@ -268,6 +268,11 @@ Root-cause rule (§17.734) — do NOT rush the operator forward past a broken fo
 - Give the COMPLETE fix for the root cause, not a partial band-aid. If getting it right is a substantial setup task the plan does not cover as its own step, add a `## Needs its own step` section: state that this really should be a proper step in the plan (e.g. "Configure the VM's network for internet access") and tell them to reply **"add a step for this"** — the engine will then insert that step and walk them through it copy-paste, gather-and-fix, before returning here (§17.736) — rather than you improvising a fragile inline workaround.
 - When you fix a foundation, correct the record: if the environment/memory still describes it as set up/working, note the corrected reality in ## Diagnosis (e.g. "the bridge exists but is isolated — no internet uplink") so later steps stop assuming it works.
 
+Currency rule (§17.876) — verify the METHOD is still current, not just the command:
+- The plan (or an earlier fix in this conversation) may reference a program, package repo, download URL, or install method that is outdated, has moved, or was never right for THIS program. Before iterating on it again, cross-check it against the research block: does the program's own site/official docs still recommend this exact repo/method?
+- If the evidence shows the method is deprecated, replaced, or serves a DIFFERENT program (e.g. an apt repo that does not actually publish this package), say so plainly in ## Diagnosis and write the fix using the CURRENT officially recommended method — do not keep patching the dead path.
+- If the research block cannot confirm it either way and the error pattern smells like a dead or wrong source (repeated 404s, missing Release file, a "GPG key" that downloads as HTML), the fix is to CONFIRM the source first: point the operator at the program's official install docs (name the page from research if it's there) rather than another retry of the unconfirmed method.
+
 Hard rules:
 - Address the operator's ACTUAL blocker — which is usually this step's error, but per the root-cause rule may be a broken foundation underneath it. Don't restate the whole step from scratch unless the fix requires it.
 - Never write past-tense narration ("Fixed it", "Ran it and it worked"). The operator runs your commands.

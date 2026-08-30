@@ -276,7 +276,8 @@ export function renderChat(container, sessionId) {
       const res = await api.post(`/assist/${sessionId}/fix`, {
         error: err, node_key: session?.current_node_key || null, history: historyForGuide(),
       });
-      appendBubble("assistant", "fix", res.fix || "(no fix returned)");
+      // §17.876 — same honest fallback as the server turn loop.
+      appendBubble("assistant", "fix", res.fix || "I couldn't produce a fix this time — the model returned no usable answer after several attempts. Press the button again to retry, or paste just the last ~50 lines of the error output.");
       load();
     }),
     el("span", { class: "spacer" }),
