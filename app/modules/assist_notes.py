@@ -530,6 +530,27 @@ async def apply_pending_replan(
                 except Exception as e:  # noqa: BLE001 — preservation is best-effort
                     logger.warning("reopen_friction_preserve_failed nk=%s err=%r", nk, e)
         summary = {"applied": True, **result}
+        # §17.866 — never leave the session pointing at a step the apply just
+        # killed. The live incident: the operator's current step was in the
+        # proposal's drop set; the apply skipped it but current_node_key kept
+        # pointing there, so the UI re-rendered the dead step's stale
+        # walkthrough forever ("refreshed and I'm on the same response").
+        # Clearing the pointer makes the next /next claim fresh — which also
+        # routes the claim through the §17.864 premise check.
+        gone = set(result.get("dropped") or [])
+        if gone:
+            cur = (await db.execute(
+                text("SELECT current_node_key FROM assist_sessions WHERE id = :sid"),
+                {"sid": session_id},
+            )).scalar()
+            if cur and cur in gone:
+                await db.execute(
+                    text("UPDATE assist_sessions SET current_node_key = NULL "
+                         "WHERE id = :sid"),
+                    {"sid": session_id},
+                )
+                await db.commit()
+                summary["current_step_cleared"] = cur
     else:
         summary = {"applied": False, "discarded": True}
         # §17.771 (Phase 4) — remember this dismissal so `_stage_replan_proposal`

@@ -372,6 +372,63 @@ class TestApplyPendingReplan:
         # the second statement removed the pending_replan key
         assert "- 'pending_replan'" in str(db.execute.await_args_list[-1].args[0])
 
+    async def test_apply_dropping_current_step_clears_pointer(self):
+        """§17.866 — an apply whose drop set contains the session's CURRENT
+        step must clear current_node_key (the live incident: the pointer kept
+        aiming at the skipped step, so the UI re-rendered its stale walkthrough
+        forever). The next /next then claims fresh — premise check included."""
+        meta = {"pending_replan": {"proposals": [{"node_key": "T8", "action": "drop"}]}}
+        statements = []
+
+        async def _exec(sql, params=None):
+            statements.append(str(sql))
+            if "SELECT job_id" in str(sql):
+                return _result(first_={"job_id": _JID, "metadata": meta})
+            if "SELECT current_node_key" in str(sql):
+                m = MagicMock()
+                m.scalar.return_value = "T8"
+                return m
+            return _result()
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=_exec)
+        db.commit = AsyncMock()
+        with patch.object(assist_replan, "apply_note_replan",
+                          AsyncMock(return_value={"revised": [], "dropped": ["T8"]})):
+            out = await assist_agent.apply_pending_replan(
+                session_id=_SID, decision="apply", db=db,
+            )
+        assert out["applied"] is True
+        assert out["current_step_cleared"] == "T8"
+        assert any("SET current_node_key = NULL" in s for s in statements)
+
+    async def test_apply_dropping_other_step_keeps_pointer(self):
+        """§17.866 — dropping a NON-current step leaves the pointer alone."""
+        meta = {"pending_replan": {"proposals": [{"node_key": "T4", "action": "drop"}]}}
+        statements = []
+
+        async def _exec(sql, params=None):
+            statements.append(str(sql))
+            if "SELECT job_id" in str(sql):
+                return _result(first_={"job_id": _JID, "metadata": meta})
+            if "SELECT current_node_key" in str(sql):
+                m = MagicMock()
+                m.scalar.return_value = "T9"
+                return m
+            return _result()
+
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=_exec)
+        db.commit = AsyncMock()
+        with patch.object(assist_replan, "apply_note_replan",
+                          AsyncMock(return_value={"revised": [], "dropped": ["T4"]})):
+            out = await assist_agent.apply_pending_replan(
+                session_id=_SID, decision="apply", db=db,
+            )
+        assert out["applied"] is True
+        assert "current_step_cleared" not in out
+        assert not any("SET current_node_key = NULL" in s for s in statements)
+
     async def test_discard_clears_without_replan(self):
         meta = {"pending_replan": {"proposals": [{"node_key": "T1", "action": "revise"}]}}
         db = AsyncMock()

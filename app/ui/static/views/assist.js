@@ -855,6 +855,13 @@ export function renderChat(container, sessionId) {
       if (abort) abort.abort();
       return;
     }
+    // §17.866 — no current step (e.g. a re-plan apply just dropped it and
+    // cleared the pointer): claim the next one first, then guide. Without
+    // this, Guide me on a cleared pointer 409s ("no current step").
+    if (!session?.current_node_key) {
+      await claimAndGuideNext();
+      return;
+    }
     guiding = true;
     guideBtn.textContent = "■ Stop";
     abort = new AbortController();
