@@ -364,3 +364,21 @@ async def test_generate_fix_novel_url_gate_regenerates():
     assert "api.github.com" in res["fix"]
     assert "Caution" not in res["fix"]
     assert res["guidance_meta"]["novel_url_violations"] == []
+
+
+# ── §17.887 — guide integrity gate (#8) ──────────────────────────────────
+
+
+def test_guide_integrity_warning_flags_repeat_and_novel():
+    from app.modules.assist_guide import guide_integrity_warning
+    failed = 'curl -L "https://radarr.video/api/x" -o /tmp/R.tar.gz'
+    guide = ('```bash\ncurl -L "https://radarr.video/api/x" -o /tmp/R.tar.gz\n```\n'
+             '```bash\nwget https://invented.example/pkg.tar.gz\n```')
+    warn = guide_integrity_warning(guide, "no grounding here", failed)
+    assert "already FAILED" in warn and "not traceable" in warn
+
+
+def test_guide_integrity_warning_clean_guide_silent():
+    from app.modules.assist_guide import guide_integrity_warning
+    guide = '```bash\nsystemctl status radarr\n```'
+    assert guide_integrity_warning(guide, "corpus", "") == ""

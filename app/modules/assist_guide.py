@@ -2021,6 +2021,7 @@ def _build_guide_user_prompt(
 async def generate_guidance(
     *,
     ctx: StepContext,
+    failed_commands: str = "",
     node_description: Optional[str] = None,
     research: bool,
     refine_hint: Optional[str] = None,
@@ -2106,6 +2107,11 @@ async def generate_guidance(
     # dropped the "## My suggestion" lean, generate just that block from the
     # options it produced and append it. Only on a miss; fail-soft (append is ""
     # → ship the un-enforced walkthrough). Off by default (tests/fresh installs).
+    if text_out:
+        warn = guide_integrity_warning(text_out, user, failed_commands)
+        if warn:
+            logger.warning("assist_guide_integrity_flag node_key=%s", node_key)
+            text_out += warn
     suggestion_enforced = False
     if (is_decision and text_out
             and settings.assist_decision_suggestion_enforce
@@ -2292,6 +2298,31 @@ def _error_focus_query(title: str, error_text: str) -> str:
     line = _re.sub(r"\s+", " ", line)[:90]
     title_part = " ".join((title or "").split()[:6])
     return f"{title_part} {line}".strip()[:130]
+
+
+def guide_integrity_warning(text_out: str, user_prompt: str, failed_commands: str) -> str:
+    """§17.887 (audit #8) — the §17.882/883 gates for GUIDE output. Returns a
+    warning block to append ("" when clean). Guides get flag-don't-regen: a
+    visible warning beats doubled latency on every walkthrough, and the live
+    radarr.video guessed-URL incident entered through a guide."""
+    if not (text_out or "").strip():
+        return ""
+    bits = []
+    if (failed_commands or "").strip():
+        hits = find_repeated_failed(text_out, failed_commands)
+        if hits:
+            bits.append("re-prescribes something that already FAILED in this "
+                        "session's troubleshooting (" +
+                        "; ".join(f"`{h[:70]}`" for h in hits[:2]) + ")")
+    novel = find_novel_urls(text_out, (user_prompt or "") + "\n" + (failed_commands or ""))
+    if novel:
+        bits.append("contains download URL(s) not traceable to research, the "
+                    "playbook, or your own output (" +
+                    "; ".join(f"`{n[:70]}`" for n in novel[:2]) + ") — verify before running")
+    if not bits:
+        return ""
+    return ("\n\n---\n⚠️ **Integrity check:** this walkthrough " +
+            " and ".join(bits) + ". Reply \"different approach\" to force a method change.")
 
 
 async def generate_fix(
@@ -2651,8 +2682,16 @@ async def ensure_guidance(
                 cached.pop("_generated_at_raw", None)
                 return cached
             logger.info("assist_guide_cache_stale_regen node_key=%s", node_key)
+    failed_cmds = ""
+    try:  # §17.887(#8) — guides see the step's failed-command history too
+        from app.modules.assist_agent import _fix_failure_streak
+        _stk, failed_cmds = await _fix_failure_streak(
+            session_id=session_id, node_key=node_key, db=db)
+    except Exception:  # noqa: BLE001
+        pass
     res = await generate_guidance(
         ctx=ctx,
+        failed_commands=failed_cmds,
         node_description=node_description,
         research=research,
         refine_hint=refine_hint,
@@ -2799,6 +2838,7 @@ async def generate_guidance_stream(
     ]
 
     # (c) stream content deltas.
+    stream_broken = False
     chunks: list[str] = []
     model_used = role
     try:
@@ -2810,9 +2850,16 @@ async def generate_guidance_stream(
                 chunks.append(delta)
                 yield {"type": "delta", "text": delta}
     except Exception as exc:
+        # §17.887 (audit #7) — a mid-stream failure with partial chunks was
+        # persisted status='ready' and REPLAYED from cache forever ("half an
+        # answer" on every re-view). Mark broken → persist non-ready below so
+        # the cache never serves a walkthrough that didn't finish cleanly.
         logger.warning("assist_guide_stream_failed: %s", exc)
+        stream_broken = True
 
     text_out = "".join(chunks).strip()
+    if stream_broken and text_out:
+        yield {"type": "delta", "text": "\n\n_⚠️ The stream broke mid-walkthrough — the steps above may be incomplete. Press Guide again for a fresh full version._"}
 
     # (d) empty-guard fallback — preserve §17.465 (stream yielded nothing).
     if not text_out:
@@ -2827,6 +2874,20 @@ async def generate_guidance_stream(
         if text_out:
             yield {"type": "delta", "text": text_out}
 
+    # §17.887(#8) — guide integrity gate on the stream path too.
+    if text_out:
+        _failed_cmds = ""
+        try:
+            from app.modules.assist_agent import _fix_failure_streak
+            _stk, _failed_cmds = await _fix_failure_streak(
+                session_id=session_id, node_key=node_key, db=db)
+        except Exception:  # noqa: BLE001
+            pass
+        _warn = guide_integrity_warning(text_out, user, _failed_cmds)
+        if _warn:
+            logger.warning("assist_guide_integrity_flag node_key=%s (stream)", node_key)
+            text_out += _warn
+            yield {"type": "delta", "text": _warn}
     # §17.854 (audit C1) — decision-suggestion enforcement was ONLY on the
     # non-stream path, so a streamed DECISION walkthrough that dropped the
     # "## My suggestion" lean shipped un-enforced even with the valve on. Run the
@@ -2857,7 +2918,7 @@ async def generate_guidance_stream(
             step_title=ctx.title, role=role, db=db,
         )
 
-    status = "ready" if text_out else "failed"
+    status = "ready" if (text_out and not stream_broken) else "failed"  # §17.887(#7)
     meta: dict[str, Any] = {
         "model": model_used,
         "tool": ctx.tool,
