@@ -122,8 +122,10 @@ async def test_refused_submit_falls_back_without_killing_turn():
          patch("app.routers.assist.assist_submit",
                new=AsyncMock(side_effect=RuntimeError("409 not claimable"))):
         ev = await _collect(message="output pasted here for the record ok")
-    # no step_outcome, but the loop survived to its terminal frame
+    # no step_outcome; §17.889(#11): a DURABLE answer explains the refusal
     assert "assist_step_outcome" not in _names(ev)
+    assert any("wouldn't accept" in (d.get("text") or "")
+               for n, d in ev if n == "assist_answer")
     assert ev[-1][0] == "assist_turn_done" and ev[-1][1]["handled"] == "submit"
 
 
@@ -342,6 +344,8 @@ async def test_submit_selfheal_second_refusal_falls_back():
         ev = await _collect(message="output pasted here for the record ok")
     assert submit.await_count == 2
     assert "assist_step_outcome" not in _names(ev)
+    assert any("wouldn't accept" in (d.get("text") or "")
+               for n, d in ev if n == "assist_answer")  # §17.889(#11)
     assert ev[-1][0] == "assist_turn_done"
 
 
