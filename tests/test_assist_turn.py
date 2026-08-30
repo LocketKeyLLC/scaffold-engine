@@ -294,3 +294,70 @@ async def test_tail_stall_cap_releases_screen():
     assert names[-1] == "assist_turn_done"
     assert out[-1][1]["handled"] == "stalled_tail"
     assert any("gone quiet" in (d.get("detail") or "") for n, d in out if n == "error")
+
+
+# ── §17.878 — unclaimed-step self-heal ───────────────────────────────────
+
+
+async def test_submit_must_claim_first_selfheals_claims_and_retries():
+    """Live incident: successful install evidence refused with 409
+    must_claim_first (pointer moved without a claim; presented_at NULL).
+    The loop must claim via assist_next and retry ONCE, then commit."""
+    from fastapi import HTTPException
+    p1, p2 = _guide_patches(node_key=None)
+    refusal = HTTPException(status_code=409, detail={
+        "error_code": "must_claim_first",
+        "message": "step T14 is pending; claim it first"})
+    submit = AsyncMock(side_effect=[refusal, {"status": "committed"}])
+    nxt = AsyncMock(return_value={"node_key": "T14", "premise_check": {}})
+    with p1, p2, \
+         patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "submit", "confidence": "high",
+                                           "node_key": "T14", "evidence": "active + 200"})), \
+         patch("app.routers.assist.assist_submit", new=submit), \
+         patch("app.routers.assist.assist_next", new=nxt):
+        ev = await _collect(message="systemctl is-active prowlarr -> active, curl 200")
+    assert submit.await_count == 2
+    nxt.assert_awaited()
+    outcome = next(d for n, d in ev if n == "assist_step_outcome")
+    assert outcome["status"] == "committed"
+    assert any("claiming it now" in (d.get("text") or "").lower()
+               for n, d in ev if n == "assist_turn_status")
+    assert ev[-1][1]["handled"] == "submit"
+
+
+async def test_submit_selfheal_second_refusal_falls_back():
+    """If the retry ALSO fails, keep the §17.863 explain-and-continue path."""
+    from fastapi import HTTPException
+    refusal = HTTPException(status_code=409, detail={"error_code": "must_claim_first",
+                                                     "message": "step T14 is pending"})
+    submit = AsyncMock(side_effect=[refusal, refusal])
+    with patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "submit", "confidence": "high",
+                                           "node_key": "T14"})), \
+         patch("app.routers.assist.assist_submit", new=submit), \
+         patch("app.routers.assist.assist_next", new=AsyncMock(return_value={})):
+        ev = await _collect(message="output pasted here for the record ok")
+    assert submit.await_count == 2
+    assert "assist_step_outcome" not in _names(ev)
+    assert ev[-1][0] == "assist_turn_done"
+
+
+async def test_claim_and_guide_repairs_pending_pointer_step():
+    """§17.878 layer 2: a 'pending' pointer step is claimed at the guide
+    chokepoint so the mirror invariant holds before any walkthrough."""
+    from unittest.mock import MagicMock
+    p1, p2 = _guide_patches(node_key="T14")
+    nxt = AsyncMock(return_value={"node_key": "T14"})
+    db = AsyncMock()
+    probe = MagicMock()
+    probe.scalar.return_value = "pending"
+    db.execute = AsyncMock(return_value=probe)
+    with p1, p2, patch("app.routers.assist.assist_next", new=nxt):
+        out = []
+        async for e in assist_turn._claim_and_guide(_SID, "T14", [], db, orient=False):
+            out.append(e)
+    nxt.assert_awaited_once()
+    assert any(n == "assist_guide_done" for n, _ in out)
