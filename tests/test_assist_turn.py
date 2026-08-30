@@ -475,3 +475,25 @@ async def test_committed_submit_still_advances_not_fixes():
         ev = await _collect(message="all done, service active")
     fix.assert_not_awaited()
     assert "assist_guide_delta" in _names(ev)
+
+
+# ── §17.885 — the tracker must ACTUALLY run on the fallback path ─────────
+
+
+async def test_fallback_path_actually_invokes_tracker():
+    """Audit finding: the fallback imported a NONEXISTENT input class since
+    §17.868; the swallowed ImportError made the tracker a silent no-op and the
+    old test passed because it never asserted the tracker was CALLED. This one
+    does — and uses the REAL input class import path."""
+    p1, p2 = _guide_patches(node_key="T9")
+    track = AsyncMock(return_value={"action": "proceed"})
+    with p1, p2, \
+         patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "unknown", "confidence": "low"})), \
+         patch("app.routers.assist.assist_track", new=track):
+        ev = await _collect(message="ok that box is racked and cabled now moving on")
+    track.assert_awaited_once()   # ImportError would leave this un-awaited
+    body = track.await_args.args[1]
+    assert body.message.startswith("ok that box")
+    assert "assist_guide_delta" in _names(ev)

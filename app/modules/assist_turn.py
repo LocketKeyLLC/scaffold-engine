@@ -416,11 +416,15 @@ async def _run_turn_inner(
         yield _ev(ASSIST_TURN_STATUS, {"text": "Checking step progress…"})
         advanced = False
         try:
-            from app.routers.assist import assist_track
-            from app.routers.assist import AssistTrackInput
+            # §17.885 (audit finding) — this imported a NONEXISTENT class
+            # (AssistTrackInput) since §17.868; the ImportError was swallowed
+            # below, so the §17.754 progress tracker NEVER ran on the server
+            # turn loop — the SPA's only dispatch path. The /track endpoint
+            # takes AssistInterpretInput.
+            from app.routers.assist import AssistInterpretInput, assist_track
             tr = await assist_track(
                 session_id,
-                AssistTrackInput(message=text_, node_key=nk, history=history),
+                AssistInterpretInput(message=text_, node_key=nk, history=history),
                 db=db,
             )
             if (tr or {}).get("action") == "advanced":
