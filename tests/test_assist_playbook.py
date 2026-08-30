@@ -286,3 +286,15 @@ async def test_plan_correction_silent_when_no_match():
         await _propose_plan_correction(
             session_id="s", ruled=["apt.servarr.com repo dead"], proven=[], db=db)
     assert not called
+
+
+def test_find_repeated_failed_ignores_local_verification_urls():
+    """§17.882b — localhost/RFC1918 health-check URLs recur legitimately in
+    every fix; only EXTERNAL URLs (the dead download hosts) are repeat signal."""
+    from app.modules.assist_guide import find_repeated_failed
+    failed = ('curl -L "https://radarr.video/api/v1/update" -o /tmp/R.tar.gz\n'
+              'curl -s http://localhost:7878\n'
+              'curl -s http://192.168.1.21:9696')
+    out = ('```bash\ncurl -fsSL https://api.github.com/repos/Radarr/Radarr/releases/latest\n```\n'
+           'then verify:\n```bash\ncurl -s -o /dev/null -w "%{http_code}" http://localhost:7878\n```')
+    assert find_repeated_failed(out, failed) == []
