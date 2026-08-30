@@ -1163,6 +1163,41 @@ async def run_step_research(
     return {"session_id": session_id, "node_key": nk, **res}
 
 
+async def _fix_failure_streak(
+    *, session_id: str, node_key: str, db,
+) -> tuple[int, str]:
+    """§17.881 — how many consecutive fixes has this step burned without
+    resolving? Walk the node's ASSISTANT turns newest→oldest and count the
+    leading run of kind='fix'; extract the fenced commands those fixes
+    prescribed (they demonstrably did not resolve the problem — the operator
+    is back with another error). Returns ``(streak, failed_commands_text)``.
+    Fail-soft → (0, "")."""
+    import re as _re
+    try:
+        rows = (await db.execute(
+            text("""
+                SELECT kind, content FROM assist_turns
+                 WHERE session_id = :sid AND node_key = :nk AND role = 'assistant'
+                 ORDER BY created_at DESC, id DESC LIMIT 8
+            """),
+            {"sid": session_id, "nk": node_key},
+        )).mappings().all()
+        streak = 0
+        cmds: list[str] = []
+        for r in rows:
+            if (r.get("kind") or "") != "fix":
+                break
+            streak += 1
+            for block in _re.findall(r"```[a-z]*\n(.*?)```", r.get("content") or "", _re.S):
+                b = block.strip()
+                if b and b not in cmds:
+                    cmds.append(b)
+        return streak, "\n\n".join(cmds[:8])
+    except Exception as e:  # noqa: BLE001 — escalation is an enhancement, never a blocker
+        logger.debug("assist_fix_streak_failed session_id=%s err=%r", session_id, e)
+        return 0, ""
+
+
 async def run_step_fix(
     *,
     session_id: str,
@@ -1218,11 +1253,21 @@ async def run_step_fix(
         session_id=session_id, nk=nk, sess=sess, db=db, ctx=ctx,
         exclude_tail=error, history=history,
     )
+    # §17.881 — repeat-failure escalation: consecutive unresolved fixes on this
+    # node mean the current METHOD is failing, not just the last command. The
+    # streak + the previously-prescribed commands thread into generate_fix,
+    # which (at threshold) demands a materially different approach and floors
+    # the research query budget.
+    streak, failed_cmds = await _fix_failure_streak(
+        session_id=session_id, node_key=nk, db=db,
+    )
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
         research=research,
         environment=mem.environment,
+        failure_streak=streak,
+        failed_commands=failed_cmds,
         node_key=nk,
         domain=node_row.get("domain"),
         verbosity=mem.verbosity,
@@ -1531,6 +1576,8 @@ from app.modules.assist_memory import (  # noqa: F401,E402
     drain_consolidate_tasks,
     capture_session_facts,
     learn_from_submit,
+    reconcile_on_commit,
+    schedule_reconcile_on_commit,
     sweep_superseded_facts,
     _sibling_facts,
     _durable_facts_for_session,

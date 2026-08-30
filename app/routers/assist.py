@@ -957,6 +957,18 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
                     result["captured_facts"] = facts
             except Exception:  # never fail a submit on the facts step
                 pass
+        # §17.881 — commit-time memory reconciliation: retire facts the
+        # committed outcome contradicts + fold proven/ruled-out methods into
+        # the session playbook. Background (own DB session); fail-soft.
+        if (isinstance(result, dict) and result.get("status") == "committed"
+                and body.action == "submit"):
+            try:
+                assist_agent.schedule_reconcile_on_commit(
+                    session_id=session_id, node_key=body.node_key or "",
+                    evidence=body.output or "",
+                )
+            except Exception:  # scheduling must never fail a submit
+                pass
         # §17.703 — surface a newly-captured / switched shell context so the
         # pipeline can confirm it ("noted: you're on root@pve").
         if captured_ctx and isinstance(result, dict):
@@ -1164,6 +1176,14 @@ async def _retire_step_mirrored(
         {"nk": nxt, "sid": session_id},
     )
     await db.commit()
+    # §17.881 — the tracker's retire is a commit too: reconcile memory with the
+    # completed outcome (retire contradicted facts, fold playbook lessons).
+    try:
+        assist_agent.schedule_reconcile_on_commit(
+            session_id=session_id, node_key=node_key, evidence=evidence or "",
+        )
+    except Exception:  # scheduling must never fail the retire
+        pass
 
 
 @router.post("/assist/{session_id}/track")

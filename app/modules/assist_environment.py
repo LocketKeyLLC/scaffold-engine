@@ -85,6 +85,8 @@ async def set_environment(
     verbosity: str | None = None,
     facts: list[str] | None = None,
     retract_facts: list[str] | None = None,
+    playbook_proven: list[str] | None = None,
+    playbook_ruled_out: list[str] | None = None,
     db,
 ) -> dict:
     """Merge environment facts into `assist_sessions.metadata`.
@@ -142,6 +144,25 @@ async def set_environment(
                 seen.add(t.lower())
         # Cap: keep the most recent (oldest drop first).
         current["facts"] = existing[-int(_s.assist_facts_max):]
+    if playbook_proven or playbook_ruled_out:
+        # §17.881 — the session playbook: methods PROVEN to work on this system
+        # this session, and approaches that FAILED here. Merged like facts
+        # (dedupe case-insensitive, newest kept under the cap) into
+        # ``environment.playbook`` = {"proven": [...], "ruled_out": [...]}.
+        from app.config import settings as _s
+        pb = dict(current.get("playbook") or {})
+        for key, adds in (("proven", playbook_proven), ("ruled_out", playbook_ruled_out)):
+            if not adds:
+                continue
+            cur = [str(x).strip() for x in (pb.get(key) or []) if str(x).strip()]
+            seen_pb = {x.lower() for x in cur}
+            for a in adds:
+                t = str(a).strip()
+                if t and t.lower() not in seen_pb:
+                    cur.append(t)
+                    seen_pb.add(t.lower())
+            pb[key] = cur[-int(_s.assist_playbook_max):]
+        current["playbook"] = pb
     # Single jsonb merge patch — environment always, verbosity when given.
     patch: dict[str, Any] = {"environment": current}
     if verbosity is not None:

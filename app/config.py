@@ -858,6 +858,25 @@ class Settings(BaseSettings):
     assist_divergence_model_role: str = "model_general"
     assist_guide_max_tokens: int = Field(default=8192, ge=512, le=16384)
     assist_guide_max_research_queries: int = Field(default=3, ge=0, le=8)
+    # §17.881 — the "stops repeating what already failed" overhaul, three parts:
+    # (1) commit-time reconciliation — when a step commits, retire ledger facts
+    # the committed outcome contradicts (the ledger otherwise asserts stale
+    # mid-troubleshooting states as timeless truth — live: "prowlarr is not
+    # installed" surviving the successful install);
+    # (2) session playbook — proven-here methods + failed-here approaches
+    # derived in the same pass, injected as a BINDING block into every
+    # generation (live: the engine guessed radarr.video URLs while its own
+    # session had proven the <app>.servarr.com updatefile pattern);
+    # (3) repeat-failure escalation (assist_fix_streak_threshold consecutive
+    # unresolved fixes on a node) — forced research floor + an explicit
+    # "these commands already failed, produce a different approach" section.
+    # Code-default OFF (§17.819 pattern — fresh installs and the test suite make
+    # zero model calls and schedule zero background tasks); the live compose
+    # turns it ON via ASSIST_COMMIT_RECONCILE_ENABLED. Lesson re-learned: a
+    # default-ON background scheduler leaked tasks into 80 unrelated tests.
+    assist_commit_reconcile_enabled: bool = False
+    assist_playbook_max: int = Field(default=12, ge=2, le=30)
+    assist_fix_streak_threshold: int = Field(default=2, ge=1, le=5)
     # §17.877 — cached guidance that predates operator work on the step is
     # STALE: re-serving it verbatim ("pct start 102" hours into troubleshooting
     # a running container — the live incident) reads as the engine repeating
