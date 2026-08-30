@@ -218,3 +218,20 @@ async def test_tail_missing_run_errors_cleanly():
     with patch("app.database.async_session", new=_fake_async_session([None])):
         out = [ev async for ev in assist_turn.tail_turn_run("nope")]
     assert out[-1][0] == "error" and "not found" in out[-1][1]["detail"]
+
+
+async def test_fix_dispatch_is_research_backed():
+    """§17.874 — fixes research, unconditionally: consecutive fixes cycled
+    guessed repo URLs while live research would have supplied the current
+    correct instructions (the operator's standing unsure→research requirement)."""
+    fixer = AsyncMock(return_value={"fix": "researched fix"})
+    with patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_agent.capture_assistant_reply", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "fix", "confidence": "high",
+                                           "node_key": "T14", "error_text": "boom"})), \
+         patch("app.modules.assist_agent.run_step_fix", new=fixer):
+        ev = await _collect(message="root@pve:~# apt-get update failed with an error")
+    assert fixer.await_args.kwargs.get("research") is True
+    ans = next(d for n, d in ev if n == "assist_answer")
+    assert ans["text"] == "researched fix"
