@@ -2173,18 +2173,89 @@ def _normalized_commands(text_: str) -> set[str]:
     return out
 
 
+_VERSIONISH_RE = None
+
+
+def _url_skeleton(url: str) -> tuple:
+    """§17.883 — a URL's identity modulo version guessing: (host,
+    frozenset(path segments with version-ish segments masked)). The live
+    guess-cycle: releases/latest/download/R.tar.gz → download/v5.3.3/… →
+    download/v5.3.0/… — three 'different' URLs, one failing endpoint family.
+    Masking version segments and ignoring order makes them EQUAL."""
+    global _VERSIONISH_RE
+    import re as _re
+    from urllib.parse import urlparse
+    if _VERSIONISH_RE is None:
+        _VERSIONISH_RE = _re.compile(r"^(v?\d[\w.\-]*|latest|master|main|stable|current)$", _re.I)
+    try:
+        p = urlparse(url)
+        segs = frozenset(
+            "~V~" if _VERSIONISH_RE.match(s) else s.lower()
+            for s in p.path.split("/") if s
+        )
+        return (p.netloc.lower(), segs)
+    except Exception:  # noqa: BLE001
+        return ("", frozenset([url]))
+
+
 def find_repeated_failed(text_out: str, failed_commands: str) -> list[str]:
-    """§17.882 — deterministic repeat detection: which already-failed commands
-    or URLs does this new walkthrough prescribe AGAIN? The live incident this
-    enforces against: with the playbook, the ruled-out list, and the failed
-    command all IN the prompt, the model still re-prescribed the identical
-    dead radarr.video URL — prompt rules are guidance, this is enforcement."""
+    """§17.882/883 — deterministic repeat detection: which already-failed
+    commands or URLs does this new walkthrough prescribe AGAIN — exactly, or
+    as a version-guess VARIATION of the same failing endpoint family? The
+    §17.882 exact matcher blocked identical repeats and the model responded by
+    mutating the version tag three times; prompt rules are guidance, this is
+    enforcement."""
+    import re as _re
     if not (text_out or "").strip() or not (failed_commands or "").strip():
         return []
     new_cmds = _normalized_commands(text_out)
     old_cmds = _normalized_commands(f"```\n{failed_commands}\n```")
-    hits = [c for c in new_cmds if c in old_cmds]
+    hits = {c for c in new_cmds if c in old_cmds}
+    # §17.883 — version-masked skeleton match on URLs only.
+    old_urls = {u for u in old_cmds if u.startswith("http")}
+    old_skels = {_url_skeleton(u) for u in old_urls}
+    for c in new_cmds:
+        for u in _re.findall(r"https?://[^\s\"'`\)\]]+", c):
+            u = u.rstrip(".,;")
+            if _url_skeleton(u) in old_skels and c not in hits:
+                hits.add(c)
     return sorted(hits)
+
+
+_CONSUMING_MARKERS = (" -o ", " -O", "wget ", "| sh", "| bash", "|sh", "|bash",
+                      "git clone", "dpkg -i", "apt install", "apt-get install",
+                      "pip install", "sh -c", "> /", "tee /")
+
+
+def find_novel_urls(text_out: str, grounding_corpus: str) -> list[str]:
+    """§17.883 — external URLs the draft tells the operator to CONSUME (download
+    to disk, pipe to a shell, install from) that appear NOWHERE in its
+    grounding (research block, playbook, conversation, the operator's own
+    pasted output, the step task). A consumed URL with no provenance is a
+    GUESS — the root disease behind today's cycles (radarr.video, then three
+    invented GitHub version tags). READ-ONLY inspection URLs (a `curl -s` API
+    query whose output the operator pastes back) are exempt — discovery is
+    self-verifying and is exactly the behavior the gate's regeneration
+    directive demands; flagging it (the first live proof-run did) would punish
+    the cure. Local/RFC1918 URLs are exempt (the operator's own services)."""
+    global _LOCAL_HOST_RE
+    import re as _re
+    if not (text_out or "").strip():
+        return []
+    _normalized_commands("")  # ensure _LOCAL_HOST_RE is built
+    corpus = grounding_corpus or ""
+    novel: list[str] = []
+    for block in _re.findall(r"```[a-z]*\n(.*?)```", text_out, _re.S):
+        flat = " ".join(block.split())
+        if not any(m in flat for m in _CONSUMING_MARKERS):
+            continue  # read-only / discovery command — exempt
+        for url in _re.findall(r"https?://[^\s\"'`\)\]]+", block):
+            u = url.rstrip(".,;")
+            if _LOCAL_HOST_RE.match(u):
+                continue
+            if u not in corpus and u.rstrip("/") not in corpus and u not in novel:
+                novel.append(u)
+    return novel
 
 
 def _error_focus_query(title: str, error_text: str) -> str:
@@ -2302,7 +2373,12 @@ async def generate_fix(
             "of them. Produce a MATERIALLY DIFFERENT approach: prefer the session "
             "playbook's proven-here methods; if the research or playbook shows the "
             "whole method is wrong for this system, CHANGE THE METHOD — do not "
-            "retune the failing command.\n\n```\n"
+            "retune the failing command. After repeated failures your FIRST "
+            "command must be a DISCOVERY command that PRINTS the ground truth "
+            "(query the release API for the real URL, list the actual assets, "
+            "curl -I the endpoint) — never another guessed download attempt; "
+            "URLs you prescribe must appear VERBATIM in the research, the "
+            "playbook, or the operator's own output.\n\n```\n"
             + failed_commands.strip()[:3000] + "\n```"
         )
     parts.append(_FIX_USER_TRAILER)
@@ -2333,54 +2409,88 @@ async def generate_fix(
     ])
     text_out = (resp.text or "").strip() if (resp and resp.success) else ""
 
-    # §17.882 — CODE-ENFORCED no-repeat gate. Live proof this must not be a
-    # prompt rule: with the playbook, the ruled-out list, AND the failed
-    # command all in the prompt, the model re-prescribed the identical dead
-    # URL twice. Deterministic check → ONE regeneration with the violation
-    # named → if it STILL repeats, a visible warning leads the answer so the
-    # operator is never silently handed a known-failed command.
+    # §17.882/883 — CODE-ENFORCED integrity gate, two deterministic checks:
+    #   repeats    — already-failed commands/URLs, exactly OR as version-guess
+    #                variations of the same endpoint family (§17.883 skeleton);
+    #   novel URLs — external URLs with NO PROVENANCE (absent from research,
+    #                playbook, conversation, the operator's output, the task).
+    #                A URL from nowhere is a GUESS — the root disease behind
+    #                today's cycles (radarr.video, then three invented GitHub
+    #                version tags that each "passed" the exact-repeat check).
+    # Violation → ONE regeneration with the violations NAMED and a
+    # diagnose-first directive → still dirty → a visible warning leads the
+    # answer so the operator is never silently handed a guess.
     repeat_meta: list[str] = []
-    if text_out and failure_streak >= 1 and (failed_commands or "").strip():
-        hits = find_repeated_failed(text_out, failed_commands)
-        if hits:
+    novel_meta: list[str] = []
+
+    def _gate(draft: str) -> tuple[list[str], list[str]]:
+        hits_ = (find_repeated_failed(draft, failed_commands)
+                 if failure_streak >= 1 and (failed_commands or "").strip() else [])
+        novel_ = (find_novel_urls(draft, user + "\n" + (failed_commands or ""))
+                  if failure_streak >= settings.assist_fix_streak_threshold else [])
+        return hits_, novel_
+
+    if text_out:
+        hits, novel = _gate(text_out)
+        if hits or novel:
             logger.warning(
-                "assist_fix_repeat_violation node_key=%s hits=%d (regenerating)",
-                node_key, len(hits),
+                "assist_fix_gate_violation node_key=%s repeats=%d novel_urls=%d (regenerating)",
+                node_key, len(hits), len(novel),
             )
+            directive = ["\n\n---\nREGENERATION NOTICE:"]
+            if hits:
+                directive.append(
+                    "Your previous draft prescribed command(s)/URL(s) that ALREADY "
+                    "FAILED for this operator (exactly or as a version-guess "
+                    "variation of the same failing endpoint):\n"
+                    + "\n".join(f"- {h}" for h in hits[:5]))
+            if novel:
+                directive.append(
+                    "Your previous draft prescribed URL(s) that appear NOWHERE in "
+                    "the research, the playbook, or the operator's own output — "
+                    "you may have invented them:\n"
+                    + "\n".join(f"- {n}" for n in novel[:5]))
+            directive.append(
+                "STOP guessing. Lead with a DISCOVERY command whose OUTPUT prints "
+                "the ground truth (e.g. query the project's release API and print "
+                "the real download URL, `curl -I` the endpoint, list the actual "
+                "assets) and have the operator paste it back — OR use only URLs "
+                "that appear VERBATIM in the research/playbook/operator output.")
             regen = await _draw_fix([
                 {"role": "system", "content": fix_system},
-                {"role": "user", "content": user + (
-                    "\n\n---\nREGENERATION NOTICE: your previous draft prescribed "
-                    "the following command(s)/URL(s) that ALREADY FAILED for this "
-                    "operator — this is exactly the failure mode you were told to "
-                    "avoid. Produce a fix that uses a DIFFERENT method entirely "
-                    "(the session playbook's proven methods first):\n"
-                    + "\n".join(f"- {h}" for h in hits[:5])
-                )},
+                {"role": "user", "content": user + "\n".join(directive)},
             ])
             regen_text = (regen.text or "").strip() if (regen and regen.success) else ""
             if regen_text:
-                rehits = find_repeated_failed(regen_text, failed_commands)
-                if not rehits:
+                rehits, renovel = _gate(regen_text)
+                if not rehits and not renovel:
                     text_out = regen_text
                 else:
-                    repeat_meta = rehits
+                    repeat_meta, novel_meta = rehits, renovel
+                    warn_bits = []
+                    if rehits:
+                        warn_bits.append(
+                            "repeats something that already failed ("
+                            + "; ".join(f"`{h[:70]}`" for h in rehits[:2]) + ")")
+                    if renovel:
+                        warn_bits.append(
+                            "contains unverified URL(s) the engine could not trace "
+                            "to any source (" + "; ".join(f"`{n[:70]}`" for n in renovel[:2]) + ")")
                     text_out = (
-                        "⚠️ **Repeat warning:** this fix STILL includes something "
-                        "that already failed for you ("
-                        + "; ".join(f"`{h[:80]}`" for h in rehits[:2])
-                        + ") — the engine flagged it twice. Treat it with "
-                        "suspicion; reply \"different approach\" to force a "
-                        "method change.\n\n" + regen_text
+                        "⚠️ **Caution:** this fix " + " and ".join(warn_bits)
+                        + " — flagged twice by the integrity gate. Prefer its "
+                        "diagnostic commands over its download commands, and reply "
+                        "\"different approach\" to force a method change.\n\n"
+                        + regen_text
                     )
             else:
-                repeat_meta = hits
+                repeat_meta, novel_meta = hits, novel
                 text_out = (
-                    "⚠️ **Repeat warning:** this fix includes something that "
-                    "already failed for you ("
-                    + "; ".join(f"`{h[:80]}`" for h in hits[:2])
-                    + "). Treat it with suspicion; reply \"different approach\" "
-                    "to force a method change.\n\n" + text_out
+                    "⚠️ **Caution:** this fix includes "
+                    + ("already-failed command(s) " if hits else "")
+                    + ("unverified URL(s) " if novel else "")
+                    + "the integrity gate flagged. Treat with suspicion; reply "
+                    "\"different approach\" to force a method change.\n\n" + text_out
                 )
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
@@ -2391,9 +2501,10 @@ async def generate_fix(
         "generated_at": _utcnow_iso(),
         # §17.492 — destructive-command safety gate (fixes can carry rm/dd too).
         "destructive": scan_destructive(text_out) if settings.assist_destructive_scan else [],
-        # §17.882 — repeats that survived the regeneration gate (visible warning
-        # was prepended; recorded here for triage/telemetry).
+        # §17.882/883 — violations that survived the regeneration gate (visible
+        # warning was prepended; recorded here for triage/telemetry).
         "repeat_violations": repeat_meta,
+        "novel_url_violations": novel_meta,
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
