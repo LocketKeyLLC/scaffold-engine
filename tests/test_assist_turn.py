@@ -361,3 +361,64 @@ async def test_claim_and_guide_repairs_pending_pointer_step():
             out.append(e)
     nxt.assert_awaited_once()
     assert any(n == "assist_guide_done" for n, _ in out)
+
+
+# ── §17.880 — terminal-pointer heal (Guide/Done must not replay a done step) ─
+
+
+async def test_claim_and_guide_heals_terminal_pointer_forward():
+    """Live incident: tracker retired T14 but the pointer stayed on it — every
+    Guide/Done press re-walked the finished step. A terminal pointer must
+    announce + heal into the claim path (next step claimed and walked)."""
+    from unittest.mock import MagicMock
+    p1, p2 = _guide_patches(node_key="T14")
+    nxt = AsyncMock(return_value={"node_key": "T15", "premise_check": {}})
+    db = AsyncMock()
+    probe = MagicMock()
+    probe.scalar.return_value = "committed"
+    db.execute = AsyncMock(return_value=probe)
+    with p1, p2, patch("app.routers.assist.assist_next", new=nxt):
+        out = []
+        async for e in assist_turn._claim_and_guide(_SID, "T14", [], db, orient=False):
+            out.append(e)
+    nxt.assert_awaited_once()
+    assert any("already done" in (d.get("text") or "")
+               for n, d in out if n == "assist_turn_status")
+    done = [d for n, d in out if n == "assist_guide_done"]
+    assert done and done[0].get("node_key") == "T15"
+
+
+async def test_claim_and_guide_live_pointer_untouched():
+    """A live (presented) pointer step is guided as-is — no heal, no claim."""
+    from unittest.mock import MagicMock
+    p1, p2 = _guide_patches(node_key="T14")
+    nxt = AsyncMock()
+    db = AsyncMock()
+    probe = MagicMock()
+    probe.scalar.return_value = "presented"
+    db.execute = AsyncMock(return_value=probe)
+    with p1, p2, patch("app.routers.assist.assist_next", new=nxt):
+        out = []
+        async for e in assist_turn._claim_and_guide(_SID, "T14", [], db, orient=False):
+            out.append(e)
+    nxt.assert_not_awaited()
+    done = [d for n, d in out if n == "assist_guide_done"]
+    assert done and done[0].get("node_key") == "T14"
+
+
+async def test_retire_step_mirrored_advances_pointer():
+    """§17.880 root cause: the tracker's retire path must move the session
+    pointer to the next claimable step, like the submit-commit path does."""
+    from app.routers.assist import _retire_step_mirrored
+    db = AsyncMock()
+    with patch("app.routers.assist.assist_agent._next_pending_node_key",
+               new=AsyncMock(return_value="T15")):
+        await _retire_step_mirrored(
+            db=db, job_id="j", session_id=_SID, node_key="T14", evidence="done")
+    updates = [str(c.args[0]) for c in db.execute.await_args_list]
+    assert any("UPDATE assist_sessions SET current_node_key" in u for u in updates)
+    ptr_call = next(c for c in db.execute.await_args_list
+                    if "current_node_key" in str(c.args[0]))
+    assert ptr_call.args[1]["nk"] == "T15"
+    step_update = next(u for u in updates if "assist_steps" in u)
+    assert "committed_at=NOW()" in step_update
