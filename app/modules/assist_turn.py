@@ -279,7 +279,18 @@ async def _run_turn_inner(
                 session_id=session_id, node_key=nk,
                 error=(d.get("error_text") or text_), history=history, db=db,
             )
-            yield _ev(ASSIST_ANSWER, {"kind": "fix", "text": (fix or {}).get("fix") or "(no fix returned)"})
+            fix_text = (fix or {}).get("fix") or "(no fix returned)"
+            yield _ev(ASSIST_ANSWER, {"kind": "fix", "text": fix_text})
+            # §17.873 — the answer must outlive the run row: capture it as an
+            # assistant turn (in-capture dedupe absorbs replays) so the
+            # transcript — the UI's source of truth — carries it.
+            try:
+                await assist_agent.capture_assistant_reply(
+                    session_id=session_id, node_key=nk, kind="fix",
+                    content=fix_text, db=db,
+                )
+            except Exception:  # noqa: BLE001 — capture is best-effort
+                logger.warning("turn_loop_fix_capture_failed sid=%s", session_id)
             if impact == "surface":
                 async for e in _surface(session_id, d, text_, nk, db):
                     yield e
@@ -294,6 +305,13 @@ async def _run_turn_inner(
             answer = (res or {}).get("answer") or ""
             if answer.strip():
                 yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": answer})
+                try:  # §17.873 — durable transcript capture (dedupe-safe)
+                    await assist_agent.capture_assistant_reply(
+                        session_id=session_id, node_key=nk, kind="ask",
+                        content=answer, db=db,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("turn_loop_ask_capture_failed sid=%s", session_id)
             else:
                 yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": "I couldn't put together a useful answer for that — try rephrasing, or ask me to guide the current step."})
             if impact == "surface":
@@ -326,6 +344,13 @@ async def _run_turn_inner(
                 answer = (res or {}).get("answer") or ""
                 if answer.strip():
                     yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": answer})
+                    try:  # §17.873 — durable transcript capture (dedupe-safe)
+                        await assist_agent.capture_assistant_reply(
+                            session_id=session_id, node_key=nk, kind="ask",
+                            content=answer, db=db,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning("turn_loop_research_capture_failed sid=%s", session_id)
                     handled["v"] = "research_fallback"
                     return
             except Exception as exc:  # noqa: BLE001

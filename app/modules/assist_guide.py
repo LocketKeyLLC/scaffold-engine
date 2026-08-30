@@ -2157,6 +2157,13 @@ async def generate_fix(
     (``fix`` key so it can't be confused with persisted guidance). Fail-soft.
     """
     role = settings.assist_guide_model_role
+    # §17.873 — cap the pasted error like every other evidence site ([:6000]
+    # house pattern) but keep the TAIL: shell errors live at the end of long
+    # output. Live incident: a 9.9k-char paste interpolated UNTRUNCATED (twice
+    # — prepass task_text + the prompt section) starved the thinking model into
+    # 3/3 empty draws (§17.465) → "(no fix returned)".
+    if len(error_text or "") > 6000:
+        error_text = "(earlier output truncated)\n…" + error_text[-6000:]
 
     sources: list[dict] = []
     if research:
