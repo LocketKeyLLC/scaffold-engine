@@ -21,6 +21,25 @@ import logging
 logger = logging.getLogger("scaffold.llm_retry")
 
 
+def _thinking_squeezed(resp) -> bool:
+    """§17.877 — non-empty but TRUNCATED because reasoning ate the budget.
+
+    The §17.876 empty-content guard has a sibling failure the live HomeLab
+    session exposed: the model thinks ~7k tokens, the answer STARTS, and the
+    shared num_predict cap cuts it mid-command ("chown -R prowlarr:prowlarr
+    /opt/Prowlarr /var/lib/prowl" — a fix the operator can't complete). The
+    non-empty check passes, so no redraw or rescue fires and the operator gets
+    a walkthrough missing its tail. Signature: Ollama ``done_reason ==
+    "length"`` WITH a non-empty ``thinking`` field — a length-stop WITHOUT
+    thinking is just a legitimately long answer and must be kept. Fail-soft:
+    unknown/missing raw shapes (other providers, test mocks) → False."""
+    raw = getattr(resp, "raw", None) or {}
+    if not isinstance(raw, dict) or raw.get("done_reason") != "length":
+        return False
+    thinking = raw.get("thinking") or (raw.get("message") or {}).get("thinking") or ""
+    return bool(str(thinking).strip())
+
+
 async def _redraw_until(call, is_usable, *, draws, label, detail,
                         event="llm_empty_redraw", rescue=None):
     """§17.582 — core retry-on-empty loop shared by the three public guards.
@@ -109,9 +128,10 @@ async def generate_until_nonempty(
             prompt, system=system, temperature=temperature,
             max_tokens=max_tokens, **route_kwargs,
         ),
-        lambda r: bool((r.text or "").strip()),
+        lambda r: bool((r.text or "").strip()) and not (
+            think_off_rescue and _thinking_squeezed(r)),
         draws=draws, label=label,
-        detail="thinking-model empty content, §17.464",
+        detail="thinking-model empty/truncated content, §17.464/877",
         rescue=(lambda: generate(
             prompt, system=system, temperature=temperature,
             max_tokens=max_tokens, think=False, **route_kwargs,
@@ -173,9 +193,10 @@ async def chat_until_nonempty(
             messages=messages, temperature=temperature,
             max_tokens=max_tokens, **route_kwargs,
         ),
-        lambda r: bool((r.text or "").strip()),
+        lambda r: bool((r.text or "").strip()) and not (
+            think_off_rescue and _thinking_squeezed(r)),
         draws=draws, label=label,
-        detail="thinking-model empty content, §17.465",
+        detail="thinking-model empty/truncated content, §17.465/877",
         rescue=(lambda: chat(
             messages=messages, temperature=temperature,
             max_tokens=max_tokens, think=False, **route_kwargs,
