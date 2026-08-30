@@ -299,13 +299,35 @@ async def _run_turn_inner(
             return
         if confident and action == "submit":
             done = False
+            blocked_reason = None
             async for e in _submit(session_id, d, text_, nk, history, db):
-                if e[0] == ASSIST_STEP_OUTCOME and e[1].get("status") == "committed":
-                    done = True
+                if e[0] == ASSIST_STEP_OUTCOME:
+                    if e[1].get("status") == "committed":
+                        done = True
+                    elif e[1].get("status") in ("step_incomplete", "verification_failed"):
+                        blocked_reason = e[1].get("verify_reason") or "the step's goal isn't met yet"
                 yield e
             if done:
                 async for e in _claim_and_guide(session_id, None, history, db,
                                                 orient=False):
+                    yield e
+            elif blocked_reason is not None:
+                # §17.884 — a blocked submit must NEVER dead-end. Live incident:
+                # the operator ran the discovery command the engine asked for,
+                # pasted the ground truth back, the verifier (correctly) said
+                # "step not complete" — and the turn ENDED, discarding the very
+                # information the engine had requested. Continue into the fix
+                # flow seeded with the evidence + the verifier's reason: the
+                # pasted values are now provenance-legal grounding, so the next
+                # command can use them directly.
+                async for e in _fix_flow(
+                    session_id, nk,
+                    (f"{text_}\n\n[Progress noted, but the step is not complete "
+                     f"yet — verifier: {blocked_reason}] Continue from the "
+                     "output above: use the concrete values it contains."),
+                    history, db,
+                    status_text="Good progress — the step isn't finished yet, so I'm working out your next move from what you just pasted…",
+                ):
                     yield e
             handled["v"] = "submit"
             return
@@ -318,35 +340,11 @@ async def _run_turn_inner(
             # supply. The operator's standing requirement: unsure → research →
             # derive from up-to-date information. Costs ~a minute; the status
             # frame carries it.
-            yield _ev(ASSIST_TURN_STATUS, {"text": "Diagnosing the error — researching current, up-to-date fixes for it (this can take a minute or two)…"})
-            fix = await assist_agent.run_step_fix(
-                session_id=session_id, node_key=nk,
-                error=(d.get("error_text") or text_), history=history,
-                research=True, db=db,
-            )
-            # §17.876 — honest, actionable fallback. "(no fix returned)" was a
-            # dead end: it told the operator nothing and suggested nothing. The
-            # empty case is now rare (think-off rescue), but when it happens the
-            # operator should know it's a transient generation failure, not a
-            # verdict on their problem.
-            fix_text = (fix or {}).get("fix") or (
-                "I couldn't produce a fix this time — the model returned no "
-                "usable answer after several attempts. This is a generation "
-                "hiccup, not a verdict on your problem. Press Send again to "
-                "retry (research is re-run fresh), or paste just the last "
-                "~50 lines of the error output to tighten the context."
-            )
-            yield _ev(ASSIST_ANSWER, {"kind": "fix", "text": fix_text})
-            # §17.873 — the answer must outlive the run row: capture it as an
-            # assistant turn (in-capture dedupe absorbs replays) so the
-            # transcript — the UI's source of truth — carries it.
-            try:
-                await assist_agent.capture_assistant_reply(
-                    session_id=session_id, node_key=nk, kind="fix",
-                    content=fix_text, db=db,
-                )
-            except Exception:  # noqa: BLE001 — capture is best-effort
-                logger.warning("turn_loop_fix_capture_failed sid=%s", session_id)
+            async for e in _fix_flow(
+                session_id, nk, (d.get("error_text") or text_), history, db,
+                status_text="Diagnosing the error — researching current, up-to-date fixes for it (this can take a minute or two)…",
+            ):
+                yield e
             if impact == "surface":
                 async for e in _surface(session_id, d, text_, nk, db):
                     yield e
@@ -468,6 +466,34 @@ async def _surface(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterato
         logger.warning("turn_loop_surface_failed sid=%s err=%r", session_id, exc)
 
 
+async def _fix_flow(session_id: str, nk, error_text: str, history, db,
+                    *, status_text: str) -> AsyncIterator[_Event]:
+    """§17.874/884 — the research-backed fix sequence, shared by the fix
+    dispatch branch and the incomplete-submit continuation."""
+    from app.modules import assist_agent
+    yield _ev(ASSIST_TURN_STATUS, {"text": status_text})
+    fix = await assist_agent.run_step_fix(
+        session_id=session_id, node_key=nk, error=error_text,
+        history=history, research=True, db=db,
+    )
+    # §17.876 — honest, actionable fallback (never a silent dead end).
+    fix_text = (fix or {}).get("fix") or (
+        "I couldn't produce a fix this time — the model returned no "
+        "usable answer after several attempts. This is a generation "
+        "hiccup, not a verdict on your problem. Press Send again to "
+        "retry (research is re-run fresh), or paste just the last "
+        "~50 lines of the error output to tighten the context."
+    )
+    yield _ev(ASSIST_ANSWER, {"kind": "fix", "text": fix_text})
+    try:  # §17.873 — answers must outlive the run row
+        await assist_agent.capture_assistant_reply(
+            session_id=session_id, node_key=nk, kind="fix",
+            content=fix_text, db=db,
+        )
+    except Exception:  # noqa: BLE001 — capture is best-effort
+        logger.warning("turn_loop_fix_capture_failed sid=%s", session_id)
+
+
 def _is_must_claim_first(exc) -> bool:
     """§17.878 — recognize the recoverable submit refusal (step never claimed)."""
     detail = getattr(exc, "detail", None)
@@ -511,6 +537,9 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
             res = await _try_submit()
         yield _ev(ASSIST_STEP_OUTCOME, {
             "node_key": nk, "status": (res or {}).get("status") or "recorded",
+            # §17.884 — the verifier's reason rides the outcome frame so the
+            # dispatch can CONTINUE a blocked submit instead of dead-ending.
+            "verify_reason": (((res or {}).get("success_verdict") or {}).get("reason") or ""),
         })
     except Exception as exc:  # noqa: BLE001 — a refused submit must not kill the turn
         yield _ev(ASSIST_TURN_STATUS, {
