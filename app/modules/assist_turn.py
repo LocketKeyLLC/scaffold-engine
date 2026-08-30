@@ -331,6 +331,89 @@ async def _run_turn_inner(
                     yield e
             handled["v"] = "submit"
             return
+        if confident and action == "skip":
+            # §17.886(#2) — explicit skip was silently answered with a re-guide.
+            from app.routers.assist import AssistSubmitInput, assist_submit
+            try:
+                yield _ev(ASSIST_TURN_STATUS, {"text": "⏩ Skipping this step (recorded — you can revisit it later)…"})
+                await assist_submit(
+                    session_id,
+                    AssistSubmitInput(node_key=nk, output=text_, action="skip",
+                                      history=history),
+                    db=db,
+                )
+                yield _ev(ASSIST_STEP_OUTCOME, {"node_key": nk, "status": "skipped"})
+                async for e in _claim_and_guide(session_id, None, history, db, orient=False):
+                    yield e
+            except Exception as exc:  # noqa: BLE001
+                yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't skip that step ({exc}). It stays open."})
+            handled["v"] = "skip"
+            return
+        if confident and action in ("advance", "finalize"):
+            # §17.886(#2) — run the tracker reconcile, then honor EVERY result
+            # action (the old code matched only 'advanced', so 'finalized' and
+            # 'added_step' re-guided the stale node).
+            async for e in _track_then_continue(session_id, text_, nk, history, db,
+                                                finalize=(action == "finalize")):
+                yield e
+            handled["v"] = action
+            return
+        if confident and action == "pause":
+            from app.routers.assist import assist_pause
+            try:
+                await assist_pause(session_id, db=db)
+                yield _ev(ASSIST_TURN_STATUS, {"text": "⏸ Session paused — say \"resume\" whenever you're ready and we'll pick up exactly here."})
+            except Exception as exc:  # noqa: BLE001
+                yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't pause ({exc})."})
+            handled["v"] = "pause"
+            return
+        if confident and action == "add_step":
+            from app.routers.assist import AssistAddStepInput, assist_add_step
+            try:
+                yield _ev(ASSIST_TURN_STATUS, {"text": "➕ Adding that as its own step…"})
+                res = await assist_add_step(
+                    session_id, AssistAddStepInput(request=text_, before_node_key=nk), db=db,
+                )
+                new_nk = (res or {}).get("node_key")
+                async for e in _claim_and_guide(session_id, new_nk, history, db, orient=False):
+                    yield e
+            except Exception as exc:  # noqa: BLE001
+                yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't add the step ({exc}) — tell me again with a bit more detail."})
+            handled["v"] = "add_step"
+            return
+        if confident and action == "handoff":
+            yield _ev(ASSIST_TURN_STATUS, {"text": "🤝 To hand this step to the engine, press the step's Handoff button in the panel — chat-initiated handoff isn't wired yet, and I'd rather tell you that than pretend."})
+            handled["v"] = "handoff"
+            return
+        if confident and action == "explain_plan":
+            from app.routers.assist import assist_get_checklist
+            try:
+                cl = await assist_get_checklist(session_id, db=db)
+                items = (cl or {}).get("steps") or (cl or {}).get("checklist") or []
+                lines = [f"- {'✅' if (i.get('status') in ('committed','skipped')) else '👉' if i.get('node_key')==nk else '·'} {i.get('node_key')}: {(i.get('title') or '')[:70]}" for i in items[:30]]
+                yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": "**The plan so far:**\n" + "\n".join(lines)})
+            except Exception as exc:  # noqa: BLE001
+                yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't render the plan ({exc})."})
+            handled["v"] = "explain_plan"
+            return
+        if confident and action in ("set_env", "set_verbosity"):
+            import re as _re2
+            from app.routers.assist import AssistEnvInput, assist_set_env
+            try:
+                subs = dict(_re2.findall(r"([A-Za-z_]\w*)=(\S+)", text_))
+                verb = ("terse" if "terse" in text_.lower() else
+                        "detailed" if "detail" in text_.lower() else
+                        "normal" if action == "set_verbosity" else None)
+                await assist_set_env(
+                    session_id,
+                    AssistEnvInput(substitutions=subs or None, verbosity=verb),
+                    db=db,
+                )
+                yield _ev(ASSIST_TURN_STATUS, {"text": "Noted — environment updated."})
+            except Exception as exc:  # noqa: BLE001
+                yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't update the environment ({exc})."})
+            handled["v"] = "set_env"
+            return
         if confident and action == "fix":
             # §17.874 — fixes are RESEARCH-BACKED, unconditionally. The live
             # incident: two consecutive fixes cycled GUESSED Servarr repo URLs
@@ -341,7 +424,7 @@ async def _run_turn_inner(
             # derive from up-to-date information. Costs ~a minute; the status
             # frame carries it.
             async for e in _fix_flow(
-                session_id, nk, (d.get("error_text") or text_), history, db,
+                session_id, nk, text_, history, db,  # §17.886(#4) — full paste, not the ≤2000-char echo
                 status_text="Diagnosing the error — researching current, up-to-date fixes for it (this can take a minute or two)…",
             ):
                 yield e
@@ -354,7 +437,7 @@ async def _run_turn_inner(
             yield _ev(ASSIST_TURN_STATUS, {"text": "Researching your question against the project's current state — this can take a minute or two…"})
             res = await assist_agent.run_step_research(
                 session_id=session_id, node_key=nk,
-                question=(d.get("query") or text_), history=history, db=db,
+                question=text_, history=history, db=db,  # §17.886(#4)
             )
             answer = (res or {}).get("answer") or ""
             if answer.strip():
@@ -413,30 +496,7 @@ async def _run_turn_inner(
 
         # 5b. Fallback (low confidence / unhandled action): the progress
         # tracker, then guidance — the pre-§17.771 default, server-side.
-        yield _ev(ASSIST_TURN_STATUS, {"text": "Checking step progress…"})
-        advanced = False
-        try:
-            # §17.885 (audit finding) — this imported a NONEXISTENT class
-            # (AssistTrackInput) since §17.868; the ImportError was swallowed
-            # below, so the §17.754 progress tracker NEVER ran on the server
-            # turn loop — the SPA's only dispatch path. The /track endpoint
-            # takes AssistInterpretInput.
-            from app.routers.assist import AssistInterpretInput, assist_track
-            tr = await assist_track(
-                session_id,
-                AssistInterpretInput(message=text_, node_key=nk, history=history),
-                db=db,
-            )
-            if (tr or {}).get("action") == "advanced":
-                yield _ev(ASSIST_STEP_OUTCOME, {
-                    "node_key": (tr or {}).get("retired_prior_step") or nk,
-                    "status": "committed",
-                })
-                advanced = True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("turn_loop_track_failed sid=%s err=%r", session_id, exc)
-        async for e in _claim_and_guide(session_id, None if advanced else nk,
-                                        history, db, orient=False):
+        async for e in _track_then_continue(session_id, text_, nk, history, db):
             yield e
         handled["v"] = "fallback"
 
@@ -447,7 +507,7 @@ async def _note(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterator[_
     kind = d.get("note_kind") or ("decision" if (d.get("plan_impact") == "reshape") else "note")
     res = await assist_note(
         session_id,
-        AssistNoteInput(text=(d.get("note_text") or text_), kind=kind, node_key=nk),
+        AssistNoteInput(text=text_, kind=kind, node_key=nk),  # §17.886(#4) — reset-intent regexes need the original words
         db=db,
     )
     yield _ev(ASSIST_NOTE_RECORDED, {
@@ -468,6 +528,40 @@ async def _surface(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterato
                 yield e
     except Exception as exc:  # noqa: BLE001
         logger.warning("turn_loop_surface_failed sid=%s err=%r", session_id, exc)
+
+
+
+async def _track_then_continue(session_id: str, text_: str, nk, history, db,
+                               *, finalize: bool = False) -> AsyncIterator[_Event]:
+    """§17.886(#2) — tracker reconcile honoring EVERY result action."""
+    from app.modules import assist_agent
+    from app.routers.assist import AssistInterpretInput, assist_track
+    tr = {}
+    try:
+        yield _ev(ASSIST_TURN_STATUS, {"text": "Checking step progress…"})
+        tr = await assist_track(
+            session_id, AssistInterpretInput(message=text_, node_key=nk, history=history),
+            db=db,
+        ) or {}
+    except Exception as exc:  # noqa: BLE001 — §17.885 lesson: log LOUD
+        logger.error("turn_loop_track_failed sid=%s err=%r", session_id, exc)
+    act = tr.get("action")
+    if act in ("advanced", "finalized"):
+        yield _ev(ASSIST_STEP_OUTCOME, {
+            "node_key": tr.get("retired_prior_step") or nk, "status": "committed",
+        })
+    if act == "finalized":
+        yield _ev(ASSIST_TURN_STATUS, {"text": "🎉 That was the last step — the project is complete! Compiling the summary is available via the session's Done view."})
+        return
+    if act == "added_step":
+        async for e in _claim_and_guide(session_id, tr.get("node_key"), history, db,
+                                        orient=False):
+            yield e
+        return
+    async for e in _claim_and_guide(
+        session_id, None if act in ("advanced",) else nk, history, db, orient=False,
+    ):
+        yield e
 
 
 async def _fix_flow(session_id: str, nk, error_text: str, history, db,
@@ -513,7 +607,7 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
     async def _try_submit():
         return await assist_submit(
             session_id,
-            AssistSubmitInput(node_key=nk, output=(d.get("evidence") or text_),
+            AssistSubmitInput(node_key=nk, output=text_,  # §17.886(#4) — verbatim, never the decide paraphrase
                               action="submit", history=history),
             db=db,
         )
