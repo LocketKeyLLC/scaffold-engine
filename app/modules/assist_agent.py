@@ -1166,33 +1166,43 @@ async def run_step_research(
 async def _fix_failure_streak(
     *, session_id: str, node_key: str, db,
 ) -> tuple[int, str]:
-    """§17.881 — how many consecutive fixes has this step burned without
-    resolving? Walk the node's ASSISTANT turns newest→oldest and count the
-    leading run of kind='fix'; extract the fenced commands those fixes
-    prescribed (they demonstrably did not resolve the problem — the operator
-    is back with another error). Returns ``(streak, failed_commands_text)``.
-    Fail-soft → (0, "")."""
+    """§17.881/882 — how many fixes has this step burned without resolving?
+
+    §17.882 counting fix: the first cut counted the LEADING consecutive run of
+    kind='fix' assistant turns — so an interleaved Guide press RESET the count
+    to zero and the escalation never fired on the live T16 marathon (5 fixes,
+    zero escalations). A guide between fixes does not mean the problem changed:
+    count EVERY fix turn since the step was claimed (presented_at), and extract
+    the fenced commands from ALL of them — each was demonstrably followed by
+    the operator returning with another error. Returns
+    ``(streak, failed_commands_text)``. Fail-soft → (0, "")."""
     import re as _re
     try:
-        rows = (await db.execute(
+        presented_at = (await db.execute(
             text("""
-                SELECT kind, content FROM assist_turns
-                 WHERE session_id = :sid AND node_key = :nk AND role = 'assistant'
-                 ORDER BY created_at DESC, id DESC LIMIT 8
+                SELECT presented_at FROM assist_steps
+                 WHERE session_id = :sid AND node_key = :nk
             """),
             {"sid": session_id, "nk": node_key},
+        )).scalar()
+        rows = (await db.execute(
+            text("""
+                SELECT content FROM assist_turns
+                 WHERE session_id = :sid AND node_key = :nk
+                   AND role = 'assistant' AND kind = 'fix'
+                   AND (:since IS NULL OR created_at >= :since)
+                 ORDER BY created_at DESC, id DESC LIMIT 12
+            """),
+            {"sid": session_id, "nk": node_key, "since": presented_at},
         )).mappings().all()
-        streak = 0
+        streak = len(rows)
         cmds: list[str] = []
         for r in rows:
-            if (r.get("kind") or "") != "fix":
-                break
-            streak += 1
             for block in _re.findall(r"```[a-z]*\n(.*?)```", r.get("content") or "", _re.S):
                 b = block.strip()
                 if b and b not in cmds:
                     cmds.append(b)
-        return streak, "\n\n".join(cmds[:8])
+        return streak, "\n\n".join(cmds[:10])
     except Exception as e:  # noqa: BLE001 — escalation is an enhancement, never a blocker
         logger.debug("assist_fix_streak_failed session_id=%s err=%r", session_id, e)
         return 0, ""

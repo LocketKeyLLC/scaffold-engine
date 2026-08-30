@@ -2139,6 +2139,58 @@ async def generate_guidance(
     return {"guidance": text_out, "guidance_meta": meta, "status": status}
 
 
+def _normalized_commands(text_: str) -> set[str]:
+    """§17.882 — fenced commands + bare URLs from a walkthrough, normalized
+    (whitespace-collapsed) for repeat detection."""
+    import re as _re
+    out: set[str] = set()
+    for block in _re.findall(r"```[a-z]*\n(.*?)```", text_ or "", _re.S):
+        b = " ".join(block.split())
+        if b:
+            out.add(b)
+    for url in _re.findall(r"https?://[^\s\"'`\)\]]+", text_ or ""):
+        out.add(url.rstrip(".,;"))
+    return out
+
+
+def find_repeated_failed(text_out: str, failed_commands: str) -> list[str]:
+    """§17.882 — deterministic repeat detection: which already-failed commands
+    or URLs does this new walkthrough prescribe AGAIN? The live incident this
+    enforces against: with the playbook, the ruled-out list, and the failed
+    command all IN the prompt, the model still re-prescribed the identical
+    dead radarr.video URL — prompt rules are guidance, this is enforcement."""
+    if not (text_out or "").strip() or not (failed_commands or "").strip():
+        return []
+    new_cmds = _normalized_commands(text_out)
+    old_cmds = _normalized_commands(f"```\n{failed_commands}\n```")
+    hits = [c for c in new_cmds if c in old_cmds]
+    return sorted(hits)
+
+
+def _error_focus_query(title: str, error_text: str) -> str:
+    """§17.882 — a DETERMINISTIC research query from the actual error, so fix
+    grounding never depends on the query-generator model's diligence (live: it
+    emitted the same generic 'official installation guide' query 5 times).
+    Step title (the program/context) + the first error-looking line."""
+    import re as _re
+    line = ""
+    for ln in (error_text or "").splitlines():
+        s = ln.strip()
+        if s and _re.search(
+            r"error|fail|not found|not in |unable|denied|refus|timeout|invalid|"
+            r"cannot|no such|returned status|unexpected|corrupt|E:|curl: \(",
+            s, _re.I,
+        ):
+            line = s
+            break
+    if not line:
+        tail = [s.strip() for s in (error_text or "").splitlines() if s.strip()]
+        line = tail[-1] if tail else ""
+    line = _re.sub(r"\s+", " ", line)[:90]
+    title_part = " ".join((title or "").split()[:6])
+    return f"{title_part} {line}".strip()[:130]
+
+
 async def generate_fix(
     *,
     ctx: StepContext,
@@ -2192,6 +2244,18 @@ async def generate_fix(
             domain=domain,
             deep=True,  # §17.500 — troubleshooting wants real doc content, not snippets
         )
+        # §17.882 — one DETERMINISTIC error-derived query, always. The
+        # LLM query generator emitted the same generic query five fixes in a
+        # row live; grounding on the ACTUAL error must not depend on it.
+        try:
+            from app.modules.assist_research_lib import _confirm_query
+            eq = _error_focus_query(ctx.title, error_text)
+            if eq and eq not in {s.get("query") for s in sources}:
+                sources.extend(await _confirm_query(
+                    eq, node_key=node_key, domain=domain, deep=True,
+                ))
+        except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
+            logger.debug("assist_fix_error_query_failed: %s", exc)
 
     parts = [ctx.assembled_prompt]
     if job_digest and job_digest.strip():   # §17.653 — project-wide context
@@ -2207,9 +2271,10 @@ async def generate_fix(
     research_block = _render_research_block(sources)
     if research_block:
         parts.append(research_block)
-    if escalated and (failed_commands or "").strip():
-        # §17.881 — the commands already tried are placed LAST before the
-        # trailer (recency) with a hard directive: change the approach.
+    if failure_streak >= 1 and (failed_commands or "").strip():
+        # §17.881/882 — from the FIRST repeat (the operator returning with an
+        # error IS the proof the prior fix failed), the commands already tried
+        # are placed LAST before the trailer (recency) with a hard directive.
         parts.append(
             "## Fixes already prescribed for THIS problem that did NOT resolve it\n"
             "The operator ran these (or was given them) and still hit the error. "
@@ -2223,30 +2288,80 @@ async def generate_fix(
     parts.append(_FIX_USER_TRAILER)
     user = "\n\n".join(parts)
 
-    resp = await chat_until_nonempty(
-        model_router.chat,
-        [
-            {"role": "system", "content": apply_location_callout(  # §17.852
-                apply_screen_grounding(  # §17.758
-                    apply_ground_or_ask(  # §17.756
-                        apply_problem_solving(  # §17.742
-                            apply_next_callout(  # §17.741
-                                apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
-                                is_decision=False, enabled=settings.assist_next_callout_enabled),
-                            enabled=settings.assist_problem_solving_enabled),
-                        is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
-                    is_decision=False, enabled=settings.assist_screen_grounding_enabled),
-                is_decision=False, enabled=settings.assist_location_callout_enabled)},
-            {"role": "user", "content": user},
-        ],
-        {"role": role},
-        temperature=0.3,
-        max_tokens=settings.assist_guide_max_tokens,
-        draws=3,
-        label="assist_fix",
-        think_off_rescue=True,  # §17.876
-    )
+    fix_system = apply_location_callout(  # §17.852
+        apply_screen_grounding(  # §17.758
+            apply_ground_or_ask(  # §17.756
+                apply_problem_solving(  # §17.742
+                    apply_next_callout(  # §17.741
+                        apply_verbosity(GUIDE_SYSTEM_FIX, verbosity),
+                        is_decision=False, enabled=settings.assist_next_callout_enabled),
+                    enabled=settings.assist_problem_solving_enabled),
+                is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
+            is_decision=False, enabled=settings.assist_screen_grounding_enabled),
+        is_decision=False, enabled=settings.assist_location_callout_enabled)
+
+    async def _draw_fix(messages):
+        return await chat_until_nonempty(
+            model_router.chat, messages, {"role": role},
+            temperature=0.3, max_tokens=settings.assist_guide_max_tokens,
+            draws=3, label="assist_fix", think_off_rescue=True,  # §17.876
+        )
+
+    resp = await _draw_fix([
+        {"role": "system", "content": fix_system},
+        {"role": "user", "content": user},
+    ])
     text_out = (resp.text or "").strip() if (resp and resp.success) else ""
+
+    # §17.882 — CODE-ENFORCED no-repeat gate. Live proof this must not be a
+    # prompt rule: with the playbook, the ruled-out list, AND the failed
+    # command all in the prompt, the model re-prescribed the identical dead
+    # URL twice. Deterministic check → ONE regeneration with the violation
+    # named → if it STILL repeats, a visible warning leads the answer so the
+    # operator is never silently handed a known-failed command.
+    repeat_meta: list[str] = []
+    if text_out and failure_streak >= 1 and (failed_commands or "").strip():
+        hits = find_repeated_failed(text_out, failed_commands)
+        if hits:
+            logger.warning(
+                "assist_fix_repeat_violation node_key=%s hits=%d (regenerating)",
+                node_key, len(hits),
+            )
+            regen = await _draw_fix([
+                {"role": "system", "content": fix_system},
+                {"role": "user", "content": user + (
+                    "\n\n---\nREGENERATION NOTICE: your previous draft prescribed "
+                    "the following command(s)/URL(s) that ALREADY FAILED for this "
+                    "operator — this is exactly the failure mode you were told to "
+                    "avoid. Produce a fix that uses a DIFFERENT method entirely "
+                    "(the session playbook's proven methods first):\n"
+                    + "\n".join(f"- {h}" for h in hits[:5])
+                )},
+            ])
+            regen_text = (regen.text or "").strip() if (regen and regen.success) else ""
+            if regen_text:
+                rehits = find_repeated_failed(regen_text, failed_commands)
+                if not rehits:
+                    text_out = regen_text
+                else:
+                    repeat_meta = rehits
+                    text_out = (
+                        "⚠️ **Repeat warning:** this fix STILL includes something "
+                        "that already failed for you ("
+                        + "; ".join(f"`{h[:80]}`" for h in rehits[:2])
+                        + ") — the engine flagged it twice. Treat it with "
+                        "suspicion; reply \"different approach\" to force a "
+                        "method change.\n\n" + regen_text
+                    )
+            else:
+                repeat_meta = hits
+                text_out = (
+                    "⚠️ **Repeat warning:** this fix includes something that "
+                    "already failed for you ("
+                    + "; ".join(f"`{h[:80]}`" for h in hits[:2])
+                    + "). Treat it with suspicion; reply \"different approach\" "
+                    "to force a method change.\n\n" + text_out
+                )
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
         "model": getattr(resp, "model", "") if resp else "",
@@ -2256,6 +2371,9 @@ async def generate_fix(
         "generated_at": _utcnow_iso(),
         # §17.492 — destructive-command safety gate (fixes can carry rm/dd too).
         "destructive": scan_destructive(text_out) if settings.assist_destructive_scan else [],
+        # §17.882 — repeats that survived the regeneration gate (visible warning
+        # was prepended; recorded here for triage/telemetry).
+        "repeat_violations": repeat_meta,
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
