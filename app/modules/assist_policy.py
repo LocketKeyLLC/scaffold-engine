@@ -149,6 +149,29 @@ def looks_like_help_request(msg: str) -> bool:
 _TEXT_FILL_FIELDS = ("evidence", "error_text", "query", "note_text")
 
 
+# §17.867 — pure orientation asks ("whats next??", "what now", "where are we").
+# Live incident: the /decide model routed "whats next??" to NOTE — the question
+# was recorded into the notes ledger and nothing moved. The phrasing is
+# unambiguous and fully anchored (a longer question like "what's next after I
+# configure X" does NOT match), so it overrides ANY model action except the
+# shell-evidence gate above it. Maps to `status` — orient, never close a step
+# (advance would commit work the operator hasn't reported).
+_WHATS_NEXT_RE = re.compile(
+    r"^\s*(?:(?:so|ok(?:ay)?)[,!\s]+)*"
+    r"(?:what(?:'?s)?\s+(?:is\s+)?next"
+    r"|what\s+(?:do|should)\s+(?:i|we)\s+do(?:\s+(?:now|next))?"
+    r"|what\s+now|now\s+what"
+    r"|where\s+(?:are\s+we|am\s+i)(?:\s+at)?"
+    r"|next\s+steps?)"
+    r"\s*[?!.\s]*$",
+    re.IGNORECASE,
+)
+
+
+def looks_like_whats_next(message: str) -> bool:
+    return bool(_WHATS_NEXT_RE.match(message or ""))
+
+
 def _override(action: str, message: str, signals: dict) -> tuple[str, str | None, dict]:
     """Return (new_action, reason|None, patch). Precedence mirrors the pipeline
     cascade: shell-result (fix > submit) → pivot → help/how-to. A `None` reason
@@ -165,7 +188,15 @@ def _override(action: str, message: str, signals: dict) -> tuple[str, str | None
         if action not in ("submit", "fix"):
             return "submit", "shell_result", {"evidence": msg.strip()}
         return action, None, {}
-    # 2. A declarative or question-framed pivot reshapes the plan → note (§17.679/
+    # 2. §17.867 — a pure orientation ask maps to `status` no matter what the
+    #    model said (live: "whats next??" was confidently routed to NOTE and
+    #    recorded as ledger junk). Never `advance` — orientation must not close
+    #    a step the operator hasn't reported on.
+    if looks_like_whats_next(msg):
+        if action != "status":
+            return "status", "whats_next", {}
+        return action, None, {}
+    # 3. A declarative or question-framed pivot reshapes the plan → note (§17.679/
     #    §17.691). Fires on skip/question/ask: the live A/B (§17.855) showed the
     #    /decide model routes QUESTION-FRAMED pivots ("can't we just … instead?")
     #    to `ask` more often than the old client classifier did, so gating on
@@ -180,7 +211,7 @@ def _override(action: str, message: str, signals: dict) -> tuple[str, str | None
             "note_kind": pivot_kind(msg),
             "plan_impact": "surface",
         }
-    # 3. An explicit help / how-to question is help-seeking, not a step-completion
+    # 4. An explicit help / how-to question is help-seeking, not a step-completion
     #    or a plan change → ask (research, §17.733/§17.763/§17.768). Pivot already
     #    won above, so a help request that also states a pivot still re-plans.
     if action == "question" and (looks_like_howto_question(msg)

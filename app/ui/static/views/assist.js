@@ -664,6 +664,22 @@ export function renderChat(container, sessionId) {
       "📌 Heads-up: what you just told me might affect a later step. Add it as a note if you'd like me to reassess the plan.");
   }
 
+  // §17.867 — orientation: say where we are, then walk the current (or next)
+  // step. Used by the ORIENT_RE fast-path and the `status` decide action.
+  async function orientAndGuide() {
+    await load();
+    const nk = session?.current_node_key;
+    if (nk) {
+      const done = session?.step_counts?.committed || 0;
+      const total = Object.values(session?.step_counts || {}).reduce((a, b) => a + b, 0);
+      appendBubble("assistant", "status",
+        `📍 You're on step ${nk}${total ? ` (${done}/${total} done)` : ""}. Here's the current walkthrough:`);
+      guideCurrent();
+    } else {
+      await claimAndGuideNext();
+    }
+  }
+
   // §17.861 — the unified /decide dispatch (§17.771 + §17.855 deterministic
   // overrides), previously OWUI-pipeline-only. Without it, a corrective or
   // plan-affecting message in the SPA was captured into the facts ledger but
@@ -764,7 +780,12 @@ export function renderChat(container, sessionId) {
         await doneNext(text);
         return true;
       }
-      return false; // skip/status/set_env/… — rare via free text; fallback chain
+      if (d.action === "status") {
+        // §17.867 — orientation (incl. the server whats_next override).
+        await orientAndGuide();
+        return true;
+      }
+      return false; // skip/set_env/… — rare via free text; fallback chain
     } finally {
       thinking.remove();
     }
@@ -783,6 +804,15 @@ export function renderChat(container, sessionId) {
     }
     if (ADVANCE_RE.test(text) && session?.current_node_key) {
       await doneNext(text);
+      return;
+    }
+    // §17.867 — pure orientation ("whats next??", "what now", "where are we"):
+    // orient + guide immediately, zero model calls. Mirrors the server
+    // assist_policy._WHATS_NEXT_RE gate; the live /decide model routed this
+    // exact phrase to NOTE and recorded the question as ledger junk.
+    const ORIENT_RE = /^\s*((so|ok(ay)?)[,!\s]+)*(what('?s)?\s+(is\s+)?next|what\s+(do|should)\s+(i|we)\s+do(\s+(now|next))?|what\s+now|now\s+what|where\s+(are\s+we|am\s+i)(\s+at)?|next\s+steps?)\s*[?!.\s]*$/i;
+    if (ORIENT_RE.test(text)) {
+      await orientAndGuide();
       return;
     }
     // §17.861 — unified decision first (server /decide); regex chain below is

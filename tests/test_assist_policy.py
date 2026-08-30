@@ -185,3 +185,50 @@ def test_regex_parity_with_pipeline_copy():
     assert P._QUESTION_PIVOT_RE.pattern == h._QUESTION_PIVOT_RE.pattern
     assert P._HOWTO_QUESTION_RE.pattern == h._HOWTO_QUESTION_RE.pattern
     assert P._HELP_REQUEST_RE.pattern == h._HELP_REQUEST_RE.pattern
+
+
+# ── §17.867 — whats-next orientation gate ─────────────────────────────────────
+
+
+@pytest.mark.parametrize("msg", [
+    "whats next??", "What's next?", "what is next", "what now", "now what?",
+    "where are we", "where am I at?", "next steps?", "ok, what's next!",
+    "so what do i do now", "what should we do next",
+])
+def test_whats_next_matches_orientation_phrases(msg):
+    assert P.looks_like_whats_next(msg), msg
+
+
+@pytest.mark.parametrize("msg", [
+    "what's next after I configure the firewall?",   # longer question — real ask
+    "what port does jellyfin use",                    # how-to
+    "done",                                           # advance verb, not orientation
+    "the next steps failed with an error",            # statement
+    "",
+])
+def test_whats_next_ignores_non_orientation(msg):
+    assert not P.looks_like_whats_next(msg), msg
+
+
+def test_override_routes_whats_next_to_status():
+    """§17.867 — the live incident: /decide confidently returned NOTE for
+    'whats next??' and the question was recorded into the notes ledger."""
+    d = {"action": "note", "confidence": "high", "signals": {}}
+    out = P.apply_deterministic_overrides(d, "whats next??")
+    assert out["action"] == "status"
+    assert out["override"] == "whats_next"
+    assert out["confidence"] == "high"
+
+
+def test_override_leaves_status_alone():
+    d = {"action": "status", "confidence": "medium", "signals": {}}
+    out = P.apply_deterministic_overrides(d, "what now?")
+    assert out is d  # unchanged — no double-stamp
+
+
+def test_shell_paste_still_beats_whats_next():
+    """Precedence: shell evidence wins even if the paste somehow matched."""
+    d = {"action": "note", "confidence": "high",
+         "signals": {"shell_paste": True, "shell_error": True}}
+    out = P.apply_deterministic_overrides(d, "whats next??")
+    assert out["action"] == "fix"
