@@ -2139,17 +2139,37 @@ async def generate_guidance(
     return {"guidance": text_out, "guidance_meta": meta, "status": status}
 
 
+_LOCAL_HOST_RE = None
+
+
 def _normalized_commands(text_: str) -> set[str]:
     """§17.882 — fenced commands + bare URLs from a walkthrough, normalized
-    (whitespace-collapsed) for repeat detection."""
+    (whitespace-collapsed) for repeat detection.
+
+    §17.882b — URLs on the operator's OWN hosts (localhost/127.x/RFC1918) are
+    EXCLUDED from URL-level matching: they're verification endpoints (`curl
+    localhost:7878`) that legitimately recur in every fix. Live false positive:
+    an otherwise-correct method-changing regen got a repeat warning because it
+    re-checked the same local health URL. External URLs (the guessed dead
+    download hosts — the real signal) still match; identical whole fenced
+    blocks still match regardless."""
+    global _LOCAL_HOST_RE
     import re as _re
+    if _LOCAL_HOST_RE is None:
+        _LOCAL_HOST_RE = _re.compile(
+            r"^https?://(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|"
+            r"192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|\[::1\])"
+            r"(?=[:/]|$)", _re.I,
+        )
     out: set[str] = set()
     for block in _re.findall(r"```[a-z]*\n(.*?)```", text_ or "", _re.S):
         b = " ".join(block.split())
         if b:
             out.add(b)
     for url in _re.findall(r"https?://[^\s\"'`\)\]]+", text_ or ""):
-        out.add(url.rstrip(".,;"))
+        u = url.rstrip(".,;")
+        if not _LOCAL_HOST_RE.match(u):
+            out.add(u)
     return out
 
 
