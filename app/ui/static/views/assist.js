@@ -4,7 +4,7 @@
 // step-guidance driver via /assist/{id}/guide/stream (SSE: assist_guide_delta
 // / assist_guide_done). Message composer persists via /assist/{id}/turn.
 import * as api from "../api.js";
-import { el, mount, shortId, timeAgo, fmtDate, mdToHtml } from "../util.js";
+import { el, mount, shortId, timeAgo, fmtDate, mdToHtml, stickyScroll, selectionWithin } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
 import { briefPanel } from "./brief_panel.js";
 
@@ -134,6 +134,15 @@ export function renderChat(container, sessionId) {
   let turnStartedAt = null;
 
   const transcript = el("div", { class: "chat-transcript" }, loading("Loading conversation…"));
+  // §17.890 — scroll only while pinned to the bottom; defer transcript
+  // re-renders while the operator holds a text selection in it (right-click
+  // copy needs the selected nodes to survive until the menu's Copy runs).
+  const stick = stickyScroll(transcript);
+  let transcriptRenderDeferred = false;
+  const onSelChange = () => {
+    if (transcriptRenderDeferred && !selectionWithin(transcript)) renderTranscript();
+  };
+  document.addEventListener("selectionchange", onSelChange);
   // Operator layout: no right sidebar. The input checklist docks LEFT of the
   // chat input; session/steps/notes/facts become a card row BELOW the chat.
   const checklistPanel = el("div", { class: "composer-checklist hidden" });
@@ -180,9 +189,11 @@ export function renderChat(container, sessionId) {
 
   // §17.848 — evidence-in-box submit with honest per-outcome handling
   // (§17.847). Returns true when the loop advanced or ended cleanly.
-  async function submitEvidence(nk, output) {
+  async function submitEvidence(nk, output, opts = {}) {
     composerText.value = "";
-    appendBubble("operator", "submit", output);
+    // §17.890 — quiet: the operator's message is already in the transcript
+    // (typed-claim fall-through from doneNext); don't echo it twice.
+    if (!opts.quiet) appendBubble("operator", "submit", output);
     const res = await api.post(`/assist/${sessionId}/submit`, {
       node_key: nk, output, action: "submit", history: historyForGuide(),
     });
@@ -250,12 +261,21 @@ export function renderChat(container, sessionId) {
       appendBubble("assistant", "done", "🎉 That was the last step — the session is wrapping up.");
       return;
     }
+    // §17.890 — a TYPED claim ("done", "it worked") must never dead-end here:
+    // the operator has explicitly said the step is complete, and the server
+    // now honors completion claims (operator-affirmed commit) even when the
+    // verifier can't confirm. Submit the claim as the step's evidence and
+    // advance — repeating "I already did that" is exactly the loop this kills.
+    if (message) {
+      await submitEvidence(nk, message, { quiet: true });
+      return;
+    }
     // Tracker not confident / thinks the step is still open — say so honestly
     // and name the ways forward. NEVER a bare "enter text" error.
     appendBubble("assistant", "track",
       (v.reason ? `${v.reason}\n\n` : "The tracker isn't sure this step is finished yet.\n\n") +
-      "To close it out: paste what happened (output, a result, even one line) and press ✓ again — " +
-      "or ⏩ Skip to move on without verification.");
+      "To close it out: paste what happened (output, a result, even one line) and press ✓ again, " +
+      "type \"done\" to confirm it's complete on your word — or ⏩ Skip to move on without verification.");
   }
 
   // Verbs ordered as the loop runs (research: labeled contextual actions over
@@ -362,7 +382,7 @@ export function renderChat(container, sessionId) {
   // feedback; load() then reconciles with the durable transcript).
   function appendBubble(role, kind, content) {
     transcript.append(bubble(role, kind, content, new Date().toISOString()));
-    transcript.scrollTop = transcript.scrollHeight;
+    stick();
   }
 
   function bubble(role, kind, content, ts) {
@@ -376,6 +396,9 @@ export function renderChat(container, sessionId) {
   }
 
   function renderTranscript() {
+    // §17.890 — never rebuild the DOM out from under an active selection.
+    if (selectionWithin(transcript)) { transcriptRenderDeferred = true; return; }
+    transcriptRenderDeferred = false;
     if (!turns.length) {
       mount(
         transcript,
@@ -419,7 +442,7 @@ export function renderChat(container, sessionId) {
         (t.content || "").trim() === e.content.trim());
       if (!dup && e.content.trim()) transcript.append(bubble("assistant", e.kind, e.content, e.at));
     }
-    transcript.scrollTop = transcript.scrollHeight;
+    stick();
   }
 
   // Lazily-fetched sidebar extras (checklist §17.707, environment §17.703) —
@@ -697,7 +720,7 @@ export function renderChat(container, sessionId) {
         transcript.append(statusEl);
       }
       statusEl.firstChild.textContent = t;
-      transcript.scrollTop = transcript.scrollHeight;
+      stick();
     };
     const clearStatusLine = () => { if (statusEl) { statusEl.remove(); statusEl = null; } };
     let live = null, liveBody = null, acc = "";
@@ -710,7 +733,7 @@ export function renderChat(container, sessionId) {
           el("span", { class: "msg-kind", text: "guiding" })),
         liveBody);
       transcript.append(live);
-      transcript.scrollTop = transcript.scrollHeight;
+      stick();
     };
     const streamArgs = resumeRunId
       ? [`/assist/${sessionId}/message/${resumeRunId}/tail`, { method: "GET", signal: abort.signal }]
@@ -751,8 +774,10 @@ export function renderChat(container, sessionId) {
             clearStatusLine();
             ensureLive();
             acc += (data && data.text) || "";
-            liveBody.innerHTML = mdToHtml(acc);
-            transcript.scrollTop = transcript.scrollHeight;
+            // §17.890 — repainting the live bubble kills a selection held in
+            // it; acc is cumulative, so the next unselected delta catches up.
+            if (!selectionWithin(transcript)) liveBody.innerHTML = mdToHtml(acc);
+            stick();
             break;
           case "assist_guide_done":
             if (live) live.classList.remove("streaming");
@@ -826,6 +851,7 @@ export function renderChat(container, sessionId) {
 
   return () => {
     disposed = true;
+    document.removeEventListener("selectionchange", onSelChange);  // §17.890
     if (abort) abort.abort();
   };
 }

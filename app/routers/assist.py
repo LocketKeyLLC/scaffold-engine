@@ -26,7 +26,7 @@ from app.authz import (
 )
 from app.config import settings
 from app.database import get_db
-from app.modules import assist_agent, assist_session_map
+from app.modules import assist_agent, assist_policy, assist_session_map
 
 logger = logging.getLogger("scaffold")
 
@@ -834,6 +834,24 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
             (_v_outcome == "failed" and settings.assist_block_on_failed_verify)
             or (_v_outcome == "incomplete" and settings.assist_block_on_incomplete_verify)
         )
+        # §17.890 — the operator's explicit word outranks the verifier. A bare
+        # completion CLAIM ("I did that already", "it's installed") carries no
+        # evidence for the verifier to judge, so it reliably comes back
+        # 'incomplete' — and the block above turned every repeat of the claim
+        # into another fix-flow loop ("the engine won't move on even though I
+        # told it multiple times"). The hard block exists to catch pasted
+        # evidence that SHOWS unfinished work; it must never overrule a human
+        # asserting completion of work the engine cannot see. Commit, tag the
+        # verdict operator_affirmed, and leave an honest friction-trail entry.
+        if _blocked and assist_policy.looks_like_completion_claim(body.output or ""):
+            _blocked = False
+            verdict["operator_affirmed"] = True
+            await assist_agent.record_friction(
+                session_id=session_id, node_key=body.node_key,
+                note=(f"verify said {_v_outcome} but the operator explicitly "
+                      f"affirmed completion — committed on their word: "
+                      f"{verdict.get('reason', '')}"), db=db,
+            )
         if _blocked:
             # Hard-block: do NOT commit — the step stays 'presented' (claimable)
             # for a clean re-submit. Log the blocker to the friction trail.

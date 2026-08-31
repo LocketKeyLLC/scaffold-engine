@@ -143,6 +143,77 @@ def looks_like_help_request(msg: str) -> bool:
     return bool(_HELP_REQUEST_RE.search(normalize_punct(msg)))
 
 
+# ── Completion-claim detection (§17.890) ─────────────────────────────────────
+# The live failure this exists for: the operator told the engine — repeatedly —
+# that they had completed the step ("I did that already", "it's installed"),
+# decide routed to submit, and the §17.731 success verifier judged the bare
+# claim AS IF it were pasted evidence: a claim shows no deliverable, so the
+# verdict came back 'incomplete', the blocking valve refused the commit, and
+# the §17.884 continuation walked the operator into a fix flow for a step they
+# had already finished. The verifier exists to judge EVIDENCE, not to overrule
+# the human: a bare completion claim (short, no shell paste, no error signal,
+# no negation) is the operator's explicit word and must commit.
+#
+# Precision-first like every gate in this file: a long message or anything
+# paste-shaped stays on the evidence path, questions are never claims, and any
+# negation/failure wording disqualifies. Recall has backstops (the decide
+# prompt, and a conservative verifier returning 'unclear' → unblocked).
+_CLAIM_SHELL_PROMPT_RE = re.compile(  # same shape as _assist_handlers'
+    r"(?m)^\s*[A-Za-z_][\w.-]*@[\w.-]+:[^\n#$]*[#$]")  # _SHELL_PROMPT_LINE_RE
+_CLAIM_DISQUALIFY_RE = re.compile(
+    r"\b(?:not|never|haven'?t|hasn'?t|isn'?t|wasn'?t|aren'?t|didn'?t|don'?t|"
+    r"doesn'?t|can'?t|cannot|couldn'?t|won'?t|wouldn'?t|unable|"
+    r"fail(?:ed|s|ing)?|error(?:s|ed)?|broke(?:n)?|stuck|trouble|issue|problem|"
+    r"no\s+luck|except|but\s+(?:it|the|when|now))\b",
+    re.IGNORECASE,
+)
+_CLAIM_PHRASE_RE = re.compile(
+    r"(?:^\s*(?:done|finished|complete[d]?|all\s+done)[.!\s]*$)"
+    r"|\bi(?:'?ve|\s+have|\s+just)?\s+(?:already\s+|just\s+)?"
+    r"(?:did|done|completed|finished|installed|configured|ran|handled|"
+    r"took\s+care\s+of|set(?:\s+\w+)?\s+up)\b"
+    r"|\b(?:it|that|this|step|task|everything)(?:'?s|\s+is|\s+was|\s+has\s+been)?"
+    r"\s+(?:all\s+|already\s+|now\s+)?"
+    r"(?:done|complete[d]?|finished|installed|configured|working|running|"
+    r"up\s+and\s+running|set\s+up|in\s+place|taken\s+care\s+of|handled)\b"
+    r"|\balready\s+(?:did|done|completed|finished|installed|handled)\b"
+    r"|\b(?:it|that)\s+worked\b"
+    r"|\bwork(?:s|ed|ing)\s+(?:now|fine|great|perfectly)\b"
+    r"|\ball\s+set\b|\bgood\s+to\s+go\b|\bwe(?:'re|\s+are)\s+good\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_completion_claim(msg: str) -> bool:
+    """§17.890 — True when `msg` is the operator's bare ASSERTION that the
+    current step is complete (vs pasted evidence, a question, or an error
+    report). Deterministic, precision-first: used to (a) route such messages to
+    submit and (b) exempt them from the §17.731 incomplete/failed hard-block —
+    the operator's explicit word outranks a verifier that, by construction,
+    cannot see their machine."""
+    if not msg:
+        return False
+    m = normalize_punct(msg).strip()
+    if len(m) > 280:            # long messages are evidence/reports, not claims
+        return False
+    if "?" in m:                # a question is never a completion claim
+        return False
+    if re.match(  # question-shaped without the "?" ("is it done", "did you…")
+            r"^\s*(?:is|are|was|were|does|do|did|has|have|had|will|would|"
+            r"should|shall|can|could|why|how|what|when|where|who|which)\b",
+            m, re.IGNORECASE):
+        return False
+    if _CLAIM_SHELL_PROMPT_RE.search(m):   # paste-shaped → the evidence path
+        return False
+    if re.match(r"^\s*(?:when|once|after|until|if)\b", m, re.IGNORECASE):
+        return False            # "once it's done…" is a plan, not a claim
+    if looks_like_howto_question(m) or looks_like_help_request(m):
+        return False            # "how do I know it's done" is help-seeking
+    if _CLAIM_DISQUALIFY_RE.search(m):     # negation / failure wording
+        return False
+    return bool(_CLAIM_PHRASE_RE.search(m))
+
+
 # ── The post-filter ───────────────────────────────────────────────────────────
 # `_TEXT_FILL_FIELDS` are filled from the message ONLY when the LLM left them
 # blank (it may have extracted a cleaner value); routing fields are always set.
@@ -196,7 +267,16 @@ def _override(action: str, message: str, signals: dict) -> tuple[str, str | None
         if action != "status":
             return "status", "whats_next", {}
         return action, None, {}
-    # 3. A declarative or question-framed pivot reshapes the plan → note (§17.679/
+    # 3. §17.890 — an explicit completion CLAIM is a submit, no matter what the
+    #    model said (live: "I did that already" was routed to question/ask →
+    #    tracker "isn't sure" → dead end, while the operator repeated themselves).
+    #    Terminal-ish routes are left alone: submit is already right, fix can't
+    #    co-occur (the error guard disqualifies the claim), skip/pause/finalize
+    #    are the operator's explicit verbs the model chose for a reason.
+    if action in ("question", "ask", "note", "status", "advance") \
+            and looks_like_completion_claim(msg):
+        return "submit", "completion_claim", {"evidence": msg.strip()}
+    # 4. A declarative or question-framed pivot reshapes the plan → note (§17.679/
     #    §17.691). Fires on skip/question/ask: the live A/B (§17.855) showed the
     #    /decide model routes QUESTION-FRAMED pivots ("can't we just … instead?")
     #    to `ask` more often than the old client classifier did, so gating on
@@ -211,7 +291,7 @@ def _override(action: str, message: str, signals: dict) -> tuple[str, str | None
             "note_kind": pivot_kind(msg),
             "plan_impact": "surface",
         }
-    # 4. An explicit help / how-to question is help-seeking, not a step-completion
+    # 5. An explicit help / how-to question is help-seeking, not a step-completion
     #    or a plan change → ask (research, §17.733/§17.763/§17.768). Pivot already
     #    won above, so a help request that also states a pivot still re-plans.
     if action == "question" and (looks_like_howto_question(msg)

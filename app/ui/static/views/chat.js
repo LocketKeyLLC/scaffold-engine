@@ -5,7 +5,7 @@
 // loop. Conversation state lives in messages[] (the same stateless model the
 // engine reads, so confirm-card follow-ups work across turns).
 import * as api from "../api.js";
-import { el, mount, mdToHtml } from "../util.js";
+import { el, mount, mdToHtml, stickyScroll, selectionWithin } from "../util.js";
 
 // §17.818 — the chat model id comes from GET /v1/models (was a literal).
 let MODEL = "scaffold-engine";
@@ -41,6 +41,13 @@ export default function chat(container) {
   const messages = loadChatHistory(); // {role, content} — restored per-tab
 
   const transcript = el("div", { class: "chat-transcript" });
+  // §17.890 — bottom-pinned scroll + selection-safe re-renders (see util.js).
+  const stick = stickyScroll(transcript);
+  let renderDeferred = false;
+  const onSelChange = () => {
+    if (renderDeferred && !selectionWithin(transcript)) render();
+  };
+  document.addEventListener("selectionchange", onSelChange);
   const input = el("textarea", {
     class: "chat-input",
     placeholder: "Describe a build, ask for job status, or type /go…",
@@ -95,6 +102,9 @@ export default function chat(container) {
   }
 
   function render() {
+    // §17.890 — never rebuild the DOM out from under an active selection.
+    if (selectionWithin(transcript)) { renderDeferred = true; return; }
+    renderDeferred = false;
     if (!messages.length) {
       // Starter chips: one click drops the text into the input so the first
       // touch invites action instead of a blank panel. Editable before send.
@@ -120,7 +130,7 @@ export default function chat(container) {
       return;
     }
     mount(transcript, ...messages.map((m) => bubble(m.role, m.content, false)));
-    transcript.scrollTop = transcript.scrollHeight;
+    stick();
   }
 
   async function send() {
@@ -138,7 +148,7 @@ export default function chat(container) {
     const live = bubble("assistant", "", true);
     const body = live.querySelector(".msg-body");
     transcript.append(live);
-    transcript.scrollTop = transcript.scrollHeight;
+    stick();
 
     let acc = "";
     // §17.854 (audit G8) — rAF-coalesce the per-token markdown re-render
@@ -150,8 +160,10 @@ export default function chat(container) {
       requestAnimationFrame(() => {
         renderPending = false;
         if (disposed) return;
-        body.innerHTML = mdToHtml(forDisplay(acc));
-        transcript.scrollTop = transcript.scrollHeight;
+        // §17.890 — don't repaint over an active selection; acc is
+        // cumulative, so the next unselected frame catches up.
+        if (!selectionWithin(transcript)) body.innerHTML = mdToHtml(forDisplay(acc));
+        stick();
       });
     };
     try {
@@ -194,6 +206,7 @@ export default function chat(container) {
 
   return () => {
     disposed = true;
+    document.removeEventListener("selectionchange", onSelChange);  // §17.890
     if (abort) abort.abort();
   };
 }
