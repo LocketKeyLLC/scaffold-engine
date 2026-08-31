@@ -2709,7 +2709,7 @@ async def ensure_guidance(
     if res.get("guidance") and _settings.assist_placeholder_resolver_enabled:
         resolved, resolved_map = await resolve_placeholders(
             text=res["guidance"], session_id=session_id, environment=environment,
-            step_title=ctx.title, db=db,
+            step_title=ctx.title, db=db, node_key=node_key,  # §17.892
         )
         res["guidance"] = resolved
         meta = res.setdefault("guidance_meta", {})
@@ -2915,7 +2915,7 @@ async def generate_guidance_stream(
     if text_out and settings.assist_placeholder_resolver_enabled:
         text_out, resolved_map = await resolve_placeholders(
             text=text_out, session_id=session_id, environment=environment,
-            step_title=ctx.title, role=role, db=db,
+            step_title=ctx.title, role=role, db=db, node_key=node_key,  # §17.892
         )
 
     status = "ready" if (text_out and not stream_broken) else "failed"  # §17.887(#7)

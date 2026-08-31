@@ -160,12 +160,19 @@ async def learn_from_submit(
     if not extracted:
         return {}
     current = await get_environment(session_id=session_id, db=db) or {}
-    existing = current.get("substitutions") or {}
-    # Only-add-new: an operator-set or already-learned key wins over a re-read.
+    # §17.892 — a key already pinned globally (operator) or on THIS node wins
+    # over a re-read; other nodes' auto-pins don't block learning here.
+    existing = dict(current.get("substitutions") or {})
+    existing.update((current.get("substitutions_by_node") or {}).get(node_key) or {})
     new = {k: v for k, v in extracted.items() if k not in existing}
     if not new:
         return {}
-    await set_environment(session_id=session_id, substitutions=new, db=db)
+    # §17.892 — learned values are NODE-SCOPED: they came from this step's
+    # evidence and belong to this step's entities (the DarthSidious incident:
+    # a switch hostname learned globally named the PalWorld VM).
+    await set_environment(
+        session_id=session_id, substitutions_by_node={node_key: new}, db=db,
+    )
     logger.info(
         "assist_learned_substitutions session_id=%s node_key=%s keys=%s",
         session_id, node_key, ",".join(new.keys()),

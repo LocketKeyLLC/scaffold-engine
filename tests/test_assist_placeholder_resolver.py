@@ -119,11 +119,15 @@ async def test_no_tokens_is_a_noop():
     assert out == "all concrete already" and applied == {}
 
 
-async def test_autopin_persists_resolutions():
+async def test_autopin_persists_resolutions_node_scoped():
+    """§17.892 — auto-pins land under substitutions_by_node[node_key], never
+    the global map (the DarthSidious incident: a switch hostname auto-pinned
+    globally deterministically named the PalWorld VM)."""
     text = "ssh root@<HOST_IP>"
     pinned = {}
     async def fake_set_env(**kw):
-        pinned.update(kw.get("substitutions") or {})
+        pinned.update(kw.get("substitutions_by_node") or {})
+        assert not kw.get("substitutions")  # never the global map
     resp = SimpleNamespace(success=True, tool_calls=[SimpleNamespace(arguments={
         "resolutions": [{"token": "HOST_IP", "value": "192.168.1.156", "kind": "known"}],
     })])
@@ -132,7 +136,62 @@ async def test_autopin_persists_resolutions():
          patch.object(assist_agent, "set_environment", new=AsyncMock(side_effect=fake_set_env)):
         out, applied = await assist_guide.resolve_placeholders(
             text=text, session_id="s1", environment=_env(facts=["host is 192.168.1.156"]),
+            db=object(), node_key="T7",
+        )
+    assert pinned == {"T7": {"HOST_IP": "192.168.1.156"}}
+    assert "root@192.168.1.156" in out
+
+
+async def test_autopin_skipped_without_node_key():
+    """§17.892 — no node_key → no honest scope → nothing pins."""
+    resp = SimpleNamespace(success=True, tool_calls=[SimpleNamespace(arguments={
+        "resolutions": [{"token": "HOST_IP", "value": "10.0.0.9", "kind": "known"}],
+    })])
+    from app.modules import assist_agent
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock(return_value=resp)), \
+         patch.object(assist_agent, "set_environment", new=AsyncMock()) as se:
+        out, _ = await assist_guide.resolve_placeholders(
+            text="ssh <HOST_IP>", session_id="s1", environment=_env(facts=["f"]),
             db=object(),
         )
-    assert pinned == {"HOST_IP": "192.168.1.156"}
-    assert "root@192.168.1.156" in out
+    se.assert_not_awaited()
+    assert "10.0.0.9" in out  # resolution itself still happens
+
+
+async def test_layer1_node_scoped_pin_applies_only_to_its_node():
+    """§17.892 — the incident, pinned as a test: T4's learned HOSTNAME must
+    not deterministically fill another step's <HOSTNAME>."""
+    env = _env(subs={"STORAGE": "local-lvm"})
+    env["substitutions_by_node"] = {"T4": {"HOSTNAME": "DarthSidious"}}
+    text = "pct create --hostname <HOSTNAME> --storage <STORAGE>"
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()) as tc:
+        out, applied = await assist_guide.resolve_placeholders(
+            text=text, session_id="s1", environment=env, node_key="T22",
+        )
+    tc.assert_not_awaited()  # no facts/profile → Layer 2 skipped
+    assert "local-lvm" in out            # operator global still applies
+    assert "<HOSTNAME>" in out           # another node's auto-pin does NOT
+    assert "DarthSidious" not in out
+    assert "HOSTNAME" not in applied
+
+
+async def test_layer1_node_scoped_pin_applies_on_its_own_node():
+    env = _env()
+    env["substitutions_by_node"] = {"T4": {"HOSTNAME": "DarthSidious"}}
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()):
+        out, applied = await assist_guide.resolve_placeholders(
+            text="config <HOSTNAME>", session_id="s1", environment=env, node_key="T4",
+        )
+    assert "config DarthSidious" in out
+    assert applied["HOSTNAME"]["source"] == "learned"
+
+
+async def test_layer1_operator_global_outranks_node_pin():
+    env = _env(subs={"HOSTNAME": "operator-choice"})
+    env["substitutions_by_node"] = {"T4": {"HOSTNAME": "DarthSidious"}}
+    with patch.object(assist_guide.model_router, "tool_call", new=AsyncMock()):
+        out, applied = await assist_guide.resolve_placeholders(
+            text="config <HOSTNAME>", session_id="s1", environment=env, node_key="T4",
+        )
+    assert "operator-choice" in out
+    assert applied["HOSTNAME"]["source"] == "operator"

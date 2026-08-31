@@ -69,6 +69,10 @@ _PLACEHOLDER_RESOLVER_SYSTEM = (
     "project with kind=suggested. Only when neither applies (secrets, passwords, "
     "values truly not in the facts) use kind=unknown with an empty value. Never "
     "invent a kind=known value that is not literally supported by the facts. "
+    "ENTITY NAMES BELONG TO THEIR ENTITY (§17.892): a hostname/name in the "
+    "facts identifies THAT device (a switch, an existing container). When the "
+    "token names a NEW entity this step creates, NEVER reuse another entity's "
+    "name — propose a fresh fitting one (kind=suggested). "
     "Each value must be ONLY that token's own part — when tokens compose (e.g. "
     "<POOL>/<DATASET>), never return a value that already includes a "
     "neighboring token's value."
@@ -78,12 +82,21 @@ _PLACEHOLDER_RESOLVER_SYSTEM = (
 async def resolve_placeholders(
     *, text: str, session_id: str, environment: Optional[dict],
     step_title: str = "", role: str = "model_general", db=None,
+    node_key: str | None = None,
 ) -> tuple[str, dict]:
     """§17.851 — substitute <PLACEHOLDER> tokens in generated guidance.
 
     Returns ``(new_text, applied)`` where ``applied`` maps token →
     ``{"value": ..., "kind": known|suggested}``. Unknown tokens stay in the
     text. Fail-soft: any error returns the original text and ``{}``.
+
+    §17.892 — deterministic Layer 1 draws from TWO scopes: the operator's
+    explicit global pins (verbatim everywhere, §17.850) and the auto-pins
+    learned ON THIS node (regeneration determinism for the same step). Auto-
+    pins from OTHER nodes never apply here — the live incident: the switch
+    step's auto-pinned HOSTNAME=DarthSidious deterministically named the
+    PalWorld VM after the HP switch. Cross-step value flow goes through the
+    facts-grounded model layer below, which exercises judgment.
     """
     try:
         tokens = list(dict.fromkeys(_PLACEHOLDER_TOKEN_RE.findall(text or "")))
@@ -91,16 +104,26 @@ async def resolve_placeholders(
             return text, {}
         env = environment or {}
         subs = {str(k).upper(): str(v) for k, v in (env.get("substitutions") or {}).items() if str(v).strip()}
+        node_subs = {}
+        if node_key:
+            node_subs = {
+                str(k).upper(): str(v)
+                for k, v in ((env.get("substitutions_by_node") or {}).get(node_key) or {}).items()
+                if str(v).strip()
+            }
         applied: dict = {}
         out = text
         # Layer 1 — deterministic: pinned values win, no model involved.
+        # Operator globals outrank this node's auto-pins on a key collision.
         for tok in list(tokens):
             v = subs.get(tok.upper())
+            src = "operator"
+            if not v:
+                v = node_subs.get(tok.upper())
+                src = "learned"  # §17.892 — this node's own auto-pin
             if v:
                 out = out.replace(f"<{tok}>", v)
-                # source="operator" — an operator-set (or previously auto-pinned)
-                # value, distinct from a fresh model suggestion (§17.854 C3).
-                applied[tok] = {"value": v, "kind": "known", "source": "operator"}
+                applied[tok] = {"value": v, "kind": "known", "source": src}
                 tokens.remove(tok)
         # Layer 2 — model-mapped against the facts ledger.
         facts = [str(f).strip() for f in (env.get("facts") or []) if str(f).strip()]
@@ -143,14 +166,19 @@ async def resolve_placeholders(
                 src = "from your environment" if r["kind"] == "known" else "suggested — rename if you like"
                 notes.append(f"- `{tok}` → `{r['value']}` ({src})")
             out = out.rstrip() + "\n\n---\n**Values filled in:**\n" + "\n".join(notes)
-            # Auto-pin so the next generation is deterministic and the operator
-            # can see/edit these in the Pinned values panel.
-            if db is not None:
+            # §17.892 — auto-pin NODE-SCOPED so re-generating THIS step stays
+            # deterministic, without the value leaking into every other step
+            # that happens to use the same token name (the DarthSidious
+            # incident). Only freshly-resolved values pin; Layer-1 hits are
+            # already pinned in their own scope. Requires a node_key — without
+            # one there is no honest scope, so nothing pins.
+            fresh = {t: r["value"] for t, r in applied.items() if r["source"] == "model"}
+            if db is not None and node_key and fresh:
                 try:
                     from app.modules import assist_agent
                     await assist_agent.set_environment(
                         session_id=session_id,
-                        substitutions={t: r["value"] for t, r in applied.items()},
+                        substitutions_by_node={node_key: fresh},
                         db=db,
                     )
                 except Exception:
