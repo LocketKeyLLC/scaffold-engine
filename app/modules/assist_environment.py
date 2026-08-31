@@ -43,9 +43,19 @@ def _environment_from_metadata(metadata: Any) -> dict:
         return {"profile": "", "substitutions": {}, "facts": []}
     facts = env.get("facts")
     playbook = env.get("playbook")
+    by_node = env.get("substitutions_by_node")
     return {
         "profile": env.get("profile") or "",
         "substitutions": env.get("substitutions") or {},
+        # §17.892 — NODE-SCOPED auto-learned/auto-pinned values. Global
+        # `substitutions` are the operator's explicit pins (verbatim
+        # everywhere, §17.850); auto-pins live here, keyed by the node they
+        # were learned on, and apply only when regenerating THAT step. The
+        # live incident: HOSTNAME=DarthSidious auto-pinned during the HP
+        # switch step deterministically named the PalWorld VM after the
+        # switch. §17.881b — MUST round-trip here or the next env write
+        # erases it.
+        "substitutions_by_node": by_node if isinstance(by_node, dict) else {},
         # §17.709 — durable observed facts about the operator's system.
         "facts": facts if isinstance(facts, list) else [],
         # §17.881b — the session playbook MUST round-trip through this
@@ -89,6 +99,7 @@ async def set_environment(
     session_id: str,
     profile: str | None = None,
     substitutions: dict | None = None,
+    substitutions_by_node: dict | None = None,
     verbosity: str | None = None,
     facts: list[str] | None = None,
     retract_facts: list[str] | None = None,
@@ -128,6 +139,21 @@ async def set_environment(
         current["substitutions"] = {
             k: v for k, v in merged.items() if v is not None and str(v).strip() != ""
         }
+    if substitutions_by_node:
+        # §17.892 — node-scoped auto-pins: merge per node per key; an empty
+        # value deletes the key; an emptied node map is dropped.
+        merged_bn = {k: dict(v) for k, v in (current.get("substitutions_by_node") or {}).items()
+                     if isinstance(v, dict)}
+        for nk, kv in substitutions_by_node.items():
+            if not isinstance(kv, dict):
+                continue
+            node_map = merged_bn.setdefault(str(nk), {})
+            node_map.update(kv)
+            merged_bn[str(nk)] = {
+                k: v for k, v in node_map.items()
+                if v is not None and str(v).strip() != ""
+            }
+        current["substitutions_by_node"] = {k: v for k, v in merged_bn.items() if v}
     if retract_facts:
         # §17.725 — retract contradicted facts BEFORE folding the new ones in.
         gone = {str(r).strip().lower() for r in retract_facts if str(r).strip()}

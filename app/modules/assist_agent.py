@@ -1151,7 +1151,7 @@ async def run_step_research(
     if (res.get("answer") or "").strip() and _settings.assist_placeholder_resolver_enabled:
         resolved, _rmap = await assist_guide.resolve_placeholders(
             text=res["answer"], session_id=session_id, environment=environment,
-            step_title=nk or "", db=db,
+            step_title=nk or "", db=db, node_key=nk,  # §17.892 — scoped auto-pin
         )
         res["answer"] = resolved
     # §17.726 — the answer is what the engine told the operator; record it.
@@ -1292,7 +1292,7 @@ async def run_step_fix(
     if (res.get("fix") or "").strip() and _settings.assist_placeholder_resolver_enabled:
         resolved, _rmap = await assist_guide.resolve_placeholders(
             text=res["fix"], session_id=session_id, environment=mem.environment,
-            step_title=ctx.title, db=db,
+            step_title=ctx.title, db=db, node_key=node_key,  # §17.892
         )
         res["fix"] = resolved
     # §17.726 — record the corrective steps the engine gave the operator.

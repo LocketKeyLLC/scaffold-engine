@@ -244,6 +244,7 @@ def test_environment_from_metadata_variants():
                          "facts": ["Existing PVE 9.2.6"]}}
     )
     assert got == {"profile": "Ubuntu", "substitutions": {"A": "1"},
+                   "substitutions_by_node": {},  # §17.892 — node-scoped pins
                    "facts": ["Existing PVE 9.2.6"],
                    "playbook": {}}  # §17.881b — playbook round-trips
     # tolerates a JSON string body
@@ -333,8 +334,8 @@ async def test_get_environment_returns_shape():
         _result({"metadata": {"environment": {"profile": "P", "substitutions": {}}}}),
     ])
     out = await assist_agent.get_environment(session_id="s", db=db)
-    assert out == {"profile": "P", "substitutions": {}, "facts": [],
-                   "playbook": {}, "verbosity": "normal"}  # §17.881b
+    assert out == {"profile": "P", "substitutions": {}, "substitutions_by_node": {},
+                   "facts": [], "playbook": {}, "verbosity": "normal"}  # §17.881b/892
 
 
 # ── §17.487: verify_submit_outcome ─────────────────────────────────────────
@@ -435,7 +436,8 @@ async def test_learn_from_submit_only_adds_new_keys():
     # HOST_IP already set by the operator → not overwritten; only PORT is new.
     assert out == {"PORT": "8080"}
     _, kwargs = setenv.call_args
-    assert kwargs["substitutions"] == {"PORT": "8080"}
+    # §17.892 — learned values are NODE-scoped, never global.
+    assert kwargs["substitutions_by_node"] == {"T2": {"PORT": "8080"}}
 
 
 @pytest.mark.asyncio
