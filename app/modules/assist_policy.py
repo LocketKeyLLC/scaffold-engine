@@ -164,7 +164,9 @@ _CLAIM_DISQUALIFY_RE = re.compile(
     r"\b(?:not|never|haven'?t|hasn'?t|isn'?t|wasn'?t|aren'?t|didn'?t|don'?t|"
     r"doesn'?t|can'?t|cannot|couldn'?t|won'?t|wouldn'?t|unable|"
     r"fail(?:ed|s|ing)?|error(?:s|ed)?|broke(?:n)?|stuck|trouble|issue|problem|"
-    r"no\s+luck|except|but\s+(?:it|the|when|now))\b",
+    r"no\s+luck|except|but\s+(?:it|the|when|now)|"
+    # §17.891b — partial/none wording means the work is NOT complete.
+    r"nothing|none|partial(?:ly)?|partly|half(?:way)?|almost|nearly|mostly)\b",
     re.IGNORECASE,
 )
 _CLAIM_PHRASE_RE = re.compile(
@@ -179,7 +181,16 @@ _CLAIM_PHRASE_RE = re.compile(
     r"|\balready\s+(?:did|done|completed|finished|installed|handled)\b"
     r"|\b(?:it|that)\s+worked\b"
     r"|\bwork(?:s|ed|ing)\s+(?:now|fine|great|perfectly)\b"
-    r"|\ball\s+set\b|\bgood\s+to\s+go\b|\bwe(?:'re|\s+are)\s+good\b",
+    r"|\ball\s+set\b|\bgood\s+to\s+go\b|\bwe(?:'re|\s+are)\s+good\b"
+    # §17.891b — CI caught real claim phrasings the noun-list missed ("that
+    # whole install is done", "done with this one"). Generic-subject completion
+    # states — deliberately WITHOUT working/running here (a download that "is
+    # running" is in progress, not complete; those stay it/that/this-only above).
+    r"|\b(?:is|are|was|were|has\s+been|have\s+been)\s+(?:all\s+|already\s+|now\s+)?"
+    r"(?:done|complete[d]?|finished|installed|configured|set\s+up|in\s+place|"
+    r"taken\s+care\s+of)\b"
+    r"|\bdone\s+with\s+(?:this|that|it|everything|the)\b"
+    r"|\b(?:on\s+to|onto)\s+the\s+next\b",
     re.IGNORECASE,
 )
 
@@ -212,6 +223,39 @@ def looks_like_completion_claim(msg: str) -> bool:
     if _CLAIM_DISQUALIFY_RE.search(m):     # negation / failure wording
         return False
     return bool(_CLAIM_PHRASE_RE.search(m))
+
+
+# ── Advancement signal (§17.891) ─────────────────────────────────────────────
+# The mirror image of §17.890. Live incident (2026-08-31 02:40): the §17.754
+# tracker — confidence above threshold, current_step_done=true — retired
+# "Create PalWorld VM" off the message "I want to build a markdown linter".
+# The tracker's LLM verdict alone must never retire a step: a retire needs a
+# deterministic ADVANCEMENT SIGNAL in the operator's own words.
+_ADVANCE_INTENT_RE = re.compile(
+    r"^\s*(?:next(?:\s+step)?|continue|move\s+on|proceed|"
+    r"skip(?:\s+(?:it|this|that|(?:this\s+)?step))?)[.!\s]*$",
+    re.IGNORECASE,
+)
+
+
+def has_advancement_signal(msg: str) -> bool:
+    """§17.891 — True when `msg` deterministically supports RETIRING the
+    current step: an explicit completion claim (§17.890), an explicit
+    next/skip/continue intent, or a clean (error-free) shell paste. Everything
+    else — questions, new-project asks, notes, noise — must never close a step,
+    no matter how confident the tracker's verdict is."""
+    if not msg:
+        return False
+    m = normalize_punct(msg).strip()
+    if _ADVANCE_INTENT_RE.match(m):
+        return True
+    if looks_like_completion_claim(m):
+        return True
+    # Lazy import — assist_decide imports this module at load time; by call
+    # time it is fully initialized. Reuses the ONE copy of the shell regexes.
+    from app.modules import assist_decide
+    sig = assist_decide._compute_signals(m, None)
+    return bool(sig["shell_paste"] and not sig["shell_error"])
 
 
 # ── The post-filter ───────────────────────────────────────────────────────────
