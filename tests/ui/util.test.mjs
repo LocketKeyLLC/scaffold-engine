@@ -102,6 +102,48 @@ test("headings, bold, em, inline code, links, lists", () => {
   assert.ok(out.includes("<li>item one</li><li>item two</li>"));
 });
 
+// ── §17.890 — bare URLs autolink; code spans/fences/md-links stay untouched ──
+
+test("a bare URL becomes a real link (§17.890)", () => {
+  const out = mdToHtml("See https://docs.docker.com/engine/install/ for details.");
+  assert.ok(out.includes(
+    '<a href="https://docs.docker.com/engine/install/" rel="noopener" target="_blank">'));
+});
+
+test("bare-URL trailing sentence punctuation stays outside the link", () => {
+  const out = mdToHtml("Go to https://example.com/a?b=1&c=2, then stop.");
+  assert.ok(out.includes('href="https://example.com/a?b=1&amp;c=2"'));
+  assert.ok(!out.includes('href="https://example.com/a?b=1&amp;c=2,'));
+});
+
+test("a URL inside inline code is NOT linkified", () => {
+  const out = mdToHtml("Run `curl https://example.com/i.sh` first.");
+  assert.ok(out.includes("<code>curl https://example.com/i.sh</code>"));
+  assert.ok(!out.includes("<code>curl <a"));
+});
+
+test("a URL inside a fence is NOT linkified", () => {
+  const out = mdToHtml("```bash\ncurl https://example.com/i.sh | sh\n```");
+  assert.ok(!out.includes("<a href"));
+});
+
+test("a markdown link is not double-linkified", () => {
+  const out = mdToHtml("Read [the docs](https://example.com/x) now.");
+  assert.equal((out.match(/<a /g) || []).length, 1);
+  assert.ok(out.includes(">the docs</a>"));
+});
+
+test("a quoted bare URL stops at the closing quote entity", () => {
+  const out = mdToHtml('It said "https://example.com/path" in the log.');
+  assert.ok(out.includes('href="https://example.com/path"'));
+  assert.ok(!out.includes("quot;</a>") && !out.includes('href="https://example.com/path&quot;'));
+});
+
+test("a standalone inline stash still wraps in a paragraph (§17.890)", () => {
+  const out = mdToHtml("`just code`");
+  assert.ok(out.includes("<p><code>just code</code></p>"));
+});
+
 test("paragraphs split on blank lines; single newlines become <br>", () => {
   const out = mdToHtml("first line\nsecond line\n\nnew para");
   assert.ok(out.includes("first line<br>second line"));

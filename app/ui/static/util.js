@@ -122,10 +122,34 @@ export function mdToHtml(src) {
     .replace(/^### (.*)$/gm, "<h3>$1</h3>")
     .replace(/^## (.*)$/gm, "<h2>$1</h2>")
     .replace(/^# (.*)$/gm, "<h1>$1</h1>")
-    .replace(/`([^`\x00]+)`/g, "<code>$1</code>")
+    // inline code — stashed like fences so a URL or emphasis inside `...` is
+    // never rewritten by the passes below (§17.890).
+    .replace(/`([^`\x00]+)`/g, (_, code) => {
+      blocks.push(`<code>${code}</code>`);
+      return `\x00MD${blocks.length - 1}\x00`;
+    })
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" rel="noopener" target="_blank">$1</a>');
+    // markdown links — stashed so the bare-URL pass below can't re-linkify
+    // the href it just produced.
+    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, (_, label, url) => {
+      blocks.push(`<a href="${url}" rel="noopener" target="_blank">${label}</a>`);
+      return `\x00MD${blocks.length - 1}\x00`;
+    });
+  // §17.890 — bare URLs become REAL links (research answers and fixes emit
+  // plain https://… constantly; they rendered as dead text). The text is
+  // already HTML-escaped, so cut the match at the first escaped delimiter
+  // entity (a literal ", ', < or > can't appear unencoded in a URL), then
+  // shed trailing punctuation that belongs to the sentence, not the URL.
+  text = text.replace(/https?:\/\/[^\s\x00]+/gi, (m) => {
+    const cut = m.search(/&(?:quot|#39|lt|gt);/);
+    let url = cut === -1 ? m : m.slice(0, cut);
+    const tail = m.slice(url.length);
+    const trimmed = url.replace(/[.,;:!?)\]]+$/, "");
+    const rest = url.slice(trimmed.length) + tail;
+    if (!trimmed) return m;
+    return `<a href="${trimmed}" rel="noopener" target="_blank">${trimmed}</a>${rest}`;
+  });
   // ordered lists (§17.854 audit G8 — assist guidance arrives as `1. … 2. …`
   // numbered steps; without this they flattened to <p> with <br>, losing the
   // step structure in the surface most dependent on it). Runs BEFORE unordered
@@ -139,13 +163,48 @@ export function mdToHtml(src) {
     const items = list.trim().split(/\n/).map((li) => `<li>${li.replace(/^[-*] /, "")}</li>`).join("");
     return `\n<ul>${items}</ul>`;
   });
-  // paragraphs / line breaks (a stashed fence stands alone — never wrapped)
+  // paragraphs / line breaks (a stashed fence stands alone — never wrapped).
+  // §17.890 — inline stashes (code spans, links) share the sentinel now, so
+  // resolve a standalone sentinel and only skip wrapping for true blocks
+  // (<pre>); a paragraph that merely STARTS with an inline stash still wraps.
   text = text
     .split(/\n{2,}/)
-    .map((p) => (/^\s*(\x00MD\d+\x00|<(h\d|ul|ol|pre|blockquote))/.test(p) ? p : `<p>${p.replace(/\n/g, "<br>")}</p>`))
+    .map((p) => {
+      const solo = p.match(/^\s*\x00MD(\d+)\x00\s*$/);
+      const isBlock = solo
+        ? (blocks[Number(solo[1])] || "").startsWith("<pre")
+        : /^\s*<(h\d|ul|ol|pre|blockquote)/.test(p);
+      return isBlock ? p : `<p>${p.replace(/\n/g, "<br>")}</p>`;
+    })
     .join("\n");
   text = text.replace(/\x00MD(\d+)\x00/g, (_, i) => blocks[Number(i)] ?? "");
   return text;
+}
+
+/** §17.890 — right-click copy was effectively impossible in the chat views:
+ * every streamed frame force-scrolled the transcript to the bottom, and full
+ * re-renders destroyed the active selection out from under the native context
+ * menu (its Copy then acts on a selection that no longer exists; a fast
+ * Ctrl+C raced the churn and usually won — hence "Ctrl+C works, right-click
+ * doesn't"). Two helpers fix the class:
+ * - stickyScroll(elm): returns a scroll-to-bottom fn that only fires while
+ *   the user is already pinned near the bottom — reading back or selecting
+ *   above never gets yanked.
+ * - selectionWithin(elm): true while the user holds a live selection inside
+ *   elm — callers defer destructive re-renders until it clears. */
+export function stickyScroll(elm) {
+  let pinned = true;
+  elm.addEventListener("scroll", () => {
+    pinned = elm.scrollHeight - elm.scrollTop - elm.clientHeight < 48;
+  });
+  return () => { if (pinned) elm.scrollTop = elm.scrollHeight; };
+}
+
+export function selectionWithin(elm) {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+  const n = sel.getRangeAt(0).commonAncestorContainer;
+  return elm.contains(n.nodeType === 1 ? n : n.parentNode);
 }
 
 /** Copy text to clipboard; returns a promise. */
