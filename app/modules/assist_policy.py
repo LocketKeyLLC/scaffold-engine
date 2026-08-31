@@ -214,6 +214,39 @@ def looks_like_completion_claim(msg: str) -> bool:
     return bool(_CLAIM_PHRASE_RE.search(m))
 
 
+# ── Advancement signal (§17.891) ─────────────────────────────────────────────
+# The mirror image of §17.890. Live incident (2026-08-31 02:40): the §17.754
+# tracker — confidence above threshold, current_step_done=true — retired
+# "Create PalWorld VM" off the message "I want to build a markdown linter".
+# The tracker's LLM verdict alone must never retire a step: a retire needs a
+# deterministic ADVANCEMENT SIGNAL in the operator's own words.
+_ADVANCE_INTENT_RE = re.compile(
+    r"^\s*(?:next(?:\s+step)?|continue|move\s+on|proceed|"
+    r"skip(?:\s+(?:it|this|that|(?:this\s+)?step))?)[.!\s]*$",
+    re.IGNORECASE,
+)
+
+
+def has_advancement_signal(msg: str) -> bool:
+    """§17.891 — True when `msg` deterministically supports RETIRING the
+    current step: an explicit completion claim (§17.890), an explicit
+    next/skip/continue intent, or a clean (error-free) shell paste. Everything
+    else — questions, new-project asks, notes, noise — must never close a step,
+    no matter how confident the tracker's verdict is."""
+    if not msg:
+        return False
+    m = normalize_punct(msg).strip()
+    if _ADVANCE_INTENT_RE.match(m):
+        return True
+    if looks_like_completion_claim(m):
+        return True
+    # Lazy import — assist_decide imports this module at load time; by call
+    # time it is fully initialized. Reuses the ONE copy of the shell regexes.
+    from app.modules import assist_decide
+    sig = assist_decide._compute_signals(m, None)
+    return bool(sig["shell_paste"] and not sig["shell_error"])
+
+
 # ── The post-filter ───────────────────────────────────────────────────────────
 # `_TEXT_FILL_FIELDS` are filled from the message ONLY when the LLM left them
 # blank (it may have extracted a cleaner value); routing fields are always set.

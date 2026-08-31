@@ -17,7 +17,7 @@ it, tested here:
 from __future__ import annotations
 
 import contextlib
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -162,6 +162,113 @@ async def test_blocked_verdict_with_claim_commits_operator_affirmed(outcome):
     submit.assert_called_once()
     friction.assert_called_once()  # the override leaves an honest trail
     assert "operator" in friction.call_args.kwargs["note"]
+
+
+# ── 4. §17.891 — the advancement signal + tracker-retire veto ────────────────
+
+@pytest.mark.parametrize("msg", [
+    "done",
+    "next step",
+    "continue",
+    "move on",
+    "skip this step",
+    "I did that already",
+    "The operator says this step is done — assess and advance.",  # ✓-button
+    "root@pve:~# systemctl enable sonarr\nCreated symlink /etc/systemd/...",
+])
+def test_advancement_signal_positive(msg):
+    assert P.has_advancement_signal(msg) is True
+
+
+@pytest.mark.parametrize("msg", [
+    "",
+    "I want to build a markdown linter",  # the live §17.891 incident message
+    "build a thing",
+    "ok",
+    "a",
+    "tell me a joke",
+    "list my jobs",
+    "how do I configure the bridge?",
+    "root@pve:~# apt install palworld\nE: Unable to locate package palworld",
+])
+def test_advancement_signal_negative(msg):
+    assert P.has_advancement_signal(msg) is False
+
+
+def _track_patches(es, *, message_verdict):
+    """Common mocks for assist_track: session, prior-row db, tracker verdict,
+    retire + finalize spies."""
+    row = {"job_id": "j1", "current_node_key": "T22"}
+    res = MagicMock()
+    res.mappings.return_value.first.return_value = row
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=res)
+    from app.modules import assist_tracker
+    es.enter_context(patch.object(assist_router.assist_agent, "get_session",
+                     new=AsyncMock(return_value={"status": "active"})))
+    es.enter_context(patch.object(assist_tracker, "assess_progress",
+                     new=AsyncMock(return_value=message_verdict)))
+    es.enter_context(patch.object(assist_router.assist_agent, "_maybe_finalize_session",
+                     new=AsyncMock()))
+    retire = es.enter_context(patch.object(assist_router, "_retire_step_mirrored",
+                              new=AsyncMock()))
+    return db, retire
+
+
+@pytest.mark.asyncio
+async def test_tracker_advance_without_signal_is_vetoed():
+    """The live incident: confident advance + current_step_done on a message
+    with no advancement signal must NOT retire the step."""
+    from app.routers.assist import AssistInterpretInput
+    with contextlib.ExitStack() as es:
+        db, retire = _track_patches(es, message_verdict={
+            "verdict": "advance", "confidence": 0.99, "current_step_done": True,
+            "node_key": "T22",
+        })
+        out = await assist_router.assist_track(
+            "sid-1", AssistInterpretInput(message="I want to build a markdown linter"),
+            db,
+        )
+    retire.assert_not_called()
+    assert out["action"] == "proceed"
+    assert out["advance_vetoed"] is True
+
+
+@pytest.mark.asyncio
+async def test_tracker_advance_with_claim_still_retires():
+    from app.routers.assist import AssistInterpretInput
+    with contextlib.ExitStack() as es:
+        db, retire = _track_patches(es, message_verdict={
+            "verdict": "advance", "confidence": 0.99, "current_step_done": True,
+            "node_key": "T22",
+        })
+        out = await assist_router.assist_track(
+            "sid-1", AssistInterpretInput(message="done, that worked"), db,
+        )
+    retire.assert_called_once()
+    assert out["action"] == "advanced"
+    assert out["retired_prior_step"] == "T22"
+
+
+@pytest.mark.asyncio
+async def test_tracker_add_step_without_signal_adds_but_does_not_retire():
+    """add_step keeps adding the new step — only the RETIRE of the prior step
+    needs the signal."""
+    from app.routers.assist import AssistInterpretInput
+    with contextlib.ExitStack() as es:
+        db, retire = _track_patches(es, message_verdict={
+            "verdict": "add_step", "confidence": 0.99, "current_step_done": True,
+            "node_key": "T22", "new_step_request": "build a markdown linter",
+        })
+        es.enter_context(patch.object(assist_router.assist_agent, "add_step",
+                         new=AsyncMock(return_value={"node_key": "ADD9"})))
+        out = await assist_router.assist_track(
+            "sid-1", AssistInterpretInput(message="I want to build a markdown linter"),
+            db,
+        )
+    retire.assert_not_called()
+    assert out["action"] == "added_step"
+    assert out["advance_vetoed"] is True
 
 
 @pytest.mark.asyncio

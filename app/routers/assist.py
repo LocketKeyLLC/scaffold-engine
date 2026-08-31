@@ -1242,6 +1242,16 @@ async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(g
     confident = float(verdict.get("confidence") or 0.0) >= settings.assist_tracker_confidence
     prior_nk = verdict.get("node_key") or (prior or {}).get("current_node_key")
     job_id = str((prior or {}).get("job_id"))
+    # §17.891 — deterministic backstop: the tracker's LLM verdict alone must
+    # never retire a step. Live incident (2026-08-31 02:40): confidence above
+    # threshold + current_step_done=true retired "Create PalWorld VM" off the
+    # message "I want to build a markdown linter" — the operator was jumped
+    # past work they never did, and the next walkthrough assumed a VM that
+    # doesn't exist. A retire requires an ADVANCEMENT SIGNAL in the operator's
+    # own words (explicit completion claim §17.890, explicit next/skip intent,
+    # or a clean shell paste). Without one, add_step still adds; advance
+    # degrades to 'proceed' so the caller re-orients on the current step.
+    adv_signal = assist_policy.has_advancement_signal(body.message or "")
     if v == "add_step" and confident and (verdict.get("new_step_request") or "").strip():
         try:
             step = await assist_agent.add_step(
@@ -1252,17 +1262,30 @@ async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(g
             # §17.754 — the tracker judged the prior step already complete (the
             # operator moved past it), so RETIRE it — else, after the new step, the
             # plan would loop the operator back to a step they've finished.
-            if verdict.get("current_step_done") and prior_nk and prior_nk != (step or {}).get("node_key"):
+            if (verdict.get("current_step_done") and adv_signal and prior_nk
+                    and prior_nk != (step or {}).get("node_key")):
                 await _retire_step_mirrored(
                     db=db, job_id=job_id, session_id=session_id, node_key=prior_nk,
                     evidence=body.message)
                 out["retired_prior_step"] = prior_nk
+            elif verdict.get("current_step_done") and not adv_signal:
+                logger.warning(  # §17.891 — enforcement veto logs LOUD (§17.882b)
+                    "tracker_retire_vetoed site=add_step session=%s nk=%s msg=%r",
+                    session_id, prior_nk, (body.message or "")[:120])
+                out["advance_vetoed"] = True
         except ValueError as exc:
             # A bad add (e.g. terminal session) must not 500 the tracker — fall
             # back to normal handling.
             out["action"] = "proceed"
             out["add_error"] = str(exc)
     elif v == "advance" and confident and verdict.get("current_step_done") and prior_nk:
+        # §17.891 — veto a retire the operator's own words don't support.
+        if not adv_signal:
+            logger.warning(
+                "tracker_retire_vetoed site=advance session=%s nk=%s msg=%r",
+                session_id, prior_nk, (body.message or "")[:120])
+            out["advance_vetoed"] = True
+            return out
         # §17.754 (#2) — the tracker is confident the current step is DONE and the
         # next work is an EXISTING pending step. Retire the current step (mirror
         # §17.286) so the next claimable step advances; the caller presents it.
