@@ -14,8 +14,8 @@ httpx==0.28.1
 # §17.772 — Model Context Protocol SDK (both sides: engine-as-server + MCP DAG
 # nodes). Kept in lockstep with requirements.txt; mcp 2.0 ships its own
 # httpx2/httpcore2 transport stack alongside our httpx 0.28.1.
-mcp==2.0.0
-mcp-types==2.0.0
+mcp==2.1.1
+mcp-types==2.1.1
 sse-starlette==3.4.8
 httpx2==2.12.0
 httpcore2==2.12.0
@@ -23,13 +23,13 @@ PyJWT==2.13.0
 truststore==0.10.4
 pymilvus==3.0.1
 setuptools==84.0.0  # §17.585
-json_repair==0.63.3
+json_repair==0.63.4
 requests==2.34.2
 structlog==26.1.0
 prometheus-client==0.26.0
 redis==8.1.0
 trafilatura==2.1.0  # HELD at 2.1.x (mirror requirements.txt) — 2.2.0 heading-loss regression, audit M12
-pypdf==6.16.1  # §17.585, §17.724 GHSA bump
+pypdf==6.16.2  # §17.585, §17.724 GHSA bump
 pdfplumber==0.11.10  # §17.585 — pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
 apscheduler==3.11.3
 tzlocal==5.4.4
