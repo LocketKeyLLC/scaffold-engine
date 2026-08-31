@@ -2087,12 +2087,13 @@ async def generate_guidance(
         conversation=conversation,
     )
 
+    gen_messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
     resp = await chat_until_nonempty(
         model_router.chat,
-        [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        gen_messages,
         {"role": role},
         temperature=0.3,
         max_tokens=settings.assist_guide_max_tokens,
@@ -2102,6 +2103,16 @@ async def generate_guidance(
     )
 
     text_out = (resp.text or "").strip() if (resp and resp.success) else ""
+    # §17.893 — banned-value enforcement: redraw once with the violation named;
+    # a still-dirty draft gets the visible flag below.
+    banned_meta: list[dict] = []
+    if text_out:
+        text_out, banned_meta, _redrew = await enforce_banned_values(
+            text_out=text_out, environment=environment, messages=gen_messages,
+            role=role, label="assist_guide",
+        )
+        if banned_meta:
+            text_out += banned_values_warning(banned_meta)
     # §17.771 (deferred, now done) — render-path suggestion validation: on a
     # DECISION step, guarantee a recommendation. If the model laid out options but
     # dropped the "## My suggestion" lean, generate just that block from the
@@ -2135,6 +2146,8 @@ async def generate_guidance(
         "generated_at": _utcnow_iso(),
         # §17.492 — destructive-command safety gate.
         "destructive": scan_destructive(text_out) if settings.assist_destructive_scan else [],
+        # §17.893 — banned values that survived the redraw (visibly flagged).
+        "banned_value_violations": banned_meta,
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
@@ -2298,6 +2311,85 @@ def _error_focus_query(title: str, error_text: str) -> str:
     line = _re.sub(r"\s+", " ", line)[:90]
     title_part = " ".join((title or "").split()[:6])
     return f"{title_part} {line}".strip()[:130]
+
+
+def find_banned_values(text_out: str, banned: list | None) -> list[dict]:
+    """§17.893 — deterministic banned-value detection. `banned` is the
+    session's ``environment.banned_values`` list of {value, reason}: concrete
+    identifiers the operator has explicitly ruled out for new use (live
+    incident: 'DarthSidious' is the HP SWITCH's hostname; with the §17.892 pin
+    removed and the constraint verbatim IN the prompt, the model still copied
+    the name from the prior walkthrough in its conversation window into
+    `qm create --name` — §17.882's lesson again: prompts are guidance, this is
+    enforcement). Word-boundary, case-insensitive; values under 3 chars are
+    ignored (too collision-prone to enforce)."""
+    import re as _re
+    if not (text_out or "").strip() or not banned:
+        return []
+    hits: list[dict] = []
+    for b in banned:
+        v = str((b or {}).get("value") or "").strip()
+        if len(v) < 3:
+            continue
+        if _re.search(rf"(?<![\w-]){_re.escape(v)}(?![\w-])", text_out, _re.I):
+            hits.append({"value": v, "reason": str((b or {}).get("reason") or "").strip()})
+    return hits
+
+
+def banned_values_warning(hits: list[dict]) -> str:
+    """§17.893 — the visible flag when a redraw still carries a banned value
+    (the §17.883 honesty contract: gates guarantee VISIBILITY, not
+    correctness)."""
+    if not hits:
+        return ""
+    return ("\n\n---\n⚠️ **Reserved value:** this walkthrough uses "
+            + "; ".join(f"`{h['value']}`" + (f" ({h['reason']})" if h["reason"] else "")
+                        for h in hits[:3])
+            + " — the operator has ruled this value out for new use. Substitute "
+              "your own value everywhere it appears before running anything.")
+
+
+async def enforce_banned_values(
+    *, text_out: str, environment: Optional[dict], messages: list[dict],
+    role: str, label: str,
+) -> tuple[str, list[dict], bool]:
+    """§17.893 — redraw-once enforcement: if the draft uses a banned value,
+    regenerate with the violation NAMED; a still-dirty redraw returns its
+    remaining hits for the caller to flag visibly. Returns
+    ``(text, remaining_hits, redrew)``. Fail-soft: any model failure keeps the
+    original draft with its hits."""
+    banned = (environment or {}).get("banned_values") or []
+    hits = find_banned_values(text_out, banned)
+    if not hits:
+        return text_out, [], False
+    logger.warning("assist_banned_value_violation label=%s values=%s (regenerating)",
+                   label, ",".join(h["value"] for h in hits))
+    directive = (
+        "REGENERATION NOTICE: your draft used value(s) the operator has "
+        "EXPLICITLY ruled out for new use:\n"
+        + "\n".join(f"- `{h['value']}`" + (f" — {h['reason']}" if h["reason"] else "")
+                    for h in hits[:5])
+        + "\nReplace EVERY occurrence — commands, verification checks, prose — "
+          "with a correct or freshly-chosen value that fits this step. Output "
+          "the corrected walkthrough in full."
+    )
+    try:
+        resp = await chat_until_nonempty(
+            model_router.chat,
+            list(messages) + [
+                {"role": "assistant", "content": text_out},
+                {"role": "user", "content": directive},
+            ],
+            {"role": role},
+            temperature=0.3, max_tokens=settings.assist_guide_max_tokens,
+            draws=2, label=f"{label}_banned_regen", think_off_rescue=True,
+        )
+        new = (resp.text or "").strip() if (resp and resp.success) else ""
+    except Exception:  # noqa: BLE001 — enforcement must not sink generation
+        new = ""
+    if not new:
+        return text_out, hits, False
+    return new, find_banned_values(new, banned), True
 
 
 def guide_integrity_warning(text_out: str, user_prompt: str, failed_commands: str) -> str:
@@ -2464,23 +2556,34 @@ async def generate_fix(
     # diagnose-first directive → still dirty → a visible warning leads the
     # answer so the operator is never silently handed a guess.
     repeat_meta: list[str] = []
+    banned_meta_fix: list[dict] = []  # §17.893
     novel_meta: list[str] = []
 
-    def _gate(draft: str) -> tuple[list[str], list[str]]:
+    _banned_list = (environment or {}).get("banned_values") or []
+
+    def _gate(draft: str) -> tuple[list[str], list[str], list[dict]]:
         hits_ = (find_repeated_failed(draft, failed_commands)
                  if failure_streak >= 1 and (failed_commands or "").strip() else [])
         novel_ = (find_novel_urls(draft, user + "\n" + (failed_commands or ""))
                   if failure_streak >= settings.assist_fix_streak_threshold else [])
-        return hits_, novel_
+        # §17.893 — banned values are banned at ANY streak.
+        banned_ = find_banned_values(draft, _banned_list)
+        return hits_, novel_, banned_
 
     if text_out:
-        hits, novel = _gate(text_out)
-        if hits or novel:
+        hits, novel, banned_hits = _gate(text_out)
+        if hits or novel or banned_hits:
             logger.warning(
-                "assist_fix_gate_violation node_key=%s repeats=%d novel_urls=%d (regenerating)",
-                node_key, len(hits), len(novel),
+                "assist_fix_gate_violation node_key=%s repeats=%d novel_urls=%d banned=%d (regenerating)",
+                node_key, len(hits), len(novel), len(banned_hits),
             )
             directive = ["\n\n---\nREGENERATION NOTICE:"]
+            if banned_hits:
+                directive.append(
+                    "Your previous draft used value(s) the operator has EXPLICITLY "
+                    "ruled out for new use — replace every occurrence:\n"
+                    + "\n".join(f"- `{b['value']}`" + (f" — {b['reason']}" if b["reason"] else "")
+                                for b in banned_hits[:5]))
             if hits:
                 directive.append(
                     "Your previous draft prescribed command(s)/URL(s) that ALREADY "
@@ -2505,11 +2608,11 @@ async def generate_fix(
             ])
             regen_text = (regen.text or "").strip() if (regen and regen.success) else ""
             if regen_text:
-                rehits, renovel = _gate(regen_text)
-                if not rehits and not renovel:
+                rehits, renovel, rebanned = _gate(regen_text)
+                if not rehits and not renovel and not rebanned:
                     text_out = regen_text
                 else:
-                    repeat_meta, novel_meta = rehits, renovel
+                    repeat_meta, novel_meta, banned_meta_fix = rehits, renovel, rebanned
                     warn_bits = []
                     if rehits:
                         warn_bits.append(
@@ -2519,6 +2622,10 @@ async def generate_fix(
                         warn_bits.append(
                             "contains unverified URL(s) the engine could not trace "
                             "to any source (" + "; ".join(f"`{n[:70]}`" for n in renovel[:2]) + ")")
+                    if rebanned:  # §17.893
+                        warn_bits.append(
+                            "uses a value the operator has ruled out ("
+                            + "; ".join(f"`{b['value']}`" for b in rebanned[:2]) + ")")
                     text_out = (
                         "⚠️ **Caution:** this fix " + " and ".join(warn_bits)
                         + " — flagged twice by the integrity gate. Prefer its "
@@ -2527,11 +2634,12 @@ async def generate_fix(
                         + regen_text
                     )
             else:
-                repeat_meta, novel_meta = hits, novel
+                repeat_meta, novel_meta, banned_meta_fix = hits, novel, banned_hits
                 text_out = (
                     "⚠️ **Caution:** this fix includes "
                     + ("already-failed command(s) " if hits else "")
                     + ("unverified URL(s) " if novel else "")
+                    + ("a ruled-out value " if banned_hits else "")
                     + "the integrity gate flagged. Treat with suspicion; reply "
                     "\"different approach\" to force a method change.\n\n" + text_out
                 )
@@ -2548,6 +2656,7 @@ async def generate_fix(
         # warning was prepended; recorded here for triage/telemetry).
         "repeat_violations": repeat_meta,
         "novel_url_violations": novel_meta,
+        "banned_value_violations": banned_meta_fix,  # §17.893
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
@@ -2874,6 +2983,27 @@ async def generate_guidance_stream(
         if text_out:
             yield {"type": "delta", "text": text_out}
 
+    # §17.893 — banned-value enforcement on the stream path: the operator
+    # already watched the dirty draft stream, so a successful redraw is shown
+    # as an explicit correction block (and becomes the durable copy the client
+    # reloads); a still-dirty redraw gets the visible flag.
+    banned_meta: list[dict] = []
+    if text_out:
+        _new, banned_meta, _redrew = await enforce_banned_values(
+            text_out=text_out, environment=environment, messages=messages,
+            role=role, label="assist_guide_stream",
+        )
+        if _redrew and _new != text_out and not banned_meta:
+            text_out = _new
+            yield {"type": "delta", "text":
+                   "\n\n---\n♻️ **Corrected walkthrough** (the draft above used a "
+                   "reserved value — this version replaces it; the corrected copy "
+                   "is what gets saved):\n\n" + _new}
+        elif banned_meta:
+            _bwarn = banned_values_warning(banned_meta)
+            text_out += _bwarn
+            yield {"type": "delta", "text": _bwarn}
+
     # §17.887(#8) — guide integrity gate on the stream path too.
     if text_out:
         _failed_cmds = ""
@@ -2928,6 +3058,7 @@ async def generate_guidance_stream(
         "status": status,
         "generated_at": _utcnow_iso(),
         "placeholders_resolved": resolved_map,
+        "banned_value_violations": banned_meta,  # §17.893
         # §17.854 (audit C3) — scan runs on the POST-resolution text (matches the
         # ensure_guidance rescan on the non-stream path), so substituted values
         # that introduce a destructive command are caught.

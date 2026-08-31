@@ -56,6 +56,10 @@ def _environment_from_metadata(metadata: Any) -> dict:
         # switch. §17.881b — MUST round-trip here or the next env write
         # erases it.
         "substitutions_by_node": by_node if isinstance(by_node, dict) else {},
+        # §17.893 — values the operator has explicitly ruled out for new use
+        # ([{value, reason}]); enforced deterministically on guide/fix output.
+        # §17.881b — must round-trip or the next env write erases it.
+        "banned_values": env.get("banned_values") if isinstance(env.get("banned_values"), list) else [],
         # §17.709 — durable observed facts about the operator's system.
         "facts": facts if isinstance(facts, list) else [],
         # §17.881b — the session playbook MUST round-trip through this
@@ -100,6 +104,7 @@ async def set_environment(
     profile: str | None = None,
     substitutions: dict | None = None,
     substitutions_by_node: dict | None = None,
+    banned_values: list | None = None,
     verbosity: str | None = None,
     facts: list[str] | None = None,
     retract_facts: list[str] | None = None,
@@ -154,6 +159,19 @@ async def set_environment(
                 if v is not None and str(v).strip() != ""
             }
         current["substitutions_by_node"] = {k: v for k, v in merged_bn.items() if v}
+    if banned_values:
+        # §17.893 — merge by value (case-insensitive); a newer reason for the
+        # same value replaces the old entry; capped like the other ledgers.
+        cur_bv = [b for b in (current.get("banned_values") or [])
+                  if isinstance(b, dict) and str(b.get("value") or "").strip()]
+        by_val = {str(b["value"]).strip().lower(): b for b in cur_bv}
+        for b in banned_values:
+            if not isinstance(b, dict):
+                continue
+            v = str(b.get("value") or "").strip()
+            if v:
+                by_val[v.lower()] = {"value": v, "reason": str(b.get("reason") or "").strip()}
+        current["banned_values"] = list(by_val.values())[-30:]
     if retract_facts:
         # §17.725 — retract contradicted facts BEFORE folding the new ones in.
         gone = {str(r).strip().lower() for r in retract_facts if str(r).strip()}

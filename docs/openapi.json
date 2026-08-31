@@ -231,6 +231,19 @@
       },
       "AssistEnvInput": {
         "properties": {
+          "banned_values": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "§17.893 — values ruled out for new use: [{value, reason}]. Enforced deterministically on generated guide/fix output.",
+            "title": "Banned Values"
+          },
           "profile": {
             "anyOf": [
               {

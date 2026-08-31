@@ -203,6 +203,11 @@ class AssistEnvInput(BaseModel):
     substitutions: dict = Field(
         default_factory=dict, description="Concrete value map, e.g. {HOST_IP: 10.0.0.5}."
     )
+    banned_values: Optional[list] = Field(
+        default=None,
+        description="§17.893 — values ruled out for new use: [{value, reason}]. "
+                    "Enforced deterministically on generated guide/fix output.",
+    )
     verbosity: Optional[str] = Field(
         default=None, description="Walkthrough verbosity: terse | normal | detailed."
     )
@@ -673,6 +678,7 @@ async def assist_set_env(session_id: str, body: AssistEnvInput, db=Depends(get_d
             session_id=session_id,
             profile=body.profile,
             substitutions=body.substitutions,
+            banned_values=body.banned_values,  # §17.893
             verbosity=body.verbosity,
             db=db,
         )
