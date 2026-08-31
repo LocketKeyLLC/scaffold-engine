@@ -45,6 +45,11 @@ from app.routers.assist import AssistSubmitInput
     "all set",
     "we're good",
     "I just ran it and it's done",
+    # §17.891b — generic-subject phrasings (CI caught the noun-list gap)
+    "ok that whole install is done and I logged in",
+    "done with this one, on to the next",
+    "the install is done",
+    "the VM is set up",
 ])
 def test_completion_claim_positive(msg):
     assert P.looks_like_completion_claim(msg) is True
@@ -66,6 +71,10 @@ def test_completion_claim_positive(msg):
     "the 4TB drive is partitioned",  # a fact, not a completion claim
     "run apt update first",  # instruction
     "help me finish this",  # help request
+    # §17.891b — partial/in-progress wording is not completion
+    "it's almost done",
+    "nothing is done yet",
+    "the download is running",  # in progress, not complete
 ])
 def test_completion_claim_negative(msg):
     assert P.looks_like_completion_claim(msg) is False

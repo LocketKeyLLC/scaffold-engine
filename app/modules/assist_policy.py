@@ -164,7 +164,9 @@ _CLAIM_DISQUALIFY_RE = re.compile(
     r"\b(?:not|never|haven'?t|hasn'?t|isn'?t|wasn'?t|aren'?t|didn'?t|don'?t|"
     r"doesn'?t|can'?t|cannot|couldn'?t|won'?t|wouldn'?t|unable|"
     r"fail(?:ed|s|ing)?|error(?:s|ed)?|broke(?:n)?|stuck|trouble|issue|problem|"
-    r"no\s+luck|except|but\s+(?:it|the|when|now))\b",
+    r"no\s+luck|except|but\s+(?:it|the|when|now)|"
+    # §17.891b — partial/none wording means the work is NOT complete.
+    r"nothing|none|partial(?:ly)?|partly|half(?:way)?|almost|nearly|mostly)\b",
     re.IGNORECASE,
 )
 _CLAIM_PHRASE_RE = re.compile(
@@ -179,7 +181,16 @@ _CLAIM_PHRASE_RE = re.compile(
     r"|\balready\s+(?:did|done|completed|finished|installed|handled)\b"
     r"|\b(?:it|that)\s+worked\b"
     r"|\bwork(?:s|ed|ing)\s+(?:now|fine|great|perfectly)\b"
-    r"|\ball\s+set\b|\bgood\s+to\s+go\b|\bwe(?:'re|\s+are)\s+good\b",
+    r"|\ball\s+set\b|\bgood\s+to\s+go\b|\bwe(?:'re|\s+are)\s+good\b"
+    # §17.891b — CI caught real claim phrasings the noun-list missed ("that
+    # whole install is done", "done with this one"). Generic-subject completion
+    # states — deliberately WITHOUT working/running here (a download that "is
+    # running" is in progress, not complete; those stay it/that/this-only above).
+    r"|\b(?:is|are|was|were|has\s+been|have\s+been)\s+(?:all\s+|already\s+|now\s+)?"
+    r"(?:done|complete[d]?|finished|installed|configured|set\s+up|in\s+place|"
+    r"taken\s+care\s+of)\b"
+    r"|\bdone\s+with\s+(?:this|that|it|everything|the)\b"
+    r"|\b(?:on\s+to|onto)\s+the\s+next\b",
     re.IGNORECASE,
 )
 
