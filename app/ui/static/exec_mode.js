@@ -39,17 +39,43 @@ export function isAssist() {
 }
 
 /** Start an assist session for a job and navigate to it. Returns true on
- * success (caller should stop its own flow). */
-export async function startAssistFor(api, jobId, toast) {
+ * success (caller should stop its own flow).
+ *
+ * §17.895 — every caller now gets the SAME handling of the two non-success
+ * shapes the server can return, instead of each entry point inventing its own:
+ *   - `assist_unavailable` (umbrella job / 0 DAG nodes, §17.561) is a 200 with
+ *     guidance, NOT an error — it used to fall through as a silent `false` and
+ *     the operator saw nothing happen at all.
+ *   - a thrown error surfaces its detail.
+ * `opts.navigate` is the hook the approve chain needs so it can route through
+ * the SPA router instead of stomping location.hash mid-chain. */
+export async function startAssistFor(api, jobId, toast, opts = {}) {
+  const go = opts.navigate || ((hash) => { location.hash = hash; });
   try {
     const s = await api.post("/assist/start", { job_id: jobId });
-    const sid = s.session_id || s.id;
+    const sid = s && (s.session_id || s.id);
     if (sid) {
       toast?.("Assist mode — the engine guides, you drive.", "ok");
       // §17.859 — land in the job hub's Run tab (it embeds the walkthrough).
-      location.hash = `#/job/${jobId}/run`;
+      go(`#/job/${jobId}/run`);
       return true;
     }
+    if (s && s.assist_unavailable) {
+      // Not an error — a 200 with guidance (§17.561: umbrella / 0-node jobs).
+      // `reason` is a machine code ("umbrella" | "no_dag"), never operator
+      // prose, so it gets translated here rather than shown raw.
+      // components.js supports "" | "ok" | "err" only; this is informational,
+      // and the caller's fallback navigation is the visible half of the answer.
+      toast?.(
+        s.reason === "umbrella"
+          ? `This is an umbrella job — its ${s.children_total || ""} component job${
+              s.children_total === 1 ? "" : "s"
+            } run automatically; open one of those to walk through it.`.replace("  ", " ")
+          : "This job has no plan steps yet, so there is nothing to walk through — generate the plan first."
+      );
+      return false;
+    }
+    toast?.("Could not start assist: the engine returned no session.", "err");
   } catch (e) {
     toast?.(`Could not start assist: ${e.detail || e.message}`, "err");
   }

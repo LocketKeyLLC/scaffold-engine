@@ -34,10 +34,20 @@ function fuzzy(q, text) {
 }
 
 // Route a searched job to its most relevant view by status.
+//
+// §17.895 — all THREE targets here (`/approvals/:id`, `/output/:id`,
+// `/dag/:id`) were retired by §17.859's move to the job hub, so every job jump
+// from the palette matched no route and fell through `setNotFound` to the
+// Dashboard. One job, one URL: #/job/:id[/tab].
 function routeForJob(j) {
-  if (j.status === "awaiting_confirmation") return `/approvals/${j.id}`;
-  if (j.status === "completed") return `/output/${j.id}`;
-  return `/dag/${j.id}`;
+  // Pre-approval statuses: Overview IS the gate (job_hub.GATE_STATUSES).
+  if (["pending", "refining", "awaiting_confirmation"].includes(j.status))
+    return `/job/${j.id}`;
+  if (j.status === "completed") return `/job/${j.id}/output`;
+  if (["awaiting_assist", "assisted_paused", "assisted_executing",
+       "assisted_running", "running"].includes(j.status))
+    return `/job/${j.id}/run`;
+  return `/job/${j.id}/plan`;
 }
 
 let mounted = false;

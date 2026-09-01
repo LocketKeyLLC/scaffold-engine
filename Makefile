@@ -185,9 +185,10 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_sse_event_inventory.py \
 			tests/test_sdk_schema_parity.py \
 			tests/test_settings_patch_scan.py \
+			tests/test_spa_route_inventory.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
 	else \
-		printf '\033[1;33m⚠ host pytest not found — skipped the 2 inventory scans (byte-equal gates above still ran). Full coverage: make test\033[0m\n'; \
+		printf '\033[1;33m⚠ host pytest not found — skipped the inventory scans (byte-equal gates above still ran). Full coverage: make test\033[0m\n'; \
 	fi
 	@printf '\033[1;32m✓ ci-tier-0 passed (static parity gates green)\033[0m\n'
 

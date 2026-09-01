@@ -16,8 +16,13 @@ const GROUPS = {
   terminal: new Set(["completed", "cancelled", "failed"]),
 };
 
+// §17.896 — "Awaiting approval" is first-class here now that Approvals is no
+// longer a sidebar destination: the approval gate is a job STATUS, and the
+// job hub's Overview tab already embeds the gate itself (§17.859). Clicking a
+// row in this bucket lands directly on that gate.
 const CHIPS = [
   ["all", "All"],
+  ["awaiting_confirmation", "Awaiting approval"],
   ["attention", "Needs attention"],
   ["running", "Running"],
   ["completed", "Completed"],

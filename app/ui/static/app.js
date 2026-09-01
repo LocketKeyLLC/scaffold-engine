@@ -1,5 +1,5 @@
 // Scaffold Engine operator SPA — bootstrap, chrome, auth gate, view lifecycle.
-import { el, mount } from "./util.js";
+import { el, mount, currentJob } from "./util.js";
 import * as api from "./api.js";
 import * as router from "./router.js";
 import { placeholder } from "./views/placeholder.js";
@@ -11,7 +11,7 @@ import { execMode, setExecMode } from "./exec_mode.js";
 // Visible build stamp (sidebar foot). Bump per UI change round — it exists so
 // "is my tab running the latest UI?" is answerable at a glance instead of by
 // diffing pixels (the §17.840/§17.842 stale-module debugging sink).
-const UI_BUILD = "r2";
+const UI_BUILD = "r3";
 
 // ── Global error surface ──────────────────────────────────────────────
 // A backstop so anything that escapes a view's own try/catch becomes a
@@ -78,6 +78,54 @@ let cleanup = () => {}; // teardown hook returned by the active view
 // detached DOM) and one duplicate Escape handler per re-auth.
 let healthTimer = null;
 let escHandler = null;
+let jobPinHandler = null; // §17.896 — replaced, not stacked, per chrome rebuild
+
+// §17.896 — the sidebar's Current-job pin. Three verbs, named the way the
+// operator names them: the canvas is "DAG" here even though its hub tab is
+// "Plan", because "where's the DAG" is the question that got asked.
+const JOB_PIN_LINKS = [
+  ["plan", "⬡", "DAG"],
+  ["run", "▶", "Run"],
+  ["output", "▤", "Output"],
+];
+
+function renderJobPin(host) {
+  const job = currentJob();
+  if (!job) {
+    host.classList.add("hidden");
+    mount(host);
+    return;
+  }
+  host.classList.remove("hidden");
+  const path = router.currentPath() || "/";
+  mount(
+    host,
+    el("div", { class: "job-pin-label", text: "Current job" }),
+    el("a", {
+      class: "job-pin-title",
+      href: `#/job/${job.id}`,
+      text: job.title || "(untitled)",
+      title: job.title || "",
+    }),
+    el(
+      "div",
+      { class: "job-pin-links" },
+      ...JOB_PIN_LINKS.map(([tab, icon, label]) =>
+        el(
+          "a",
+          {
+            class:
+              "job-pin-link" + (path === `/job/${job.id}/${tab}` ? " active" : ""),
+            href: `#/job/${job.id}/${tab}`,
+            title: label,
+          },
+          el("span", { class: "job-pin-icon", text: icon }),
+          el("span", { text: label })
+        )
+      )
+    )
+  );
+}
 
 // ── Auth / connect gate ───────────────────────────────────────────────
 function gateStep(n, title, ...body) {
@@ -260,7 +308,12 @@ function buildChrome() {
     navLinks.push(...links);
     // Collapsible group. §17.854 (G7) — OPEN by default (unless the operator
     // explicitly collapsed it), and always open when it owns the active view.
-    const open = !navClosedGroups().has(g.label) || items.some((n) => n.id === topSegment(router.currentPath() || "/"));
+    // §17.896 — a group may declare `collapsed: true` to start CLOSED (System);
+    // an explicit operator choice in scaffold_nav_closed still wins either way.
+    const closed = navClosedGroups();
+    const opened = navOpenedGroups();
+    const dflt = g.collapsed ? opened.has(g.label) : !closed.has(g.label);
+    const open = dflt || items.some((n) => n.id === topSegment(router.currentPath() || "/"));
     const group = el(
       "div",
       { class: "nav-group" + (open ? "" : " collapsed"), dataset: { group: g.label } },
@@ -270,9 +323,17 @@ function buildChrome() {
           class: "nav-group-label nav-group-toggle",
           onClick: () => {
             const collapsed = group.classList.toggle("collapsed");
-            const set = navClosedGroups();
-            collapsed ? set.add(g.label) : set.delete(g.label);
-            saveNavClosedGroups(set);
+            // §17.896 — record the choice against whichever default this group
+            // has, so an explicitly-opened System group STAYS open.
+            if (g.collapsed) {
+              const set = navOpenedGroups();
+              collapsed ? set.delete(g.label) : set.add(g.label);
+              saveNavOpenedGroups(set);
+            } else {
+              const set = navClosedGroups();
+              collapsed ? set.add(g.label) : set.delete(g.label);
+              saveNavClosedGroups(set);
+            }
           },
         },
         el("span", { class: "nav-group-chevron", text: "▸" }),
@@ -286,6 +347,17 @@ function buildChrome() {
   const healthDot = el("span", { class: "health-dot", dataset: { state: "unknown" } });
   const healthText = el("span", { class: "health-text", text: "checking…" });
 
+  // §17.896 — the pinned Current-job block. This is the DAG's front door: the
+  // canvas lives at #/job/:id/plan (a hub tab, §17.859) and had no sidebar
+  // presence at all, so finding it meant Jobs → pick a row → find the tab.
+  const jobPin = el("div", { class: "job-pin" });
+  renderJobPin(jobPin);
+  // Re-render on both signals: a hub load (setCurrentJob) and any navigation
+  // (so the active surface highlights and a cleared pin disappears).
+  if (jobPinHandler) window.removeEventListener("scaffold:currentjob", jobPinHandler);
+  jobPinHandler = () => renderJobPin(jobPin);
+  window.addEventListener("scaffold:currentjob", jobPinHandler);
+
   const sidebar = el(
     "aside",
     { class: "sidebar" },
@@ -295,6 +367,7 @@ function buildChrome() {
       el("img", { class: "brand-logo", src: "/ui/static/logo.svg", alt: "" }),
       el("span", { class: "brand-name", text: "Scaffold" })
     ),
+    jobPin,
     el("nav", { class: "nav" }, ...navGroups),
     // §17.854 (audit G7) — the Auto/Assist switch changes what "Execute" MEANS
     // everywhere, yet it lived in .foot-controls at 11.5px styled like the theme
@@ -471,6 +544,17 @@ function saveNavClosedGroups(set) {
   localStorage.setItem(NAV_CLOSED_KEY, JSON.stringify([...set]));
 }
 
+// §17.896 — the mirror of the above for groups that default to COLLAPSED
+// (System): membership means "the operator deliberately opened this".
+const NAV_OPENED_KEY = "scaffold_nav_opened";
+function navOpenedGroups() {
+  try { return new Set(JSON.parse(localStorage.getItem(NAV_OPENED_KEY)) || []); }
+  catch { return new Set(); }
+}
+function saveNavOpenedGroups(set) {
+  localStorage.setItem(NAV_OPENED_KEY, JSON.stringify([...set]));
+}
+
 function highlightNav(path) {
   const active = topSegment(path);
   document.querySelectorAll(".nav-link").forEach((a) => {
@@ -480,11 +564,18 @@ function highlightNav(path) {
     // deliberate "keep this open" choice).
     if (a.dataset.nav === active) a.closest(".nav-group")?.classList.remove("collapsed");
   });
+  // §17.896 — keep the pin's active-tab highlight in step with the route.
+  const pin = document.querySelector(".job-pin");
+  if (pin) renderJobPin(pin);
 }
 
 // Detail routes without their own nav item map onto the sidebar item that owns
 // their flow, so the sidebar highlights sensibly while on them.
-const NAV_ALIAS = { plan: "approvals" };
+// §17.896 — `approvals` lost its sidebar item (it is a job STATUS, now the
+// "Awaiting approval" chip in Jobs); the route still resolves, so both it and
+// the legacy `plan` route highlight Jobs rather than silently falling back to
+// Dashboard.
+const NAV_ALIAS = { plan: "jobs", approvals: "jobs", job: "jobs" };
 
 function topSegment(path) {
   const seg = path.split("/").filter(Boolean)[0];

@@ -36,7 +36,7 @@ test("core destinations exist (easy access to all components)", () => {
   // §17.859 — dag/theater/output collapsed into the job hub's tabs
   // (#/job/:id); they are deliberately ABSENT from the nav.
   for (const id of [
-    "new", "chat", "dashboard", "approvals",
+    "new", "chat", "dashboard", "jobs",
     "compare", "research", "rag", "library", "assist", "schedules",
     "models", "costs", "traces", "alerts", "settings", "setup",
   ]) {
@@ -45,6 +45,23 @@ test("core destinations exist (easy access to all components)", () => {
   for (const id of ["dag", "theater", "output"]) {
     assert.ok(!ids.has(id), `${id} must stay retired from the nav (job hub owns it, §17.859)`);
   }
+  // §17.896 — approvals is a job STATUS, not a destination: it is the
+  // "Awaiting approval" chip in Jobs and the hub's Overview tab embeds the
+  // gate itself. The #/approvals route still resolves for old links.
+  assert.ok(!ids.has("approvals"),
+    "approvals must stay retired from the nav (Jobs owns the bucket, §17.896)");
+});
+
+test("§17.896 — the sidebar stays condensed", () => {
+  // The regression this guards: the nav creeping back toward the 17-item wall
+  // that made the DAG unfindable. System is the one collapsed-by-default
+  // group; everything outside it is everyday chrome.
+  const everyday = NAV_GROUPS.filter((g) => !g.collapsed);
+  const everydayItems = everyday.flatMap((g) => g.items);
+  assert.ok(everydayItems.length <= 12,
+    `${everydayItems.length} always-visible nav items — condense before adding more`);
+  const system = NAV_GROUPS.find((g) => g.label === "System");
+  assert.equal(system.collapsed, true, "System must default to collapsed");
 });
 
 test("admin-only surfaces keep their flags (§17.810/815/816/817)", () => {
@@ -53,7 +70,7 @@ test("admin-only surfaces keep their flags (§17.810/815/816/817)", () => {
     assert.equal(byId[id].adminOnly, true, `${id} must be adminOnly`);
   }
   // …and the everyday surfaces must NOT be admin-gated.
-  for (const id of ["new", "dashboard", "approvals", "compare", "research", "rag", "assist"]) {
+  for (const id of ["new", "dashboard", "jobs", "compare", "research", "rag", "assist"]) {
     assert.ok(!byId[id].adminOnly, `${id} must not be adminOnly`);
   }
 });
