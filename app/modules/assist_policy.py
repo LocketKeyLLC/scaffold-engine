@@ -258,6 +258,95 @@ def has_advancement_signal(msg: str) -> bool:
     return bool(sig["shell_paste"] and not sig["shell_error"])
 
 
+# ── Completion DENIAL (§17.899) ───────────────────────────────────────────────
+# The missing half of §17.890. That change let the operator's word outrank the
+# verifier — correctly, since the verifier cannot see their machine. But it gave
+# a claim about the WRONG THING the same power, and nothing could take it back.
+#
+# Live incident (2026-08-31 23:13, HomeLab session): the operator wrote "It
+# worked Ubuntu Server is now downloading!" — a genuine completion claim, about
+# the OS ISO. It landed on step T23 "Install PalWorld server" and closed it.
+# 62 seconds later: "But we have ONLY installed the ubuntu server and have not
+# installed anything else." The correction was correctly NOT read as a claim —
+# and then nothing listened for it. T23 stayed `done` with the bogus output
+# "It worked Ubuntu Server is now downloading!", the plan's PalWorld install
+# work silently migrated into T24 "Configure PalWorld service", and T24 could
+# never satisfy its own goal. It churned for 22 hours.
+#
+# So: a denial is not merely "not a claim" — it is an active signal that must
+# REOPEN the step the operator is talking about. Precision-first, same guards as
+# §17.890: an error report about the CURRENT step is a `fix`, not a denial, and
+# the caller additionally bounds this to the step just committed.
+_DENIAL_PHRASE_RE = re.compile(
+    # "we have not installed anything else", "I haven't done that yet"
+    r"\b(?:i|we|you)?\s*(?:have|has|had)?\s*(?:not|n'?t)\s+"
+    r"(?:yet\s+)?(?:actually\s+)?"
+    r"(?:done|did|finished|completed|installed|configured|created|"
+    r"set\s+(?:it\s+)?up|run|ran|started)\b"
+    r"|\b(?:haven'?t|hasn'?t|didn'?t|did\s+not)\s+(?:yet\s+)?(?:actually\s+)?"
+    r"(?:done|do|finished|finish|completed|complete|installed|install|"
+    r"configured|configure|created|create|set\s+up|run|ran|start(?:ed)?)\b"
+    # "that isn't done", "this step was not finished", "it's not complete".
+    # \s* (not \s+) before the negation: in "isn't" the contraction hangs
+    # directly off the verb with no space, and that is the commonest phrasing.
+    r"|\b(?:that|this|it|the\s+step|that\s+step|this\s+step)"
+    r"(?:'?s|\s+is|\s+was|\s+are|\s+were|\s+has\s+been)?\s*(?:still\s+)?(?:not|n'?t)\s+"
+    r"(?:yet\s+)?(?:done|complete[d]?|finished|installed|configured|set\s+up)\b"
+    # "nothing was installed", "nothing else has been done"
+    r"|\bnothing\s+(?:else\s+)?(?:was|is|has\s+been|got)\s+"
+    r"(?:done|installed|configured|created|set\s+up)\b"
+    # "we ONLY installed the ubuntu server" — the live phrasing: an assertion
+    # that the work done was LESS than what the step claimed.
+    r"|\bonly\s+(?:done|did|installed|configured|created|finished|"
+    r"set\s+up|got)\b"
+    # "not done yet" / "still not done" — FULLY ANCHORED, unlike the branches
+    # above which carry their own subject. Unanchored it fired on "the download
+    # is not finished yet, still going", which is a progress report about the
+    # CURRENT step, not a denial that a closed one happened.
+    r"|^\s*(?:still\s+)?not\s+(?:done|complete[d]?|finished)\s*(?:yet)?[.!\s]*$",
+    re.IGNORECASE,
+)
+
+# Work still in flight is a progress report, not a denial — the step the
+# operator is describing is the one they are ON, not one the engine closed.
+_DENIAL_IN_PROGRESS_RE = re.compile(
+    r"\b(?:still\s+(?:going|running|downloading|installing|working)|"
+    r"in\s+progress|currently\s+(?:downloading|installing|running))\b",
+    re.IGNORECASE,
+)
+
+# A denial is about work NOT happening. These say the work DID happen and
+# something then went wrong — that is the §17.874 fix path, not a reopen.
+_DENIAL_DISQUALIFY_RE = re.compile(
+    r"\b(?:error|traceback|exception|failed\s+to\s+start|command\s+not\s+found|"
+    r"permission\s+denied|no\s+such\s+file)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_completion_denial(msg: str) -> bool:
+    """§17.899 — True when `msg` is the operator asserting that work the engine
+    believes is DONE was not actually done. The mirror of
+    ``looks_like_completion_claim``; the caller decides WHICH step it reopens.
+    """
+    if not msg:
+        return False
+    m = normalize_punct(msg).strip()
+    if len(m) > 400:            # long messages are evidence/reports
+        return False
+    if "?" in m:                # "did we install that?" is a question, not a denial
+        return False
+    if _CLAIM_SHELL_PROMPT_RE.search(m):   # paste-shaped → the evidence path
+        return False
+    if _DENIAL_DISQUALIFY_RE.search(m):    # an error report → the fix path
+        return False
+    if _DENIAL_IN_PROGRESS_RE.search(m):   # work in flight → a progress report
+        return False
+    if looks_like_howto_question(m) or looks_like_help_request(m):
+        return False
+    return bool(_DENIAL_PHRASE_RE.search(m))
+
+
 # ── The post-filter ───────────────────────────────────────────────────────────
 # `_TEXT_FILL_FIELDS` are filled from the message ONLY when the LLM left them
 # blank (it may have extracted a cleaner value); routing fields are always set.

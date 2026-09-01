@@ -279,6 +279,32 @@ async def _run_turn_inner(
         except Exception as exc:  # noqa: BLE001
             logger.warning("turn_loop_capture_failed sid=%s err=%r", session_id, exc)
 
+        # 2a. §17.899 — "that wasn't actually done". Runs BEFORE the decision
+        # layer and before orientation, because every downstream step reads the
+        # completed-work digest: while a step is wrongly `done`, the decision
+        # model, the guide, and the verifier are all reasoning from a false
+        # premise. Deterministic + tightly bounded (see reopen_denied_step);
+        # a no-op returns None and the turn continues normally.
+        reopened = await assist_agent.reopen_denied_step(
+            session_id=session_id, message=text_, db=db,
+        )
+        if reopened:
+            yield _ev(ASSIST_TURN_ROUTED, {"action": "reopen", "override": "denial"})
+            yield _ev(ASSIST_STEP_OUTCOME, {
+                "node_key": reopened["node_key"], "status": "reopened",
+            })
+            yield _ev(ASSIST_TURN_STATUS, {"text": (
+                f"↩︎ Got it — I'd marked **{reopened['node_key']}: "
+                f"{reopened['title']}** done, and you're telling me it wasn't. "
+                "Reopening it and picking that step back up."
+            )})
+            # node_key=None so the claim path resolves the (now reopened) step.
+            async for e in _claim_and_guide(session_id, None, history, db,
+                                            orient=False):
+                yield e
+            handled["v"] = "reopen"
+            return
+
         # 2. Deterministic orientation (§17.867) — zero model calls.
         if assist_policy.looks_like_whats_next(text_):
             yield _ev(ASSIST_TURN_ROUTED, {"action": "status", "override": "whats_next"})

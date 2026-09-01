@@ -1082,6 +1082,19 @@ class Settings(BaseSettings):
     # callouts in walkthrough/fix prompts. Prompt-only, fail-safe, default ON.
     assist_location_callout_enabled: bool = True
     assist_tracker_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    # §17.899 — the missing half of §17.890: an explicit operator DENIAL that a
+    # just-closed step was actually done REOPENS it. §17.890 let a completion
+    # claim outrank the verifier; the live failure was a genuine claim about the
+    # WRONG THING ("It worked Ubuntu Server is now downloading!" closed "Install
+    # PalWorld server"), which nothing could take back. Deterministic phrase
+    # match + a tight recency bound, because a reopen is a plan mutation.
+    # Default ON: the alternative is a step wrongly marked done, which corrupts
+    # the completed-work digest every later step reads.
+    assist_denial_reopen_enabled: bool = True
+    # Only the most recently committed step, only this soon after the commit.
+    assist_denial_reopen_window_s: int = Field(default=1800, ge=60, le=86400)
+    # …and only if the operator has not moved on (turns since that commit).
+    assist_denial_reopen_max_turns: int = Field(default=3, ge=1, le=20)
     # §17.755 — on a reset/rebuild note (§17.714), auto-RETRACT the facts that
     # describe the abandoned system (an LLM pass keeps durable host/network/storage/
     # new-build facts). §17.714 only demoted them at render time, so they lingered

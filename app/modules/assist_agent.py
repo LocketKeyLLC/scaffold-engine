@@ -1208,6 +1208,167 @@ async def _fix_failure_streak(
         return 0, ""
 
 
+async def reopen_denied_step(*, session_id: str, message: str, db) -> dict | None:
+    """§17.899 — the operator says work the engine closed was not actually done.
+    Reopen that step (mirror invariant §17.286) and point the session at it.
+
+    The missing half of §17.890. That change let a completion CLAIM outrank the
+    verifier; this handles a claim that was about the wrong thing. Live
+    incident: "It worked Ubuntu Server is now downloading!" closed T23 "Install
+    PalWorld server" (the claim was about the OS ISO), and 62 seconds later
+    "But we have ONLY installed the ubuntu server and have not installed
+    anything else" was correctly not-a-claim — and then ignored. T23 stayed
+    done, its PalWorld work migrated into T24, and T24 churned for 22 hours
+    unable to satisfy its own goal.
+
+    Deterministic and tightly bounded, because reopening is a plan mutation:
+      * the message must be an explicit denial (``looks_like_completion_denial``);
+      * only the MOST RECENTLY committed step is eligible;
+      * it must have been committed within ``assist_denial_reopen_window_s``
+        (default 30 min) — a denial hours later is about something else;
+      * at most ``assist_denial_reopen_max_turns`` operator turns may have
+        happened since that commit (default 3): a correction comes immediately.
+
+    Returns ``{node_key, title, evidence}`` on a reopen, else ``None``. Fail-soft:
+    any error logs LOUD (§17.882b) and returns ``None`` so the turn proceeds.
+    """
+    from app.config import settings
+    from app.modules import assist_policy
+
+    if not settings.assist_denial_reopen_enabled:
+        return None
+    if not assist_policy.looks_like_completion_denial(message or ""):
+        return None
+    try:
+        sess = (await db.execute(
+            text("SELECT job_id, status FROM assist_sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).mappings().first()
+        if not sess or sess["status"] not in ("active", "paused"):
+            return None
+        job_id = str(sess["job_id"])
+        # The most recently COMMITTED step, and only if it is recent enough.
+        row = (await db.execute(
+            text("""
+                SELECT node_key, committed_at,
+                       EXTRACT(EPOCH FROM (NOW() - committed_at)) AS age_s
+                  FROM assist_steps
+                 WHERE session_id = :sid AND status = 'committed'
+                   AND committed_at IS NOT NULL
+                 ORDER BY committed_at DESC
+                 LIMIT 1
+            """),
+            {"sid": session_id},
+        )).mappings().first()
+        if not row:
+            return None
+        if float(row["age_s"] or 0) > settings.assist_denial_reopen_window_s:
+            logger.info(
+                "assist_denial_reopen_skipped reason=too_old session_id=%s nk=%s age_s=%.0f",
+                session_id, row["node_key"], float(row["age_s"] or 0))
+            return None
+        nk = row["node_key"]
+        turns_since = (await db.execute(
+            text("""
+                SELECT COUNT(*) FROM assist_turns
+                 WHERE session_id = :sid AND role = 'operator'
+                   AND kind <> 'submit' AND created_at > :since
+            """),
+            {"sid": session_id, "since": row["committed_at"]},
+        )).scalar() or 0
+        # This turn's own message is already captured, so it counts itself.
+        if int(turns_since) > settings.assist_denial_reopen_max_turns:
+            logger.info(
+                "assist_denial_reopen_skipped reason=too_many_turns session_id=%s "
+                "nk=%s turns=%d", session_id, nk, int(turns_since))
+            return None
+
+        node = (await db.execute(
+            text("SELECT title, output_text FROM dag_nodes "
+                 "WHERE job_id = :jid AND node_key = :nk"),
+            {"jid": job_id, "nk": nk},
+        )).mappings().first()
+
+        # Mirror invariant (§17.286): reopen on BOTH tables in one commit.
+        await db.execute(
+            text("UPDATE dag_nodes SET status='pending', output_text=NULL, "
+                 "completed_at=NULL, updated_at=NOW() "
+                 "WHERE job_id=:jid AND node_key=:nk"),
+            {"jid": job_id, "nk": nk},
+        )
+        # Clear the cached guidance too: it was written for a step the engine
+        # believed was progressing, and (§17.894) the project has moved since.
+        await db.execute(
+            text("UPDATE assist_steps "
+                 "SET status='pending', committed_at=NULL, submitted_at=NULL, "
+                 "    evidence=NULL, evidence_kind=NULL, presented_at=NULL, "
+                 "    guidance=NULL, guidance_status='none', "
+                 "    guidance_generated_at=NULL, updated_at=NOW() "
+                 "WHERE session_id=:sid AND node_key=:nk"),
+            {"sid": session_id, "nk": nk},
+        )
+        await db.execute(
+            text("UPDATE assist_sessions SET current_node_key=:nk, updated_at=NOW() "
+                 "WHERE id=:sid AND status IN ('active','paused')"),
+            {"nk": nk, "sid": session_id},
+        )
+        await db.commit()
+        logger.warning(  # LOUD: a plan mutation from operator words
+            "assist_denial_reopen session_id=%s node_key=%s msg=%r",
+            session_id, nk, (message or "")[:120])
+        return {
+            "node_key": nk,
+            "title": (node or {}).get("title") or nk,
+            "evidence": (node or {}).get("output_text") or "",
+        }
+    except Exception as e:  # noqa: BLE001 — §17.882b: log LOUD, never trap the turn
+        logger.warning("assist_denial_reopen_failed session_id=%s err=%r",
+                       session_id, e)
+        return None
+
+
+async def _prescribed_commands(*, session_id: str, node_key: str, db) -> str:
+    """§17.898 — what the ENGINE told the operator to run on this step.
+
+    The live incident this exists for: on T24 the engine's own guide (turn
+    1319) and ask (turn 1308) prescribed ``pct enter 106`` — a CONTAINER
+    command — for a resource its own facts ledger records as ``VM 106``. When
+    it failed, the fix turn (1330) opened with *"The error happened because YOU
+    used `pct enter`"*. The engine had no record of its own prescriptions, so
+    it misattributed its mistake to the operator and could not reason "I never
+    asked you to start a container."
+
+    §17.881's ``_fix_failure_streak`` already extracts commands, but only from
+    ``kind='fix'`` turns — the two turns that actually issued ``pct enter``
+    were a guide and an ask, so they were invisible. This reads EVERY
+    assistant turn on the step and labels each command with the turn that
+    issued it. Fail-soft → "" (self-attribution is grounding, never a blocker).
+    """
+    import re as _re
+    try:
+        rows = (await db.execute(
+            text("""
+                SELECT kind, content FROM assist_turns
+                 WHERE session_id = :sid AND node_key = :nk AND role = 'assistant'
+                 ORDER BY created_at DESC, id DESC LIMIT 12
+            """),
+            {"sid": session_id, "nk": node_key},
+        )).mappings().all()
+        out: list[str] = []
+        seen: set[str] = set()
+        for r in rows:
+            for block in _re.findall(r"```[a-z]*\n(.*?)```", r.get("content") or "", _re.S):
+                b = block.strip()
+                if b and b not in seen:
+                    seen.add(b)
+                    out.append(f"[{r.get('kind') or 'reply'}] {b}")
+        return "\n\n".join(out[:12])
+    except Exception as e:  # noqa: BLE001 — §17.882b: log LOUD, never swallow
+        logger.warning("assist_prescribed_commands_failed session_id=%s err=%r",
+                       session_id, e)
+        return ""
+
+
 async def run_step_fix(
     *,
     session_id: str,
@@ -1271,6 +1432,9 @@ async def run_step_fix(
     streak, failed_cmds = await _fix_failure_streak(
         session_id=session_id, node_key=nk, db=db,
     )
+    # §17.898 — the engine's OWN prescriptions on this step, so a fix can never
+    # again blame the operator for a command the engine issued.
+    prescribed = await _prescribed_commands(session_id=session_id, node_key=nk, db=db)
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
@@ -1278,6 +1442,7 @@ async def run_step_fix(
         environment=mem.environment,
         failure_streak=streak,
         failed_commands=failed_cmds,
+        prescribed_commands=prescribed,
         node_key=nk,
         domain=node_row.get("domain"),
         verbosity=mem.verbosity,
