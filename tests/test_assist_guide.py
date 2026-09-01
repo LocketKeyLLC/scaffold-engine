@@ -1949,26 +1949,89 @@ async def test_stream_prepass_passes_environment_block():
 # ── §17.877 — stale-cache refresh (guide must not repeat itself) ─────────
 
 
+def _stale_db(*, operator_turns=0, advanced=0, replanned=0, row=True):
+    """A db whose staleness probe returns the given signal counts (§17.894)."""
+    db = AsyncMock()
+    result = MagicMock()
+    result.mappings.return_value.first.return_value = (
+        {"operator_turns": operator_turns, "advanced": advanced,
+         "replanned": replanned} if row else None
+    )
+    db.execute = AsyncMock(return_value=result)
+    return db
+
+
 @pytest.mark.asyncio
 async def test_cached_guidance_is_stale_when_operator_turns_are_newer():
     """Operator turns on the node newer than guidance_generated_at → stale."""
-    db = AsyncMock()
-    result = MagicMock()
-    result.scalar.return_value = 3
-    db.execute = AsyncMock(return_value=result)
     assert await assist_guide.cached_guidance_is_stale(
-        session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z", db=db,
+        session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z",
+        db=_stale_db(operator_turns=3),
     ) is True
 
 
 @pytest.mark.asyncio
 async def test_cached_guidance_is_stale_false_when_no_newer_turns():
-    db = AsyncMock()
-    result = MagicMock()
-    result.scalar.return_value = 0
-    db.execute = AsyncMock(return_value=result)
     assert await assist_guide.cached_guidance_is_stale(
-        session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z", db=db,
+        session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z",
+        db=_stale_db(),
+    ) is False
+
+
+# ── §17.894 — session-level staleness (guide must not out-date the project) ──
+
+
+@pytest.mark.asyncio
+async def test_cached_guidance_is_stale_when_project_advanced():
+    """The T23/PalWorld incident: zero operator turns on the node, but an
+    upstream step completed after the guide was written — the cached
+    walkthrough ('pct enter 106') predates the VM that step actually built."""
+    assert await assist_guide.cached_guidance_is_stale(
+        session_id="s", node_key="T23", generated_at="2026-08-31T02:44:31Z",
+        db=_stale_db(operator_turns=0, advanced=1),
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_cached_guidance_is_stale_when_plan_changed():
+    """A re-plan editing this node or one of its depends_on → stale."""
+    assert await assist_guide.cached_guidance_is_stale(
+        session_id="s", node_key="T23", generated_at="2026-08-31T02:44:31Z",
+        db=_stale_db(operator_turns=0, replanned=1),
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_cached_guidance_stale_on_advance_valve_off_keeps_node_scope():
+    """Valve off → back to §17.877 node-scoped behaviour (cache served)."""
+    db = _stale_db(operator_turns=0, advanced=2, replanned=2)
+    with patch.object(assist_guide.settings, "assist_guide_stale_on_advance", False):
+        assert await assist_guide.cached_guidance_is_stale(
+            session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z", db=db,
+        ) is False
+    # …but operator turns still invalidate with the valve off.
+    db2 = _stale_db(operator_turns=1)
+    with patch.object(assist_guide.settings, "assist_guide_stale_on_advance", False):
+        assert await assist_guide.cached_guidance_is_stale(
+            session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z", db=db2,
+        ) is True
+
+
+@pytest.mark.asyncio
+async def test_cached_guidance_is_stale_quiet_session_still_hits_cache():
+    """No turns, no commits, no plan edits → instant re-view preserved."""
+    assert await assist_guide.cached_guidance_is_stale(
+        session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z",
+        db=_stale_db(),
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_cached_guidance_is_stale_missing_session_row_serves_cache():
+    """Fail-soft: no session row → serve cache rather than burn an LLM call."""
+    assert await assist_guide.cached_guidance_is_stale(
+        session_id="s", node_key="T3", generated_at="2026-08-29T00:00:00Z",
+        db=_stale_db(row=False),
     ) is False
 
 
