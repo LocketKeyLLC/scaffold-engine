@@ -2734,19 +2734,78 @@ async def cached_guidance_is_stale(
     already-running container) — the engine looked like it was repeating itself
     and ignoring everything the operator had done since. Any operator turn on
     the node NEWER than ``guidance_generated_at`` means the cached text was
-    written without knowledge of that work. Fail-soft → False (serve cache)."""
+    written without knowledge of that work. Fail-soft → False (serve cache).
+
+    §17.894 — that probe was NODE-scoped, which misses the costlier failure:
+    guidance written for a step that is reached much *later*, after the rest of
+    the project moved on. Live incident — T23 ("Install PalWorld server") was
+    guided at 02:44 while the plan still called for an LXC container; the plan
+    was then re-planned so T22 created a QEMU **VM**; 20h later T23 was reached
+    and the cached walkthrough was served verbatim, opening with
+    ``pct enter 106`` against a container that never existed. There were no
+    operator turns on T23 in that window, so node-scoped staleness saw nothing
+    to invalidate and the engine looked like it had forgotten the VM it had
+    just walked the operator through building.
+
+    Two deterministic session-level signals are therefore checked as well:
+
+    * **advanced** — another node on the job reached ``done``/``skipped`` after
+      the guide was written, so the completed-work digest the guide was built
+      from is out of date.
+    * **replanned** — this node, or one of its ``depends_on``, was edited after
+      the guide was written, so the guide may encode a superseded plan.
+
+    Both are pure SQL over columns the assist path already maintains (verified
+    on the live job: presenting a step does not touch ``dag_nodes.updated_at``,
+    so a step being viewed does not self-invalidate). Instant re-views survive
+    — with no operator turns, no commits and no plan edits since, the cache
+    still hits."""
     if not generated_at or not settings.assist_guide_stale_cache_refresh:
         return False
     try:
-        n = (await db.execute(
+        row = (await db.execute(
             text("""
-                SELECT count(*) FROM assist_turns
-                 WHERE session_id = :sid AND node_key = :nk
-                   AND role = 'operator' AND created_at > :gen
+                SELECT
+                  (SELECT count(*) FROM assist_turns t
+                    WHERE t.session_id = :sid AND t.node_key = :nk
+                      AND t.role = 'operator' AND t.created_at > :gen)
+                    AS operator_turns,
+                  (SELECT count(*) FROM dag_nodes n
+                    WHERE n.job_id = s.job_id AND n.node_key <> :nk
+                      AND n.status IN ('done', 'skipped')
+                      AND COALESCE(n.completed_at, n.updated_at) > :gen)
+                    AS advanced,
+                  (SELECT count(*) FROM dag_nodes n
+                    WHERE n.job_id = s.job_id AND n.updated_at > :gen
+                      AND (n.node_key = :nk
+                           OR n.node_key = ANY(
+                                COALESCE(cur.depends_on, ARRAY[]::text[]))))
+                    AS replanned
+                  FROM assist_sessions s
+                  LEFT JOIN dag_nodes cur
+                    ON cur.job_id = s.job_id AND cur.node_key = :nk
+                 WHERE s.id = :sid
             """),
             {"sid": session_id, "nk": node_key, "gen": generated_at},
-        )).scalar()
-        return bool(n)
+        )).mappings().first()
+        if not row:
+            return False
+        on_advance = settings.assist_guide_stale_on_advance
+        if row["operator_turns"]:
+            reason = "operator_turns"
+        elif on_advance and row["advanced"]:
+            reason = "project_advanced"
+        elif on_advance and row["replanned"]:
+            reason = "plan_changed"
+        else:
+            return False
+        logger.info(
+            "assist_guide_cache_stale node_key=%s reason=%s "
+            "operator_turns=%s advanced=%s replanned=%s",
+            node_key, reason,
+            row["operator_turns"], row["advanced"], row["replanned"],
+        )
+        return True
     except Exception as exc:  # noqa: BLE001 — staleness probe must not break guide
         logger.warning("assist_guide_staleness_check_failed node_key=%s: %s", node_key, exc)
         return False

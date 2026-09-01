@@ -885,6 +885,20 @@ class Settings(BaseSettings):
     # regenerates from current session memory. Default ON (correctness fix);
     # disable to restore always-serve-cache.
     assist_guide_stale_cache_refresh: bool = True
+    # §17.894 — the §17.877 staleness probe was NODE-scoped: it only counted
+    # operator turns on the SAME node. A step guided early and reached much
+    # later re-served guidance written against a world that no longer exists.
+    # The live incident: T23 ("Install PalWorld server") was guided at 02:44
+    # while the plan still said LXC, the plan was then re-planned so T22 built
+    # a QEMU *VM*, and when T23 was reached 20h later the cached walkthrough
+    # was served verbatim — "pct enter 106" into a container that never
+    # existed. Zero operator turns on T23 in between, so node-scoped staleness
+    # saw nothing. This widens the probe with two deterministic session-level
+    # signals: the project ADVANCED (another node reached done/skipped after
+    # the guide was written) or the plan CHANGED (this node or one of its
+    # depends_on was edited since). Default ON (correctness fix); disable to
+    # keep staleness node-scoped.
+    assist_guide_stale_on_advance: bool = True
     # §17.487 — Tier 1 "close the loop". On /assist submit, judge whether the
     # pasted evidence shows the step actually succeeded (catches a pasted
     # error/traceback being recorded as success). Adds one sync tool_call per
