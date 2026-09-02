@@ -613,6 +613,24 @@
         "title": "AssistStartInput",
         "type": "object"
       },
+      "AssistStepBackInput": {
+        "properties": {
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Step to reopen. Omit to undo the most recently completed or skipped step (the mis-click case).",
+            "title": "Node Key"
+          }
+        },
+        "title": "AssistStepBackInput",
+        "type": "object"
+      },
       "AssistSubmitInput": {
         "properties": {
           "action": {
@@ -6328,6 +6346,62 @@
           }
         ],
         "summary": "Assist Resume",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/step/back": {
+      "post": {
+        "description": "§17.901 — undo the last completed step and return the operator to it.\n\n`✓ Done → next step` was a one-way door: a mis-click closed a step that\nwasn't finished, and the only nearby verb (`↻ Re-show step`) re-presents\nwhatever the pointer moved TO — the next step, not the one you wanted back.\n\nThe reopened step keeps its walkthrough: nothing about the project changed,\nand regenerating would hand the operator a DIFFERENT set of instructions\nfor work they were halfway through (§17.899's denial path redraws, on\npurpose — that case is exactly the one where the project HAS moved on).",
+        "operationId": "assist_step_back_assist__session_id__step_back_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistStepBackInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Step Back",
         "tags": [
           "Assist"
         ]

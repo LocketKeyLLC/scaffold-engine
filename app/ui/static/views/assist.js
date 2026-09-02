@@ -235,6 +235,36 @@ export function renderChat(container, sessionId) {
   //                   as the evidence — confident-done retires the step and
   //                   the next one streams; not-done gets an honest bubble
   //                   (never a "type something first" error).
+  // §17.901 — undo the last ✓ Done (or ⏩ Skip) and put the operator back on
+  // that step. Deliberately does NOT re-run the guide: the stored walkthrough
+  // is re-rendered as-is, because a regeneration would hand them different
+  // instructions for work they were part-way through.
+  async function stepBack() {
+    try {
+      const res = await api.post(`/assist/${sessionId}/step/back`, {});
+      const r = res?.reopened || {};
+      await load();
+      appendBubble("assistant", "track",
+        `↩ Reopened **${r.node_key}: ${r.title}** — you're back on it, with the same ` +
+        `walkthrough you had. Nothing else in the plan moved.`);
+      // Render the PRESERVED walkthrough the server handed back. Deliberately
+      // NOT guideCurrent(): that runs the guide pipeline, and the reopen bumps
+      // dag_nodes.updated_at, which trips §17.894's staleness probe and would
+      // regenerate — landing the operator on a different walkthrough for work
+      // they were part-way through.
+      if (r.guidance) appendBubble("assistant", "guide", r.guidance);
+      toast(`Back on ${r.node_key}.`, "ok");
+    } catch (e) {
+      // 409 = nothing completed yet; say that plainly rather than "failed".
+      toast(
+        e.status === 409
+          ? "Nothing to go back to — no step has been completed in this session yet."
+          : `Couldn't go back: ${e.detail || e.message}`,
+        "err"
+      );
+    }
+  }
+
   async function doneNext(message) {
     const nk = session?.current_node_key;
     if (!nk) { await claimAndGuideNext(); return; }
@@ -284,6 +314,13 @@ export function renderChat(container, sessionId) {
     "div",
     { class: "row row-wrap assist-verbs" },
     verb("✓ Done → next step", "Close out the current step (uses the box text as evidence when present, the conversation otherwise) and walk into the next one", () => doneNext()),
+    // §17.901 — the undo for the button immediately to its left. "✓ Done" was
+    // a one-way door: a mis-click closed a step that wasn't finished, and
+    // "↻ Re-show step" re-presents whatever the pointer moved TO — the NEXT
+    // step, which is why going back landed somewhere unrecognisable.
+    verb("↩ Back a step", "Undo the last completed step and return to it — its walkthrough is kept exactly as it was", async () => {
+      await stepBack();
+    }),
     verb("↻ Re-show step", "Re-present the current step's walkthrough", async () => {
       // §17.868 — one server-side stream (claim-if-needed + premise + guide).
       await runTurnStream({ command: "guide" });
