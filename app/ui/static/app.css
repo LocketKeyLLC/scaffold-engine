@@ -1207,6 +1207,50 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 .prog-text { white-space: nowrap; font-size: 12px; }
 
 /* §17.818 — auto-run toggle */
+/* §17.900 — provider connections (Models view). A card per backend: status
+   dot, key + endpoint fields, Save / Test / Forget. */
+.models-section { margin-bottom: 26px; }
+.models-section .section-head { align-items: baseline; margin-bottom: 2px; }
+.models-section h2 { font-size: 16px; margin: 0 0 2px; }
+.models-section > .dim { margin: 0 0 12px; font-size: 12.5px; }
+.default-provider { gap: 6px; align-items: center; font-size: 12px; }
+.conn-grid { gap: 12px; }
+.conn-card { display: flex; flex-direction: column; gap: 9px; }
+.conn-head { align-items: center; gap: 8px; }
+.conn-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--text-faint); flex: none;
+}
+.conn-dot[data-state="ok"]   { background: var(--ok, #3fb950); }
+.conn-dot[data-state="warn"] { background: var(--warn, #d29922); }
+.conn-dot[data-state="err"]  { background: var(--err, #f85149); }
+.conn-status { font-size: 11.5px; text-align: right; }
+.conn-fields {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 10px;
+  align-items: center;
+}
+.conn-label { font-size: 11.5px; color: var(--text-dim); white-space: nowrap; }
+.conn-help { font-size: 11.5px; line-height: 1.45; }
+.conn-warn {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--warn, #d29922);
+  border-left: 2px solid currentColor;
+  padding-left: 8px;
+}
+.conn-actions { gap: 6px; }
+.models-provider { min-width: 116px; }
+/* The role table gained a Backend column — keep the action cell on one line so
+   Set/Reset/Probe don't wrap under the input and read as a separate row. */
+.models-table td:last-child { white-space: nowrap; }
+.models-table .models-actions { flex-wrap: nowrap; gap: 5px; }
+.models-table .models-input { min-width: 0; width: 150px; }
+@media (max-width: 900px) {
+  .conn-grid { grid-template-columns: 1fr; }
+}
+
 .autorun-toggle { gap: 5px; align-items: center; font-size: 12px; margin-left: 8px; }
 /* §17.895 — auto-run is an AUTO-mode concept; in Assist mode the walkthrough
    IS the run, so the checkbox would be a second, contradictory switch. */

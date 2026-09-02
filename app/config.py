@@ -11,7 +11,12 @@ from pydantic_settings import BaseSettings
 # .env fail at orchestrator boot (ValidationError) instead of mid-pipeline
 # at first call (ProviderError). When a new provider is added, update
 # this constant AND the registry _autoload tuple in providers/__init__.py.
-ProviderName = Literal["ollama", "openai", "anthropic"]
+# §17.900 — `huggingface` joins the allowlist: HF's Inference Router speaks the
+# OpenAI chat-completions dialect, so the provider is a thin subclass of the
+# OpenAI one with its own credentials/base URL. HF models DOWNLOADED as GGUF are
+# a different path entirely — `ollama pull hf.co/<user>/<repo>` makes them
+# ordinary Ollama tags, so they need no provider of their own.
+ProviderName = Literal["ollama", "openai", "anthropic", "huggingface"]
 
 _logger = logging.getLogger("scaffold.config")
 
@@ -76,6 +81,69 @@ def set_runtime_model(role: str, model: str) -> None:
     if not isinstance(model, str) or not model.strip():
         raise ValueError("model tag must be a non-empty string")
     setattr(settings, role, model.strip())
+
+
+# §17.900 — the PROVIDER half of the same idea. `set_runtime_model` (§17.483)
+# made the model tag switchable at runtime but left the provider env-only, so
+# "use Claude for the reasoning role" still meant editing .env and restarting.
+# `model_<role>_provider` is a plain settings field, so re-pointing it is the
+# same one-line mutation — the only new work is validating the provider name
+# against the registry allowlist rather than against a pulled tag list.
+def provider_field_for(role: str) -> str:
+    """`model_general` -> `model_general_provider`."""
+    return f"{role}_provider"
+
+
+def valid_provider_names() -> tuple[str, ...]:
+    """The registry allowlist, read off the ProviderName Literal so this can
+    never drift from the type that validates .env at boot."""
+    from typing import get_args
+    return tuple(get_args(ProviderName))
+
+
+def set_runtime_provider(role: str, provider: str) -> None:
+    """Re-point a switchable role's PROVIDER on the live settings singleton.
+
+    Same contract as ``set_runtime_model``: in-process, single-worker, reverts
+    to env on restart (the DB layer replays it at lifespan startup). Raises
+    ``ValueError`` on a non-switchable role or an unregistered provider name.
+    """
+    if role not in SWITCHABLE_ROLE_FIELDS:
+        if role in _MODEL_SINGLETON_ROLES:
+            raise ValueError(
+                f"role {role!r} is config-only (embedder/reranker are "
+                f"singletons) — set the env var and restart"
+            )
+        raise ValueError(
+            f"unknown role {role!r}; must be one of "
+            f"{sorted(SWITCHABLE_ROLE_FIELDS)}"
+        )
+    p = (provider or "").strip()
+    if p not in valid_provider_names():
+        raise ValueError(
+            f"unknown provider {provider!r}; must be one of "
+            f"{list(valid_provider_names())}"
+        )
+    field = provider_field_for(role)
+    if not hasattr(settings, field):
+        # A switchable role with no provider field would silently ignore the
+        # setting; better to say so than to accept a write that does nothing.
+        raise ValueError(f"role {role!r} has no provider field ({field})")
+    setattr(settings, field, p)
+
+
+def clear_runtime_provider(role: str) -> None:
+    """Revert a role's provider to its env/default value."""
+    if role not in SWITCHABLE_ROLE_FIELDS:
+        raise ValueError(
+            f"unknown role {role!r}; must be one of "
+            f"{sorted(SWITCHABLE_ROLE_FIELDS)}"
+        )
+    field = provider_field_for(role)
+    if not hasattr(settings, field):
+        raise ValueError(f"role {role!r} has no provider field ({field})")
+    default = type(settings).model_fields[field].default
+    setattr(settings, field, default)
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +521,29 @@ class Settings(BaseSettings):
     anthropic_version: str = "2023-06-01"
     anthropic_prompt_caching: bool = True
     openai_organization: str = ""
+
+    # §17.900 — HuggingFace Inference provider. HF's router speaks the OpenAI
+    # chat-completions dialect, so HuggingFaceProvider subclasses the OpenAI one
+    # and only swaps credentials/base URL. Note this is for HOSTED inference; a
+    # GGUF model DOWNLOADED from HF is pulled into Ollama
+    # (`ollama pull hf.co/<user>/<repo>`) and is an ordinary Ollama tag.
+    huggingface_api_key: SecretStr = SecretStr("")
+    huggingface_base_url: str = "https://router.huggingface.co/v1"
+    huggingface_inference_timeout: int = Field(default=600, ge=1, le=86400)
+
+    # §17.900 — the fallback provider for any role with no explicit
+    # MODEL_<ROLE>_PROVIDER and no stored override. Lets an operator move the
+    # whole engine onto Claude or GPT with one switch, then pin the cheap roles
+    # back to local — which is what the per-role fields above were built for.
+    model_default_provider: ProviderName = "ollama"
+
+    # §17.900 — secret used to derive the Fernet key that encrypts provider API
+    # keys at rest (app/utils/secrets.py). Blank falls back to SCAFFOLD_API_KEY,
+    # so a fresh install needs nothing extra; set this when you want credential
+    # encryption decoupled from API-key rotation. Rotating it makes stored
+    # ciphertexts unreadable — they degrade to "reconnect this provider", never
+    # to an error.
+    scaffold_secret_key: SecretStr = SecretStr("")
 
     # §17.773 — grammar-constrained decoding (structured outputs). When a caller
     # passes ``response_schema=`` to model_router.generate/chat (or uses
