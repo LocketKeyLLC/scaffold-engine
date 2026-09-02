@@ -60,6 +60,17 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps(docker)"
+    # §17.904 — group the base-image digest bumps. Without this, dependabot
+    # opens one PR PER DIRECTORY, so a single `python:3.14.7-slim` digest roll
+    # became five identical PRs (#332-#336, all `ce40764` -> `cae66f2`) that had
+    # to be reviewed, gated and closed five times. Every directory here pins the
+    # SAME python base, so they move together or not at all — reviewing them
+    # apart is busywork with a real cost on a metered runner. The pip ecosystem
+    # above has grouped minor/patch since §17.534 for exactly this reason; the
+    # docker one was simply never given the same treatment.
+    groups:
+      docker-base-images:
+        patterns: ["*"]
 
   # ── GitHub Actions used by the three workflows ───────────────────────────
   - package-ecosystem: "github-actions"
