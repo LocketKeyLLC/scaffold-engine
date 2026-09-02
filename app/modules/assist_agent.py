@@ -1208,6 +1208,140 @@ async def _fix_failure_streak(
         return 0, ""
 
 
+async def _reopen_step_mirrored(
+    *, db, job_id: str, session_id: str, node_key: str,
+    preserve_guidance: bool = False,
+) -> None:
+    """§17.899/§17.901 — put a completed step back in play, on BOTH tables plus
+    the session pointer, in ONE commit (mirror invariant §17.286).
+
+    `preserve_guidance` is the difference between the two callers, and it
+    matters more than it looks:
+
+      * False (a §17.899 DENIAL) — the project moved on and the cached
+        walkthrough was written against a state that no longer holds, so drop
+        it and redraw (§17.894).
+      * True (a §17.901 BACK-A-STEP) — nothing about the project changed; the
+        operator just mis-clicked. Redrawing here is what makes "redo a step"
+        land somewhere unrecognisable: a fresh generation is a DIFFERENT
+        walkthrough, so the operator is returned to a step they were halfway
+        through and handed unfamiliar instructions. Keep the exact text they
+        were working from.
+    """
+    await db.execute(
+        text("UPDATE dag_nodes SET status='pending', output_text=NULL, "
+             "completed_at=NULL, updated_at=NOW() "
+             "WHERE job_id=:jid AND node_key=:nk"),
+        {"jid": job_id, "nk": node_key},
+    )
+    if preserve_guidance:
+        # presented_at is kept too — re-presenting is exactly what we want.
+        await db.execute(
+            text("UPDATE assist_steps "
+                 "SET status='presented', committed_at=NULL, submitted_at=NULL, "
+                 "    evidence=NULL, evidence_kind=NULL, updated_at=NOW() "
+                 "WHERE session_id=:sid AND node_key=:nk"),
+            {"sid": session_id, "nk": node_key},
+        )
+    else:
+        await db.execute(
+            text("UPDATE assist_steps "
+                 "SET status='pending', committed_at=NULL, submitted_at=NULL, "
+                 "    evidence=NULL, evidence_kind=NULL, presented_at=NULL, "
+                 "    guidance=NULL, guidance_status='none', "
+                 "    guidance_generated_at=NULL, updated_at=NOW() "
+                 "WHERE session_id=:sid AND node_key=:nk"),
+            {"sid": session_id, "nk": node_key},
+        )
+    await db.execute(
+        text("UPDATE assist_sessions SET current_node_key=:nk, updated_at=NOW() "
+             "WHERE id=:sid AND status IN ('active','paused')"),
+        {"nk": node_key, "sid": session_id},
+    )
+    await db.commit()
+
+
+async def step_back(*, session_id: str, node_key: str | None = None, db) -> dict | None:
+    """§17.901 — undo the last completed step and return the operator to it.
+
+    The gap this fills: `✓ Done → next step` is a one-way door. A mis-click
+    closed a step the operator had NOT finished, and the only nearby verb —
+    `↻ Re-show step` — re-presents the step the pointer has already moved TO,
+    which is why "redo a step brings it to a weird place": it shows the NEXT
+    step, not the one you meant to get back to.
+
+    Unlike §17.899's denial reopen this is deliberately unbounded by time or
+    turn count (an operator may notice the mis-click much later) and it
+    PRESERVES the walkthrough, because nothing about the project changed.
+
+    Without `node_key`, targets the most recently committed step. Returns
+    ``{node_key, title, was}`` or None when there is nothing to step back to.
+    """
+    try:
+        sess = (await db.execute(
+            text("SELECT job_id, status, current_node_key FROM assist_sessions "
+                 "WHERE id = :sid"),
+            {"sid": session_id},
+        )).mappings().first()
+        if not sess or sess["status"] not in ("active", "paused"):
+            return None
+        job_id = str(sess["job_id"])
+        if node_key:
+            row = (await db.execute(
+                text("SELECT node_key, status FROM assist_steps "
+                     "WHERE session_id=:sid AND node_key=:nk"),
+                {"sid": session_id, "nk": node_key},
+            )).mappings().first()
+            if not row or row["status"] not in ("committed", "skipped"):
+                return None
+            nk = row["node_key"]
+            was = row["status"]
+        else:
+            # Most recent terminal step. Skipped steps count: ⏩ Skip is just as
+            # mis-clickable as ✓ Done, and both leave the operator stranded
+            # forward of where they meant to be.
+            row = (await db.execute(
+                text("SELECT node_key, status FROM assist_steps "
+                     "WHERE session_id = :sid AND status IN ('committed','skipped') "
+                     "ORDER BY COALESCE(committed_at, updated_at) DESC LIMIT 1"),
+                {"sid": session_id},
+            )).mappings().first()
+            if not row:
+                return None
+            nk, was = row["node_key"], row["status"]
+
+        node = (await db.execute(
+            text("SELECT title FROM dag_nodes WHERE job_id=:jid AND node_key=:nk"),
+            {"jid": job_id, "nk": nk},
+        )).mappings().first()
+        # Read the preserved walkthrough BEFORE the reopen and hand it back, so
+        # the caller can re-render it WITHOUT going through ensure_guidance.
+        #
+        # This is not an optimization, it is the whole point. The reopen sets
+        # dag_nodes.updated_at = NOW(), which makes §17.894's `replanned` probe
+        # (n.node_key = :nk AND n.updated_at > :gen) fire — so a guide call
+        # after a step-back would judge the cache stale and REGENERATE, handing
+        # the operator a different walkthrough for work they were part-way
+        # through. That is precisely the "redo a step lands somewhere weird"
+        # behavior this endpoint exists to remove.
+        guidance = (await db.execute(
+            text("SELECT guidance FROM assist_steps "
+                 "WHERE session_id=:sid AND node_key=:nk"),
+            {"sid": session_id, "nk": nk},
+        )).scalar()
+        await _reopen_step_mirrored(
+            db=db, job_id=job_id, session_id=session_id, node_key=nk,
+            preserve_guidance=True,
+        )
+        logger.info("assist_step_back session_id=%s node_key=%s was=%s has_guidance=%s",
+                    session_id, nk, was, bool(guidance))
+        return {"node_key": nk, "title": (node or {}).get("title") or nk,
+                "was": was, "guidance": guidance or ""}
+    except Exception as e:  # noqa: BLE001 — §17.882b: log LOUD, never trap the turn
+        logger.warning("assist_step_back_failed session_id=%s err=%r", session_id, e)
+        return None
+
+
 async def reopen_denied_step(*, session_id: str, message: str, db) -> dict | None:
     """§17.899 — the operator says work the engine closed was not actually done.
     Reopen that step (mirror invariant §17.286) and point the session at it.
@@ -1289,30 +1423,12 @@ async def reopen_denied_step(*, session_id: str, message: str, db) -> dict | Non
             {"jid": job_id, "nk": nk},
         )).mappings().first()
 
-        # Mirror invariant (§17.286): reopen on BOTH tables in one commit.
-        await db.execute(
-            text("UPDATE dag_nodes SET status='pending', output_text=NULL, "
-                 "completed_at=NULL, updated_at=NOW() "
-                 "WHERE job_id=:jid AND node_key=:nk"),
-            {"jid": job_id, "nk": nk},
+        await _reopen_step_mirrored(
+            db=db, job_id=job_id, session_id=session_id, node_key=nk,
+            # A denial means the PROJECT moved on, so the cached walkthrough was
+            # written against a state that no longer holds (§17.894) — redraw it.
+            preserve_guidance=False,
         )
-        # Clear the cached guidance too: it was written for a step the engine
-        # believed was progressing, and (§17.894) the project has moved since.
-        await db.execute(
-            text("UPDATE assist_steps "
-                 "SET status='pending', committed_at=NULL, submitted_at=NULL, "
-                 "    evidence=NULL, evidence_kind=NULL, presented_at=NULL, "
-                 "    guidance=NULL, guidance_status='none', "
-                 "    guidance_generated_at=NULL, updated_at=NOW() "
-                 "WHERE session_id=:sid AND node_key=:nk"),
-            {"sid": session_id, "nk": nk},
-        )
-        await db.execute(
-            text("UPDATE assist_sessions SET current_node_key=:nk, updated_at=NOW() "
-                 "WHERE id=:sid AND status IN ('active','paused')"),
-            {"nk": nk, "sid": session_id},
-        )
-        await db.commit()
         logger.warning(  # LOUD: a plan mutation from operator words
             "assist_denial_reopen session_id=%s node_key=%s msg=%r",
             session_id, nk, (message or "")[:120])

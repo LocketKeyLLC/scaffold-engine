@@ -1318,6 +1318,47 @@ async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(g
     return out
 
 
+class AssistStepBackInput(BaseModel):
+    node_key: Optional[str] = Field(
+        default=None,
+        description=(
+            "Step to reopen. Omit to undo the most recently completed or "
+            "skipped step (the mis-click case)."
+        ),
+    )
+
+
+@router.post("/assist/{session_id}/step/back")
+async def assist_step_back(
+    session_id: str, body: AssistStepBackInput, db=Depends(get_db),
+):
+    """§17.901 — undo the last completed step and return the operator to it.
+
+    `✓ Done → next step` was a one-way door: a mis-click closed a step that
+    wasn't finished, and the only nearby verb (`↻ Re-show step`) re-presents
+    whatever the pointer moved TO — the next step, not the one you wanted back.
+
+    The reopened step keeps its walkthrough: nothing about the project changed,
+    and regenerating would hand the operator a DIFFERENT set of instructions
+    for work they were halfway through (§17.899's denial path redraws, on
+    purpose — that case is exactly the one where the project HAS moved on).
+    """
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    res = await assist_agent.step_back(
+        session_id=session_id, node_key=body.node_key, db=db,
+    )
+    if not res:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"no completed step to go back to"
+                    + (f" ({body.node_key} is not completed)" if body.node_key else "")),
+        )
+    return {"session_id": session_id, "reopened": res,
+            "current_node_key": res["node_key"]}
+
+
 @router.get("/assist/{session_id}/replan")
 async def assist_replan_get(session_id: str, db=Depends(get_db)):
     """§17.677 — the session's un-resolved note-triggered plan-fix proposal.
