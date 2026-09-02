@@ -20,7 +20,14 @@ from app import model_router
 from app.config import settings
 from app.utils.llm_retry import chat_until_nonempty
 from app.utils.tool_call_args import read_tool_args
-from app.modules.assist_directives import apply_ground_or_ask, apply_problem_solving
+from app.modules.assist_directives import (  # §17.897 — full output contract
+    apply_ground_or_ask,
+    apply_location_callout,
+    apply_next_callout,
+    apply_problem_solving,
+    apply_screen_grounding,
+    promote_inline_commands,
+)
 
 logger = logging.getLogger("scaffold.assist_guide")
 
@@ -412,11 +419,29 @@ async def research_one(
         resp = await chat_until_nonempty(
             model_router.chat,
             [
-                {"role": "system", "content": apply_ground_or_ask(  # §17.760
-                    apply_problem_solving(  # §17.742
-                        _RESEARCH_SYNTH_SYSTEM,
-                        enabled=settings.assist_problem_solving_enabled),
-                    is_decision=False, enabled=settings.assist_ground_or_ask_enabled)},
+                # §17.897 — the ask path now carries the SAME output contract as
+                # guide/fix. It previously applied only two of the five
+                # directives, and the missing one mattered most: the mandate
+                # that every command sits in its OWN fenced block lives in
+                # apply_next_callout. Without it the model answered with inline
+                # `code spans`, and only fenced blocks get a ⧉ copy button
+                # (util.js mdToHtml) — so a research answer's commands were
+                # literally not copy-pasteable. Live proof: an answer that told
+                # the operator to run `qm resize 106 scsi0 +60G` with no way to
+                # copy it, in the same session where guide/fix output had
+                # copy buttons on every command.
+                {"role": "system", "content": apply_location_callout(  # §17.852
+                    apply_screen_grounding(  # §17.758
+                        apply_ground_or_ask(  # §17.760
+                            apply_problem_solving(  # §17.742
+                                apply_next_callout(  # §17.741/897
+                                    _RESEARCH_SYNTH_SYSTEM,
+                                    is_decision=False,
+                                    enabled=settings.assist_next_callout_enabled),
+                                enabled=settings.assist_problem_solving_enabled),
+                            is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
+                        is_decision=False, enabled=settings.assist_screen_grounding_enabled),
+                    is_decision=False, enabled=settings.assist_location_callout_enabled)},
                 {"role": "user", "content": (
                     f"{ctx_block}"
                     f"Question: {question}\n\n"
@@ -435,4 +460,6 @@ async def research_one(
         )
         if resp and resp.success:
             answer = (resp.text or "").strip() or None
+            if answer:  # §17.897 — code-enforced copy-paste format
+                answer = promote_inline_commands(answer)
     return {"question": question, "sources": sources, "answer": answer}

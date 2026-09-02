@@ -191,6 +191,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     apply_ground_or_ask,
     apply_screen_grounding,
     apply_location_callout,
+    promote_inline_commands,  # §17.897
     _PROBLEM_SOLVING_FRAMING,
     _NEXT_CALLOUT_DIRECTIVE,
     _GROUND_OR_ASK_DIRECTIVE,
@@ -2106,6 +2107,7 @@ async def generate_guidance(
     # §17.893 — banned-value enforcement: redraw once with the violation named;
     # a still-dirty draft gets the visible flag below.
     banned_meta: list[dict] = []
+    reskind_meta: list[dict] = []  # §17.898
     if text_out:
         text_out, banned_meta, _redrew = await enforce_banned_values(
             text_out=text_out, environment=environment, messages=gen_messages,
@@ -2113,6 +2115,14 @@ async def generate_guidance(
         )
         if banned_meta:
             text_out += banned_values_warning(banned_meta)
+        # §17.898 — a VM addressed with `pct` (or a container with `qm`) is
+        # always wrong and the confirmed facts already say which is which.
+        text_out, reskind_meta, _rk = await enforce_resource_kinds(
+            text_out=text_out, environment=environment, messages=gen_messages,
+            role=role, label="assist_guide",
+        )
+        if reskind_meta:
+            text_out += resource_kind_warning(reskind_meta)
     # §17.771 (deferred, now done) — render-path suggestion validation: on a
     # DECISION step, guarantee a recommendation. If the model laid out options but
     # dropped the "## My suggestion" lean, generate just that block from the
@@ -2135,6 +2145,10 @@ async def generate_guidance(
             text_out = f"{text_out}\n\n{block}"
             suggestion_enforced = True
             logger.info("assist_decision_suggestion_enforced node_key=%s", node_key)
+    # §17.897 — every command the operator is handed must be copy-pasteable,
+    # whichever path produced it. The fenced-block mandate is a prompt rule and
+    # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
+    text_out = promote_inline_commands(text_out)
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
         "model": getattr(resp, "model", "") if resp else "",
@@ -2148,6 +2162,8 @@ async def generate_guidance(
         "destructive": scan_destructive(text_out) if settings.assist_destructive_scan else [],
         # §17.893 — banned values that survived the redraw (visibly flagged).
         "banned_value_violations": banned_meta,
+        # §17.898 — wrong-resource-type commands that survived the redraw.
+        "resource_kind_violations": reskind_meta,
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
@@ -2336,6 +2352,146 @@ def find_banned_values(text_out: str, banned: list | None) -> list[dict]:
     return hits
 
 
+# ── §17.898 — VM-vs-container resource-kind gate ─────────────────────────
+#
+# Proxmox addresses a VM with `qm` and an LXC container with `pct`, by numeric
+# ID. Using the wrong verb is always an error, and the engine committed it live:
+# facts recorded "VM 106 (palworld-server)", yet the guide prescribed `pct enter
+# 106` three times across an ask and two guides. The session's other five
+# resources (102-105) really are containers, so the container-shaped context
+# out-voted the one fact that mattered. The confirmed facts are ground truth and
+# this makes them binding — the §17.893 lesson: prompts are guidance,
+# enforcement is code.
+_VM_FACT_RE = None
+_CT_FACT_RE = None
+_VM_CMD_RE = None
+_CT_CMD_RE = None
+
+
+def resource_kinds_from_facts(environment: Optional[dict]) -> dict[str, str]:
+    """Map Proxmox resource id → ``'vm'`` / ``'ct'`` from the confirmed facts.
+
+    An id the facts describe BOTH ways is ambiguous and is dropped: a
+    half-remembered fact must never become an enforcement rule."""
+    global _VM_FACT_RE, _CT_FACT_RE
+    import re as _re
+    if _VM_FACT_RE is None:
+        # "VM 106", "VM 106 (palworld-server)" — but not "VM/LXC 106".
+        _VM_FACT_RE = _re.compile(r"(?<![\w/])VM\s+(\d{2,5})\b")
+        # "container 103", "LXC container 104", "CT 107".
+        _CT_FACT_RE = _re.compile(r"(?<![\w/])(?:LXC\s+)?(?:container|CT)\s+(\d{2,5})\b",
+                                  _re.I)
+    kinds: dict[str, str] = {}
+    conflict: set[str] = set()
+    for fact in (environment or {}).get("facts") or []:
+        s = str(fact or "")
+        for rid in _VM_FACT_RE.findall(s):
+            if kinds.setdefault(rid, "vm") != "vm":
+                conflict.add(rid)
+        for rid in _CT_FACT_RE.findall(s):
+            if kinds.setdefault(rid, "ct") != "ct":
+                conflict.add(rid)
+    for rid in conflict:
+        kinds.pop(rid, None)
+    return kinds
+
+
+def find_resource_kind_violations(
+    text_out: str, kinds: dict[str, str] | None,
+) -> list[dict]:
+    """§17.898 — fenced commands that address a resource with the WRONG verb.
+
+    Returns ``[{id, used, correct, command}]``. Only fenced blocks are scanned:
+    prose legitimately says "`pct` is for containers" while explaining the very
+    mistake this gate catches, and flagging that would punish the correction."""
+    global _VM_CMD_RE, _CT_CMD_RE
+    import re as _re
+    if not (text_out or "").strip() or not kinds:
+        return []
+    if _VM_CMD_RE is None:
+        # `qm start 106`, `qm set 106 --…`, `qm resize 106 scsi0 +60G`
+        _VM_CMD_RE = _re.compile(r"\bqm\s+(?:[a-z][\w-]*\s+)?(\d{2,5})\b")
+        _CT_CMD_RE = _re.compile(r"\bpct\s+(?:[a-z][\w-]*\s+)?(\d{2,5})\b")
+    hits: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for block in _re.findall(r"```[a-z]*\n(.*?)```", text_out, _re.S):
+        for line in block.splitlines():
+            for rx, used in ((_VM_CMD_RE, "vm"), (_CT_CMD_RE, "ct")):
+                for rid in rx.findall(line):
+                    want = kinds.get(rid)
+                    if want and want != used and (rid, used) not in seen:
+                        seen.add((rid, used))
+                        hits.append({
+                            "id": rid, "used": used, "correct": want,
+                            "command": line.strip()[:120],
+                        })
+    return hits
+
+
+def _kind_word(k: str) -> str:
+    return "a VM (use `qm`)" if k == "vm" else "an LXC container (use `pct`)"
+
+
+def resource_kind_warning(hits: list[dict]) -> str:
+    """§17.898 — the visible flag when a redraw still addresses a resource with
+    the wrong verb (the §17.883 honesty contract: gates guarantee VISIBILITY,
+    not correctness)."""
+    if not hits:
+        return ""
+    return ("\n\n---\n⚠️ **Wrong resource type:** this reply uses "
+            + "; ".join(
+                f"`{h['used']}` commands for {h['id']}, which your confirmed "
+                f"facts record as {_kind_word(h['correct'])}"
+                for h in hits[:3])
+            + ". Do not run those commands as written.")
+
+
+async def enforce_resource_kinds(
+    *, text_out: str, environment: Optional[dict], messages: list[dict],
+    role: str, label: str,
+) -> tuple[str, list[dict], bool]:
+    """§17.898 — redraw-once enforcement of the VM/container verb against the
+    confirmed facts. Same contract as ``enforce_banned_values``: returns
+    ``(text, remaining_hits, redrew)`` and fail-soft on any model failure."""
+    kinds = resource_kinds_from_facts(environment)
+    hits = find_resource_kind_violations(text_out, kinds)
+    if not hits:
+        return text_out, [], False
+    logger.warning(
+        "assist_resource_kind_violation label=%s hits=%s (regenerating)",
+        label, ",".join(f"{h['id']}:{h['used']}->{h['correct']}" for h in hits),
+    )
+    directive = (
+        "REGENERATION NOTICE: your draft addressed the wrong RESOURCE TYPE. "
+        "Proxmox uses `qm` for VMs and `pct` for LXC containers; these ids are "
+        "recorded in the confirmed facts as:\n"
+        + "\n".join(
+            f"- {h['id']} is {_kind_word(h['correct'])} — you wrote "
+            f"`{h['command']}`" for h in hits[:5])
+        + "\nRewrite every affected command with the correct tool for that "
+          "resource type. If a step genuinely needs the other type, say so and "
+          "explain — do not silently switch verbs. Output the corrected reply "
+          "in full."
+    )
+    try:
+        resp = await chat_until_nonempty(
+            model_router.chat,
+            list(messages) + [
+                {"role": "assistant", "content": text_out},
+                {"role": "user", "content": directive},
+            ],
+            {"role": role},
+            temperature=0.3, max_tokens=settings.assist_guide_max_tokens,
+            draws=2, label=f"{label}_reskind_regen", think_off_rescue=True,
+        )
+        new = (resp.text or "").strip() if (resp and resp.success) else ""
+    except Exception:  # noqa: BLE001 — enforcement must not sink generation
+        new = ""
+    if not new:
+        return text_out, hits, False
+    return new, find_resource_kind_violations(new, kinds), True
+
+
 def banned_values_warning(hits: list[dict]) -> str:
     """§17.893 — the visible flag when a redraw still carries a banned value
     (the §17.883 honesty contract: gates guarantee VISIBILITY, not
@@ -2431,6 +2587,7 @@ async def generate_fix(
     conversation: Optional[str] = None,
     failure_streak: int = 0,
     failed_commands: Optional[str] = None,
+    prescribed_commands: Optional[str] = None,  # §17.898
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -2497,6 +2654,28 @@ async def generate_fix(
     research_block = _render_research_block(sources)
     if research_block:
         parts.append(research_block)
+    if (prescribed_commands or "").strip():
+        # §17.898 — self-attribution. Without this the fix reconstructs blame
+        # from the operator's paste alone and lands on "the error happened
+        # because YOU used `pct enter`" for a command the ENGINE prescribed two
+        # turns earlier. Owning the mistake is not politeness: a model that
+        # thinks the operator improvised looks for operator error, while one
+        # that knows it mis-prescribed looks at its own assumption — which is
+        # where the actual bug (VM addressed as a container) was.
+        parts.append(
+            "## Commands YOU (the engine) prescribed on this step\n"
+            "These came from your own earlier replies, newest first, tagged with "
+            "the reply kind that issued them. If the operator's error is from one "
+            "of these, it is YOUR command that failed: say so plainly ('the "
+            "`pct enter` I gave you was wrong — 106 is a VM, not a container') "
+            "and correct YOUR assumption. NEVER write 'the error happened because "
+            "you used X' or 'you ran X' about a command in this list — the "
+            "operator ran what you asked them to run. Equally, do NOT assume the "
+            "operator did anything you never asked for: if a resource, service, "
+            "or container does not appear in these commands or in the confirmed "
+            "facts, it was never created, started, or configured.\n\n```\n"
+            + prescribed_commands.strip()[:3000] + "\n```"
+        )
     if failure_streak >= 1 and (failed_commands or "").strip():
         # §17.881/882 — from the FIRST repeat (the operator returning with an
         # error IS the proof the prior fix failed), the commands already tried
@@ -2558,26 +2737,41 @@ async def generate_fix(
     repeat_meta: list[str] = []
     banned_meta_fix: list[dict] = []  # §17.893
     novel_meta: list[str] = []
+    reskind_meta_fix: list[dict] = []  # §17.898
 
     _banned_list = (environment or {}).get("banned_values") or []
+    _kinds = resource_kinds_from_facts(environment)  # §17.898
 
-    def _gate(draft: str) -> tuple[list[str], list[str], list[dict]]:
+    def _gate(draft: str) -> tuple[list[str], list[str], list[dict], list[dict]]:
         hits_ = (find_repeated_failed(draft, failed_commands)
                  if failure_streak >= 1 and (failed_commands or "").strip() else [])
         novel_ = (find_novel_urls(draft, user + "\n" + (failed_commands or ""))
                   if failure_streak >= settings.assist_fix_streak_threshold else [])
         # §17.893 — banned values are banned at ANY streak.
         banned_ = find_banned_values(draft, _banned_list)
-        return hits_, novel_, banned_
+        # §17.898 — wrong resource verb is wrong at ANY streak, and a FIX is
+        # exactly where it surfaced live (the fix that "corrected" pct enter
+        # still had to be told 106 was a VM).
+        reskind_ = find_resource_kind_violations(draft, _kinds)
+        return hits_, novel_, banned_, reskind_
 
     if text_out:
-        hits, novel, banned_hits = _gate(text_out)
-        if hits or novel or banned_hits:
+        hits, novel, banned_hits, reskind_hits = _gate(text_out)
+        if hits or novel or banned_hits or reskind_hits:
             logger.warning(
-                "assist_fix_gate_violation node_key=%s repeats=%d novel_urls=%d banned=%d (regenerating)",
-                node_key, len(hits), len(novel), len(banned_hits),
+                "assist_fix_gate_violation node_key=%s repeats=%d novel_urls=%d "
+                "banned=%d reskind=%d (regenerating)",
+                node_key, len(hits), len(novel), len(banned_hits), len(reskind_hits),
             )
             directive = ["\n\n---\nREGENERATION NOTICE:"]
+            if reskind_hits:
+                directive.append(
+                    "Your previous draft addressed the wrong RESOURCE TYPE "
+                    "(`qm` is for VMs, `pct` is for LXC containers) — the "
+                    "confirmed facts record:\n"
+                    + "\n".join(
+                        f"- {h['id']} is {_kind_word(h['correct'])} — you wrote "
+                        f"`{h['command']}`" for h in reskind_hits[:5]))
             if banned_hits:
                 directive.append(
                     "Your previous draft used value(s) the operator has EXPLICITLY "
@@ -2608,12 +2802,20 @@ async def generate_fix(
             ])
             regen_text = (regen.text or "").strip() if (regen and regen.success) else ""
             if regen_text:
-                rehits, renovel, rebanned = _gate(regen_text)
-                if not rehits and not renovel and not rebanned:
+                rehits, renovel, rebanned, rereskind = _gate(regen_text)
+                if not rehits and not renovel and not rebanned and not rereskind:
                     text_out = regen_text
                 else:
                     repeat_meta, novel_meta, banned_meta_fix = rehits, renovel, rebanned
+                    reskind_meta_fix = rereskind
                     warn_bits = []
+                    if rereskind:  # §17.898
+                        warn_bits.append(
+                            "addresses the wrong resource type ("
+                            + "; ".join(
+                                f"`{h['used']}` for {h['id']}, which is "
+                                f"{_kind_word(h['correct'])}" for h in rereskind[:2])
+                            + ")")
                     if rehits:
                         warn_bits.append(
                             "repeats something that already failed ("
@@ -2635,14 +2837,20 @@ async def generate_fix(
                     )
             else:
                 repeat_meta, novel_meta, banned_meta_fix = hits, novel, banned_hits
+                reskind_meta_fix = reskind_hits  # §17.898
                 text_out = (
                     "⚠️ **Caution:** this fix includes "
+                    + ("a wrong-resource-type command " if reskind_hits else "")
                     + ("already-failed command(s) " if hits else "")
                     + ("unverified URL(s) " if novel else "")
                     + ("a ruled-out value " if banned_hits else "")
                     + "the integrity gate flagged. Treat with suspicion; reply "
                     "\"different approach\" to force a method change.\n\n" + text_out
                 )
+    # §17.897 — every command the operator is handed must be copy-pasteable,
+    # whichever path produced it. The fenced-block mandate is a prompt rule and
+    # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
+    text_out = promote_inline_commands(text_out)
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
         "model": getattr(resp, "model", "") if resp else "",
@@ -2657,6 +2865,7 @@ async def generate_fix(
         "repeat_violations": repeat_meta,
         "novel_url_violations": novel_meta,
         "banned_value_violations": banned_meta_fix,  # §17.893
+        "resource_kind_violations": reskind_meta_fix,  # §17.898
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"

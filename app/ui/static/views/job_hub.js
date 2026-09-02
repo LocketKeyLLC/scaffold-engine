@@ -11,7 +11,7 @@
 // The old per-view routes (#/theater/:id etc.) are gone (hard switch,
 // operator decision) — every in-SPA link now points here.
 import * as api from "../api.js";
-import { el, mount, shortId, timeAgo } from "../util.js";
+import { el, mount, shortId, timeAgo, setCurrentJob } from "../util.js";
 import { statusBadge, loading, errorPanel } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
 import { briefPanel } from "./brief_panel.js";
@@ -188,6 +188,7 @@ export default function jobHub(container, params) {
     if (disposed) return;
     titleEl.textContent = job.title || "(untitled)";
     mount(pillSlot, statusBadge(job.status));
+    setCurrentJob(job); // §17.896 — pin it in the sidebar (⬡ DAG · ▶ Run · ▤ Output)
 
     switch (tab) {
       case "plan":

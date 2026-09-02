@@ -221,6 +221,44 @@ export async function copy(text) {
  * Returns true if the swap happened, false when it would fall off either
  * end. Pure array semantics extracted from the plan view so the reorder
  * permutation the server receives is unit-testable. */
+// §17.896 — the "current job" the sidebar pins.
+//
+// The operator finding: "the DAG is rather difficult to locate with all the
+// options along the left bar." §17.859 was right to collapse a job's six peer
+// views into hub tabs, but it left the DAG reachable ONLY as a tab you find
+// after picking a job out of a list — from anywhere else in the app it was
+// three navigations away and named "Plan", not "DAG". Remembering the job the
+// operator last opened lets the chrome pin ⬡ DAG · ▶ Run · ▤ Output at the top
+// of the sidebar, so the canvas is one click from every surface.
+//
+// Deliberately localStorage, not in-memory: it survives a reload, which is
+// when an operator is most likely to have lost their place. Writes are
+// best-effort — a private window with storage disabled degrades to no pin.
+const CURRENT_JOB_KEY = "scaffold_current_job";
+
+/** Remember the job the operator is looking at. Pass null to clear. */
+export function setCurrentJob(job) {
+  try {
+    if (!job || !job.id) localStorage.removeItem(CURRENT_JOB_KEY);
+    else
+      localStorage.setItem(
+        CURRENT_JOB_KEY,
+        JSON.stringify({ id: job.id, title: job.title || "", status: job.status || "" })
+      );
+  } catch { /* storage disabled — the pin is a convenience, never a dependency */ }
+  window.dispatchEvent(new CustomEvent("scaffold:currentjob"));
+}
+
+/** The pinned job, or null. Shape: {id, title, status}. */
+export function currentJob() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CURRENT_JOB_KEY) || "null");
+    return raw && raw.id ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 export function moveItem(arr, i, delta) {
   const j = i + delta;
   if (j < 0 || j >= arr.length || i < 0 || i >= arr.length) return false;

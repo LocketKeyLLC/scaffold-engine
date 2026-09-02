@@ -7,6 +7,7 @@ import * as router from "../router.js";
 import { el, mount, shortId, timeAgo, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
+import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
 
 // Phase 1 in flight — feasibility not ready for approval yet (e.g. a job just
 // submitted from the composer). The detail view waits + polls through these
@@ -211,13 +212,23 @@ export function renderApprovalDetail(container, jobId) {
   mount(container, outlet);
 
   const progress = el("div", { class: "approval-progress hidden" });
-  const approveBtn = el("button", { class: "btn btn-primary", text: "✓ Approve — research & plan", onClick: () => approve() });
+  const approveBtn = el("button", { class: "btn btn-primary", text: "✓ Approve", onClick: () => approve() });
   // Built per-render by buildQuestionsCard; approve() collects the Q/A pairs.
   let qa = null;
+  // §17.895 — the approve chain is the ONLY execution entry point that never
+  // read the global Auto/Assist mode, so the sidebar toggle silently did
+  // nothing here: approve always parked the operator in the plan editor with
+  // no assist session, and the "idea → approve → assist" progression the
+  // OWUI auto-chain used to provide simply did not exist in the SPA. The
+  // label now states the WHOLE destination, so the button never under-promises.
+  const approveTail = () =>
+    isAssist() ? " — research, plan & start the walkthrough" : " — research & plan";
   const refreshApproveLabel = () => {
-    approveBtn.textContent = qa && qa.collect()
-      ? "✓ Approve with answers — research & plan"
-      : "✓ Approve — research & plan";
+    approveBtn.textContent =
+      (qa && qa.collect() ? "✓ Approve with answers" : "✓ Approve") + approveTail();
+    // Auto-run is an AUTO-mode concept: in Assist mode the walkthrough IS the
+    // run, so the checkbox would be a second, contradictory switch.
+    autoRunLabel.classList.toggle("hidden", isAssist());
   };
   // §17.818 (plan 5.5) — one approve semantic across surfaces: approve always
   // means confirm → plan-ready; RUNNING is an explicit choice. This toggle
@@ -230,6 +241,9 @@ export function renderApprovalDetail(container, jobId) {
     localStorage.setItem("scaffold_auto_run", autoRun.checked ? "1" : "0"));
   const autoRunLabel = el("label", { class: "row faint autorun-toggle" },
     autoRun, " Auto-run after approve");
+  // §17.895 — flipping the sidebar toggle while the gate is open must not
+  // leave the button describing the other mode's destination.
+  const offExecMode = onExecModeChange(() => refreshApproveLabel());
   const rejectBtn = el("button", { class: "btn btn-danger", text: "✕ Reject (cancel)", onClick: () => reject() });
 
   let waitingShown = false; // dedupe re-renders while polling the waiting state
@@ -254,6 +268,7 @@ export function renderApprovalDetail(container, jobId) {
       if (st === "awaiting_confirmation") {
         stopWaitPoll();
         waitingShown = false;
+        refreshApproveLabel(); // §17.895 — mode-correct label on every render
         const fg = flowGuide(job, { here: `#/job/${jobId}` });
         const brief = job.refined_brief || {};
         const feas = job.feasibility || {};
@@ -400,6 +415,7 @@ export function renderApprovalDetail(container, jobId) {
     setBusy(true);
     const fb = qa ? qa.collect() : null;
     const nAns = fb ? (fb.match(/^Q:/gm) || []).length : 0;
+    const assist = isAssist(); // §17.895 — latch the mode for the whole chain
     showProgress(
       nAns
         ? `✓ ${nAns} answer${nAns === 1 ? "" : "s"} received — researching with your input… (a few minutes)`
@@ -417,7 +433,24 @@ export function renderApprovalDetail(container, jobId) {
       // Generate the DAG but DO NOT execute — the operator edits it next.
       await api.post("/dag", { job_id: jobId });
       if (disposed) return;
-      if (autoRun.checked) {
+      if (assist) {
+        // §17.895 — Assist mode carries STRAIGHT THROUGH into the walkthrough:
+        // confirm → DAG → assist/start → Run tab, with step 1's guidance
+        // already generating. This is the "idea → approve → assist"
+        // progression; without it the job stayed at `executing` (never
+        // `assisted_*`), so the Run tab rendered the autonomous theater and
+        // the operator had to know to press "✦ Start assist" themselves.
+        const line = progress.querySelector(".progress-msg");
+        if (line) line.textContent = "Starting the guided walkthrough…";
+        const ok = await startAssistFor(api, jobId, toast, {
+          navigate: (hash) => router.navigate(hash.replace(/^#/, "")),
+        });
+        if (disposed) return;
+        // assist_unavailable (umbrella / 0-node) or a failed start must not
+        // strand the operator on a spinner — the plan editor is the honest
+        // fallback, and startAssistFor has already explained why.
+        if (!ok) router.navigate(`/job/${jobId}/plan`);
+      } else if (autoRun.checked) {
         // §17.818 — hand off to the hub's Run tab (same /execute/all SSE
         // the manual Run uses; sessionStorage carries the one-shot intent).
         sessionStorage.setItem("scaffold_autorun", jobId);
@@ -488,6 +521,7 @@ export function renderApprovalDetail(container, jobId) {
   return () => {
     disposed = true;
     if (pollTimer) clearInterval(pollTimer);
+    offExecMode(); // §17.895 — don't leak the exec-mode listener per render
   };
 }
 

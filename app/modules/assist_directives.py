@@ -11,6 +11,8 @@ take a system string + flags and return a string, calling nothing else in assist
 
 from __future__ import annotations
 
+import re
+
 from app.modules.prompt_assembly import EXECUTION_SYSTEM_RUNBOOK
 from app.modules.assist_prompts import (
     GUIDE_SYSTEM_CODEGEN,
@@ -275,3 +277,102 @@ def apply_location_callout(system: str, *, is_decision: bool, enabled: bool) -> 
     if not enabled or is_decision:
         return system
     return system + _LOCATION_CALLOUT_DIRECTIVE
+
+
+# ── §17.897 — code-enforced copy-paste format ────────────────────────────
+#
+# Prompt rules are guidance; this is enforcement (the §17.882/§17.893 lesson).
+# Only FENCED blocks get a ⧉ copy button in the UI (util.js `mdToHtml`), so a
+# command the model emitted as an inline `code span` cannot be copied — the
+# operator has to hand-retype it, which is exactly the complaint that opened
+# this fix ("not giving commands in the copy and paste format").
+#
+# The rule is deliberately narrow: promote a span ONLY when it is the ENTIRE
+# line. That is the shape the model actually produced ("**Run this command:**"
+# on one line, `ssh root@…` alone on the next) and it leaves every mid-sentence
+# mention (…set `scsi0` to…, the `radarr` user) untouched. A verb check on the
+# first token then rejects a lone identifier or path standing on its own line.
+_COMMAND_VERBS = frozenset("""
+apt apt-get aptitude dnf yum zypper pacman apk brew snap flatpak
+systemctl service journalctl systemd-analyze loginctl timedatectl hostnamectl
+docker docker-compose podman kubectl helm crictl
+qm pct pvesm pveam pvecm vzdump ha-manager
+ssh scp sftp rsync curl wget nc telnet ping traceroute dig nslookup host
+ip ifconfig route iptables nft ufw firewall-cmd ss netstat arp ethtool
+mkdir rmdir cp mv rm ln touch chmod chown chgrp mount umount df du ls find
+cat tac head tail less more grep egrep sed awk sort uniq cut tr wc tee xargs
+tar gzip gunzip zip unzip bzip2 xz zstd
+git make cmake gcc g++ cargo go npm npx pnpm yarn pip pip3 python python3
+node deno ruby gem perl php java javac mvn gradle dotnet
+useradd usermod userdel groupadd passwd chpasswd adduser deluser su sudo doas
+lvcreate lvextend lvresize pvcreate vgcreate resize2fs xfs_growfs mkfs fdisk
+parted lsblk blkid growpart e2fsck partprobe swapon swapoff
+nano vim vi emacs echo printf export source bash sh zsh env printenv
+crontab at systemd-run nohup kill killall pkill ps top htop free uptime uname
+lsmod modprobe dmesg lspci lsusb lscpu dmidecode sensors nvidia-smi
+openssl ssh-keygen ssh-copy-id gpg certbot
+steamcmd wine winetray
+reboot shutdown poweroff halt
+""".split())
+
+# A leading `$`/`#`/`>` prompt marker, or `sudo`/`doas`/`env`/`time` wrappers,
+# are stripped before the verb check so `sudo apt update` still resolves.
+_CMD_PREFIXES = ("sudo", "doas", "env", "time", "nohup", "exec")
+_INLINE_ONLY_LINE_RE = re.compile(r"^(\s*)`([^`]{2,300})`\s*$")
+_FENCE_RE = re.compile(r"^\s*```")
+
+
+def _looks_like_command(span: str) -> bool:
+    """True when an inline span is a runnable shell command, not a reference."""
+    s = span.strip().lstrip("$#>").strip()
+    if not s or "\n" in s:
+        return False
+    # A bare identifier/path with no argument is a REFERENCE (`scsi0`,
+    # `/opt/Radarr`, `radarr.service`), never a command worth its own block.
+    if " " not in s:
+        return False
+    # Shell prompt pastes ("root@pve:~# qm start 106") are operator OUTPUT
+    # echoed back, not an instruction to run — leave them alone.
+    if re.match(r"^\S+@\S+:.*[#$]\s", s):
+        return False
+    toks = s.split()
+    i = 0
+    while i < len(toks) - 1 and toks[i] in _CMD_PREFIXES:
+        i += 1
+    head = toks[i]
+    if head.startswith(("./", "/", "~/")):
+        return True  # an explicit path invocation
+    # Strip an env-assignment prefix (FOO=bar cmd …) before matching.
+    if "=" in head and i + 1 < len(toks):
+        head = toks[i + 1]
+    return head in _COMMAND_VERBS
+
+
+def promote_inline_commands(text: str) -> str:
+    """§17.897 — rewrite whole-line inline command spans as fenced ```bash
+    blocks so every command the engine hands the operator has a copy button.
+
+    Content inside an existing fenced block is never touched. Fail-soft by
+    construction: anything that does not match the narrow whole-line +
+    command-verb shape is returned byte-for-byte unchanged."""
+    if not text or "`" not in text:
+        return text
+    out: list[str] = []
+    in_fence = False
+    changed = False
+    for line in text.split("\n"):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        m = _INLINE_ONLY_LINE_RE.match(line)
+        if m and _looks_like_command(m.group(2)):
+            cmd = m.group(2).strip().lstrip("$#>").strip()
+            out.extend(["```bash", cmd, "```"])
+            changed = True
+            continue
+        out.append(line)
+    return "\n".join(out) if changed else text

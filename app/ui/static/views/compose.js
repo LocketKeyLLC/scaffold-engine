@@ -44,10 +44,18 @@ export default function compose(container) {
       const res = await api.post("/ideate/start", { idea: text, domain: domain.value || null });
       const jobId = res && res.job_id;
       toast("Idea submitted — refining now. Approve it here when it’s ready.", "ok");
-      // Deep-link to the approval detail: it shows a live "refining…" state and
-      // polls until the feasibility assessment is ready to approve. Fall back to
-      // the dashboard if no id came back.
-      router.navigate(jobId ? `/approvals/${jobId}` : "/");
+      // §17.895 — land in the JOB HUB, whose Overview tab embeds the approval
+      // gate for pre-approval statuses (job_hub.GATE_STATUSES), including the
+      // live "refining…" polling state this used to reach directly.
+      //
+      // This line pointed at `/approvals/:id` — a route §17.859 RETIRED when it
+      // folded the gate into the hub. The router has no 2-segment /approvals
+      // pattern, so every idea submission fell through to `setNotFound`, which
+      // silently renders the Dashboard: the operator submitted an idea, landed
+      // somewhere else with the URL still reading #/approvals/<uuid>, and had
+      // no path onward. That is the missing "idea → approve" progression — and
+      // it failed invisibly because not-found is a fallback, not an error.
+      router.navigate(jobId ? `/job/${jobId}` : "/");
     } catch (e) {
       busy = false;
       submit.disabled = false;

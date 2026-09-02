@@ -467,6 +467,17 @@ services:
       # walks them through it instead of repeating the current step. Fail-soft,
       # confidence-gated. Code default off; live here.
       ASSIST_PROGRESS_TRACKER_ENABLED: "${ASSIST_PROGRESS_TRACKER_ENABLED:-true}"
+      # §17.899 — the missing half of §17.890. A completion CLAIM outranks the
+      # verifier; the live failure was a genuine claim about the WRONG THING
+      # ("It worked Ubuntu Server is now downloading!" closed "Install PalWorld
+      # server"), which nothing could take back — the step stayed done, its work
+      # migrated to the next step, and that step churned for 22 hours. An
+      # explicit operator DENIAL now reopens the just-closed step. Deterministic
+      # phrase match, bounded to the most recent commit within the window/turn
+      # budget below, because a reopen is a plan mutation. Default ON.
+      ASSIST_DENIAL_REOPEN_ENABLED: "${ASSIST_DENIAL_REOPEN_ENABLED:-true}"
+      ASSIST_DENIAL_REOPEN_WINDOW_S: "${ASSIST_DENIAL_REOPEN_WINDOW_S:-1800}"
+      ASSIST_DENIAL_REOPEN_MAX_TURNS: "${ASSIST_DENIAL_REOPEN_MAX_TURNS:-3}"
       # §17.755 — on a reset/rebuild note, auto-retract the facts about the
       # abandoned system (durable host/network/storage/new-build facts kept) so the
       # append-only ledger stops dragging dead state into later steps. Code default
