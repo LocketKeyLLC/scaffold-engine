@@ -45,6 +45,19 @@ updates:
     open-pull-requests-limit: 3
     commit-message:
       prefix: "deps(sidecar)"
+    # §17.905 — the same fix §17.904 gave the docker block, which that change
+    # should have covered and didn't: this block also lists four directories
+    # with no `groups:`, so one bump becomes one PR PER SIDECAR. Proven the very
+    # next run — a single pydantic 2.13.4 -> 2.13.5 opened #349, #350, #351 and
+    # #352, four PRs for one version, while the grouped docker block correctly
+    # produced one (#348) and the grouped root-pip block one (#353).
+    #
+    # The four sidecars pin the same small set of shared deps and are rebuilt
+    # together, so a bump that lands in one but not the others is a state
+    # nobody wants — grouping is how they stay in lockstep.
+    groups:
+      sidecar-deps:
+        patterns: ["*"]
 
   # ── Container base images — Dockerfile + docker-compose.yml digest pins ───
   - package-ecosystem: "docker"
