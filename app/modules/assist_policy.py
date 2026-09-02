@@ -108,6 +108,95 @@ _HOWTO_QUESTION_RE = re.compile(
 )
 
 
+# ── §17.903 — blocked-on-a-prerequisite detection ────────────────────────────
+#
+# The live failure: the operator reported "i hit the reboot now and its still
+# hung up" while the plan pointer sat on "Install PalWorld server". The engine
+# had no representation of "this operator cannot reach the current step at all",
+# so the next walkthrough opened with `sudo apt update` on a VM whose own
+# Prerequisites section said it must be "fully installed and reachable via
+# shell" — the exact thing they had just said was broken.
+#
+# Deliberately deterministic: a blocker report is a plain, recognisable shape,
+# and putting an LLM in front of it would add a call per turn to decide
+# something a regex settles. Precision-first — a bare error paste is NOT a
+# blocker (that is the §17.874 fix path); a blocker is the operator saying the
+# work is not progressing, usually after a prior attempt.
+_BLOCKED_RE = re.compile(
+    # "it's still hung", "still not working", "still stuck", "still failing"
+    r"\bstill\s+(?:hung|hanging|stuck|frozen|freezing|not\s+working|"
+    r"broken|failing|fails|failed|down|the\s+same)\b"
+    # "it's hung up", "it hangs", "frozen at", "stuck on/at"
+    r"|\b(?:is\s+|it'?s\s+|its\s+|has\s+)?hung(?:\s+up)?\b"
+    r"|\b(?:stuck|frozen|hanging)\s+(?:on|at|in)\b"
+    r"|\bwon'?t\s+(?:boot|start|load|come\s+up|finish|complete)\b"
+    r"|\bkeeps?\s+(?:hanging|freezing|failing|crashing|restarting|looping)\b"
+    r"|\bnot\s+(?:responding|responsive)\b"
+    r"|\bcan'?t\s+(?:get\s+(?:in|past)|proceed|continue|move\s+(?:on|forward))\b"
+    r"|\bnothing\s+(?:happens|is\s+happening)\b",
+    re.IGNORECASE,
+)
+
+# Work that is progressing is not a blocker, however slow. Without this,
+# "still downloading" and "still installing" read as stuck.
+_BLOCKED_IN_PROGRESS_RE = re.compile(
+    r"\bstill\s+(?:going|running|downloading|installing|copying|building|"
+    r"working|processing)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_blocked(msg: str) -> bool:
+    """§17.903 — True when the operator reports being STUCK, not merely erroring.
+
+    The distinction that matters: an error paste means "this command failed,
+    diagnose it" (§17.874 fix). A blocker means "I cannot get to where your
+    step assumes I already am" — which invalidates the step's premise, so
+    continuing to guide the step at all is wrong.
+    """
+    if not msg:
+        return False
+    m = normalize_punct(msg).strip()
+    if _BLOCKED_IN_PROGRESS_RE.search(m):
+        return False
+    return bool(_BLOCKED_RE.search(m))
+
+
+# §17.903 — a question that wants a DECISION from the engine ("should I…?",
+# "do we…?", "…or…?"). These are the ones the operator most needs a lean on,
+# and the ones a pivot override was silently swallowing.
+_DECISION_QUESTION_RE = re.compile(
+    r"^\s*(?:should|shall|do|does|did|can|could|would|will|is|are|was|were|"
+    r"ought)\b.*\?\s*$"
+    r"|\bshould\s+(?:i|we|you)\b"
+    r"|\bdo\s+(?:i|we)\s+(?:need|have)\s+to\b"
+    r"|\bor\s+should\s+(?:i|we)\b"
+    r"|\bwhich\s+(?:one|option|way)\b"
+    r"|\bwhat\s+do\s+you\s+(?:think|recommend|suggest)\b"
+    # §17.903 — IMPERATIVE-framed proposals. The live message was "…perhaps we
+    # should start over. Delete this VM and start over?" — a yes/no question
+    # with no interrogative opener, which the patterns above all miss. These are
+    # exactly the questions that most need a lean, because the operator is
+    # proposing to throw work away and wants to know if they should.
+    r"|\b(?:perhaps|maybe|should)\s+(?:i|we)\b"
+    r"|^\s*(?:delete|remove|destroy|rebuild|reinstall|restart|reset|wipe|"
+    r"start\s+over|scrap|redo|revert|roll\s*back|switch|try)\b[^?]*\?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def wants_a_recommendation(msg: str) -> bool:
+    """§17.903 — True when the operator asked something that deserves a LEAN,
+    not a menu. "Delete this VM and start over?" is answerable; laying out
+    options without a recommendation is what left them stuck."""
+    if not msg:
+        return False
+    m = normalize_punct(msg).strip()
+    if "?" not in m and not _DECISION_QUESTION_RE.search(m):
+        return False
+    return bool(_DECISION_QUESTION_RE.search(m))
+
+
 def looks_like_howto_question(msg: str) -> bool:
     """§17.733 — True when `msg` is a help-seeking how-to/which/should-I question
     that deserves a researched answer, not a re-render of the current step."""
@@ -419,11 +508,25 @@ def _override(action: str, message: str, signals: dict) -> tuple[str, str | None
     #    from a plain how-to, so widening to `ask` stays precise. A confident
     #    submit is still left alone (a completion is not a pivot).
     if action in ("skip", "question", "ask") and looks_like_pivot(msg):
-        return "note", "pivot", {
+        # §17.903 — the note is still recorded, but a pivot framed as a QUESTION
+        # must also be ANSWERED. Live failure: "i hit the reboot now and its
+        # still hung up, perhaps we should start over. Delete this VM and start
+        # over?" was classified `ask` by the model, overridden to `note` here,
+        # filed, and the turn ended SILENTLY — the operator's direct question got
+        # no answer at all, and the next walkthrough then guided them into a step
+        # whose prerequisites they had just reported broken.
+        #
+        # `answer_query` tells the turn loop to continue into the answer flow
+        # after recording. Recording and answering were never in conflict; the
+        # override just happened to be written as a replacement.
+        params = {
             "note_text": msg.strip(),
             "note_kind": pivot_kind(msg),
             "plan_impact": "surface",
         }
+        if "?" in msg or wants_a_recommendation(msg) or looks_like_blocked(msg):
+            params["answer_query"] = msg.strip()
+        return "note", "pivot", params
     # 5. An explicit help / how-to question is help-seeking, not a step-completion
     #    or a plan change → ask (research, §17.733/§17.763/§17.768). Pivot already
     #    won above, so a help request that also states a pivot still re-plans.

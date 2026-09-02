@@ -305,6 +305,20 @@ async def _run_turn_inner(
             handled["v"] = "reopen"
             return
 
+        # 2b. §17.903 — the operator is BLOCKED, not merely erroring. This runs
+        # ahead of the decision layer because being unable to reach the step at
+        # all is the dominant fact of the turn: the plan's premise is broken, so
+        # any walkthrough for the current step is answering the wrong question.
+        # Live failure: "i hit the reboot now and its still hung up" while the
+        # pointer sat on "Install PalWorld server" — the next guide opened with
+        # `sudo apt update` on a VM whose own Prerequisites said it must be
+        # "fully installed and reachable", the exact thing just reported broken.
+        if assist_policy.looks_like_blocked(text_):
+            async for e in _blocked_flow(session_id, text_, node_key, history, db):
+                yield e
+            handled["v"] = "blocked"
+            return
+
         # 2. Deterministic orientation (§17.867) — zero model calls.
         if assist_policy.looks_like_whats_next(text_):
             yield _ev(ASSIST_TURN_ROUTED, {"action": "status", "override": "whats_next"})
@@ -338,6 +352,17 @@ async def _run_turn_inner(
         if confident and (action == "note" or impact == "reshape"):
             async for e in _note(session_id, d, text_, nk, db):
                 yield e
+            # §17.903 — recording is not answering. A pivot framed as a QUESTION
+            # was overridden ask→note, filed, and the turn ENDED — the operator's
+            # direct "delete this VM and start over?" got no reply at all, and
+            # they pressed Guide out of the silence, straight into a walkthrough
+            # whose premise was already broken. The note still gets recorded (the
+            # plan impact matters); it just no longer swallows the answer.
+            q = (d.get("answer_query") or "").strip()
+            if q:
+                async for e in _answer(session_id, q, nk, history, db,
+                                       status_text="Recorded that — now answering your question…"):
+                    yield e
             handled["v"] = "note"
             return
         if confident and action == "submit":
@@ -605,6 +630,98 @@ async def _track_then_continue(session_id: str, text_: str, nk, history, db,
         session_id, None if act in ("advanced",) else nk, history, db, orient=False,
     ):
         yield e
+
+
+async def _answer(session_id: str, question: str, nk, history, db,
+                  *, status_text: str) -> AsyncIterator[_Event]:
+    """§17.903 — the shared "answer the operator's question" tail.
+
+    Extracted because more than one branch now needs it: a recorded note that
+    also asked something, and the blocked flow. Every path that reaches an
+    operator turn must leave them with an answer — a branch that records and
+    returns is the shape that produced the silent dead end."""
+    from app.modules import assist_agent
+    yield _ev(ASSIST_TURN_STATUS, {"text": status_text})
+    try:
+        res = await assist_agent.run_step_research(
+            session_id=session_id, node_key=nk, question=question,
+            history=history, db=db,
+        )
+        answer = (res or {}).get("answer") or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("turn_loop_answer_failed sid=%s err=%r", session_id, exc)
+        answer = ""
+    if not answer.strip():
+        # §17.876 posture — an honest, actionable fallback beats silence, which
+        # is the whole point of this function existing.
+        answer = ("I couldn't put together a grounded answer for that just now. "
+                  "Tell me what you're seeing on screen right now and I'll pick "
+                  "it up from there.")
+    yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": answer})
+    try:  # §17.873 — answers must outlive the run row
+        await assist_agent.capture_assistant_reply(
+            session_id=session_id, node_key=nk, kind="ask", content=answer, db=db,
+        )
+    except Exception:  # noqa: BLE001 — capture is best-effort
+        logger.warning("turn_loop_answer_capture_failed sid=%s", session_id)
+
+
+async def _blocked_flow(session_id: str, text_: str, node_key, history, db
+                        ) -> AsyncIterator[_Event]:
+    """§17.903 — the operator can't reach the current step; work the BLOCKER.
+
+    Three things happen, in this order, and the order is the point:
+      1. Say plainly that the step's premise is broken. The operator had been
+         handed guidance that assumed the opposite; naming the contradiction is
+         what turns "the engine isn't listening" back into a conversation.
+      2. Diagnose the blocker itself (research-backed fix flow), seeded with the
+         blocker text rather than the step's task — the step is not the problem.
+      3. Record it as a plan-affecting note so §17.677 can SURFACE a plan change
+         for approval. Operator-confirmed: work the blocker in place, never
+         mutate the plan unasked (the §17.891 lesson).
+    """
+    from app.modules import assist_agent
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    nk = node_key or (sess or {}).get("current_node_key")
+    title = ""
+    if nk:
+        try:
+            from sqlalchemy import text as _text
+            title = (await db.execute(_text(
+                "SELECT n.title FROM dag_nodes n JOIN assist_sessions s "
+                "ON s.job_id = n.job_id WHERE s.id = :sid AND n.node_key = :nk"),
+                {"sid": session_id, "nk": nk})).scalar() or ""
+        except Exception:  # noqa: BLE001 — the callout degrades, never fails
+            title = ""
+
+    step_label = f"**{nk}: {title}**" if title else (f"**{nk}**" if nk else "this step")
+    yield _ev(ASSIST_ANSWER, {"kind": "track", "text": (
+        f"⚠️ You're blocked, so {step_label} can't move yet — its starting point "
+        f"isn't true right now. I'm working the blocker itself, not the step.")})
+
+    async for e in _fix_flow(
+        session_id, nk, text_, history, db,
+        status_text="Diagnosing what's actually blocking you — researching current fixes for it (this can take a minute or two)…",
+    ):
+        yield e
+
+    # The plan may well need to change (a rebuild, an inserted step). Surface it
+    # for approval rather than applying it — see the docstring.
+    try:
+        from app.routers.assist import AssistNoteInput, assist_note
+        res = await assist_note(
+            session_id,
+            # "constraint" is the closest kind the AssistNoteInput Literal
+            # allows — a blocker genuinely constrains what the plan can do next,
+            # and it rides the same §17.677 impact pass. ("blocker" is not in
+            # the enum; passing it would 422 the whole turn.)
+            AssistNoteInput(text=text_, kind="constraint", node_key=nk),
+            db=db,
+        )
+        if res.get("replan_proposal"):
+            yield _ev(ASSIST_REPLAN_PROPOSAL, {"proposal": res["replan_proposal"]})
+    except Exception as exc:  # noqa: BLE001 — surfacing is an enhancement
+        logger.warning("turn_loop_blocked_note_failed sid=%s err=%r", session_id, exc)
 
 
 async def _fix_flow(session_id: str, nk, error_text: str, history, db,
