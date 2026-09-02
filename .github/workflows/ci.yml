@@ -1,6 +1,6 @@
 # Scaffold Engine CI
 # ──────────────────────────────────────────────────────────
-# Tier 1 (ci-smoke)  → every push & PR   → GitHub cloud runners  → no live services
+# Tier 1 (ci-smoke)  → every PR + main   → GitHub cloud runners  → no live services
 # Tier 2 (validate)  → main merges only  → self-hosted / local   → full Docker stack
 # Tier 1 budget: 10 min wall (~681 smoke tests post-§17.102; ~8 min local).
 # ──────────────────────────────────────────────────────────
@@ -12,12 +12,36 @@ on:
   # §17.404 — skip docs-only pushes/PRs. paths-ignore fires only when EVERY
   # changed file matches, so a mixed code+docs commit still runs the gates;
   # a pure OVERVIEW.md/README edit doesn't burn a metered run.
+  #
+  # §17.902 — this block used to read `push: branches: ["*"]` +
+  # `pull_request: branches: [main]`, and BOTH halves were wrong:
+  #
+  #   * `"*"` does not match `/`. Every branch in this repo is `fix/…`,
+  #     `feat/…` or `refactor/…`, so the push trigger silently matched only
+  #     `main` — the "every push" the header promised had never once fired on
+  #     a feature branch.
+  #   * `pull_request: branches: [main]` filters on the PR's BASE, so a
+  #     stacked PR (one opened against another feature branch) got no checks
+  #     at all. Live: #343 sat with "no checks reported" until it was
+  #     retargeted to main.
+  #
+  # Now: PRs are gated regardless of base (which is what actually protects
+  # merges, stacked or not), and push covers the trunk after a merge. That is
+  # one run per change — no push/PR double-billing on a metered private repo —
+  # and matches test.yml's trigger shape.
   push:
-    branches: ["*"]
-    paths-ignore: ['**.md']
-  pull_request:
     branches: [main]
     paths-ignore: ['**.md']
+  pull_request:
+    paths-ignore: ['**.md']
+
+# §17.902 — cancel superseded runs. test.yml learned this at §17.399 after
+# nine stacked timed-out runs piled up in one session; ci.yml never got it, so
+# rapid pushes to the same ref still stack. Keyed by workflow+ref so different
+# branches/PRs don't cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   # §17.854 (audit H3) — match the runtime image (Dockerfile `python:3.14.7`).
