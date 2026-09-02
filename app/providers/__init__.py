@@ -77,8 +77,9 @@ def provider_for_role(role: str, overrides: dict | None = None) -> LLMProvider:
 
     Precedence:
       1. ``overrides[f"{role}_provider"]`` — request-time override.
-      2. ``settings.{role}_provider`` — env var via Pydantic Settings.
-      3. ``"ollama"`` — default.
+      2. ``settings.{role}_provider`` — env var / stored override (§17.900).
+      3. ``settings.model_default_provider`` — the global default (§17.900),
+         itself defaulting to "ollama".
 
     The returned provider is validated against the role's capability
     requirements: embedder roles require ``supports_embeddings``;
@@ -95,7 +96,9 @@ def provider_for_role(role: str, overrides: dict | None = None) -> LLMProvider:
     if not name:
         name = getattr(settings, key, None)
     if not name:
-        name = "ollama"
+        # §17.900 — the global default, so "move everything to Claude" is one
+        # switch instead of eleven. Still falls back to ollama if unset.
+        name = getattr(settings, "model_default_provider", None) or "ollama"
 
     provider = get_provider(name)
 
@@ -134,6 +137,8 @@ def _autoload() -> None:
         "app.providers.ollama",
         "app.providers.openai",
         "app.providers.anthropic",
+        # §17.900 — imported AFTER openai: HuggingFaceProvider subclasses it.
+        "app.providers.huggingface",
     ):
         try:
             __import__(mod)

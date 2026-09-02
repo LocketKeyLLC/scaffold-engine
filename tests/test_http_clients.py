@@ -106,12 +106,40 @@ async def test_close_clients_resets_registry():
     http_clients.get_ollama_client()
     http_clients.get_openai_client()
     http_clients.get_anthropic_client()  # §17.345
+    # §17.900 — HF INFERENCE, distinct from the `huggingface` client above:
+    # that one talks to the Hub for ingest, this one to the OpenAI-dialect
+    # inference router. Two endpoints, two timeouts, two clients.
+    http_clients.get_hf_inference_client()
     http_clients.get_ngspice_client()
     http_clients.get_verilator_client()
     http_clients.get_symbiyosys_client()
     assert set(http_clients._clients.keys()) == {
         "searxng", "github", "huggingface", "generic", "ollama", "openai",
-        "anthropic", "ngspice", "verilator", "symbiyosys",
+        "anthropic", "hf_inference", "ngspice", "verilator", "symbiyosys",
     }
     await http_clients.close_clients()
     assert http_clients._clients == {}
+
+
+# §17.900 — a connection edited at runtime changes base_url, but a client bakes
+# base_url in at construction, so it must be REBUILT or every later call keeps
+# hitting the old endpoint until the next restart — the restart this feature
+# exists to remove.
+@pytest.mark.smoke
+async def test_rebuild_client_replaces_the_instance():
+    http_clients.init_clients()
+    before = http_clients.get_openai_client()
+    http_clients.rebuild_client("openai")
+    after = http_clients.get_openai_client()
+    assert after is not before
+    await http_clients.close_clients()
+
+
+@pytest.mark.smoke
+async def test_rebuild_client_is_a_noop_for_an_unknown_name():
+    """Providers without a dedicated client must not raise — a failed rebuild
+    can never be allowed to fail the connection write that triggered it."""
+    http_clients.init_clients()
+    http_clients.rebuild_client("not-a-client")   # must not raise
+    assert http_clients.get_openai_client() is not None
+    await http_clients.close_clients()

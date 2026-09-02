@@ -977,6 +977,54 @@
         "title": "ConfirmInput",
         "type": "object"
       },
+      "ConnectionInput": {
+        "description": "§17.900 — one provider's credentials/endpoint.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The API key. Omit to leave any stored key untouched (so the base URL can be edited without re-typing the secret); pass an empty string to CLEAR it and revert to the environment value.",
+            "title": "Api Key"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Override the provider's endpoint. Omit to keep.",
+            "title": "Base Url"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional display name.",
+            "title": "Label"
+          }
+        },
+        "title": "ConnectionInput",
+        "type": "object"
+      },
       "DagInput": {
         "properties": {
           "job_id": {
@@ -1082,6 +1130,20 @@
           "entries"
         ],
         "title": "DedupLogResponse",
+        "type": "object"
+      },
+      "DefaultProviderInput": {
+        "properties": {
+          "provider": {
+            "description": "Fallback backend for roles with no explicit provider.",
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider"
+        ],
+        "title": "DefaultProviderInput",
         "type": "object"
       },
       "DeleteResponse": {
@@ -3931,9 +3993,21 @@
           },
           "probe": {
             "default": true,
-            "description": "Generate-probe cloud tags before applying (the pulled-tag list serves stale 200s for retired cloud models). Local tags are only checked against the pulled list — probing one would force a full model load on this CPU-only host.",
+            "description": "Generate-probe cloud tags before applying (the pulled-tag list serves stale 200s for retired cloud models). Local tags are only checked against the pulled list — probing one would force a full model load on this CPU-only host. Applies to the ollama provider only; remote providers are validated against their /models list.",
             "title": "Probe",
             "type": "boolean"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Which backend serves this role: ollama | openai | anthropic | huggingface. Omit to keep the role's current provider.",
+            "title": "Provider"
           }
         },
         "required": [
@@ -9065,8 +9139,26 @@
     },
     "/models/available": {
       "get": {
-        "description": "§17.817 (plan 5.7) — the pulled Ollama tag list for the wizard's\npickers, split local vs cloud. ``reachable: false`` (with an empty list)\nwhen the daemon is down — the wizard renders that state instead of a\nspinner-forever.",
+        "description": "§17.817 (plan 5.7) — models the picker can offer.\n\n§17.900: now provider-aware. Without ``?provider=`` this keeps its original\nOllama-shaped contract (``local``/``cloud``/``ollama_url``) so the wizard\nand OWUI callers are untouched; with it, the same call answers for any\nconnected backend. ``reachable: false`` with empty lists when the backend\nis down — the picker renders that state instead of spinning forever.",
         "operationId": "get_available_models_models_available_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Provider"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -9079,6 +9171,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [
@@ -9087,6 +9189,242 @@
           }
         ],
         "summary": "Get Available Models",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/models/connections": {
+      "get": {
+        "description": "Every provider with its effective connection state.\n\nAPI keys are ALWAYS masked to \"(set)\"/\"(unset)\" — there is deliberately no\nendpoint that returns a stored key, so a compromised session cannot\nexfiltrate credentials the operator pasted in.",
+        "operationId": "get_connections_models_connections_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Connections Models Connections Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Connections",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/models/connections/{provider}": {
+      "delete": {
+        "description": "Forget a stored connection; the provider reverts to its env defaults.",
+        "operationId": "delete_connection_models_connections__provider__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Connection Models Connections  Provider  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Delete Connection",
+        "tags": [
+          "Models"
+        ]
+      },
+      "put": {
+        "description": "Set a provider's credentials/endpoint (encrypted at rest, applied live).",
+        "operationId": "put_connection_models_connections__provider__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Connection Models Connections  Provider  Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Put Connection",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/models/connections/{provider}/test": {
+      "post": {
+        "description": "Live reachability + auth check (\"does my key actually work\").",
+        "operationId": "test_connection_models_connections__provider__test_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Test Connection Models Connections  Provider  Test Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Test Connection",
+        "tags": [
+          "Models"
+        ]
+      }
+    },
+    "/models/default-provider": {
+      "put": {
+        "description": "The fallback backend for roles with no explicit provider — the \"move\neverything to Claude\" switch. Persisted (system_flags), so it survives a\nrestart rather than silently reverting to Ollama.",
+        "operationId": "put_default_provider_models_default_provider_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DefaultProviderInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Default Provider Models Default Provider Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Put Default Provider",
         "tags": [
           "Models"
         ]

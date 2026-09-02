@@ -222,8 +222,71 @@ def _build_anthropic() -> httpx.AsyncClient:
     return client
 
 
+def _build_hf_inference() -> httpx.AsyncClient:
+    """§17.900 — HuggingFace INFERENCE client (distinct from the `huggingface`
+    client above, which talks to the Hub for ingest). HF's router speaks the
+    OpenAI chat-completions dialect, so this is shaped like _build_openai; auth
+    is added per-request by the provider.
+    """
+    client = httpx.AsyncClient(
+        base_url=settings.huggingface_base_url,
+        timeout=float(settings.huggingface_inference_timeout),
+        headers={"User-Agent": "scaffold-engine"},
+        follow_redirects=True,
+        limits=httpx.Limits(
+            max_connections=20,
+            max_keepalive_connections=10,
+            keepalive_expiry=30,
+        ),
+    )
+    logger.info("HF inference client initialized: %s", settings.huggingface_base_url)
+    return client
+
+
+# §17.900 — a client's base_url and timeout are baked in at construction, so a
+# connection edited at runtime (Settings → Connections) would keep hitting the
+# OLD endpoint until the next restart — exactly the restart this feature exists
+# to remove. `rebuild_client` closes and re-creates one client from the CURRENT
+# settings; provider_connections calls it after every successful write.
+_BUILDERS: dict = {}
+
+
+def rebuild_client(name: str) -> None:
+    """Close and re-create one shared client from current settings.
+
+    Unknown names are a no-op (a provider with no dedicated client, e.g. one
+    that rides the generic client). Never raises: a failed rebuild must not
+    fail the connection write that triggered it — the old client stays usable
+    and the next restart picks up the new URL.
+    """
+    factory = _BUILDERS.get(name)
+    if factory is None:
+        return
+    old = _clients.pop(name, None)
+    if old is not None and not old.is_closed:
+        # Fire-and-forget close: aclose() is async and we are on a sync path.
+        # Dropping the reference is what actually matters; the connections are
+        # reaped by keepalive_expiry.
+        try:
+            import asyncio
+            asyncio.get_running_loop().create_task(old.aclose())
+        except Exception:  # noqa: BLE001 — no loop / already closing
+            pass
+    try:
+        _clients[name] = factory()
+        logger.info("http_client_rebuilt name=%s", name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("http_client_rebuild_failed name=%s err=%r", name, exc)
+
+
 def init_clients() -> None:
     """Eager-init all shared clients. Call once from app lifespan startup."""
+    _BUILDERS.update({
+        "openai": _build_openai,
+        "anthropic": _build_anthropic,
+        "ollama": _build_ollama,
+        "hf_inference": _build_hf_inference,
+    })
     _get_or_create("searxng", _build_searxng)
     _get_or_create("github", _build_github)
     _get_or_create("huggingface", _build_huggingface)
@@ -231,6 +294,7 @@ def init_clients() -> None:
     _get_or_create("ollama", _build_ollama)
     _get_or_create("openai", _build_openai)
     _get_or_create("anthropic", _build_anthropic)
+    _get_or_create("hf_inference", _build_hf_inference)
     _get_or_create("ngspice", _build_ngspice)
     _get_or_create("verilator", _build_verilator)
     _get_or_create("symbiyosys", _build_symbiyosys)
@@ -254,6 +318,14 @@ def get_huggingface_client() -> httpx.AsyncClient:
     client = _clients.get("huggingface")
     if client is None or client.is_closed:
         raise RuntimeError("HuggingFace client not initialized; call init_clients() at startup")
+    return client
+
+
+def get_hf_inference_client() -> httpx.AsyncClient:
+    """§17.900 — HF INFERENCE (not the Hub-ingest `huggingface` client)."""
+    client = _clients.get("hf_inference")
+    if client is None or client.is_closed:
+        raise RuntimeError("HF inference client not initialized; call init_clients() at startup")
     return client
 
 

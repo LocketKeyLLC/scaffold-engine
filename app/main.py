@@ -355,6 +355,24 @@ async def lifespan(app: FastAPI):
     # table). Fail-soft: a DB hiccup logs but doesn't block startup — the
     # roles just keep their env/config defaults. Uses the module-level
     # async_session (imported at L36) — no function-local import (§17.164).
+    # §17.900 — provider CONNECTIONS replay BEFORE the model overrides: an
+    # override may pin a role to `openai`/`anthropic`/`huggingface`, and that
+    # role's first call needs the credential already mirrored onto settings.
+    # Same fail-soft posture — a DB hiccup or an undecryptable key leaves the
+    # env values in place rather than blocking startup.
+    try:
+        from app.modules.provider_connections import (
+            load_connections_into_settings,
+            load_default_provider,
+        )
+        async with async_session() as _pc_db:
+            n_conns = await load_connections_into_settings(_pc_db)
+            await load_default_provider(_pc_db)
+        if n_conns:
+            logger.info("provider_connections_applied_at_startup: count=%d", n_conns)
+    except Exception as exc:
+        logger.warning("provider_connections_hook_failed: err=%s", exc)
+
     try:
         from app.modules.model_overrides import load_overrides_into_settings
         async with async_session() as _mo_db:

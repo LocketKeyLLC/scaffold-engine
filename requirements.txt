@@ -76,3 +76,9 @@ opentelemetry-exporter-otlp-proto-http==1.44.0
 opentelemetry-instrumentation-fastapi==0.65b0
 opentelemetry-instrumentation-httpx==0.65b0
 opentelemetry-instrumentation-asyncpg==0.65b0
+
+# §17.900 — Fernet symmetric encryption for provider API keys at rest
+# (`provider_connections.api_key_enc`). Already present transitively; pinned
+# explicitly because it is now a DIRECT dependency of app/utils/secrets.py and
+# the "pinned everything" invariant applies to direct deps.
+cryptography==50.0.1
