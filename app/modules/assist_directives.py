@@ -279,6 +279,40 @@ def apply_location_callout(system: str, *, is_decision: bool, enabled: bool) -> 
     return system + _LOCATION_CALLOUT_DIRECTIVE
 
 
+_RECOMMENDATION_DIRECTIVE = (
+    "\n\nANSWER THE QUESTION, AND LEAN. When the operator asks something "
+    "answerable — a yes/no ('should I delete this VM and start over?'), an "
+    "either/or, 'which one', 'what do you recommend' — your FIRST line is the "
+    "ANSWER, not a menu: 'Yes — rebuild it.' / 'No, keep it — here's why.' "
+    "Then ONE line of reasoning, then the concrete next action. Laying out "
+    "balanced options and asking them to choose is a non-answer: they asked "
+    "BECAUSE they don't have the basis to choose, and a menu leaves them exactly "
+    "as stuck as before.\n"
+    "You may recommend a destructive action when it is genuinely the right call "
+    "(rebuilding a corrupted install is often faster than salvaging it) — the "
+    "operator runs every command themselves, so a clear recommendation costs "
+    "them nothing and a dodge costs them time. But SAY what it destroys: name "
+    "the resource and what is lost, on its own line, before the command. If the "
+    "honest answer is that you cannot tell without more information, say THAT "
+    "plainly and name the single piece of information that would decide it — "
+    "that is still an answer, and still directive."
+)
+
+
+def apply_recommendation(system: str, *, enabled: bool = True) -> str:
+    """§17.903 — append the answer-and-lean discipline.
+
+    The live failure: the operator asked "perhaps we should start over. Delete
+    this VM and start over?" and got no answer at all — the question was
+    recorded as a note and the turn ended. Even once answering was restored,
+    an answer that lays out options without a lean would leave them exactly as
+    stuck, because they asked precisely because they lacked the basis to pick.
+    """
+    if not enabled:
+        return system
+    return system + _RECOMMENDATION_DIRECTIVE
+
+
 # ── §17.897 — code-enforced copy-paste format ────────────────────────────
 #
 # Prompt rules are guidance; this is enforcement (the §17.882/§17.893 lesson).

@@ -25,6 +25,7 @@ from app.modules.assist_directives import (  # §17.897 — full output contract
     apply_location_callout,
     apply_next_callout,
     apply_problem_solving,
+    apply_recommendation,  # §17.903
     apply_screen_grounding,
     promote_inline_commands,
 )
@@ -430,7 +431,11 @@ async def research_one(
                 # the operator to run `qm resize 106 scsi0 +60G` with no way to
                 # copy it, in the same session where guide/fix output had
                 # copy buttons on every command.
-                {"role": "system", "content": apply_location_callout(  # §17.852
+                # §17.903 — outermost: this is the ASK path, the one the
+                # operator uses to ask a direct question, so the answer-and-lean
+                # rule belongs here above all else.
+                {"role": "system", "content": apply_recommendation(
+                  apply_location_callout(  # §17.852
                     apply_screen_grounding(  # §17.758
                         apply_ground_or_ask(  # §17.760
                             apply_problem_solving(  # §17.742
@@ -441,7 +446,7 @@ async def research_one(
                                 enabled=settings.assist_problem_solving_enabled),
                             is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
                         is_decision=False, enabled=settings.assist_screen_grounding_enabled),
-                    is_decision=False, enabled=settings.assist_location_callout_enabled)},
+                    is_decision=False, enabled=settings.assist_location_callout_enabled))},
                 {"role": "user", "content": (
                     f"{ctx_block}"
                     f"Question: {question}\n\n"

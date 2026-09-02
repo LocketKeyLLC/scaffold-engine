@@ -191,6 +191,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     apply_ground_or_ask,
     apply_screen_grounding,
     apply_location_callout,
+    apply_recommendation,  # §17.903
     promote_inline_commands,  # §17.897
     _PROBLEM_SOLVING_FRAMING,
     _NEXT_CALLOUT_DIRECTIVE,
@@ -2698,7 +2699,10 @@ async def generate_fix(
     parts.append(_FIX_USER_TRAILER)
     user = "\n\n".join(parts)
 
-    fix_system = apply_location_callout(  # §17.852
+    # §17.903 — the fix path also carries the answer-and-lean rule: the blocked
+    # flow routes through here, and a blocked operator asking "should we start
+    # over?" needs a recommendation, not a balanced menu.
+    fix_system = apply_recommendation(apply_location_callout(  # §17.852
         apply_screen_grounding(  # §17.758
             apply_ground_or_ask(  # §17.756
                 apply_problem_solving(  # §17.742
@@ -2708,7 +2712,7 @@ async def generate_fix(
                     enabled=settings.assist_problem_solving_enabled),
                 is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
             is_decision=False, enabled=settings.assist_screen_grounding_enabled),
-        is_decision=False, enabled=settings.assist_location_callout_enabled)
+        is_decision=False, enabled=settings.assist_location_callout_enabled))
 
     async def _draw_fix(messages):
         return await chat_until_nonempty(
