@@ -131,16 +131,28 @@ async def test_reconcile_valve_off_noop(monkeypatch):
 # ── failure streak ───────────────────────────────────────────────────────
 
 
+def _turn(i, role, content, kind=None):
+    return {"id": i, "role": role,
+            "kind": kind or ("fix" if role == "assistant" else "message"),
+            "content": content}
+
+
 async def test_fix_failure_streak_counts_all_fixes_since_claim():
     """§17.882 — an interleaved Guide press must NOT reset the count (live: 5
     fixes, zero escalations, because a guide sat between them). The SQL filters
-    to kind='fix' since presented_at; streak = all of them."""
+    to kind='fix'; streak = all of them.
+
+    §17.916 — the COMMANDS now additionally require evidence the operator RAN
+    them; the streak itself still counts every fix, because burning fixes is
+    the escalation signal regardless."""
     db = AsyncMock()
     rows = MagicMock()
     rows.mappings.return_value.all.return_value = [
-        {"content": "## Fix\n```bash\ncurl -L https://bad.example\n```"},
-        {"content": "try\n```bash\ntar -xzf /tmp/x.tar.gz\n```"},
-        {"content": "plain prose fix, no fence"},
+        _turn(1, "assistant", "## Fix\n```bash\ncurl -L https://bad.example\n```"),
+        _turn(2, "operator", "root@pve:~# curl -L https://bad.example\ncurl: (6) Could not resolve host"),
+        _turn(3, "assistant", "try\n```bash\ntar -xzf /tmp/x.tar.gz\n```"),
+        _turn(4, "operator", "root@pve:~# tar -xzf /tmp/x.tar.gz\ngzip: stdin: not in gzip format"),
+        _turn(5, "assistant", "plain prose fix, no fence"),
     ]
     # §17.886(#6) — ONE node-scoped query; no presented_at filter (claim-repair
     # re-stamps must not zero the streak).
@@ -631,3 +643,80 @@ def test_find_contradicted_facts_needs_both_a_claim_and_a_known_value():
     # claim wording, no facts at all
     assert find_contradicted_facts(_LIVE_1377, {"facts": []}) == []
     assert find_contradicted_facts(_LIVE_1377, None) == []
+
+
+# ── §17.916 — "already tried" must mean the OPERATOR RAN IT ──────────────
+#
+# §17.906 read PRESCRIPTIONS only, so a command the operator never executed
+# counted as an exhausted remedy: it blocked legitimate re-prescription and
+# stapled a false "repeats something already tried" banner above fixes whose
+# content was correct. Proven live — driving /fix to verify §17.914 wrote
+# prescriptions the operator never saw, and the next fix was flagged for them.
+
+
+async def test_prescriptions_the_operator_never_ran_are_not_repeats():
+    db = AsyncMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        _turn(1, "assistant", "```bash\nqm set 106 --boot order=scsi0\n```"),
+        # the operator replies, but never runs it and reports no shell error
+        _turn(2, "operator", "I will try that later, but first — what does scsi0 mean?"),
+    ]
+    db.execute = AsyncMock(return_value=rows)
+    streak, cmds = await _fix_failure_streak(session_id="s", node_key="T1", db=db)
+    assert streak == 1          # the fix still counts toward escalation
+    assert cmds == ""           # but nothing was TRIED
+
+
+async def test_an_echoed_command_counts_as_tried():
+    """The live shape: the operator pastes `root@pve:~# <cmd>` with its output."""
+    db = AsyncMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        _turn(1, "assistant", "```bash\nqm destroy 106 --purge\n```"),
+        _turn(2, "operator", "root@pve:~# qm destroy 106 --purge\n  Logical volume removed."),
+    ]
+    db.execute = AsyncMock(return_value=rows)
+    _s, cmds = await _fix_failure_streak(session_id="s", node_key="T1", db=db)
+    assert "qm destroy 106 --purge" in cmds
+
+
+async def test_a_shell_error_next_turn_counts_as_tried_without_an_echo():
+    """Operators often paste only the OUTPUT. A shell error in the turn
+    immediately after a prescription is proof they ran it."""
+    db = AsyncMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        _turn(1, "assistant", "```bash\nqm set 106 --boot order=ide2\n```"),
+        _turn(2, "operator", "-bash: qm: invalid bootorder: device 'ide2' does not exist"),
+    ]
+    db.execute = AsyncMock(return_value=rows)
+    _s, cmds = await _fix_failure_streak(session_id="s", node_key="T1", db=db)
+    assert "qm set 106 --boot order=ide2" in cmds
+
+
+async def test_a_vague_complaint_is_not_proof_of_execution():
+    """Only a SHELL error counts for the no-echo path — 'it didn't work' is not
+    evidence that any particular command was run."""
+    db = AsyncMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        _turn(1, "assistant", "```bash\nqm set 106 --boot order=ide2\n```"),
+        _turn(2, "operator", "that didn't seem to help much"),
+    ]
+    db.execute = AsyncMock(return_value=rows)
+    _s, cmds = await _fix_failure_streak(session_id="s", node_key="T1", db=db)
+    assert cmds == ""
+
+
+async def test_a_prescription_with_no_later_operator_turn_is_not_tried():
+    """The last fix in a session has not been acted on yet."""
+    db = AsyncMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        _turn(1, "operator", "root@pve:~# qm start 106"),
+        _turn(2, "assistant", "```bash\nqm set 106 --boot order=scsi0\n```"),
+    ]
+    db.execute = AsyncMock(return_value=rows)
+    _s, cmds = await _fix_failure_streak(session_id="s", node_key="T1", db=db)
+    assert cmds == ""
