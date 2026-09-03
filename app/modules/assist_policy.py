@@ -347,6 +347,43 @@ def has_advancement_signal(msg: str) -> bool:
     return bool(sig["shell_paste"] and not sig["shell_error"])
 
 
+# ── Completion EVIDENCE (§17.915) ────────────────────────────────────────────
+# §17.891's `has_advancement_signal` decides whether the pointer may MOVE. It
+# accepts three things, and one of them must never close a step: a bare
+# next/continue/skip intent means "move on", not "this is done". The tracker
+# retire path treated all three alike, marked the node `done` with a fabricated
+# note ("Completed by the operator in assist mode"), and wrote NO evidence at
+# all — `assist_steps.evidence_kind` stayed NULL.
+#
+# Live (session 613dd1df, 2026-09-03 20:06:16): ADD5 "Install Ubuntu Server
+# 22.04 on VM 106" — the step inserted BECAUSE the operator could not get the OS
+# installed — was closed with zero evidence while the OS was not installed. The
+# same shape that put T23 wrongly `done` (§17.911 repaired the consequence;
+# nothing stopped the close).
+#
+# `_retire_step_mirrored`'s own docstring already draws the line: "The ⏩ Skip
+# verb (deliberate skip, work NOT done) still writes 'skipped' via the submit
+# path — the two are semantically different and now recorded differently."
+# Retiring on a bare advance intent erases that distinction.
+def is_completion_evidence(msg: str) -> bool:
+    """§17.915 — True when `msg` can justify marking a step DONE.
+
+    Strictly narrower than `has_advancement_signal`: an explicit completion
+    claim (§17.890 — the operator's own word, which outranks a verifier that
+    cannot see their machine) or a clean, error-free shell paste. A bare
+    next/continue/skip intent is deliberately EXCLUDED — it moves the pointer,
+    it does not evidence the work.
+    """
+    if not msg or not msg.strip():
+        return False
+    m = normalize_punct(msg).strip()
+    if looks_like_completion_claim(m):
+        return True
+    from app.modules import assist_decide
+    sig = assist_decide._compute_signals(m, None)
+    return bool(sig["shell_paste"] and not sig["shell_error"])
+
+
 # ── Completion DENIAL (§17.899) ───────────────────────────────────────────────
 # The missing half of §17.890. That change let the operator's word outrank the
 # verifier — correctly, since the verifier cannot see their machine. But it gave
