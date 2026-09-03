@@ -32,7 +32,11 @@ def render_environment_block(environment: dict | None) -> str:
     profile = (environment.get("profile") or "").strip()
     subs = environment.get("substitutions") or {}
     facts = [str(f).strip() for f in (environment.get("facts") or []) if str(f).strip()]
-    if not profile and not subs and not facts:
+    # §17.913 — tools this shell has PROVEN it lacks.
+    missing = [m for m in (environment.get("missing_tools") or [])
+               if isinstance(m, dict) and str(m.get("tool") or "").strip()]
+    state = environment.get("system_state") if isinstance(environment.get("system_state"), dict) else {}
+    if not profile and not subs and not facts and not missing and not state:
         return ""
     parts = [
         "## Operator environment (use these concrete values; emit a <PLACEHOLDER> "
@@ -51,6 +55,30 @@ def render_environment_block(environment: dict | None) -> str:
             "these; do NOT assume a fresh/empty system, and treat anything marked "
             "unknown/unverified as still open):\n"
             + "\n".join(f"- {f}" for f in facts)
+        )
+    # §17.913 — WITHOUT this the ledger never reaches the model, and the engine
+    # only "knows" a tool is missing on the one turn whose error text mentions
+    # it. Live: `sudo lvextend …` was emitted to a root@pve shell, died with
+    # `sudo: command not found`, and four minutes later the SAME sudo command
+    # was emitted again — the shell's verdict had nowhere to live.
+    # §17.914 — GROUND TRUTH first: parsed from the operator's own output, so
+    # it outranks the LLM-distilled prose facts above it.
+    if state:
+        from app.modules.assist_state import render_system_state
+        block = render_system_state(state)
+        if block:
+            parts.append(block)
+    if missing:
+        parts.append(
+            "### NOT AVAILABLE on the operator's system (the shell reported "
+            "these missing — never emit a command that depends on one; if it is "
+            "genuinely required, the FIRST step is installing it):\n"
+            + "\n".join(
+                f"- `{m['tool']}`"
+                + (f" (on {m['host']})" if str(m.get('host') or '').strip() else "")
+                + ("  — the operator is root there, so simply omit it"
+                   if str(m['tool']).lower() == "sudo" else "")
+                for m in missing)
         )
     return "\n\n".join(parts)
 
@@ -192,7 +220,30 @@ def render_session_memory(
         n for n in (operator_notes or [])
         if isinstance(n, dict) and (n.get("text") or "").strip()
     ]
-    if not (profile or facts or subs or notes):
+    # §17.913/914 — ground truth read from the operator's own command output,
+    # and the tools their shell has proven it lacks. These live HERE because
+    # render_session_memory is the single injection path (§17.751): putting them
+    # only in render_environment_block, as the first cut did, meant the fix path
+    # never saw them at all — the engine went on asking for `qm config 106`
+    # (21 times live) and contradicting a boot order it had been given.
+    from app.modules.assist_state import render_system_state
+    state_block = render_system_state(environment.get("system_state")
+                                      if isinstance(environment.get("system_state"), dict) else {})
+    missing = [m for m in (environment.get("missing_tools") or [])
+               if isinstance(m, dict) and str(m.get("tool") or "").strip()]
+    missing_block = ""
+    if missing:
+        missing_block = (
+            "**NOT AVAILABLE on this system** (the shell reported these missing — "
+            "never emit a command that depends on one; if it is genuinely needed, "
+            "installing it is the FIRST step):\n"
+            + "\n".join(
+                f"- `{m['tool']}`"
+                + (f" (on {m['host']})" if str(m.get('host') or '').strip() else "")
+                + ("  — the operator is root there, so simply omit it"
+                   if str(m['tool']).lower() == "sudo" else "")
+                for m in missing))
+    if not (profile or facts or subs or notes or state_block or missing_block):
         return ""
 
     # §17.722 — the facts section is ELASTIC under budget pressure: the ledger
@@ -245,6 +296,10 @@ def render_session_memory(
             sections.append(_facts_section(facts_header, facts, 0))
         if subs:
             sections.append("**Provided values:**\n" + "\n".join(f"- {k} = {v}" for k, v in subs.items()))
+        if state_block:  # §17.914 — survives a reset; it is measured, not inferred
+            sections.append(state_block)
+        if missing_block:
+            sections.append(missing_block)
         if profile:
             sections.append(
                 "**Execution context (re-confirm the host/hostname after a rebuild):** " + profile
@@ -261,6 +316,12 @@ def render_session_memory(
         sections = [header]
         if profile:
             sections.append(f"**Execution context:** {profile}")
+        # §17.914 — CONFIRMED state outranks the distilled prose facts below it.
+        if state_block:
+            direction_idx = len(sections) if direction_idx is None else direction_idx
+            sections.append(state_block)
+        if missing_block:
+            sections.append(missing_block)
         # §17.881 — the playbook leads the facts: proven/ruled-out methods are
         # the highest-leverage memory (they change WHAT the model prescribes,
         # not just which values it fills in) and are never budget-dropped.

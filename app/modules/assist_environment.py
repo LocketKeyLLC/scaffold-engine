@@ -62,6 +62,18 @@ def _environment_from_metadata(metadata: Any) -> dict:
         "banned_values": env.get("banned_values") if isinstance(env.get("banned_values"), list) else [],
         # §17.709 — durable observed facts about the operator's system.
         "facts": facts if isinstance(facts, list) else [],
+        # §17.913 — tools the operator's shell has PROVEN it does not have
+        # ([{tool, host}]). Live: the engine emitted `sudo lvextend ...` to an
+        # operator whose profile says "runs commands as root@pve"; PVE is Debian
+        # minimal with no sudo, so it died with `sudo: command not found` — and
+        # the next fix prescribed `qm config 106` instead of noticing.
+        # §17.881b — MUST round-trip here or the next env write erases it.
+        "missing_tools": env.get("missing_tools") if isinstance(env.get("missing_tools"), list) else [],
+        # §17.914 — STRUCTURED resource state parsed from the operator's own
+        # command output. The engine asked for `qm config 106` 21 times on the
+        # live session because there was nowhere to keep the 6 answers it got.
+        # §17.881b — MUST round-trip here.
+        "system_state": env.get("system_state") if isinstance(env.get("system_state"), dict) else {},
         # §17.881b — the session playbook MUST round-trip through this
         # deserializer: set_environment writes the WHOLE env dict back, so a
         # key dropped here is erased by the very next fact fold (live: T14's
@@ -105,6 +117,8 @@ async def set_environment(
     substitutions: dict | None = None,
     substitutions_by_node: dict | None = None,
     banned_values: list | None = None,
+    missing_tools: list | None = None,
+    system_state: dict | None = None,
     verbosity: str | None = None,
     facts: list[str] | None = None,
     retract_facts: list[str] | None = None,
@@ -172,6 +186,25 @@ async def set_environment(
             if v:
                 by_val[v.lower()] = {"value": v, "reason": str(b.get("reason") or "").strip()}
         current["banned_values"] = list(by_val.values())[-30:]
+    if missing_tools:
+        # §17.913 — merge by (tool, host); newest wins. Capped like the others.
+        cur_mt = [m for m in (current.get("missing_tools") or [])
+                  if isinstance(m, dict) and str(m.get("tool") or "").strip()]
+        by_key = {(str(m["tool"]).strip().lower(),
+                   str(m.get("host") or "").strip().lower()): m for m in cur_mt}
+        for m in missing_tools:
+            if not isinstance(m, dict):
+                continue
+            t = str(m.get("tool") or "").strip()
+            if t:
+                h = str(m.get("host") or "").strip()
+                by_key[(t.lower(), h.lower())] = {"tool": t, "host": h}
+        current["missing_tools"] = list(by_key.values())[-30:]
+    if system_state:
+        # §17.914 — newest observation wins per resource; others survive.
+        from app.modules.assist_state import merge_system_state
+        current["system_state"] = merge_system_state(
+            current.get("system_state"), system_state)
     if retract_facts:
         # §17.725 — retract contradicted facts BEFORE folding the new ones in.
         gone = {str(r).strip().lower() for r in retract_facts if str(r).strip()}

@@ -245,7 +245,7 @@ def test_environment_from_metadata_variants():
     )
     assert got == {"profile": "Ubuntu", "substitutions": {"A": "1"},
                    "substitutions_by_node": {},  # §17.892 — node-scoped pins
-                   "banned_values": [],  # §17.893 — ruled-out values
+                   "banned_values": [], "missing_tools": [], "system_state": {},  # §17.893 — ruled-out values
                    "facts": ["Existing PVE 9.2.6"],
                    "playbook": {}}  # §17.881b — playbook round-trips
     # tolerates a JSON string body
@@ -336,7 +336,7 @@ async def test_get_environment_returns_shape():
     ])
     out = await assist_agent.get_environment(session_id="s", db=db)
     assert out == {"profile": "P", "substitutions": {}, "substitutions_by_node": {},
-                   "banned_values": [], "facts": [], "playbook": {},
+                   "banned_values": [], "missing_tools": [], "system_state": {}, "facts": [], "playbook": {},
                    "verbosity": "normal"}  # §17.881b/892/893
 
 
