@@ -185,7 +185,12 @@ def test_error_focus_query_picks_error_line():
            "gzip: stdin: not in gzip format\n"
            "tar: Child returned status 1\n")
     q = _error_focus_query("Install Radarr in LXC 103", err)
-    assert "not in gzip format" in q and "Install Radarr" in q
+    # §17.909 — the deterministic query is now the SYMPTOM alone. The step title
+    # is not lost: `_research_prepass` runs alongside it anchored on
+    # `ctx.base_prompt`, so task context is already a separate query. Requiring
+    # both in ONE string is what let "Install PalWorld server" ride six
+    # consecutive Ubuntu-installer queries and steer retrieval at SteamCMD.
+    assert "not in gzip format" in q
     assert len(q) <= 130
 
 

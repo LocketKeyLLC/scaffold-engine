@@ -2553,28 +2553,135 @@ def find_novel_urls(text_out: str, grounding_corpus: str) -> list[str]:
     return novel
 
 
+# §17.909 — the research query is built from the OPERATOR'S SYMPTOM, not the
+# step's task. §17.882 built it as `step title + first error line`, and on the
+# live T23 marathon that produced, for six consecutive blocker reports:
+#
+#   "Install PalWorld server curtin command in-target'"
+#   "Install PalWorld server when attempting to set up the ubuntu server, it
+#    continues to hang. I thing it would be bes"
+#   "Install PalWorld server It got hung up on install again, however it appears
+#    to be when installing the openssh-serv"
+#
+# Three compounding defects. (a) The step title ANCHORS retrieval on the wrong
+# subject: the operator was fighting the Ubuntu installer, and every query was
+# steered at PalWorld/SteamCMD. (b) Conversational filler ("I thing it would be
+# best to", "I appear to have been mistaken") ate the character budget. (c) The
+# 130-char cap then truncated the actual diagnostic terms — "downloading and
+# installing security update" never survived into a single query.
+#
+# A blocker is frequently UPSTREAM of the step it is blocking. When the operator
+# names their own subject, that subject is the query.
+
+# "hung"/"stuck"/"frozen" were absent from the §17.882 line detector, so a HANG —
+# the most common non-error blocker — never even registered as the error line.
+_SYMPTOM_LINE_RE = (
+    r"error|fail|not found|not in |unable|denied|refus|timeout|timed out|"
+    r"invalid|cannot|can't|no such|returned status|unexpected|corrupt|E:|"
+    r"curl: \(|hang|hung|hangs|stuck|frozen|freeze|unresponsive|crash|panic|"
+    r"no progress|never finish|won't boot|wont boot|loop"
+)
+
+# Hedges and first-person narration carry no retrieval signal and crowd out the
+# terms that do.
+_QUERY_FILLER_RE = __import__("re").compile(
+    r"\b(?:i\s+(?:think|thing|guess|believe|assume|appear\s+to\s+have\s+been\s+"
+    r"mistaken|viewed\s+the\s+full\s+logs\s+and)|it\s+(?:appears?|seems?)"
+    r"(?:\s+to\s+be|\s+that|\s+as\s+though)?|perhaps|maybe|however|actually|"
+    r"basically|i\s+would|we\s+should|it\s+would\s+be\s+best\s+to|"
+    r"when\s+(?:attempting|trying)\s+to|now\s+its|now\s+it's)\b",
+    __import__("re").IGNORECASE,
+)
+
+# A quoted span or a hyphen/dot identifier is the operator naming a thing.
+_SIGNAL_TOKEN_RE = __import__("re").compile(
+    r"'([^']{4,70})'|\"([^\"]{4,70})\"|`([^`]{4,70})`"
+    r"|\b([a-z][a-z0-9]*(?:[-_.][a-z0-9]+)+)\b",
+    __import__("re").IGNORECASE,
+)
+
+
+# The operator's PROPOSAL is not the symptom. "I think we should destroy this
+# VM and start over" steers retrieval at how to delete a VM — live, four of six
+# queries carried a "start over"/"destroy the curren" tail.
+_PROPOSAL_CLAUSE_RE = __import__("re").compile(
+    r"[^.;!?]*\b(?:start(?:ing)?\s+over|destroy|delete|remove\s+this|recreate|"
+    r"rebuild|wipe|from\s+the\s+beginning|from\s+scratch)\b[^.;!?]*",
+    __import__("re").IGNORECASE,
+)
+
+# Words that name no subject. A title contributes to a query only through its
+# DISTINCTIVE terms — "Install PalWorld server" contributes "palworld", and if
+# the operator never mentions PalWorld, the title is the wrong anchor entirely.
+_GENERIC_TITLE_WORDS = frozenset({
+    "install", "installing", "installation", "setup", "set", "up", "configure",
+    "configuring", "config", "create", "creating", "add", "adding", "deploy",
+    "deploying", "server", "service", "system", "the", "a", "an", "and", "or",
+    "for", "to", "of", "on", "in", "with", "run", "running", "start", "enable",
+    "build", "building", "new", "step", "verify", "test", "check",
+})
+
+
+def _distinctive(title: str) -> set[str]:
+    return {w for w in (
+        __import__("re").sub(r"[^a-z0-9 ]", " ", (title or "").lower()).split()
+    ) if w and w not in _GENERIC_TITLE_WORDS and len(w) > 2}
+
+
+def _symptom_tokens(line: str) -> list[str]:
+    """Quoted phrases and identifier-shaped words — what the operator NAMED."""
+    out: list[str] = []
+    for m in _SIGNAL_TOKEN_RE.finditer(line or ""):
+        tok = next((g for g in m.groups() if g), "").strip()
+        if tok and tok.lower() not in {t.lower() for t in out}:
+            out.append(tok)
+    return out
+
+
 def _error_focus_query(title: str, error_text: str) -> str:
-    """§17.882 — a DETERMINISTIC research query from the actual error, so fix
-    grounding never depends on the query-generator model's diligence (live: it
-    emitted the same generic 'official installation guide' query 5 times).
-    Step title (the program/context) + the first error-looking line."""
+    """§17.882/909 — a DETERMINISTIC research query from the operator's symptom.
+
+    Leads with what the operator described; the step title is appended ONLY when
+    the symptom does not already name its own subject, because a blocker is
+    often upstream of the step it blocks.
+    """
     import re as _re
     line = ""
     for ln in (error_text or "").splitlines():
-        s = ln.strip()
-        if s and _re.search(
-            r"error|fail|not found|not in |unable|denied|refus|timeout|invalid|"
-            r"cannot|no such|returned status|unexpected|corrupt|E:|curl: \(",
-            s, _re.I,
-        ):
-            line = s
+        s_ = ln.strip()
+        if s_ and _re.search(_SYMPTOM_LINE_RE, s_, _re.I):
+            line = s_
             break
     if not line:
-        tail = [s.strip() for s in (error_text or "").splitlines() if s.strip()]
+        tail = [s_.strip() for s_ in (error_text or "").splitlines() if s_.strip()]
         line = tail[-1] if tail else ""
-    line = _re.sub(r"\s+", " ", line)[:90]
-    title_part = " ".join((title or "").split()[:6])
-    return f"{title_part} {line}".strip()[:130]
+    # Drop the operator's proposed remedy, but never the whole line.
+    without_proposal = _PROPOSAL_CLAUSE_RE.sub(" ", line)
+    if without_proposal.strip(" ,.;:-"):
+        line = without_proposal
+    line = _re.sub(r"\s+", " ", _QUERY_FILLER_RE.sub(" ", line)).strip(" ,.;:-'\"")
+    if not line:
+        return " ".join((title or "").split()[:6]).strip()
+
+    # The title anchors the query ONLY when the operator is talking about the
+    # thing it names. A blocker upstream of the step shares none of its
+    # distinctive vocabulary, and prefixing it there points retrieval at the
+    # wrong subject — the whole §17.909 defect.
+    distinctive = _distinctive(title)
+    lowered = line.lower()
+    on_topic = any(w in lowered for w in distinctive) if distinctive else True
+
+    lead = " ".join(_symptom_tokens(line)[:3])
+    if on_topic:
+        title_part = " ".join((title or "").split()[:6])
+        body = f"{title_part} {line}"
+    else:
+        body = f"{lead} {line}" if lead else line
+    body = _re.sub(r"\s+", " ", body)
+    # Filler removal leaves orphaned punctuation ("again. , it was on the …").
+    body = _re.sub(r"\s+([,;:.])", r"\1", body)
+    body = _re.sub(r"([,;:.])\s*[,;:.]+", r"\1", body)
+    return body.strip(" ,.;:-").strip()[:150]
 
 
 def find_banned_values(text_out: str, banned: list | None) -> list[dict]:
