@@ -1180,6 +1180,28 @@ async def run_step_research(
     return {"session_id": session_id, "node_key": nk, **res}
 
 
+# §17.917 — the operator reporting the problem PERSISTS. Distinct from a shell
+# error (they may not have run anything) and from a bare complaint about the
+# engine: this is an assertion that the step is STILL not achieved, which
+# retires whatever was last prescribed for it.
+_STILL_BROKEN_RE = __import__("re").compile(
+    r"\bstill\s+(?:not|isn'?t|hasn'?t|haven'?t|won'?t|doesn'?t|does not|"
+    r"getting|hung|hangs|stuck|failing|fails|broken|the same)\b"
+    r"|\bhave\s+not\s+fixed\b|\bhaven'?t\s+fixed\b|\bnot\s+fixed\b"
+    r"|\b(?:didn'?t|did\s+not|does\s+not|doesn'?t|won'?t|will\s+not)"
+    r"\s+(?:work|help|fix|boot|start|install)\w*\b"
+    r"|\bsame\s+(?:problem|issue|error|result)\b"
+    r"|\bno\s+(?:change|difference|luck)\b"
+    r"|\bkeeps?\s+(?:hanging|failing|happening)\b",
+    __import__("re").IGNORECASE,
+)
+
+
+def _looks_like_still_broken(msg: str) -> bool:
+    """True when the operator asserts the step is STILL not achieved."""
+    return bool(_STILL_BROKEN_RE.search(msg or ""))
+
+
 async def _fix_failure_streak(
     *, session_id: str, node_key: str, db,
 ) -> tuple[int, str]:
@@ -1261,6 +1283,17 @@ async def _fix_failure_streak(
             # the shell itself reported an error — a vague complaint is not
             # proof they ran anything.
             if not echoed and later[0][2]:
+                echoed = set(lines)
+            # (c) §17.917 — the operator saying the problem PERSISTS retires the
+            # prescription regardless of execution. §17.916 correctly stopped
+            # counting un-run commands as tried, and thereby licensed this:
+            # live turn 1446 "You still have not fixed the ubuntu server install
+            # and it getting hung up on the install" → turn 1447 re-issued the
+            # same `qm set 106 --boot order=scsi0 && qm set 106 --ide2 none &&
+            # qm start` it had just given. Whether or not they ran it, they have
+            # told us it did not resolve the step; re-offering it is the §17.906
+            # loop by another route.
+            if not echoed and _looks_like_still_broken(later[0][1]):
                 echoed = set(lines)
             for ln in lines:
                 if ln in echoed and ln not in cmds:

@@ -69,9 +69,22 @@ def test_newer_observation_wins_and_others_survive():
 
 def test_render_marks_it_as_ground_truth():
     block = render_system_state(parse_system_state(LIVE_1421))
-    assert "CONFIRMED system state" in block
+    assert "CONFIRMED resource CONFIGURATION" in block
     assert "order=scsi0" in block
     assert "do NOT ask them to re-run" in block
+
+
+def test_render_scopes_itself_to_configuration_only():
+    """§17.917 REGRESSION — the first header said only "GROUND TRUTH … do NOT
+    contradict it", and the model drew a conclusion the data never supported.
+    Live (turn 1445): "Guide me" on ADD5 "Install Ubuntu Server 22.04 on VM 106"
+    returned an entirely POST-INSTALL walkthrough — fix the boot order, detach
+    the ISO, "wait for the login prompt" — because this block showed a 100G
+    scsi0 disk and boot: order=scsi0. A disk existing is not an OS existing."""
+    block = render_system_state(parse_system_state(LIVE_1421))
+    assert "does NOT establish" in block
+    assert "installed" in block and "running" in block
+    assert "not an OS being installed on it" in block
 
 
 def test_state_reaches_the_real_injection_path():
@@ -82,8 +95,11 @@ def test_state_reaches_the_real_injection_path():
     from app.modules.assist_render import render_session_memory
     env = {"profile": "root@pve", "system_state": parse_system_state(LIVE_1421)}
     out = render_session_memory(env, [])
-    assert "CONFIRMED system state" in out
+    assert "CONFIRMED resource CONFIGURATION" in out
     assert "order=scsi0" in out
+    # §17.917 — the scope caveat must travel WITH it into the real prompt, or
+    # the block regains the authority that produced the post-install guide.
+    assert "does NOT establish" in out
 
 
 def test_redundant_discovery_is_detected():

@@ -720,3 +720,36 @@ async def test_a_prescription_with_no_later_operator_turn_is_not_tried():
     db.execute = AsyncMock(return_value=rows)
     _s, cmds = await _fix_failure_streak(session_id="s", node_key="T1", db=db)
     assert cmds == ""
+
+
+async def test_still_broken_retires_a_prescription_even_if_unrun():
+    """§17.917 — §17.916 correctly stopped counting un-run commands as tried,
+    and thereby licensed a repeat: live turn 1446 "You still have not fixed the
+    ubuntu server install and it getting hung up on the install" → turn 1447
+    re-issued the same commands. Whether or not the operator ran it, they have
+    said it did not resolve the step."""
+    db = AsyncMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        _turn(1, "assistant", "```bash\nqm set 106 --boot order=scsi0\n```"),
+        _turn(2, "operator",
+              "You still have not fixed the ubuntu server install and it "
+              "getting hung up on the install"),
+    ]
+    db.execute = AsyncMock(return_value=rows)
+    _s, cmds = await _fix_failure_streak(session_id="s", node_key="ADD5", db=db)
+    assert "qm set 106 --boot order=scsi0" in cmds
+
+
+async def test_a_neutral_reply_still_does_not_retire_a_prescription():
+    """The §17.916 contract must survive: only a PERSISTENCE assertion counts,
+    not any reply."""
+    db = AsyncMock()
+    rows = MagicMock()
+    rows.mappings.return_value.all.return_value = [
+        _turn(1, "assistant", "```bash\nqm set 106 --boot order=scsi0\n```"),
+        _turn(2, "operator", "ok, what does scsi0 mean?"),
+    ]
+    db.execute = AsyncMock(return_value=rows)
+    _s, cmds = await _fix_failure_streak(session_id="s", node_key="ADD5", db=db)
+    assert cmds == ""

@@ -2000,7 +2000,32 @@ def _build_guide_user_prompt(
     block, and a human-walkthrough trailer (a decision-framing trailer when the
     node is a decision).
     """
+    # §17.917 — AN OPEN STEP'S GOAL IS NOT YET ACHIEVED. Definitionally true —
+    # a step being guided is pending/presented, never committed — and nothing in
+    # the prompt said it. Live (session 613dd1df, turn 1445): "Guide me" on
+    # ADD5 "Install Ubuntu Server 22.04 on VM 106" returned an entirely
+    # POST-INSTALL walkthrough (correct the boot order, detach the ISO, "wait
+    # for the login prompt … `palworld-server login:`"). The operator, who had
+    # been unable to install the OS for three days, was handed instructions for
+    # a machine that had already booted one.
+    #
+    # It reached that from CONFIGURATION (§17.914's block showed a disk and a
+    # boot order) while §17.714's reset branch had demoted the facts saying the
+    # install was HUNG to "earlier observations … most will not hold". Both
+    # halves are addressed where they live; this is the invariant that makes
+    # the class impossible: the walkthrough for a step may not presuppose the
+    # step's own outcome.
     parts: list[str] = [ctx.assembled_prompt]
+    parts.append(
+        "## This step is NOT done\n"
+        f"The goal — \"{(ctx.title or 'this step').strip()}\" — has NOT been "
+        "achieved yet; that is why the operator is on it. Write the walkthrough "
+        "that ACHIEVES it, starting from where they actually are. Do NOT write "
+        "steps that assume it already succeeded (verifying it, tidying up after "
+        "it, or moving on to what comes next), and do not infer that it "
+        "succeeded from configuration values — a resource being configured is "
+        "not the work being done."
+    )
     if node_description and node_description.strip() and node_description.strip() not in ctx.assembled_prompt:
         parts.append(f"Task description: {node_description.strip()}")
     if job_digest and job_digest.strip():

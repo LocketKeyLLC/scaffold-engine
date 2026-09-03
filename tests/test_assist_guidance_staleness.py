@@ -61,3 +61,21 @@ def test_advance_and_replan_signals_are_untouched():
     the costlier failure (a guide written before the plan moved on)."""
     sql = _sql()
     assert "AS advanced" in sql and "AS replanned" in sql
+
+
+# ── §17.917 — an open step's goal is NOT achieved ────────────────────────
+
+
+def test_guide_prompt_states_the_step_is_not_done():
+    """Live (turn 1445): "Guide me" on "Install Ubuntu Server 22.04 on VM 106"
+    returned a POST-INSTALL walkthrough. A step being guided is pending or
+    presented — never committed — so its goal is definitionally unachieved, and
+    nothing in the prompt said so. This is the invariant that makes the class
+    impossible regardless of which memory block misleads."""
+    import inspect
+    from app.modules import assist_guide
+    src = inspect.getsource(assist_guide._build_guide_user_prompt)
+    assert "This step is NOT done" in src
+    assert "has NOT been" in src
+    # and it must forbid the specific inference that caused it
+    assert "not the work being done" in src
