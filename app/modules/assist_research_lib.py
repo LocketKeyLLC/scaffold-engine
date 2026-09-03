@@ -120,8 +120,14 @@ def _is_useful_grounding(body: str) -> bool:
 async def _detect_unknowns(
     *, task_text: str, tool: str, role: str, max_queries: int,
     environment_block: str = "",
-) -> list[str]:
+) -> Optional[list[str]]:
     """Ask the model which facts a human would need to confirm. Fail-soft.
+
+    §17.912 — returns ``None`` when the machinery FAILED (provider error, no
+    tool call) and ``[]`` when the model succeeded and declined to ask anything.
+    Callers that treat both as falsy are unaffected; only the guide-path floor
+    needs the distinction, because flooring after an infrastructure error would
+    convert a deliberate fail-soft path into another live request.
 
     §17.771 (Phase 3) — when the operator's observed system (`environment_block`
     = profile + §17.709 facts ledger) is given, the queries are grounded in THEIR
@@ -168,9 +174,9 @@ async def _detect_unknowns(
         )
     except Exception as exc:  # network / provider error — never block guidance
         logger.warning("assist_guide_detect_unknowns_failed: %s", exc)
-        return []
+        return None  # §17.912 — FAILED, not "nothing to ask"
     if not resp.success or not resp.tool_calls:
-        return []
+        return None  # §17.912 — FAILED, not "nothing to ask"
     args = resp.tool_calls[0].arguments or {}
     raw = args.get("queries") or []
     queries = [q.strip() for q in raw if isinstance(q, str) and q.strip()]
@@ -279,17 +285,88 @@ async def _confirm_query(
     return sources
 
 
+# §17.912 — action-shaped steps whose guidance is real commands on a real box.
+# A pure-LLM/document step ("draft the runbook") legitimately needs no lookup.
+_ACTION_STEP_RE = re.compile(
+    r"\b(?:install|configur|deploy|provision|set\s*up|setup|upgrade|migrat|"
+    r"enable|harden|mount|partition|flash|image|boot|join|network)\w*\b",
+    re.IGNORECASE,
+)
+_ACTION_TOOLS = frozenset({"shell", "runbook", "code", "codegen"})
+
+
+def _floor_query(task_text: str, tool: str) -> str:
+    """One query from the step's own words, for when the query generator
+    declines. Returns "" when the step is not action-shaped."""
+    head = ""
+    for line in (task_text or "").splitlines():
+        t = line.strip()
+        if t and not t.lower().startswith("context:"):
+            head = t
+            break
+    if not head:
+        return ""
+    # Stop at the project Context blob and at sentence 2 — the first sentence is
+    # the task; the rest is acceptance criteria and scope.
+    head = re.split(r"(?<=[.!?])\s", head)[0].strip()
+    if not head:
+        return ""
+    if (tool or "").strip().lower() not in _ACTION_TOOLS and not _ACTION_STEP_RE.search(head):
+        return ""
+    # Instance detail is why the first cut matched only the local corpus: an
+    # external engine has nothing to say about "(palworld-server)" or
+    # "'ubuntu-22.04.3-live-server-amd64.iso'". Strip parentheticals and quoted
+    # spans, keep the technology and the action.
+    head = re.sub(r"\([^)]*\)", " ", head)
+    head = re.sub(r"'[^']*'|\"[^\"]*\"", " ", head)
+    head = re.sub(r"\s+", " ", head).strip(" .,:;-")
+    # Strip punctuation BEFORE the dangling-preposition rule, or the `$` anchor
+    # never matches the orphan left behind by the quoted span ("… using the .").
+    head = re.sub(r"\s+(?:using|with|from|via|on|for)\s+(?:the|a|an)\s*$",
+                  "", head, flags=re.I)
+    return head.strip(" .,:;-")[:150]
+
+
 async def _research_prepass(
     *, task_text: str, tool: str, role: str, max_queries: int,
     node_key: str, domain: Optional[str], deep: bool = False,
-    environment_block: str = "",
+    environment_block: str = "", floor_when_empty: bool = False,
 ) -> list[dict]:
     queries = await _detect_unknowns(
         task_text=task_text, tool=tool, role=role, max_queries=max_queries,
         environment_block=environment_block,
     )
-    if not queries:
-        return []
+    if queries == [] and floor_when_empty:
+        # §17.912 — DETERMINISTIC FLOOR for the guide path.
+        #
+        # `_detect_unknowns` is an LLM judgment about whether research is
+        # needed, and it declines precisely when the step text reads
+        # confidently. Live (ADD5 "Install Ubuntu Server 22.04 on VM 106"): it
+        # returned ZERO queries, so the walkthrough was written from model
+        # memory alone — while the very same retrieval stack, asked "ubuntu
+        # 22.04 installer stalls at Downloading and installing security updates
+        # fix", returned two useful sources. A confident-sounding step
+        # description is not evidence that nothing needs looking up; for an
+        # install step on a real machine it is usually the opposite. This is
+        # §17.882's medicine ("one DETERMINISTIC query, always") applied to the
+        # guide path, which never got the equivalent floor.
+        #
+        # OPT-IN per call site, because `_detect_unknowns` swallows its own
+        # errors and returns [] either way: an unconditional floor cannot tell
+        # "the model declined" from "the tool call failed". Applied everywhere
+        # it broke /fix's documented fail-soft contract ("no queries -> no
+        # confirm calls") and made a decision node's "empty research is a
+        # no-op" path start threading a research block. Only the guide path
+        # carries the §17.912 defect, so only the guide path asks for the floor.
+        floor = _floor_query(task_text, tool)
+        if not floor:
+            return []
+        queries = [floor]
+        logger.info(
+            "assist_research_floor_query node_key=%s query=%r "
+            "(detect_unknowns returned none)", node_key, floor[:120])
+    elif not queries:
+        return []  # declined with the floor off, or the machinery failed
     logger.info("assist_guide_research: %d queries node_key=%s deep=%s", len(queries), node_key, deep)
     # One round-trip: all queries confirmed concurrently.
     batches = await asyncio.gather(

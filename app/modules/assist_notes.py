@@ -233,11 +233,42 @@ async def add_step(
             """),
             {"jid": job_id, "nk": new_key, "anchor": before},
         )
+        # §17.911 — REOPEN the anchor, on BOTH tables (mirror invariant §17.286).
+        #
+        # The first cut reset `assist_steps` only, and only from 'presented'.
+        # Live (session 613dd1df): T23 "Install PalWorld server" was recorded
+        # `done`/`handed_off` for work that never happened — the operator had
+        # spent three days failing to install the OS underneath it (§17.910).
+        # Inserting the missing prerequisite left T23 `done`, so once the new
+        # step completed T23 would never be presented and the PalWorld install
+        # would simply be skipped, while T24 stayed claimable behind a step that
+        # was never really finished.
+        #
+        # A step cannot be both "done" and "blocked on a new prerequisite". The
+        # operator asking to insert work BEFORE it is an explicit instruction,
+        # not an inference, so reopening is the necessary consequence rather
+        # than a §17.891 auto-mutation. Guidance is dropped because the plan
+        # itself changed — the cached walkthrough was written against a state
+        # that no longer holds (§17.894/§17.899).
         await db.execute(
             text("""
-                UPDATE assist_steps SET status = 'pending', updated_at = NOW()
+                UPDATE dag_nodes
+                   SET status = 'pending', output_text = NULL,
+                       completed_at = NULL, updated_at = NOW()
+                 WHERE job_id = :jid AND node_key = :anchor
+                   AND status IN ('done', 'skipped', 'failed')
+            """),
+            {"jid": job_id, "anchor": before},
+        )
+        await db.execute(
+            text("""
+                UPDATE assist_steps
+                   SET status = 'pending', committed_at = NULL, submitted_at = NULL,
+                       evidence = NULL, evidence_kind = NULL, presented_at = NULL,
+                       guidance = NULL, guidance_status = 'none',
+                       guidance_generated_at = NULL, updated_at = NOW()
                  WHERE session_id = :sid AND node_key = :anchor
-                   AND status = 'presented'
+                   AND status <> 'pending'
             """),
             {"sid": session_id, "anchor": before},
         )

@@ -1486,6 +1486,13 @@ class Settings(BaseSettings):
     # out). Feeds the validator retry loop so the generator ADDS the missing step;
     # any survivor is surfaced as an `unimplemented_decisions` warning.
     dag_decision_impl_check_enabled: bool = True
+    # §17.910 — insert a missing OS-install step between a VM-creating node and
+    # any dependent that runs commands inside that guest. The live homelab plan
+    # had "Create AI VM → Install AI VM OS" but "Create PalWorld VM → Install
+    # PalWorld server", and the operator spent three days installing an OS that
+    # was not in the plan. Containers are exempt (a template ships a userspace).
+    dag_os_install_gap_check_enabled: bool = True
+
     # §17.670 — converge multiple terminal leaves (dangling decisions + parallel
     # config steps that never join) into a SINGLE final sink, so the plan flows to
     # one deliverable instead of several loose ends. Deterministic, cycle-safe.
