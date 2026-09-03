@@ -940,7 +940,8 @@ async def test_generate_step_guidance_history_falls_back_to_transcript():
 @pytest.mark.asyncio
 async def test_add_step_inserts_node_and_points_session():
     # session, anchor (T14) lookup, brief lookup, existing-keys, INSERT node,
-    # INSERT step, UPDATE anchor deps, UPDATE anchor step, UPDATE session.
+    # INSERT step, UPDATE anchor deps, §17.911 UPDATE anchor dag_node (reopen),
+    # UPDATE anchor step, UPDATE session.
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[
         _result({"job_id": "j1", "status": "active", "current_node_key": "T14",
@@ -952,7 +953,8 @@ async def test_add_step_inserts_node_and_points_session():
         _result(None),  # INSERT dag_nodes
         _result(None),  # INSERT assist_steps
         _result(None),  # UPDATE anchor depends_on
-        _result(None),  # UPDATE anchor step presented->pending
+        _result(None),  # §17.911 UPDATE anchor dag_nodes done->pending
+        _result(None),  # UPDATE anchor assist_steps ->pending
         _result(None),  # UPDATE session current_node_key
     ])
     db.commit = AsyncMock()
@@ -969,6 +971,18 @@ async def test_add_step_inserts_node_and_points_session():
     sqls = [str(c.args[0]) for c in db.execute.await_args_list]
     assert any("array_append" in s for s in sqls)          # T14 now depends on ADD1
     assert any("current_node_key = :nk" in s for s in sqls)  # session repointed
+    # §17.911 — the anchor is reopened on BOTH tables. It was recorded `done`
+    # for work that never happened (live T23), and a step cannot be both done
+    # and blocked on a new prerequisite: without the dag_nodes reset it would
+    # never be presented again and the work would be silently skipped.
+    dag_reopen = [s for s in sqls if "UPDATE dag_nodes" in s and "status = 'pending'" in s]
+    assert dag_reopen, "add_step must reopen the anchor node, not just its step"
+    assert "completed_at = NULL" in dag_reopen[0]
+    step_reopen = [s for s in sqls if "UPDATE assist_steps" in s and "guidance = NULL" in s]
+    assert step_reopen, "the stale walkthrough must be dropped — the plan changed"
+    assert "status <> 'pending'" in step_reopen[0], (
+        "must reopen from ANY non-pending status, not only 'presented' — the "
+        "live anchor was 'handed_off'")
     db.commit.assert_awaited()
 
 

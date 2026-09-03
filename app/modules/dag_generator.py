@@ -628,6 +628,109 @@ def connect_isolated_nodes(tasks: list[dict]) -> list[str]:
     return wired
 
 
+# §17.910 — a bare VM that nothing installs an OS on. The live homelab plan
+# (job 55f68b7f) contained BOTH shapes side by side:
+#
+#     T25 Create AI VM  →  T26 Install AI VM OS  →  T28 Install NVIDIA drivers
+#     T22 Create PalWorld VM  →  T23 Install PalWorld server
+#
+# The AI branch got a provisioning step; the PalWorld branch did not, and no
+# node anywhere in that plan installed an operating system on VM 106. So T23's
+# premise — a booted, reachable Ubuntu — was never established and no step was
+# ever going to establish it. The operator spent three days installing an OS
+# that WAS NOT IN THE PLAN: every walkthrough was correctly anchored on "Install
+# PalWorld server" and therefore useless, every research query asked about
+# SteamCMD, and the fix loop had no step to attach the real work to.
+#
+# This is the §17.668 lesson at plan level: the generator is asked in the prompt
+# to produce complete provisioning chains, it does so inconsistently, and a
+# deterministic post-pass is the only thing that makes it hold.
+#
+# CONTAINERS ARE EXCLUDED and that exclusion is load-bearing: `pct create`
+# clones a distro template, so an LXC has a userspace the moment it exists.
+# Only a `qm`-style VM boots bare and needs an OS installed into it.
+_VM_CREATE_RE = re.compile(
+    r"\b(?:create|provision|build|spin\s*up|deploy)\b[^.\n]{0,48}?"
+    r"\b(?:vm|virtual\s+machine|guest)\b", re.IGNORECASE)
+_LXC_RE = re.compile(r"\b(?:lxc|container|ct)\b", re.IGNORECASE)
+_OS_INSTALL_RE = re.compile(
+    r"\b(?:install|provision|deploy|image|flash)\b[^.\n]{0,48}?"
+    r"\b(?:os|operating\s+system|ubuntu|debian|centos|rocky|alma|fedora|"
+    r"windows|linux|distro)\b", re.IGNORECASE)
+# Anything that runs INSIDE the guest presumes a booted userspace.
+_IN_GUEST_RE = re.compile(
+    r"\b(?:install|configure|deploy|enable|set\s*up|setup|run|start|harden|"
+    r"join|mount|update)\b", re.IGNORECASE)
+_LEADING_VERB_RE = re.compile(
+    r"^\s*(?:create|provision|build|spin\s*up|deploy)\s+(?:a|an|the)?\s*",
+    re.IGNORECASE)
+
+
+def _label_of(task: dict) -> str:
+    return f"{task.get('name') or ''} {task.get('description') or ''}"
+
+
+def insert_missing_os_install(tasks: list[dict]) -> list[str]:
+    """§17.910 — insert an OS-install step between a VM-creating node and any
+    dependent that runs commands inside that guest. Returns the new node ids.
+
+    Structural repair in the same family as §17.668's connectivity guarantee:
+    deterministic, cycle-safe (the new node depends only on the creator and is
+    spliced in front of existing dependents), and a no-op when the generator
+    already produced the step.
+    """
+    real = [t for t in tasks if t.get("id")]
+    ids = {t["id"] for t in real}
+    by_id = {t["id"]: t for t in real}
+    dependents: dict[str, list[str]] = {}
+    for t in real:
+        for d in (t.get("depends_on") or []):
+            if d in ids:
+                dependents.setdefault(d, []).append(t["id"])
+    added: list[str] = []
+    for t in real:
+        label = _label_of(t)
+        if not _VM_CREATE_RE.search(label) or _LXC_RE.search(label):
+            continue
+        kids = dependents.get(t["id"], [])
+        if not kids:
+            continue
+        if any(_OS_INSTALL_RE.search(_label_of(by_id[k])) for k in kids):
+            continue  # the generator already did it
+        in_guest = [
+            k for k in kids
+            if _IN_GUEST_RE.search(_label_of(by_id[k]))
+            and not _OS_INSTALL_RE.search(_label_of(by_id[k]))
+        ]
+        if not in_guest:
+            continue
+        new_id = f"{t['id']}_OS"
+        n = 2
+        while new_id in ids:
+            new_id = f"{t['id']}_OS{n}"
+            n += 1
+        ids.add(new_id)
+        subject = _LEADING_VERB_RE.sub("", (t.get("name") or "the VM")).strip()
+        node = {
+            "id": new_id,
+            "name": f"Install OS on {subject}"[:120],
+            "type": "action",
+            "inputs": [], "outputs": [],
+            "depends_on": [t["id"]],
+            "tool": t.get("tool") or "LLM",
+        }
+        if t.get("domain"):
+            node["domain"] = t["domain"]
+        tasks.append(node)
+        by_id[new_id] = node
+        for k in in_guest:  # splice: dependents now wait on the OS, not the shell
+            by_id[k]["depends_on"] = [
+                new_id if d == t["id"] else d for d in (by_id[k]["depends_on"] or [])
+            ]
+        added.append(new_id)
+    return added
+
+
 def _enforce_deliverable_marking(tasks: list[dict]) -> list[str]:
     """§17.669 — §17.475 says a MID-GRAPH setup step is NEVER the deliverable, but
     the generator over-marks (homelab test: 8/10, incl. 'Download Proxmox ISO',
@@ -1426,6 +1529,21 @@ async def generate_dag(
                 logger.warning(
                     "dag_isolated_nodes_connected: job=%s nodes=%s",
                     job_id, _iso_wired,
+                )
+        # §17.910 — provisioning completeness: a bare VM whose dependents run
+        # in-guest commands needs an OS installed first. Runs BEFORE validate_dag
+        # and _build_edges so the inserted node is validated and edged like any
+        # other. See insert_missing_os_install for the live plan that motivated it.
+        if settings.dag_os_install_gap_check_enabled:
+            _os_added = insert_missing_os_install(normalized)
+            if _os_added:
+                validator_warnings.append(
+                    f"os_install_step_inserted: {', '.join(_os_added)} — a VM was "
+                    f"created with no step installing an operating system on it, "
+                    f"while later steps ran commands inside that guest"
+                )
+                logger.warning(
+                    "dag_os_install_gap_repaired: job=%s nodes=%s", job_id, _os_added,
                 )
         normalized, dag_warnings = validate_dag(normalized)
     except ValueError as exc:

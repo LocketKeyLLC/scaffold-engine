@@ -2060,6 +2060,9 @@ async def generate_guidance(
             # a generic textbook list. render_environment_block folds in the
             # §17.709 facts ledger; "" when unknown (fail-soft, generic queries).
             environment_block=render_environment_block(environment),
+            # §17.912 — the guide path is the one that loses retrieval when the
+            # query generator declines on a confident-sounding step.
+            floor_when_empty=True,
         )
 
     system = apply_verbosity(
