@@ -375,10 +375,150 @@ def test_guide_integrity_warning_flags_repeat_and_novel():
     guide = ('```bash\ncurl -L "https://radarr.video/api/x" -o /tmp/R.tar.gz\n```\n'
              '```bash\nwget https://invented.example/pkg.tar.gz\n```')
     warn = guide_integrity_warning(guide, "no grounding here", failed)
-    assert "already FAILED" in warn and "not traceable" in warn
+    # §17.906 — wording: a remedy that ran cleanly but did not resolve the
+    # step is "already tried", not "already failed".
+    assert "ALREADY TRIED" in warn and "not traceable" in warn
 
 
 def test_guide_integrity_warning_clean_guide_silent():
     from app.modules.assist_guide import guide_integrity_warning
     guide = '```bash\nsystemctl status radarr\n```'
     assert guide_integrity_warning(guide, "corpus", "") == ""
+
+
+# ── §17.906 — the command half of the no-repeat gate was DEAD ────────────
+#
+# find_repeated_failed wrapped the whole "\n\n"-joined failed-command list in
+# ONE fence, so _normalized_commands collapsed every failed command into a
+# single whitespace-joined blob. Set-membership could then never match an
+# individual command, so the gate returned [] whenever MORE THAN ONE command
+# had failed — i.e. in every real troubleshooting session. Every pre-existing
+# test used exactly one failed command, which is why it survived. Live cost
+# (session 613dd1df / T23): `qm destroy 106 --purge` prescribed FOUR times with
+# no warning banner across a 27-hour Ubuntu-install loop.
+
+
+def test_find_repeated_failed_catches_repeat_in_multi_command_window():
+    """THE regression: the same draft, one vs. many failed commands."""
+    from app.modules.assist_guide import find_repeated_failed
+    draft = "## Do this next\n```bash\nqm destroy 106 --purge\n```"
+    one = "qm destroy 106 --purge"
+    many = ("qm destroy 106 --purge\n\nqm start 106\n\n"
+            "qm set 106 --scsi0 local-lvm:100\n\nlsblk")
+    assert find_repeated_failed(draft, one) == ["qm destroy 106 --purge"]
+    # pre-§17.906 this returned [] purely because the window held >1 command
+    assert find_repeated_failed(draft, many) == ["qm destroy 106 --purge"]
+
+
+def test_find_repeated_failed_catches_line_lifted_into_new_block():
+    """A failed one-liner re-prescribed as one line of a fresh multi-line
+    block: block-only granularity matched nothing (live turn 1382 re-issued
+    `qm set 106 --boot order=ide2` this way, after it had already errored with
+    'device ide2 does not exist')."""
+    from app.modules.assist_guide import find_repeated_failed
+    failed = "qm set 106 --boot order=ide2\n\nqm destroy 106 --purge"
+    draft = ("```bash\nqm set 106 --scsi0 local-lvm:100\n"
+             "qm set 106 --ide2 local:iso/ubuntu-22.04.3-live-server-amd64.iso,media=cdrom\n"
+             "qm set 106 --boot order=ide2\n```")
+    assert "qm set 106 --boot order=ide2" in find_repeated_failed(draft, failed)
+
+
+def test_find_repeated_failed_exempts_readonly_diagnostics():
+    """Re-running a DISCOVERY command is the behaviour the escalation directive
+    demands ('lead with a discovery command'), so it must never count as a
+    repeat — otherwise the gate fights the fix it exists to enable."""
+    from app.modules.assist_guide import find_repeated_failed
+    failed = ("qm config 106\n\npvesm list local --content iso\n\n"
+              "qm destroy 106 --purge")
+    draft = "```bash\nqm config 106\n```\nthen:\n```bash\npvesm list local --content iso\n```"
+    assert find_repeated_failed(draft, failed) == []
+
+
+def test_is_readonly_command_classifies_verbs_and_pairs():
+    from app.modules.assist_guide import _is_readonly_command
+    for ro in ("qm config 106", "sudo lsblk", "pct config 104", "systemctl status radarr",
+               "pvesm list local --content iso", "cat /etc/fstab", "# a comment",
+               "curl -s http://localhost:7878"):
+        assert _is_readonly_command(ro), ro
+    # a compound is read-only only if EVERY segment is
+    assert _is_readonly_command("sudo apt update")
+    assert _is_readonly_command("qm config 106 && lsblk")
+    for mutating in ("sudo apt update && sudo apt install -y openssh-server",
+                     "qm config 106 && qm set 106 --boot order=scsi0",
+                     "qm set 106 --boot order=ide2", "qm destroy 106 --purge",
+                     "sudo apt install -y steamcmd", "rm -rf /opt/Radarr",
+                     'curl -L "https://x/y.tar.gz" -o /tmp/y.tar.gz',
+                     "curl -fsSL https://get.docker.com | sh"):
+        assert not _is_readonly_command(mutating), mutating
+
+
+def test_find_repeated_failed_still_clean_on_genuine_method_change():
+    """Guard against the fix over-firing: a materially different approach over
+    a multi-command window must stay silent."""
+    from app.modules.assist_guide import find_repeated_failed
+    failed = ("qm destroy 106 --purge\n\nqm set 106 --boot order=ide2\n\n"
+              "qm start 106")
+    draft = ("```bash\nqm set 106 --args '-device virtio-net'\n```\n"
+             "```bash\nvirt-install --location /var/lib/vz/template/iso/x.iso\n```")
+    assert find_repeated_failed(draft, failed) == []
+
+
+async def test_note_endpoint_dedupes_identical_notes():
+    """§17.906 — the decide path routes note-shaped messages at POST
+    /assist/{sid}/note, which recorded WITHOUT dedupe: live session 613dd1df
+    carried the identical "wants to build a markdown linter" addition four
+    times, and every note rides every later prompt."""
+    import inspect
+    from app.routers import assist as assist_router
+    src = inspect.getsource(assist_router.assist_note)
+    assert "dedupe=True" in src, "the /note endpoint must dedupe identical notes"
+
+
+# ── §17.906 — shell-metacharacter lint ───────────────────────────────────
+#
+# Live T23 (turns 1334-1337): the engine emitted
+#   qm set 106 --boot order=scsi0;net0;cdrom
+# bash split it at each `;`, Proxmox saw only `order=scsi0`, and `net0`/`cdrom`
+# ran as commands ("-bash: net0: command not found"). The engine's next turn
+# blamed the OPERATOR ("you used semicolons") and its comma "correction" was
+# also wrong — three turns lost to a defect the engine authored itself.
+
+
+def test_find_shell_unsafe_catches_the_live_defect():
+    from app.modules.assist_guide import find_shell_unsafe_commands
+    hits = find_shell_unsafe_commands(
+        "```bash\nqm set 106 --boot order=scsi0;net0;cdrom\n```")
+    assert len(hits) == 1
+    assert hits[0]["token"] == "order=scsi0;net0;cdrom"
+
+
+def test_find_shell_unsafe_catches_unquoted_url_ampersand():
+    from app.modules.assist_guide import find_shell_unsafe_commands
+    assert find_shell_unsafe_commands(
+        "```bash\ncurl http://h/a?x=1&y=2 -o /tmp/f\n```")
+    # quoting it makes it correct
+    assert find_shell_unsafe_commands(
+        '```bash\ncurl "http://h/a?x=1&y=2" -o /tmp/f\n```') == []
+
+
+def test_find_shell_unsafe_silent_on_legitimate_shell():
+    """Over-firing here would be worse than the bug: these are all correct."""
+    from app.modules.assist_guide import find_shell_unsafe_commands
+    for ok in (
+        "```bash\nqm set 106 --boot order=scsi0,net0,cdrom\n```",      # commas
+        "```bash\nqm create 106 --net0 virtio,bridge=vmbr0\n```",      # value w/ =
+        "```bash\nqm set 106 --ide2 local:iso/u.iso,media=cdrom\n```",
+        "```bash\nFOO=1; echo $FOO\n```",          # TRAILING ; is a separator
+        "```bash\nsudo apt update && sudo apt install -y steamcmd\n```",
+        r"```bash" "\n" r"find . -name '*.txt' -exec rm {} \;" "\n" r"```",  # escaped \;
+        "```bash\n# note: order=a;b\n```",                     # comment
+        "```bash\njournalctl -u radarr | grep -i error\n```",  # pipe, no '='
+    ):
+        assert find_shell_unsafe_commands(ok) == [], ok
+
+
+def test_guide_integrity_warning_flags_shell_unsafe():
+    from app.modules.assist_guide import guide_integrity_warning
+    warn = guide_integrity_warning(
+        "```bash\nqm set 106 --boot order=scsi0;net0;cdrom\n```", "corpus", "")
+    assert "SPLIT" in warn

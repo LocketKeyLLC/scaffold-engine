@@ -1093,7 +1093,13 @@ async def assist_note(session_id: str, body: AssistNoteInput, db=Depends(get_db)
     )
     note = await assist_agent.record_note(
         session_id=session_id, text_=body.text, kind=body.kind,
-        node_key=body.node_key, db=db,
+        # §17.906 — carry §17.854's dedupe to THIS endpoint too. The decide path
+        # routes note-shaped messages here, so a restated message re-recorded the
+        # SAME note every time: live session 613dd1df carried the identical
+        # "wants to build a markdown linter" addition FOUR times (plus a near-
+        # duplicate), and every note rides every later prompt. Dedupe returns the
+        # existing note rather than None, so the 409 below is unaffected.
+        node_key=body.node_key, dedupe=True, db=db,
     )
     if note is None:
         raise HTTPException(status_code=409, detail="empty note text")
