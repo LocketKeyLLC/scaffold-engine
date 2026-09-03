@@ -1203,28 +1203,70 @@ async def _fix_failure_streak(
         # re-claims of the same node are the same problem context.
         rows = (await db.execute(
             text("""
-                SELECT content FROM assist_turns
+                SELECT id, role, kind, content FROM assist_turns
                  WHERE session_id = :sid AND node_key = :nk
-                   AND role = 'assistant' AND kind = 'fix'
-                 ORDER BY created_at DESC, id DESC LIMIT 40
+                   AND (role = 'operator' OR (role = 'assistant' AND kind = 'fix'))
+                 ORDER BY created_at ASC, id ASC
             """),
             {"sid": session_id, "nk": node_key},
         )).mappings().all()
-        streak = len(rows)
-        cmds: list[str] = []
+
+        # §17.916 — "already TRIED" must mean the OPERATOR RAN IT, not that the
+        # engine said it. The old query read prescriptions only, so a command
+        # the operator never executed counted as an exhausted remedy: it blocked
+        # legitimate re-prescription and stapled a false "repeats something
+        # already tried" banner above fixes whose content was correct. Proven
+        # live — driving the /fix endpoint to verify §17.914 wrote prescriptions
+        # the operator never saw, and the very next fix was flagged for them.
+        #
+        # Evidence of execution, in order of strength:
+        #   (a) the operator's paste ECHOES the command (`root@pve:~# qm …`);
+        #   (b) the operator's NEXT turn carries a shell ERROR — they ran what
+        #       was just handed to them and the shell complained, without
+        #       echoing it back.
+        # A prescription with neither is not a repeat; the streak still counts
+        # it, because burning fixes is itself the escalation signal.
+        from app.modules.assist_decide import _compute_signals
+
+        prescriptions: list[tuple[int, list[str]]] = []
+        operator_turns: list[tuple[int, str, bool]] = []
+        streak = 0
         for r in rows:
-            for block in _re.findall(r"```[a-z]*\n(.*?)```", r.get("content") or "", _re.S):
-                b = block.strip()
-                if b and b not in cmds:
-                    cmds.append(b)
-        # §17.906 — was LIMIT 12 / cmds[:10]. On the live T23 marathon the step
-        # accumulated 23 distinct commands across 13 fix turns, so the cap
-        # silently aged out the EARLIEST failures — exactly the ones a long
-        # loop circles back to (`qm set 106 --boot order=ide2` and
-        # `--boot order=cdrom` were both dropped, then re-prescribed). The
-        # caller truncates to [:3000] for the PROMPT; the gate reads the full
-        # string, so widening here costs no tokens and re-arms late-marathon
-        # repeat detection.
+            content = r.get("content") or ""
+            if r.get("role") == "assistant":
+                streak += 1
+                lines: list[str] = []
+                for block in _re.findall(r"```[a-z]*\n(.*?)```", content, _re.S):
+                    for ln in block.splitlines():
+                        norm = " ".join(ln.split())
+                        if norm and not norm.startswith("#"):
+                            lines.append(norm)
+                if lines:
+                    prescriptions.append((int(r["id"]), lines))
+            else:
+                try:
+                    err = bool(_compute_signals(content, None)["shell_error"])
+                except Exception:  # noqa: BLE001 — signal is an enhancement
+                    err = False
+                operator_turns.append(
+                    (int(r["id"]), " ".join(content.split()), err))
+
+        cmds: list[str] = []
+        for pid, lines in prescriptions:
+            later = [o for o in operator_turns if o[0] > pid]
+            if not later:
+                continue
+            echoed = {ln for ln in lines if any(ln in o[1] for o in later)}
+            # (b) only the IMMEDIATELY following operator turn, and only when
+            # the shell itself reported an error — a vague complaint is not
+            # proof they ran anything.
+            if not echoed and later[0][2]:
+                echoed = set(lines)
+            for ln in lines:
+                if ln in echoed and ln not in cmds:
+                    cmds.append(ln)
+        # §17.906 — the caller truncates to [:3000] for the PROMPT; the gate
+        # reads the full string, so a wide cap here costs no tokens.
         return streak, "\n\n".join(cmds[:40])
     except Exception as e:  # noqa: BLE001 — escalation is an enhancement, never a blocker
         # §17.882b — WARNING, not debug: a swallowed error here silently
