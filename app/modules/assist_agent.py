@@ -1154,6 +1154,23 @@ async def run_step_research(
             step_title=nk or "", db=db, node_key=nk,  # §17.892 — scoped auto-pin
         )
         res["answer"] = resolved
+    # §17.913 — the ask path emits commands too, and it is where the live
+    # `qm set 106 --boot order=scsi0;ide2` reached the operator (bash split it).
+    # Same two repairs the guide/fix paths get: make it runnable on the box the
+    # operator actually has, and flag a command the shell will split.
+    if (res.get("answer") or "").strip():
+        _fixed, _notes = assist_guide.repair_unavailable_tools(
+            res["answer"], environment)
+        _shell = assist_guide.find_shell_unsafe_commands(_fixed)
+        if _shell:
+            logger.warning(
+                "assist_ask_shell_unsafe session_id=%s node_key=%s token=%r",
+                session_id, nk, _shell[0]["token"][:80])
+            _notes.append(
+                "the shell will SPLIT `" + _shell[0]["token"][:70]
+                + "` on an unquoted separator — quote the value or use the "
+                  "separator the program expects")
+        res["answer"] = _fixed + assist_guide.unavailable_tools_note(_notes)
     # §17.726 — the answer is what the engine told the operator; record it.
     if (res.get("answer") or "").strip():
         await capture_assistant_reply(

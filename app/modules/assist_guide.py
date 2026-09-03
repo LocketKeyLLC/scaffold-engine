@@ -2153,8 +2153,11 @@ async def generate_guidance(
     # §17.897 — every command the operator is handed must be copy-pasteable,
     # whichever path produced it. The fenced-block mandate is a prompt rule and
     # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
+    # §17.913 — make it runnable on the box the operator actually has.
+    text_out, _tool_notes = repair_unavailable_tools(text_out, environment)
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
+    text_out += unavailable_tools_note(_tool_notes)  # §17.913
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
         "model": getattr(resp, "model", "") if resp else "",
@@ -2315,6 +2318,27 @@ def _is_readonly_command(line: str) -> bool:
     return False
 
 
+# §17.913 — idempotent LIFECYCLE commands are not remedies and cannot be
+# "exhausted": you stop and start a VM many times in one troubleshooting run.
+# Live, the caution banner read "repeats something already tried on this step
+# that did not resolve it (`qm stop 106`)" — technically true, useless as a
+# warning, and it is stapled to the top of a fix whose actual content was
+# correct. A gate that cries wolf on `qm stop` teaches the operator to skip the
+# banner that also carries the real repeats.
+_LIFECYCLE_RE = re.compile(
+    r"^(?:sudo\s+)?(?:qm|pct)\s+(?:start|stop|shutdown|reboot|reset|suspend|resume)\s"
+    r"|^(?:sudo\s+)?systemctl\s+(?:start|stop|restart|reload)\s"
+    r"|^(?:sudo\s+)?(?:docker|virsh)\s+(?:start|stop|restart)\s"
+    r"|^(?:sudo\s+)?reboot\b|^(?:sudo\s+)?shutdown\b",
+    re.IGNORECASE,
+)
+
+
+def _is_lifecycle_command(line: str) -> bool:
+    """True for a start/stop/restart that is legitimately repeated."""
+    return bool(_LIFECYCLE_RE.match((line or "").strip()))
+
+
 def _command_corpus(text_: str, *, fenced: bool) -> set[str]:
     """Normalized commands from a walkthrough (`fenced=True`) or from a raw
     newline/blank-line separated failed-command blob (`fenced=False`).
@@ -2335,11 +2359,12 @@ def _command_corpus(text_: str, *, fenced: bool) -> set[str]:
             continue
         whole = " ".join(block.split())
         # A block of pure diagnostics is exempt wholesale.
-        if whole and not all(_is_readonly_command(ln) for ln in lines):
+        if whole and not all(
+                _is_readonly_command(ln) or _is_lifecycle_command(ln) for ln in lines):
             out.add(whole)
         if len(lines) > 1:
             for ln in lines:
-                if _is_readonly_command(ln):
+                if _is_readonly_command(ln) or _is_lifecycle_command(ln):
                     continue
                 norm = " ".join(ln.split())
                 if norm:
@@ -2453,6 +2478,170 @@ def find_contradicted_facts(text_out: str, environment: dict | None) -> list[dic
                         max(0, m.start() - lo - 60):m.end() - lo + 60].split())[:160],
                 })
     return hits
+
+
+# §17.913 — the engine prescribing a tool the operator's box does not have.
+# Live (session 613dd1df, turns 1423-1428): the environment profile records
+# "Operator runs commands as root@pve in ONE interactive shell", and the engine
+# still emitted `sudo lvextend ... && sudo resize2fs ...`. Proxmox is Debian
+# minimal: no sudo, and root does not need it. The operator got
+# `-bash: sudo: command not found` TWICE, four minutes apart, and the fix in
+# between prescribed `qm config 106` — it never registered the actual error.
+#
+# Two halves. `find_missing_tools` reads the operator's own output for the
+# shell's verdict; `find_unavailable_tools` refuses to hand back a command that
+# depends on one. `sudo` is special-cased: on a root shell the remedy is to DROP
+# it, not to install it.
+# `zsh: command not found: jq` names the SHELL first and the tool last; the
+# bash form is the reverse. The zsh alternative must therefore be tried FIRST,
+# and shell names are never reported as the missing tool.
+_SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"})
+# THREE separate patterns, not one alternation. `zsh: command not found: jq`
+# names the shell first and the tool last; bash is the reverse. With a single
+# alternation the bash branch matched "zsh: command not found", the shell-name
+# filter then discarded it, and the scan resumed PAST the real tool — so the
+# zsh form silently reported nothing.
+_MISSING_TOOL_PATTERNS = (
+    re.compile(r"command not found:\s*([A-Za-z0-9_.\-]{2,40})", re.IGNORECASE),
+    re.compile(r"([A-Za-z0-9_.\-]{2,40}):\s*command not found", re.IGNORECASE),
+    re.compile(r"([A-Za-z0-9_.\-]{2,40}):\s*not found", re.IGNORECASE),
+)
+_ROOT_SHELL_RE = re.compile(r"\broot@|\bas root\b", re.IGNORECASE)
+
+
+def find_missing_tools(operator_text: str) -> list[str]:
+    """Tools the operator's shell reported it does not have."""
+    out: list[str] = []
+    lowered: set[str] = set()
+    for pat in _MISSING_TOOL_PATTERNS:
+        for m in pat.finditer(operator_text or ""):
+            tool = (m.group(1) or "").strip()
+            key = tool.lower().lstrip("-")
+            # a path is a missing FILE, not a missing tool; a shell name is the
+            # reporter, not the subject
+            if tool and "/" not in tool and key not in _SHELL_NAMES and key not in lowered:
+                lowered.add(key)
+                out.append(tool)
+    return out
+
+
+def find_unavailable_tools(text_out: str, missing: list | None) -> list[dict]:
+    """Commands in the draft that invoke a tool this session has PROVEN absent.
+
+    Returns ``[{tool, line}]``. Word-boundary matched inside fenced blocks only,
+    so prose discussing the tool is never flagged.
+    """
+    names = [str(m.get("tool") or "").strip() for m in (missing or [])
+             if isinstance(m, dict) and str(m.get("tool") or "").strip()]
+    if not names or not (text_out or "").strip():
+        return []
+    hits: list[dict] = []
+    seen: set[str] = set()
+    for block in re.findall(r"```[a-z]*\n(.*?)```", text_out, re.S):
+        for raw in block.splitlines():
+            line = " ".join(raw.split())
+            if not line or line.startswith("#"):
+                continue
+            for tool in names:
+                if re.search(rf"(?:^|[|&;]\s*|\s){re.escape(tool)}\s", line + " "):
+                    key = f"{tool}::{line}"
+                    if key not in seen:
+                        seen.add(key)
+                        hits.append({"tool": tool, "line": line[:160]})
+    return hits
+
+
+def operator_is_root(environment: dict | None) -> bool:
+    """§17.913 — does the session's execution context run as root?"""
+    profile = str((environment or {}).get("profile") or "")
+    return bool(_ROOT_SHELL_RE.search(profile))
+
+
+# Must catch `sudo` after a separator too — the live command was
+# `sudo lvextend … && sudo resize2fs …` and a line-anchored rule stripped only
+# the first, leaving a command that still died. Applied ONLY inside fenced
+# blocks: a prose sentence like "you need sudo for this" must survive intact.
+_SUDO_IN_CMD_RE = re.compile(r"(?m)(^|&&|\|\||;|\|)([ \t]*)sudo[ \t]+(?=\S)")
+
+
+# A draft routinely spans TWO machines: the Proxmox host (root, no sudo) and a
+# guest console (an ordinary user, where sudo IS required). Stripping
+# session-wide broke that — the first cut removed `sudo` from `lvextend` and
+# `resize2fs` blocks explicitly introduced with "Run these INSIDE the VM
+# Console", which would have failed as permission-denied. Decide per BLOCK, from
+# the text immediately preceding it.
+_IN_GUEST_MARKER_RE = re.compile(
+    r"inside the (?:vm|guest|container)|vm console|guest console|in the guest|"
+    r"noVNC|[a-z][a-z0-9_-]*@(?!pve\b)[a-z0-9_-]+:~|log ?in(?:ged)? (?:to|into) the vm",
+    re.IGNORECASE,
+)
+_GUEST_LOOKBEHIND = 400
+
+
+def _strip_sudo_in_fences(text_: str) -> tuple[str, int]:
+    """Drop `sudo` from fenced blocks that run on the ROOT host only."""
+    total = 0
+
+    def _fix_block(m: "re.Match") -> str:
+        nonlocal total
+        preceding = text_[max(0, m.start() - _GUEST_LOOKBEHIND):m.start()]
+        if _IN_GUEST_MARKER_RE.search(preceding):
+            return m.group(0)  # targets a guest — sudo is legitimate there
+        body, n = _SUDO_IN_CMD_RE.subn(r"\1\2", m.group(2))
+        total += n
+        return m.group(1) + body + m.group(3)
+
+    out = re.sub(r"(```[a-z]*\n)(.*?)(```)", _fix_block, text_ or "", flags=re.S)
+    return out, total
+
+
+def repair_unavailable_tools(text_out: str, environment: dict | None) -> tuple[str, list[str]]:
+    """§17.913 — make the draft runnable on the box the operator actually has.
+
+    Returns ``(text, notes)``.
+
+    * ``sudo`` on a ROOT shell is REMOVED, not flagged. Root does not need it and
+      Proxmox (Debian minimal) does not ship it, so the prefix is pure breakage:
+      live, `sudo lvextend …` died with `sudo: command not found` twice.
+      Stripping is safe by construction — every command runs with strictly the
+      same privileges.
+    * Any OTHER proven-missing tool gets a note saying how to obtain it, because
+      "what the operator has available and how to attain it" is the actual
+      question; silently emitting a command they cannot run is not an answer.
+    """
+    if not (text_out or "").strip():
+        return text_out, []
+    missing = [str(m.get("tool") or "").strip()
+               for m in ((environment or {}).get("missing_tools") or [])
+               if isinstance(m, dict) and str(m.get("tool") or "").strip()]
+    missing_l = {t.lower() for t in missing}
+    notes: list[str] = []
+    out = text_out
+
+    if "sudo" in missing_l or operator_is_root(environment):
+        fixed, n = _strip_sudo_in_fences(out)
+        if n:
+            out = fixed
+            why = ("this shell has no `sudo`" if "sudo" in missing_l
+                   else "you are already root")
+            notes.append(f"dropped `sudo` from {n} command(s) — {why}")
+
+    for tool in missing:
+        if tool.lower() == "sudo":
+            continue
+        if find_unavailable_tools(out, [{"tool": tool}]):
+            notes.append(
+                f"`{tool}` is not installed on this box — install it first with "
+                f"`apt-get install -y {tool}`, or use an alternative")
+    return out, notes
+
+
+def unavailable_tools_note(notes: list[str]) -> str:
+    """Operator-facing footer for what was repaired or is still missing."""
+    if not notes:
+        return ""
+    return ("\n\n---\nℹ️ **Adjusted for your system:** "
+            + "; ".join(notes) + ".")
 
 
 def find_guess_before_look(text_out: str) -> list[dict]:
@@ -3015,6 +3204,27 @@ async def generate_fix(
     parts.extend(_render_memory_or_legacy(environment, operator_notes))
     if conversation and conversation.strip():  # §17.687 — recent back-and-forth
         parts.append(conversation.strip())
+    # §17.914 — SALIENCE. The confirmed state is already in the session-memory
+    # block, but that block runs ~12k chars and the model argued around it
+    # ("Even if the configuration says `scsi0` is first…") while re-asking for
+    # `qm config 106`. Repeat the records for the resources THIS error is about,
+    # immediately beside the error, where they cannot be skimmed past.
+    try:
+        from app.modules.assist_state import render_system_state
+        _st = ((environment or {}).get("system_state")
+               if isinstance((environment or {}).get("system_state"), dict) else {})
+        _ids = set(re.findall(r"\b(\d{2,5})\b", error_text or ""))
+        _relevant = {k: v for k, v in _st.items() if k in _ids} or _st
+        _sb = render_system_state(_relevant)
+        if _sb:
+            parts.append(
+                "## Already gathered — do NOT ask the operator to re-run these\n"
+                + _sb
+                + "\n\nThese values were read from the operator's own output. "
+                  "Use them directly. Asking for them again is a failure of this "
+                  "step, not a safe default.")
+    except Exception as exc:  # noqa: BLE001 — salience is an enhancement
+        logger.debug("assist_fix_state_salience_failed: %s", exc)
     parts.append(f"## Error the operator hit\n{error_text.strip()}")
     research_block = _render_research_block(sources)
     if research_block:
@@ -3109,12 +3319,16 @@ async def generate_fix(
     shell_meta_fix: list[dict] = []  # §17.906
     look_meta_fix: list[dict] = []  # §17.907
     contra_meta_fix: list[dict] = []  # §17.908
+    redundant_meta_fix: list[dict] = []  # §17.914
 
     _banned_list = (environment or {}).get("banned_values") or []
     _kinds = resource_kinds_from_facts(environment)  # §17.898
 
+    _known_state = ((environment or {}).get("system_state")
+                    if isinstance((environment or {}).get("system_state"), dict) else {})
+
     def _gate(draft: str) -> tuple[list[str], list[str], list[dict], list[dict],
-                                   list[dict], list[dict], list[dict]]:
+                                   list[dict], list[dict], list[dict], list[dict]]:
         hits_ = (find_repeated_failed(draft, failed_commands)
                  if failure_streak >= 1 and (failed_commands or "").strip() else [])
         novel_ = (find_novel_urls(draft, user + "\n" + (failed_commands or ""))
@@ -3132,26 +3346,50 @@ async def generate_fix(
         # does not know the current state, so it must print it before changing
         # it. Same knob as the novel-URL gate: below the threshold a direct fix
         # is usually right and a mandatory discovery step would just add noise.
+        # §17.914 — "look before you mutate" is SATISFIED when the state is
+        # already on file. The two gates must agree: §17.907 exists to stop
+        # blind guessing, and a draft acting on values read from the operator's
+        # own `qm config` output is the opposite of a guess. Without this, the
+        # moment §17.914 got the model to USE the records, §17.907 started
+        # flagging it for not re-reading them — the engine would be warned for
+        # doing the right thing.
         look_ = (find_guess_before_look(draft)
                  if failure_streak >= settings.assist_fix_streak_threshold else [])
+        if look_ and _known_state:
+            _ids = set(re.findall(r"\b(\d{2,5})\b", look_[0].get("command") or ""))
+            if _ids and _ids <= set(_known_state):
+                look_ = []  # every resource it touches is already recorded
         # §17.908 — disowning a CONFIRMED fact is wrong at any streak.
         contra_ = find_contradicted_facts(draft, environment)
-        return hits_, novel_, banned_, reskind_, shell_, look_, contra_
+        # §17.914 — re-asking for state already on file is wrong at ANY streak.
+        from app.modules.assist_state import find_redundant_discovery
+        redundant_ = find_redundant_discovery(draft, _known_state)
+        return hits_, novel_, banned_, reskind_, shell_, look_, contra_, redundant_
 
     if text_out:
         draft_src = text_out  # §17.907 — the text the directive is reasoning about
         (hits, novel, banned_hits, reskind_hits,
-         shell_hits, look_hits, contra_hits) = _gate(text_out)
+         shell_hits, look_hits, contra_hits, redundant_hits) = _gate(text_out)
         if (hits or novel or banned_hits or reskind_hits or shell_hits
-                or look_hits or contra_hits):
+                or look_hits or contra_hits or redundant_hits):
             logger.warning(
                 "assist_fix_gate_violation node_key=%s repeats=%d novel_urls=%d "
                 "banned=%d reskind=%d shell_unsafe=%d guess_before_look=%d "
-                "contradicted_facts=%d (regenerating)",
+                "contradicted_facts=%d redundant_discovery=%d (regenerating)",
                 node_key, len(hits), len(novel), len(banned_hits), len(reskind_hits),
                 len(shell_hits), len(look_hits), len(contra_hits),
+                len(redundant_hits),
             )
             directive = ["\n\n---\nREGENERATION NOTICE:"]
+            if redundant_hits:  # §17.914 — you already have this
+                directive.append(
+                    "You asked the operator to re-run a DISCOVERY command whose "
+                    "answer is ALREADY on file, read from their own earlier "
+                    "output. Use the recorded values; do not ask again, and do "
+                    "not state anything that contradicts them:\n"
+                    + "\n".join(
+                        f"- `{h['command']}` — already known: {h['known']}"
+                        for h in redundant_hits[:3]))
             if look_hits:  # §17.907 — method before content
                 # The probe must name the resource THIS step is about. Sorting
                 # the whole ledger and truncating suggested `pct config 102`
@@ -3240,10 +3478,10 @@ async def generate_fix(
             regen_text = (regen.text or "").strip() if (regen and regen.success) else ""
             if regen_text:
                 (rehits, renovel, rebanned, rereskind,
-                 reshell, relook, recontra) = _gate(regen_text)
+                 reshell, relook, recontra, reredundant) = _gate(regen_text)
                 if (not rehits and not renovel and not rebanned
                         and not rereskind and not reshell and not relook
-                        and not recontra):
+                        and not recontra and not reredundant):
                     text_out = regen_text
                 else:
                     repeat_meta, novel_meta, banned_meta_fix = rehits, renovel, rebanned
@@ -3251,7 +3489,12 @@ async def generate_fix(
                     shell_meta_fix = reshell  # §17.906
                     look_meta_fix = relook  # §17.907
                     contra_meta_fix = recontra  # §17.908
+                    redundant_meta_fix = reredundant  # §17.914
                     warn_bits = []
+                    if reredundant:
+                        warn_bits.append(
+                            "asks you to re-run `" + reredundant[0]["command"]
+                            + "`, whose answer the engine already has")
                     if recontra:
                         warn_bits.append(
                             "calls a confirmed value fake ("
@@ -3300,8 +3543,11 @@ async def generate_fix(
                 shell_meta_fix = shell_hits  # §17.906
                 look_meta_fix = look_hits  # §17.907
                 contra_meta_fix = contra_hits  # §17.908
+                redundant_meta_fix = redundant_hits  # §17.914
                 text_out = (
                     "⚠️ **Caution:** this fix includes "
+                    + ("a request to re-run a command already answered "
+                       if redundant_hits else "")
                     + ("a claim that a confirmed value is fake " if contra_hits else "")
                     + ("a change made without reading the current state first "
                        if look_hits else "")
@@ -3316,8 +3562,11 @@ async def generate_fix(
     # §17.897 — every command the operator is handed must be copy-pasteable,
     # whichever path produced it. The fenced-block mandate is a prompt rule and
     # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
+    # §17.913 — make it runnable on the box the operator actually has.
+    text_out, _tool_notes = repair_unavailable_tools(text_out, environment)
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
+    text_out += unavailable_tools_note(_tool_notes)  # §17.913
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
         "model": getattr(resp, "model", "") if resp else "",
@@ -3336,6 +3585,7 @@ async def generate_fix(
         "shell_unsafe_violations": shell_meta_fix,  # §17.906
         "guess_before_look_violations": look_meta_fix,  # §17.907
         "contradicted_fact_violations": contra_meta_fix,  # §17.908
+        "redundant_discovery_violations": redundant_meta_fix,  # §17.914
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"

@@ -495,6 +495,42 @@ async def derive_turn_memory(
         # §17.908 — a destroy in the operator's own output invalidates the
         # steps that produced the resource. Surface it as a constraint note
         # (§17.677 turns that into a re-plan proposal); never auto-mutate.
+        # §17.914 — structured resource state from the operator's own pasted
+        # command output. Deterministic; no model call.
+        try:
+            from app.modules.assist_state import parse_system_state
+            observed = parse_system_state(msg)
+            if observed:
+                await set_environment(
+                    session_id=session_id, system_state=observed, db=db)
+                result["system_state_observed"] = sorted(observed)
+                logger.info(
+                    "assist_system_state_observed session_id=%s resources=%r",
+                    session_id, sorted(observed))
+        except Exception as e:  # noqa: BLE001 — the scribe must never break the turn
+            logger.warning("assist_system_state_failed session_id=%s err=%r",
+                           session_id, e)
+        # §17.913 — the shell's own verdict on what it does not have. Recorded
+        # unconditionally from every operator message, like the facts ledger.
+        try:
+            tools = assist_guide.find_missing_tools(msg)
+            if tools:
+                host = ""
+                m = re.search(r"([A-Za-z0-9_.\-]+@[A-Za-z0-9_.\-]+)", msg)
+                if m:
+                    host = m.group(1)
+                await set_environment(
+                    session_id=session_id,
+                    missing_tools=[{"tool": t, "host": host} for t in tools],
+                    db=db,
+                )
+                result["missing_tools_added"] = tools
+                logger.info(
+                    "assist_missing_tools_recorded session_id=%s tools=%r host=%r",
+                    session_id, tools, host)
+        except Exception as e:  # noqa: BLE001 — the scribe must never break the turn
+            logger.warning("assist_missing_tools_failed session_id=%s err=%r",
+                           session_id, e)
         destroyed = await flag_steps_for_destroyed_resources(
             session_id=session_id, message=msg, db=db,
         )
