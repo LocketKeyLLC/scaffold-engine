@@ -2246,18 +2246,176 @@ def _url_skeleton(url: str) -> tuple:
         return ("", frozenset([url]))
 
 
+# §17.906 — commands that only READ state. Re-running one is never a "repeat"
+# worth blocking: diagnose-first is the behaviour the escalation directive is
+# actively asking for, so flagging `qm config 106` as a repeat would fight the
+# very fix it is meant to enable. First token after an optional `sudo`, plus the
+# verb+subcommand pairs whose mutating siblings share a binary (`qm config` is
+# read-only, `qm set` is not).
+_READONLY_VERBS = frozenset({
+    "ls", "cat", "less", "head", "tail", "grep", "egrep", "rg", "find", "stat",
+    "df", "du", "free", "lsblk", "blkid", "lscpu", "lsmod", "lspci", "lsusb",
+    "ip", "ping", "ss", "netstat", "ps", "top", "uname", "whoami", "id",
+    "which", "whereis", "echo", "printf", "pwd", "date", "uptime", "hostname",
+    "env", "printenv", "journalctl", "dmesg", "true", "test", "file", "wc",
+})
+_READONLY_PAIRS = frozenset({
+    ("qm", "config"), ("qm", "list"), ("qm", "status"), ("qm", "showcmd"),
+    ("pct", "config"), ("pct", "list"), ("pct", "status"),
+    ("pvesm", "list"), ("pvesm", "status"), ("pvesh", "get"),
+    ("systemctl", "status"), ("systemctl", "is-active"),
+    ("systemctl", "is-enabled"), ("systemctl", "list-units"),
+    ("docker", "ps"), ("docker", "logs"), ("docker", "inspect"),
+    ("git", "status"), ("git", "log"), ("git", "diff"), ("git", "show"),
+    ("apt", "list"), ("apt", "show"), ("apt-cache", "policy"),
+    # index refresh only — a near-universal prerequisite LINE, and the most
+    # likely false positive now that matching is line-granular. Safe: no fix
+    # ever hinges on being stopped from re-running it.
+    ("apt", "update"), ("apt-get", "update"),
+    ("zpool", "status"), ("zfs", "list"),
+})
+# A fetch that writes to disk or pipes into a shell is a real action (the live
+# Radarr guess-cycle was exactly a repeated `curl -o`); a bare probe is not.
+_FETCH_WRITES_RE = re.compile(r"(^|\s)(-o|-O|--output|--remote-name)(\s|=|$)|\|\s*(ba)?sh\b")
+
+
+def _is_readonly_command(line: str) -> bool:
+    """True when `line` only inspects state, so repeating it is legitimate.
+
+    A compound is read-only only if EVERY segment is: `apt update` alone is an
+    index refresh, but `apt update && apt install -y openssh-server` installs.
+    Pipes are deliberately NOT split — `curl … | sh` must stay one segment so
+    `_FETCH_WRITES_RE` sees it.
+    """
+    parts = [p for p in re.split(r"&&|\|\||;", line or "") if p.strip()]
+    if len(parts) > 1:
+        return all(_is_readonly_command(p) for p in parts)
+    s = (line or "").strip()
+    if not s or s.startswith("#"):
+        return True  # comments/blank carry no action
+    if s.startswith("$"):  # a copied `$ cmd` prompt marker, not a comment marker
+        s = s[1:].strip()
+    toks = s.split()
+    while toks and toks[0] in ("sudo", "-E", "time", "\\"):
+        toks = toks[1:]
+    if not toks:
+        return True
+    verb = toks[0].rsplit("/", 1)[-1]
+    if verb in _READONLY_VERBS:
+        return True
+    if len(toks) >= 2 and (verb, toks[1]) in _READONLY_PAIRS:
+        return True
+    if verb in ("curl", "wget"):
+        return not _FETCH_WRITES_RE.search(s)
+    return False
+
+
+def _command_corpus(text_: str, *, fenced: bool) -> set[str]:
+    """Normalized commands from a walkthrough (`fenced=True`) or from a raw
+    newline/blank-line separated failed-command blob (`fenced=False`).
+
+    §17.906 — indexes BOTH whole blocks and their individual mutating lines.
+    Block-only granularity was the hole that made the whole gate inert: a fix
+    that re-prescribed one already-failed line inside a fresh 3-line block
+    matched nothing.
+    """
+    out: set[str] = set()
+    if fenced:
+        blocks = re.findall(r"```[a-z]*\n(.*?)```", text_ or "", re.S)
+    else:
+        blocks = re.split(r"\n\s*\n", text_ or "")
+    for block in blocks:
+        lines = [ln for ln in (block or "").splitlines() if ln.strip()]
+        if not lines:
+            continue
+        whole = " ".join(block.split())
+        # A block of pure diagnostics is exempt wholesale.
+        if whole and not all(_is_readonly_command(ln) for ln in lines):
+            out.add(whole)
+        if len(lines) > 1:
+            for ln in lines:
+                if _is_readonly_command(ln):
+                    continue
+                norm = " ".join(ln.split())
+                if norm:
+                    out.add(norm)
+    return out
+
+
+# §17.906 — a shell metacharacter sitting INSIDE an unquoted argument value.
+# Live (T23, turns 1334-1337): the engine emitted
+#   qm set 106 --boot order=scsi0;net0;cdrom
+# The shell split that at each `;`, so Proxmox saw only `order=scsi0` and bash
+# then tried to run `net0` and `cdrom` as commands. The engine's next turn
+# diagnosed it as the OPERATOR's typo ("you used semicolons"), and its
+# "correction" (commas) was also wrong — three turns burned on a defect the
+# engine had authored itself. This is pure syntax, so it is decidable here
+# rather than left to a prompt rule.
+#
+# Only an INTERNAL metachar counts: `order=scsi0;net0` is broken, while a
+# TRAILING one (`FOO=1; echo $FOO`) is an ordinary command separator, and a
+# bare `&&`/`|` token carries no `=` and is never examined.
+_QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_INTERNAL_METACHAR_RE = re.compile(r"(?<!\\)[;&|][^\s;&|]")
+
+
+def find_shell_unsafe_commands(text_out: str) -> list[dict]:
+    """Fenced command lines whose unquoted `--flag=value` token carries a shell
+    metacharacter the shell will act on. Returns ``[{line, token}]``."""
+    hits: list[dict] = []
+    seen: set[str] = set()
+    for block in re.findall(r"```[a-z]*\n(.*?)```", text_out or "", re.S):
+        for raw in (block or "").splitlines():
+            ln = raw.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            # Quoted spans are safe by construction — blank them before tokenizing.
+            bare = _QUOTED_SPAN_RE.sub(" ", ln)
+            for tok in bare.split():
+                if "=" not in tok:
+                    continue
+                value = tok.split("=", 1)[1]
+                if _INTERNAL_METACHAR_RE.search(value):
+                    norm = " ".join(ln.split())
+                    if norm not in seen:
+                        seen.add(norm)
+                        hits.append({"line": norm, "token": tok})
+                    break
+    return hits
+
+
 def find_repeated_failed(text_out: str, failed_commands: str) -> list[str]:
-    """§17.882/883 — deterministic repeat detection: which already-failed
-    commands or URLs does this new walkthrough prescribe AGAIN — exactly, or
-    as a version-guess VARIATION of the same failing endpoint family? The
-    §17.882 exact matcher blocked identical repeats and the model responded by
-    mutating the version tag three times; prompt rules are guidance, this is
-    enforcement."""
+    """§17.882/883/906 — deterministic repeat detection: which already-failed
+    commands or URLs does this new walkthrough prescribe AGAIN — exactly, as an
+    individual line lifted into a new block, or as a version-guess VARIATION of
+    the same failing endpoint family? The §17.882 exact matcher blocked
+    identical repeats and the model responded by mutating the version tag three
+    times; prompt rules are guidance, this is enforcement.
+
+    §17.906 — the command half of this gate had been DEAD since §17.882. The
+    old line wrapped the whole `\n\n`-joined failed-command list in ONE fence,
+    so `_normalized_commands` collapsed every failed command into a single
+    whitespace-joined blob; set-membership then could not match any individual
+    command, and the gate returned [] whenever more than one command had failed
+    — i.e. in every real troubleshooting session. Live cost (session
+    613dd1df/T23): `qm destroy 106 --purge` prescribed FOUR times, with no
+    warning banner, across a 27-hour Ubuntu-install loop. The URL half kept
+    working (URLs are regex-extracted individually), which is why the gate
+    looked healthy.
+    """
     import re as _re
     if not (text_out or "").strip() or not (failed_commands or "").strip():
         return []
-    new_cmds = _normalized_commands(text_out)
-    old_cmds = _normalized_commands(f"```\n{failed_commands}\n```")
+    new_cmds = _command_corpus(text_out, fenced=True)
+    old_cmds = _command_corpus(failed_commands, fenced=False)
+    # URLs stay matched individually and independently of command granularity.
+    new_cmds |= {u for u in _normalized_commands(text_out) if u.startswith("http")}
+    old_urls_raw = {
+        u.rstrip(".,;")
+        for u in _re.findall(r"https?://[^\s\"\'`\)\]]+", failed_commands or "")
+        if not (_LOCAL_HOST_RE and _LOCAL_HOST_RE.match(u))
+    }
+    old_cmds |= old_urls_raw
     hits = {c for c in new_cmds if c in old_cmds}
     # §17.883 — version-masked skeleton match on URLs only.
     old_urls = {u for u in old_cmds if u.startswith("http")}
@@ -2560,9 +2718,16 @@ def guide_integrity_warning(text_out: str, user_prompt: str, failed_commands: st
     if (failed_commands or "").strip():
         hits = find_repeated_failed(text_out, failed_commands)
         if hits:
-            bits.append("re-prescribes something that already FAILED in this "
-                        "session's troubleshooting (" +
+            bits.append("re-prescribes something ALREADY TRIED on this step "
+                        "that did not resolve it (" +
                         "; ".join(f"`{h[:70]}`" for h in hits[:2]) + ")")
+    # §17.906 — a guide emits commands too, and the live `order=scsi0;net0;cdrom`
+    # reached the operator this way. Guides get flag-don't-regen (§17.887).
+    shell_unsafe = find_shell_unsafe_commands(text_out)
+    if shell_unsafe:
+        bits.append("contains a command the shell will SPLIT on an unquoted "
+                    "separator — only the text before it reaches the program (" +
+                    "; ".join(f"`{h['token'][:70]}`" for h in shell_unsafe[:2]) + ")")
     novel = find_novel_urls(text_out, (user_prompt or "") + "\n" + (failed_commands or ""))
     if novel:
         bits.append("contains download URL(s) not traceable to research, the "
@@ -2742,11 +2907,12 @@ async def generate_fix(
     banned_meta_fix: list[dict] = []  # §17.893
     novel_meta: list[str] = []
     reskind_meta_fix: list[dict] = []  # §17.898
+    shell_meta_fix: list[dict] = []  # §17.906
 
     _banned_list = (environment or {}).get("banned_values") or []
     _kinds = resource_kinds_from_facts(environment)  # §17.898
 
-    def _gate(draft: str) -> tuple[list[str], list[str], list[dict], list[dict]]:
+    def _gate(draft: str) -> tuple[list[str], list[str], list[dict], list[dict], list[dict]]:
         hits_ = (find_repeated_failed(draft, failed_commands)
                  if failure_streak >= 1 and (failed_commands or "").strip() else [])
         novel_ = (find_novel_urls(draft, user + "\n" + (failed_commands or ""))
@@ -2757,17 +2923,30 @@ async def generate_fix(
         # exactly where it surfaced live (the fix that "corrected" pct enter
         # still had to be told 106 was a VM).
         reskind_ = find_resource_kind_violations(draft, _kinds)
-        return hits_, novel_, banned_, reskind_
+        # §17.906 — a shell metachar inside an unquoted argument value is a
+        # SYNTAX defect: wrong at any streak, and decidable without a model.
+        shell_ = find_shell_unsafe_commands(draft)
+        return hits_, novel_, banned_, reskind_, shell_
 
     if text_out:
-        hits, novel, banned_hits, reskind_hits = _gate(text_out)
-        if hits or novel or banned_hits or reskind_hits:
+        hits, novel, banned_hits, reskind_hits, shell_hits = _gate(text_out)
+        if hits or novel or banned_hits or reskind_hits or shell_hits:
             logger.warning(
                 "assist_fix_gate_violation node_key=%s repeats=%d novel_urls=%d "
-                "banned=%d reskind=%d (regenerating)",
+                "banned=%d reskind=%d shell_unsafe=%d (regenerating)",
                 node_key, len(hits), len(novel), len(banned_hits), len(reskind_hits),
+                len(shell_hits),
             )
             directive = ["\n\n---\nREGENERATION NOTICE:"]
+            if shell_hits:  # §17.906 — syntax first: it is the least arguable
+                directive.append(
+                    "Your previous draft emitted command(s) the SHELL WILL "
+                    "SPLIT: an unquoted `;`, `&` or `|` sits inside an argument "
+                    "value, so only the text before it reaches the program and "
+                    "the rest runs as separate commands. Quote the value or use "
+                    "the separator the program actually expects:\n"
+                    + "\n".join(f"- `{h['line']}` — the token `{h['token']}`"
+                                 for h in shell_hits[:5]))
             if reskind_hits:
                 directive.append(
                     "Your previous draft addressed the wrong RESOURCE TYPE "
@@ -2784,9 +2963,19 @@ async def generate_fix(
                                 for b in banned_hits[:5]))
             if hits:
                 directive.append(
-                    "Your previous draft prescribed command(s)/URL(s) that ALREADY "
-                    "FAILED for this operator (exactly or as a version-guess "
-                    "variation of the same failing endpoint):\n"
+                    # §17.906 — the wording used to assert these commands
+                    # "ALREADY FAILED". For the live destroy/recreate loop that
+                    # was literally false: `qm destroy 106 --purge` succeeded
+                    # every time, it just never resolved the symptom — so a
+                    # model handed that premise can reject it and re-emit.
+                    # State the actual, unarguable fact instead: it was tried
+                    # on this step and the step is still not done.
+                    "Your previous draft re-prescribed command(s)/URL(s) ALREADY "
+                    "TRIED on this step, which did NOT resolve it — either the "
+                    "command errored, or it ran cleanly and the operator came "
+                    "back with the same symptom. Re-running them cannot help "
+                    "(this includes version-guess variations of the same "
+                    "failing endpoint):\n"
                     + "\n".join(f"- {h}" for h in hits[:5]))
             if novel:
                 directive.append(
@@ -2806,13 +2995,21 @@ async def generate_fix(
             ])
             regen_text = (regen.text or "").strip() if (regen and regen.success) else ""
             if regen_text:
-                rehits, renovel, rebanned, rereskind = _gate(regen_text)
-                if not rehits and not renovel and not rebanned and not rereskind:
+                rehits, renovel, rebanned, rereskind, reshell = _gate(regen_text)
+                if (not rehits and not renovel and not rebanned
+                        and not rereskind and not reshell):
                     text_out = regen_text
                 else:
                     repeat_meta, novel_meta, banned_meta_fix = rehits, renovel, rebanned
                     reskind_meta_fix = rereskind
+                    shell_meta_fix = reshell  # §17.906
                     warn_bits = []
+                    if reshell:
+                        warn_bits.append(
+                            "contains a command the shell will split on an "
+                            "unquoted separator ("
+                            + "; ".join(f"`{h['token'][:70]}`" for h in reshell[:2])
+                            + ")")
                     if rereskind:  # §17.898
                         warn_bits.append(
                             "addresses the wrong resource type ("
@@ -2822,7 +3019,8 @@ async def generate_fix(
                             + ")")
                     if rehits:
                         warn_bits.append(
-                            "repeats something that already failed ("
+                            "repeats something already tried on this step that "
+                            "did not resolve it ("
                             + "; ".join(f"`{h[:70]}`" for h in rehits[:2]) + ")")
                     if renovel:
                         warn_bits.append(
@@ -2842,10 +3040,12 @@ async def generate_fix(
             else:
                 repeat_meta, novel_meta, banned_meta_fix = hits, novel, banned_hits
                 reskind_meta_fix = reskind_hits  # §17.898
+                shell_meta_fix = shell_hits  # §17.906
                 text_out = (
                     "⚠️ **Caution:** this fix includes "
+                    + ("a shell-unsafe command " if shell_hits else "")
                     + ("a wrong-resource-type command " if reskind_hits else "")
-                    + ("already-failed command(s) " if hits else "")
+                    + ("already-tried command(s) " if hits else "")
                     + ("unverified URL(s) " if novel else "")
                     + ("a ruled-out value " if banned_hits else "")
                     + "the integrity gate flagged. Treat with suspicion; reply "
@@ -2870,6 +3070,7 @@ async def generate_fix(
         "novel_url_violations": novel_meta,
         "banned_value_violations": banned_meta_fix,  # §17.893
         "resource_kind_violations": reskind_meta_fix,  # §17.898
+        "shell_unsafe_violations": shell_meta_fix,  # §17.906
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"

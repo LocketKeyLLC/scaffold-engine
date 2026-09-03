@@ -1189,7 +1189,7 @@ async def _fix_failure_streak(
                 SELECT content FROM assist_turns
                  WHERE session_id = :sid AND node_key = :nk
                    AND role = 'assistant' AND kind = 'fix'
-                 ORDER BY created_at DESC, id DESC LIMIT 12
+                 ORDER BY created_at DESC, id DESC LIMIT 40
             """),
             {"sid": session_id, "nk": node_key},
         )).mappings().all()
@@ -1200,7 +1200,15 @@ async def _fix_failure_streak(
                 b = block.strip()
                 if b and b not in cmds:
                     cmds.append(b)
-        return streak, "\n\n".join(cmds[:10])
+        # §17.906 — was LIMIT 12 / cmds[:10]. On the live T23 marathon the step
+        # accumulated 23 distinct commands across 13 fix turns, so the cap
+        # silently aged out the EARLIEST failures — exactly the ones a long
+        # loop circles back to (`qm set 106 --boot order=ide2` and
+        # `--boot order=cdrom` were both dropped, then re-prescribed). The
+        # caller truncates to [:3000] for the PROMPT; the gate reads the full
+        # string, so widening here costs no tokens and re-arms late-marathon
+        # repeat detection.
+        return streak, "\n\n".join(cmds[:40])
     except Exception as e:  # noqa: BLE001 — escalation is an enhancement, never a blocker
         # §17.882b — WARNING, not debug: a swallowed error here silently
         # disables the whole no-repeat enforcement stack (lived it).
