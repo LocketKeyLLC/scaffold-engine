@@ -1451,6 +1451,20 @@ async def reopen_denied_step(*, session_id: str, message: str, db) -> dict | Non
         return None
 
 
+# §17.908 — a bolded imperative is a prescription the operator acts on, and
+# reversing one silently is the same defect as re-issuing a dead command.
+# Anchored to an instruction verb so ordinary emphasis is not swept up.
+# `type` and `enter` are excluded on purpose: they are nouns as often as verbs
+# here, and **Type of Install:** is a LABEL, not an instruction. A directive also
+# has to SAY something — bare **do not** emphasis is not a prescription.
+_BOLD_DIRECTIVE_RE = __import__("re").compile(
+    r"\*\*((?:select|choose|pick|click|press|use|set|enable|disable|"
+    r"skip|avoid|do not|don't|leave|keep|accept|decline)\b[^*]{0,200})\*\*",
+    __import__("re").IGNORECASE,
+)
+_MIN_DIRECTIVE_CHARS = 15
+
+
 async def _prescribed_commands(*, session_id: str, node_key: str, db) -> str:
     """§17.898 — what the ENGINE told the operator to run on this step.
 
@@ -1474,19 +1488,39 @@ async def _prescribed_commands(*, session_id: str, node_key: str, db) -> str:
             text("""
                 SELECT kind, content FROM assist_turns
                  WHERE session_id = :sid AND node_key = :nk AND role = 'assistant'
-                 ORDER BY created_at DESC, id DESC LIMIT 12
+                 ORDER BY created_at DESC, id DESC LIMIT 40
             """),
             {"sid": session_id, "nk": node_key},
         )).mappings().all()
-        out: list[str] = []
+        # §17.908 — SEPARATE budgets. A single shared cap let commands from the
+        # newest turns crowd out prose from older ones: on the live step the
+        # contradicted recommendation sat 14 turns back, well inside the row
+        # window, but every slot was already spent on commands before the loop
+        # reached it. (Third instance of this shape today — see §17.906's
+        # cmds[:10] and the LIMIT 12 row window.)
+        cmds: list[str] = []
+        directives: list[str] = []
         seen: set[str] = set()
         for r in rows:
-            for block in _re.findall(r"```[a-z]*\n(.*?)```", r.get("content") or "", _re.S):
+            kind = r.get("kind") or "reply"
+            content = r.get("content") or ""
+            for block in _re.findall(r"```[a-z]*\n(.*?)```", content, _re.S):
                 b = block.strip()
                 if b and b not in seen:
                     seen.add(b)
-                    out.append(f"[{r.get('kind') or 'reply'}] {b}")
-        return "\n\n".join(out[:12])
+                    cmds.append(f"[{kind}] {b}")
+            # §17.908 — PROSE prescriptions, not just commands. Live T23: turn
+            # 1362 said **Select "Ubuntu Server" (the full version), NOT the
+            # minimized version.**; turn 1382 said **Select "Ubuntu Server
+            # (minimized)"** — a straight reversal, unacknowledged, because only
+            # fenced COMMANDS were ever fed back and the advice was prose. An
+            # installer choice is a prescription exactly like a command is.
+            for bold in _BOLD_DIRECTIVE_RE.findall(content):
+                d = " ".join(bold.split())
+                if len(d) >= _MIN_DIRECTIVE_CHARS and d not in seen:
+                    seen.add(d)
+                    directives.append(f"[{kind} · told the operator] {d}")
+        return "\n\n".join(cmds[:14] + directives[:10])
     except Exception as e:  # noqa: BLE001 — §17.882b: log LOUD, never swallow
         logger.warning("assist_prescribed_commands_failed session_id=%s err=%r",
                        session_id, e)

@@ -28,6 +28,7 @@ from app.modules.assist_directives import (  # §17.897 — full output contract
     apply_recommendation,  # §17.903
     apply_screen_grounding,
     promote_inline_commands,
+    strip_operator_meta_preamble,
 )
 
 logger = logging.getLogger("scaffold.assist_guide")
@@ -466,5 +467,6 @@ async def research_one(
         if resp and resp.success:
             answer = (resp.text or "").strip() or None
             if answer:  # §17.897 — code-enforced copy-paste format
+                answer = strip_operator_meta_preamble(answer)  # §17.908
                 answer = promote_inline_commands(answer)
     return {"question": question, "sources": sources, "answer": answer}

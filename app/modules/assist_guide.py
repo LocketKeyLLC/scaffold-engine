@@ -193,6 +193,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     apply_location_callout,
     apply_recommendation,  # §17.903
     promote_inline_commands,  # §17.897
+    strip_operator_meta_preamble,  # §17.908
     _PROBLEM_SOLVING_FRAMING,
     _NEXT_CALLOUT_DIRECTIVE,
     _GROUND_OR_ASK_DIRECTIVE,
@@ -2149,6 +2150,7 @@ async def generate_guidance(
     # §17.897 — every command the operator is handed must be copy-pasteable,
     # whichever path produced it. The fenced-block mandate is a prompt rule and
     # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
+    text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
@@ -2384,6 +2386,93 @@ def find_shell_unsafe_commands(text_out: str) -> list[dict]:
     return hits
 
 
+# §17.907 — the METHOD failure behind the live boot-order cycle. Across turns
+# 1333-1341 the engine prescribed five state-CHANGING commands in a row —
+# `--boot order=scsi0;net0;cdrom`, then `,`-separated, then `order=cdrom`, then
+# `order=ide2`, then attaching ide2 — and never once ran `qm config 106`, whose
+# output names the actual boot order and the actual attached devices, i.e. the
+# answer. The engine had a shell (through the operator) and never LOOKED.
+#
+# §17.906 stops it re-prescribing what already failed; that leaves it free to
+# guess something NEW every turn, which is the same disease. This gate closes
+# the loop: once a step has burned the escalation threshold in fixes, the
+# engine has PROVED it does not know the current state, so the next thing it
+# hands over must be a command that PRINTS that state — not another change.
+# §17.908 — the draft calls a value fake while the facts ledger records it as
+# REAL. Live (T23, turn 1377), in one message:
+#   "The previous command failed because it contained a placeholder
+#    (`ubuntu-22.04.3-live-server-amd64.iso`) instead of the actual filename.
+#    The computer tried to find a file literally named
+#    `ubuntu-22.04.3-live-server-amd64.iso`, which does not exist."
+#   …and the command it then prescribed used that exact string.
+# The facts ledger, written from the operator's own `pvesm list` output, said:
+#   "The following ISOs are available on local storage:
+#    ubuntu-22.04.3-live-server-amd64.iso and ubuntu-26.04-live-server-amd64.iso"
+# So it disowned a confirmed fact, and contradicted itself inside one turn.
+# Sentence boundaries are useless here: the values themselves contain dots
+# (`ubuntu-22.04.3-live-server-amd64.iso`), so a `[^.!?]*` sentence regex stops
+# INSIDE the filename and finds nothing. Match the claim word, then look for
+# backticked values in a character window around it.
+_FAKE_VALUE_CLAIM_RE = re.compile(
+    r"\b(?:placeholder|does\s+not\s+exist|doesn't\s+exist|never\s+existed|"
+    r"not\s+the\s+actual|example\s+(?:file)?name|dummy|made[\s-]up|fictitious)\b",
+    re.IGNORECASE,
+)
+_BACKTICKED_RE = re.compile(r"`([^`\n]{3,120})`")
+_CLAIM_WINDOW = 220
+
+
+def find_contradicted_facts(text_out: str, environment: dict | None) -> list[dict]:
+    """Values the draft calls fake/absent that the confirmed facts record as
+    real. Returns ``[{value, claim}]``.
+
+    Requires BOTH an explicit does-not-exist claim and, near it, a backticked
+    value that appears verbatim in the ledger — narrow on purpose, because
+    "X does not exist" is a legitimate thing to say about a value the facts have
+    never confirmed.
+    """
+    facts = " \n".join(str(f) for f in ((environment or {}).get("facts") or []))
+    if not facts.strip() or not (text_out or "").strip():
+        return []
+    hits: list[dict] = []
+    seen: set[str] = set()
+    for m in _FAKE_VALUE_CLAIM_RE.finditer(text_out):
+        lo = max(0, m.start() - _CLAIM_WINDOW)
+        hi = min(len(text_out), m.end() + _CLAIM_WINDOW)
+        window = text_out[lo:hi]
+        for value in _BACKTICKED_RE.findall(window):
+            v = value.strip()
+            if v and v in facts and v not in seen:
+                seen.add(v)
+                hits.append({
+                    "value": v,
+                    "claim": " ".join(window[
+                        max(0, m.start() - lo - 60):m.end() - lo + 60].split())[:160],
+                })
+    return hits
+
+
+def find_guess_before_look(text_out: str) -> list[dict]:
+    """Fix drafts that mutate state without first showing the operator a
+    read-only command that prints it. Returns ``[{command}]`` naming the
+    offending first mutation, or ``[]`` when a discovery step comes first.
+
+    Deliberately permissive: ANY read-only command anywhere before the first
+    mutation satisfies it. This asks the engine to look, not to look well.
+    """
+    ordered: list[str] = []
+    for block in re.findall(r"```[a-z]*\n(.*?)```", text_out or "", re.S):
+        for raw in (block or "").splitlines():
+            ln = " ".join((raw or "").split())
+            if ln and not ln.startswith("#"):
+                ordered.append(ln)
+    for ln in ordered:
+        if _is_readonly_command(ln):
+            return []       # it looked first — satisfied
+        return [{"command": ln}]  # first actionable line already mutates
+    return []               # no commands at all (prose answer) — nothing to gate
+
+
 def find_repeated_failed(text_out: str, failed_commands: str) -> list[str]:
     """§17.882/883/906 — deterministic repeat detection: which already-failed
     commands or URLs does this new walkthrough prescribe AGAIN — exactly, as an
@@ -2464,28 +2553,135 @@ def find_novel_urls(text_out: str, grounding_corpus: str) -> list[str]:
     return novel
 
 
+# §17.909 — the research query is built from the OPERATOR'S SYMPTOM, not the
+# step's task. §17.882 built it as `step title + first error line`, and on the
+# live T23 marathon that produced, for six consecutive blocker reports:
+#
+#   "Install PalWorld server curtin command in-target'"
+#   "Install PalWorld server when attempting to set up the ubuntu server, it
+#    continues to hang. I thing it would be bes"
+#   "Install PalWorld server It got hung up on install again, however it appears
+#    to be when installing the openssh-serv"
+#
+# Three compounding defects. (a) The step title ANCHORS retrieval on the wrong
+# subject: the operator was fighting the Ubuntu installer, and every query was
+# steered at PalWorld/SteamCMD. (b) Conversational filler ("I thing it would be
+# best to", "I appear to have been mistaken") ate the character budget. (c) The
+# 130-char cap then truncated the actual diagnostic terms — "downloading and
+# installing security update" never survived into a single query.
+#
+# A blocker is frequently UPSTREAM of the step it is blocking. When the operator
+# names their own subject, that subject is the query.
+
+# "hung"/"stuck"/"frozen" were absent from the §17.882 line detector, so a HANG —
+# the most common non-error blocker — never even registered as the error line.
+_SYMPTOM_LINE_RE = (
+    r"error|fail|not found|not in |unable|denied|refus|timeout|timed out|"
+    r"invalid|cannot|can't|no such|returned status|unexpected|corrupt|E:|"
+    r"curl: \(|hang|hung|hangs|stuck|frozen|freeze|unresponsive|crash|panic|"
+    r"no progress|never finish|won't boot|wont boot|loop"
+)
+
+# Hedges and first-person narration carry no retrieval signal and crowd out the
+# terms that do.
+_QUERY_FILLER_RE = __import__("re").compile(
+    r"\b(?:i\s+(?:think|thing|guess|believe|assume|appear\s+to\s+have\s+been\s+"
+    r"mistaken|viewed\s+the\s+full\s+logs\s+and)|it\s+(?:appears?|seems?)"
+    r"(?:\s+to\s+be|\s+that|\s+as\s+though)?|perhaps|maybe|however|actually|"
+    r"basically|i\s+would|we\s+should|it\s+would\s+be\s+best\s+to|"
+    r"when\s+(?:attempting|trying)\s+to|now\s+its|now\s+it's)\b",
+    __import__("re").IGNORECASE,
+)
+
+# A quoted span or a hyphen/dot identifier is the operator naming a thing.
+_SIGNAL_TOKEN_RE = __import__("re").compile(
+    r"'([^']{4,70})'|\"([^\"]{4,70})\"|`([^`]{4,70})`"
+    r"|\b([a-z][a-z0-9]*(?:[-_.][a-z0-9]+)+)\b",
+    __import__("re").IGNORECASE,
+)
+
+
+# The operator's PROPOSAL is not the symptom. "I think we should destroy this
+# VM and start over" steers retrieval at how to delete a VM — live, four of six
+# queries carried a "start over"/"destroy the curren" tail.
+_PROPOSAL_CLAUSE_RE = __import__("re").compile(
+    r"[^.;!?]*\b(?:start(?:ing)?\s+over|destroy|delete|remove\s+this|recreate|"
+    r"rebuild|wipe|from\s+the\s+beginning|from\s+scratch)\b[^.;!?]*",
+    __import__("re").IGNORECASE,
+)
+
+# Words that name no subject. A title contributes to a query only through its
+# DISTINCTIVE terms — "Install PalWorld server" contributes "palworld", and if
+# the operator never mentions PalWorld, the title is the wrong anchor entirely.
+_GENERIC_TITLE_WORDS = frozenset({
+    "install", "installing", "installation", "setup", "set", "up", "configure",
+    "configuring", "config", "create", "creating", "add", "adding", "deploy",
+    "deploying", "server", "service", "system", "the", "a", "an", "and", "or",
+    "for", "to", "of", "on", "in", "with", "run", "running", "start", "enable",
+    "build", "building", "new", "step", "verify", "test", "check",
+})
+
+
+def _distinctive(title: str) -> set[str]:
+    return {w for w in (
+        __import__("re").sub(r"[^a-z0-9 ]", " ", (title or "").lower()).split()
+    ) if w and w not in _GENERIC_TITLE_WORDS and len(w) > 2}
+
+
+def _symptom_tokens(line: str) -> list[str]:
+    """Quoted phrases and identifier-shaped words — what the operator NAMED."""
+    out: list[str] = []
+    for m in _SIGNAL_TOKEN_RE.finditer(line or ""):
+        tok = next((g for g in m.groups() if g), "").strip()
+        if tok and tok.lower() not in {t.lower() for t in out}:
+            out.append(tok)
+    return out
+
+
 def _error_focus_query(title: str, error_text: str) -> str:
-    """§17.882 — a DETERMINISTIC research query from the actual error, so fix
-    grounding never depends on the query-generator model's diligence (live: it
-    emitted the same generic 'official installation guide' query 5 times).
-    Step title (the program/context) + the first error-looking line."""
+    """§17.882/909 — a DETERMINISTIC research query from the operator's symptom.
+
+    Leads with what the operator described; the step title is appended ONLY when
+    the symptom does not already name its own subject, because a blocker is
+    often upstream of the step it blocks.
+    """
     import re as _re
     line = ""
     for ln in (error_text or "").splitlines():
-        s = ln.strip()
-        if s and _re.search(
-            r"error|fail|not found|not in |unable|denied|refus|timeout|invalid|"
-            r"cannot|no such|returned status|unexpected|corrupt|E:|curl: \(",
-            s, _re.I,
-        ):
-            line = s
+        s_ = ln.strip()
+        if s_ and _re.search(_SYMPTOM_LINE_RE, s_, _re.I):
+            line = s_
             break
     if not line:
-        tail = [s.strip() for s in (error_text or "").splitlines() if s.strip()]
+        tail = [s_.strip() for s_ in (error_text or "").splitlines() if s_.strip()]
         line = tail[-1] if tail else ""
-    line = _re.sub(r"\s+", " ", line)[:90]
-    title_part = " ".join((title or "").split()[:6])
-    return f"{title_part} {line}".strip()[:130]
+    # Drop the operator's proposed remedy, but never the whole line.
+    without_proposal = _PROPOSAL_CLAUSE_RE.sub(" ", line)
+    if without_proposal.strip(" ,.;:-"):
+        line = without_proposal
+    line = _re.sub(r"\s+", " ", _QUERY_FILLER_RE.sub(" ", line)).strip(" ,.;:-'\"")
+    if not line:
+        return " ".join((title or "").split()[:6]).strip()
+
+    # The title anchors the query ONLY when the operator is talking about the
+    # thing it names. A blocker upstream of the step shares none of its
+    # distinctive vocabulary, and prefixing it there points retrieval at the
+    # wrong subject — the whole §17.909 defect.
+    distinctive = _distinctive(title)
+    lowered = line.lower()
+    on_topic = any(w in lowered for w in distinctive) if distinctive else True
+
+    lead = " ".join(_symptom_tokens(line)[:3])
+    if on_topic:
+        title_part = " ".join((title or "").split()[:6])
+        body = f"{title_part} {line}"
+    else:
+        body = f"{lead} {line}" if lead else line
+    body = _re.sub(r"\s+", " ", body)
+    # Filler removal leaves orphaned punctuation ("again. , it was on the …").
+    body = _re.sub(r"\s+([,;:.])", r"\1", body)
+    body = _re.sub(r"([,;:.])\s*[,;:.]+", r"\1", body)
+    return body.strip(" ,.;:-").strip()[:150]
 
 
 def find_banned_values(text_out: str, banned: list | None) -> list[dict]:
@@ -2908,11 +3104,14 @@ async def generate_fix(
     novel_meta: list[str] = []
     reskind_meta_fix: list[dict] = []  # §17.898
     shell_meta_fix: list[dict] = []  # §17.906
+    look_meta_fix: list[dict] = []  # §17.907
+    contra_meta_fix: list[dict] = []  # §17.908
 
     _banned_list = (environment or {}).get("banned_values") or []
     _kinds = resource_kinds_from_facts(environment)  # §17.898
 
-    def _gate(draft: str) -> tuple[list[str], list[str], list[dict], list[dict], list[dict]]:
+    def _gate(draft: str) -> tuple[list[str], list[str], list[dict], list[dict],
+                                   list[dict], list[dict], list[dict]]:
         hits_ = (find_repeated_failed(draft, failed_commands)
                  if failure_streak >= 1 and (failed_commands or "").strip() else [])
         novel_ = (find_novel_urls(draft, user + "\n" + (failed_commands or ""))
@@ -2926,18 +3125,60 @@ async def generate_fix(
         # §17.906 — a shell metachar inside an unquoted argument value is a
         # SYNTAX defect: wrong at any streak, and decidable without a model.
         shell_ = find_shell_unsafe_commands(draft)
-        return hits_, novel_, banned_, reskind_, shell_
+        # §17.907 — at/after the escalation threshold the engine has PROVED it
+        # does not know the current state, so it must print it before changing
+        # it. Same knob as the novel-URL gate: below the threshold a direct fix
+        # is usually right and a mandatory discovery step would just add noise.
+        look_ = (find_guess_before_look(draft)
+                 if failure_streak >= settings.assist_fix_streak_threshold else [])
+        # §17.908 — disowning a CONFIRMED fact is wrong at any streak.
+        contra_ = find_contradicted_facts(draft, environment)
+        return hits_, novel_, banned_, reskind_, shell_, look_, contra_
 
     if text_out:
-        hits, novel, banned_hits, reskind_hits, shell_hits = _gate(text_out)
-        if hits or novel or banned_hits or reskind_hits or shell_hits:
+        draft_src = text_out  # §17.907 — the text the directive is reasoning about
+        (hits, novel, banned_hits, reskind_hits,
+         shell_hits, look_hits, contra_hits) = _gate(text_out)
+        if (hits or novel or banned_hits or reskind_hits or shell_hits
+                or look_hits or contra_hits):
             logger.warning(
                 "assist_fix_gate_violation node_key=%s repeats=%d novel_urls=%d "
-                "banned=%d reskind=%d shell_unsafe=%d (regenerating)",
+                "banned=%d reskind=%d shell_unsafe=%d guess_before_look=%d "
+                "contradicted_facts=%d (regenerating)",
                 node_key, len(hits), len(novel), len(banned_hits), len(reskind_hits),
-                len(shell_hits),
+                len(shell_hits), len(look_hits), len(contra_hits),
             )
             directive = ["\n\n---\nREGENERATION NOTICE:"]
+            if look_hits:  # §17.907 — method before content
+                # The probe must name the resource THIS step is about. Sorting
+                # the whole ledger and truncating suggested `pct config 102`
+                # for a step whose command was `qm set 106 ...` — a discovery
+                # step pointed at the wrong box is worse than none.
+                _bad_cmd = look_hits[0]["command"]
+                _ids = [rid for rid in re.findall(r"\b(\d{2,5})\b", _bad_cmd)
+                        if rid in _kinds]
+                if not _ids:  # fall back to whatever the draft mentions at all
+                    _ids = [rid for rid in _kinds if re.search(rf"\b{rid}\b", draft_src)]
+                _probe = ", ".join(
+                    f"`{'qm' if _kinds[rid] == 'vm' else 'pct'} config {rid}`"
+                    for rid in dict.fromkeys(_ids)
+                ) or "the command that prints this resource's current configuration"
+                directive.append(
+                    f"You have now issued {failure_streak} fixes on this step "
+                    "without resolving it. That means you do NOT know the "
+                    "current state, so STOP changing it and LOOK at it. Your "
+                    "previous draft opened with the state-changing command "
+                    f"`{look_hits[0]['command']}` and never printed the state it "
+                    "depends on. Open instead with a READ-ONLY command whose "
+                    f"output contains the answer ({_probe}) and ask the operator "
+                    "to paste it back. Do not guess the next value — read it.")
+            if contra_hits:  # §17.908
+                directive.append(
+                    "Your previous draft called a value FAKE that the confirmed "
+                    "facts record as REAL — the facts were written from the "
+                    "operator's own output, so they win:\n"
+                    + "\n".join(f"- `{h['value']}` is confirmed to exist; you "
+                                 f"wrote: \"{h['claim']}\"" for h in contra_hits[:3]))
             if shell_hits:  # §17.906 — syntax first: it is the least arguable
                 directive.append(
                     "Your previous draft emitted command(s) the SHELL WILL "
@@ -2995,15 +3236,28 @@ async def generate_fix(
             ])
             regen_text = (regen.text or "").strip() if (regen and regen.success) else ""
             if regen_text:
-                rehits, renovel, rebanned, rereskind, reshell = _gate(regen_text)
+                (rehits, renovel, rebanned, rereskind,
+                 reshell, relook, recontra) = _gate(regen_text)
                 if (not rehits and not renovel and not rebanned
-                        and not rereskind and not reshell):
+                        and not rereskind and not reshell and not relook
+                        and not recontra):
                     text_out = regen_text
                 else:
                     repeat_meta, novel_meta, banned_meta_fix = rehits, renovel, rebanned
                     reskind_meta_fix = rereskind
                     shell_meta_fix = reshell  # §17.906
+                    look_meta_fix = relook  # §17.907
+                    contra_meta_fix = recontra  # §17.908
                     warn_bits = []
+                    if recontra:
+                        warn_bits.append(
+                            "calls a confirmed value fake ("
+                            + "; ".join(f"`{h['value'][:60]}`" for h in recontra[:2])
+                            + ")")
+                    if relook:
+                        warn_bits.append(
+                            "changes the system without first showing you its "
+                            f"current state (`{relook[0]['command'][:70]}`)")
                     if reshell:
                         warn_bits.append(
                             "contains a command the shell will split on an "
@@ -3041,8 +3295,13 @@ async def generate_fix(
                 repeat_meta, novel_meta, banned_meta_fix = hits, novel, banned_hits
                 reskind_meta_fix = reskind_hits  # §17.898
                 shell_meta_fix = shell_hits  # §17.906
+                look_meta_fix = look_hits  # §17.907
+                contra_meta_fix = contra_hits  # §17.908
                 text_out = (
                     "⚠️ **Caution:** this fix includes "
+                    + ("a claim that a confirmed value is fake " if contra_hits else "")
+                    + ("a change made without reading the current state first "
+                       if look_hits else "")
                     + ("a shell-unsafe command " if shell_hits else "")
                     + ("a wrong-resource-type command " if reskind_hits else "")
                     + ("already-tried command(s) " if hits else "")
@@ -3054,6 +3313,7 @@ async def generate_fix(
     # §17.897 — every command the operator is handed must be copy-pasteable,
     # whichever path produced it. The fenced-block mandate is a prompt rule and
     # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
+    text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
@@ -3071,6 +3331,8 @@ async def generate_fix(
         "banned_value_violations": banned_meta_fix,  # §17.893
         "resource_kind_violations": reskind_meta_fix,  # §17.898
         "shell_unsafe_violations": shell_meta_fix,  # §17.906
+        "guess_before_look_violations": look_meta_fix,  # §17.907
+        "contradicted_fact_violations": contra_meta_fix,  # §17.908
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
@@ -3138,6 +3400,14 @@ async def read_cached_guidance(
     }
 
 
+def _trivial_turns() -> set[str]:
+    """§17.908 — the contentless-message set, owned by assist_memory. Deferred
+    import: assist_memory imports assist_guide, so a module-level import here
+    would close the cycle."""
+    from app.modules.assist_memory import _TRIVIAL_TURN
+    return set(_TRIVIAL_TURN)
+
+
 async def cached_guidance_is_stale(
     *, session_id: str, node_key: str, generated_at, db,
 ) -> bool:
@@ -3182,7 +3452,17 @@ async def cached_guidance_is_stale(
                 SELECT
                   (SELECT count(*) FROM assist_turns t
                     WHERE t.session_id = :sid AND t.node_key = :nk
-                      AND t.role = 'operator' AND t.created_at > :gen)
+                      AND t.role = 'operator' AND t.created_at > :gen
+                      -- §17.908: a CONTENTLESS turn must not invalidate a
+                      -- walkthrough. A submit/note is always a real event; a
+                      -- bare message counts only if it carries something,
+                      -- using the SAME predicate derive_turn_memory already
+                      -- applies to decide a message is worth reading.
+                      AND (t.kind IN ('submit', 'note')
+                           OR (COALESCE(array_length(
+                                 regexp_split_to_array(btrim(t.content),
+                                                       '[[:space:]]+'), 1), 0) >= 2
+                               AND lower(btrim(t.content)) <> ALL(:trivial))))
                     AS operator_turns,
                   (SELECT count(*) FROM dag_nodes n
                     WHERE n.job_id = s.job_id AND n.node_key <> :nk
@@ -3200,7 +3480,8 @@ async def cached_guidance_is_stale(
                     ON cur.job_id = s.job_id AND cur.node_key = :nk
                  WHERE s.id = :sid
             """),
-            {"sid": session_id, "nk": node_key, "gen": generated_at},
+            {"sid": session_id, "nk": node_key, "gen": generated_at,
+             "trivial": sorted(_trivial_turns())},
         )).mappings().first()
         if not row:
             return False

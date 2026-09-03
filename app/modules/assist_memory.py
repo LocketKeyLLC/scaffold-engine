@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -320,6 +321,85 @@ def _norm_note(text_: str) -> str:
     return " ".join((text_ or "").lower().split())
 
 
+# §17.908 — a step's deliverable can be DESTROYED after the step is committed,
+# and nothing noticed. Live (session 613dd1df): the operator ran
+# `qm destroy 106 --purge` twice, yet T22 "Create PalWorld VM" — the step that
+# built VM 106 — stayed `committed` for the rest of the session. Every later
+# step's premise ("VM 106 exists") was silently false.
+#
+# SURFACE, never auto-mutate: this records a `constraint` note, which §17.677
+# turns into a re-plan proposal the operator approves or ignores. Silently
+# re-opening a step on a regex match is the §17.891 mistake.
+_DESTROY_RE = re.compile(
+    r"\b(qm|pct)\s+destroy\s+(\d{2,5})\b", re.IGNORECASE)
+
+
+def find_destroyed_resources(message: str) -> list[dict]:
+    """``[{kind, id}]`` for Proxmox resources the operator's output shows being
+    destroyed. Reads OPERATOR text only — what they ran, not what they were told
+    to run."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for verb, rid in _DESTROY_RE.findall(message or ""):
+        if rid not in seen:
+            seen.add(rid)
+            out.append({"kind": "vm" if verb.lower() == "qm" else "ct", "id": rid})
+    return out
+
+
+async def flag_steps_for_destroyed_resources(
+    *, session_id: str, message: str, db,
+) -> list[dict]:
+    """Find COMMITTED steps whose deliverable the operator just destroyed and
+    record one constraint note naming them. Returns what was flagged.
+    Fail-soft: this is an enhancement to the scribe, never a blocker."""
+    destroyed = find_destroyed_resources(message)
+    if not destroyed:
+        return []
+    # §17.856 re-export (patch-safe deferred, same as derive_turn_memory does)
+    from app.modules.assist_agent import record_note
+    flagged: list[dict] = []
+    try:
+        for res in destroyed:
+            rows = (await db.execute(
+                text("""
+                    SELECT s.node_key, n.title
+                      FROM assist_steps s
+                      JOIN dag_nodes n
+                        ON n.job_id = s.job_id AND n.node_key = s.node_key
+                     WHERE s.session_id = :sid
+                       AND s.status = 'committed'
+                       AND (n.title ILIKE :pat
+                            OR COALESCE(n.description, '') ILIKE :pat
+                            OR COALESCE(s.evidence, '') ILIKE :pat)
+                     ORDER BY s.committed_at NULLS LAST
+                """),
+                {"sid": session_id, "pat": f"%{res['id']}%"},
+            )).mappings().all()
+            if not rows:
+                continue
+            what = "VM" if res["kind"] == "vm" else "container"
+            steps = ", ".join(f"{r['node_key']} ({r['title']})" for r in rows[:4])
+            await record_note(
+                session_id=session_id,
+                text_=(f"{what} {res['id']} was destroyed. These steps are marked "
+                       f"done but produced it, so their result no longer exists: "
+                       f"{steps}. Re-do them before any step that assumes "
+                       f"{what} {res['id']} exists."),
+                kind="constraint", node_key=None, dedupe=True, db=db,
+            )
+            flagged.append({**res, "steps": [r["node_key"] for r in rows]})
+        if flagged:
+            logger.info(
+                "assist_destroyed_resource_flagged session_id=%s flagged=%r",
+                session_id, flagged)
+    except Exception as e:  # noqa: BLE001 — the scribe must never break the turn
+        logger.warning(
+            "assist_destroyed_resource_flag_failed session_id=%s err=%r",
+            session_id, e)
+    return flagged
+
+
 async def derive_turn_memory(
     *, session_id: str, node_key: str | None, message: str, db,
 ) -> dict:
@@ -412,7 +492,15 @@ async def derive_turn_memory(
             schedule_consolidate_facts(
                 session_id=session_id, fact_count=_fact_count_of(env_after),
             )
-        if result["notes_added"] or result["facts_added"] or superseded:
+        # §17.908 — a destroy in the operator's own output invalidates the
+        # steps that produced the resource. Surface it as a constraint note
+        # (§17.677 turns that into a re-plan proposal); never auto-mutate.
+        destroyed = await flag_steps_for_destroyed_resources(
+            session_id=session_id, message=msg, db=db,
+        )
+        if destroyed:
+            result["destroyed_flagged"] = destroyed
+        if result["notes_added"] or result["facts_added"] or superseded or destroyed:
             logger.info(
                 "assist_derived_turn_memory session_id=%s notes=+%d facts=+%d facts=-%d",
                 session_id, result["notes_added"], result["facts_added"],
