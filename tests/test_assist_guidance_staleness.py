@@ -69,13 +69,34 @@ def test_advance_and_replan_signals_are_untouched():
 def test_guide_prompt_states_the_step_is_not_done():
     """Live (turn 1445): "Guide me" on "Install Ubuntu Server 22.04 on VM 106"
     returned a POST-INSTALL walkthrough. A step being guided is pending or
-    presented — never committed — so its goal is definitionally unachieved, and
-    nothing in the prompt said so. This is the invariant that makes the class
-    impossible regardless of which memory block misleads."""
-    import inspect
-    from app.modules import assist_guide
-    src = inspect.getsource(assist_guide._build_guide_user_prompt)
-    assert "This step is NOT done" in src
-    assert "has NOT been" in src
-    # and it must forbid the specific inference that caused it
-    assert "not the work being done" in src
+    presented — never committed — so its goal is unachieved, and nothing in the
+    prompt said so.
+
+    §17.921 — reframed: "assume it is not done" fights genuine ambiguity, since
+    earlier attempts left the VM PARTLY changed and nobody, operator included,
+    knows what is on that disk. The walkthrough must DETERMINE the state and
+    handle BOTH outcomes.
+
+    Asserted against the RENDERED prompt, not the source: the sentences are
+    split across adjacent string literals, so source-text matching tests the
+    formatting rather than the contract.
+    """
+    from types import SimpleNamespace
+    from app.modules.assist_guide import _build_guide_user_prompt
+
+    ctx = SimpleNamespace(
+        assembled_prompt="Task: install the OS.",
+        title="Install Ubuntu Server 22.04 on VM 106",
+        tool="Shell", base_prompt="Task: install the OS.",
+    )
+    prompt = _build_guide_user_prompt(ctx, None, [], None)
+
+    assert "This step is NOT done" in prompt
+    assert "Install Ubuntu Server 22.04 on VM 106" in prompt
+    assert "AMBIGUOUS" in prompt
+    # determine-then-branch, rather than assume either state
+    assert "REVEALS it" in prompt
+    assert "handle BOTH outcomes" in prompt
+    # and it must forbid the exact inference that produced the live failure
+    assert "a disk existing is not an OS installed on it" in prompt
+    assert "has already been completed, run, or performed" in prompt

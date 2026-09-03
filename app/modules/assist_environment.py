@@ -83,6 +83,19 @@ def _environment_from_metadata(metadata: Any) -> dict:
     }
 
 
+# §17.920 — a fact that records what does NOT exist / is NOT available. These
+# prevent a repeated wrong attempt every time they are read, so they must not be
+# the first thing a FIFO cap discards.
+_CORRECTION_FACT_RE = __import__("re").compile(
+    r"\b(?:there\s+is\s+no|there\s+are\s+no|no\s+option|not\s+available|"
+    r"does\s+not\s+exist|doesn'?t\s+exist|is\s+not\s+installed|"
+    r"not\s+installed|cannot\s+be|can'?t\s+be|is\s+not\s+supported|"
+    r"never\s+use|do\s+not\s+use|don'?t\s+use|must\s+not|reserved\s+for|"
+    r"command\s+not\s+found|no\s+such)\b",
+    __import__("re").IGNORECASE,
+)
+
+
 _VERBOSITY_LEVELS = ("terse", "normal", "detailed")
 
 
@@ -227,7 +240,37 @@ async def set_environment(
                 existing.append(t)
                 seen.add(t.lower())
         # Cap: keep the most recent (oldest drop first).
-        current["facts"] = existing[-int(_s.assist_facts_max):]
+        # §17.920 — NEGATIVE KNOWLEDGE SURVIVES THE CAP. Plain FIFO discards
+        # the most valuable facts first. Live (session 613dd1df): the operator
+        # corrected the engine at turn 1417 — "There is no option to uncheck for
+        # the security update" — the scribe recorded it correctly, the ledger
+        # was at its 40-fact cap, and newer routine observations evicted it.
+        # The engine then went on telling them to uncheck that box, which is
+        # exactly the loop the correction existed to stop.
+        #
+        # A fact saying something does NOT exist / is NOT available prevents a
+        # repeated wrong attempt every time it is read; a routine observation
+        # usually restates what a command would show anyway. When the cap bites,
+        # drop routine facts first and keep corrections, newest-last order
+        # preserved within each class.
+        cap = int(_s.assist_facts_max)
+        if len(existing) > cap:
+            keep_flags = [bool(_CORRECTION_FACT_RE.search(str(f))) for f in existing]
+            corrections = [f for f, k in zip(existing, keep_flags) if k]
+            routine = [f for f, k in zip(existing, keep_flags) if not k]
+            # corrections are capped too — half the budget at most, newest kept
+            corr_keep = corrections[-max(1, cap // 2):]
+            room = cap - len(corr_keep)
+            kept = set(map(id, corr_keep)) | set(map(id, routine[-room:] if room > 0 else []))
+            trimmed = [f for f in existing if id(f) in kept]
+            if len(corrections) > len(corr_keep) or len(routine) > max(0, room):
+                logger.info(
+                    "assist_facts_trimmed session_id=%s kept=%d of %d "
+                    "(corrections kept=%d)",
+                    session_id, len(trimmed), len(existing), len(corr_keep))
+            current["facts"] = trimmed[-cap:]
+        else:
+            current["facts"] = existing
     if playbook_proven or playbook_ruled_out:
         # §17.881 — the session playbook: methods PROVEN to work on this system
         # this session, and approaches that FAILED here. Merged like facts

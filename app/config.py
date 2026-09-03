@@ -1035,6 +1035,13 @@ class Settings(BaseSettings):
     # injected block bounded; oldest facts drop first.
     assist_capture_facts_enabled: bool = True
     assist_facts_max: int = Field(default=40, ge=1, le=200)
+
+    # §17.921 — how many times a guide may be redrawn when it presupposes its
+    # own step is already complete. The failure is non-deterministic (four live
+    # draws on one step: two correct, two wrong), so one redraw is a coin flip;
+    # the DETECTOR is reliable, so it is used as an acceptance test. 0 disables
+    # the retry and leaves the visible ⚠️ banner.
+    assist_guide_presupposed_retries: int = Field(default=3, ge=0, le=5)
     # §17.710 — unified session memory. Master gate + per-stage sub-valves so the
     # refactor rolls out incrementally and each stage A/Bs against today's
     # behavior. Default OFF: `assist_unified_memory_enabled=False` keeps the
