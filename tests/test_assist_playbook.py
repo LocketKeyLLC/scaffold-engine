@@ -522,3 +522,107 @@ def test_guide_integrity_warning_flags_shell_unsafe():
     warn = guide_integrity_warning(
         "```bash\nqm set 106 --boot order=scsi0;net0;cdrom\n```", "corpus", "")
     assert "SPLIT" in warn
+
+
+# ── §17.907 — inspect before you mutate ──────────────────────────────────
+#
+# The METHOD failure behind the live boot-order cycle. Turns 1333-1341 issued
+# five state-changing commands in a row — order=scsi0;net0;cdrom, then commas,
+# then order=cdrom, then order=ide2, then attaching ide2 — and never ran
+# `qm config 106`, whose output names the real boot order and real devices,
+# i.e. the answer. §17.906 stops it REPEATING a failure; that still leaves it
+# free to guess something NEW every turn. This makes it look first.
+
+
+def test_find_guess_before_look_flags_the_live_boot_order_guesses():
+    from app.modules.assist_guide import find_guess_before_look
+    for guess in (
+        "```bash\nqm set 106 --boot order=scsi0,net0,cdrom\n```",
+        "```bash\nqm set 106 --boot order=cdrom\n```",
+        "```bash\nqm set 106 --boot order=ide2\n```",
+        "```bash\nqm destroy 106 --purge\n```",
+    ):
+        hits = find_guess_before_look(guess)
+        assert hits, guess
+        assert hits[0]["command"].startswith("qm ")
+
+
+def test_find_guess_before_look_passes_when_it_looks_first():
+    from app.modules.assist_guide import find_guess_before_look
+    # the turn that would have ENDED the cycle
+    assert find_guess_before_look(
+        "## Do this next\n```bash\nqm config 106\n```\nthen paste the output.") == []
+    # look, then change, in one draft
+    assert find_guess_before_look(
+        "```bash\nqm config 106 | grep -E 'boot|ide2'\n```\n"
+        "```bash\nqm set 106 --boot order=scsi0\n```") == []
+
+
+def test_find_guess_before_look_ignores_prose_and_comments():
+    """A prose answer ('click Cancel update and reboot') prescribes no command
+    at all — there is nothing to look at first, and gating it would block the
+    correct answer to the operator's actual Ubuntu-installer question."""
+    from app.modules.assist_guide import find_guess_before_look
+    assert find_guess_before_look("Click **Cancel update and reboot**.") == []
+    assert find_guess_before_look("```bash\n# first, check the console\n```") == []
+
+
+def test_guess_before_look_gate_is_streak_gated():
+    """Below the escalation threshold a direct fix is usually right; a
+    mandatory discovery step there would just add a round trip to every fix."""
+    import inspect
+    from app.modules import assist_guide
+    src = inspect.getsource(assist_guide.generate_fix)
+    assert "find_guess_before_look(draft)" in src
+    assert "failure_streak >= settings.assist_fix_streak_threshold" in src
+
+
+# ── §17.908 — disowning a confirmed fact ─────────────────────────────────
+#
+# Live T23 turn 1377, in ONE message: "The previous command failed because it
+# contained a placeholder (`ubuntu-22.04.3-live-server-amd64.iso`) instead of
+# the actual filename … which does not exist" — and then it prescribed a command
+# using that exact string. The facts ledger, written from the operator's own
+# `pvesm list` output, recorded that ISO as present on local storage.
+
+_ISO = "ubuntu-22.04.3-live-server-amd64.iso"
+_ENV = {"facts": [
+    "The following ISOs are available on local storage: "
+    f"{_ISO} and ubuntu-26.04-live-server-amd64.iso.",
+]}
+_LIVE_1377 = (
+    "## Diagnosis\nThe previous command failed because it contained a "
+    f"placeholder (`{_ISO}`) instead of the actual filename. The computer tried "
+    f"to find a file literally named `{_ISO}`, which does not exist."
+)
+
+
+def test_find_contradicted_facts_catches_the_live_disowned_iso():
+    from app.modules.assist_guide import find_contradicted_facts
+    hits = find_contradicted_facts(_LIVE_1377, _ENV)
+    assert [h["value"] for h in hits] == [_ISO]
+
+
+def test_contradiction_window_survives_dots_inside_the_value():
+    """REGRESSION — the first cut scoped the claim to a SENTENCE via `[^.!?]*`.
+    The values here are filenames full of dots, so the sentence regex stopped
+    INSIDE `ubuntu-22.04.3-...` and matched nothing on the real turn. A
+    character window around the claim word has no such boundary problem."""
+    from app.modules.assist_guide import find_contradicted_facts
+    assert find_contradicted_facts(_LIVE_1377, _ENV)
+
+
+def test_find_contradicted_facts_silent_when_the_value_is_genuinely_unknown():
+    """Saying an UNCONFIRMED value does not exist is correct and common."""
+    from app.modules.assist_guide import find_contradicted_facts
+    assert find_contradicted_facts(
+        "The file `totally-made-up.iso` does not exist.", _ENV) == []
+
+
+def test_find_contradicted_facts_needs_both_a_claim_and_a_known_value():
+    from app.modules.assist_guide import find_contradicted_facts
+    # known value, no fake-claim wording
+    assert find_contradicted_facts(f"Attach `{_ISO}` to the VM.", _ENV) == []
+    # claim wording, no facts at all
+    assert find_contradicted_facts(_LIVE_1377, {"facts": []}) == []
+    assert find_contradicted_facts(_LIVE_1377, None) == []

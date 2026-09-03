@@ -101,6 +101,15 @@ def render_operator_notes_block(notes: list[dict] | None) -> str:
     return (
         "## Operator notes & additions (things the operator has raised for THIS "
         "project — honor them; do not contradict or re-assume around them)\n"
+        # §17.908 — provenance, because "honor them" was read as "these are
+        # requirements of record". Live: an operator aside ("I want to build a
+        # markdown linter") became a note, and a later turn told the operator
+        # "the project brief already lists several Extras (Markdown linter,
+        # screenshot-to-PDF tool)". The brief contains no such thing — the note
+        # was laundered into a fabricated fact about the approved plan.
+        "These are things said IN CONVERSATION. They are NOT the approved brief "
+        "or the plan: never describe one as something the brief lists, the plan "
+        "includes, or the project already covers.\n"
         + "\n".join(lines)
     )
 

@@ -11,6 +11,7 @@ take a system string + flags and return a string, calling nothing else in assist
 
 from __future__ import annotations
 
+import logging
 import re
 
 from app.modules.prompt_assembly import EXECUTION_SYSTEM_RUNBOOK
@@ -44,6 +45,10 @@ def apply_verbosity(system: str, verbosity: str | None) -> str:
     """Append the verbosity directive to a system prompt. `normal`/unknown → no
     change (current behavior)."""
     return system + _VERBOSITY_DIRECTIVE.get(verbosity or "normal", "")
+
+
+# Stdlib logging is the runtime logger here (structlog is the formatter only).
+logger = logging.getLogger("scaffold.assist_directives")
 
 
 def guide_system_for_tool(tool: str, *, is_decision: bool = False) -> str:
@@ -380,6 +385,55 @@ def _looks_like_command(span: str) -> bool:
     if "=" in head and i + 1 < len(toks):
         head = toks[i + 1]
     return head in _COMMAND_VERBS
+
+
+# §17.908 — the model's REASONING ABOUT the operator, rendered TO the operator.
+# Live (T23, turns 1399 and 1404):
+#   "The operator's \"anything\" is a non-sequitur—they are likely expressing
+#    frustration or boredom while the VM is hanging…"
+#   "The operator's messages … are a pivot away from the current technical
+#    struggle with VM 106. They are expressing boredom or frustration…"
+# That is the model talking to ITSELF in the third person, and the operator read
+# every word of it — including being told what they were feeling. The answer
+# starts at the second paragraph in both cases, so this is a pure preamble
+# strip, not a rewrite.
+#
+# Deliberately narrow: FIRST paragraph only, must OPEN with a third-person
+# reference to the operator, never touches a heading/fence/list, and never
+# empties the message.
+# Must match NARRATION about the operator, not any sentence that happens to
+# begin with the word. "The operator error was in the config file" and "The user
+# data directory is /var/lib" are ordinary content and were stripped by the
+# first cut. Two shapes carry the real signal: the POSSESSIVE ("The operator's
+# messages …") and a state/communication verb ("The operator is asking …").
+_OPERATOR_META_OPENER_RE = re.compile(
+    r"^\s*(?:the\s+)?(?:operator|user)(?:'s|s')\s"
+    r"|"
+    r"^\s*(?:the\s+)?(?:operator|user)\s+"
+    r"(?:is|are|was|were|has|have|had|seems?|appears?|sounds?|wants?|"
+    r"means?|intends?|asks?|asking|saying|says?|likely|probably|apparently|"
+    r"clearly|evidently)\b",
+    re.IGNORECASE,
+)
+
+
+def strip_operator_meta_preamble(text: str) -> str:
+    """Drop a leading paragraph that narrates the operator in third person."""
+    if not text or not text.strip():
+        return text
+    parts = re.split(r"(\n\s*\n)", text, maxsplit=1)
+    first = parts[0]
+    stripped = first.lstrip()
+    # Structure is content, never preamble.
+    if stripped.startswith(("#", "```", "-", "*", ">", "|", "1.")):
+        return text
+    if not _OPERATOR_META_OPENER_RE.match(stripped):
+        return text
+    rest = "".join(parts[2:]) if len(parts) > 2 else ""
+    if not rest.strip():
+        return text  # it is the WHOLE message — stripping would leave nothing
+    logger.info("assist_meta_preamble_stripped chars=%d", len(first))
+    return rest.lstrip()
 
 
 def promote_inline_commands(text: str) -> str:
