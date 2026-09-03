@@ -9,6 +9,7 @@ OVERVIEW.md §9 ("Assist Mode") for the design.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Literal, Optional
 from uuid import UUID
@@ -1164,7 +1165,7 @@ async def assist_reroute(session_id: str, body: AssistInterpretInput, db=Depends
 
 async def _retire_step_mirrored(
     *, db, job_id: str, session_id: str, node_key: str, evidence: str | None = None,
-) -> None:
+) -> bool:
     """§17.754/§17.852 — mark a tracker-verified step DONE on BOTH dag_nodes and
     assist_steps in one commit (mirror invariant §17.286).
 
@@ -1177,6 +1178,24 @@ async def _retire_step_mirrored(
     what actually happened. The ⏩ Skip verb (deliberate skip, work NOT done)
     still writes 'skipped' via the submit path — the two are semantically
     different and now recorded differently."""
+    # §17.915 — A STEP NEVER COMMITS WITHOUT EVIDENCE. This is the sink every
+    # tracker retire funnels through, so the guard lives here rather than at
+    # each caller. §17.891 gated retires on `has_advancement_signal`, which
+    # also accepts a bare next/continue/skip intent — that moves the pointer,
+    # it does not evidence the work. Live (613dd1df, 20:06:16): ADD5 "Install
+    # Ubuntu Server 22.04 on VM 106" — the step inserted precisely BECAUSE the
+    # operator could not install the OS — was marked `done` with
+    # `evidence_kind` NULL while the OS was not installed.
+    #
+    # Refusing is safe in a way committing is not: an unretired step is
+    # re-presented (a visible, correctable annoyance), while a wrongly retired
+    # one silently deletes work from the plan and every later step inherits a
+    # false premise.
+    if not assist_policy.is_completion_evidence(evidence or ""):
+        logger.warning(  # §17.882b — enforcement vetoes log LOUD
+            "assist_retire_vetoed_no_evidence session=%s node=%s msg=%r",
+            session_id, node_key, (evidence or "")[:160])
+        return False
     note = "Completed by the operator in assist mode (progress-tracker verified, §17.754)."
     if (evidence or "").strip():
         note += f"\nOperator's account: {evidence.strip()[:600]}"
@@ -1189,9 +1208,18 @@ async def _retire_step_mirrored(
     )
     await db.execute(
         text("UPDATE assist_steps SET status='committed', committed_at=NOW(), "
+             "submitted_at=COALESCE(submitted_at, NOW()), "
+             # §17.915 — persist the justification. ADD5 closed with
+             # evidence_kind NULL, so nothing downstream could tell a
+             # tracker-retire from a real submit, and §17.899's denial path had
+             # nothing to check.
+             "evidence=COALESCE(NULLIF(evidence,''), :ev), "
+             "evidence_kind=COALESCE(evidence_kind, 'text'), "
+             "evidence_meta=evidence_meta || CAST(:meta AS jsonb), "
              "updated_at=NOW() "
              "WHERE session_id=:sid AND node_key=:nk AND status NOT IN ('committed','skipped')"),
-        {"sid": session_id, "nk": node_key},
+        {"sid": session_id, "nk": node_key, "ev": (evidence or "").strip()[:4000],
+         "meta": json.dumps({"by": "tracker_retire", "evidence_kind": "text"})},
     )
     # §17.880 — retiring a step must also MOVE the session pointer, exactly as
     # the submit-commit path does. The live incident: the tracker retired T14
@@ -1214,6 +1242,7 @@ async def _retire_step_mirrored(
         )
     except Exception:  # scheduling must never fail the retire
         pass
+    return True  # §17.915 — the retire happened, with evidence on record
 
 
 @router.post("/assist/{session_id}/track")
@@ -1276,10 +1305,13 @@ async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(g
             # plan would loop the operator back to a step they've finished.
             if (verdict.get("current_step_done") and adv_signal and prior_nk
                     and prior_nk != (step or {}).get("node_key")):
-                await _retire_step_mirrored(
-                    db=db, job_id=job_id, session_id=session_id, node_key=prior_nk,
-                    evidence=body.message)
-                out["retired_prior_step"] = prior_nk
+                # §17.915 — the sink refuses without completion evidence.
+                if await _retire_step_mirrored(
+                        db=db, job_id=job_id, session_id=session_id,
+                        node_key=prior_nk, evidence=body.message):
+                    out["retired_prior_step"] = prior_nk
+                else:
+                    out["retire_vetoed_no_evidence"] = prior_nk
             elif verdict.get("current_step_done") and not adv_signal:
                 logger.warning(  # §17.891 — enforcement veto logs LOUD (§17.882b)
                     "tracker_retire_vetoed site=add_step session=%s nk=%s msg=%r",
@@ -1301,11 +1333,18 @@ async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(g
         # §17.754 (#2) — the tracker is confident the current step is DONE and the
         # next work is an EXISTING pending step. Retire the current step (mirror
         # §17.286) so the next claimable step advances; the caller presents it.
-        await _retire_step_mirrored(
+        # §17.915 — the sink refuses without completion evidence. A bare
+        # "next"/"continue" still ADVANCES the pointer; it just no longer marks
+        # the step it is leaving as done, which is the distinction
+        # `has_advancement_signal` collapses.
+        _retired = await _retire_step_mirrored(
             db=db, job_id=job_id, session_id=session_id, node_key=prior_nk,
             evidence=body.message)
         out["action"] = "advanced"
-        out["retired_prior_step"] = prior_nk
+        if _retired:
+            out["retired_prior_step"] = prior_nk
+        else:
+            out["retire_vetoed_no_evidence"] = prior_nk
         # §17.766 — retiring the step via the tracker must be able to FINALIZE the
         # session, exactly as a submit does (_maybe_finalize_session is otherwise
         # ONLY reached from submit_step). Without this, retiring the LAST
