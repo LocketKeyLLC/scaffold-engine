@@ -2000,7 +2000,41 @@ def _build_guide_user_prompt(
     block, and a human-walkthrough trailer (a decision-framing trailer when the
     node is a decision).
     """
+    # §17.917 — AN OPEN STEP'S GOAL IS NOT YET ACHIEVED. Definitionally true —
+    # a step being guided is pending/presented, never committed — and nothing in
+    # the prompt said it. Live (session 613dd1df, turn 1445): "Guide me" on
+    # ADD5 "Install Ubuntu Server 22.04 on VM 106" returned an entirely
+    # POST-INSTALL walkthrough (correct the boot order, detach the ISO, "wait
+    # for the login prompt … `palworld-server login:`"). The operator, who had
+    # been unable to install the OS for three days, was handed instructions for
+    # a machine that had already booted one.
+    #
+    # It reached that from CONFIGURATION (§17.914's block showed a disk and a
+    # boot order) while §17.714's reset branch had demoted the facts saying the
+    # install was HUNG to "earlier observations … most will not hold". Both
+    # halves are addressed where they live; this is the invariant that makes
+    # the class impossible: the walkthrough for a step may not presuppose the
+    # step's own outcome.
     parts: list[str] = [ctx.assembled_prompt]
+    parts.append(
+        "## This step is NOT done — and its current state may be AMBIGUOUS\n"
+        f"The goal — \"{(ctx.title or 'this step').strip()}\" — has NOT been "
+        "achieved; that is why the operator is on it. But earlier attempts may "
+        "have left the system PARTLY changed, so configuration values in this "
+        "prompt can look like success without being it: a disk existing is not "
+        "an OS installed on it, and a boot order pointing at a disk says nothing "
+        "about what is on that disk.\n"
+        "Therefore:\n"
+        "1. If the prompt does not TELL you the current state, the FIRST action "
+        "must be one that REVEALS it — and say plainly what each possible "
+        "outcome means.\n"
+        "2. Then handle BOTH outcomes. Never write a walkthrough whose steps "
+        "only make sense if the work already succeeded (logging in with "
+        "credentials they may never have created, verifying a service that may "
+        "never have been installed, or tidying up afterwards).\n"
+        "3. Never state as fact that the step, or any part of it, has already "
+        "been completed, run, or performed."
+    )
     if node_description and node_description.strip() and node_description.strip() not in ctx.assembled_prompt:
         parts.append(f"Task description: {node_description.strip()}")
     if job_digest and job_digest.strip():
@@ -2064,6 +2098,21 @@ async def generate_guidance(
             # query generator declines on a confident-sounding step.
             floor_when_empty=True,
         )
+        # §17.918 — ONE deterministic query about the BLOCKER, always, when the
+        # session records one. The prepass is anchored on the step's task text
+        # and therefore researches the task; a step the operator is STUCK on
+        # needs the stuck-ness researched. Mirrors §17.882 on the fix path.
+        try:
+            bq = blocker_research_query(environment, operator_notes, ctx.title)
+            if bq and bq not in {s.get("query") for s in sources}:
+                from app.modules.assist_research_lib import _confirm_query
+                sources.extend(await _confirm_query(
+                    bq, node_key=node_key, domain=domain, deep=True,
+                ))
+                logger.info("assist_guide_blocker_query node_key=%s q=%r",
+                            node_key, bq[:120])
+        except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
+            logger.warning("assist_guide_blocker_query_failed: %s", exc)
 
     system = apply_verbosity(
         guide_system_for_tool(ctx.tool, is_decision=is_decision), verbosity
@@ -2133,6 +2182,76 @@ async def generate_guidance(
     # dropped the "## My suggestion" lean, generate just that block from the
     # options it produced and append it. Only on a miss; fail-soft (append is ""
     # → ship the un-enforced walkthrough). Off by default (tests/fresh installs).
+    # §17.919 — a walkthrough that presupposes its own step is done is not a
+    # flag-worthy imperfection, it is the wrong document: it sends the operator
+    # to verify work they have not performed. Guides are flag-don't-regen
+    # (§17.887) as a rule; this violation earns the one exception, because the
+    # §17.917 prompt invariant was VERIFIED present in the prompt and the model
+    # produced it anyway.
+    # §17.919/921 — a walkthrough that presupposes its own step is done is not a
+    # flag-worthy imperfection, it is the wrong document: it sends the operator
+    # to verify work they have not performed. Guides are flag-don't-regen
+    # (§17.887) as a rule; this earns the exception, because the §17.917 prompt
+    # invariant was VERIFIED present in the prompt and the model produced the
+    # violation anyway.
+    #
+    # §17.921 — RETRY, don't redraw once. Across four live draws on the same
+    # step the model produced install guidance twice and post-install guidance
+    # twice: the failure is NON-DETERMINISTIC, so a single regeneration is a
+    # coin flip. The detector, by contrast, is reliable — so use it as an
+    # ACCEPTANCE TEST and keep the first clean draw. That is the whole gate-stack
+    # philosophy applied to variance rather than to a systematic error.
+    presupposed = find_presupposed_completion(text_out, ctx.title) if text_out else []
+    if presupposed:
+        logger.warning(
+            "assist_guide_presupposes_completion node_key=%s title=%r sentence=%r",
+            node_key, ctx.title, presupposed[0]["sentence"][:120])
+        directive = (
+            "\n\n---\nREGENERATION NOTICE:\n"
+            f"Your previous draft asserted that \"{ctx.title}\" has ALREADY been "
+            "done, and wrote the steps that come AFTER it. It has NOT been done "
+            "— that is why the operator is on this step. Offending text:\n"
+            + "\n".join(f"- \"{h['sentence']}\"" for h in presupposed[:3])
+            + "\nWrite the walkthrough that ACHIEVES the step, from where the "
+              "operator actually is. Configuration values in the prompt describe "
+              "how a resource is set up; they do NOT mean the work inside it has "
+              "been performed. Do not add a 'Prerequisites' line asserting the "
+              "step is already complete.")
+        for attempt in range(settings.assist_guide_presupposed_retries):
+            try:
+                regen = await chat_until_nonempty(
+                    model_router.chat,
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user + directive},
+                    ],
+                    {"role": role},
+                    temperature=0.3,
+                    max_tokens=settings.assist_guide_max_tokens,
+                    draws=2,
+                    label="assist_guide_presupposed_regen",
+                    think_off_rescue=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — never fail the guide on this
+                logger.warning("assist_guide_presupposed_regen_failed: %s", exc)
+                break
+            regen_text = (regen.text or "").strip() if (regen and regen.success) else ""
+            if not regen_text:
+                continue
+            still = find_presupposed_completion(regen_text, ctx.title)
+            if not still:
+                logger.info(
+                    "assist_guide_presupposed_cleared node_key=%s attempt=%d",
+                    node_key, attempt + 1)
+                text_out, presupposed = regen_text, []
+                break
+            text_out, presupposed = regen_text, still
+        if presupposed:
+            text_out = (
+                "⚠️ **Caution:** this walkthrough reads as though \""
+                + (ctx.title or "this step") + "\" is already done, and it is "
+                "not — treat its steps as unverified and tell me where you "
+                "actually are.\n\n" + text_out)
     if text_out:
         warn = guide_integrity_warning(text_out, user, failed_commands)
         if warn:
@@ -2642,6 +2761,163 @@ def unavailable_tools_note(notes: list[str]) -> str:
         return ""
     return ("\n\n---\nℹ️ **Adjusted for your system:** "
             + "; ".join(notes) + ".")
+
+
+# §17.918 — the GUIDE path must research the operator's BLOCKER, not the step's
+# title. §17.909 established this for /fix ("a blocker is frequently UPSTREAM of
+# the step it blocks, so the step title is then the worst term to lead with")
+# and it was never carried to /guide. Live (ADD5): the only research query on a
+# step the operator had been stuck on for three days was
+#
+#     kind=milvus  query="Install Ubuntu Server 22.04 on VM 106"
+#
+# — my own §17.912 floor, doing exactly what §17.909 proved wrong. Nothing was
+# ever asked about the hang, so the walkthrough's installer details came from
+# model memory, and got the screen flow wrong: it told the operator to "uncheck
+# the update box" AFTER they had said, at turn 1417, "There is no option to
+# uncheck for the security update."
+_BLOCKER_FACT_RE = re.compile(
+    r"\b(hang|hangs|hung|stuck|frozen|freeze|unresponsive|fail(?:s|ed|ing)?|"
+    r"error|crash(?:es|ed)?|loop|won'?t boot|times? out|timed out)\b",
+    re.IGNORECASE,
+)
+# A message ADDRESSED TO THE ENGINE is not a technical symptom. The first cut
+# picked "You still have not fixed the ubuntu server install and it getting hung
+# up on the install" — the operator's frustration, which describes nothing a
+# search engine can act on.
+_BLOCKER_NOISE_RE = re.compile(
+    r"^\s*(?:operator (?:has )?(?:decided|wants|attempted)|i (?:think|want))\b"
+    r"|\byou (?:still )?(?:have not|haven'?t|keep|are not|aren'?t)\b"
+    r"|\bnot fixed\b|\bperhaps we should\b",
+    re.IGNORECASE,
+)
+
+
+def blocker_research_query(
+    environment: dict | None, operator_notes: list | None, title: str,
+) -> str:
+    """§17.918 — one deterministic query about what is actually BLOCKING this
+    step, drawn from the facts ledger and operator notes. "" when the session
+    records no blocker (a step going fine needs no blocker research).
+
+    The mirror of §17.882's "one DETERMINISTIC error-derived query, always" on
+    the fix path: same medicine, the surface that never got it.
+    """
+    # FACTS are distilled observations of the system; NOTES are whatever the
+    # operator typed, complaints included. Prefer a fact, and only fall back to
+    # notes when no fact records a blocker.
+    def _pick(items) -> list[str]:
+        out = []
+        for it in items:
+            t = " ".join(str(it).split())
+            if t and _BLOCKER_FACT_RE.search(t) and not _BLOCKER_NOISE_RE.search(t):
+                out.append(t)
+        return out
+
+    candidates = _pick((environment or {}).get("facts") or [])
+    if not candidates:
+        candidates = _pick(
+            (n or {}).get("text") or "" for n in (operator_notes or []))
+    if not candidates:
+        return ""
+    # Prefer the MOST SPECIFIC blocker, not merely the newest: "installation
+    # hangs during the final system configuration phase while downloading and
+    # installing security updates" retrieves an answer; "installation is hung on
+    # rebooting" retrieves noise. Length is a crude but reliable proxy for how
+    # much a symptom narrows a search; recency breaks ties.
+    blocker = max(candidates, key=lambda c: (len(c[:220]), candidates.index(c)))
+    # Instance identifiers ("VM 106") are noise to a search engine; the
+    # technology and the symptom are the signal.
+    blocker = re.sub(r"\b(?:VM|CT|container)\s+\d{2,5}\b", "", blocker,
+                     flags=re.IGNORECASE)
+    blocker = re.sub(r"\s+", " ", blocker).strip(" .,:;-")
+    # Instance identifiers are noise in the SUBJECT too — "VM 106" tells a
+    # search engine nothing.
+    subject_src = re.sub(r"\b(?:on|in)?\s*(?:VM|CT|container)\s+\d{2,5}\b", " ",
+                         title or "", flags=re.IGNORECASE)
+    subject = " ".join(w for w in subject_src.split()
+                       if w.lower() not in _GENERIC_TITLE_WORDS)[:60]
+    return (f"{subject} {blocker}".strip() if subject else blocker)[:180]
+
+
+# §17.919 — the walkthrough asserts the step's OWN GOAL is already achieved.
+# §17.917 added the invariant to the guide prompt ("This step is NOT done …")
+# and VERIFIED it reaches the model — and the very next draw still opened with
+# "change the boot order to prioritize the virtual hard disk where Ubuntu was
+# installed" and "the login prompt asking for the username of the account you
+# created during installation", for a step titled "Install Ubuntu Server 22.04
+# on VM 106" that the operator had never completed. Prompt rules are guidance;
+# this is enforcement (§17.668/882, the house rule).
+#
+# High precision by construction: it fires only when the STEP'S OWN action verb
+# is asserted in the completed past. Forward-looking uses ("once installed",
+# "after the installation completes", "will be installed") are excluded — those
+# are how a correct walkthrough talks about its own outcome.
+# §17.921 — recall gap found live: a draft said "installation has been run at
+# least once" and "the password created during the installation", neither of
+# which contains the participle of the step's verb. Any COMPLETION participle
+# applied to the step's own noun counts.
+_GENERIC_DONE_RE = re.compile(
+    r"[^.!?\n]*\b(?:has|have|was|were)\s+been\s+"
+    r"(?:run|performed|completed|done|carried out)\b[^.!?\n]*"
+    r"|[^.!?\n]*\b(?:created|configured|installed|set up)\s+during\s+"
+    r"(?:the\s+)?(?:install|installation|setup|configuration)\b[^.!?\n]*",
+    re.IGNORECASE,
+)
+_STEP_ACTIONS: dict[str, tuple[str, ...]] = {
+    "install": ("installed",),
+    "create": ("created",),
+    "configure": ("configured",),
+    "deploy": ("deployed",),
+    "provision": ("provisioned",),
+    "set up": ("set up", "setup"),
+}
+_FORWARD_LOOKING_RE = re.compile(
+    r"\b(?:once|after|when|until|before|if)\b[^.!?\n]{0,40}$", re.IGNORECASE)
+
+
+def find_presupposed_completion(text_out: str, title: str) -> list[dict]:
+    """Sentences asserting the step's own goal is already done.
+
+    Returns ``[{action, sentence}]``.
+    """
+    if not (text_out or "").strip() or not (title or "").strip():
+        return []
+    tl = title.lower()
+    actions = [a for a in _STEP_ACTIONS if a in tl]
+    if not actions:
+        return []
+    hits: list[dict] = []
+    seen: set[str] = set()
+    for action in actions:
+        for past in _STEP_ACTIONS[action]:
+            # "was/were/has been/have been <past>" or "you <past> during …"
+            pat = re.compile(
+                r"[^.!?\n]*\b(?:(?:was|were|has\s+been|have\s+been|is|are)"
+                r"\s+(?:successfully\s+|already\s+)?" + re.escape(past) + r"\b"
+                r"|already\s+" + re.escape(past) + r"\b"
+                r"|you\s+\w+\s+during\s+(?:the\s+)?" + re.escape(action) + r"\w*\b"
+                r")[^.!?\n]*", re.IGNORECASE)
+            for m in pat.finditer(text_out):
+                sentence = " ".join(m.group(0).split())
+                if not sentence or sentence in seen:
+                    continue
+                # a clause introduced by once/after/when is about the FUTURE
+                head = text_out[max(0, m.start() - 40):m.start()]
+                if _FORWARD_LOOKING_RE.search(head):
+                    continue
+                seen.add(sentence)
+                hits.append({"action": action, "sentence": sentence[:200]})
+    # §17.921 — completion phrasings that never name the step's verb.
+    for m in _GENERIC_DONE_RE.finditer(text_out):
+        sentence = " ".join(m.group(0).split())
+        if sentence and sentence not in seen:
+            head = text_out[max(0, m.start() - 40):m.start()]
+            if _FORWARD_LOOKING_RE.search(head):
+                continue
+            seen.add(sentence)
+            hits.append({"action": "completion", "sentence": sentence[:200]})
+    return hits
 
 
 def find_guess_before_look(text_out: str) -> list[dict]:

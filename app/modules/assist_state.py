@@ -91,10 +91,31 @@ def render_system_state(state: dict | None) -> str:
     rows = [(rid, rec) for rid, rec in (state or {}).items() if isinstance(rec, dict)]
     if not rows:
         return ""
+    # §17.917 — SCOPE. The first version of this header said only "GROUND TRUTH
+    # … do NOT contradict it", and the model drew a conclusion the data never
+    # supported. Live (session 613dd1df, turn 1445): "Guide me" on ADD5
+    # "Install Ubuntu Server 22.04 on VM 106" produced an entirely POST-INSTALL
+    # walkthrough — fix the boot order, detach the ISO, "wait for the login
+    # prompt" — because this block showed `boot: order=scsi0` and a 100G
+    # `scsi0` disk. A disk existing is not an OS existing. Worse, the §17.714
+    # reset branch had just demoted the facts that said the install was HUNG to
+    # "earlier observations … most will not hold", so the one authoritative
+    # block in the prompt was a CONFIGURATION snapshot, and configuration
+    # outranked observation.
+    #
+    # A `qm config` read establishes what the hypervisor is configured to do.
+    # It establishes nothing about what is installed, running, or working
+    # inside the guest. Say so, in the block itself.
     lines = [
-        "### CONFIRMED system state (read from the operator's own command "
-        "output — this is GROUND TRUTH; do NOT ask them to re-run a command "
-        "whose answer is already here, and do NOT contradict it):"
+        "### CONFIRMED resource CONFIGURATION (read from the operator's own "
+        "command output — accurate for what it covers; do NOT ask them to "
+        "re-run a command whose answer is already here, and do NOT contradict "
+        "these values).\n"
+        "SCOPE — this is hypervisor configuration ONLY. It does NOT establish "
+        "that any OS or software is installed, booted, running or working "
+        "inside these resources: a disk being attached is not an OS being "
+        "installed on it. Never infer that a step's goal is already achieved "
+        "from configuration alone."
     ]
     for rid, rec in sorted(rows):
         kind = "VM" if rec.get("kind") == "vm" else "container"
