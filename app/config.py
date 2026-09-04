@@ -1042,6 +1042,12 @@ class Settings(BaseSettings):
     # the DETECTOR is reliable, so it is used as an acceptance test. 0 disables
     # the retry and leaves the visible ⚠️ banner.
     assist_guide_presupposed_retries: int = Field(default=3, ge=0, le=5)
+
+    # §17.926 — after this many replies on one step without closing it, the fix
+    # prompt re-states the step's definition of done and demands the next action
+    # name which unmet criterion it advances. Live: six consecutive replies about
+    # `qemu-guest-agent` on a step whose criteria name SSH and a login prompt.
+    assist_stalled_step_replies: int = Field(default=5, ge=2, le=20)
     # §17.710 — unified session memory. Master gate + per-stage sub-valves so the
     # refactor rolls out incrementally and each stage A/Bs against today's
     # behavior. Default OFF: `assist_unified_memory_enabled=False` keeps the

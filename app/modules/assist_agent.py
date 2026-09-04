@@ -1685,6 +1685,25 @@ async def run_step_fix(
     # §17.898 — the engine's OWN prescriptions on this step, so a fix can never
     # again blame the operator for a command the engine issued.
     prescribed = await _prescribed_commands(session_id=session_id, node_key=nk, db=db)
+    # §17.925 — the recent thread on this step, so generate_fix can tell whether
+    # it has been advancing the step's definition of done or yak-shaving. Live:
+    # six consecutive replies about `qemu-guest-agent` on a step whose criteria
+    # name SSH and a login prompt.
+    recent_replies: list[str] = []
+    try:
+        _rows = (await db.execute(
+            text("""
+                SELECT content FROM assist_turns
+                 WHERE session_id = :sid AND node_key = :nk
+                   AND role = 'assistant' AND kind IN ('fix', 'guide')
+                 ORDER BY created_at DESC, id DESC LIMIT 4
+            """),
+            {"sid": session_id, "nk": nk},
+        )).mappings().all()
+        recent_replies = [r.get("content") or "" for r in _rows]
+    except Exception as e:  # noqa: BLE001 — steering is never a blocker
+        logger.warning("assist_recent_replies_failed session_id=%s err=%r",
+                       session_id, e)
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
@@ -1693,6 +1712,7 @@ async def run_step_fix(
         failure_streak=streak,
         failed_commands=failed_cmds,
         prescribed_commands=prescribed,
+        recent_replies=recent_replies,  # §17.925
         node_key=nk,
         domain=node_row.get("domain"),
         verbosity=mem.verbosity,

@@ -3092,6 +3092,68 @@ def find_presupposed_completion(text_out: str, title: str) -> list[dict]:
     return hits
 
 
+# §17.925 — GOAL DRIFT. A step carries its own definition of done, and nothing
+# measured progress against it. Live (session 613dd1df, ADD5): the step reads
+#
+#   "The step is complete when the VM boots from its local disk into a working
+#    login prompt and is reachable via SSH from the Proxmox host."
+#
+# The operator reported the login prompt at turn 1460 — half the criteria met.
+# The remaining one is SSH. The engine then spent SIX CONSECUTIVE turns on
+# `qemu-guest-agent`, which appears nowhere in the criteria, and never once
+# proposed `openssh-server`. Each individual reply was locally reasonable (the
+# guest agent genuinely is missing; the apt cdrom error genuinely needs fixing),
+# and the sequence went nowhere — the operator's report: "the continuation is
+# just a repeat that will not achieve anything nor solve the problem".
+#
+# This is an unbounded yak-shave: solve whatever error is in front of you,
+# forever, without asking whether it advances the step.
+_ACCEPTANCE_RE = re.compile(
+    r"(?:the\s+)?step\s+is\s+complete\s+when\b[^.]*\.?"
+    r"|(?:is\s+)?(?:considered\s+)?done\s+when\b[^.]*\.?"
+    r"|success(?:\s+is|\s+means|:)\s*[^.]*\.?"
+    r"|acceptance\s+criteri(?:a|on)\s*:?\s*[^.]*\.?",
+    re.IGNORECASE,
+)
+_CRITERIA_STOPWORDS = frozenset({
+    "the", "step", "is", "complete", "when", "and", "a", "an", "to", "of", "on",
+    "in", "with", "from", "into", "its", "it", "be", "been", "via", "for", "or",
+    "that", "this", "are", "was", "were", "has", "have", "done", "working",
+    "successfully", "should", "must", "can", "will", "then", "at", "by",
+})
+
+
+def extract_acceptance_criteria(description: str | None) -> str:
+    """The step's own definition of done, verbatim. "" when it states none."""
+    m = _ACCEPTANCE_RE.search(description or "")
+    return " ".join(m.group(0).split()) if m else ""
+
+
+def _criteria_terms(criteria: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9][a-z0-9._-]{2,}", (criteria or "").lower())
+            if w not in _CRITERIA_STOPWORDS}
+
+
+def find_goal_drift(recent_assistant_texts: list[str], criteria: str,
+                    *, window: int = 4) -> bool:
+    """True when the last `window` replies advanced none of the criteria.
+
+    Deliberately crude: a reply "advances" a criterion if it mentions any
+    distinctive term from it. That is a low bar, and the live failure cleared
+    it in neither direction — six consecutive replies about a package the
+    criteria never name.
+    """
+    terms = _criteria_terms(criteria)
+    if not terms:
+        return False
+    recent = [t for t in (recent_assistant_texts or []) if (t or "").strip()][:window]
+    if len(recent) < window:
+        return False          # too early to call it drift
+    return not any(
+        any(term in (t or "").lower() for term in terms) for t in recent
+    )
+
+
 def find_guess_before_look(text_out: str) -> list[dict]:
     """Fix drafts that mutate state without first showing the operator a
     read-only command that prints it. Returns ``[{command}]`` naming the
@@ -3590,6 +3652,7 @@ async def generate_fix(
     failure_streak: int = 0,
     failed_commands: Optional[str] = None,
     prescribed_commands: Optional[str] = None,  # §17.898
+    recent_replies: Optional[list[str]] = None,  # §17.925
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -3679,6 +3742,47 @@ async def generate_fix(
     # qemu-guest-agent` — 88 characters and two chains — for a VM console the
     # operator has to TYPE into.
     parts.append(_CONSOLE_TYPING_RULE)
+    # §17.925 — the step's own DEFINITION OF DONE, next to the error. It was
+    # already inside `ctx.assembled_prompt` and demonstrably not steering: the
+    # live step said "complete when the VM boots ... and is reachable via SSH
+    # from the Proxmox host", the operator reported the login prompt, and the
+    # engine then spent six consecutive turns on `qemu-guest-agent` — a package
+    # the criteria never mention — without once proposing openssh-server.
+    # generate_fix has no `node_description` parameter; the step's description
+    # (and therefore its acceptance criteria) is inside the assembled prompt.
+    _criteria = (extract_acceptance_criteria(getattr(ctx, "base_prompt", "") or "")
+                 or extract_acceptance_criteria(
+                     getattr(ctx, "assembled_prompt", "") or ""))
+    # §17.926 — the first cut tested whether recent replies MENTIONED a
+    # criteria term. Useless: the criteria contain "vm", "disk", "host",
+    # "prompt", words that appear in nearly every reply, so it never fired on
+    # the live six-turn yak-shave it was written for. Turn COUNT is crude and
+    # actually reliable: a step that has absorbed this many replies without
+    # closing is one where the engine should re-state the goal and name which
+    # criterion it is advancing, rather than open another sub-problem.
+    _stalled = bool(_criteria) and failure_streak >= settings.assist_stalled_step_replies
+    if _stalled:
+        logger.warning(
+            "assist_step_stalled node_key=%s replies=%d criteria=%r",
+            node_key, failure_streak, _criteria[:120])
+    if _criteria:
+        parts.append(
+            "## Definition of done for THIS step\n" + _criteria + "\n"
+            "Every reply must move the operator toward THIS. Before proposing "
+            "work, ask yourself which part of it the work advances — if the "
+            "answer is 'none', you are solving an incidental error instead of "
+            "the step. If the criteria already appear MET from what the operator "
+            "has reported, say so plainly and ask them to confirm rather than "
+            "finding more work.")
+        if _stalled:
+            parts.append(
+                "## STOP — this step has stalled\n"
+                f"You have now sent {failure_streak} replies on this step without "
+                "closing it. Do not open another sub-problem. Either (a) take "
+                "the action that directly advances an UNMET criterion above — "
+                "and say which one it is — or (b) if the criteria already appear "
+                "met from what the operator has reported, say so plainly and ask "
+                "them to confirm so the step can be closed.")
     parts.append(f"## Error the operator hit\n{error_text.strip()}")
     research_block = _render_research_block(sources)
     if research_block:
@@ -3809,6 +3913,15 @@ async def generate_fix(
         # doing the right thing.
         look_ = (find_guess_before_look(draft)
                  if failure_streak >= settings.assist_fix_streak_threshold else [])
+        # §17.926 — a console has no copy-paste, so "run this and show me the
+        # output" costs the operator hand-transcription of every line. §17.907
+        # exists to stop blind guessing; in a console it was forcing
+        # `cat /etc/apt/sources.list` + "paste the output here" in place of a
+        # direct, idempotent one-line fix the operator could simply type. When
+        # the draft's first actionable block is a console block, the gate is
+        # satisfied — looking is not free there.
+        if look_ and not _block_runs_on_root_host(draft, draft.find("```")):
+            look_ = []
         if look_ and _known_state:
             _ids = set(re.findall(r"\b(\d{2,5})\b", look_[0].get("command") or ""))
             if _ids and _ids <= set(_known_state):
@@ -4024,6 +4137,23 @@ async def generate_fix(
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913
+    # §17.926 — when a step has absorbed this many replies without closing, the
+    # model has repeatedly been told to re-anchor on the definition of done and
+    # has repeatedly continued its existing thread instead (live: six turns on
+    # `qemu-guest-agent` for a step whose criteria name SSH). Prompt rules are
+    # guidance. Surface it to the OPERATOR, who can judge whether the current
+    # approach is worth continuing — that decision is theirs, and stating the
+    # criteria plainly is the honest way to hand it over.
+    if _stalled and text_out:
+        text_out += (
+            "\n\n---\n🧭 **Still on this step after "
+            f"{failure_streak} replies.** Its definition of done is:\n"
+            f"> {_criteria}\n"
+            "If any part of that is already true on your machine, say so and I "
+            "will close the step. If the current approach is not getting you "
+            "there, say \"different approach\" and I will work the goal from "
+            "another angle instead of continuing this thread."
+        )
     status = "ready" if text_out else "failed"
     meta: dict[str, Any] = {
         "model": getattr(resp, "model", "") if resp else "",
