@@ -4346,6 +4346,87 @@ async def cached_guidance_is_stale(
         return False
 
 
+# §17.927 — a conclusion that is not an action leaves the operator parked.
+# Live (session 613dd1df, turn 1497), the ENTIRE walkthrough for ADD3:
+#
+#   "The operator has explicitly requested to remove this step from the project
+#    plan. No further action is required for the Markdown linter implementation."
+#
+# The engine had assessed the step correctly — ADD3/ADD4 are junk steps created
+# from casual test messages ("I want to build a markdown linter") and really are
+# obsolete — and then did nothing with that assessment. No skip, no advance, no
+# offer. The operator, who had just finished ADD5, was handed a two-sentence
+# dead end. Their report: "this appears to be its ability to move on after
+# completing the task".
+#
+# §17.915 already draws the distinction this needs: SKIP is "work deliberately
+# NOT done", which is exactly the right terminal state for an obsolete step, and
+# unlike a commit it requires no evidence. So the fix is to turn the conclusion
+# into the one-word action that acts on it.
+_NO_ACTION_RE = re.compile(
+    r"no (?:further |additional )?action (?:is |was )?(?:required|needed)"
+    r"|nothing (?:further |more )?(?:to do|is required|is needed)"
+    r"|(?:requested to |should be )?remove(?:d)? (?:this step )?from the (?:project )?plan"
+    r"|this step (?:is (?:no longer|not) (?:required|needed|relevant)|can be skipped)"
+    r"|already (?:been )?(?:complete|completed|done|achieved)\b",
+    re.IGNORECASE,
+)
+
+
+def concludes_no_action_required(text_out: str) -> bool:
+    """True when a walkthrough's conclusion is that the step needs no work.
+
+    Scoped to SHORT replies: a long walkthrough that merely mentions something
+    is already done in passing is still a walkthrough. A reply that is mostly
+    this conclusion is a dead end unless it carries an action.
+    """
+    t = (text_out or "").strip()
+    if not t or len(t) > 1200:
+        return False
+    return bool(_NO_ACTION_RE.search(t))
+
+
+async def _next_claimable_step(*, db, job_id: str, exclude: str) -> Optional[dict]:
+    """The step the operator would move to next — named so the offer is concrete."""
+    try:
+        row = (await db.execute(
+            text("""
+                SELECT n.node_key, n.title
+                  FROM dag_nodes n
+                 WHERE n.job_id = :jid
+                   AND n.node_key <> :nk
+                   AND n.status NOT IN ('done', 'skipped', 'failed')
+                   AND NOT EXISTS (
+                       SELECT 1 FROM unnest(COALESCE(n.depends_on, ARRAY[]::text[])) d
+                        JOIN dag_nodes p
+                          ON p.job_id = n.job_id AND p.node_key = d
+                       WHERE p.status NOT IN ('done', 'skipped')
+                   )
+                 ORDER BY n.execution_order NULLS LAST, n.node_key
+                 LIMIT 1
+            """),
+            {"jid": job_id, "nk": exclude},
+        )).mappings().first()
+        return dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001 — the offer is an enhancement
+        logger.warning("assist_next_claimable_failed: %s", exc)
+        return None
+
+
+def no_action_footer(next_step: Optional[dict], title: str) -> str:
+    """The action that makes the conclusion usable."""
+    nxt = ""
+    if next_step:
+        nxt = (f" and move on to **{next_step['node_key']} — "
+               f"{next_step.get('title') or ''}**".rstrip())
+    return (
+        "\n\n---\n➡️ **This step needs no work.** Reply **`skip`** to retire "
+        f"\"{title}\"{nxt}. Skipping records it as deliberately not done — it "
+        "does NOT claim the work happened. If you think it IS still needed, say "
+        "what is missing and I will work it instead."
+    )
+
+
 async def ensure_guidance(
     *,
     session_id: str,
@@ -4431,6 +4512,25 @@ async def ensure_guidance(
         status=res["status"],
         db=db,
     )
+    # §17.927 — a "no action required" conclusion must carry the action that
+    # acts on it, or the operator is parked on a dead step (live turn 1497).
+    try:
+        if concludes_no_action_required(res.get("guidance") or ""):
+            _job = (await db.execute(
+                text("SELECT job_id FROM assist_sessions WHERE id = :sid"),
+                {"sid": session_id},
+            )).mappings().first()
+            _nxt = await _next_claimable_step(
+                db=db, job_id=str(_job["job_id"]), exclude=node_key,
+            ) if _job else None
+            res["guidance"] = (res["guidance"] or "") + no_action_footer(
+                _nxt, ctx.title or node_key)
+            res.setdefault("guidance_meta", {})["no_action_offer"] = True
+            logger.info(
+                "assist_no_action_offer node_key=%s next=%r",
+                node_key, (_nxt or {}).get("node_key"))
+    except Exception as exc:  # noqa: BLE001 — the offer must never fail a guide
+        logger.warning("assist_no_action_offer_failed: %s", exc)
     res["cached"] = False
     return res
 
