@@ -1984,6 +1984,32 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# §17.923 — a VM/noVNC console is a KEYBOARD, not a terminal with a clipboard.
+# The operator reported it directly: "within the console copy and paste is not
+# possible". Every long one-liner the engine emits for a console is transcribed
+# by hand, and a typo in a 90-character `&&` chain fails opaquely. Shared by the
+# guide AND fix prompts — it was added to the guide only, and the very next live
+# fix emitted an 88-character double-chained apt command for a console.
+_CONSOLE_TYPING_RULE = (
+    "## Console commands must be TYPED, not pasted\n"
+    "Anything the operator runs in a VM/noVNC console is typed by hand — that "
+    "console has NO copy-paste. For any command in a console context:\n"
+    "- keep it SHORT and on ONE line; never chain with `&&` or `;` when separate "
+    "steps will do — each step is separately verifiable and separately "
+    "re-typeable;\n"
+    "- prefer the shortest form that works (`ip a` over `ip addr show | grep "
+    "inet`), and avoid long paths, long flags and quoting the operator must "
+    "reproduce exactly;\n"
+    "- say \"type this\", never \"paste this\" or \"copy this\";\n"
+    "- if something genuinely long is unavoidable, say so and offer a way around "
+    "it (SSH in from the host and paste there, or write it to a file);\n"
+    "- a console guest is an ORDINARY USER: privileged commands there need "
+    "`sudo`. Only the Proxmox HOST shell is root.\n"
+    "Commands on the HOST shell are pasteable as normal — this applies to the "
+    "console only."
+)
+
+
 def _build_guide_user_prompt(
     ctx: StepContext, node_description: Optional[str],
     sources: list[dict], refine_hint: Optional[str],
@@ -2035,6 +2061,14 @@ def _build_guide_user_prompt(
         "3. Never state as fact that the step, or any part of it, has already "
         "been completed, run, or performed."
     )
+    # §17.923 — a VM/noVNC console is a KEYBOARD, not a terminal emulator with a
+    # clipboard. The operator reported it directly: "within the console copy and
+    # paste is not possible". Every long one-liner the engine emits for a
+    # console is therefore transcribed by hand, character by character, and a
+    # single typo in a 90-character `&&` chain fails opaquely.
+    parts.append(_CONSOLE_TYPING_RULE)
+
+
     if node_description and node_description.strip() and node_description.strip() not in ctx.assembled_prompt:
         parts.append(f"Task description: {node_description.strip()}")
     if job_digest and job_digest.strip():
@@ -2274,6 +2308,9 @@ async def generate_guidance(
     # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
     # §17.913 — make it runnable on the box the operator actually has.
     text_out, _tool_notes = repair_unavailable_tools(text_out, environment)
+    # §17.924 — console blocks are typed by hand: unchain them.
+    text_out, _console_notes = repair_console_commands(text_out)
+    _tool_notes = list(_tool_notes) + list(_console_notes)
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913
@@ -2683,18 +2720,88 @@ def operator_is_root(environment: dict | None) -> bool:
 _SUDO_IN_CMD_RE = re.compile(r"(?m)(^|&&|\|\||;|\|)([ \t]*)sudo[ \t]+(?=\S)")
 
 
-# A draft routinely spans TWO machines: the Proxmox host (root, no sudo) and a
-# guest console (an ordinary user, where sudo IS required). Stripping
-# session-wide broke that — the first cut removed `sudo` from `lvextend` and
-# `resize2fs` blocks explicitly introduced with "Run these INSIDE the VM
-# Console", which would have failed as permission-denied. Decide per BLOCK, from
-# the text immediately preceding it.
+# §17.922 — WHICH MACHINE does this block run on? A draft routinely spans two:
+# the Proxmox host (root, no sudo) and a guest console (an ordinary user, where
+# sudo is REQUIRED). §17.913 decided this by matching prose in the preceding
+# 400 chars and missed six of eight real phrasings — "Run these commands in the
+# VM:", "From the VM shell:", "Once logged into Ubuntu, run:" — so `sudo` was
+# stripped from GUEST commands, which then fail permission-denied. That is the
+# operator's report: "it not giving sudo within the console commands".
+#
+# Prose matching was the wrong instrument. The engine already emits a STRUCTURED
+# location banner on every walkthrough (§17.700/741):
+#     📍 On: the Proxmox host shell (root@pve)
+#     📍 In: the Proxmox VM 106 Console (noVNC)
+#     📍 On: VM 106 shell (ubuntu@palworld-server)
+# Use the nearest PRECEDING banner as the authority, and when there is none, do
+# NOT strip: leaving a needless sudo is recoverable and obvious, silently
+# removing a required one is neither.
+_LOCATION_BANNER_RE = re.compile(r"📍\s*(?:On|In|At)\s*:?\s*([^\n]{0,120})",
+                                 re.IGNORECASE)
+_ROOT_HOST_BANNER_RE = re.compile(
+    r"\broot@|\bproxmox\s+host\b|\bhost\s+shell\b|\bpve\s+shell\b|\bhypervisor\b",
+    re.IGNORECASE,
+)
+_GUEST_BANNER_RE = re.compile(
+    r"\bconsole\b|\bnovnc\b|\bguest\b|\b(?:vm|ct)\s*\d{2,5}\s+shell\b"
+    r"|[a-z][a-z0-9_-]*@(?!pve\b)[a-z0-9_-]+",
+    re.IGNORECASE,
+)
+# Fallback for a block that has no 📍 banner above it — which includes the
+# 👉 "Do this next" block, since the banner follows it. Every alternative below
+# is a phrasing observed in a real live walkthrough during §17.922-924 testing;
+# the first cut missed six of eight and the second still missed "Log into the VM
+# via the Proxmox Web UI Console".
 _IN_GUEST_MARKER_RE = re.compile(
-    r"inside the (?:vm|guest|container)|vm console|guest console|in the guest|"
-    r"noVNC|[a-z][a-z0-9_-]*@(?!pve\b)[a-z0-9_-]+:~|log ?in(?:ged)? (?:to|into) the vm",
+    r"inside the (?:vm|guest|container)"
+    r"|(?:vm|guest|ui)\s+console"
+    r"|console\s+(?:for|of|button|tab)\b"
+    r"|(?:web\s*ui|proxmox)[^.\n]{0,40}console"
+    r"|in the guest|in the vm\b|from the vm\b|on the vm\b"
+    r"|vm shell|guest shell|novnc"
+    r"|log\s?g?in(?:to|ged)?\s+(?:to\s+|into\s+)?the\s+(?:vm|guest|ubuntu)"
+    r"|logged\s+(?:in)?\s*(?:to|into)\s+(?:the\s+)?(?:vm|ubuntu|guest)"
+    r"|on the ubuntu (?:server|vm|guest|prompt)"
+    r"|login prompt"
+    r"|[a-z][a-z0-9_-]*@(?!pve\b)[a-z0-9_-]+:~",
     re.IGNORECASE,
 )
 _GUEST_LOOKBEHIND = 400
+
+
+def _block_runs_on_root_host(text_: str, block_start: int) -> bool:
+    """True only when the nearest preceding 📍 banner names the ROOT HOST.
+
+    Conservative by construction: no banner, or an ambiguous one, returns False
+    so nothing is stripped.
+    """
+    head = text_[:block_start]
+    banners = list(_LOCATION_BANNER_RE.finditer(head))
+    if banners:
+        last = banners[-1]
+        where = last.group(1)
+        if _GUEST_BANNER_RE.search(where):
+            return False          # a guest context — sudo is legitimate
+        if _ROOT_HOST_BANNER_RE.search(where):
+            # A host banner does NOT own every block below it: a walkthrough
+            # commonly banners the host once and then moves into the guest in
+            # prose ("Now run these inside the VM Console"). Prose AFTER the
+            # banner overrides it — caught by test_in_guest_blocks_keep_their_sudo,
+            # where the guest block inherited the host banner and lost its sudo.
+            if _IN_GUEST_MARKER_RE.search(head[last.end():]):
+                return False
+            return True
+        return False              # an ambiguous banner: do not strip
+    # No banner anywhere above (the 👉 headline block precedes its own banner).
+    # Strip ONLY when the prose positively identifies the host; an
+    # unclassifiable block is left alone. A needless `sudo` fails visibly with
+    # "sudo: command not found" — which the engine now knows about and can
+    # correct — while a silently removed one fails permission-denied inside a
+    # guest, which is what the operator actually hit.
+    tail = head[-_GUEST_LOOKBEHIND:]
+    if _IN_GUEST_MARKER_RE.search(tail):
+        return False
+    return bool(_ROOT_HOST_BANNER_RE.search(tail))
 
 
 def _strip_sudo_in_fences(text_: str) -> tuple[str, int]:
@@ -2703,15 +2810,80 @@ def _strip_sudo_in_fences(text_: str) -> tuple[str, int]:
 
     def _fix_block(m: "re.Match") -> str:
         nonlocal total
-        preceding = text_[max(0, m.start() - _GUEST_LOOKBEHIND):m.start()]
-        if _IN_GUEST_MARKER_RE.search(preceding):
-            return m.group(0)  # targets a guest — sudo is legitimate there
+        if not _block_runs_on_root_host(text_, m.start()):
+            return m.group(0)
         body, n = _SUDO_IN_CMD_RE.subn(r"\1\2", m.group(2))
         total += n
         return m.group(1) + body + m.group(3)
 
     out = re.sub(r"(```[a-z]*\n)(.*?)(```)", _fix_block, text_ or "", flags=re.S)
     return out, total
+
+
+# §17.924 — a console block the operator must TYPE, emitted as a chain. Live:
+# the body of a fix correctly listed `sudo apt update` / `sudo apt install -y
+# qemu-guest-agent` on separate lines AND said "remember: no copy-paste in this
+# window", while its own 👉 headline said
+#     apt update && apt install -y qemu-guest-agent
+# — 46 characters, chained, and missing the sudo its own steps used. The prompt
+# rule reached the body and not the headline, which is the §17.668 house rule
+# yet again: enforce it.
+#
+# Splitting is a SAFE repair for a typed workflow: the operator types one line,
+# sees its result, then types the next — which is what the walkthrough's own
+# prose already tells them to do. `&&`'s stop-on-failure is preserved by the
+# human, who can see the failure.
+_PRIVILEGED_GUEST_RE = re.compile(
+    r"^\s*(?:apt|apt-get|dpkg|snap|systemctl|lvextend|lvresize|resize2fs|"
+    r"pvresize|mkfs\S*|mount|umount|usermod|useradd|groupadd|chown|chmod|"
+    r"ufw|timedatectl|hostnamectl)\b",
+    re.IGNORECASE,
+)
+
+
+def repair_console_commands(text_out: str) -> tuple[str, list[str]]:
+    """Split chained commands in CONSOLE blocks and report privileged guest
+    commands that are missing `sudo`. Returns ``(text, notes)``."""
+    if not (text_out or "").strip():
+        return text_out, []
+    notes: list[str] = []
+    split_count = 0
+    missing_sudo: list[str] = []
+
+    def _fix(m: "re.Match") -> str:
+        nonlocal split_count
+        if _block_runs_on_root_host(text_out, m.start()):
+            return m.group(0)          # host shell — pasteable, leave alone
+        out_lines: list[str] = []
+        for raw in m.group(2).splitlines():
+            line = raw.rstrip()
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                parts = [p.strip() for p in re.split(r"&&", stripped) if p.strip()]
+                if len(parts) > 1:
+                    split_count += len(parts) - 1
+                    out_lines.extend(parts)
+                else:
+                    out_lines.append(stripped)
+            else:
+                out_lines.append(line)
+        for ln in out_lines:
+            if (_PRIVILEGED_GUEST_RE.match(ln) and not ln.lower().startswith("sudo ")
+                    and ln not in missing_sudo):
+                missing_sudo.append(ln)
+        return m.group(1) + "\n".join(out_lines) + "\n" + m.group(3)
+
+    out = re.sub(r"(```[a-z]*\n)(.*?)\n?(```)", _fix, text_out, flags=re.S)
+    if split_count:
+        notes.append(
+            f"split {split_count} chained command(s) into separate lines — the "
+            "VM console has no copy-paste, so each is typed by hand")
+    if missing_sudo:
+        notes.append(
+            "these console commands need `sudo` (a guest console is an ordinary "
+            "user, unlike the Proxmox host): `"
+            + "`, `".join(c[:48] for c in missing_sudo[:3]) + "`")
+    return out, notes
 
 
 def repair_unavailable_tools(text_out: str, environment: dict | None) -> tuple[str, list[str]]:
@@ -3501,6 +3673,12 @@ async def generate_fix(
                   "step, not a safe default.")
     except Exception as exc:  # noqa: BLE001 — salience is an enhancement
         logger.debug("assist_fix_state_salience_failed: %s", exc)
+    # §17.923 — the console-typing contract applies to /fix as well. It was
+    # added to the guide prompt only, and the very next live fix emitted
+    # `apt update && apt install -y qemu-guest-agent && systemctl enable --now
+    # qemu-guest-agent` — 88 characters and two chains — for a VM console the
+    # operator has to TYPE into.
+    parts.append(_CONSOLE_TYPING_RULE)
     parts.append(f"## Error the operator hit\n{error_text.strip()}")
     research_block = _render_research_block(sources)
     if research_block:
@@ -3840,6 +4018,9 @@ async def generate_fix(
     # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
     # §17.913 — make it runnable on the box the operator actually has.
     text_out, _tool_notes = repair_unavailable_tools(text_out, environment)
+    # §17.924 — console blocks are typed by hand: unchain them.
+    text_out, _console_notes = repair_console_commands(text_out)
+    _tool_notes = list(_tool_notes) + list(_console_notes)
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913

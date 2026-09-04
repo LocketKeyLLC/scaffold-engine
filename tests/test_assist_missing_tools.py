@@ -57,6 +57,7 @@ def test_sudo_is_dropped_on_the_root_host():
     """Root does not need sudo and PVE does not ship it, so the prefix is pure
     breakage. Stripping is safe: identical privileges either way."""
     out, notes = repair_unavailable_tools(
+        "📍 On: the Proxmox host shell (root@pve)\n"
         "```bash\nsudo lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv "
         "&& sudo resize2fs /dev/ubuntu-vg/ubuntu-lv\n```", ROOT_ENV)
     assert "sudo" not in out
@@ -67,12 +68,14 @@ def test_sudo_after_a_separator_is_also_dropped():
     """REGRESSION — a line-anchored rule stripped only the FIRST sudo, leaving
     `lvextend … && sudo resize2fs …`, which still died."""
     out, _ = repair_unavailable_tools(
+        "📍 On: the Proxmox host shell (root@pve)\n"
         "```bash\nsudo a && sudo b ; sudo c | sudo d\n```", ROOT_ENV)
     assert "sudo" not in out
 
 
 def test_prose_mentioning_sudo_is_never_touched():
-    text = "Note: you need sudo for normal users.\n```bash\nsudo qm stop 106\n```"
+    text = ("📍 On: the Proxmox host shell (root@pve)\n"
+            "Note: you need sudo for normal users.\n```bash\nsudo qm stop 106\n```")
     out, _ = repair_unavailable_tools(text, ROOT_ENV)
     assert "you need sudo for normal users." in out
     assert "sudo qm stop" not in out
@@ -115,7 +118,11 @@ def test_missing_tools_reach_the_prompt():
     block = render_environment_block(ROOT_ENV)
     assert "NOT AVAILABLE" in block
     assert "`sudo`" in block
-    assert "operator is root there" in block
+    # §17.923 — scoped to THAT HOST: the unqualified "the operator is root
+    # there, so simply omit it" read as a global instruction, and a live fix
+    # then emitted guest `apt` commands with no sudo at all.
+    assert "THAT HOST ONLY" in block
+    assert "still needs sudo" in block
 
 
 def test_lifecycle_commands_are_not_repeat_violations():

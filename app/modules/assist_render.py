@@ -76,7 +76,8 @@ def render_environment_block(environment: dict | None) -> str:
             + "\n".join(
                 f"- `{m['tool']}`"
                 + (f" (on {m['host']})" if str(m.get('host') or '').strip() else "")
-                + ("  — the operator is root there, so simply omit it"
+                + ("  — omit it for commands on THAT HOST ONLY; a VM/guest "
+                   "console is an ordinary user and still needs sudo"
                    if str(m['tool']).lower() == "sudo" else "")
                 for m in missing)
         )
