@@ -125,3 +125,66 @@ def test_uninstall_restores_the_api_key():
     _live_write_guard.uninstall()
     assert os.environ["SCAFFOLD_API_KEY"] == real
     _live_write_guard.install()  # leave the process guarded
+
+
+# ── §17.944 — live inference is blocked too ───────────────────────────────
+
+
+def test_the_inference_endpoint_is_derived_from_settings(_ensure_guard):
+    """Hardcoding 172.18.0.1:11434 would silently stop guarding on any other
+    deployment — that address is specific to this box, where containers reach
+    the host Ollama through the bridge gateway."""
+    from app.config import settings
+    from app.modules import assist_agent  # noqa: F401 — ensure app is importable
+
+    from tests._live_write_guard import targets_inference
+
+    assert targets_inference(settings.ollama_base_url + "/api/chat") is True
+    assert targets_inference(settings.ollama_base_url + "/api/generate") is True
+    assert targets_inference("http://example.com:11434/api/chat") is False
+    assert targets_inference("http://172.18.0.1:9999/api/chat") is False
+
+
+async def test_inference_over_httpx_is_blocked(_ensure_guard):
+    """The app reaches the orchestrator with `requests` and the model with
+    `httpx`; guarding only the first left every §17.943-class call open."""
+    import httpx
+
+    from app.config import settings
+
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(LiveEngineWriteBlocked) as exc:
+            await client.post(settings.ollama_base_url + "/api/chat", json={})
+    msg = str(exc.value)
+    assert "LIVE INFERENCE" in msg
+    assert "grounding_gate_enabled" in msg      # names the §17.943 cause
+    assert "tests/integration/" in msg
+
+
+async def test_non_inference_httpx_still_dispatches(_ensure_guard):
+    """The guard must not become a blanket no-network rule — the sim sidecars
+    and SearXNG are legitimately reachable from unit tests today."""
+    import httpx
+
+    sentinel = MagicMock(name="response")
+
+    async def _fake_send(self, request, *a, **kw):
+        return sentinel
+
+    with patch.object(_live_write_guard, "_original_httpx_send", new=_fake_send):
+        async with httpx.AsyncClient() as client:
+            out = await client.get("http://scaffold-ngspice:8001/health")
+    assert out is sentinel
+
+
+async def test_uninstall_restores_the_httpx_transport():
+    """`make test` runs unit and integration tests in ONE process, so the
+    inference block must lift for the integration lane exactly like the
+    orchestrator block does."""
+    import httpx
+
+    _live_write_guard.install()
+    guarded = httpx.AsyncClient.send
+    _live_write_guard.uninstall()
+    assert httpx.AsyncClient.send is not guarded
+    _live_write_guard.install()  # leave the process guarded
