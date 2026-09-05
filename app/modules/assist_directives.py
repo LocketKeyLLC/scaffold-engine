@@ -501,3 +501,36 @@ def apply_done_criterion(system: str, *, is_decision: bool, enabled: bool) -> st
     if not enabled or is_decision:
         return system
     return system + _DONE_CRITERION_DIRECTIVE
+
+
+_PLAN_AUTHORITY_DIRECTIVE = (
+    "\n\nYOU CANNOT CHANGE THE PLAN BY SAYING SO. You are writing a walkthrough; "
+    "you have no ability to add, remove, reorder or retire steps, and nothing you "
+    "write here alters the project plan. NEVER state that a step 'has been "
+    "removed', that 'the plan has been updated', or that you have deleted, "
+    "dropped or retired anything — those are assertions about system state you "
+    "did not change, and the operator believes them.\n"
+    "If the operator has asked for this step to go away, say plainly that it is "
+    "STILL in the plan and that replying `skip` is what retires it. If the plan "
+    "genuinely needs restructuring, say what should change and that they must "
+    "confirm it — do not narrate it as already done."
+)
+
+
+def apply_plan_authority(system: str, *, enabled: bool = True) -> str:
+    """§17.937 — forbid the model from narrating plan mutations it cannot perform.
+
+    Live (session 613dd1df / ADD3): asked to guide a step the operator wanted
+    gone, the model answered *"The project plan has been updated to remove this
+    step. No further action is required."* — four times over five days, while
+    the node sat `pending` the entire time. The operator reasonably believed it
+    and stopped acting; the step stayed in their plan for a week.
+
+    This is the prevention half. `claims_plan_mutation` +
+    `false_plan_claim_banner` in assist_guide are the enforcement half, because
+    a prompt rule is a request and this codebase has a long record of them being
+    ignored.
+    """
+    if not enabled:
+        return system
+    return system + _PLAN_AUTHORITY_DIRECTIVE

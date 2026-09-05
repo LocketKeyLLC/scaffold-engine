@@ -189,6 +189,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     apply_problem_solving,
     apply_done_criterion,
     apply_next_callout,
+    apply_plan_authority,
     apply_ground_or_ask,
     apply_screen_grounding,
     apply_location_callout,
@@ -2160,6 +2161,7 @@ async def generate_guidance(
         system, is_decision=is_decision,
         enabled=settings.assist_done_criterion_enabled,
     )
+    system = apply_plan_authority(system)  # §17.937 — never narrate a plan change
     system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
         system, enabled=settings.assist_problem_solving_enabled,
     )
@@ -4378,6 +4380,52 @@ _NO_ACTION_RE = re.compile(
 )
 
 
+# §17.937 — a walkthrough claiming the PLAN ITSELF was changed. Distinct from
+# _NO_ACTION_RE, which catches "there is nothing to do here": this catches an
+# assertion of COMPLETED SYSTEM STATE — "the plan has been updated", "this step
+# has been removed". The engine cannot change the plan by saying so; only a
+# skip/drop does. Live cost (session 613dd1df, node ADD3): asked to write a
+# walkthrough for a step the operator wanted gone, the model replied "The
+# project plan has been updated to remove this step. No further action is
+# required." — FOUR times across five days, 2026-08-31 to 09-04, while the node
+# sat `pending` in dag_nodes the whole time. §17.927 dutifully appended "reply
+# `skip` to retire this step" underneath, but the operator had just been told
+# the step was already gone, so the offer read as noise and the step stayed in
+# the plan.
+_PLAN_MUTATION_CLAIM_RE = re.compile(
+    r"\b(?:the\s+)?(?:project\s+)?plan\s+(?:has\s+been|was|is\s+now)\s+"
+    r"(?:updated|changed|revised|modified|amended)\b"
+    r"|\bthis\s+step\s+(?:has\s+been|was|is\s+now)\s+"
+    r"(?:removed|deleted|dropped|retired|taken\s+out)\b"
+    r"|\b(?:has\s+been|was)\s+removed\s+from\s+the\s+(?:project\s+)?plan\b"
+    r"|\bi\s+(?:have\s+)?(?:removed|deleted|dropped|retired)\s+this\s+step\b",
+    re.IGNORECASE,
+)
+
+
+def claims_plan_mutation(text_out: str) -> bool:
+    """§17.937 — does this walkthrough assert the plan was already changed?"""
+    return bool(_PLAN_MUTATION_CLAIM_RE.search(text_out or ""))
+
+
+def false_plan_claim_banner(title: str) -> str:
+    """§17.937 — the correction that leads a walkthrough whose plan claim is FALSE.
+
+    Leads rather than trails for the same reason §17.882's integrity warning
+    does: the operator reads the top of the reply and acts on it. A correction
+    under a confident false statement is a correction they never see.
+    """
+    return (
+        "⚠️ **Correction: the plan has NOT changed.** I said this step was "
+        f"removed — it was not. \"{title}\" is still in your plan, and saying so "
+        "does not retire it.\n\n"
+        "**To actually retire it, reply `skip`** (or press ⏩ Skip). That records "
+        "it as deliberately not done and moves you on. If you meant something "
+        "else — that the step is finished, or that the plan should change in a "
+        "different way — tell me which and I will do that instead.\n\n---\n\n"
+    )
+
+
 def concludes_no_action_required(text_out: str) -> bool:
     """True when a walkthrough's conclusion is that the step needs no work.
 
@@ -4580,6 +4628,34 @@ async def ensure_guidance(
         status=res["status"],
         db=db,
     )
+    # §17.937 — the engine may not assert a plan change it did not make. Checked
+    # against the ACTUAL node status: if the walkthrough says this step was
+    # removed and the node is still live, the claim is false and leads with a
+    # correction. Runs BEFORE the §17.927 offer so the operator reads "the plan
+    # has NOT changed — reply `skip` to retire it" as one coherent instruction,
+    # instead of a skip offer stapled under a confident false statement.
+    try:
+        _g = res.get("guidance") or ""
+        if _g and claims_plan_mutation(_g):
+            _job_row = (await db.execute(
+                text("SELECT job_id FROM assist_sessions WHERE id = :sid"),
+                {"sid": session_id},
+            )).mappings().first()
+            _node_status = (await db.execute(
+                text("SELECT status FROM dag_nodes "
+                     "WHERE job_id = :jid AND node_key = :nk"),
+                {"jid": str(_job_row["job_id"]), "nk": node_key},
+            )).scalar() if _job_row else None
+            # 'skipped'/'done' mean the claim is TRUE — leave it alone.
+            if _node_status is not None and _node_status not in ("skipped", "done"):
+                res["guidance"] = false_plan_claim_banner(
+                    ctx.title or node_key) + _g
+                res.setdefault("guidance_meta", {})["false_plan_claim"] = True
+                logger.warning(  # LOUD: the model asserted state it cannot set
+                    "assist_false_plan_claim node_key=%s node_status=%s",
+                    node_key, _node_status)
+    except Exception as exc:  # noqa: BLE001 — a correction must never fail a guide
+        logger.warning("assist_false_plan_claim_check_failed: %s", exc)
     # §17.927 — a "no action required" conclusion must carry the action that
     # acts on it, or the operator is parked on a dead step (live turn 1497).
     try:
@@ -4694,6 +4770,7 @@ async def generate_guidance_stream(
         system, is_decision=is_decision,
         enabled=settings.assist_done_criterion_enabled,
     )
+    system = apply_plan_authority(system)  # §17.937 — never narrate a plan change
     system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
         system, enabled=settings.assist_problem_solving_enabled,
     )
