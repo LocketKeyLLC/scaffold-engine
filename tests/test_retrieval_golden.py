@@ -33,6 +33,17 @@ corpus rebuild arc.
 
 import pytest
 
+# §17.946 — this file drives LIVE RAG retrieval against a populated Milvus; its
+# own docstring says so ("from the live RAG pipeline", "Tier: make validate").
+# It sat in the unit lane unmarked, and `skip_if_milvus_empty` made that
+# invisible: `get_collection_entry_count` swallows every exception and returns
+# 0, so an UNREACHABLE Milvus is indistinguishable from an empty one and the
+# test quietly skips either way. That is why blocking Milvus in the unit lane
+# looked free — it silently disabled 7 parametrizations instead of failing.
+# Marked for what it is; `make test` still runs it (the integration marker is
+# included by default), the unit lane no longer pretends to.
+pytestmark = pytest.mark.integration
+
 from app.modules.rag_pipeline import query_rag
 from tests._milvus_helpers import skip_if_milvus_empty
 # Per-query KB-availability skips below (3 queries currently active; 4 skipped

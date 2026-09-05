@@ -225,3 +225,60 @@ async def test_uninstall_restores_the_httpx_transport():
     _live_write_guard.uninstall()
     assert httpx.AsyncHTTPTransport.handle_async_request is not guarded
     _live_write_guard.install()  # leave the process guarded
+
+
+# ── §17.946 — search and vector store ─────────────────────────────────────
+
+
+def test_searxng_endpoint_is_derived_from_settings(_ensure_guard):
+    """Hardcoding the port would silently stop guarding — `searxng_url` is
+    `searxng:8080` here, and an earlier test in this very arc hardcoded 8888."""
+    from app.config import settings
+
+    from tests._live_write_guard import targets_search
+
+    assert targets_search(settings.searxng_url + "/search") is True
+    assert targets_search("http://searxng:9999/search") is False
+    assert targets_search("http://example.com:8080/search") is False
+
+
+async def test_live_search_is_blocked(_ensure_guard):
+    import httpx
+
+    from app.config import settings
+
+    async with httpx.AsyncClient() as c:
+        with pytest.raises(LiveEngineWriteBlocked) as exc:
+            await c.get(settings.searxng_url + "/search?q=x")
+    msg = str(exc.value)
+    assert "SearXNG" in msg
+    assert "not reproducible" in msg          # says WHY, not just "no"
+    assert "tests/integration/" in msg
+
+
+def test_a_real_milvus_client_is_blocked(_ensure_guard):
+    """Milvus is gRPC, not httpx — the transport hook is blind to it, so
+    adding `milvus-standalone` to a host list would have been false
+    assurance."""
+    import pymilvus
+
+    with pytest.raises(LiveEngineWriteBlocked) as exc:
+        pymilvus.MilvusClient(uri="http://milvus-standalone:19530")
+    msg = str(exc.value)
+    assert "MilvusClient" in msg
+    assert "gRPC, not httpx" in msg
+    # it must name the skip-vs-fail trap that hid this
+    assert "IDENTICAL to an empty one" in msg
+
+
+def test_uninstall_restores_pymilvus():
+    """The integration lane genuinely needs a populated Milvus — verified by
+    tests/test_retrieval_golden.py, which passes its 7 parametrizations
+    against live Milvus under the exemption."""
+    import pymilvus
+
+    _live_write_guard.install()
+    guarded = pymilvus.MilvusClient.__init__
+    _live_write_guard.uninstall()
+    assert pymilvus.MilvusClient.__init__ is not guarded
+    _live_write_guard.install()  # leave the process guarded

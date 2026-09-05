@@ -141,6 +141,69 @@ _SIDECAR_HOSTS = {
 }
 
 
+def _searxng_netloc() -> tuple[str, int | None]:
+    """§17.946 — (host, port) of the configured SearXNG, from settings.
+
+    Same reasoning as the inference endpoint: `searxng_url` is deployment
+    specific (`http://searxng:8080` here) and a hardcoded guess would silently
+    stop guarding. Worth stating because I hardcoded the wrong port into a test
+    assertion earlier in this very arc.
+    """
+    try:
+        from app.config import settings
+
+        parsed = urlparse(str(settings.searxng_url))
+        return (parsed.hostname or "").lower(), parsed.port
+    except Exception:  # noqa: BLE001
+        return "", None
+
+
+def targets_search(url: str) -> bool:
+    """True when `url` points at the configured SearXNG."""
+    host, port = _searxng_netloc()
+    if not host:
+        return False
+    try:
+        parsed = urlparse(url if "//" in str(url) else f"//{url}")
+    except Exception:  # noqa: BLE001
+        return False
+    return (parsed.hostname or "").lower() == host and parsed.port == port
+
+
+def _explain_milvus() -> str:
+    return (
+        "\n\n§17.946 BLOCKED: a unit test constructed a real MilvusClient.\n\n"
+        "Milvus speaks gRPC, not httpx, so it needs its own block — and its own "
+        "care. `tests/_milvus_helpers.skip_if_milvus_empty` swallows every "
+        "exception and returns 0, which makes an UNREACHABLE Milvus look "
+        "IDENTICAL to an empty one: a live-retrieval test silently SKIPS "
+        "instead of failing. That is how 7 golden-retrieval parametrizations "
+        "hid in the unit lane.\n\n"
+        "Fix the TEST: mock `app.main.get_milvus_client` / the collection "
+        "helper. If it genuinely needs a populated Milvus it belongs in the "
+        "integration lane — mark it `pytest.mark.integration`, the way "
+        "tests/test_retrieval_golden.py now is.\n"
+        f"To bypass deliberately on a throwaway box: {_ENV_ESCAPE}=1\n"
+    )
+
+
+def _explain_search(method: str, url: str) -> str:
+    return (
+        f"\n\n§17.946 BLOCKED: a unit test opened a real connection to "
+        f"SearXNG.\n    {method} {url}\n\n"
+        "No unit test needs live web search — the whole lane passes without "
+        "it (measured: zero SearXNG traffic across 5,247 tests). Results from "
+        "a real search engine are not reproducible, so a test that depends on "
+        "them is a flake waiting for the index to change.\n\n"
+        "Fix the TEST: patch the helper the code under test calls "
+        "(`_searxng_search`) or mock `get_searxng_client`, as "
+        "tests/test_research_searxng_engines.py already does. If it genuinely "
+        "needs live search it belongs in tests/integration/ (marked "
+        "`integration`, which is exempt).\n"
+        f"To bypass deliberately on a throwaway box: {_ENV_ESCAPE}=1\n"
+    )
+
+
 def targets_sidecar(url: str) -> bool:
     try:
         parsed = urlparse(url if "//" in str(url) else f"//{url}")
@@ -212,6 +275,11 @@ _original_request = None
 #: correct tests. `AsyncHTTPTransport.handle_async_request` is real network
 #: egress; MockTransport is a different class and passes through untouched.
 _original_httpx_transport = None
+#: §17.946 — Milvus does NOT go over httpx. `pymilvus` speaks gRPC, so the
+#: transport hook above is blind to it and adding `milvus-standalone` to a
+#: host list would have been false assurance. Blocking it means intercepting
+#: client construction instead.
+_original_milvus_init = None
 #: The real key, stashed on first install so `uninstall()` can hand it back.
 #: `make test` runs unit and integration tests in ONE process, so a unit test
 #: that strips the key permanently would break every integration test that
@@ -229,7 +297,8 @@ def install() -> None:
     path that escapes the patch (a socket call, a vendored client) cannot
     authenticate as the operator.
     """
-    global _installed, _original_request, _original_httpx_transport, _saved_api_key
+    global _installed, _original_request, _original_httpx_transport
+    global _original_milvus_init, _saved_api_key
     if _installed or guard_disabled():
         return
 
@@ -272,9 +341,26 @@ def install() -> None:
         if targets_sidecar(url):
             raise LiveEngineWriteBlocked(
                 _explain_sidecar(str(request.method).upper(), url))
+        if targets_search(url):
+            raise LiveEngineWriteBlocked(
+                _explain_search(str(request.method).upper(), url))
         return await _original_httpx_transport(self, request, *a, **kw)
 
     httpx.AsyncHTTPTransport.handle_async_request = _guarded_transport
+
+    # §17.946 — Milvus over gRPC.
+    try:
+        import pymilvus
+    except ImportError:  # pragma: no cover
+        _installed = True
+        return
+
+    _original_milvus_init = pymilvus.MilvusClient.__init__
+
+    def _guarded_milvus(self, *a, **kw):
+        raise LiveEngineWriteBlocked(_explain_milvus())
+
+    pymilvus.MilvusClient.__init__ = _guarded_milvus
     _installed = True
 
 
@@ -293,4 +379,8 @@ def uninstall() -> None:
         import httpx
 
         httpx.AsyncHTTPTransport.handle_async_request = _original_httpx_transport
+    if _original_milvus_init is not None:
+        import pymilvus
+
+        pymilvus.MilvusClient.__init__ = _original_milvus_init
     _installed = False
