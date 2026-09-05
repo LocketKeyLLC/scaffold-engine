@@ -399,23 +399,84 @@ export function renderChat(container, sessionId) {
 
   // 📍 Current-step hero — where am I, what's the loop position (§17.738/741
   // surface the recap in chat; this pins the essentials above it).
+  // §17.938 — the step picker. Until now the only navigation was ✓ Done
+  // (forward one), ↩ Back a step (back one, terminal steps only) and ↻ Re-show
+  // (stay put); reaching any other step meant walking the whole plan. The
+  // operator asked for "a simpler means to jump between the different nodes
+  // within the chat". Terminal steps stay VISIBLE but disabled — seeing the
+  // shape of the plan is half the value, and jumping to one would either
+  // un-complete finished work or silently do nothing.
+  const STEP_ICON = {
+    committed: "✅", skipped: "⏩", handed_off: "🤝",
+    presented: "📍", pending: "○", awaiting_input: "💬",
+  };
+
+  function renderStepPicker(currentKey) {
+    if (!steps.length) return null;
+    const sel = el("select", { class: "step-picker", title: "Jump to a step" });
+    for (const st of steps) {
+      const icon = STEP_ICON[st.step_status] || "○";
+      const terminal = !["pending", "presented", "awaiting_input"].includes(st.step_status);
+      const running = st.node_status === "running";
+      const label = `${icon} ${st.node_key} — ${(st.title || "").slice(0, 58)}`
+        + (running ? "  (engine is running this)" : "");
+      const opt = el("option", { value: st.node_key, text: label });
+      if (terminal || running) opt.disabled = true;
+      if (st.node_key === currentKey) opt.selected = true;
+      sel.append(opt);
+    }
+    sel.addEventListener("change", async () => {
+      const target = sel.value;
+      if (!target || target === currentKey) return;
+      try {
+        const res = await api.post(`/assist/${sessionId}/step/goto`, { node_key: target });
+        await load();
+        // The server records a durable turn for the move, so load() already
+        // shows it. Render the PRESERVED walkthrough after it — deliberately
+        // not guideCurrent(), for §17.901's reason: regenerating hands the
+        // operator a different walkthrough for work they may be part-way
+        // through.
+        if (res?.guidance) appendBubble("assistant", "guide", res.guidance);
+        else toast(`On ${res.node_key}. Press ✦ Guide me for a walkthrough.`, "ok");
+      } catch (e) {
+        toast(errText(e), "err");
+        sel.value = currentKey || "";   // selection must not lie about state
+      }
+    });
+    return sel;
+  }
+
   function renderStepHero() {
     if (!session) return;
     const nk = session.current_node_key;
     const sc = session.step_counts || {};
-    const doneN = (sc.done || 0) + (sc.skipped || 0);
+    // §17.938 — `step_counts` is keyed by ASSIST-step status, where the
+    // terminal state is `committed`; `done` is the dag_nodes vocabulary and
+    // never appears here. Counting `sc.done` read 1/41 on a session with 26
+    // committed steps — the progress badge had been understating the operator's
+    // own progress by an order of magnitude. Count every terminal state, and
+    // keep `done` in the sum so the badge stays right if the shape ever changes.
+    const doneN = (sc.committed || 0) + (sc.done || 0)
+      + (sc.skipped || 0) + (sc.handed_off || 0);
     const totalN = Object.values(sc).reduce((a, b) => a + b, 0);
+    const cur = steps.find((x) => x.node_key === nk);
     stepHero.classList.remove("hidden");
     mount(
       stepHero,
       el("div", { class: "row row-wrap" },
         el("span", { class: "step-hero-pin", text: "📍" }),
         nk
-          ? el("span", { class: "step-hero-title" }, el("strong", { text: `Step ${nk}` }), session.current_node_title ? ` — ${session.current_node_title}` : "")
+          ? el("span", { class: "step-hero-title" }, el("strong", { text: `Step ${nk}` }),
+              (cur?.title || session.current_node_title) ? ` — ${cur?.title || session.current_node_title}` : "")
           : el("span", { class: "step-hero-title dim", text: session.status === "completed" ? "Session complete 🎉" : "No step claimed — press Next step to begin" }),
         el("span", { class: "spacer" }),
         totalN ? el("span", { class: "tag", text: `${doneN}/${totalN} steps done` }) : null,
         statusBadge(session.status)),
+      steps.length
+        ? el("div", { class: "row row-wrap step-hero-nav" },
+            el("span", { class: "dim small", text: "Jump to:" }),
+            renderStepPicker(nk))
+        : null,
       nk
         ? el("div", { class: "step-hero-loop dim", text: "The loop: ✦ Guide me → do it on your machine → paste what happened → ✓ Submit results" })
         : null
@@ -514,6 +575,8 @@ export function renderChat(container, sessionId) {
   // cached per load cycle; failures degrade to absent cards, never errors.
   let checklist = null;
   let environment = null;
+  // §17.938 — the plan's steps, for the step picker in the hero.
+  let steps = [];
 
   // §17.707 — what the engine still needs from YOU, docked left of the input
   // so it's in view exactly where you answer.
@@ -625,11 +688,12 @@ export function renderChat(container, sessionId) {
 
   async function load() {
     try {
-      const [s, t, cl, env] = await Promise.all([
+      const [s, t, cl, env, st] = await Promise.all([
         api.get(`/assist/${sessionId}`),
         api.get(`/assist/${sessionId}/turns`),
         api.get(`/assist/${sessionId}/checklist`).catch(() => null),
         api.get(`/assist/${sessionId}/env`).catch(() => null),
+        api.get(`/assist/${sessionId}/steps`).catch(() => null),
       ]);
       if (disposed) return;
       session = s;
@@ -638,6 +702,7 @@ export function renderChat(container, sessionId) {
       // a blip must not blank the needs-from-you panel mid-session.
       if (cl !== null) checklist = cl;
       if (env !== null) environment = env?.environment ?? null;
+      if (st !== null) steps = st?.steps || [];
       header.querySelector(".sub").textContent = s.job_title || shortId(sessionId);
       if (!briefMounted && s.job_id) {
         briefMounted = true;

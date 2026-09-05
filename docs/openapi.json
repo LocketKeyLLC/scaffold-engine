@@ -330,6 +330,20 @@
         "title": "AssistFrictionInput",
         "type": "object"
       },
+      "AssistGotoStepInput": {
+        "properties": {
+          "node_key": {
+            "description": "Step to move to and present.",
+            "title": "Node Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_key"
+        ],
+        "title": "AssistGotoStepInput",
+        "type": "object"
+      },
       "AssistGuideInput": {
         "properties": {
           "force": {
@@ -6402,6 +6416,108 @@
           }
         ],
         "summary": "Assist Step Back",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/step/goto": {
+      "post": {
+        "description": "§17.938 — jump to an arbitrary step.\n\nThe only navigation the operator had was ✓ Done (forward one), ↩ Back a\nstep (back one, terminal only) and ↻ Re-show (stay put). Reaching any other\nstep meant walking the whole plan or hand-editing the database.\n\nRefuses a terminal step on purpose: silently un-completing finished work to\nsatisfy a menu selection is a plan mutation nobody asked for, and\n↩ Back a step already exists for the deliberate reopen.",
+        "operationId": "assist_goto_step_assist__session_id__step_goto_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistGotoStepInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Goto Step",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/steps": {
+      "get": {
+        "description": "§17.938 — the session's steps, for the step picker.\n\nTitle + both statuses in one call, ordered the way the plan runs.",
+        "operationId": "assist_list_steps_assist__session_id__steps_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist List Steps",
         "tags": [
           "Assist"
         ]

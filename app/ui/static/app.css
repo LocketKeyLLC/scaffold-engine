@@ -1367,3 +1367,25 @@ a.strip-item:hover { background: var(--bg-elev-2); }
   font-size: 13px;
 }
 .replan-chip.busy { border-style: dashed; }
+
+/* ── §17.938 — step picker in the hero ─────────────────────────────────
+   Jump to any workable step. Terminal steps stay listed but disabled: the
+   shape of the plan is half the value, and jumping to a finished one would
+   either un-complete real work or silently do nothing.                   */
+.step-hero-nav { margin-top: 8px; gap: 8px; align-items: center; }
+.step-picker {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 560px;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.step-picker:hover { border-color: var(--border-strong); }
+.step-picker:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.step-picker option:disabled { color: var(--text-faint); }
