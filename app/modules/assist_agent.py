@@ -1184,6 +1184,14 @@ async def run_step_research(
 # error (they may not have run anything) and from a bare complaint about the
 # engine: this is an assertion that the step is STILL not achieved, which
 # retires whatever was last prescribed for it.
+# §17.930 — the §17.917 vocabulary only recognised "still …" phrasings, so the
+# plainest possible failure report went unheard. Live (session 613dd1df/T26):
+# "neither the first or the 'if that fails' worked" scored False, and
+# `qm set 110 --delete hostpci0` was re-prescribed FOUR times over 40 minutes —
+# twice BYTE-IDENTICAL — until the operator finally ran it and the shell said
+# "cannot delete 'hostpci0' - not set in current configuration!", i.e. it had
+# been done long before. Negative-quantifier reports ("neither", "none of
+# them", "nothing") are how people actually say a remedy failed.
 _STILL_BROKEN_RE = __import__("re").compile(
     r"\bstill\s+(?:not|isn'?t|hasn'?t|haven'?t|won'?t|doesn'?t|does not|"
     r"getting|hung|hangs|stuck|failing|fails|broken|the same)\b"
@@ -1192,7 +1200,15 @@ _STILL_BROKEN_RE = __import__("re").compile(
     r"\s+(?:work|help|fix|boot|start|install)\w*\b"
     r"|\bsame\s+(?:problem|issue|error|result)\b"
     r"|\bno\s+(?:change|difference|luck)\b"
-    r"|\bkeeps?\s+(?:hanging|failing|happening)\b",
+    r"|\bkeeps?\s+(?:hanging|failing|happening)\b"
+    # §17.930 — negative quantifiers: "neither/none of/nothing … worked".
+    # Bounded gap so it stays within one clause and cannot span a paragraph.
+    r"|\bneither\b[^.!?\n]{0,90}\bwork(?:ed|s|ing)?\b"
+    r"|\bnone\s+of\s+(?:them|these|those|it|that|the)\b[^.!?\n]{0,60}"
+    r"\bwork(?:ed|s|ing)?\b"
+    r"|\bnothing\s+(?:worked|works|helped|helps|changed|happened)\b"
+    r"|\bnot\s+work(?:ed|ing)\b"
+    r"|\bfailed\s+again\b|\bstill\s+broken\b",
     __import__("re").IGNORECASE,
 )
 
@@ -1293,7 +1309,15 @@ async def _fix_failure_streak(
             # qm start` it had just given. Whether or not they ran it, they have
             # told us it did not resolve the step; re-offering it is the §17.906
             # loop by another route.
-            if not echoed and _looks_like_still_broken(later[0][1]):
+            # §17.930 — scan EVERY later operator turn, not just the
+            # immediately-following one. The §17.917 cut read `later[0]` only,
+            # so a failure report separated from the prescription by anything
+            # at all — a clarifying question, a `note` double-record, an
+            # intervening ask — never retired it. That is exactly the live T26
+            # shape: the fix landed 23:35, a `note` was recorded 23:36, and the
+            # operator's "neither … worked" arrived at 00:07 as later[1]. The
+            # prescription stayed "untried" and came back three more times.
+            if not echoed and any(_looks_like_still_broken(o[1]) for o in later):
                 echoed = set(lines)
             for ln in lines:
                 if ln in echoed and ln not in cmds:

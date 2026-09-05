@@ -187,6 +187,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     apply_verbosity,
     guide_system_for_tool,
     apply_problem_solving,
+    apply_done_criterion,
     apply_next_callout,
     apply_ground_or_ask,
     apply_screen_grounding,
@@ -2154,6 +2155,10 @@ async def generate_guidance(
     system = apply_next_callout(  # §17.741 — lead with the immediate action
         system, is_decision=is_decision,
         enabled=settings.assist_next_callout_enabled,
+    )
+    system = apply_done_criterion(  # §17.932 — and say when the step is FINISHED
+        system, is_decision=is_decision,
+        enabled=settings.assist_done_criterion_enabled,
     )
     system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
         system, enabled=settings.assist_problem_solving_enabled,
@@ -4413,6 +4418,63 @@ async def _next_claimable_step(*, db, job_id: str, exclude: str) -> Optional[dic
         return None
 
 
+# §17.932 — a walkthrough that never names its finish line leaves the operator
+# reporting output forever. The directive asks the model for a "Done when"
+# close; this is the enforcement half, because a prompt rule is a request and
+# the live transcript is full of ignored ones. Matching is deliberately loose:
+# any heading or bolded lead-in that states a completion condition counts, so a
+# model that phrases it its own way is not double-footered.
+_DONE_WHEN_RE = re.compile(
+    r"(?:^|\n)\s*(?:#{1,4}\s*|\*\*)\s*(?:✅\s*)?"
+    r"(?:done\s+when|step\s+is\s+(?:done|complete)|"
+    r"you(?:'?re| are)\s+done\s+when|success\s+looks\s+like|"
+    r"how\s+you(?:'?ll| will)\s+know)\b",
+    re.IGNORECASE,
+)
+
+
+def _with_advance_footer(guidance: Optional[str], title: str) -> str:
+    """§17.932 — append `advance_footer` unless the text already closes itself.
+    Valve-gated and fail-soft: guidance must never fail over a footer."""
+    text_out = guidance or ""
+    try:
+        if not settings.assist_done_criterion_enabled:
+            return text_out
+        if not text_out.strip() or has_done_criterion(text_out):
+            return text_out
+        return text_out + advance_footer(title)
+    except Exception as exc:  # noqa: BLE001 — a footer never breaks a guide
+        logger.warning("assist_advance_footer_failed: %s", exc)
+        return text_out
+
+
+def has_done_criterion(text_out: str) -> bool:
+    """§17.932 — does this walkthrough already state an observable finish line?"""
+    return bool(_DONE_WHEN_RE.search(text_out or ""))
+
+
+def advance_footer(title: str) -> str:
+    """§17.932 — the close every walkthrough needs and the model kept omitting:
+    what finishing looks like, and the exact control that ends the step.
+
+    The live session ran for days on walkthroughs that closed with *"then tell
+    me what it shows"*. That is an instruction to REPORT — the operator pastes
+    output, the engine answers, and neither of them ever says the step is over.
+    Steps that had genuinely succeeded stayed open, which is what "it doesn't
+    move through the steps smoothly" looked like from the operator's chair.
+    """
+    return (
+        "\n\n---\n## ✅ Done when\n"
+        f"You can see, on your own screen, that \"{title}\" has actually taken "
+        "effect — the command returned without an error and the thing it was "
+        "meant to change now looks changed.\n\n"
+        "**When you can see that, press ✓ Done → next step** (or just type "
+        "`next`) — you do not need to paste anything else.\n\n"
+        "If you cannot see it, paste what you DO see and I will work it from "
+        "there."
+    )
+
+
 def no_action_footer(next_step: Optional[dict], title: str) -> str:
     """The action that makes the conclusion usable."""
     nxt = ""
@@ -4464,6 +4526,10 @@ async def ensure_guidance(
             )
             if not stale:
                 cached.pop("_generated_at_raw", None)
+                # §17.932 — a CACHED walkthrough needs the finish line just as
+                # much as a fresh one; it is the same text served again.
+                cached["guidance"] = _with_advance_footer(
+                    cached.get("guidance"), ctx.title or node_key)
                 return cached
             logger.info("assist_guide_cache_stale_regen node_key=%s", node_key)
     failed_cmds = ""
@@ -4531,6 +4597,13 @@ async def ensure_guidance(
                 node_key, (_nxt or {}).get("node_key"))
     except Exception as exc:  # noqa: BLE001 — the offer must never fail a guide
         logger.warning("assist_no_action_offer_failed: %s", exc)
+    # §17.932 — state the finish line and the control that ends the step. Runs
+    # AFTER the §17.927 no-action offer on purpose: a step that needs no work
+    # is retired with `skip`, not finished by observation, so that footer owns
+    # the close and this one stands down.
+    if not res.get("guidance_meta", {}).get("no_action_offer"):
+        res["guidance"] = _with_advance_footer(
+            res.get("guidance"), ctx.title or node_key)
     res["cached"] = False
     return res
 
@@ -4614,6 +4687,10 @@ async def generate_guidance_stream(
     system = apply_next_callout(  # §17.741 — lead with the immediate action
         system, is_decision=is_decision,
         enabled=settings.assist_next_callout_enabled,
+    )
+    system = apply_done_criterion(  # §17.932 — and say when the step is FINISHED
+        system, is_decision=is_decision,
+        enabled=settings.assist_done_criterion_enabled,
     )
     system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
         system, enabled=settings.assist_problem_solving_enabled,

@@ -464,3 +464,40 @@ def promote_inline_commands(text: str) -> str:
             continue
         out.append(line)
     return "\n".join(out) if changed else text
+
+
+_DONE_CRITERION_DIRECTIVE = (
+    "\n\nSAY WHEN THE STEP IS FINISHED. The operator cannot see your plan, so they "
+    "cannot tell the difference between 'this command worked' and 'this STEP is "
+    "complete'. End the walkthrough with a section titled exactly "
+    "`## ✅ Done when` containing:\n"
+    "  1. a single OBSERVABLE condition that means this step is finished — something "
+    "they can SEE on their own screen (an exact prompt, a status line, a page that "
+    "loads, a service reported active). Never 'when it works' or 'when the "
+    "configuration is correct'; name what is visible.\n"
+    "  2. one line telling them exactly how to move on: press "
+    "**✓ Done → next step** (or type `next`).\n"
+    "  3. if the observable condition does NOT appear, one line saying to paste what "
+    "they see instead so it can be worked.\n"
+    "Keep it to those three lines. Do NOT declare the step complete yourself, and do "
+    "NOT ask them to keep reporting output after the condition is met — once they can "
+    "see it, they should advance."
+)
+
+
+def apply_done_criterion(system: str, *, is_decision: bool, enabled: bool) -> str:
+    """§17.932 — append the 'state the finish line' discipline.
+
+    The live complaint was that the engine's instructions to move on were not
+    clear, and the transcript showed why: every walkthrough ended on *"then
+    tell me what it shows"*, which is an instruction to REPORT, never an
+    instruction to ADVANCE. The operator was told what to run and what to paste
+    back, but never what finished looks like or which control ends the step, so
+    perfectly successful steps stayed open and the session read as stuck.
+
+    No-op for decision nodes (their deliverable is a choice — `no_action_footer`
+    and the decision card carry that path) and when the valve is off.
+    """
+    if not enabled or is_decision:
+        return system
+    return system + _DONE_CRITERION_DIRECTIVE

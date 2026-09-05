@@ -241,12 +241,45 @@ async def _history_or_transcript(
 
 async def list_turns(*, session_id: str, limit: int = 200, db) -> list[dict]:
     """§17.710a — the session's raw transcript, oldest-first. Backs GET
-    /assist/{sid}/turns and (Stage B) session_memory consolidation."""
+    /assist/{sid}/turns and (Stage B) session_memory consolidation.
+
+    §17.928 — the window is the NEWEST ``limit`` turns, rendered oldest-first.
+    It used to be ``ORDER BY created_at, id LIMIT :lim`` — the OLDEST ``limit``
+    turns — which is the same query only while a session is shorter than the
+    cap. Past it the endpoint froze: every turn after number ``limit`` was
+    unreachable, so the transcript silently stopped at the moment the session
+    crossed 200 turns and never moved again.
+
+    This one line was three separate operator-visible failures:
+
+      * **the engine "can't figure out the current problem"** — the client
+        derives its model history from this response (`historyForGuide()` sends
+        the last 8), so guidance was reasoning about the wrong week entirely;
+      * **"my messages vanish"** — the client renders this response as the
+        transcript, so every message the operator sent after the cap
+        disappeared on the next reload (§17.929 covers the racing half);
+      * **the step never advances cleanly** — the recap and next-action both
+        read a transcript that ended days ago.
+
+    Measured on the live session (613dd1df, 545 turns): the endpoint returned
+    turns 1-200, ending 2026-08-30, while the operator was working 2026-09-05.
+    Six days of context — an entire finished sub-project — were invisible to
+    both the screen and the model.
+
+    Ordering the window DESC and re-sorting ASC in a subquery keeps the
+    contract ("oldest-first") for every existing caller while making the cap
+    mean "the most recent N", which is what a transcript window is for.
+    """
     rows = (await db.execute(
         text("""
             SELECT id, node_key, role, kind, content, evidence_kind, created_at
-              FROM assist_turns WHERE session_id = :sid
-             ORDER BY created_at, id LIMIT :lim
+              FROM (
+                    SELECT id, node_key, role, kind, content,
+                           evidence_kind, created_at
+                      FROM assist_turns WHERE session_id = :sid
+                     ORDER BY created_at DESC, id DESC LIMIT :lim
+                   ) AS recent
+             ORDER BY created_at ASC, id ASC
         """),
         {"sid": session_id, "lim": int(limit)},
     )).mappings().all()

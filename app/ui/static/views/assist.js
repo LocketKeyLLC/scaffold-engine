@@ -132,6 +132,16 @@ export function renderChat(container, sessionId) {
   // replace an ephemeral entry (see renderTranscript).
   let ephemeralTail = [];
   let turnStartedAt = null;
+  // §17.929 — the operator's OWN messages, held on screen until a durable turn
+  // with the same text comes back from the server. `ephemeralTail` only ever
+  // protected ASSISTANT output, so the operator's half of the conversation had
+  // no such guard: sendMessage() pushed an optimistic bubble into `turns`, and
+  // the end-of-turn load() overwrote `turns` wholesale with the server list.
+  // Whenever the operator's line was not in that response — the §17.928 window
+  // bug put every message past turn 200 outside it, and a slow/failed capture
+  // does the same — what they had just typed silently disappeared mid-session.
+  // Nothing told them whether it had been sent, ignored, or lost.
+  let pendingOps = [];
 
   const transcript = el("div", { class: "chat-transcript" }, loading("Loading conversation…"));
   // §17.890 — scroll only while pinned to the bottom; defer transcript
@@ -158,7 +168,7 @@ export function renderChat(container, sessionId) {
   const stepHero = el("div", { class: "card card-pad step-hero hidden" });
   // §17.863 — pending re-plan proposal card slot (declared HERE, above the
   // chrome mount that references it — const does not hoist).
-  const replanSlot = el("div", {});
+  const replanSlot = el("div", { class: "replan-slot" });
   // §17.816 (plan 5.4h) — step verbs, previously slash/OWUI-only. Submit and
   // Fix consume the composer text (evidence / error report); the server side
   // captures + derives it (§17.812 3E) and verifies submits (§17.731).
@@ -364,6 +374,10 @@ export function renderChat(container, sessionId) {
     { class: "chat-composer" },
     // Top row: what the engine needs (left) · step verbs (right).
     el("div", { class: "composer-top" }, checklistPanel, el("span", { class: "spacer" }), verbsBar),
+    // §17.933 — a pending re-plan is a compact chip docked with the input the
+    // operator answers in, not a full card wedged above the step. Clicking it
+    // reopens the modal that explains the changes.
+    replanSlot,
     // Full-width input below.
     composerText,
     el("div", { class: "composer-actions" }, guideBtn, el("span", { class: "spacer" }), sendBtn)
@@ -380,7 +394,7 @@ export function renderChat(container, sessionId) {
   // §17.845 — the editable living brief rides with the session (mounted once
   // the session tells us its job).
   const briefSlot = el("div", { class: "assist-brief-slot" });
-  mount(container, header, contractCard(), replanSlot, stepHero, main, briefSlot, belowGrid);
+  mount(container, header, contractCard(), stepHero, main, briefSlot, belowGrid);
   let briefMounted = false;
 
   // 📍 Current-step hero — where am I, what's the loop position (§17.738/741
@@ -472,6 +486,20 @@ export function renderChat(container, sessionId) {
     // exactly when the walkthrough had been shown just before the operator's
     // last message (the live home-lab T14 case: the newest-2 turns WERE the
     // old walkthrough + their paste).
+    // §17.929 — the operator's own un-persisted messages, rendered BEFORE the
+    // assistant tail (they said it first). An entry retires the moment an
+    // operator turn with the same text exists durably, so the steady state is
+    // an empty list and no bubble is ever shown twice.
+    // Retire ONLY against turns that came back from the server. Comparing
+    // against `turns` wholesale matched the optimistic copy pushed by
+    // sendMessage() and cleared the entry on its very first render — which
+    // left the guard doing nothing at all, the exact bug it exists to stop.
+    pendingOps = pendingOps.filter((o) => !turns.some(
+      (t) => t.role === "operator" && !t._pending
+        && (t.content || "").trim() === o.content.trim()));
+    for (const o of pendingOps) {
+      transcript.append(bubble("operator", o.kind, o.content, o.created_at));
+    }
     const cutoff = turnStartedAt || "9999";
     for (const e of ephemeralTail) {
       const dup = turns.some((t) =>
@@ -619,7 +647,7 @@ export function renderChat(container, sessionId) {
       // any reload (the server now exposes it on the session read); resolving
       // it clears the slot.
       if (s.pending_replan) renderReplanProposal(s.pending_replan);
-      else mount(replanSlot);
+      else { lastReplanSig = null; mount(replanSlot); }
       renderStepHero();
       renderTranscript();
       renderChecklist();
@@ -651,46 +679,80 @@ export function renderChat(container, sessionId) {
     return e?.message || String(e);
   }
 
-  // §17.861 — render the §17.677 note-triggered re-plan proposal with
-  // apply/discard controls. §17.863 — into the dedicated slot (idempotent:
-  // load() re-renders the session's PENDING proposal after any reload, so a
-  // surfaced proposal can no longer be lost to navigation).
-  function renderReplanProposal(p) {
-    const items = (p.proposals || []).map((ch) =>
-      el("li", {},
-        el("span", { class: "mono", text: ch.node_key || "" }),
-        ch.action ? el("span", { class: "tag", text: ch.action }) : null,
-        el("span", { text: ` ${ch.proposed_change || ch.summary || ch.change || ch.reason || JSON.stringify(ch).slice(0, 200)}` })));
-    const applyBtn = el("button", { class: "btn btn-sm btn-primary", text: "Apply re-plan" });
-    const discardBtn = el("button", { class: "btn btn-sm btn-ghost", text: "Keep plan as-is" });
-    const card = el("div", { class: "card card-pad replan-card" },
-      el("strong", { text: "📋 What you've told me affects the plan — proposed changes:" }),
-      el("ul", { class: "brief-list" }, ...items),
-      el("div", { class: "row" }, applyBtn, discardBtn));
-    // §17.865 — the click must be unmistakable (live operator: applied a
-    // 13-change proposal and saw "nothing"). The card flips to a live
-    // progress state the moment a button is pressed, the outcome lands as a
-    // brief centered popup with the REAL counts, and an apply flows straight
-    // into the revised plan (load + claim-and-guide) — acknowledgment AND
-    // movement, not a corner toast.
-    const ackPopup = (icon, title, body) => {
-      const overlay = el("div", { class: "ack-overlay" },
-        el("div", { class: "card ack-card" },
-          el("span", { class: "ack-icon", text: icon }),
-          el("strong", { text: title }),
-          body ? el("p", { class: "dim", text: body }) : null));
-      overlay.addEventListener("click", () => overlay.remove());
-      document.body.append(overlay);
-      setTimeout(() => overlay.remove(), 2600);
-    };
+  // §17.861/863 — the §17.677 note-triggered re-plan proposal.
+  // §17.933 — REPRESENTED. It used to render as a permanent card pinned above
+  // the step, listing raw `proposed_change` strings with no statement of what
+  // the operator had said to cause it, what the plan currently assumes, or
+  // what applying it would actually do. Sitting at the top of every reload, it
+  // read as chrome and got scrolled past — the live session carried one
+  // unresolved for hours. Now it ARRIVES as a modal at the moment it is
+  // proposed, explains itself in full, and if dismissed without a decision
+  // leaves only a compact chip beside the composer that reopens it. Nothing is
+  // lost to navigation (the §17.863 invariant), but nothing squats at the top
+  // either.
+  let lastReplanSig = null;
+
+  const REPLAN_ACTION_COPY = {
+    revise: { icon: "✏️", label: "revise", blurb: "rewrite this step's instructions" },
+    drop: { icon: "🗑️", label: "drop", blurb: "remove this step from the plan" },
+    reopen: { icon: "↩️", label: "reopen", blurb: "put this finished step back in play" },
+  };
+
+  function replanChangeRow(ch) {
+    const meta = REPLAN_ACTION_COPY[ch.action] || { icon: "•", label: ch.action || "change", blurb: "" };
+    const change = ch.proposed_change || ch.summary || ch.change || ch.reason || "";
+    return el("div", { class: "replan-change" },
+      el("div", { class: "replan-change-head" },
+        el("span", { class: "replan-act", text: `${meta.icon} ${meta.label}` }),
+        el("span", { class: "mono replan-node", text: ch.node_key || "" }),
+        meta.blurb ? el("span", { class: "dim small", text: `— ${meta.blurb}` }) : null),
+      ch.current_assumption
+        ? el("div", { class: "replan-line" },
+            el("span", { class: "replan-tag dim", text: "Plan assumes now" }),
+            el("span", { text: ch.current_assumption }))
+        : null,
+      change
+        ? el("div", { class: "replan-line" },
+            el("span", { class: "replan-tag", text: "Change to" }),
+            el("span", { text: change }))
+        : null);
+  }
+
+  // The outcome popup — brief, centred, with the REAL counts (§17.865).
+  const ackPopup = (icon, title, body) => {
+    const overlay = el("div", { class: "ack-overlay" },
+      el("div", { class: "card ack-card" },
+        el("span", { class: "ack-icon", text: icon }),
+        el("strong", { text: title }),
+        body ? el("p", { class: "dim", text: body }) : null));
+    overlay.addEventListener("click", () => overlay.remove());
+    document.body.append(overlay);
+    setTimeout(() => overlay.remove(), 2600);
+  };
+
+  function renderReplanProposal(p, { open = false } = {}) {
+    const changes = p.proposals || [];
+    if (!changes.length) { mount(replanSlot); return; }
+    const sig = JSON.stringify(changes.map((c) => [c.node_key, c.action, c.proposed_change]));
+    const isNew = sig !== lastReplanSig;
+    lastReplanSig = sig;
+
+    const counts = changes.reduce((a, c) => { a[c.action] = (a[c.action] || 0) + 1; return a; }, {});
+    const countText = ["revise", "drop", "reopen"]
+      .filter((k) => counts[k])
+      .map((k) => `${counts[k]} to ${k}`).join(" · ");
+
+    let overlay = null;
+    const closeModal = () => { if (overlay) { overlay.remove(); overlay = null; } };
+
     const resolve = async (decision) => {
-      const n = (p.proposals || []).length;
-      mount(replanSlot, el("div", { class: "card card-pad replan-card" },
-        el("div", { class: "row" },
-          el("span", { class: "spin" }),
-          el("strong", { text: decision === "apply"
-            ? ` Applying ${n} change(s) to the plan…`
-            : " Discarding the proposal…" }))));
+      const n = changes.length;
+      closeModal();
+      mount(replanSlot, el("div", { class: "replan-chip busy" },
+        el("span", { class: "spin" }),
+        el("span", { text: decision === "apply"
+          ? ` Applying ${n} change${n === 1 ? "" : "s"}…`
+          : " Discarding…" })));
       try {
         const res = await api.post(`/assist/${sessionId}/replan/apply`, { decision });
         mount(replanSlot);
@@ -707,18 +769,65 @@ export function renderChat(container, sessionId) {
         ackPopup("👍", "Proposal discarded", "The plan is unchanged. I won't re-suggest this one.");
         toast("Proposal discarded.", "ok");
       } catch (e) {
-        // Restore the card so the operator can retry; the proposal is still
+        // Restore the chip so the operator can retry; the proposal is still
         // staged server-side when apply failed.
         toast(errText(e), "err");
+        lastReplanSig = null;
         renderReplanProposal(p);
         return;
       }
       load();
     };
-    applyBtn.addEventListener("click", () => resolve("apply"));
-    discardBtn.addEventListener("click", () => resolve("discard"));
-    mount(replanSlot, card);
-    replanSlot.scrollIntoView({ block: "nearest" });
+
+    const openModal = () => {
+      closeModal();
+      const applyBtn = el("button", { class: "btn btn-primary", text: `Apply ${changes.length === 1 ? "this change" : "these changes"}` });
+      const keepBtn = el("button", { class: "btn btn-ghost", text: "Keep plan as-is" });
+      const laterBtn = el("button", { class: "btn btn-ghost btn-sm", text: "Decide later" });
+      applyBtn.addEventListener("click", () => resolve("apply"));
+      keepBtn.addEventListener("click", () => resolve("discard"));
+      laterBtn.addEventListener("click", () => { closeModal(); renderChip(); });
+
+      overlay = el("div", { class: "modal-overlay" },
+        el("div", { class: "card modal-card replan-modal" },
+          el("div", { class: "modal-head" },
+            el("strong", { text: "📋 This changes the plan" }),
+            el("button", { class: "btn btn-ghost btn-sm", text: "✕",
+              onClick: () => { closeModal(); renderChip(); } })),
+          // WHY — the operator's own words are the cause; show them.
+          p.note_text
+            ? el("div", { class: "replan-why" },
+                el("div", { class: "dim small", text: "Because you told me:" }),
+                el("blockquote", { class: "replan-quote", text: p.note_text }))
+            : null,
+          el("p", { class: "dim small", text:
+            (changes.length === 1
+              ? "That conflicts with what a step in your plan currently assumes. Here is the change I suggest"
+              : "That conflicts with what some steps in your plan currently assume. Here are the changes I suggest") +
+            " — nothing is applied until you choose." }),
+          el("div", { class: "replan-changes" }, ...changes.map(replanChangeRow)),
+          el("p", { class: "dim small", text: countText
+            ? `If you apply: ${countText}. Your finished work is kept; only the steps listed above change.`
+            : "Nothing is applied until you choose." }),
+          el("div", { class: "modal-actions" }, applyBtn, keepBtn,
+            el("span", { class: "spacer" }), laterBtn)));
+      overlay.addEventListener("click", (ev) => {
+        if (ev.target === overlay) { closeModal(); renderChip(); }
+      });
+      document.body.append(overlay);
+    };
+
+    const renderChip = () => {
+      const chip = el("div", { class: "replan-chip" },
+        el("span", { text: `📋 ${changes.length} proposed plan change${changes.length === 1 ? "" : "s"}` }),
+        el("button", { class: "btn btn-sm btn-primary", text: "Review", onClick: openModal }));
+      mount(replanSlot, chip);
+    };
+
+    renderChip();
+    // Pop it the moment it is PRESENTED — a freshly proposed change, or one
+    // the operator has not seen in this view yet.
+    if (open || isNew) openModal();
   }
 
 
@@ -796,7 +905,9 @@ export function renderChat(container, sessionId) {
             break;
           }
           case "assist_replan_proposal":
-            if (data?.proposal) renderReplanProposal(data.proposal);
+            // §17.933 — a proposal arriving mid-turn is being PRESENTED:
+            // open the explanation now rather than parking a card.
+            if (data?.proposal) renderReplanProposal(data.proposal, { open: true });
             break;
           case "assist_answer":
             clearStatusLine();
@@ -863,7 +974,18 @@ export function renderChat(container, sessionId) {
     const text = composerText.value.trim();
     if (!text || guiding) return;
     composerText.value = "";
-    turns.push({ role: "operator", kind: "message", content: text, created_at: new Date().toISOString() });
+    // §17.929 — record it in BOTH places: `turns` for the immediate paint, and
+    // `pendingOps` so the reconcile at the end of the turn cannot erase it.
+    // `_pending` marks this as the OPTIMISTIC copy: it lives in `turns` so it
+    // paints at once and rides in historyForGuide(), but the retire-filter
+    // below must not mistake it for the durable turn it is waiting for.
+    const sent = {
+      role: "operator", kind: "message", content: text,
+      created_at: new Date().toISOString(), _pending: true,
+    };
+    turns.push(sent);
+    pendingOps.push(sent);
+    if (pendingOps.length > 50) pendingOps = pendingOps.slice(-50);
     renderTranscript();
     // Advance verbs stay a local fast-path (deterministic, closes the step
     // through the verified submit/track flow). EVERYTHING else is one server

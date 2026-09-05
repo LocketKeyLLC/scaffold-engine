@@ -1296,3 +1296,74 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 .ack-card .ack-icon { font-size: 28px; display: block; margin-bottom: 8px; }
 @keyframes ack-fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes ack-pop { from { transform: scale(0.92); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+/* ── §17.933 — re-plan: explained modal + docked chip ──────────────────
+   Replaces the permanent card that used to sit above the step. The proposal
+   now ARRIVES as a modal that explains what the operator said, what the plan
+   currently assumes and what would change; dismissing it without a decision
+   leaves only the chip below, beside the input they answer in.            */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 80;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  animation: ack-fade-in 0.15s ease-out;
+}
+.modal-card {
+  width: min(640px, 100%);
+  max-height: 82vh; overflow-y: auto;
+  padding: 20px 22px;
+  animation: ack-pop 0.18s ease-out;
+}
+.modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 10px;
+}
+.modal-head strong { font-size: 15px; }
+.modal-actions {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 16px; padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.replan-why { margin: 10px 0 12px; }
+.replan-quote {
+  margin: 4px 0 0; padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-inset);
+  border-radius: 0 6px 6px 0;
+  font-style: italic;
+}
+.replan-changes { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
+.replan-change {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-inset);
+}
+.replan-change-head {
+  display: flex; align-items: baseline; gap: 8px;
+  flex-wrap: wrap; margin-bottom: 6px;
+}
+.replan-act { font-weight: 600; }
+.replan-node { font-size: 12px; color: var(--text-dim); }
+.replan-line {
+  display: flex; gap: 8px; align-items: baseline;
+  margin-top: 4px; font-size: 13px;
+}
+.replan-tag {
+  flex: 0 0 auto; min-width: 116px;
+  font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-faint);
+}
+
+.replan-slot:empty { display: none; }
+.replan-chip {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 8px; padding: 7px 12px;
+  border: 1px solid var(--accent-dim);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  font-size: 13px;
+}
+.replan-chip.busy { border-style: dashed; }

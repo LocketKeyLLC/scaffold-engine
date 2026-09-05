@@ -1261,6 +1261,11 @@ class Settings(BaseSettings):
     # nodes (they suggest a choice, not an action). Code default off; live via
     # compose.
     assist_next_callout_enabled: bool = False
+    # §17.932 — require an explicit, observable "Done when" close on every
+    # walkthrough plus the control that advances. Guidance ended on "then
+    # tell me what it shows", which never tells the operator the step is
+    # over; finished steps stayed open and the session read as stuck.
+    assist_done_criterion_enabled: bool = False
     # §17.742 — problem-solving discipline for TANGLED, multi-attempt steps. Live
     # evidence (P40/T14: 48 assistant turns on one step, 4 approaches tried+failed)
     # showed the engine THRASHING — re-proposing ruled-out approaches and asking
