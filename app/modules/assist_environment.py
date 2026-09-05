@@ -358,7 +358,11 @@ async def set_environment(
                 if t and t.lower() not in seen_pb:
                     cur.append(t)
                     seen_pb.add(t.lower())
-            pb[key] = cur[-int(_s.assist_playbook_max):]
+            # §17.940 — `ruled_out` is a BINDING prohibition, not a
+            # convenience; it gets its own, larger budget (see config).
+            _pb_cap = (_s.assist_playbook_ruled_out_max if key == "ruled_out"
+                       else _s.assist_playbook_max)
+            pb[key] = cur[-int(_pb_cap):]
         current["playbook"] = pb
     # Single jsonb merge patch — environment always, verbosity when given.
     patch: dict[str, Any] = {"environment": current}
