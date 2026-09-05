@@ -267,8 +267,10 @@ def test_a_real_milvus_client_is_blocked(_ensure_guard):
     msg = str(exc.value)
     assert "MilvusClient" in msg
     assert "gRPC, not httpx" in msg
-    # it must name the skip-vs-fail trap that hid this
-    assert "IDENTICAL to an empty one" in msg
+    # §17.947 — it must say what the reader will actually see now: a
+    # live-retrieval test FAILS as unreachable rather than skipping as empty.
+    assert "UNREACHABLE" in msg
+    assert "no longer conflates" in msg
 
 
 def test_uninstall_restores_pymilvus():

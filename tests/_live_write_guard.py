@@ -173,12 +173,12 @@ def targets_search(url: str) -> bool:
 def _explain_milvus() -> str:
     return (
         "\n\n§17.946 BLOCKED: a unit test constructed a real MilvusClient.\n\n"
-        "Milvus speaks gRPC, not httpx, so it needs its own block — and its own "
-        "care. `tests/_milvus_helpers.skip_if_milvus_empty` swallows every "
-        "exception and returns 0, which makes an UNREACHABLE Milvus look "
-        "IDENTICAL to an empty one: a live-retrieval test silently SKIPS "
-        "instead of failing. That is how 7 golden-retrieval parametrizations "
-        "hid in the unit lane.\n\n"
+        "Milvus speaks gRPC, not httpx, so it needs its own block.\n\n"
+        "§17.947 — if you are seeing this from a live-retrieval test, it will "
+        "now FAIL with 'Milvus is UNREACHABLE' rather than skip: "
+        "`skip_if_milvus_empty` no longer conflates a blocked service with an "
+        "empty collection, which is how 7 golden-retrieval parametrizations "
+        "once hid in the unit lane.\n\n"
         "Fix the TEST: mock `app.main.get_milvus_client` / the collection "
         "helper. If it genuinely needs a populated Milvus it belongs in the "
         "integration lane — mark it `pytest.mark.integration`, the way "
