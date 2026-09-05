@@ -256,6 +256,13 @@ def render_session_memory(
     # Never-dropped protected slot: §17.714 reset-mode direction (reset branch)
     # or the §17.881 session playbook (normal branch) — one per render.
     direction_idx: int | None = None
+    # §17.941 — the playbook's OWN index. `direction_idx` is claimed by
+    # whichever direction section lands first, so once a §17.914 state block
+    # existed the playbook was unprotected and got dropped WHOLE under
+    # budget pressure — taking every `ruled_out` prohibition with it, while
+    # the §17.881 comment below promised the opposite. Measured at a 4k
+    # budget with a full playbook.
+    playbook_idx: int | None = None
     facts_header = ""
 
     def _facts_section(header_: str, items: list[str], omitted: int) -> str:
@@ -326,9 +333,19 @@ def render_session_memory(
         # §17.881 — the playbook leads the facts: proven/ruled-out methods are
         # the highest-leverage memory (they change WHAT the model prescribes,
         # not just which values it fills in) and are never budget-dropped.
-        pb_block = render_playbook_block(environment)
+        # §17.941 — but `proven` is elastic WITHIN it. A quarter of the budget
+        # is a generous share for re-derivable methods and leaves the facts
+        # ledger room to breathe; `ruled_out` is exempt and always renders in
+        # full. Without this the store cap had to stay artificially low (12) to
+        # protect the prompt, which is what made the session forget methods it
+        # had proven.
+        pb_block = render_playbook_block(
+            environment,
+            proven_budget=(max(400, budget // 4) if budget else None),
+        )
         if pb_block:
             direction_idx = len(sections) if direction_idx is None else direction_idx
+            playbook_idx = len(sections)
             sections.append(pb_block)
         if facts:
             facts_header = "**Observed facts:**"
@@ -382,22 +399,35 @@ def render_session_memory(
                 # slot, and a §17.714 direction section are never dropped.
                 droppable = [
                     i for i in range(len(sections))
-                    if i not in (0, facts_idx, direction_idx)
+                    if i not in (0, facts_idx, direction_idx, playbook_idx)
                 ]
                 if not droppable:
                     del sections[facts_idx]
                     break
                 drop = max(droppable)
                 del sections[drop]
+                # §17.941 — adjust BOTH indices. Only facts_idx was shifted, so
+                # after a single drop `direction_idx` aliased whatever slid into
+                # its slot — usually the facts section — and the playbook it was
+                # meant to protect became droppable on the next pass. Measured:
+                # at a 4k budget a full playbook was deleted entirely while the
+                # facts it was supposed to outrank survived, exactly inverting
+                # the §17.881 priority the comment above still promised.
                 if drop < facts_idx:
                     facts_idx -= 1
+                if direction_idx is not None and drop < direction_idx:
+                    direction_idx -= 1
+                if playbook_idx is not None and drop < playbook_idx:
+                    playbook_idx -= 1
         block = "\n\n".join(sections)
         if len(block) > budget:
             block = block[:budget].rstrip() + "\n… (memory truncated)"
     return block
 
 
-def render_playbook_block(environment: dict | None) -> str:
+def render_playbook_block(
+    environment: dict | None, *, proven_budget: int | None = None,
+) -> str:
     """§17.881 — the session playbook as a BINDING block: methods PROVEN on
     this system this session, and approaches that already FAILED here. Derived
     at step-commit time (reconcile_on_commit); rendered into every generation
@@ -408,6 +438,32 @@ def render_playbook_block(environment: dict | None) -> str:
     pb = (environment or {}).get("playbook") or {}
     proven = [str(x).strip() for x in (pb.get("proven") or []) if str(x).strip()]
     ruled = [str(x).strip() for x in (pb.get("ruled_out") or []) if str(x).strip()]
+    # §17.941 — `proven` is ELASTIC under budget pressure; `ruled_out` is not.
+    #
+    # The store cap had been doing prompt-budget duty: `assist_playbook_max`
+    # was 12 not because twelve methods is the right thing to REMEMBER but
+    # because more than that crowded the injected block. Measured on the live
+    # session at the deployed 12k budget, proven=20 with a full ruled_out
+    # already started evicting facts — so raising what the session remembers
+    # was impossible without shrinking what it knows.
+    #
+    # Splitting the two lets the STORE cap govern memory and the RENDER budget
+    # govern the prompt. Newest kept, because a later proof supersedes an
+    # earlier one; `ruled_out` is never trimmed here — it is a prohibition, and
+    # dropping one silently re-enables a known-failing approach (§17.940).
+    proven_omitted = 0
+    if proven_budget is not None and proven:
+        kept: list[str] = []
+        used = 0
+        for entry in reversed(proven):
+            cost = len(entry) + 3  # "- " prefix + newline
+            if used + cost > proven_budget and kept:
+                break
+            kept.append(entry)
+            used += cost
+        kept.reverse()
+        proven_omitted = len(proven) - len(kept)
+        proven = kept
     if not proven and not ruled:
         return ""
     parts = [
@@ -418,6 +474,8 @@ def render_playbook_block(environment: dict | None) -> str:
         parts.append(
             "**Proven to work here — when a task matches, use these instead of "
             "any method from memory:**\n" + "\n".join(f"- {p}" for p in proven)
+            + (f"\n(… {proven_omitted} older proven method(s) omitted to fit the "
+               "memory budget — newest kept)" if proven_omitted else "")
         )
     if ruled:
         parts.append(

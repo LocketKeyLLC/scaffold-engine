@@ -966,7 +966,13 @@ class Settings(BaseSettings):
     # turns it ON via ASSIST_COMMIT_RECONCILE_ENABLED. Lesson re-learned: a
     # default-ON background scheduler leaked tasks into 80 unrelated tests.
     assist_commit_reconcile_enabled: bool = False
-    assist_playbook_max: int = Field(default=12, ge=2, le=30)
+    # §17.941 — raised 12 -> 30 now that `proven` is ELASTIC at render time
+    # (render_playbook_block trims it to a share of the memory budget, newest
+    # kept). 12 was never a judgement about how many methods are worth
+    # remembering; it was a prompt-budget control wearing a store cap's
+    # clothes, and it meant a 41-step session forgot methods it had proven.
+    # The store now governs memory and the renderer governs the prompt.
+    assist_playbook_max: int = Field(default=30, ge=2, le=100)
     # §17.940 — `ruled_out` gets its OWN, larger budget. Both halves of the
     # playbook shared one cap, but they are not worth the same: `proven` is a
     # method that can be re-derived if lost, while `ruled_out` renders as a
