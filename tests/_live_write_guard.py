@@ -129,6 +129,42 @@ def targets_live_engine(url: str) -> bool:
     return port in _LIVE_PORTS
 
 
+#: §17.945 — the simulation sidecars. Nothing in the unit lane legitimately
+#: reaches them: the adapter tests stub `httpx.MockTransport` and the health
+#: tests hand in MagicMock clients. Listed so that if a unit test ever DOES
+#: open a real connection to one, it says so by name.
+_SIDECAR_HOSTS = {
+    "scaffold-ngspice", "ngspice",
+    "scaffold-verilator", "verilator",
+    "scaffold-symbiyosys", "symbiyosys",
+    "scaffold-coderunner", "coderunner",
+}
+
+
+def targets_sidecar(url: str) -> bool:
+    try:
+        parsed = urlparse(url if "//" in str(url) else f"//{url}")
+    except Exception:  # noqa: BLE001
+        return False
+    return (parsed.hostname or "").lower() in _SIDECAR_HOSTS
+
+
+def _explain_sidecar(method: str, url: str) -> str:
+    return (
+        f"\n\n§17.945 BLOCKED: a unit test opened a real connection to a "
+        f"simulation sidecar.\n    {method} {url}\n\n"
+        "No unit test needs one. The adapter tests stub `httpx.MockTransport` "
+        "(a real AsyncClient with a fake transport, which this guard "
+        "deliberately does NOT intercept) and the health tests hand in "
+        "MagicMock clients — both stay hermetic without a live sidecar.\n\n"
+        "Fix the TEST: stub the transport or mock the client getter, the way "
+        "tests/test_sim_ngspice_adapter.py and tests/test_health_cleanup.py "
+        "already do. If it genuinely needs a running sidecar it belongs in "
+        "tests/integration/ (marked `integration`, which is exempt).\n"
+        f"To bypass deliberately on a throwaway box: {_ENV_ESCAPE}=1\n"
+    )
+
+
 def _explain_inference(method: str, url: str) -> str:
     return (
         f"\n\n§17.944 BLOCKED: a unit test tried to call LIVE INFERENCE.\n"
@@ -165,10 +201,17 @@ def _explain(method: str, url: str) -> str:
 
 _installed = False
 _original_request = None
-#: §17.944 — the app talks to the orchestrator with `requests` and to the model
-#: with `httpx`, so the guard needs both transports. `AsyncClient.send` is the
-#: chokepoint every httpx post/get/stream funnels through.
-_original_httpx_send = None
+#: §17.944/§17.945 — the app talks to the orchestrator with `requests` and to
+#: the model with `httpx`, so the guard needs both.
+#:
+#: §17.945 — the httpx hook is on the TRANSPORT, not on `AsyncClient.send`.
+#: `send` sits ABOVE the transport, so a test using `httpx.MockTransport` — a
+#: real AsyncClient with a stubbed transport, which is exactly how the sim
+#: adapter tests stay hermetic — was intercepted even though its request was
+#: never going to leave the process. Blocking at `send` failed 11 already-
+#: correct tests. `AsyncHTTPTransport.handle_async_request` is real network
+#: egress; MockTransport is a different class and passes through untouched.
+_original_httpx_transport = None
 #: The real key, stashed on first install so `uninstall()` can hand it back.
 #: `make test` runs unit and integration tests in ONE process, so a unit test
 #: that strips the key permanently would break every integration test that
@@ -186,7 +229,7 @@ def install() -> None:
     path that escapes the patch (a socket call, a vendored client) cannot
     authenticate as the operator.
     """
-    global _installed, _original_request, _original_httpx_send, _saved_api_key
+    global _installed, _original_request, _original_httpx_transport, _saved_api_key
     if _installed or guard_disabled():
         return
 
@@ -216,9 +259,9 @@ def install() -> None:
         _installed = True
         return
 
-    _original_httpx_send = httpx.AsyncClient.send
+    _original_httpx_transport = httpx.AsyncHTTPTransport.handle_async_request
 
-    async def _guarded_send(self, request, *a, **kw):
+    async def _guarded_transport(self, request, *a, **kw):
         url = str(request.url)
         if targets_inference(url):
             raise LiveEngineWriteBlocked(
@@ -226,9 +269,12 @@ def install() -> None:
         if targets_live_engine(url):
             raise LiveEngineWriteBlocked(
                 _explain(str(request.method).upper(), url))
-        return await _original_httpx_send(self, request, *a, **kw)
+        if targets_sidecar(url):
+            raise LiveEngineWriteBlocked(
+                _explain_sidecar(str(request.method).upper(), url))
+        return await _original_httpx_transport(self, request, *a, **kw)
 
-    httpx.AsyncClient.send = _guarded_send
+    httpx.AsyncHTTPTransport.handle_async_request = _guarded_transport
     _installed = True
 
 
@@ -243,8 +289,8 @@ def uninstall() -> None:
     import requests
 
     requests.Session.request = _original_request
-    if _original_httpx_send is not None:
+    if _original_httpx_transport is not None:
         import httpx
 
-        httpx.AsyncClient.send = _original_httpx_send
+        httpx.AsyncHTTPTransport.handle_async_request = _original_httpx_transport
     _installed = False

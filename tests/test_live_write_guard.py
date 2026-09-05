@@ -161,20 +161,57 @@ async def test_inference_over_httpx_is_blocked(_ensure_guard):
     assert "tests/integration/" in msg
 
 
-async def test_non_inference_httpx_still_dispatches(_ensure_guard):
-    """The guard must not become a blanket no-network rule — the sim sidecars
-    and SearXNG are legitimately reachable from unit tests today."""
+async def test_a_mock_transport_is_never_intercepted(_ensure_guard):
+    """§17.945 — the reason the hook is on the TRANSPORT, not on
+    `AsyncClient.send`.
+
+    `httpx.MockTransport` is a real AsyncClient with a stubbed transport — how
+    the sim adapter tests stay hermetic without a live sidecar. A `send`-level
+    guard intercepted those requests even though they were never going to
+    leave the process, failing 11 already-correct tests. Blocking at
+    `AsyncHTTPTransport.handle_async_request` (real egress) leaves them alone.
+    """
     import httpx
 
-    sentinel = MagicMock(name="response")
+    def _handler(request):
+        return httpx.Response(200, json={"stubbed": True})
 
-    async def _fake_send(self, request, *a, **kw):
-        return sentinel
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as c:
+        # a sidecar URL, which the guard blocks on the real transport
+        r = await c.get("http://scaffold-ngspice:8001/health")
+    assert r.status_code == 200 and r.json() == {"stubbed": True}
 
-    with patch.object(_live_write_guard, "_original_httpx_send", new=_fake_send):
-        async with httpx.AsyncClient() as client:
-            out = await client.get("http://scaffold-ngspice:8001/health")
-    assert out is sentinel
+
+async def test_a_real_sidecar_connection_is_blocked(_ensure_guard):
+    """The same URL over the REAL transport is refused, by name."""
+    import httpx
+
+    async with httpx.AsyncClient() as c:
+        with pytest.raises(LiveEngineWriteBlocked) as exc:
+            await c.get("http://scaffold-ngspice:8001/health")
+    msg = str(exc.value)
+    assert "simulation sidecar" in msg
+    assert "MockTransport" in msg          # names the hermetic pattern to copy
+    assert "tests/integration/" in msg
+
+
+async def test_non_guarded_hosts_still_dispatch(_ensure_guard):
+    """Not a blanket no-network rule: SearXNG, Milvus and anything else stay
+    reachable, so this guard never becomes the reason a legitimate test fails."""
+    import httpx
+
+    from tests._live_write_guard import (
+        targets_inference,
+        targets_live_engine,
+        targets_sidecar,
+    )
+
+    for url in ("http://searxng:8888/search",
+                "http://milvus-standalone:19530/",
+                "https://example.com/x"):
+        assert not targets_inference(url)
+        assert not targets_live_engine(url)
+        assert not targets_sidecar(url)
 
 
 async def test_uninstall_restores_the_httpx_transport():
@@ -184,7 +221,7 @@ async def test_uninstall_restores_the_httpx_transport():
     import httpx
 
     _live_write_guard.install()
-    guarded = httpx.AsyncClient.send
+    guarded = httpx.AsyncHTTPTransport.handle_async_request
     _live_write_guard.uninstall()
-    assert httpx.AsyncClient.send is not guarded
+    assert httpx.AsyncHTTPTransport.handle_async_request is not guarded
     _live_write_guard.install()  # leave the process guarded
