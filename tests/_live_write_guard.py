@@ -25,6 +25,26 @@ The guard is deliberately NOISY rather than silent. Returning a canned 401
 would leave a non-hermetic test half-working and hide the dependency; raising
 names the offending URL and the test that made the call, so the fix is obvious.
 
+§17.944 — the guard also blocks LIVE INFERENCE.
+
+§17.943 was a unit test calling Ollama: `grounding_gate_enabled` defaults True,
+so a synthesis-override test ran `score_faithfulness` for real, and when the
+model happened to score low the gate prepended a banner to the value the test
+asserted on. It failed one run in five for weeks.
+
+A sweep instrumented every outbound httpx call across the lane. Fifteen tests
+in six files were reaching `POST /api/chat` or `/api/generate`; twenty-one more
+made Ollama GET probes. But blocking Ollama and re-running the FULL lane gave
+**5,241 passed / 1 skipped / 0 failed** — byte-identical to the unblocked
+baseline. Not one unit test's assertions actually depend on live model output;
+they mock the call and assert the mocked return, while an unmocked side-path
+quietly talks to the model anyway.
+
+So inference is dead weight in this lane: it costs seconds per test, makes the
+suite fail when Ollama is down, and — the §17.943 case — occasionally lets a
+real model response reach an assertion. Blocking it is free, and it converts
+that whole class from "flakes five runs later" into "fails here, by name".
+
 Exemptions:
   * `tests/integration/` legitimately drives live services — the conftest hook
     skips anything marked `integration`.
@@ -49,6 +69,35 @@ _LIVE_HOSTS = {
 _LIVE_PORTS = {8000, None}
 
 _ENV_ESCAPE = "SCAFFOLD_ALLOW_LIVE_TEST_WRITES"
+
+
+def _inference_netloc() -> tuple[str, int | None]:
+    """§17.944 — (host, port) of the configured model endpoint.
+
+    Read from settings rather than hardcoded: `ollama_base_url` is
+    deployment-specific (172.18.0.1:11434 on this box, because containers reach
+    the host Ollama through the bridge gateway) and a guard pinned to one
+    address would silently stop guarding anywhere else.
+    """
+    try:
+        from app.config import settings
+
+        parsed = urlparse(str(settings.ollama_base_url))
+        return (parsed.hostname or "").lower(), parsed.port
+    except Exception:  # noqa: BLE001 — never break collection over a guard
+        return "", None
+
+
+def targets_inference(url: str) -> bool:
+    """True when `url` points at the configured model endpoint."""
+    host, port = _inference_netloc()
+    if not host:
+        return False
+    try:
+        parsed = urlparse(url if "//" in str(url) else f"//{url}")
+    except Exception:  # noqa: BLE001
+        return False
+    return (parsed.hostname or "").lower() == host and parsed.port == port
 
 
 class LiveEngineWriteBlocked(RuntimeError):
@@ -80,6 +129,24 @@ def targets_live_engine(url: str) -> bool:
     return port in _LIVE_PORTS
 
 
+def _explain_inference(method: str, url: str) -> str:
+    return (
+        f"\n\n§17.944 BLOCKED: a unit test tried to call LIVE INFERENCE.\n"
+        f"    {method} {url}\n\n"
+        "No unit test's assertions depend on real model output — the whole lane "
+        "passes with this blocked (5,241 passed, measured). A live call here is "
+        "dead weight at best, and at worst it is §17.943: a real response "
+        "reaching an assertion and failing one run in five.\n\n"
+        "Fix the TEST: mock the model call. Patch the specific function the code "
+        "under test calls (`model_router.generate` / `.chat` / `.tool_call`, or "
+        "the helper that wraps it), or pin the valve that gates it — "
+        "`grounding_gate_enabled` is the one that caused §17.943.\n"
+        "If it genuinely needs a model it belongs in tests/integration/ "
+        "(marked `integration`, which is exempt).\n"
+        f"To bypass deliberately on a throwaway box: {_ENV_ESCAPE}=1\n"
+    )
+
+
 def _explain(method: str, url: str) -> str:
     return (
         f"\n\n§17.934 BLOCKED: a test tried to call the LIVE orchestrator.\n"
@@ -98,6 +165,10 @@ def _explain(method: str, url: str) -> str:
 
 _installed = False
 _original_request = None
+#: §17.944 — the app talks to the orchestrator with `requests` and to the model
+#: with `httpx`, so the guard needs both transports. `AsyncClient.send` is the
+#: chokepoint every httpx post/get/stream funnels through.
+_original_httpx_send = None
 #: The real key, stashed on first install so `uninstall()` can hand it back.
 #: `make test` runs unit and integration tests in ONE process, so a unit test
 #: that strips the key permanently would break every integration test that
@@ -115,7 +186,7 @@ def install() -> None:
     path that escapes the patch (a socket call, a vendored client) cannot
     authenticate as the operator.
     """
-    global _installed, _original_request, _saved_api_key
+    global _installed, _original_request, _original_httpx_send, _saved_api_key
     if _installed or guard_disabled():
         return
 
@@ -137,6 +208,27 @@ def install() -> None:
         return _original_request(self, method, url, *args, **kwargs)
 
     requests.Session.request = _guarded
+
+    # §17.944 — inference goes out over httpx, not requests.
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover — httpx is a hard dep here
+        _installed = True
+        return
+
+    _original_httpx_send = httpx.AsyncClient.send
+
+    async def _guarded_send(self, request, *a, **kw):
+        url = str(request.url)
+        if targets_inference(url):
+            raise LiveEngineWriteBlocked(
+                _explain_inference(str(request.method).upper(), url))
+        if targets_live_engine(url):
+            raise LiveEngineWriteBlocked(
+                _explain(str(request.method).upper(), url))
+        return await _original_httpx_send(self, request, *a, **kw)
+
+    httpx.AsyncClient.send = _guarded_send
     _installed = True
 
 
@@ -151,4 +243,8 @@ def uninstall() -> None:
     import requests
 
     requests.Session.request = _original_request
+    if _original_httpx_send is not None:
+        import httpx
+
+        httpx.AsyncClient.send = _original_httpx_send
     _installed = False
