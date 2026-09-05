@@ -967,6 +967,14 @@ class Settings(BaseSettings):
     # default-ON background scheduler leaked tasks into 80 unrelated tests.
     assist_commit_reconcile_enabled: bool = False
     assist_playbook_max: int = Field(default=12, ge=2, le=30)
+    # §17.940 — `ruled_out` gets its OWN, larger budget. Both halves of the
+    # playbook shared one cap, but they are not worth the same: `proven` is a
+    # method that can be re-derived if lost, while `ruled_out` renders as a
+    # BINDING prohibition ("Already failed here — do NOT prescribe these
+    # again"). Evicting one silently deletes a prohibition and the engine
+    # re-prescribes a known-failing approach — the §17.882/906 loop by another
+    # route. Same principle as §17.920: negative knowledge survives the cap.
+    assist_playbook_ruled_out_max: int = Field(default=30, ge=2, le=100)
     assist_fix_streak_threshold: int = Field(default=2, ge=1, le=5)
     # §17.877 — cached guidance that predates operator work on the step is
     # STALE: re-serving it verbatim ("pct start 102" hours into troubleshooting
