@@ -187,7 +187,9 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     apply_verbosity,
     guide_system_for_tool,
     apply_problem_solving,
+    apply_done_criterion,
     apply_next_callout,
+    apply_plan_authority,
     apply_ground_or_ask,
     apply_screen_grounding,
     apply_location_callout,
@@ -2155,6 +2157,11 @@ async def generate_guidance(
         system, is_decision=is_decision,
         enabled=settings.assist_next_callout_enabled,
     )
+    system = apply_done_criterion(  # §17.932 — and say when the step is FINISHED
+        system, is_decision=is_decision,
+        enabled=settings.assist_done_criterion_enabled,
+    )
+    system = apply_plan_authority(system)  # §17.937 — never narrate a plan change
     system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
         system, enabled=settings.assist_problem_solving_enabled,
     )
@@ -4373,6 +4380,52 @@ _NO_ACTION_RE = re.compile(
 )
 
 
+# §17.937 — a walkthrough claiming the PLAN ITSELF was changed. Distinct from
+# _NO_ACTION_RE, which catches "there is nothing to do here": this catches an
+# assertion of COMPLETED SYSTEM STATE — "the plan has been updated", "this step
+# has been removed". The engine cannot change the plan by saying so; only a
+# skip/drop does. Live cost (session 613dd1df, node ADD3): asked to write a
+# walkthrough for a step the operator wanted gone, the model replied "The
+# project plan has been updated to remove this step. No further action is
+# required." — FOUR times across five days, 2026-08-31 to 09-04, while the node
+# sat `pending` in dag_nodes the whole time. §17.927 dutifully appended "reply
+# `skip` to retire this step" underneath, but the operator had just been told
+# the step was already gone, so the offer read as noise and the step stayed in
+# the plan.
+_PLAN_MUTATION_CLAIM_RE = re.compile(
+    r"\b(?:the\s+)?(?:project\s+)?plan\s+(?:has\s+been|was|is\s+now)\s+"
+    r"(?:updated|changed|revised|modified|amended)\b"
+    r"|\bthis\s+step\s+(?:has\s+been|was|is\s+now)\s+"
+    r"(?:removed|deleted|dropped|retired|taken\s+out)\b"
+    r"|\b(?:has\s+been|was)\s+removed\s+from\s+the\s+(?:project\s+)?plan\b"
+    r"|\bi\s+(?:have\s+)?(?:removed|deleted|dropped|retired)\s+this\s+step\b",
+    re.IGNORECASE,
+)
+
+
+def claims_plan_mutation(text_out: str) -> bool:
+    """§17.937 — does this walkthrough assert the plan was already changed?"""
+    return bool(_PLAN_MUTATION_CLAIM_RE.search(text_out or ""))
+
+
+def false_plan_claim_banner(title: str) -> str:
+    """§17.937 — the correction that leads a walkthrough whose plan claim is FALSE.
+
+    Leads rather than trails for the same reason §17.882's integrity warning
+    does: the operator reads the top of the reply and acts on it. A correction
+    under a confident false statement is a correction they never see.
+    """
+    return (
+        "⚠️ **Correction: the plan has NOT changed.** I said this step was "
+        f"removed — it was not. \"{title}\" is still in your plan, and saying so "
+        "does not retire it.\n\n"
+        "**To actually retire it, reply `skip`** (or press ⏩ Skip). That records "
+        "it as deliberately not done and moves you on. If you meant something "
+        "else — that the step is finished, or that the plan should change in a "
+        "different way — tell me which and I will do that instead.\n\n---\n\n"
+    )
+
+
 def concludes_no_action_required(text_out: str) -> bool:
     """True when a walkthrough's conclusion is that the step needs no work.
 
@@ -4411,6 +4464,65 @@ async def _next_claimable_step(*, db, job_id: str, exclude: str) -> Optional[dic
     except Exception as exc:  # noqa: BLE001 — the offer is an enhancement
         logger.warning("assist_next_claimable_failed: %s", exc)
         return None
+
+
+# §17.932 — a walkthrough that never names its finish line leaves the operator
+# reporting output forever. The directive asks the model for a "Done when"
+# close; this is the enforcement half, because a prompt rule is a request and
+# the live transcript is full of ignored ones. Matching is deliberately loose:
+# any heading or bolded lead-in that states a completion condition counts, so a
+# model that phrases it its own way is not double-footered.
+_DONE_WHEN_RE = re.compile(
+    r"(?:^|\n)\s*(?:#{1,4}\s*|\*\*)\s*(?:✅\s*)?"
+    r"(?:done\s+when|step\s+is\s+(?:done|complete)|"
+    r"you(?:'?re| are)\s+done\s+when|success\s+looks\s+like|"
+    r"how\s+you(?:'?ll| will)\s+know)\b",
+    re.IGNORECASE,
+)
+
+
+def _with_advance_footer(guidance: Optional[str], title: str) -> str:
+    """§17.932 — append `advance_footer` unless the text already closes itself.
+    Valve-gated and fail-soft: guidance must never fail over a footer."""
+    text_out = guidance or ""
+    try:
+        if not settings.assist_done_criterion_enabled:
+            return text_out
+        if not text_out.strip() or has_done_criterion(text_out):
+            return text_out
+        return text_out + advance_footer(title)
+    except Exception as exc:  # noqa: BLE001 — a footer never breaks a guide
+        logger.warning("assist_advance_footer_failed: %s", exc)
+        return text_out
+
+
+def has_done_criterion(text_out: str) -> bool:
+    """§17.932 — does this walkthrough already state an observable finish line?"""
+    return bool(_DONE_WHEN_RE.search(text_out or ""))
+
+
+def advance_footer(title: str) -> str:
+    """§17.932 — the close every walkthrough needs and the model kept omitting:
+    what finishing looks like, and the exact control that ends the step.
+
+    The live session ran for days on walkthroughs that closed with *"then tell
+    me what it shows"*. That is an instruction to REPORT — the operator pastes
+    output, the engine answers, and neither of them ever says the step is over.
+    Steps that had genuinely succeeded stayed open, which is what "it doesn't
+    move through the steps smoothly" looked like from the operator's chair.
+    """
+    return (
+        "\n\n---\n## ✅ Done when\n"
+        f"This step is finished when **{title}** is actually true on your "
+        "machine — NOT when the last command merely returned without an error. "
+        "A command succeeding is one move toward the goal; it is not the "
+        "goal.\n\n"
+        "**Once that is genuinely achieved, press ✓ Done → next step** (or type "
+        "`next`).\n\n"
+        "**If it is not — or you are not sure — paste what you see and I will "
+        "keep working THIS step with you.** I would rather stay here than move "
+        "you on from something that is not finished."
+    )
 
 
 def no_action_footer(next_step: Optional[dict], title: str) -> str:
@@ -4464,6 +4576,10 @@ async def ensure_guidance(
             )
             if not stale:
                 cached.pop("_generated_at_raw", None)
+                # §17.932 — a CACHED walkthrough needs the finish line just as
+                # much as a fresh one; it is the same text served again.
+                cached["guidance"] = _with_advance_footer(
+                    cached.get("guidance"), ctx.title or node_key)
                 return cached
             logger.info("assist_guide_cache_stale_regen node_key=%s", node_key)
     failed_cmds = ""
@@ -4512,6 +4628,34 @@ async def ensure_guidance(
         status=res["status"],
         db=db,
     )
+    # §17.937 — the engine may not assert a plan change it did not make. Checked
+    # against the ACTUAL node status: if the walkthrough says this step was
+    # removed and the node is still live, the claim is false and leads with a
+    # correction. Runs BEFORE the §17.927 offer so the operator reads "the plan
+    # has NOT changed — reply `skip` to retire it" as one coherent instruction,
+    # instead of a skip offer stapled under a confident false statement.
+    try:
+        _g = res.get("guidance") or ""
+        if _g and claims_plan_mutation(_g):
+            _job_row = (await db.execute(
+                text("SELECT job_id FROM assist_sessions WHERE id = :sid"),
+                {"sid": session_id},
+            )).mappings().first()
+            _node_status = (await db.execute(
+                text("SELECT status FROM dag_nodes "
+                     "WHERE job_id = :jid AND node_key = :nk"),
+                {"jid": str(_job_row["job_id"]), "nk": node_key},
+            )).scalar() if _job_row else None
+            # 'skipped'/'done' mean the claim is TRUE — leave it alone.
+            if _node_status is not None and _node_status not in ("skipped", "done"):
+                res["guidance"] = false_plan_claim_banner(
+                    ctx.title or node_key) + _g
+                res.setdefault("guidance_meta", {})["false_plan_claim"] = True
+                logger.warning(  # LOUD: the model asserted state it cannot set
+                    "assist_false_plan_claim node_key=%s node_status=%s",
+                    node_key, _node_status)
+    except Exception as exc:  # noqa: BLE001 — a correction must never fail a guide
+        logger.warning("assist_false_plan_claim_check_failed: %s", exc)
     # §17.927 — a "no action required" conclusion must carry the action that
     # acts on it, or the operator is parked on a dead step (live turn 1497).
     try:
@@ -4531,6 +4675,13 @@ async def ensure_guidance(
                 node_key, (_nxt or {}).get("node_key"))
     except Exception as exc:  # noqa: BLE001 — the offer must never fail a guide
         logger.warning("assist_no_action_offer_failed: %s", exc)
+    # §17.932 — state the finish line and the control that ends the step. Runs
+    # AFTER the §17.927 no-action offer on purpose: a step that needs no work
+    # is retired with `skip`, not finished by observation, so that footer owns
+    # the close and this one stands down.
+    if not res.get("guidance_meta", {}).get("no_action_offer"):
+        res["guidance"] = _with_advance_footer(
+            res.get("guidance"), ctx.title or node_key)
     res["cached"] = False
     return res
 
@@ -4615,6 +4766,11 @@ async def generate_guidance_stream(
         system, is_decision=is_decision,
         enabled=settings.assist_next_callout_enabled,
     )
+    system = apply_done_criterion(  # §17.932 — and say when the step is FINISHED
+        system, is_decision=is_decision,
+        enabled=settings.assist_done_criterion_enabled,
+    )
+    system = apply_plan_authority(system)  # §17.937 — never narrate a plan change
     system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
         system, enabled=settings.assist_problem_solving_enabled,
     )

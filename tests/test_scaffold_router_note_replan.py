@@ -313,9 +313,12 @@ class TestPivotGateRouting:
         """A non-pivot question must still get the current step's guidance."""
         interp = {"intent": "question", "note_text": "", "note_kind": "note",
                   "evidence": "", "error_text": "", "query": "", "node_key": "T1"}
+        # §17.934 — `_track_progress` POSTs to /assist/{sid}/track. Unstubbed
+        # this test issued a real WRITE against a live session id.
         with patch.object(_vendor, "fast_classify_turn", return_value=None), \
              patch.object(_vendor, "assist_interpret", return_value=interp), \
              patch.object(_vendor, "fetch_pending_replan", return_value=None), \
+             patch.object(_vendor, "_track_progress", return_value=None), \
              patch.object(_vendor, "assist_note_cmd",
                           return_value=iter(["NOTE"])) as note_cmd, \
              patch.object(_vendor, "assist_chat_turn",

@@ -222,6 +222,33 @@ def _init_shared_http_clients():
     yield
 
 
+# ---------------------------------------------------------------------------
+# §17.934 — no unit test may reach the operator's LIVE orchestrator.
+# ---------------------------------------------------------------------------
+# `make test` runs inside the orchestrator container, which exports
+# SCAFFOLD_API_KEY and resolves scaffold-orchestrator:8000 to itself. Any test
+# that escapes its mocks therefore authenticates as the MASTER key against the
+# real database. That is not hypothetical: the scaffold_router lane wrote 61
+# fixture turns into the operator's live assist session before this existed
+# (§17.770 sticky-continuity bound them to the sole active session), and after
+# §17.928 those injected turns are exactly what the model reads as current
+# context.
+#
+# tests/integration/ drives live services ON PURPOSE, so it is exempt — the
+# marker check is the whole reason this is a fixture rather than an
+# import-time install like the one in _scaffold_router_setup.py.
+@pytest.fixture(autouse=True)
+def _block_live_engine_writes(request):
+    from tests import _live_write_guard
+
+    if request.node.get_closest_marker("integration"):
+        _live_write_guard.uninstall()
+        yield
+        return
+    _live_write_guard.install()
+    yield
+
+
 @pytest.fixture
 def realistic_settings():
     """§17.854 (audit H4) — a REAL, isolated Settings object for patching a

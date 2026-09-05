@@ -450,6 +450,7 @@ services:
       # Panel implies the recap (forces its computation). Code default off; live here.
       ASSIST_STATUS_PANEL_ENABLED: "${ASSIST_STATUS_PANEL_ENABLED:-true}"
       ASSIST_NEXT_CALLOUT_ENABLED: "${ASSIST_NEXT_CALLOUT_ENABLED:-true}"
+      ASSIST_DONE_CRITERION_ENABLED: "${ASSIST_DONE_CRITERION_ENABLED:-true}"  # §17.932
       # §17.742 — problem-solving discipline for tangled, multi-attempt steps:
       # honor confirmed CONSTRAINTS, stop cycling once approaches have failed
       # (commit to one path), match the operator's real capability. Recap gains

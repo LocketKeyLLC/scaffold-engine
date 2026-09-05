@@ -30,6 +30,7 @@ pytestmark = pytest.mark.asyncio
 
 def _db(*, session=("job-1", "active", "T24"),
         target=("T23", "committed"), title="Install PalWorld server",
+        node_status="done",
         guidance="## 👉 Do this next\n```bash\nsudo apt update\n```"):
     """execute() returns rows in call order: session → target step → node title
     → preserved guidance, then the UPDATEs."""
@@ -45,7 +46,7 @@ def _db(*, session=("job-1", "active", "T24"),
     out.append(_row({"job_id": session[0], "status": session[1],
                      "current_node_key": session[2]} if session else None))
     out.append(_row({"node_key": target[0], "status": target[1]} if target else None))
-    out.append(_row({"title": title}))
+    out.append(_row({"title": title, "status": node_status}))
     out.append(_row(scalar=guidance))
     db.execute = AsyncMock(side_effect=out + [_row()] * 8)
     db.commit = AsyncMock()
@@ -168,3 +169,55 @@ async def test_denial_reopen_still_DROPS_guidance():
     sql = _sql(db).replace(" = ", "=")
     assert "guidance=NULL" in sql
     assert "guidance_status='none'" in sql
+
+
+# ── §17.936 — 🤝 Engine does it is a one-way door too ─────────────────────
+
+
+async def test_a_handed_off_step_can_be_stepped_back():
+    """The gap that made this real: a handed-off step could not be reopened at
+    all, so `↩ Back a step` 409'd and the only repair was hand-written SQL
+    against all three mirrored tables.
+
+    Found on the operator's live session — a stray write handed off T26
+    ("Install AI VM OS") and advanced them to T27, i.e. off the install they
+    had been working for days. `🤝 Engine does it` moves the pointer forward
+    off a step the operator may not have finished, exactly like ✓ Done and
+    ⏩ Skip, so it belongs in the same undo."""
+    db = _db(target=("T26", "handed_off"), node_status="pending")
+    res = await assist_agent.step_back(session_id="s1", db=db)
+    assert res["node_key"] == "T26"
+    assert res["was"] == "handed_off"
+    db.commit.assert_awaited()
+
+
+async def test_handed_off_step_is_refused_while_the_executor_runs_it():
+    """A handed-off step may be IN FLIGHT: the autonomous executor claims the
+    node as `running`. Reopening underneath it would race a live writer and
+    leave the two tables disagreeing about who owns the step. Committed and
+    skipped steps can never be in this state, so the guard is specific to
+    handed_off."""
+    db = _db(target=("T26", "handed_off"), node_status="running")
+    assert await assist_agent.step_back(session_id="s1", node_key="T26", db=db) is None
+    db.commit.assert_not_awaited()
+
+
+async def test_committed_step_is_not_blocked_by_a_running_node():
+    """The race guard must not over-reach: only handed_off is gated on it."""
+    db = _db(target=("T23", "committed"), node_status="running")
+    res = await assist_agent.step_back(session_id="s1", db=db)
+    assert res["node_key"] == "T23"
+
+
+async def test_handed_off_is_reachable_without_an_explicit_node_key():
+    """The implicit 'most recent terminal step' query must include the new
+    status too, or ↩ Back a step still does nothing on the bare button."""
+    db = _db(target=("T26", "handed_off"), node_status="pending")
+    await assist_agent.step_back(session_id="s1", db=db)
+    sql = _sql(db)
+    assert "status = ANY(:states)" in sql
+    states = next(c.args[1]["states"] for c in db.execute.await_args_list
+                  if len(c.args) > 1 and isinstance(c.args[1], dict)
+                  and "states" in c.args[1])
+    assert set(states) == {"committed", "skipped", "handed_off"}
+

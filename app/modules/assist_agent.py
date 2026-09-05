@@ -1184,6 +1184,14 @@ async def run_step_research(
 # error (they may not have run anything) and from a bare complaint about the
 # engine: this is an assertion that the step is STILL not achieved, which
 # retires whatever was last prescribed for it.
+# §17.930 — the §17.917 vocabulary only recognised "still …" phrasings, so the
+# plainest possible failure report went unheard. Live (session 613dd1df/T26):
+# "neither the first or the 'if that fails' worked" scored False, and
+# `qm set 110 --delete hostpci0` was re-prescribed FOUR times over 40 minutes —
+# twice BYTE-IDENTICAL — until the operator finally ran it and the shell said
+# "cannot delete 'hostpci0' - not set in current configuration!", i.e. it had
+# been done long before. Negative-quantifier reports ("neither", "none of
+# them", "nothing") are how people actually say a remedy failed.
 _STILL_BROKEN_RE = __import__("re").compile(
     r"\bstill\s+(?:not|isn'?t|hasn'?t|haven'?t|won'?t|doesn'?t|does not|"
     r"getting|hung|hangs|stuck|failing|fails|broken|the same)\b"
@@ -1192,7 +1200,15 @@ _STILL_BROKEN_RE = __import__("re").compile(
     r"\s+(?:work|help|fix|boot|start|install)\w*\b"
     r"|\bsame\s+(?:problem|issue|error|result)\b"
     r"|\bno\s+(?:change|difference|luck)\b"
-    r"|\bkeeps?\s+(?:hanging|failing|happening)\b",
+    r"|\bkeeps?\s+(?:hanging|failing|happening)\b"
+    # §17.930 — negative quantifiers: "neither/none of/nothing … worked".
+    # Bounded gap so it stays within one clause and cannot span a paragraph.
+    r"|\bneither\b[^.!?\n]{0,90}\bwork(?:ed|s|ing)?\b"
+    r"|\bnone\s+of\s+(?:them|these|those|it|that|the)\b[^.!?\n]{0,60}"
+    r"\bwork(?:ed|s|ing)?\b"
+    r"|\bnothing\s+(?:worked|works|helped|helps|changed|happened)\b"
+    r"|\bnot\s+work(?:ed|ing)\b"
+    r"|\bfailed\s+again\b|\bstill\s+broken\b",
     __import__("re").IGNORECASE,
 )
 
@@ -1293,7 +1309,15 @@ async def _fix_failure_streak(
             # qm start` it had just given. Whether or not they ran it, they have
             # told us it did not resolve the step; re-offering it is the §17.906
             # loop by another route.
-            if not echoed and _looks_like_still_broken(later[0][1]):
+            # §17.930 — scan EVERY later operator turn, not just the
+            # immediately-following one. The §17.917 cut read `later[0]` only,
+            # so a failure report separated from the prescription by anything
+            # at all — a clarifying question, a `note` double-record, an
+            # intervening ask — never retired it. That is exactly the live T26
+            # shape: the fix landed 23:35, a `note` was recorded 23:36, and the
+            # operator's "neither … worked" arrived at 00:07 as later[1]. The
+            # prescription stayed "untried" and came back three more times.
+            if not echoed and any(_looks_like_still_broken(o[1]) for o in later):
                 echoed = set(lines)
             for ln in lines:
                 if ln in echoed and ln not in cmds:
@@ -1361,6 +1385,17 @@ async def _reopen_step_mirrored(
     await db.commit()
 
 
+#: §17.936 — the states ↩ Back a step can return FROM. `handed_off` was
+#: missing, so the operator-facing undo 409'd on a step delegated to the
+#: engine. Found the hard way: a test-lane write handed off the live T26
+#: ("Install AI VM OS") and advanced the operator to T27, and `step_back`
+#: could not repair it — the fix had to be hand-written SQL against all three
+#: mirrored tables. Every one of these three states moves the pointer FORWARD
+#: off a step the operator may not have finished, which is the whole premise
+#: of §17.901.
+_STEP_BACK_FROM = ("committed", "skipped", "handed_off")
+
+
 async def step_back(*, session_id: str, node_key: str | None = None, db) -> dict | None:
     """§17.901 — undo the last completed step and return the operator to it.
 
@@ -1392,28 +1427,41 @@ async def step_back(*, session_id: str, node_key: str | None = None, db) -> dict
                      "WHERE session_id=:sid AND node_key=:nk"),
                 {"sid": session_id, "nk": node_key},
             )).mappings().first()
-            if not row or row["status"] not in ("committed", "skipped"):
+            if not row or row["status"] not in _STEP_BACK_FROM:
                 return None
             nk = row["node_key"]
             was = row["status"]
         else:
             # Most recent terminal step. Skipped steps count: ⏩ Skip is just as
             # mis-clickable as ✓ Done, and both leave the operator stranded
-            # forward of where they meant to be.
+            # forward of where they meant to be. §17.936 — so does 🤝 Engine
+            # does it.
             row = (await db.execute(
                 text("SELECT node_key, status FROM assist_steps "
-                     "WHERE session_id = :sid AND status IN ('committed','skipped') "
+                     "WHERE session_id = :sid AND status = ANY(:states) "
                      "ORDER BY COALESCE(committed_at, updated_at) DESC LIMIT 1"),
-                {"sid": session_id},
+                {"sid": session_id, "states": list(_STEP_BACK_FROM)},
             )).mappings().first()
             if not row:
                 return None
             nk, was = row["node_key"], row["status"]
 
         node = (await db.execute(
-            text("SELECT title FROM dag_nodes WHERE job_id=:jid AND node_key=:nk"),
+            text("SELECT title, status FROM dag_nodes "
+                 "WHERE job_id=:jid AND node_key=:nk"),
             {"jid": job_id, "nk": nk},
         )).mappings().first()
+        # §17.936 — a handed-off step may be IN FLIGHT. `🤝 Engine does it`
+        # delegates to the autonomous executor, which claims the node as
+        # `running`; reopening underneath it would race a live writer and
+        # leave the two tables disagreeing about who owns the step. A
+        # committed or skipped step can never be in this state, so the guard
+        # is specific to the status §17.936 added.
+        if was == "handed_off" and (node or {}).get("status") == "running":
+            logger.info(
+                "assist_step_back_refused reason=executor_running "
+                "session_id=%s node_key=%s", session_id, nk)
+            return None
         # Read the preserved walkthrough BEFORE the reopen and hand it back, so
         # the caller can re-render it WITHOUT going through ensure_guidance.
         #

@@ -44,7 +44,12 @@ def _drive_pipe(pipe, user_message: str, messages: list[dict]) -> str:
     no-op result so the nudge fallback is exercised hermetically (per
     [[project_assist_crosschat_continuity]]: pipeline tests MUST stub the
     live-fetching continuity methods)."""
+    # §17.934 — see the note in test_scaffold_router_welcome.py: unstubbed,
+    # `_fetch_work` reaches the LIVE orchestrator and this lane's fixtures end
+    # up as durable turns on the operator's active assist session.
     with patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT"), \
+         patch.object(pipe, "_fetch_work", return_value=None), \
+         patch.object(pipe, "_in_progress_banner", return_value=""), \
          patch.object(pipe, "_assist_try_natural_start", return_value=None), \
          patch.object(pipe, "_reconnect_in_progress", return_value=None), \
          patch.object(pipe, "_nl_command_route", return_value=None):

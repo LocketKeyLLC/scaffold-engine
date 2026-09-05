@@ -41,8 +41,18 @@ def _drive_pipe(pipe, user_message: str, messages: list[dict]) -> str:
     the LLM. §17.633 — the welcome preamble is the brand-new-operator path
     (no in-progress work); stub the cross-chat continuity so these tests
     isolate the welcome from whatever in-progress jobs exist live (the
-    in-progress banner takes precedence over the welcome when work exists)."""
+    in-progress banner takes precedence over the welcome when work exists).
+
+    §17.934 — `_fetch_work` is stubbed because pipe() probes it for the
+    §17.770 sole-active-session binding. Unstubbed it reaches the LIVE
+    orchestrator (this process runs inside that container and inherits its
+    master API key), which is how this lane wrote its fixtures into the
+    operator's real assist session. None is the method's own documented
+    degrade value.
+    """
     with patch.object(pipe, "_call_triage", return_value="TRIAGE_OUTPUT"), \
+         patch.object(pipe, "_fetch_work", return_value=None), \
+         patch.object(pipe, "_nl_command_route", return_value=None), \
          patch.object(pipe, "_reconnect_in_progress", return_value=None), \
          patch.object(pipe, "_in_progress_banner", return_value=""):
         chunks = list(pipe.pipe(user_message, "model-id", messages, {}))
