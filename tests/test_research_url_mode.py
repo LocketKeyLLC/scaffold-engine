@@ -8,6 +8,28 @@ import pytest
 from app.modules import research_agent as ra
 from app.providers.base import ToolCall
 
+@pytest.fixture(autouse=True)
+def _no_model_unload():
+    """§17.949 — `_run_research_url_mode` / `_run_research_pdf_mode` call
+    `_unload_ollama_model` (Finding C: force Ollama to free the extract model
+    with `keep_alive=0` before the embedder cold-loads). It is HOUSEKEEPING,
+    not inference, and it is fail-open by design — so every test in this file
+    was opening a real connection to Ollama that no assertion reads.
+
+    Worth being precise about, because I first reported
+    `test_url_mode_classifier_bypass_skips_llm` as "making a live /api/generate
+    call despite its name". The name and its assertion are correct: the LLM
+    EXTRACT loop genuinely is skipped (`tool_call` is mocked and asserted
+    not-called). What leaked was the unload.
+
+    The helper's own behaviour is covered by
+    tests/test_finding_c_extract_unload.py, which mocks the client properly, so
+    stubbing it here loses no coverage.
+    """
+    with patch.object(ra, "_unload_ollama_model", AsyncMock()):
+        yield
+
+
 
 def _llm_with_entries(entries_json: str):
     """Fake response that satisfies both generate (.text) and W.6
