@@ -294,17 +294,25 @@ class TestPayloadInclusion:
         messages = [{"role": "user", "content": command}]
         body = {"messages": messages, "stream": False}
 
-        result = pipe.pipe(
-            user_message=command,
-            model_id="test-model",
-            messages=messages,
-            body=body,
-        )
+        # §17.934 — this file does its OWN importlib load of the router (see
+        # `_router_mod` above), so it does NOT pick up the class-level stubs in
+        # tests/_scaffold_router_setup.py. Only `.post` was mocked here, and
+        # pipe() also GETs /work for the §17.770 sole-active-session probe —
+        # which reached the LIVE orchestrator, since this process runs inside
+        # that container with its master API key. The assertions are about the
+        # POST payload; the work probe is incidental.
+        with patch.object(pipe, "_fetch_work", return_value=None):
+            result = pipe.pipe(
+                user_message=command,
+                model_id="test-model",
+                messages=messages,
+                body=body,
+            )
 
-        # Exhaust generators (streamed commands)
-        if hasattr(result, "__next__"):
-            for _ in result:
-                pass
+            # Exhaust generators (streamed commands)
+            if hasattr(result, "__next__"):
+                for _ in result:
+                    pass
         return mock_post
 
     def test_idea_includes_overrides(self, pipe):

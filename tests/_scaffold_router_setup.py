@@ -22,6 +22,19 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests import _live_write_guard
+
+# §17.934 — install BEFORE the router module is exec'd or any Pipeline is
+# built. This lane runs with --noconftest (tests/conftest.py eager-loads app
+# and shadows the pipeline mocks), so the conftest-level guard never loads
+# here — but every test_scaffold_router_*.py file imports THIS helper, which
+# makes it the lane's one reliable chokepoint.
+#
+# This is the lane that actually did the damage: it drove real turns through
+# the live pipeline and §17.770 bound them to the operator's active assist
+# session. It is a UNIT lane; it has no business reaching the engine at all.
+_live_write_guard.install()
+
 _router_candidates = [
     Path(__file__).resolve().parent.parent / "pipelines" / "scaffold_router.py",
     Path("/app/pipelines/scaffold_router.py"),
@@ -68,6 +81,37 @@ Pipeline = _mod.Pipeline
 Pipeline._probe_embedder_dim = lambda self, model=None: (
     True, "test stub (§17.333)"
 )
+
+# §17.934 — same treatment, same reason, for the OTHER unconditional live call
+# on the pipe() path. `_fetch_work` GETs /work on essentially every turn to
+# back the §17.770 sole-active-session binding, and it is what dragged this
+# UNIT lane onto the operator's real engine: the probe found their live assist
+# session and the lane's fixtures were bound to it as durable turns.
+#
+# None is the method's OWN documented degrade value ("returns None on any
+# error so callers degrade gracefully"), so the default is the no-work path
+# rather than an invented shape. Any test that cares about work state patches
+# the instance, which takes precedence over this class attribute.
+Pipeline._fetch_work = lambda self: None
+
+# §17.934 — and the third unconditional live call on the pipe() path.
+# `fetch_assist_candidates` GETs /assist/candidates; it is reached from
+# `_reconnect_in_progress` and `_in_progress_banner`, i.e. on nearly every
+# turn. Stubbing it at the NETWORK seam rather than at its two callers is
+# deliberate: the pipe-level continuity logic still executes and stays under
+# test, it just does so against an empty candidate list instead of the
+# operator's real in-flight jobs. `[]` is the function's own fail-soft return.
+_mod._assist.fetch_assist_candidates = lambda pipe: []
+
+# §17.934 — and the fourth: `_classify_command` POSTs /route on every
+# natural-language turn. Its OWN fail-soft return is intent='none' ("a
+# classifier or endpoint hiccup degrades to triage rather than misfiring"),
+# which is exactly the neutral default a unit wants — the tests this affects
+# are the `falls_to_triage` / `does_not_hijack` cases, i.e. they assert the
+# fall-through this produces. `_nl_command_route`'s own gating logic stays
+# under test; only the network hop is replaced. Tests that need a specific
+# intent patch the instance, which wins over this class attribute.
+Pipeline._classify_command = lambda self, msg: {"intent": "none", "confidence": "low"}
 
 sys.modules["scaffold_router"] = _mod
 _pkg = types.ModuleType("pipelines")
