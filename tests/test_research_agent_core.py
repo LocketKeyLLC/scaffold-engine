@@ -182,7 +182,14 @@ class TestExtractEntries:
 
     @pytest.mark.asyncio
     async def test_extracts_entries(self):
-        with patch("app.modules.research_agent.model_router") as mock_mr:
+        # §17.948 — `_extract_entries` calls `_fetch_and_extract`, which FETCHES
+        # every result URL. MOCK_SEARCH_RESULTS point at https://redis.io/...,
+        # so leaving it unmocked made real requests to a public website from a
+        # unit test: slow, internet-dependent, and invisible because the
+        # assertions only read the mocked LLM output.
+        with patch("app.modules.research_agent.model_router") as mock_mr, \
+             patch("app.modules.research_agent._fetch_and_extract",
+                   new=AsyncMock(return_value=[])):
             mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response(GOOD_EXTRACTION))
             from app.modules.research_agent import _extract_entries
 
@@ -205,7 +212,9 @@ class TestExtractEntries:
 
     @pytest.mark.asyncio
     async def test_llm_failure_returns_empty(self):
-        with patch("app.modules.research_agent.model_router") as mock_mr:
+        with patch("app.modules.research_agent.model_router") as mock_mr, \
+             patch("app.modules.research_agent._fetch_and_extract",
+                   new=AsyncMock(return_value=[])):  # §17.948 — no real fetch
             mock_mr.tool_call = mock_mr.generate = AsyncMock(return_value=_make_generate_response("", success=False))
             from app.modules.research_agent import _extract_entries
 
