@@ -1373,6 +1373,72 @@ class AssistStepBackInput(BaseModel):
     )
 
 
+class AssistGotoStepInput(BaseModel):
+    node_key: str = Field(description="Step to move to and present.")
+
+
+@router.get("/assist/{session_id}/steps")
+async def assist_list_steps(session_id: str, db=Depends(get_db)):
+    """§17.938 — the session's steps, for the step picker.
+
+    Title + both statuses in one call, ordered the way the plan runs.
+    """
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    return {"session_id": session_id,
+            "current_node_key": sess.get("current_node_key"),
+            "steps": await assist_agent.list_steps(session_id=session_id, db=db)}
+
+
+@router.post("/assist/{session_id}/step/goto")
+async def assist_goto_step(
+    session_id: str, body: AssistGotoStepInput, db=Depends(get_db),
+):
+    """§17.938 — jump to an arbitrary step.
+
+    The only navigation the operator had was ✓ Done (forward one), ↩ Back a
+    step (back one, terminal only) and ↻ Re-show (stay put). Reaching any other
+    step meant walking the whole plan or hand-editing the database.
+
+    Refuses a terminal step on purpose: silently un-completing finished work to
+    satisfy a menu selection is a plan mutation nobody asked for, and
+    ↩ Back a step already exists for the deliberate reopen.
+    """
+    res = await assist_agent.goto_step(
+        session_id=session_id, node_key=body.node_key, db=db)
+    if not res.get("ok"):
+        reason = res.get("reason")
+        if reason == "no_session":
+            raise HTTPException(status_code=404,
+                                detail=f"assist session not found: {session_id}")
+        detail = {
+            "session_terminal": "this session is finished — nothing to navigate",
+            "unknown_step": f"{body.node_key} is not a step in this plan",
+            "executor_running": (
+                f"{body.node_key} is being run by the engine right now; "
+                "wait for it to finish or pause the session"),
+            "terminal_step": (
+                f"{body.node_key} is already "
+                f"{res.get('step_status', 'finished')} — use ↩ Back a step to "
+                "reopen it deliberately, which records that you did"),
+        }.get(reason, f"cannot move to {body.node_key}")
+        raise HTTPException(status_code=409, detail=detail)
+
+    # §17.938 — leave a DURABLE trace. The transcript is the operator's sense of
+    # where they are, and it is rebuilt from assist_turns on every reload: a
+    # jump that only rendered client-side left the chat tail showing the step
+    # they came FROM, so a refresh read as "it moved me forward again". Lived
+    # exactly that on the live session after a T21 reopen.
+    await assist_agent.ingest_turn(
+        session_id=session_id, role="assistant", kind="track",
+        content=(f"↪ Moved to **{res['node_key']}: {res['title']}**. "
+                 "Nothing else in the plan changed."),
+        node_key=res["node_key"], db=db,
+    )
+    return res
+
+
 @router.post("/assist/{session_id}/step/back")
 async def assist_step_back(
     session_id: str, body: AssistStepBackInput, db=Depends(get_db),
@@ -1408,6 +1474,17 @@ async def assist_step_back(
                 + (f" ({body.node_key})" if body.node_key else "")
             ),
         )
+    # §17.938 — same durable trace as `goto`. The SPA rendered the reopen with
+    # appendBubble, which is client-only: after a reload the transcript tail
+    # still showed the step the operator had been moved forward to, so the
+    # reopen looked like it had not happened.
+    await assist_agent.ingest_turn(
+        session_id=session_id, role="assistant", kind="track",
+        content=(f"↩ Reopened **{res['node_key']}: {res.get('title') or ''}** — "
+                 "back on it with the same walkthrough. Nothing else in the "
+                 "plan moved."),
+        node_key=res["node_key"], db=db,
+    )
     return {"session_id": session_id, "reopened": res,
             "current_node_key": res["node_key"]}
 

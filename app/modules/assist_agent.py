@@ -1385,6 +1385,116 @@ async def _reopen_step_mirrored(
     await db.commit()
 
 
+#: §17.938 — steps a `goto` may present. A terminal step is NOT navigable this
+#: way: silently un-completing finished work to satisfy a dropdown selection is
+#: a plan mutation nobody asked for. ↩ Back a step is the deliberate reopen and
+#: says so in its own copy.
+_GOTO_PRESENTABLE = ("pending", "presented", "awaiting_input")
+
+
+async def list_steps(*, session_id: str, db) -> list[dict]:
+    """§17.938 — every step in this session's plan, for the step picker.
+
+    Joins the assist step to its dag node so one call carries both halves the
+    operator needs to choose: the TITLE (a bare `T26` means nothing) and both
+    statuses. Ordered the way the plan runs, not alphabetically — `T9` must not
+    sort after `T35`.
+    """
+    try:
+        rows = (await db.execute(
+            text("""
+                SELECT s.node_key,
+                       n.title,
+                       s.status              AS step_status,
+                       n.status              AS node_status,
+                       n.execution_order,
+                       (COALESCE(s.guidance, '') <> '') AS has_guidance
+                  FROM assist_steps s
+                  JOIN dag_nodes n
+                    ON n.job_id = s.job_id AND n.node_key = s.node_key
+                 WHERE s.session_id = :sid
+                 ORDER BY n.execution_order NULLS LAST,
+                          length(s.node_key), s.node_key
+            """),
+            {"sid": session_id},
+        )).mappings().all()
+        return [dict(r) for r in rows]
+    except Exception as e:  # noqa: BLE001 — a picker must never break the view
+        logger.warning("assist_list_steps_failed session_id=%s err=%r", session_id, e)
+        return []
+
+
+async def goto_step(*, session_id: str, node_key: str, db) -> dict:
+    """§17.938 — move the operator to `node_key` and present it.
+
+    The operator asked for "a simpler means to jump between the different nodes
+    within the chat". Until now the only navigation was ✓ Done (forward one),
+    ↩ Back a step (back one, terminal steps only) and ↻ Re-show (stay put) —
+    there was no way to reach an arbitrary step at all.
+
+    Deliberately NARROW. It moves the pointer and presents the target; it does
+    not un-complete anything (see `_GOTO_PRESENTABLE`), and it PRESERVES an
+    existing walkthrough rather than regenerating — §17.901's lesson, that
+    redrawing hands the operator different instructions for work they were
+    part-way through, applies to arriving at a step exactly as it does to
+    returning to one.
+
+    Returns ``{"ok": True, "node_key", "title", "guidance"}`` or
+    ``{"ok": False, "reason": ...}`` so the caller can say WHY.
+    """
+    sess = (await db.execute(
+        text("SELECT job_id, status FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        return {"ok": False, "reason": "no_session"}
+    if sess["status"] not in ("active", "paused"):
+        return {"ok": False, "reason": "session_terminal"}
+    job_id = str(sess["job_id"])
+
+    row = (await db.execute(
+        text("""
+            SELECT s.status AS step_status, n.status AS node_status, n.title
+              FROM assist_steps s
+              JOIN dag_nodes n ON n.job_id = s.job_id AND n.node_key = s.node_key
+             WHERE s.session_id = :sid AND s.node_key = :nk
+        """),
+        {"sid": session_id, "nk": node_key},
+    )).mappings().first()
+    if not row:
+        return {"ok": False, "reason": "unknown_step"}
+    # §17.936's guard, same reasoning: the executor owns a running node.
+    if row["node_status"] == "running":
+        return {"ok": False, "reason": "executor_running", "title": row["title"]}
+    if row["step_status"] not in _GOTO_PRESENTABLE:
+        return {"ok": False, "reason": "terminal_step",
+                "title": row["title"], "step_status": row["step_status"]}
+
+    await db.execute(
+        text("UPDATE assist_steps "
+             "   SET status = 'presented', "
+             "       presented_at = COALESCE(presented_at, NOW()), "
+             "       updated_at = NOW() "
+             " WHERE session_id = :sid AND node_key = :nk"),
+        {"sid": session_id, "nk": node_key},
+    )
+    await db.execute(
+        text("UPDATE assist_sessions SET current_node_key = :nk, updated_at = NOW() "
+             " WHERE id = :sid AND status IN ('active','paused')"),
+        {"nk": node_key, "sid": session_id},
+    )
+    await db.commit()
+    guidance = (await db.execute(
+        text("SELECT guidance FROM assist_steps "
+             " WHERE session_id = :sid AND node_key = :nk"),
+        {"sid": session_id, "nk": node_key},
+    )).scalar()
+    logger.info("assist_goto_step session_id=%s node_key=%s has_guidance=%s",
+                session_id, node_key, bool(guidance))
+    return {"ok": True, "node_key": node_key,
+            "title": row["title"] or node_key, "guidance": guidance or ""}
+
+
 #: §17.936 — the states ↩ Back a step can return FROM. `handed_off` was
 #: missing, so the operator-facing undo 409'd on a step delegated to the
 #: engine. Found the hard way: a test-lane write handed off the live T26
