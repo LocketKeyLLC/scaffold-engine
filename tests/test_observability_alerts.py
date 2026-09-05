@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.auth import require_api_key
@@ -129,14 +130,71 @@ class TestEmit:
             )
         client.post.assert_not_awaited()
 
+    async def test_uninitialized_shared_client_falls_back_to_one_shot(
+        self, monkeypatch,
+    ):
+        """§17.948 — cover the fallback the mocked tests used to MISS.
+
+        `_post_webhook` treats RuntimeError from `get_generic_http_client` as
+        "shared client not initialized" and retries with a one-shot
+        `httpx.AsyncClient`, so alerts fired outside the app lifespan (startup
+        migration failures, the CLI path) still reach the webhook. The source
+        comment says that path was "found by the §17.835 live drill, not by the
+        mocked tests" — and it stayed uncovered, because the one test that
+        happened to trigger it did so by accident and made a real network call
+        instead of asserting anything about it.
+        """
+        import httpx
+
+        monkeypatch.setattr(
+            "app.observability.alerts.settings.alert_webhook_url",
+            "http://receiver.invalid/hook", raising=False,
+        )
+        posted: dict = {}
+
+        class _OneShot:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def post(self, url, **kw):
+                posted["url"] = url
+                posted["json"] = kw.get("json")
+                return SimpleNamespace(status_code=200)
+
+        with patch("app.utils.http_clients.get_generic_http_client",
+                   side_effect=RuntimeError("not initialized")), \
+             patch("httpx.AsyncClient", return_value=_OneShot()):
+            result = await _alerts.emit(
+                kind="test.hook", severity="warning", message="fallback path",
+                db=_mock_db(),
+            )
+        assert posted["url"] == "http://receiver.invalid/hook"
+        assert posted["json"]["kind"] == "test.hook"
+        assert result is not None
+
     async def test_emit_webhook_failure_absorbed(self, monkeypatch):
-        """A dead receiver can never break alert emission."""
+        """A dead receiver can never break alert emission.
+
+        §17.948 — the failure must be a CONNECTION error, not a RuntimeError.
+        `_post_webhook` catches RuntimeError as its "shared client not
+        initialized" signal and falls through to a one-shot
+        `httpx.AsyncClient()`, so raising RuntimeError here skipped the path
+        this test names and made a REAL POST to dead.local. It still passed —
+        DNS fails, the outer handler absorbs it, the assertion holds — which is
+        the worst kind of green: right answer, wrong path, real network.
+        """
+        import httpx
+
         monkeypatch.setattr(
             "app.observability.alerts.settings.alert_webhook_url",
             "http://dead.local/", raising=False,
         )
         client = MagicMock()
-        client.post = AsyncMock(side_effect=RuntimeError("conn refused"))
+        client.post = AsyncMock(
+            side_effect=httpx.ConnectError("conn refused"))
         with patch("app.utils.http_clients.get_generic_http_client",
                    return_value=client):
             result = await _alerts.emit(
