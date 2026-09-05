@@ -26,6 +26,70 @@ from app.config import settings
 logger = logging.getLogger("scaffold.assist")
 
 
+# §17.939 — WHICH SUBJECT is this fact about?
+#
+# The ledger is a flat list with a global cap, so eviction was purely "oldest
+# first" (§17.920 carved out corrections, nothing else). That is fine while a
+# session works one thing, and wrong the moment it works several: the operator
+# spent days on VM 110, forty VM-106/VM-110 facts filled the ledger, and EVERY
+# media-stack fact — the Radarr/Prowlarr/Sonarr addresses, the container ids —
+# was evicted. Returning to that step a week later, the engine had no context
+# for it at all and the addresses survived only because they happened to still
+# be in the transcript window.
+#
+# Bucketing by subject lets the cap be spent FAIRLY: a subject with one fact
+# keeps it while a subject with twenty gets trimmed. Deliberately coarse and
+# deterministic — resource ids and hosts are what these facts are actually
+# about, and a wrong bucket costs a little fairness, never correctness.
+_SUBJ_VM_RE = __import__("re").compile(r"(?<![\w/])VM\s+(\d{2,5})\b")
+_SUBJ_CT_RE = __import__("re").compile(
+    r"(?<![\w/])(?:LXC\s+)?(?:container|CT)\s+(\d{2,5})\b", __import__("re").I)
+_SUBJ_IP_RE = __import__("re").compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+
+
+def _fact_subject(fact: str) -> str:
+    """A stable bucket key for one fact. Most specific wins; `general` is the
+    catch-all for facts that name no resource (host-wide observations)."""
+    s = str(fact or "")
+    m = _SUBJ_VM_RE.search(s)
+    if m:
+        return f"vm:{m.group(1)}"
+    m = _SUBJ_CT_RE.search(s)
+    if m:
+        return f"ct:{m.group(1)}"
+    m = _SUBJ_IP_RE.search(s)
+    if m:
+        return f"host:{m.group(1)}"
+    return "general"
+
+
+def _fair_share_keep(facts: list, room: int) -> list:
+    """Trim `facts` to `room` entries WITHOUT wiping out any one subject.
+
+    Repeatedly drops the oldest fact from the currently-largest bucket, so the
+    budget is spent across subjects instead of on whichever one the operator
+    happened to touch most recently. Original order is preserved in the result.
+    """
+    if room <= 0:
+        return []
+    if len(facts) <= room:
+        return list(facts)
+    buckets: dict[str, list] = {}
+    for f in facts:
+        buckets.setdefault(_fact_subject(f), []).append(f)
+    total = len(facts)
+    while total > room:
+        # largest bucket; ties broken by the OLDEST head, so eviction stays
+        # deterministic rather than dict-order dependent.
+        key = max(buckets, key=lambda k: (len(buckets[k]), -facts.index(buckets[k][0])))
+        buckets[key].pop(0)
+        if not buckets[key]:
+            del buckets[key]
+        total -= 1
+    kept = {id(f) for b in buckets.values() for f in b}
+    return [f for f in facts if id(f) in kept]
+
+
 def _environment_from_metadata(metadata: Any) -> dict:
     """Pull the `environment` sub-object out of a session's metadata JSONB.
 
@@ -261,13 +325,19 @@ async def set_environment(
             # corrections are capped too — half the budget at most, newest kept
             corr_keep = corrections[-max(1, cap // 2):]
             room = cap - len(corr_keep)
-            kept = set(map(id, corr_keep)) | set(map(id, routine[-room:] if room > 0 else []))
+            # §17.939 — spend the remaining budget FAIRLY across subjects
+            # instead of newest-first. Newest-first meant whichever resource the
+            # operator touched most recently owned the entire ledger, and every
+            # other subject's context was gone when they came back to it.
+            kept = set(map(id, corr_keep)) | set(map(id, _fair_share_keep(routine, room)))
             trimmed = [f for f in existing if id(f) in kept]
             if len(corrections) > len(corr_keep) or len(routine) > max(0, room):
                 logger.info(
                     "assist_facts_trimmed session_id=%s kept=%d of %d "
-                    "(corrections kept=%d)",
-                    session_id, len(trimmed), len(existing), len(corr_keep))
+                    "(corrections kept=%d, subjects kept=%d of %d)",
+                    session_id, len(trimmed), len(existing), len(corr_keep),
+                    len({_fact_subject(f) for f in trimmed}),
+                    len({_fact_subject(f) for f in existing}))
             current["facts"] = trimmed[-cap:]
         else:
             current["facts"] = existing
