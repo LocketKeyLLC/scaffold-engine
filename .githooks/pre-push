@@ -8,6 +8,10 @@
 #   - §17.190 — SSE-event vendor drift + emitter-not-in-inventory (§17.392)
 #   - §17.195 — next-actions vendor drift
 #   - §17.245 — MODEL_RERANKER default drift across 3 sites
+#   - §17.942 — OpenAPI route drift (a route added or removed without
+#               regenerating docs/openapi.json). The SHAPE check still needs a
+#               live app and stays in `make openapi-check`; this is the static
+#               half, which is the drift class that actually reached a PR.
 #
 # These are file-diff / grep / static-AST checks — no docker, no Milvus/
 # Postgres/Ollama, ~2s. Live-schema drift (§17.319 Milvus parity) needs the

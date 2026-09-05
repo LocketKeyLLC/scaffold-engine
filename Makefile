@@ -186,6 +186,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_sdk_schema_parity.py \
 			tests/test_settings_patch_scan.py \
 			tests/test_spa_route_inventory.py \
+			tests/test_openapi_route_inventory.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
 	else \
 		printf '\033[1;33m⚠ host pytest not found — skipped the inventory scans (byte-equal gates above still ran). Full coverage: make test\033[0m\n'; \
@@ -332,7 +333,7 @@ openapi-snapshot: ## Regenerate docs/openapi.json from the live FastAPI app
 		mv docs/openapi.json.tmp docs/openapi.json && \
 		echo "Wrote docs/openapi.json ($$(wc -c < docs/openapi.json) bytes)."
 
-openapi-check: ## Verify docs/openapi.json matches the live spec (CI gate)
+openapi-check: ## Verify docs/openapi.json matches the live spec, SHAPES included (needs the container). The route-path half is static and runs in ci-tier-0 (§17.942).
 	docker exec $(CONTAINER) python scripts/openapi_snapshot.py --check
 
 sync-schemas: ## Refresh sdk/scaffold_client/schemas.py from app/schemas.py (byte-equal vendor)
