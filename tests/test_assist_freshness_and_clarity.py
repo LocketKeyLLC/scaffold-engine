@@ -174,7 +174,21 @@ def test_advance_footer_names_the_control_that_ends_the_step():
     assert "`next`" in foot
     assert "Install Ubuntu Server on the AI VM" in foot
     # and it must tell them what to do when it did NOT work
-    assert "paste what you DO see" in foot
+    assert "paste what you see" in foot
+
+
+def test_advance_footer_does_not_license_advancing_on_a_clean_exit_status():
+    """§17.932 — the first cut defined done as "the command returned without an
+    error", which is exactly the premature advance this whole arc is about: on
+    the live T26 ("Install AI VM OS") `qm set 110 --hostpci0 …` returns cleanly
+    in a second while the OS install is nowhere near finished. The footer must
+    anchor on the step's GOAL and must never hand the operator a completion
+    criterion the engine cannot actually check."""
+    foot = advance_footer("Install AI VM OS")
+    assert "NOT when the last command merely returned without an error" in foot
+    assert "it is not the goal" in foot
+    # the goal, not the command, is the gate
+    assert "**Install AI VM OS** is actually true on your machine" in foot
 
 
 def test_advance_footer_applied_and_idempotent(monkeypatch):

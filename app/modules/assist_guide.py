@@ -4465,13 +4465,15 @@ def advance_footer(title: str) -> str:
     """
     return (
         "\n\n---\n## ✅ Done when\n"
-        f"You can see, on your own screen, that \"{title}\" has actually taken "
-        "effect — the command returned without an error and the thing it was "
-        "meant to change now looks changed.\n\n"
-        "**When you can see that, press ✓ Done → next step** (or just type "
-        "`next`) — you do not need to paste anything else.\n\n"
-        "If you cannot see it, paste what you DO see and I will work it from "
-        "there."
+        f"This step is finished when **{title}** is actually true on your "
+        "machine — NOT when the last command merely returned without an error. "
+        "A command succeeding is one move toward the goal; it is not the "
+        "goal.\n\n"
+        "**Once that is genuinely achieved, press ✓ Done → next step** (or type "
+        "`next`).\n\n"
+        "**If it is not — or you are not sure — paste what you see and I will "
+        "keep working THIS step with you.** I would rather stay here than move "
+        "you on from something that is not finished."
     )
 
 
