@@ -26,6 +26,31 @@ from app.config import settings
 from app.modules import execution_compile
 
 
+@pytest.fixture(autouse=True)
+def _pin_grounding_gate(monkeypatch):
+    """§17.943 — pin the grounding gate OFF for this whole module.
+
+    This file is about the per-job synthesis OVERRIDE, not about grounding.
+    But `_maybe_synthesize` runs `_maybe_grounding_gate` on whatever it
+    synthesizes, and `grounding_gate_enabled` defaults **True** — so the
+    override tests were calling `score_faithfulness`, which makes a LIVE
+    inference call. When the model happened to return a low score the gate
+    prepended its "⚠️ Grounding check" banner and the exact-equality assertion
+    below blew up.
+
+    That is the whole flake: `test_override_true_runs_synthesis_when_global_off`
+    failed roughly one run in five, passed in isolation and in cloud CI (no
+    live services), and was proven non-deterministic by running the SAME commit
+    twice — 1 failed / 0 failed. It was never a bug in the code under test; it
+    was a unit test reaching live inference for a behaviour it does not test.
+
+    `tests/test_execution_compile_grounding.py` already pins this flag on both
+    sides — that is the file that IS about grounding, and it is the pattern
+    this one was missing.
+    """
+    monkeypatch.setattr(settings, "grounding_gate_enabled", False)
+
+
 def _db_with_override(value):
     """Build an AsyncMock db whose first execute() returns a row with
     `compile_synthesis_override = value`.
@@ -112,6 +137,25 @@ class TestMaybeSynthesizeHonorsOverride:
             )
         assert text_value == "LLM-rewritten narrative"
         assert was_syn is True
+
+    async def test_synthesis_path_does_not_reach_the_faithfulness_scorer(self):
+        """§17.943 — the regression pin. With the gate off this unit must not
+        call `score_faithfulness` at all; if it does, it is talking to live
+        inference again and the flake is back."""
+        db = _db_with_override(True)
+        scorer = AsyncMock(return_value={"score": 0.1, "unsupported": [], "reason": ""})
+        with patch.object(settings, "compile_synthesis_enabled", False), \
+             patch("app.modules.faithfulness.score_faithfulness", new=scorer), \
+             patch.object(
+                 execution_compile, "_synthesize_compiled_output",
+                 new=AsyncMock(return_value="LLM-rewritten narrative"),
+             ):
+            text_value, _ = await execution_compile._maybe_synthesize(
+                job_id="jid", heuristic="raw heuristic body",
+                strategy="0_single_leaf", source_tool="LLM", db=db,
+            )
+        scorer.assert_not_awaited()
+        assert text_value == "LLM-rewritten narrative"
 
     async def test_override_false_skips_synthesis_when_global_on(self):
         """Global on + override False → heuristic returned unchanged,
