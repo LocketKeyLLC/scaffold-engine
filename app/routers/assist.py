@@ -1395,10 +1395,18 @@ async def assist_step_back(
         session_id=session_id, node_key=body.node_key, db=db,
     )
     if not res:
+        # §17.936 — name the two distinguishable causes. The old text said only
+        # "not completed", which was actively misleading for a handed-off step
+        # the engine is still working: the operator reads it as "nothing to undo"
+        # and goes looking for a bug that isn't there.
         raise HTTPException(
             status_code=409,
-            detail=(f"no completed step to go back to"
-                    + (f" ({body.node_key} is not completed)" if body.node_key else "")),
+            detail=(
+                "no step to go back to — a step must be completed, skipped or "
+                "handed off, and a handed-off step cannot be reopened while the "
+                "engine is still running it"
+                + (f" ({body.node_key})" if body.node_key else "")
+            ),
         )
     return {"session_id": session_id, "reopened": res,
             "current_node_key": res["node_key"]}
