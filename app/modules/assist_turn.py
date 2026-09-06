@@ -258,6 +258,24 @@ async def _run_turn_inner(
 
     if True:  # single indent block — keeps the dispatch ladder's early returns flat
         if command == "guide":
+            # §17.950 — "Guide me" used to go STRAIGHT to claim-and-guide, with
+            # no notion of whether the step was already finished. So an operator
+            # who completed a step and pressed Guide me expecting to move on got
+            # the same walkthrough back, forever.
+            #
+            # It now reuses the message path's gates EXACTLY — no weaker: the
+            # operator's OWN most recent words on this step must carry a §17.891
+            # advancement signal, AND the tracker must independently judge the
+            # step done above the confidence threshold. A Guide press is not
+            # itself evidence of anything, so a step with no such message behind
+            # it re-guides exactly as before.
+            _adv_msg = await _recent_advance_message(session_id, node_key, db)
+            if _adv_msg:
+                async for e in _track_then_continue(
+                        session_id, _adv_msg, node_key, history, db):
+                    yield e
+                handled["v"] = "guide_advanced"
+                return
             async for e in _claim_and_guide(session_id, node_key, history, db,
                                             orient=False):
                 yield e
@@ -597,6 +615,46 @@ async def _surface(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterato
     except Exception as exc:  # noqa: BLE001
         logger.warning("turn_loop_surface_failed sid=%s err=%r", session_id, exc)
 
+
+
+async def _recent_advance_message(session_id: str, node_key, db) -> str | None:
+    """§17.950 — the operator's most recent words on this step, IF they carry an
+    advancement signal.
+
+    Returns None otherwise, which is the common case and keeps Guide me behaving
+    exactly as it always has. Deliberately narrow:
+
+      * only the LATEST operator turn on this step is considered — an
+        advancement signal from earlier in a long troubleshooting thread has
+        already been superseded by whatever came after it;
+      * only `message`/`submit` kinds, never a `note`;
+      * the signal is `assist_policy.has_advancement_signal`, the same §17.891
+        gate the message path uses, so this cannot advance on anything the
+        typed path would not.
+
+    Fail-soft: any error returns None and Guide me re-guides.
+    """
+    if not node_key:
+        return None
+    try:
+        row = (await db.execute(
+            _sqltext("""
+                SELECT content FROM assist_turns
+                 WHERE session_id = :sid AND node_key = :nk
+                   AND role = 'operator' AND kind IN ('message', 'submit')
+                 ORDER BY created_at DESC, id DESC LIMIT 1
+            """),
+            {"sid": session_id, "nk": node_key},
+        )).mappings().first()
+        msg = (row or {}).get("content") or ""
+        if msg.strip() and assist_policy.has_advancement_signal(msg):
+            logger.info(
+                "turn_loop_guide_advance_candidate sid=%s nk=%s msg=%r",
+                session_id, node_key, msg[:120])
+            return msg
+    except Exception as exc:  # noqa: BLE001 — never break Guide me
+        logger.warning("guide_advance_probe_failed sid=%s err=%r", session_id, exc)
+    return None
 
 
 async def _track_then_continue(session_id: str, text_: str, nk, history, db,
