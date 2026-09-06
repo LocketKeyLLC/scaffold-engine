@@ -415,7 +415,7 @@ async def derive_turn_memory(
     explicit notes, submit-facts). A plan change stated in a message routed to
     ask/fix/etc. was captured raw yet never became memory that shapes later
     steps. Now every message is reviewed."""
-    from app.modules.assist_agent import _apply_shell_context, _detect_shell_context, _environment_from_metadata, set_environment, record_note, _coerce_notes  # §17.856 re-exports (patch-safe deferred)
+    from app.modules.assist_agent import _apply_shell_context, _detect_shell_context, _environment_from_metadata, get_environment, set_environment, record_note, _coerce_notes  # §17.856 re-exports (patch-safe deferred)
     from app.config import settings
     from app.modules import assist_guide
 
@@ -507,7 +507,7 @@ async def derive_turn_memory(
             # §17.965 — a byte count in their paste is the answer to a question
             # the engine already knows the expected value for. Record it; the
             # comparison happens in code, not in the model's head.
-            from app.modules.assist_files import parse_file_sizes
+            from app.modules.assist_files import parse_file_contents, parse_file_sizes
             sizes = parse_file_sizes(msg)
             if sizes:
                 await set_environment(
@@ -515,6 +515,19 @@ async def derive_turn_memory(
                 result["file_sizes_observed"] = sorted(sizes)
                 logger.info("assist_file_size_observed session_id=%s sizes=%r",
                             session_id, sizes)
+            # §17.967 — and when they paste the FILE back, compare the content,
+            # not just its length. This is the signal that ends a rewrite loop.
+            _env_now = await get_environment(session_id=session_id, db=db)
+            _known = list((_env_now or {}).get("file_writes") or {})
+            if _known:
+                bodies = parse_file_contents(msg, _known)
+                if bodies:
+                    await set_environment(
+                        session_id=session_id, file_contents=bodies, db=db)
+                    result["file_contents_observed"] = sorted(bodies)
+                    logger.info(
+                        "assist_file_content_observed session_id=%s paths=%r",
+                        session_id, sorted(bodies))
                 logger.info(
                     "assist_system_state_observed session_id=%s resources=%r",
                     session_id, sorted(observed))

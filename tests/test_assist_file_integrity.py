@@ -34,8 +34,9 @@ def _write_block(path=_PATH, lines=("a = 1;", "b = 2;"), redirect=">"):
 
 
 def test_a_write_records_its_exact_byte_count():
-    got = parse_file_writes(_write_block(lines=("abc", "de")))
-    assert got == {_PATH: {"expected": 7, "lines": 2}}   # 3+1 + 2+1
+    got = parse_file_writes(_write_block(lines=("abc", "de")))[_PATH]
+    assert got["expected"] == 7 and got["lines"] == 2    # 3+1 + 2+1
+    assert got["sha"]                                    # §17.967 fingerprint
 
 
 def test_chunked_appends_sum_to_one_total():
@@ -43,7 +44,8 @@ def test_chunked_appends_sum_to_one_total():
     text = (_write_block(lines=("abc",), redirect=">") + "\n"
             + _write_block(lines=("de",), redirect=">>") + "\n"
             + _write_block(lines=("f",), redirect=">>"))
-    assert parse_file_writes(text) == {_PATH: {"expected": 4 + 3 + 2, "lines": 3}}
+    got = parse_file_writes(text)[_PATH]
+    assert got["expected"] == 4 + 3 + 2 and got["lines"] == 3
 
 
 def test_the_same_file_printed_twice_is_not_written_twice():
@@ -167,3 +169,142 @@ def test_the_ledger_is_recorded_observed_rendered_and_acted_on():
     assert "render_file_writes" in inspect.getsource(assist_render)  # every prompt
     fix = inspect.getsource(assist_guide.generate_fix)
     assert "find_size_mismatches" in fix and "apply_file_mismatch" in fix
+
+
+# ── §17.967 — compare the CONTENT, not just the length ────────────────────
+#
+# Operator: "It needs to review the users pasted response and compare what is
+# recorded to work."
+#
+# Live T34 (22:41-23:01): the operator pasted the whole of App.jsx back. It was
+# complete, it ended in `export default App;`, and it matched what the engine
+# had composed. The engine rewrote it anyway, three turns running, while the
+# real cause sat in two files it had itself written — a backend returning an
+# object where the frontend calls `.find` on it.
+
+from app.modules.assist_files import (  # noqa: E402
+    _as_written_to_disk,
+    _heredoc_is_quote_nested,
+    content_fingerprint,
+    find_content_mismatches,
+    find_verified_file_rewrites,
+    parse_file_contents,
+    verified_files,
+)
+
+_NESTED = 'pct exec 111 -- bash -c "cat > /opt/a/App.jsx <<\'EOF\''
+_OUTER = 'pct exec 111 -- bash -c "cat > /opt/a/App.jsx" <<\'EOF\''
+
+
+# The escaping layer — the whole difficulty, and the thing that would have made
+# naive comparison worse than none.
+
+
+def test_a_quote_nested_heredoc_is_recognised():
+    assert _heredoc_is_quote_nested(_NESTED)
+    assert not _heredoc_is_quote_nested(_OUTER)
+    assert not _heredoc_is_quote_nested("cat > /opt/a/App.jsx <<'EOF'")
+
+
+def test_the_shell_layer_is_resolved_before_comparing():
+    """Live: the reply says fetch(\\`\\${API_BASE}\\`) and the file correctly
+    holds fetch(`${API_BASE}`). Comparing those raw reports a difference on
+    every write containing a template literal."""
+    emitted = r"fetch(\`\${API_BASE}/status\`)"
+    on_disk = "fetch(`${API_BASE}/status`)"
+    assert _as_written_to_disk(_NESTED, emitted) == on_disk
+    # Outside the quotes there is no shell layer to undo.
+    assert _as_written_to_disk(_OUTER, on_disk) == on_disk
+
+
+def test_normalisation_ignores_trailing_space_and_blank_lines_only():
+    """Leading indentation IS content in a source file — unlike §17.966's
+    dedupe, where it was the only difference between two printings of one
+    file. Trailing whitespace and blank lines are not."""
+    assert content_fingerprint("a\nb") == content_fingerprint("a  \n\nb\n")
+    assert content_fingerprint("a\nb") != content_fingerprint("a\n  b")
+    assert content_fingerprint("a\nb") != content_fingerprint("a\nB")
+
+
+# Reading the file back out of the operator's paste.
+
+
+def test_the_pasted_file_is_extracted():
+    paste = ('root@pve:~# pct exec 111 -- bash -c "cat /opt/a/App.jsx"\n'
+             "line one\nline two\nline three\n"
+             "root@pve:~# pm2 restart control-panel\n[PM2] done")
+    got = parse_file_contents(paste, ["/opt/a/App.jsx"])
+    assert got == {"/opt/a/App.jsx": "line one\nline two\nline three"}
+
+
+def test_only_known_paths_are_extracted():
+    """An unrelated `cat` must not invent a ledger entry."""
+    paste = "root@pve:~# cat /etc/hosts\n127.0.0.1 localhost\nroot@pve:~# "
+    assert parse_file_contents(paste, ["/opt/a/App.jsx"]) == {}
+
+
+# The comparison, and the loop it ends.
+
+
+def _ledger(written_body, pasted_body, open_line=_NESTED):
+    written = {"/opt/a/App.jsx": {
+        "expected": 100, "lines": len(written_body.splitlines()),
+        "sha": content_fingerprint(_as_written_to_disk(open_line, written_body))}}
+    return merge_file_writes({}, written=written,
+                             contents={"/opt/a/App.jsx": pasted_body})
+
+
+def test_a_matching_paste_marks_the_file_verified():
+    st = _ledger(r"const a = \`\${X}\`;", "const a = `${X}`;")
+    assert verified_files(st) == ["/opt/a/App.jsx"]
+    assert find_content_mismatches(st) == []
+    block = render_file_writes(st)
+    assert "VERIFIED CORRECT on disk" in block
+    assert "Do NOT rewrite it" in block
+    assert "different cause" in block
+
+
+def test_a_differing_paste_is_reported_as_such():
+    st = _ledger("const a = 1;\nconst b = 2;", "const a = 1;")
+    assert verified_files(st) == []
+    assert find_content_mismatches(st) == [
+        {"path": "/opt/a/App.jsx", "expected_lines": 2, "observed_lines": 1}]
+    assert "does NOT match" in render_file_writes(st)
+
+
+def test_a_fresh_write_clears_the_verification():
+    """A rewritten file has to be proven again; the old hash says nothing."""
+    st = _ledger("a", "a")
+    assert verified_files(st)
+    st = merge_file_writes(st, written={"/opt/a/App.jsx": {
+        "expected": 9, "lines": 1, "sha": "deadbeefdeadbeef"}})
+    assert verified_files(st) == []
+
+
+# The gate: rewriting a verified file is not a judgement call.
+
+
+def test_rewriting_a_verified_file_is_a_violation():
+    draft = ('```bash\npct exec 111 -- bash -c "cat > /opt/a/App.jsx" '
+             "<<'EOF'\nx\nEOF\n```")
+    assert find_verified_file_rewrites(draft, ["/opt/a/App.jsx"])
+
+
+def test_reading_a_verified_file_is_fine():
+    draft = "```bash\npct exec 111 -- cat /opt/a/App.jsx\n```"
+    assert find_verified_file_rewrites(draft, ["/opt/a/App.jsx"]) == []
+
+
+def test_writing_a_different_file_is_fine():
+    draft = "```bash\ncat > /opt/a/main.jsx <<'EOF'\nx\nEOF\n```"
+    assert find_verified_file_rewrites(draft, ["/opt/a/App.jsx"]) == []
+
+
+def test_the_gate_and_the_ledger_reach_the_fix_path():
+    from app.modules import assist_guide, assist_memory
+
+    fix = inspect.getsource(assist_guide.generate_fix)
+    assert "find_verified_file_rewrites" in fix
+    assert "verified_files" in fix
+    assert "pasted back by the operator and match" in fix   # regeneration notice
+    assert "parse_file_contents" in inspect.getsource(assist_memory)
