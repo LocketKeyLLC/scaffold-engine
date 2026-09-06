@@ -159,6 +159,22 @@ async def capture_assistant_reply(
     from app.config import settings
 
     bounded = (content or "")[:8000]
+    # §17.965 — the engine composed the file, so it knows the exact byte count.
+    # Record it here, where every reply already passes through, so the number
+    # is on file before the operator has run anything. Fail-soft: a ledger
+    # write must never cost the operator their reply.
+    try:
+        from app.modules.assist_files import parse_file_writes
+        _written = parse_file_writes(content or "")
+        if _written:
+            from app.modules.assist_environment import set_environment
+            await set_environment(session_id=session_id, file_writes=_written, db=db)
+            logger.info("assist_file_write_recorded session_id=%s files=%r",
+                        session_id,
+                        {k: v["expected"] for k, v in _written.items()})
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("assist_file_write_record_failed session_id=%s err=%r",
+                       session_id, _e)
     if settings.assist_unified_memory_enabled and settings.assist_umem_capture:
         try:
             last = (await db.execute(

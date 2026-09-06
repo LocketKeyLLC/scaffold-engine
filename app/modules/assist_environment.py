@@ -196,6 +196,8 @@ async def set_environment(
     banned_values: list | None = None,
     missing_tools: list | None = None,
     system_state: dict | None = None,
+    file_writes: dict | None = None,   # §17.965
+    file_sizes: dict | None = None,    # §17.965
     verbosity: str | None = None,
     facts: list[str] | None = None,
     retract_facts: list[str] | None = None,
@@ -282,6 +284,12 @@ async def set_environment(
         from app.modules.assist_state import merge_system_state
         current["system_state"] = merge_system_state(
             current.get("system_state"), system_state)
+    if file_writes or file_sizes:
+        # §17.965 — what the engine WROTE and what the disk REPORTS, side by
+        # side, so the comparison is arithmetic rather than a judgement call.
+        from app.modules.assist_files import merge_file_writes
+        current["file_writes"] = merge_file_writes(
+            current.get("file_writes"), written=file_writes, observed=file_sizes)
     if retract_facts:
         # §17.725 — retract contradicted facts BEFORE folding the new ones in.
         gone = {str(r).strip().lower() for r in retract_facts if str(r).strip()}

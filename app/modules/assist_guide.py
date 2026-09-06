@@ -196,6 +196,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     apply_interactive_prompt,  # §17.958
     apply_interface_fidelity,  # §17.959
     apply_truncated_paste,  # §17.962
+    apply_file_mismatch,  # §17.965
     apply_recommendation,  # §17.903
     promote_inline_commands,  # §17.897
     strip_operator_meta_preamble,  # §17.908
@@ -4610,10 +4611,18 @@ async def generate_fix(
         logger.info("assist_fix_interactive_prompt node_key=%s kind=%s",
                     node_key, _pending_prompt.get("kind"))
     _truncated = _pol.detect_truncated_paste(error_text or "")
+    # §17.965 — a size the engine can check itself outranks any symptom report.
+    from app.modules.assist_files import find_size_mismatches
+    _size_bad = find_size_mismatches(
+        (environment or {}).get("file_writes")
+        if isinstance((environment or {}).get("file_writes"), dict) else {})
+    if _size_bad:
+        logger.warning("assist_file_size_mismatch node_key=%s %r", node_key, _size_bad[:2])
     if _truncated:
         logger.warning("assist_truncated_paste node_key=%s hung=%s", node_key,
                        _truncated.get("hung"))
-    fix_system = apply_truncated_paste(apply_interface_fidelity(apply_interactive_prompt(
+    fix_system = apply_file_mismatch(apply_truncated_paste(
+      apply_interface_fidelity(apply_interactive_prompt(
       apply_recommendation(apply_location_callout(  # §17.852
         apply_screen_grounding(  # §17.758
             apply_ground_or_ask(  # §17.756
@@ -4625,7 +4634,8 @@ async def generate_fix(
                 is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
             is_decision=False, enabled=settings.assist_screen_grounding_enabled),
         is_decision=False, enabled=settings.assist_location_callout_enabled)),
-      prompt=_pending_prompt), gui=_gui_question), truncated=_truncated)
+      prompt=_pending_prompt), gui=_gui_question), truncated=_truncated),
+      mismatches=_size_bad)
 
     async def _draw_fix(messages):
         return await chat_until_nonempty(

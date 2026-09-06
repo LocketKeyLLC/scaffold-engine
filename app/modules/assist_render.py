@@ -68,6 +68,12 @@ def render_environment_block(environment: dict | None) -> str:
         block = render_system_state(state)
         if block:
             parts.append(block)
+    # §17.965 — expected vs measured file sizes, same ground-truth tier.
+    from app.modules.assist_files import render_file_writes
+    _fw = render_file_writes(environment.get("file_writes")
+                             if isinstance(environment.get("file_writes"), dict) else {})
+    if _fw:
+        parts.append(_fw)
     if missing:
         parts.append(
             "### NOT AVAILABLE on the operator's system (the shell reported "
@@ -230,6 +236,11 @@ def render_session_memory(
     from app.modules.assist_state import render_system_state
     state_block = render_system_state(environment.get("system_state")
                                       if isinstance(environment.get("system_state"), dict) else {})
+    from app.modules.assist_files import render_file_writes   # §17.965
+    _fw_block = render_file_writes(environment.get("file_writes")
+                                   if isinstance(environment.get("file_writes"), dict) else {})
+    if _fw_block:
+        state_block = (state_block + "\n\n" + _fw_block) if state_block else _fw_block
     missing = [m for m in (environment.get("missing_tools") or [])
                if isinstance(m, dict) and str(m.get("tool") or "").strip()]
     missing_block = ""

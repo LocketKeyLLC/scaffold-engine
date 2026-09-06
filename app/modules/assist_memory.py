@@ -504,6 +504,17 @@ async def derive_turn_memory(
                 await set_environment(
                     session_id=session_id, system_state=observed, db=db)
                 result["system_state_observed"] = sorted(observed)
+            # §17.965 — a byte count in their paste is the answer to a question
+            # the engine already knows the expected value for. Record it; the
+            # comparison happens in code, not in the model's head.
+            from app.modules.assist_files import parse_file_sizes
+            sizes = parse_file_sizes(msg)
+            if sizes:
+                await set_environment(
+                    session_id=session_id, file_sizes=sizes, db=db)
+                result["file_sizes_observed"] = sorted(sizes)
+                logger.info("assist_file_size_observed session_id=%s sizes=%r",
+                            session_id, sizes)
                 logger.info(
                     "assist_system_state_observed session_id=%s resources=%r",
                     session_id, sorted(observed))
