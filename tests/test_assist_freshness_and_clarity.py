@@ -10,6 +10,8 @@ import pytest
 from app.config import settings
 from app.modules.assist_agent import _fix_failure_streak, _looks_like_still_broken
 from app.modules.assist_guide import (
+    _primary_action_corpus,
+    _repeats_in_primary_action,
     _with_advance_footer,
     advance_footer,
     find_repeated_failed,
@@ -209,3 +211,98 @@ def test_advance_footer_never_raises(monkeypatch):
     monkeypatch.setattr(settings, "assist_done_criterion_enabled", True)
     assert _with_advance_footer(None, "t") == ""
     assert _with_advance_footer("", "t") == ""
+
+
+# ── §17.954 — a repeat that is not the IMMEDIATE action is not a cycle ─────
+#
+# Reconstructed from live session 613dd1df/T31 (2026-09-06 12:09), not invented.
+# The fix was CORRECT: it read the real template filename out of the operator's
+# own `pvesm list local` output and opened with a new `pct create …`. Its step 2
+# re-listed `pct set 111 --net0 firewall=1`, which had failed exactly once,
+# because container 111 did not exist yet — the thing step 1 creates. The banner
+# told the operator to distrust a fix that was right.
+
+_T31_FIX = """## 👉 Do this next
+
+**Run this now:**
+```bash
+pct create 111 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst --hostname control-panel --rootfs local-lvm:8
+```
+then tell me what it shows.
+
+## Diagnosis
+The previous `pct create` used a generic template name instead of the exact
+filename on disk.
+
+## Fix
+2. **Enable the Firewall:**
+   ```bash
+   pct set 111 --net0 firewall=1
+   ```
+3. **Start the Container:**
+   ```bash
+   pct start 111
+   ```
+"""
+
+
+def test_a_downstream_prerequisite_repeat_is_not_flagged():
+    hits = ["pct set 111 --net0 firewall=1"]
+    assert _repeats_in_primary_action(_T31_FIX, hits) == []
+
+
+def test_the_primary_action_is_still_flagged_when_it_repeats():
+    """§17.906's live cost — `qm destroy 106 --purge` prescribed four times as
+    the immediate action — must stay flagged. This narrows the gate, not the
+    thing the gate was built for."""
+    draft = (
+        "## 👉 Do this next\n**Run this now:**\n"
+        "```bash\nqm destroy 106 --purge\n```\nthen tell me what it shows.\n"
+    )
+    hits = ["qm destroy 106 --purge"]
+    assert _repeats_in_primary_action(draft, hits) == ["qm destroy 106 --purge"]
+
+
+def test_both_are_judged_independently_in_one_draft():
+    """A draft whose immediate action repeats AND whose step 2 repeats keeps
+    only the immediate one — the operator is warned about what they run now."""
+    draft = _T31_FIX.replace(
+        "pct create 111 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst "
+        "--hostname control-panel --rootfs local-lvm:8",
+        "qm destroy 106 --purge")
+    hits = ["qm destroy 106 --purge", "pct set 111 --net0 firewall=1"]
+    assert _repeats_in_primary_action(draft, hits) == ["qm destroy 106 --purge"]
+
+
+def test_repeated_urls_are_never_demoted():
+    """§17.883's version-guess skeleton match is the reason the URL half of this
+    gate exists — a re-prescribed failing endpoint is wrong wherever it sits."""
+    draft = _T31_FIX + "\n```bash\nwget https://example.test/r/v1.2.3/x.tar.gz\n```\n"
+    hits = ["https://example.test/r/v1.2.3/x.tar.gz"]
+    assert _repeats_in_primary_action(draft, hits) == hits
+
+
+def test_an_unlocatable_action_stays_loud():
+    """No fenced block means the immediate action can't be identified. Silence
+    would be a gate that fails open, so the hits are kept."""
+    hits = ["pct set 111 --net0 firewall=1"]
+    assert _repeats_in_primary_action("just prose, no commands", hits) == hits
+    assert _primary_action_corpus("just prose, no commands") == set()
+
+
+def test_falls_back_to_the_first_fenced_block_without_a_callout():
+    """Not every draft carries the §17.741 👉 heading; the first fenced block is
+    the immediate action in that case."""
+    draft = "**Run this now:**\n```bash\nqm destroy 106 --purge\n```\n"
+    assert _primary_action_corpus(draft) == {"qm destroy 106 --purge"}
+
+
+def test_the_gate_applies_the_scoping():
+    """Pin the wiring, not just the helper — the demotion has to be reachable
+    from the gate that builds the operator-facing banner."""
+    import inspect
+
+    from app.modules import assist_guide
+
+    src = inspect.getsource(assist_guide.generate_fix)
+    assert "_repeats_in_primary_action" in src
