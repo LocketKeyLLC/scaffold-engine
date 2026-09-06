@@ -278,7 +278,9 @@ _CLAIM_PHRASE_RE = re.compile(
     r"|\b(?:is|are|was|were|has\s+been|have\s+been)\s+(?:all\s+|already\s+|now\s+)?"
     r"(?:done|complete[d]?|finished|installed|configured|set\s+up|in\s+place|"
     r"taken\s+care\s+of)\b"
-    r"|\bdone\s+with\s+(?:this|that|it|everything|the)\b"
+    # §17.950 — the construction listed only "done"; "finished with that" and
+    # "complete with this" are the same claim in the same shape.
+    r"|\b(?:done|finished|complete[d]?)\s+with\s+(?:this|that|it|everything|the)\b"
     r"|\b(?:on\s+to|onto)\s+the\s+next\b",
     re.IGNORECASE,
 )
@@ -326,6 +328,42 @@ _ADVANCE_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# §17.950 — an explicit REQUEST to move on, anywhere in the message.
+#
+# `_ADVANCE_INTENT_RE` is anchored `^…$`, so it only fires on a message that is
+# NOTHING but "next"/"continue". And `looks_like_completion_claim` bails on any
+# "?" — correctly, a question is not a claim. Between them, the single most
+# natural way an operator says "I finished, move me on" signalled NOTHING:
+#
+#     "i am connected via SSH! whats next?"      (live, 2026-09-06 01:16:59)
+#
+# It claims completion AND asks to advance, and scored False on both gates, so
+# §17.891 vetoed the tracker's verdict and the operator stayed on the step.
+#
+# This is deliberately a SEPARATE signal class from a completion claim: it is
+# INTENT, and questions are exactly how intent gets phrased. Safe to read
+# loosely because `has_advancement_signal` is a VETO, not a decision — the
+# tracker must still independently judge `current_step_done` with confidence
+# above threshold before anything retires. Restoring the tracker's vote is all
+# this does.
+#
+# "what's the NEXT COMMAND" stays out by construction: the request forms below
+# require `next` to follow `what/what's` directly, so an intervening noun
+# ("the next command", "the next file") does not match.
+_NEXT_REQUEST_RE = re.compile(
+    # `next` must END the clause — "whats next?" yes, "what next COMMAND" no.
+    # The first cut assumed an article ("the next command") and let the
+    # article-less form through, which turned "it failed, what next command
+    # should i try" into an advancement signal.
+    r"\bwhat(?:'?s|\s+is)?\s+next\b(?!\s+\w)"
+    r"|\bwhat\s+now\b"
+    r"|\bon\s+to\s+the\s+next\b"
+    r"|\bmove\s+on\b"
+    r"|\bnext\s+step\b"
+    r"|\bwhere\s+to\s+next\b",
+    re.IGNORECASE,
+)
+
 
 def has_advancement_signal(msg: str) -> bool:
     """§17.891 — True when `msg` deterministically supports RETIRING the
@@ -337,6 +375,11 @@ def has_advancement_signal(msg: str) -> bool:
         return False
     m = normalize_punct(msg).strip()
     if _ADVANCE_INTENT_RE.match(m):
+        return True
+    # §17.950 — an operator reporting a FAILURE is not asking to move on, however
+    # they phrase the rest of the sentence. The disqualifier that already guards
+    # completion claims guards this signal class too.
+    if _NEXT_REQUEST_RE.search(m) and not _CLAIM_DISQUALIFY_RE.search(m):
         return True
     if looks_like_completion_claim(m):
         return True
@@ -595,3 +638,60 @@ def apply_deterministic_overrides(decision: dict, message: str) -> dict:
     out["override"] = reason
     out["rationale"] = f"[deterministic:{reason}] " + (out.get("rationale") or "")
     return out
+
+
+# ── Completion confirmation (§17.951) ────────────────────────────────────────
+# §17.890 already commits on a BARE claim ("it's installed") — the operator's
+# word outranks a verifier that cannot see their machine. But that gate is
+# deliberately narrow: it rejects paste-shaped input (that is the evidence
+# path), anything with a "?", and anything over 280 chars. So the common real
+# shape — evidence PLUS an assertion, or a long report ending "all of that was
+# downloaded" — took the evidence path, came back `incomplete`, and the
+# operator was handed another fix instead of being asked.
+#
+# The fix is not a looser claim detector; widening §17.890 would let genuine
+# not-done reports commit steps. It is to ASK. When a submit is blocked, the
+# engine offers the operator the commit on their word, and a plain affirmative
+# takes it.
+#
+# This detector is loose ON PURPOSE and safe only because it is SCOPED: it is
+# consulted exclusively when a confirmation is already pending on the session
+# (`metadata.pending_completion_confirm`). "yes" means confirm only when the
+# engine has just asked something.
+_CONFIRM_RE = re.compile(
+    r"^\s*(?:"
+    r"confirm(?:ed|ing)?|"
+    r"yes|yeah|yep|yup|correct|right|affirmative|"
+    r"(?:that'?s|thats|that\s+is|it\s+is)\s+(?:right|correct|it|done)|"
+    r"i\s+confirm|"
+    r"it\s+(?:is|was)\s+(?:done|complete[d]?|finished|installed)|"
+    r"(?:all\s+)?(?:done|complete[d]?|finished|installed)|"
+    r"mark\s+it\s+(?:done|complete[d]?)|"
+    r"commit\s+it"
+    r")\b[.! ]*$",
+    re.IGNORECASE,
+)
+_DECLINE_RE = re.compile(
+    r"^\s*(?:no|nope|not\s+(?:yet|done|quite)|cancel|wait|hold\s+on|"
+    r"(?:that'?s|thats)\s+(?:wrong|not\s+right))\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_confirmation(msg: str) -> bool:
+    """§17.951 — the operator answering YES to a pending completion offer.
+
+    Only ever consulted while a confirmation is staged on the session, which is
+    what makes a bare "yes" safe to read this way.
+    """
+    if not msg:
+        return False
+    return bool(_CONFIRM_RE.match(normalize_punct(msg).strip()))
+
+
+def looks_like_decline(msg: str) -> bool:
+    """§17.951 — the operator answering NO. Clears the offer without committing;
+    the step stays open and the conversation continues normally."""
+    if not msg:
+        return False
+    return bool(_DECLINE_RE.match(normalize_punct(msg).strip()))
