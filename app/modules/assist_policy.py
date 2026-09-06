@@ -695,3 +695,129 @@ def looks_like_decline(msg: str) -> bool:
     if not msg:
         return False
     return bool(_DECLINE_RE.match(normalize_punct(msg).strip()))
+
+
+# ── §17.958 — the operator is sitting AT an interactive prompt ─────────────
+#
+# Live, session 613dd1df/T32 (2026-09-06 14:47): *"its asking whick linter to
+# use"*. The reply told them to re-run the whole `npm create vite` command AND,
+# in the same breath, *"simply type `eslint` and press Enter"*. Their own paste
+# one turn later shows what was actually on screen — a clack SELECT menu:
+#
+#     o  Which linter to use?
+#     |  ESLint
+#
+# You do not type into that; you arrow to the entry and press Enter. So the
+# instruction was wrong for the widget in front of them, and the engine had
+# already been shown that widget. It models a command as something that runs to
+# completion, and has no notion of one that stops and waits.
+#
+# Two things follow deterministically and neither needs a model: while a prompt
+# is pending the command must NOT be re-issued (they are already inside it), and
+# the keystroke advice depends on the prompt KIND.
+
+_PROMPT_CONFIRM_RE = re.compile(
+    r"\[y/n\]|\(y/n\)|\[y/n,[^\]]*\]|\bok to proceed\?|\(yes/no\)|\[yes/no\]",
+    re.IGNORECASE,
+)
+# Arrow-key pickers: inquirer/prompts (`❯`), clack (box-drawing rail, flattened
+# to `|`/`o` by many terminals on copy), and the explicit hint some emit.
+_PROMPT_SELECT_RE = re.compile(
+    r"use arrow keys|❯|›\s*$|◆|◇|^\s*[|│]\s{2}\S|^\s*[o○]\s{2}\S.*\?\s*$"
+    r"|press <enter> to select|\(use arrow",
+    re.IGNORECASE | re.MULTILINE,
+)
+_PROMPT_TEXT_RE = re.compile(r"^\s*\?\s+\S[^\n]{2,80}[:›]\s*$", re.MULTILINE)
+# The operator SAYING they are stuck at one. "asking" is the load-bearing word.
+_PROMPT_SPOKEN_RE = re.compile(
+    r"\b(?:it'?s?|its|it is)\s+asking\b|\bis\s+asking\s+me\b"
+    r"|\basking\s+(?:me\s+)?(?:which|what|for|if|whether)\b"
+    r"|\bstuck\s+(?:at|on)\s+a?\s*prompt\b|\bwaiting\s+for\s+(?:my\s+)?input\b",
+    re.IGNORECASE,
+)
+
+
+def detect_interactive_prompt(text: str) -> dict | None:
+    """Is the operator parked at an interactive prompt right now?
+
+    Returns ``{"kind": "select"|"confirm"|"text"|"unknown", "how": <advice>}``
+    or None. `kind` decides the keystroke advice, which is the half the engine
+    got wrong live — telling someone to TYPE an option at an arrow-key menu.
+    """
+    if not (text or "").strip():
+        return None
+    kind = None
+    if _PROMPT_SELECT_RE.search(text):
+        kind = "select"
+    elif _PROMPT_CONFIRM_RE.search(text):
+        kind = "confirm"
+    elif _PROMPT_TEXT_RE.search(text):
+        kind = "text"
+    elif _PROMPT_SPOKEN_RE.search(text):
+        kind = "unknown"
+    if not kind:
+        return None
+    return {"kind": kind, "how": _PROMPT_ADVICE[kind]}
+
+
+_PROMPT_ADVICE = {
+    "select": ("an arrow-key menu — move with ↑/↓ to the entry you want and "
+               "press Enter. Do NOT type the option's name."),
+    "confirm": "a yes/no prompt — press `y` (or `n`) then Enter.",
+    "text": "a free-text prompt — type the value, then press Enter.",
+    "unknown": ("a prompt of some kind — ask the operator to paste the exact "
+                "lines on screen before guessing which keys to press."),
+}
+
+
+# ── §17.959 — answer the question in the interface it was asked about ─────
+#
+# Live, session 613dd1df/T31 (2026-09-06 14:03), the operator's own words:
+#
+#     "I need a better explanation on implementing the firewall in the web
+#      browser. There are far more options then what you are telling me to add
+#      with not enough context."
+#
+# The reply opened *"Since the Web UI is confusing and the `pct` command doesn't
+# support security groups, skip the security groups for now"* and handed over
+# `pct start 111`. A direct request for GUI guidance, answered by declining to
+# give it. The CLI may well be the better route — but that is an argument to
+# make AFTER answering, not a reason to leave the question standing.
+
+_GUI_SCOPE_RE = re.compile(
+    r"\bweb\s?(?:browser|ui|interface|gui|console)\b|\bwebui\b|\bgui\b"
+    r"|\bin the browser\b|\bwhich button\b|\bwhat button\b|\bwhich (?:menu|tab|field|box)\b"
+    r"|\bwhere do i click\b|\bon the (?:screen|dashboard|page)\b|\bproxmox (?:ui|web)\b",
+    re.IGNORECASE,
+)
+_ASK_SHAPE_RE = re.compile(
+    r"\?|\bi need\b|\bexplain\b|\bhow do i\b|\bhow to\b|\bwalk me\b|\bshow me\b"
+    r"|\bnot enough context\b|\bbetter explanation\b",
+    re.IGNORECASE,
+)
+# Navigation language — what a real GUI answer necessarily contains.
+_GUI_NAV_RE = re.compile(
+    r"\bclick\b|\bselect\b|\bnavigate\b|\bexpand\b|\btick\b|\buncheck\b|\bcheckbox\b"
+    r"|\bdrop-?down\b|\bbutton\b|\btab\b|\bpanel\b|\bsidebar\b|\bdialog\b|→|➜"
+    r"|\bunder\s+[A-Z]\w+\b|\bthe\s+\w+\s+field\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_gui_question(msg: str) -> bool:
+    """A question explicitly scoped to a graphical interface."""
+    if not (msg or "").strip():
+        return False
+    return bool(_GUI_SCOPE_RE.search(msg) and _ASK_SHAPE_RE.search(msg))
+
+
+def answer_dodges_the_interface(answer: str, question: str) -> bool:
+    """True when a GUI question came back with no GUI in the answer.
+
+    Deliberately generous to the answer: ANY navigation language anywhere
+    clears it. This fires only on the shape that actually happened — a GUI
+    question answered purely in shell commands.
+    """
+    if not looks_like_gui_question(question) or not (answer or "").strip():
+        return False
+    return not _GUI_NAV_RE.search(answer)

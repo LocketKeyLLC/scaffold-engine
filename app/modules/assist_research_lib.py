@@ -22,6 +22,8 @@ from app.utils.llm_retry import chat_until_nonempty
 from app.utils.tool_call_args import read_tool_args
 from app.modules.assist_directives import (  # §17.897 — full output contract
     apply_ground_or_ask,
+    apply_interactive_prompt,  # §17.958
+    apply_interface_fidelity,  # §17.959
     apply_location_callout,
     apply_next_callout,
     apply_problem_solving,
@@ -495,6 +497,15 @@ async def research_one(
         ctx_block = (
             f"{job_context.strip()}\n\n" if (job_context or "").strip() else ""
         )
+        # §17.958/959 — read the operator's own words BEFORE answering them.
+        from app.modules import assist_policy as _pol
+        _pending_prompt = _pol.detect_interactive_prompt(question)
+        _gui_question = _pol.looks_like_gui_question(question)
+        if _pending_prompt:
+            logger.info("assist_interactive_prompt_detected node_key=%s kind=%s",
+                        node_key, _pending_prompt.get("kind"))
+        if _gui_question:
+            logger.info("assist_gui_question_detected node_key=%s", node_key)
         resp = await chat_until_nonempty(
             model_router.chat,
             [
@@ -512,19 +523,27 @@ async def research_one(
                 # §17.903 — outermost: this is the ASK path, the one the
                 # operator uses to ask a direct question, so the answer-and-lean
                 # rule belongs here above all else.
-                {"role": "system", "content": apply_recommendation(
-                  apply_location_callout(  # §17.852
-                    apply_screen_grounding(  # §17.758
-                        apply_ground_or_ask(  # §17.760
-                            apply_problem_solving(  # §17.742
-                                apply_next_callout(  # §17.741/897
-                                    _RESEARCH_SYNTH_SYSTEM,
-                                    is_decision=False,
-                                    enabled=settings.assist_next_callout_enabled),
-                                enabled=settings.assist_problem_solving_enabled),
-                            is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
-                        is_decision=False, enabled=settings.assist_screen_grounding_enabled),
-                    is_decision=False, enabled=settings.assist_location_callout_enabled))},
+                # §17.958/959 — outermost, above the answer-and-lean rule:
+                # both live failures were on THIS path. A pending interactive
+                # prompt makes the immediate action a keystroke, and a question
+                # asked about the web UI has to be answered about the web UI.
+                {"role": "system", "content": apply_interface_fidelity(
+                  apply_interactive_prompt(
+                    apply_recommendation(
+                      apply_location_callout(  # §17.852
+                        apply_screen_grounding(  # §17.758
+                            apply_ground_or_ask(  # §17.760
+                                apply_problem_solving(  # §17.742
+                                    apply_next_callout(  # §17.741/897
+                                        _RESEARCH_SYNTH_SYSTEM,
+                                        is_decision=False,
+                                        enabled=settings.assist_next_callout_enabled),
+                                    enabled=settings.assist_problem_solving_enabled),
+                                is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
+                            is_decision=False, enabled=settings.assist_screen_grounding_enabled),
+                        is_decision=False, enabled=settings.assist_location_callout_enabled)),
+                    prompt=_pending_prompt),
+                  gui=_gui_question)},
                 {"role": "user", "content": (
                     f"{ctx_block}"
                     f"Question: {question}\n\n"
@@ -543,6 +562,39 @@ async def research_one(
         )
         if resp and resp.success:
             answer = (resp.text or "").strip() or None
+            # §17.959 — the directive is guidance; this is enforcement. Live,
+            # the model was perfectly willing to open with "the Web UI is
+            # confusing, skip it". One regeneration, told exactly what it did.
+            if answer and _gui_question and _pol.answer_dodges_the_interface(
+                    answer, question):
+                logger.warning(
+                    "assist_gui_answer_deflected node_key=%s (regenerating)",
+                    node_key)
+                _retry = await chat_until_nonempty(
+                    model_router.chat,
+                    [
+                        {"role": "system", "content": apply_interface_fidelity(
+                            _RESEARCH_SYNTH_SYSTEM, gui=True)},
+                        {"role": "user", "content": (
+                            f"{ctx_block}"
+                            f"Question: {question}\n\n"
+                            f"{_render_research_block(sources)}\n\n"
+                            "---\nREGENERATION NOTICE: your previous answer "
+                            "contained no navigation of the interface the "
+                            "operator asked about — no screen, no menu, no "
+                            "field, nothing to click. They asked how to do "
+                            "this in the graphical interface. Answer THAT "
+                            "question: the exact path, every field on the "
+                            "screen, and what to leave alone. Offer a "
+                            "command-line alternative only AFTER it, if at "
+                            "all.")},
+                    ],
+                    {"role": role}, temperature=0.2, max_tokens=8192,
+                    draws=2, label="assist_research_gui_retry",
+                    think_off_rescue=True,
+                )
+                if _retry and _retry.success and (_retry.text or "").strip():
+                    answer = _retry.text.strip()
             if answer:  # §17.897 — code-enforced copy-paste format
                 answer = strip_operator_meta_preamble(answer)  # §17.908
                 answer = promote_inline_commands(answer)
