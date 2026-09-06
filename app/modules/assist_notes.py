@@ -641,3 +641,79 @@ async def list_notes(*, session_id: str, db) -> list[dict]:
     if not row:
         return []
     return _coerce_notes(row.get("notes"))
+
+
+# ── Completion confirmation (§17.951) ────────────────────────────────────────
+
+
+async def stage_completion_confirm(
+    *, session_id: str, node_key: str, reason: str, db,
+) -> dict:
+    """§17.951 — stash a pending "confirm this step is done?" offer.
+
+    Staged when a submit is verify-BLOCKED. §17.890 already commits on a bare
+    claim, but the common real shape — evidence plus an assertion, or a long
+    report ending "all of that was downloaded" — takes the evidence path and
+    comes back `incomplete`, so the operator was handed another fix instead of
+    being asked. This is the ask.
+
+    Same read-modify-write merge as `_stage_replan_proposal` so other metadata
+    survives, and one offer at a time (a fresh block overwrites a stale offer —
+    the newer reason is the accurate one).
+    """
+    from datetime import datetime, timezone
+
+    offer = {
+        "node_key": node_key,
+        "reason": (reason or "").strip()[:400],
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    await db.execute(
+        text("""
+            UPDATE assist_sessions
+               SET metadata = COALESCE(metadata, '{}'::jsonb)
+                     || CAST(:patch AS jsonb),
+                   updated_at = NOW()
+             WHERE id = :sid
+        """),
+        {"sid": session_id, "patch": json.dumps({"pending_completion_confirm": offer})},
+    )
+    await db.commit()
+    logger.info(
+        "assist_completion_confirm_staged session_id=%s node_key=%s reason=%r",
+        session_id, node_key, offer["reason"][:100],
+    )
+    return offer
+
+
+async def get_pending_completion_confirm(*, session_id: str, db) -> dict | None:
+    """§17.951 — the staged offer, or None. Fail-soft."""
+    try:
+        row = (await db.execute(
+            text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).mappings().first()
+        meta = (row or {}).get("metadata")
+        offer = meta.get("pending_completion_confirm") if isinstance(meta, dict) else None
+        if isinstance(offer, dict) and (offer.get("node_key") or "").strip():
+            return offer
+    except Exception as exc:  # noqa: BLE001 — an offer must never break a turn
+        logger.warning("completion_confirm_read_failed sid=%s err=%r", session_id, exc)
+    return None
+
+
+async def clear_pending_completion_confirm(*, session_id: str, db) -> None:
+    """§17.951 — drop the offer. Called on confirm, on decline, and whenever the
+    step moves on by any other route, so a stale "confirm?" can never attach
+    itself to a step the operator has since left."""
+    try:
+        await db.execute(
+            text("UPDATE assist_sessions "
+                 "   SET metadata = COALESCE(metadata, '{}'::jsonb) - "
+                 "       'pending_completion_confirm', updated_at = NOW() "
+                 " WHERE id = :sid"),
+            {"sid": session_id},
+        )
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("completion_confirm_clear_failed sid=%s err=%r", session_id, exc)

@@ -297,6 +297,73 @@ async def _run_turn_inner(
         except Exception as exc:  # noqa: BLE001
             logger.warning("turn_loop_capture_failed sid=%s err=%r", session_id, exc)
 
+        # 1b. §17.951 — resolve a pending completion confirmation.
+        #
+        # Runs BEFORE the decision layer on purpose: a bare "yes" or "confirm"
+        # carries no intent the classifier could route sensibly, and the ONLY
+        # thing that makes reading it as a completion is that the engine just
+        # asked. Scoping it to a staged offer is what makes a loose affirmative
+        # safe — outside that window "yes" is just a word.
+        try:
+            from app.modules import assist_notes
+
+            _offer = await assist_notes.get_pending_completion_confirm(
+                session_id=session_id, db=db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("completion_confirm_probe_failed sid=%s err=%r",
+                           session_id, exc)
+            _offer = None
+        if _offer:
+            _onk = _offer.get("node_key")
+            if assist_policy.looks_like_confirmation(text_):
+                yield _ev(ASSIST_TURN_STATUS, {
+                    "text": "Marking this step complete on your word…"})
+                await _clear_completion_confirm(session_id, db)
+                from app.routers.assist import AssistSubmitInput, assist_submit
+                try:
+                    # The operator's affirmation IS the evidence (§17.890): a
+                    # bare claim is exempt from the verify hard-block, so this
+                    # commits rather than looping back through the same veto
+                    # that produced the offer.
+                    res = await assist_submit(
+                        session_id,
+                        AssistSubmitInput(
+                            node_key=_onk,
+                            output=(f"Operator confirmed this step is complete: "
+                                    f"{text_.strip()[:200]}"),
+                            action="submit", history=history),
+                        db=db,
+                    ) or {}
+                    if res.get("committed"):
+                        yield _ev(ASSIST_STEP_OUTCOME,
+                                  {"node_key": _onk, "status": "committed"})
+                        logger.info(
+                            "assist_completion_confirmed session_id=%s node_key=%s",
+                            session_id, _onk)
+                        async for e in _claim_and_guide(session_id, None, history,
+                                                        db, orient=False):
+                            yield e
+                        handled["v"] = "completion_confirmed"
+                        return
+                    logger.warning(
+                        "completion_confirm_not_committed sid=%s nk=%s res=%r",
+                        session_id, _onk, str(res)[:200])
+                except Exception as exc:  # noqa: BLE001 — never strand the turn
+                    logger.error("completion_confirm_commit_failed sid=%s err=%r",
+                                 session_id, exc)
+                    yield _ev(ASSIST_TURN_STATUS, {
+                        "text": f"Couldn't close the step out ({exc}) — it stays open."})
+            elif assist_policy.looks_like_decline(text_):
+                # Not done after all: drop the offer and carry on normally, so
+                # the "no" is answered as a message rather than re-asked.
+                await _clear_completion_confirm(session_id, db)
+                logger.info("assist_completion_confirm_declined session_id=%s nk=%s",
+                            session_id, _onk)
+            else:
+                # Anything else supersedes the offer — the operator has moved on
+                # to something new and a stale "confirm?" must not linger.
+                await _clear_completion_confirm(session_id, db)
+
         # 2a. §17.899 — "that wasn't actually done". Runs BEFORE the decision
         # layer and before orientation, because every downstream step reads the
         # completed-work digest: while a step is wrongly `done`, the decision
@@ -394,10 +461,34 @@ async def _run_turn_inner(
                         blocked_reason = e[1].get("verify_reason") or "the step's goal isn't met yet"
                 yield e
             if done:
+                await _clear_completion_confirm(session_id, db)
                 async for e in _claim_and_guide(session_id, None, history, db,
                                                 orient=False):
                     yield e
             elif blocked_reason is not None:
+                # §17.951 — OFFER the operator the commit on their word.
+                # §17.890 already honours a BARE claim, but the common real
+                # shape — evidence plus an assertion, or a long report ending
+                # "all of that was downloaded" — takes the evidence path,
+                # verifies `incomplete`, and the operator got another fix
+                # instead of being asked. Staged BEFORE the fix flow so the
+                # invitation leads; they still get the help underneath it if it
+                # genuinely is not done.
+                try:
+                    from app.modules import assist_notes
+                    await assist_notes.stage_completion_confirm(
+                        session_id=session_id, node_key=nk,
+                        reason=blocked_reason, db=db)
+                    yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": (
+                        f"I couldn't verify this step myself — {blocked_reason}\n\n"
+                        "**If it IS done, reply `confirm`** and I'll mark it "
+                        "complete on your word and move to the next step. You "
+                        "know your machine; I only see what you paste.\n\n"
+                        "If something is still outstanding, here's where I'd "
+                        "look next:")})
+                except Exception as exc:  # noqa: BLE001 — an offer never blocks
+                    logger.warning("completion_confirm_offer_failed sid=%s err=%r",
+                                   session_id, exc)
                 # §17.884 — a blocked submit must NEVER dead-end. Live incident:
                 # the operator ran the discovery command the engine asked for,
                 # pasted the ground truth back, the verifier (correctly) said
@@ -615,6 +706,18 @@ async def _surface(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterato
     except Exception as exc:  # noqa: BLE001
         logger.warning("turn_loop_surface_failed sid=%s err=%r", session_id, exc)
 
+
+
+async def _clear_completion_confirm(session_id: str, db) -> None:
+    """§17.951 — drop any staged confirmation. Called wherever a step actually
+    moves, so a stale "confirm?" can never attach itself to a step the operator
+    has since left."""
+    try:
+        from app.modules import assist_notes
+        await assist_notes.clear_pending_completion_confirm(
+            session_id=session_id, db=db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("completion_confirm_clear_failed sid=%s err=%r", session_id, exc)
 
 
 async def _recent_advance_message(session_id: str, node_key, db) -> str | None:

@@ -456,7 +456,13 @@ async def test_incomplete_submit_continues_into_fix():
     outcome = next(d for n, d in ev if n == "assist_step_outcome")
     assert outcome["status"] == "step_incomplete"
     answers = [d for n, d in ev if n == "assist_answer"]
-    assert answers and "curl -L" in answers[0]["text"]  # the continuation fix
+    # §17.884 — the continuation fix is still emitted, seeded with the evidence.
+    assert any("curl -L" in a["text"] for a in answers)
+    # §17.951 — and the completion OFFER now LEADS it. Ordering is the point:
+    # the operator reads the top of the reply, so "if it IS done, reply
+    # `confirm`" has to arrive before the fix, not under it.
+    assert "reply `confirm`" in answers[0]["text"]
+    assert "curl -L" in answers[1]["text"]
     assert "not complete" in captured_error["error"]
     assert "Radarr not installed" in captured_error["error"]
     assert ev[-1][1]["handled"] == "submit"
