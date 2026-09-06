@@ -1165,7 +1165,10 @@ async def run_step_research(
         # it had only two of the four paste repairs the guide/fix paths get.
         _fixed, _hx = assist_guide.repair_history_expansion(_fixed)
         _fixed, _esc = assist_guide.repair_unescaped_expansions(_fixed)
-        _notes = list(_notes) + list(_hx) + list(_esc)
+        # §17.964/963 — a prompt to come back to, and a paste that fits.
+        _fixed, _term = assist_guide.repair_nonterminating_commands(_fixed)
+        _fixed, _chunk = assist_guide.split_large_paste_blocks(_fixed)
+        _notes = list(_notes) + list(_hx) + list(_esc) + list(_term) + list(_chunk)
         _shell = assist_guide.find_shell_unsafe_commands(_fixed)
         if _shell:
             logger.warning(

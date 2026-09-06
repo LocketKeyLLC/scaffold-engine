@@ -195,6 +195,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     apply_location_callout,
     apply_interactive_prompt,  # §17.958
     apply_interface_fidelity,  # §17.959
+    apply_truncated_paste,  # §17.962
     apply_recommendation,  # §17.903
     promote_inline_commands,  # §17.897
     strip_operator_meta_preamble,  # §17.908
@@ -2323,8 +2324,13 @@ async def generate_guidance(
     text_out, _histfix_notes = repair_history_expansion(text_out)
     # §17.960 — and it would expand `$…`/backticks straight into the file.
     text_out, _escape_notes = repair_unescaped_expansions(text_out)
+    # §17.964 — every command must return the operator to a prompt.
+    text_out, _term_notes = repair_nonterminating_commands(text_out)
+    # §17.963 — chunk last, so the pieces account for every rewrite above.
+    text_out, _chunk_notes = split_large_paste_blocks(text_out)
     _tool_notes = (list(_tool_notes) + list(_console_notes)
-                   + list(_histfix_notes) + list(_escape_notes))
+                   + list(_histfix_notes) + list(_escape_notes)
+                   + list(_term_notes) + list(_chunk_notes))
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913
@@ -3132,6 +3138,337 @@ def repair_unescaped_expansions(text_out: str) -> tuple[str, list[str]]:
     ]
 
 
+# §17.963 — never hand over a paste the terminal cannot swallow.
+#
+# Live, T34, twice: a ~3.6 KB heredoc writing `App.jsx` arrived in the shell
+# spliced and truncated ("...Loading Lab StatuEOFort default App;..."), the file
+# was written corrupt, the page came up blank, and the next turns debugged React
+# against garbage. The engine's output was verified clean both times, so the
+# loss was on the way IN. Both pastes opened with `^C` — a hung shell they had
+# to interrupt.
+#
+# The cause is not worth diagnosing per-terminal (canonical-mode tty buffers are
+# 4096 bytes, noVNC and web consoles are worse, SSH without flow control worse
+# again). The fix is cause-agnostic: do not emit a block big enough to be at
+# risk. Split the write into appends that each fit comfortably, tell the
+# operator to paste them one at a time, and finish with a byte count they can
+# check — which is the part that turns "did that work?" into a yes or a no.
+#
+# The threshold is deliberately far below 4096. A few extra pastes cost seconds;
+# a silently corrupt file cost this session two hours.
+
+_PASTE_SAFE_BYTES = 1200
+
+
+def _heredoc_write_parts(body: str):
+    """Split a fenced block into (prefix, open_line, body_lines, term, suffix).
+
+    Returns None when the block is not a single heredoc file write, which is
+    the only shape this rewrite knows how to reassemble safely.
+    """
+    lines = body.splitlines()
+    open_idx = None
+    delim = None
+    for i, ln in enumerate(lines):
+        m = _HEREDOC_START_RE.search(ln)
+        if m:
+            open_idx, delim = i, m.group(2)
+            break
+    if open_idx is None:
+        return None
+    term_idx = None
+    for j in range(open_idx + 1, len(lines)):
+        if lines[j].strip().rstrip("\"'`);") == delim:
+            term_idx = j
+            break
+    if term_idx is None:
+        return None
+    return (lines[:open_idx], lines[open_idx], lines[open_idx + 1:term_idx],
+            lines[term_idx], lines[term_idx + 1:])
+
+
+def _append_form(open_line: str) -> str | None:
+    """`cat > FILE` → `cat >> FILE`, so chunks 2..N extend the file."""
+    out, n = re.subn(r"(?<![>\d])>(?![>])", ">>", open_line, count=1)
+    return out if n else None
+
+
+def _verify_command_for(open_line: str) -> str | None:
+    """Turn the write into a byte-count check the operator can compare."""
+    head = open_line.split("<<", 1)[0].rstrip()
+    if not head:
+        return None
+    head, n = re.subn(r"\bcat\s+>>?\s*", "wc -c ", head, count=1)
+    if not n:
+        return None
+    if head.count('"') % 2:          # the heredoc lived inside the quotes
+        head += '"'
+    return head
+
+
+def split_large_paste_blocks(text_out: str) -> tuple[str, list[str]]:
+    """Chunk oversized heredoc writes into paste-safe appends."""
+    if not (text_out or "").strip():
+        return text_out, []
+    notes: list[str] = []
+
+    def _fix(m: "re.Match") -> str:
+        lang, body = m.group(1), m.group(2)
+        if len(m.group(0)) <= _PASTE_SAFE_BYTES:
+            return m.group(0)
+        parts = _heredoc_write_parts(body)
+        if not parts:
+            notes.append(
+                f"this block is {len(m.group(0))} characters — paste it in "
+                "pieces if your terminal drops any of it")
+            return m.group(0)
+        prefix, open_line, body_lines, term, suffix = parts
+        appender = _append_form(open_line)
+        if not appender:
+            return m.group(0)
+
+        overhead = len(open_line) + len(term) + 2
+        chunks: list[list[str]] = [[]]
+        size = overhead
+        for ln in body_lines:
+            if chunks[-1] and size + len(ln) + 1 > _PASTE_SAFE_BYTES:
+                chunks.append([])
+                size = overhead
+            chunks[-1].append(ln)
+            size += len(ln) + 1
+        if len(chunks) < 2:
+            return m.group(0)
+
+        total = sum(len(ln.encode("utf-8")) + 1 for ln in body_lines)
+        out: list[str] = []
+        for k, chunk in enumerate(chunks, 1):
+            head = prefix if k == 1 else []
+            opener = open_line if k == 1 else appender
+            hint = ("" if k > 1 else
+                    " If the prompt turns into `>` instead of coming back, the "
+                    "paste was clipped — press Ctrl-C and tell me.")
+            out.append(
+                f"**Paste {k} of {len(chunks)}** — wait for the prompt to come "
+                f"back before the next one.{hint}\n\n"
+                f"```{lang}\n" + "\n".join(head + [opener] + chunk + [term])
+                + "\n```")
+        verify = _verify_command_for(open_line)
+        if verify:
+            out.append(
+                f"**Then confirm it arrived intact** — this must print "
+                f"`{total}`. Any other number means a paste was clipped; tell "
+                f"me the number and we redo that piece.\n\n"
+                f"```{lang}\n{verify}\n```")
+        if suffix:
+            out.append(f"```{lang}\n" + "\n".join(suffix) + "\n```")
+        notes.append(
+            f"split a {len(m.group(0))}-character block into {len(chunks)} "
+            "pastes with a byte-count check, because a block this size arrives "
+            "truncated in most terminals")
+        return "\n\n".join(out)
+
+    return re.sub(r"```([a-z]*)\n(.*?)```", _fix, text_out, flags=re.S), notes
+
+
+# §17.964 — a command that never returns to the prompt.
+#
+# Live, session 613dd1df/T33 (2026-09-06 17:52). The engine asked the operator
+# to verify the backend API with:
+#
+#     pct exec 111 -- pm2 logs control-panel-backend --lines 20
+#
+# and then "tell me what it shows". `pm2 logs` TAILS. It prints the backlog and
+# then sits there forever. In the operator's own words:
+#
+#     "it then is just blank, as if i'm in a program and its waiting for a
+#      command."
+#
+# They were stuck in a running process with no prompt, and the only way out was
+# Ctrl-C — which the engine then read as an aborted step rather than as its own
+# instruction never terminating.
+#
+# The class is much wider than pm2, and splits cleanly in two:
+#
+#   FIXABLE  — the tool has a flag that makes it print and exit
+#              (`pm2 logs --nostream`, `--no-pager`, `tail -n`, `ping -c`).
+#              Rewrite it; the operator gets the same information and a prompt.
+#   PAGED    — output goes through `less`, so the shell is not hung but the
+#              screen is captive until `q`. Same felt experience.
+#   BLOCKING — an editor, a REPL, a dev server. No flag fixes those; say what
+#              it is and how to leave it, and never pair it with "tell me what
+#              it shows".
+#
+# `--lines 20` in the live command is the trap in miniature: it looks like it
+# bounds the output, and it does — but it bounds the BACKLOG, not the tail.
+
+_NONTERMINATING_FIXES: list[tuple[str, str, str]] = [
+    # (pattern, replacement, human explanation)
+    (r"\bpm2\s+logs\b(?![^\n]*--nostream)", r"pm2 logs --nostream",
+     "`pm2 logs` tails forever; `--nostream` prints and exits"),
+    (r"\btail\s+-[fF]\b", "tail -n 50",
+     "`tail -f` never exits; `-n 50` prints the same tail and returns"),
+    # The follow flag has to be REMOVED, not merely preceded by a bound —
+    # `journalctl -n 50 --no-pager -u nginx -f` still follows.
+    (r"\bjournalctl\b([^\n]*?)\s+(?:-f|--follow)\b",
+     r"journalctl -n 50 --no-pager\1",
+     "`journalctl -f` follows forever; `-n 50 --no-pager` prints and returns"),
+    (r"\bdocker\s+logs\s+(?:-f|--follow)\b", "docker logs --tail 50",
+     "`docker logs -f` follows forever; `--tail 50` prints and returns"),
+    (r"\bkubectl\s+logs\s+(?:-f|--follow)\b", "kubectl logs --tail=50",
+     "`kubectl logs -f` follows forever; `--tail=50` prints and returns"),
+    (r"\bwatch\s+(?:-n\s*\d+\s+)?", "",
+     "`watch` re-runs forever; the command is run once instead"),
+    (r"\b(?:htop|top)\b(?![^\n]*-b)", "top -b -n 1",
+     "`top` is a full-screen program; `-b -n 1` prints one snapshot"),
+    # `-c1` (no space) is as bounded as `-c 1`; missing it rewrote a correct
+    # command into `ping -c 4 -c1 …`. Live text in this session used `-c1`.
+    (r"\bping\b(?![^\n]*\s-c\s*\d)", "ping -c 4",
+     "`ping` runs until stopped; `-c 4` sends four and returns"),
+]
+# Paged output: not hung, but captive until `q`.
+_PAGER_FIXES: list[tuple[str, str, str]] = [
+    (r"\bsystemctl\s+status\b(?![^\n]*--no-pager)", "systemctl status --no-pager",
+     "`systemctl status` opens a pager; `--no-pager` prints and returns"),
+    (r"\bjournalctl\b(?![^\n]*(?:--no-pager|\s-f\b|\s--follow\b))",
+     "journalctl --no-pager",
+     "`journalctl` opens a pager; `--no-pager` prints and returns"),
+    (r"\bgit\s+(?!--no-pager)(?=log\b|diff\b|show\b)", "git --no-pager ",
+     "`git log`/`diff` open a pager; `--no-pager` prints and returns"),
+]
+# No flag saves these — name them and say how to get out.
+#
+# Matched on the EFFECTIVE VERB, never by scanning the line. Scanning produced
+# two false positives immediately, on real output from this very session:
+# `\b(less|more|man)\b` fired on the prose "If you want more details", and
+# `node\s*$` fired on `pct exec 111 -- ln -sf /usr/local/bin/node /bin/node`,
+# whose verb is `ln`. A banner that cries wolf on an English sentence is the
+# §17.913 mistake again.
+_RUNNER_PREFIX_RE = re.compile(
+    r"^\s*(?:sudo\s+|time\s+|nohup\s+|env\s+\S+=\S+\s+"
+    r"|pct\s+exec\s+\S+\s+--\s+|qm\s+guest\s+exec\s+\S+\s+--\s+"
+    r"|docker\s+exec\s+(?:-\S+\s+)*\S+\s+|kubectl\s+exec\s+\S+\s+--\s+"
+    r"|ssh\s+\S+\s+|bash\s+-c\s+[\"']|sh\s+-c\s+[\"'])+",
+    re.IGNORECASE,
+)
+
+_BLOCKING_VERBS = {
+    "nano": ("an editor", "Ctrl-X"),
+    "vi": ("an editor", "`:q!`"),
+    "vim": ("an editor", "`:q!`"),
+    "emacs": ("an editor", "Ctrl-X Ctrl-C"),
+    "less": ("a pager", "`q`"),
+    "more": ("a pager", "`q`"),
+    "man": ("a pager", "`q`"),
+    "tcpdump": ("a capture that runs until stopped", "Ctrl-C"),
+}
+_REPL_VERBS = {"python", "python3", "node", "irb", "psql", "mysql", "sqlite3"}
+
+
+def _effective_verb(line: str) -> str:
+    """The program actually being invoked, past any runner prefix."""
+    stripped = _RUNNER_PREFIX_RE.sub("", (line or "").strip())
+    toks = stripped.split()
+    return toks[0].rsplit("/", 1)[-1].strip("\"'") if toks else ""
+
+
+def _blocking_program(line: str) -> tuple[str, str] | None:
+    verb = _effective_verb(line)
+    if not verb:
+        return None
+    if verb in _BLOCKING_VERBS:
+        return _BLOCKING_VERBS[verb]
+    rest = _RUNNER_PREFIX_RE.sub("", line.strip()).split()[1:]
+    # Only a BARE invocation is a REPL. `node -v`, `python3 -c "…"` and
+    # `node server.js` all print and exit — live, `pct exec 111 -- node -v`
+    # was flagged as an interactive shell the operator would be trapped in.
+    if verb in _REPL_VERBS and not rest:
+        return ("an interactive REPL", "`exit()` / Ctrl-D")
+    if verb in ("npm", "yarn", "pnpm"):
+        words = [a for a in rest if not a.startswith("-")]
+        if words and words[0] == "run":
+            words = words[1:]
+        if words and words[0] in ("dev", "start", "serve"):
+            return ("a dev server that runs until stopped", "Ctrl-C")
+    if verb in ("nc", "netcat") and "-l" in rest:
+        return ("a listener that runs until stopped", "Ctrl-C")
+    return None
+
+
+def _at_command_position(line: str, start: int) -> bool:
+    """Is this match where a COMMAND begins, rather than mid-sentence?
+
+    `top`, `watch` and `more` are ordinary English words. Live, the prose "On
+    top of that, the DNS server..." was flagged as a full-screen program. A
+    rewrite gate that edits sentences is worse than no gate.
+    """
+    head = line[:start]
+    if not head.strip():
+        return True
+    m = _RUNNER_PREFIX_RE.match(line)
+    if m and start <= m.end():
+        return True
+    return bool(re.search(r"(?:[|;&]|&&|\|\||--|\bif\b|\bthen\b|\bdo\b)\s*$", head))
+
+
+def find_nonterminating_commands(text_out: str) -> list[dict]:
+    """Prescribed commands that will not return the operator to a prompt."""
+    hits: list[dict] = []
+    for m in re.finditer(r"```[a-z]*\n(.*?)```", text_out or "", re.S):
+        for raw in _command_lines_only(m.group(1)):   # §17.956 — not file content
+            ln = raw.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            for pat, _repl, why in (_NONTERMINATING_FIXES + _PAGER_FIXES):
+                m2 = re.search(pat, ln)
+                if m2 and _at_command_position(ln, m2.start()):
+                    hits.append({"line": ln[:120], "why": why, "fixable": True})
+                    break
+            else:
+                blocked = _blocking_program(ln)
+                if blocked:
+                    hits.append({"line": ln[:120],
+                                 "why": f"{blocked[0]} — leave it with {blocked[1]}",
+                                 "fixable": False})
+    return hits
+
+
+def repair_nonterminating_commands(text_out: str) -> tuple[str, list[str]]:
+    """Give every prescribed command a way back to the prompt."""
+    if not (text_out or "").strip():
+        return text_out, []
+    notes: list[str] = []
+    seen: set[str] = set()
+
+    def _fix_block(m: "re.Match") -> str:
+        body = m.group(2)
+        keep = set(_command_lines_only(body))     # never touch heredoc content
+        out_lines = []
+        for raw in body.splitlines():
+            ln = raw
+            if raw in keep and raw.strip() and not raw.strip().startswith("#"):
+                for pat, repl, why in (_NONTERMINATING_FIXES + _PAGER_FIXES):
+                    m3 = re.search(pat, ln)
+                    if not (m3 and _at_command_position(ln, m3.start())):
+                        continue
+                    new_ln, n = re.subn(pat, repl, ln, count=1)
+                    if n:
+                        ln = re.sub(r"\s{2,}", " ", new_ln).rstrip()
+                        if why not in seen:
+                            seen.add(why)
+                            notes.append(why)
+                        break
+            out_lines.append(ln)
+        return f"```{m.group(1)}\n" + "\n".join(out_lines) + "\n```"
+
+    out = re.sub(r"```([a-z]*)\n(.*?)```", _fix_block, text_out, flags=re.S)
+    # Blocking programs cannot be rewritten — warn instead.
+    for h in find_nonterminating_commands(out):
+        if not h["fixable"] and h["why"] not in seen:
+            seen.add(h["why"])
+            notes.append(f"`{h['line'][:60]}` starts {h['why']}")
+    return (out if out != text_out else text_out), notes
+
+
 def find_history_expansion_hazards(text_out: str) -> list[dict]:
     """Fenced blocks carrying a `!` an interactive bash would expand."""
     hits: list[dict] = []
@@ -3505,6 +3842,47 @@ def find_guess_before_look(text_out: str) -> list[dict]:
     return []               # no commands at all (prose answer) — nothing to gate
 
 
+# §17.961 — a URL inside a file the operator is WRITING is not a URL the engine
+# is prescribing.
+#
+# Live, session 613dd1df/T33 (2026-09-06 17:41 and 17:46), two cautions in a row:
+#
+#   ⚠️ repeats something already tried … (`https://\${PVE_HOST}:8006/api2/json\``)
+#   ⚠️ contains unverified URL(s) the engine could not trace to any source
+#      (`https://${PVE_HOST}:8006/api2/json`)
+#
+# That string is a JavaScript template literal in the operator's own Express
+# app. It is not an endpoint anyone can fetch, it has no provenance to trace,
+# and it "repeats" only because the same source file was written twice.
+#
+# §17.956 fixed this for COMMANDS by skipping heredoc bodies in the per-line
+# corpus. URLs escaped that fix because both URL gates extract them by regex
+# over the WHOLE text, independently of command granularity — deliberately, so
+# that a URL buried in a chained command still counts. The body of a heredoc is
+# the one place that reasoning does not hold.
+#
+# Cost of leaving it: these two banners are what the operator was reacting to
+# with "i'm confused why we are doing this again, it appears to be working, did
+# you read through the whole pasted command sequence?"
+
+
+def _text_without_heredoc_bodies(text_: str) -> str:
+    """The text with every fenced block's heredoc BODY removed.
+
+    Used only for URL extraction. Commands keep their own path through
+    `_command_corpus`/`_command_lines_only`; this is the same rule applied to
+    the two gates that read the raw text instead.
+    """
+    if not (text_ or "").strip():
+        return text_ or ""
+
+    def _strip(m: "re.Match") -> str:
+        kept = _command_lines_only(m.group(2))
+        return f"```{m.group(1)}\n" + "\n".join(kept) + "\n```"
+
+    return re.sub(r"```([a-z]*)\n(.*?)```", _strip, text_, flags=re.S)
+
+
 def find_repeated_failed(text_out: str, failed_commands: str) -> list[str]:
     """§17.882/883/906 — deterministic repeat detection: which already-failed
     commands or URLs does this new walkthrough prescribe AGAIN — exactly, as an
@@ -3530,7 +3908,10 @@ def find_repeated_failed(text_out: str, failed_commands: str) -> list[str]:
     new_cmds = _command_corpus(text_out, fenced=True)
     old_cmds = _command_corpus(failed_commands, fenced=False)
     # URLs stay matched individually and independently of command granularity.
-    new_cmds |= {u for u in _normalized_commands(text_out) if u.startswith("http")}
+    # §17.961 — URLs from a file's CONTENTS are data, not prescriptions.
+    _stripped = _text_without_heredoc_bodies(text_out)
+    _url_cmds = {u for u in _normalized_commands(_stripped) if u.startswith("http")}
+    new_cmds |= _url_cmds
     old_urls_raw = {
         u.rstrip(".,;")
         for u in _re.findall(r"https?://[^\s\"\'`\)\]]+", failed_commands or "")
@@ -3539,9 +3920,11 @@ def find_repeated_failed(text_out: str, failed_commands: str) -> list[str]:
     old_cmds |= old_urls_raw
     hits = {c for c in new_cmds if c in old_cmds}
     # §17.883 — version-masked skeleton match on URLs only.
+    # §17.961 — over commands only: a template literal in a file the operator is
+    # writing must not drag the whole write into the banner as a URL repeat.
     old_urls = {u for u in old_cmds if u.startswith("http")}
     old_skels = {_url_skeleton(u) for u in old_urls}
-    for c in new_cmds:
+    for c in (_command_corpus(_stripped, fenced=True) | _url_cmds):
         for u in _re.findall(r"https?://[^\s\"'`\)\]]+", c):
             u = u.rstrip(".,;")
             if _url_skeleton(u) in old_skels and c not in hits:
@@ -4226,7 +4609,11 @@ async def generate_fix(
     if _pending_prompt:
         logger.info("assist_fix_interactive_prompt node_key=%s kind=%s",
                     node_key, _pending_prompt.get("kind"))
-    fix_system = apply_interface_fidelity(apply_interactive_prompt(
+    _truncated = _pol.detect_truncated_paste(error_text or "")
+    if _truncated:
+        logger.warning("assist_truncated_paste node_key=%s hung=%s", node_key,
+                       _truncated.get("hung"))
+    fix_system = apply_truncated_paste(apply_interface_fidelity(apply_interactive_prompt(
       apply_recommendation(apply_location_callout(  # §17.852
         apply_screen_grounding(  # §17.758
             apply_ground_or_ask(  # §17.756
@@ -4238,7 +4625,7 @@ async def generate_fix(
                 is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
             is_decision=False, enabled=settings.assist_screen_grounding_enabled),
         is_decision=False, enabled=settings.assist_location_callout_enabled)),
-      prompt=_pending_prompt), gui=_gui_question)
+      prompt=_pending_prompt), gui=_gui_question), truncated=_truncated)
 
     async def _draw_fix(messages):
         return await chat_until_nonempty(
@@ -4285,7 +4672,8 @@ async def generate_fix(
                  if failure_streak >= 1 and (failed_commands or "").strip() else [])
         # §17.954 — warn only about a repeat the operator is told to run NOW.
         hits_ = _repeats_in_primary_action(draft, hits_)
-        novel_ = (find_novel_urls(draft, user + "\n" + (failed_commands or ""))
+        novel_ = (find_novel_urls(_text_without_heredoc_bodies(draft),
+                                  user + "\n" + (failed_commands or ""))
                   if failure_streak >= settings.assist_fix_streak_threshold else [])
         # §17.893 — banned values are banned at ANY streak.
         banned_ = find_banned_values(draft, _banned_list)
@@ -4533,8 +4921,13 @@ async def generate_fix(
     text_out, _histfix_notes = repair_history_expansion(text_out)
     # §17.960 — and it would expand `$…`/backticks straight into the file.
     text_out, _escape_notes = repair_unescaped_expansions(text_out)
+    # §17.964 — every command must return the operator to a prompt.
+    text_out, _term_notes = repair_nonterminating_commands(text_out)
+    # §17.963 — chunk last, so the pieces account for every rewrite above.
+    text_out, _chunk_notes = split_large_paste_blocks(text_out)
     _tool_notes = (list(_tool_notes) + list(_console_notes)
-                   + list(_histfix_notes) + list(_escape_notes))
+                   + list(_histfix_notes) + list(_escape_notes)
+                   + list(_term_notes) + list(_chunk_notes))
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913
