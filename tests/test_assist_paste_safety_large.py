@@ -284,3 +284,104 @@ def test_the_live_session_has_no_false_positives_left():
     assert "journalctl --no-pager -u palworld -n 50" in out
     assert any("editor" in n for n in notes)          # nano: warned, not rewritten
     assert "nano /etc/default/grub" in out
+
+
+# ── §17.966 — one copy of a file per reply ────────────────────────────────
+#
+# §17.741 mandates a leading 👉 block with the immediate action and then the
+# full walkthrough. For a one-line command that repetition is the point; for a
+# file it means the whole file twice. Live turn 1746 carried App.jsx complete in
+# both — 73 lines each, identical once indentation is ignored, 2291 vs 2715
+# bytes. The operator has to pick one, §17.963 chunks both, and §17.965 has to
+# guess which byte count the file is held to.
+
+from app.modules.assist_guide import dedupe_repeated_file_writes  # noqa: E402
+
+_BODY = [f"const item{i:02d} = {{ id: '{i}', name: 'Service number {i}' }};"
+         for i in range(20)]
+
+
+def _write(path, lines, redirect=">", indent=""):
+    body = "\n".join(indent + l for l in lines)
+    return (f'```bash\npct exec 111 -- bash -c "cat {redirect} {path}" '
+            f"<<'EOF'\n{body}\nEOF\n```")
+
+
+def test_the_indented_reprint_is_collapsed():
+    """The live shape exactly: flattened in the callout, indented below it."""
+    reply = ("## Do this next\n" + _write("/opt/a/App.jsx", _BODY)
+             + "\n\n## Fix\n" + _write("/opt/a/App.jsx", _BODY, indent="  "))
+    out, notes = dedupe_repeated_file_writes(reply)
+    assert out.count("<<'EOF'") == 1
+    assert "run it once, not twice" in out
+    assert notes and "printed twice" in notes[0]
+
+
+def test_the_first_copy_is_the_one_kept():
+    """§17.741 puts the actionable block first; that is what they paste."""
+    reply = (_write("/opt/a/App.jsx", _BODY)
+             + "\n" + _write("/opt/a/App.jsx", _BODY, indent="    "))
+    out, _ = dedupe_repeated_file_writes(out_first := reply)
+    kept = re.search(r"```bash\n(.*?)```", out, re.S).group(1)
+    assert "    const item00" not in kept          # not the indented one
+    assert out_first.index("const item00") > 0
+
+
+def test_a_short_repeated_command_is_left_alone():
+    """Repeating a one-liner is the §17.741 design working."""
+    reply = ("## Do this next\n```bash\npct exec 111 -- pm2 restart api\n```\n"
+             "## Fix\n```bash\npct exec 111 -- pm2 restart api\n```")
+    assert dedupe_repeated_file_writes(reply) == (reply, [])
+
+
+def test_chunked_appends_are_never_deduped():
+    """§17.963 emits `cat >` then N x `cat >>` for ONE file. Collapsing those
+    would silently drop most of the file."""
+    reply = (_write("/opt/a/App.jsx", _BODY[:10])
+             + "\n" + _write("/opt/a/App.jsx", _BODY[10:], redirect=">>"))
+    assert dedupe_repeated_file_writes(reply) == (reply, [])
+
+
+def test_different_paths_are_untouched():
+    reply = _write("/opt/a/App.jsx", _BODY) + "\n" + _write("/opt/a/main.jsx", _BODY)
+    assert dedupe_repeated_file_writes(reply) == (reply, [])
+
+
+def test_a_genuinely_different_second_write_survives():
+    """Same path, different content, is an edit — not a re-print."""
+    reply = (_write("/opt/a/App.jsx", _BODY)
+             + "\n" + _write("/opt/a/App.jsx", _BODY[:5] + ["// changed"]))
+    out, notes = dedupe_repeated_file_writes(reply)
+    assert out == reply and notes == []
+
+
+def test_dedupe_is_idempotent():
+    reply = _write("/opt/a/App.jsx", _BODY) + "\n" + _write("/opt/a/App.jsx", _BODY)
+    once, _ = dedupe_repeated_file_writes(reply)
+    twice, notes = dedupe_repeated_file_writes(once)
+    assert twice == once and notes == []
+
+
+def test_dedupe_runs_before_chunking():
+    """Order matters both ways: dedupe after chunking would compare `>>`
+    fragments, and chunking a duplicate doubles the operator's pastes."""
+    import inspect
+
+    from app.modules import assist_guide
+
+    for fn in (assist_guide.generate_fix, assist_guide.generate_guidance):
+        src = inspect.getsource(fn)
+        assert src.index("dedupe_repeated_file_writes") < src.index(
+            "split_large_paste_blocks"), fn.__name__
+
+
+def test_one_file_yields_one_chunked_sequence():
+    """End to end: the duplicate must not double the paste count. Live turn
+    1746 chunked into SIX pastes for one 72-line file."""
+    big = _BODY * 3                       # comfortably over the chunk threshold
+    reply = (_write("/opt/a/App.jsx", big)
+             + "\n" + _write("/opt/a/App.jsx", big, indent="  "))
+    assert len(_write("/opt/a/App.jsx", big)) > 1200
+    deduped, _ = dedupe_repeated_file_writes(reply)
+    chunked, _ = split_large_paste_blocks(deduped)
+    assert chunked.count("**Paste 1 of") == 1
