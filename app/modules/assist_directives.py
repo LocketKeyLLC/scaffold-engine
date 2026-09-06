@@ -637,3 +637,40 @@ def apply_truncated_paste(system: str, *, truncated: dict | None,
         return system
     return system + _TRUNCATED_PASTE_DIRECTIVE.format(
         evidence=(truncated.get("evidence") or "the paste is incomplete")[:200])
+
+
+# §17.965 — the file on disk is not the file the engine wrote.
+_FILE_MISMATCH_DIRECTIVE = (
+    "\n\nA FILE THIS SESSION WROTE IS THE WRONG SIZE ON DISK. {detail}\n"
+    "- This is arithmetic, not a judgement: the engine composed that file, so "
+    "the expected byte count is exact. A different number means the write did "
+    "not land whole — almost always a paste clipped by the operator's "
+    "terminal.\n"
+    "- Everything downstream of that file is therefore unexplained, not "
+    "broken: a blank page, a syntax error, a service that will not start are "
+    "all consistent with a half-written file. Do NOT debug the application, "
+    "the framework, the dependencies or the config until the file is correct.\n"
+    "- Do NOT ask the operator to investigate the symptom. Rewrite the file, "
+    "in small pieces they paste one at a time, and finish with the byte count "
+    "again.\n"
+    "- Tell them in one line why, so they know it was the paste and not "
+    "something they did."
+)
+
+
+def apply_file_mismatch(system: str, *, mismatches: list[dict] | None,
+                        enabled: bool = True) -> str:
+    """§17.965 — make a measured size difference the dominant fact of the turn.
+
+    Live (T34): `App.jsx` sat at ~1000 of 2287 bytes with `export default App;`
+    missing entirely, and the engine spent two turns on React while the answer
+    was a subtraction it had all the inputs for.
+    """
+    if not enabled or not mismatches:
+        return system
+    detail = "; ".join(
+        f"`{h['path']}` should be {h['expected']} bytes but measures "
+        f"{h['observed']}"
+        + (f" — {h['missing']} bytes missing" if h.get("short") else "")
+        for h in mismatches[:3])
+    return system + _FILE_MISMATCH_DIRECTIVE.format(detail=detail)
