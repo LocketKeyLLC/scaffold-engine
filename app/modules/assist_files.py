@@ -23,6 +23,7 @@ Nothing here calls a model. A file is the right size or it is not.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from typing import Any
@@ -74,10 +75,15 @@ def parse_file_writes(assistant_text: str) -> dict[str, dict[str, Any]]:
         nbytes = sum(len(ln.encode("utf-8")) + 1 for ln in body_lines)
         if not nbytes:
             continue
+        # §17.967 — what the DISK will hold, past the shell's escaping.
+        open_line = text[text.rfind("\n", 0, m.start()) + 1:m.end()]
+        disk_body = _as_written_to_disk(open_line, "\n".join(body_lines))
         rec = out.get(path)
         if rec and m.group("append") == ">>":
             rec["expected"] += nbytes
             rec["lines"] += len(body_lines)
+            rec["body"] = rec.get("body", "") + "\n" + disk_body
+            rec["sha"] = content_fingerprint(rec["body"])
         elif rec:
             # A SECOND `>` to the same path in one reply is the engine printing
             # the file twice, not writing it twice. Live (turn 1746): the same
@@ -88,7 +94,102 @@ def parse_file_writes(assistant_text: str) -> dict[str, dict[str, Any]]:
             logger.info("assist_file_write_duplicated path=%s first=%d second=%d",
                         path, rec["expected"], nbytes)
         else:
-            out[path] = {"expected": nbytes, "lines": len(body_lines)}
+            out[path] = {"expected": nbytes, "lines": len(body_lines),
+                         "body": disk_body,
+                         "sha": content_fingerprint(disk_body)}
+    for rec in out.values():
+        rec.pop("body", None)          # the hash is the record; the text is not
+    return out
+
+
+# §17.967 — comparing the file's CONTENT, not just its length.
+#
+# Operator: *"It needs to review the users pasted response and compare what is
+# recorded to work."*
+#
+# Live (T34, 22:41-23:01): the operator pasted the whole of `App.jsx` back from
+# `cat`. It was complete, it ended in `export default App;`, and it was
+# character-for-character what the engine had composed. The engine rewrote it
+# anyway — three times (turns 1754, 1756, 1760) — because a byte count alone
+# never arrived, and nothing else compared the paste to the record. Every one of
+# those turns was spent re-fixing a file that was already right, while the real
+# cause sat untouched in two files the engine had itself written: the backend
+# returns an object keyed by name, the frontend calls `services.find(...)` on it,
+# and `.find` is not a function on an object.
+#
+# THE ESCAPING LAYER IS THE WHOLE DIFFICULTY. What the engine emits is not what
+# lands on disk. For a heredoc nested inside `bash -c "…"` the outer double
+# quote consumes one level of backslashes first (§17.960 puts them there on
+# purpose), so the reply says
+#
+#     fetch(\`\${API_BASE}/status\`)
+#
+# and the file correctly contains
+#
+#     fetch(`${API_BASE}/status`)
+#
+# Comparing those raw reports a difference on every single write that contains a
+# template literal — which is worse than not comparing at all, because it would
+# send the engine off rewriting correct files with total confidence. Resolving
+# the escaping first, on the live pair, turns 2 spurious differences into 0.
+
+_DQUOTE_ESCAPE_RE = re.compile(r'\\([$`"\\])')
+
+
+def _heredoc_is_quote_nested(open_line: str) -> bool:
+    """Is the heredoc inside an open double-quoted string on its own line?
+
+    `bash -c "cat > f <<'EOF'`  -> one unescaped quote before `<<`  -> nested
+    `bash -c "cat > f" <<'EOF'` -> two                              -> not
+    """
+    head = open_line.split("<<", 1)[0]
+    quotes = 0
+    j = 0
+    while j < len(head):
+        if head[j] == "\\":
+            j += 2
+            continue
+        if head[j] == '"':
+            quotes += 1
+        j += 1
+    return quotes % 2 == 1
+
+
+def _as_written_to_disk(open_line: str, body: str) -> str:
+    """The bytes the file will actually hold, after the shell has had its turn."""
+    return _DQUOTE_ESCAPE_RE.sub(r"\1", body) if _heredoc_is_quote_nested(open_line) else body
+
+
+def normalize_content(text: str) -> str:
+    """Trailing whitespace and blank lines are not content differences."""
+    return "\n".join(ln.rstrip() for ln in (text or "").splitlines() if ln.strip())
+
+
+def content_fingerprint(text: str) -> str:
+    return hashlib.sha256(normalize_content(text).encode("utf-8")).hexdigest()[:16]
+
+
+def parse_file_contents(operator_text: str, known_paths) -> dict[str, str]:
+    """File bodies the operator pasted back, by path.
+
+    Reads `cat <path>` echoes — the shape the engine itself asks for. Bounded to
+    paths already in the ledger, so an unrelated `cat` cannot invent an entry.
+    """
+    out: dict[str, str] = {}
+    text = operator_text or ""
+    for path in sorted(known_paths or (), key=len, reverse=True):
+        for m in re.finditer(re.escape(path) + r'"?\s*\n', text):
+            tail = text[m.end():]
+            body: list[str] = []
+            for line in tail.splitlines():
+                # The next shell prompt ends the file.
+                if re.match(r"^[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+:.*[#$]\s", line) \
+                        or re.match(r"^root@\S+:.*#", line):
+                    break
+                body.append(line)
+            if len(body) >= 2:
+                out[path] = "\n".join(body)
+                break
     return out
 
 
@@ -108,21 +209,57 @@ def parse_file_sizes(operator_text: str) -> dict[str, int]:
 
 def merge_file_writes(current: dict | None,
                       written: dict | None = None,
-                      observed: dict | None = None) -> dict:
-    """Fold a new write and/or a new observation into the ledger."""
+                      observed: dict | None = None,
+                      contents: dict | None = None) -> dict:
+    """Fold a new write, a new size, and/or pasted-back content into the ledger."""
     merged: dict[str, dict[str, Any]] = {
         k: dict(v) for k, v in (current or {}).items() if isinstance(v, dict)
     }
     for path, rec in (written or {}).items():
-        # A fresh write supersedes the previous expectation AND its observation:
-        # the old size is no longer the thing being checked.
+        # A fresh write supersedes the previous expectation AND everything
+        # observed about the old one: the file being checked has changed.
         merged[path] = {"expected": rec.get("expected"),
                         "lines": rec.get("lines"),
-                        "observed": None}
+                        "sha": rec.get("sha"),
+                        "observed": None,
+                        "observed_sha": None}
     for path, size in (observed or {}).items():
-        merged.setdefault(path, {"expected": None, "lines": None})
+        merged.setdefault(path, {"expected": None, "lines": None, "sha": None})
         merged[path]["observed"] = int(size)
+    for path, body in (contents or {}).items():
+        merged.setdefault(path, {"expected": None, "lines": None, "sha": None})
+        merged[path]["observed_sha"] = content_fingerprint(body)
+        merged[path]["observed_lines"] = len(normalize_content(body).splitlines())
     return dict(list(merged.items())[-_MAX_TRACKED:])
+
+
+def verified_files(state: dict | None) -> list[str]:
+    """Paths whose pasted-back content matches what the engine wrote.
+
+    This is the answer to "is the file the problem?" and it is a hash compare,
+    not an opinion. A file on this list must not be rewritten again.
+    """
+    out = []
+    for path, rec in (state or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("sha") and rec.get("sha") == rec.get("observed_sha"):
+            out.append(path)
+    return out
+
+
+def find_content_mismatches(state: dict | None) -> list[dict]:
+    """Files whose pasted-back content is NOT what the engine wrote."""
+    hits = []
+    for path, rec in (state or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        sha, obs = rec.get("sha"), rec.get("observed_sha")
+        if sha and obs and sha != obs:
+            hits.append({"path": path,
+                         "expected_lines": rec.get("lines"),
+                         "observed_lines": rec.get("observed_lines")})
+    return hits
 
 
 def find_size_mismatches(state: dict | None) -> list[dict]:
@@ -157,6 +294,23 @@ def render_file_writes(state: dict | None) -> str:
              "did not land whole):"]
     for path, rec in rows[-10:]:
         exp, obs = rec["expected"], rec.get("observed")
+        # §17.967 — a content match is stronger evidence than any byte count and
+        # is stated first, because it is the fact that ends the rewrite loop.
+        if rec.get("sha") and rec.get("sha") == rec.get("observed_sha"):
+            lines.append(
+                f"- `{path}` — **VERIFIED CORRECT on disk.** The operator pasted "
+                "this file back and it matches what you wrote, exactly. Do NOT "
+                "rewrite it, do not re-send it in pieces, and do not treat it as "
+                "a suspect. Whatever symptom remains has a different cause — "
+                "look at the OTHER files and services this session set up, and "
+                "at how they agree with each other.")
+            continue
+        if rec.get("sha") and rec.get("observed_sha"):
+            lines.append(
+                f"- `{path}` — pasted back and it does NOT match what you wrote "
+                f"({rec.get('observed_lines')} lines on disk vs {rec.get('lines')} "
+                "written). Rewrite it in pieces.")
+            continue
         if not isinstance(obs, int):
             lines.append(f"- `{path}` — should be {exp} bytes (not yet checked)")
         elif obs == exp:
@@ -168,3 +322,26 @@ def render_file_writes(state: dict | None) -> str:
                 "Its contents are not what you wrote; rewrite it in pieces "
                 "before drawing any conclusion from how the program behaves.")
     return "\n".join(lines)
+
+
+def find_verified_file_rewrites(text_out: str, verified: list[str] | None) -> list[dict]:
+    """§17.967 — a draft that rewrites a file already proven correct.
+
+    Live, three turns in a row (1754, 1756, 1760) re-sent `App.jsx` after the
+    operator had pasted it back intact. Each rewrite cost a full turn, taught
+    the operator nothing, and left the real cause — a backend returning an
+    object where the frontend calls `.find` — untouched in two files the engine
+    had itself written.
+
+    Rewriting a verified file is not a judgement call the model gets to make:
+    the content matched by hash. This is the deterministic backstop behind the
+    ledger's prose, in the §17.882 tradition — prompt rules get ignored.
+    """
+    hits: list[dict] = []
+    if not verified or not (text_out or "").strip():
+        return hits
+    for path in verified:
+        # Only a WRITE counts. `cat <path>` to inspect it is entirely fine.
+        if re.search(r"\b(?:cat|tee)\s*>>?\s*\"?" + re.escape(path), text_out or ""):
+            hits.append({"path": path})
+    return hits

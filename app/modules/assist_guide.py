@@ -4675,10 +4675,12 @@ async def generate_fix(
                     node_key, _pending_prompt.get("kind"))
     _truncated = _pol.detect_truncated_paste(error_text or "")
     # §17.965 — a size the engine can check itself outranks any symptom report.
-    from app.modules.assist_files import find_size_mismatches
-    _size_bad = find_size_mismatches(
-        (environment or {}).get("file_writes")
-        if isinstance((environment or {}).get("file_writes"), dict) else {})
+    from app.modules.assist_files import (
+        find_size_mismatches, find_verified_file_rewrites, verified_files)
+    _fw_state = ((environment or {}).get("file_writes")
+                 if isinstance((environment or {}).get("file_writes"), dict) else {})
+    _size_bad = find_size_mismatches(_fw_state)
+    _verified = verified_files(_fw_state)   # §17.967
     if _size_bad:
         logger.warning("assist_file_size_mismatch node_key=%s %r", node_key, _size_bad[:2])
     if _truncated:
@@ -4745,6 +4747,14 @@ async def generate_fix(
                  if failure_streak >= 1 and (failed_commands or "").strip() else [])
         # §17.954 — warn only about a repeat the operator is told to run NOW.
         hits_ = _repeats_in_primary_action(draft, hits_)
+        # §17.967 — rewriting a file the operator has PROVEN correct is the
+        # loop this gate exists to stop. Folded into the repeat class so it
+        # rides the existing regenerate-then-warn machinery.
+        for _v in find_verified_file_rewrites(draft, _verified):
+            _msg = (f"a rewrite of {_v['path']}, which the operator already "
+                    "pasted back and which matches what you wrote")
+            if _msg not in hits_:
+                hits_.append(_msg)
         novel_ = (find_novel_urls(_text_without_heredoc_bodies(draft),
                                   user + "\n" + (failed_commands or ""))
                   if failure_streak >= settings.assist_fix_streak_threshold else [])
@@ -4805,6 +4815,18 @@ async def generate_fix(
                 len(redundant_hits),
             )
             directive = ["\n\n---\nREGENERATION NOTICE:"]
+            if _verified:  # §17.967
+                directive.append(
+                    "These files have been pasted back by the operator and match "
+                    "what you wrote, BY HASH: "
+                    + ", ".join(f"`{p}`" for p in _verified[:3])
+                    + ". They are correct on disk. Do not rewrite them, do not "
+                    "re-send them in pieces, and do not name them as the "
+                    "suspect. The symptom has another cause: check the OTHER "
+                    "artefacts this session produced against each other — the "
+                    "shape one program returns versus the shape another expects, "
+                    "the port one listens on versus the one another calls, the "
+                    "path one writes versus the one another reads.")
             if redundant_hits:  # §17.914 — you already have this
                 directive.append(
                     "You asked the operator to re-run a DISCOVERY command whose "
