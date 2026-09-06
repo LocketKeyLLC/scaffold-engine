@@ -2327,11 +2327,14 @@ async def generate_guidance(
     text_out, _escape_notes = repair_unescaped_expansions(text_out)
     # §17.964 — every command must return the operator to a prompt.
     text_out, _term_notes = repair_nonterminating_commands(text_out)
+    # §17.966 — one copy of a file per reply, before it gets chunked.
+    text_out, _dedupe_notes = dedupe_repeated_file_writes(text_out)
     # §17.963 — chunk last, so the pieces account for every rewrite above.
     text_out, _chunk_notes = split_large_paste_blocks(text_out)
     _tool_notes = (list(_tool_notes) + list(_console_notes)
                    + list(_histfix_notes) + list(_escape_notes)
-                   + list(_term_notes) + list(_chunk_notes))
+                   + list(_term_notes) + list(_dedupe_notes)
+                   + list(_chunk_notes))
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913
@@ -3205,6 +3208,66 @@ def _verify_command_for(open_line: str) -> str | None:
     if head.count('"') % 2:          # the heredoc lived inside the quotes
         head += '"'
     return head
+
+
+# §17.966 — the same file, printed twice in one reply.
+#
+# §17.741 mandates a leading `## 👉 Do this next` carrying the single immediate
+# action, and then "continue with the full walkthrough". For a one-line command
+# that repetition is the point — the operator sees it up top and again in
+# context. For a file, it means the whole file twice.
+#
+# Live (turn 1746): `App.jsx` appeared complete in the 👉 block (2291 bytes,
+# flattened) and complete again under `## Fix` (2715 bytes, indented) — 73 lines
+# each, identical once indentation is ignored. The costs compound:
+#
+#   * the operator must decide which of two blocks to paste, and they differ;
+#   * §17.963 chunks BOTH, so a 3-paste job becomes 6;
+#   * §17.965 sees two `cat >` writes for one path and has to guess which byte
+#     count to hold the file to (2287 or 2711 — one of them permanently wrong).
+#
+# Only large blocks are collapsed. Repeating a short command is the §17.741
+# design working, and stripping that would make walkthroughs harder to follow.
+
+_DEDUPE_MIN_BYTES = 400
+
+_WRITE_PATH_RE = re.compile(
+    r"""\b(?:cat|tee)\s*(?P<append>>>?)\s*"?(?P<path>(?:/|\./|~/)[^\s"'`;|&)]+)""")
+
+
+def dedupe_repeated_file_writes(text_out: str) -> tuple[str, list[str]]:
+    """Collapse a later re-print of a file already written earlier in the reply."""
+    if not (text_out or "").strip():
+        return text_out, []
+    seen: dict[tuple[str, str], bool] = {}
+    notes: list[str] = []
+
+    def _fix(m: "re.Match") -> str:
+        whole, body = m.group(0), m.group(2)
+        if len(whole) < _DEDUPE_MIN_BYTES:
+            return whole
+        parts = _heredoc_write_parts(body)
+        if not parts:
+            return whole
+        _prefix, open_line, body_lines, _term, _suffix = parts
+        pm = _WRITE_PATH_RE.search(open_line)
+        if not pm or pm.group("append") == ">>":
+            return whole          # an append is a chunk, never a duplicate
+        # Indentation is the only difference between the two live copies, so it
+        # cannot be part of the identity.
+        key = (pm.group("path"),
+               "\n".join(ln.strip() for ln in body_lines if ln.strip()))
+        if key not in seen:
+            seen[key] = True
+            return whole
+        notes.append(
+            f"removed a second full copy of `{pm.group('path')}` from this "
+            "reply — it was the same file printed twice")
+        return (f"*(the same `cat > {pm.group('path')}` block as above — "
+                "run it once, not twice.)*")
+
+    out = re.sub(r"```([a-z]*)\n(.*?)```", _fix, text_out, flags=re.S)
+    return (out, notes) if notes else (text_out, [])
 
 
 def split_large_paste_blocks(text_out: str) -> tuple[str, list[str]]:
@@ -4933,11 +4996,14 @@ async def generate_fix(
     text_out, _escape_notes = repair_unescaped_expansions(text_out)
     # §17.964 — every command must return the operator to a prompt.
     text_out, _term_notes = repair_nonterminating_commands(text_out)
+    # §17.966 — one copy of a file per reply, before it gets chunked.
+    text_out, _dedupe_notes = dedupe_repeated_file_writes(text_out)
     # §17.963 — chunk last, so the pieces account for every rewrite above.
     text_out, _chunk_notes = split_large_paste_blocks(text_out)
     _tool_notes = (list(_tool_notes) + list(_console_notes)
                    + list(_histfix_notes) + list(_escape_notes)
-                   + list(_term_notes) + list(_chunk_notes))
+                   + list(_term_notes) + list(_dedupe_notes)
+                   + list(_chunk_notes))
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913
