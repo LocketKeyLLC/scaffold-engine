@@ -3226,6 +3226,60 @@ def find_repeated_failed(text_out: str, failed_commands: str) -> list[str]:
     return sorted(hits)
 
 
+# §17.954 — a repeat that is not the IMMEDIATE action is not the engine going
+# in circles.
+#
+# Live (session 613dd1df/T31, 2026-09-06 12:09): the fix was correct. It read
+# the real template filename out of the operator's own `pvesm list local`
+# output and opened with a NEW `pct create … debian-12-standard_12.12-1_amd64
+# .tar.zst`. Its step 2 then re-listed `pct set 111 --net0 firewall=1`, which
+# had failed exactly once, for the single reason that container 111 did not
+# exist yet — the very thing step 1 creates. The banner told the operator to
+# distrust a fix that was right, and "reply 'different approach'" would have
+# thrown away the correct answer.
+#
+# §17.913 exempted idempotent lifecycle commands and §17.916 required evidence
+# the operator actually RAN it; this is the third class — a prerequisite step
+# further down a sequence whose earlier failure the same fix repairs above it.
+# The gate exists (§17.882/906) to stop the engine RE-HANDING the same
+# immediate action, so that is what it now warns about. A hit deeper in the
+# walkthrough is the fix making progress, not repeating itself.
+#
+# URLs are deliberately exempt from the demotion: a re-prescribed failing
+# endpoint is wrong wherever it appears, and §17.883's version-guess skeleton
+# match is the whole reason the URL half of this gate exists.
+
+_NEXT_ACTION_SECTION_RE = re.compile(r"##\s*👉[^\n]*\n(.*?)(?=\n##\s|\Z)", re.S)
+
+
+def _primary_action_corpus(draft: str) -> set[str]:
+    """Normalized commands from the fix's single immediate action.
+
+    The §17.741 directive mandates a leading `## 👉 Do this next` section whose
+    one fenced block is the thing to run right now; prefer it, and fall back to
+    the draft's first fenced block. An empty set means the action could not be
+    located, which the caller reads as "stay loud".
+    """
+    m = _NEXT_ACTION_SECTION_RE.search(draft or "")
+    region = m.group(1) if m else (draft or "")
+    fences = re.findall(r"```[a-z]*\n.*?```", region, re.S)
+    if not fences:
+        return set()
+    return _command_corpus(fences[0], fenced=True)
+
+
+def _repeats_in_primary_action(draft: str, hits: list[str]) -> list[str]:
+    """Keep only the repeats the operator is being told to run RIGHT NOW."""
+    if not hits:
+        return hits
+    primary = _primary_action_corpus(draft)
+    if not primary:
+        return hits
+    url_hits = {h for h in hits if "http" in h}
+    kept = {h for h in hits if "http" not in h and h in primary}
+    return sorted(kept | url_hits)
+
+
 _CONSUMING_MARKERS = (" -o ", " -O", "wget ", "| sh", "| bash", "|sh", "|bash",
                       "git clone", "dpkg -i", "apt install", "apt-get install",
                       "pip install", "sh -c", "> /", "tee /")
@@ -3896,6 +3950,8 @@ async def generate_fix(
                                    list[dict], list[dict], list[dict], list[dict]]:
         hits_ = (find_repeated_failed(draft, failed_commands)
                  if failure_streak >= 1 and (failed_commands or "").strip() else [])
+        # §17.954 — warn only about a repeat the operator is told to run NOW.
+        hits_ = _repeats_in_primary_action(draft, hits_)
         novel_ = (find_novel_urls(draft, user + "\n" + (failed_commands or ""))
                   if failure_streak >= settings.assist_fix_streak_threshold else [])
         # §17.893 — banned values are banned at ANY streak.

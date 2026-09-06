@@ -158,3 +158,185 @@ def test_confirming_commits_and_then_advances():
     assert "assist_submit" in tail
     assert "_claim_and_guide" in tail          # moves on after committing
     assert "completion_confirmed" in tail
+
+
+# ── §17.952 — the offer has to SURVIVE, not just stream once ──────────────
+#
+# Live on 2026-09-06 the offer was staged three times (T29 11:37, T29 11:40,
+# T31 12:09) and appeared in ZERO of the session's 584 turns. Staging recorded
+# THAT the engine asked; nothing recorded WHAT it asked. The SPA renders the
+# streamed bubble into `ephemeralTail` only and rebuilds the transcript from
+# `assist_turns` on every reload, so the invitation evaporated — the operator
+# read a run of fixes with no sign the engine had ever offered to take their
+# word, and forced T29 with the Done button instead.
+
+_OFFER_SID = "99999999-8888-7777-6666-555555555555"
+
+
+async def _drive_blocked_submit(**extra_patches):
+    """Drive a verify-BLOCKED submit through the real turn loop."""
+    from app.modules import assist_turn
+
+    submit_res = {"status": "step_incomplete",
+                  "success_verdict": {"outcome": "incomplete",
+                                      "reason": "no evidence JupyterLab is running"}}
+    stack = {
+        "app.modules.assist_agent.ingest_turn": AsyncMock(),
+        "app.modules.assist_decide.decide_turn": AsyncMock(return_value={
+            "action": "submit", "confidence": "high",
+            "node_key": "T29", "evidence": "installed it"}),
+        "app.routers.assist.assist_submit": AsyncMock(return_value=submit_res),
+        "app.modules.assist_agent.run_step_fix": AsyncMock(
+            return_value={"fix": "check `systemctl status jupyter`"}),
+    }
+    stack.update(extra_patches)
+
+    patches = [patch(t, new=m) for t, m in stack.items()]
+    for p in patches:
+        p.start()
+    try:
+        out = []
+        async for name, data in assist_turn.run_turn(
+            session_id=_OFFER_SID, message="all of that was downloaded",
+            command="message", node_key="T29", history=[], db=AsyncMock(),
+        ):
+            out.append((name, data))
+        return out
+    finally:
+        for p in reversed(patches):
+            p.stop()
+
+
+@pytest.mark.asyncio
+async def test_offer_is_written_to_the_transcript():
+    """The offer is a QUESTION awaiting an answer, so it must be captured like
+    every other substantive reply (§17.873) — otherwise it dies on reload."""
+    capture = AsyncMock()
+    ev = await _drive_blocked_submit(**{
+        "app.modules.assist_agent.capture_assistant_reply": capture,
+    })
+
+    answers = [d for n, d in ev if n == "assist_answer"]
+    assert "reply `confirm`" in answers[0]["text"]        # still streamed, still leads
+
+    offer_captures = [
+        c for c in capture.await_args_list
+        if "reply `confirm`" in (c.kwargs.get("content") or "")
+    ]
+    assert offer_captures, "the completion offer was never persisted to assist_turns"
+    kw = offer_captures[0].kwargs
+    assert kw["kind"] == "ask"
+    assert kw["node_key"] == "T29"
+    assert kw["session_id"] == _OFFER_SID
+    # What is persisted is EXACTLY what was streamed — a transcript that
+    # paraphrases the question the operator is answering is worse than none.
+    assert kw["content"] == answers[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stage_records_no_phantom_offer():
+    """If staging blows up the offer never reached the operator, so the
+    transcript must not claim the engine asked. Capture hangs off `else`."""
+    capture = AsyncMock()
+    ev = await _drive_blocked_submit(**{
+        "app.modules.assist_notes.stage_completion_confirm":
+            AsyncMock(side_effect=RuntimeError("db down")),
+        "app.modules.assist_agent.capture_assistant_reply": capture,
+    })
+
+    assert not [c for c in capture.await_args_list
+                if "reply `confirm`" in (c.kwargs.get("content") or "")]
+    # and the turn still completes into the §17.884 continuation fix
+    assert any("systemctl status jupyter" in d.get("text", "")
+               for n, d in ev if n == "assist_answer")
+    assert ev[-1][1]["handled"] == "submit"
+
+
+@pytest.mark.asyncio
+async def test_a_capture_failure_never_blocks_the_turn():
+    """Persistence is best-effort: a transcript write that fails must not cost
+    the operator the offer they can still see, nor the fix underneath it."""
+    ev = await _drive_blocked_submit(**{
+        "app.modules.assist_agent.capture_assistant_reply":
+            AsyncMock(side_effect=RuntimeError("write failed")),
+    })
+
+    answers = [d for n, d in ev if n == "assist_answer"]
+    assert "reply `confirm`" in answers[0]["text"]
+    assert any("systemctl status jupyter" in a["text"] for a in answers)
+    assert ev[-1][1]["handled"] == "submit"
+
+
+# ── §17.953 — the offer has to be readable at the END of the reply too ────
+
+
+@pytest.mark.asyncio
+async def test_offer_is_repeated_after_the_fix():
+    """§17.951 leads with the offer because "they read the top of the reply".
+    In a bottom-anchored chat the long fix underneath scrolls it off-screen, so
+    a one-liner closes the reply where the eye actually lands."""
+    ev = await _drive_blocked_submit(**{
+        "app.modules.assist_agent.capture_assistant_reply": AsyncMock(),
+    })
+    answers = [d["text"] for n, d in ev if n == "assist_answer"]
+
+    assert "reply `confirm`" in answers[0]           # still leads
+    assert "systemctl status jupyter" in answers[1]  # the §17.884 fix
+    assert "confirm" in answers[-1]                  # and closes
+    assert answers[-1] is not answers[0]
+    # The nudge is a one-liner, not a re-print of the whole offer.
+    assert len(answers[-1]) < len(answers[0])
+
+
+@pytest.mark.asyncio
+async def test_the_trailing_nudge_is_persisted_too():
+    capture = AsyncMock()
+    await _drive_blocked_submit(**{
+        "app.modules.assist_agent.capture_assistant_reply": capture,
+    })
+    contents = [c.kwargs.get("content") or "" for c in capture.await_args_list]
+    assert sum(1 for c in contents if "confirm" in c) >= 2, contents
+
+
+@pytest.mark.asyncio
+async def test_no_nudge_when_no_offer_was_made():
+    """A staging failure means the operator was never offered anything — the
+    reply must not close by inviting them to confirm an offer they never saw."""
+    ev = await _drive_blocked_submit(**{
+        "app.modules.assist_notes.stage_completion_confirm":
+            AsyncMock(side_effect=RuntimeError("db down")),
+        "app.modules.assist_agent.capture_assistant_reply": AsyncMock(),
+    })
+    answers = [d["text"] for n, d in ev if n == "assist_answer"]
+    assert answers, "the fix itself must still be emitted"
+    assert not any("reply `confirm`" in a for a in answers)
+
+
+# ── §17.955 — the project-complete announcement is durable ────────────────
+
+
+@pytest.mark.asyncio
+async def test_project_complete_message_is_captured():
+    """The most consequential "you are done" the engine emits, and it was
+    streamed only — so on reload the transcript ended on the last fix."""
+    from app.modules import assist_turn
+
+    capture = AsyncMock()
+    with patch("app.modules.assist_agent.get_session",
+               new=AsyncMock(return_value={"current_node_key": None,
+                                           "status": "active"})), \
+         patch("app.routers.assist.assist_next",
+               new=AsyncMock(return_value={"node_key": None,
+                                           "status": "completed"})), \
+         patch("app.modules.assist_agent.capture_assistant_reply", new=capture):
+        out = []
+        async for name, data in assist_turn._claim_and_guide(
+            "77777777-6666-5555-4444-333333333333", None, [], AsyncMock(),
+            orient=False,
+        ):
+            out.append((name, data))
+
+    answers = [d["text"] for n, d in out if n == "assist_answer"]
+    assert any("the project is complete" in a for a in answers)
+    assert any("the project is complete" in (c.kwargs.get("content") or "")
+               for c in capture.await_args_list), "completion message not persisted"

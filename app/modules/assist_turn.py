@@ -474,21 +474,46 @@ async def _run_turn_inner(
                 # instead of being asked. Staged BEFORE the fix flow so the
                 # invitation leads; they still get the help underneath it if it
                 # genuinely is not done.
+                _offer_made = False
+                _confirm_offer_text = (
+                    f"I couldn't verify this step myself — {blocked_reason}\n\n"
+                    "**If it IS done, reply `confirm`** and I'll mark it "
+                    "complete on your word and move to the next step. You "
+                    "know your machine; I only see what you paste.\n\n"
+                    "If something is still outstanding, here's where I'd "
+                    "look next:")
                 try:
                     from app.modules import assist_notes
                     await assist_notes.stage_completion_confirm(
                         session_id=session_id, node_key=nk,
                         reason=blocked_reason, db=db)
-                    yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": (
-                        f"I couldn't verify this step myself — {blocked_reason}\n\n"
-                        "**If it IS done, reply `confirm`** and I'll mark it "
-                        "complete on your word and move to the next step. You "
-                        "know your machine; I only see what you paste.\n\n"
-                        "If something is still outstanding, here's where I'd "
-                        "look next:")})
+                    yield _ev(ASSIST_ANSWER,
+                              {"kind": "ask", "text": _confirm_offer_text})
                 except Exception as exc:  # noqa: BLE001 — an offer never blocks
                     logger.warning("completion_confirm_offer_failed sid=%s err=%r",
                                    session_id, exc)
+                else:
+                    # §17.952 — the offer is a QUESTION awaiting an answer, so it
+                    # has to survive a reload like every other substantive reply
+                    # (§17.873). It did not: staging recorded THAT the engine
+                    # asked (session metadata), the transcript never recorded
+                    # WHAT it asked. The SPA renders the streamed bubble into
+                    # `ephemeralTail` only, and rebuilds from `assist_turns` on
+                    # every reload — so the invitation evaporated and the
+                    # operator was left reading a run of fixes, with no sign the
+                    # engine had ever offered to take their word. Live on
+                    # 2026-09-06: staged three times (T29 11:37, T29 11:40,
+                    # T31 12:09), present in ZERO of the session's 584 turns;
+                    # the operator gave up and forced T29 with the Done button.
+                    try:
+                        await assist_agent.capture_assistant_reply(
+                            session_id=session_id, node_key=nk, kind="ask",
+                            content=_confirm_offer_text, db=db,
+                        )
+                    except Exception:  # noqa: BLE001 — capture never blocks
+                        logger.warning(
+                            "completion_confirm_capture_failed sid=%s", session_id)
+                    _offer_made = True
                 # §17.884 — a blocked submit must NEVER dead-end. Live incident:
                 # the operator ran the discovery command the engine asked for,
                 # pasted the ground truth back, the verifier (correctly) said
@@ -506,6 +531,35 @@ async def _run_turn_inner(
                     status_text="Good progress — the step isn't finished yet, so I'm working out your next move from what you just pasted…",
                 ):
                     yield e
+                if _offer_made:
+                    # §17.953 — §17.951 put the offer FIRST because "they read
+                    # the top of the reply". True of a static reply; false of a
+                    # chat pinned to its own bottom. What actually happens: the
+                    # offer renders, then `_fix_flow` spends a minute or two on
+                    # research and drops a long fix underneath it, and the
+                    # transcript scrolls to the end of THAT. The invitation is
+                    # off-screen by the time the operator has anything to read.
+                    # Live 2026-09-06: offered three times, answered none, then
+                    # forced the step with the Done button.
+                    #
+                    # So say it at both ends. The offer still leads (that
+                    # ordering is load-bearing for anyone reading top-down) and
+                    # a one-liner now closes the reply, which is where the eye
+                    # actually lands. Same staged offer either way — this adds
+                    # no new state and no second thing to answer.
+                    _nudge = ("↩︎ Or — if this step is in fact already done on "
+                              "your machine, reply `confirm` and I'll mark it "
+                              "complete and move to the next one.")
+                    yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _nudge})
+                    try:
+                        await assist_agent.capture_assistant_reply(
+                            session_id=session_id, node_key=nk, kind="ask",
+                            content=_nudge, db=db,
+                        )
+                    except Exception:  # noqa: BLE001 — capture never blocks
+                        logger.warning(
+                            "completion_confirm_nudge_capture_failed sid=%s",
+                            session_id)
             handled["v"] = "submit"
             return
         if confident and action == "skip":
@@ -1040,7 +1094,23 @@ async def _claim_and_guide(
             # §17.889(#9) — say WHICH terminal state, not a shrug.
             st = (nxt or {}).get("status") or ""
             if st == "completed":
-                yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": "🎉 **Every step in this plan is done — the project is complete.** Open the session's Done view for the compiled summary of what you built."})
+                # §17.955 — same class as §17.952: the single most consequential
+                # "you are done" the engine ever emits, and it was streamed into
+                # `ephemeralTail` only. On any reload the transcript ended on the
+                # last fix, so the one message confirming the project was
+                # finished simply was not there.
+                _done_text = ("🎉 **Every step in this plan is done — the project "
+                              "is complete.** Open the session's Done view for the "
+                              "compiled summary of what you built.")
+                yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _done_text})
+                try:
+                    await assist_agent.capture_assistant_reply(
+                        session_id=session_id, node_key=None, kind="ask",
+                        content=_done_text, db=db,
+                    )
+                except Exception:  # noqa: BLE001 — capture never blocks
+                    logger.warning("project_complete_capture_failed sid=%s",
+                                   session_id)
             elif st == "paused":
                 yield _ev(ASSIST_TURN_STATUS, {"text": "⏸ This session is paused — say \"resume\" to pick up where you left off."})
             else:
