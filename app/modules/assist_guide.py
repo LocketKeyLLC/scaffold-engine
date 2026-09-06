@@ -2317,7 +2317,9 @@ async def generate_guidance(
     text_out, _tool_notes = repair_unavailable_tools(text_out, environment)
     # §17.924 — console blocks are typed by hand: unchain them.
     text_out, _console_notes = repair_console_commands(text_out)
-    _tool_notes = list(_tool_notes) + list(_console_notes)
+    # §17.957 — a `!` in the block is an event designator to an interactive bash.
+    text_out, _histfix_notes = repair_history_expansion(text_out)
+    _tool_notes = list(_tool_notes) + list(_console_notes) + list(_histfix_notes)
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913
@@ -2502,6 +2504,57 @@ def _is_lifecycle_command(line: str) -> bool:
     return bool(_LIFECYCLE_RE.match((line or "").strip()))
 
 
+# §17.956 — a heredoc body is the CONTENT of a file, not a list of commands.
+#
+# Live, session 613dd1df/T33 (2026-09-06 15:21-15:28), three consecutive fixes:
+#
+#   ⚠️ Caution: this fix repeats something already tried on this step that did
+#   not resolve it (`'ai-vm': 110`; `'jellyfin': 101,`)
+#
+# Those are lines of a JavaScript object literal inside
+# `cat > server.js <<'EOF' … EOF`. `_command_corpus` indexed every mutating
+# line of a fenced block individually (§17.906, correctly — that is what made
+# the gate work at all), and a file's contents came along with the commands.
+# The operator was told three times running to distrust a correct file and
+# "reply 'different approach'" while trying to write it.
+#
+# §17.954 does not help here: the heredoc IS the immediate action.
+
+_HEREDOC_START_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _command_lines_only(block: str) -> list[str]:
+    """Non-blank lines of a fenced block with heredoc BODIES removed.
+
+    The line that OPENS the heredoc is kept — it carries the real command
+    (`cat > /path <<'EOF'`). The body and its terminator are dropped. An
+    unterminated heredoc swallows the rest of the block, which is the
+    conservative direction: under-indexing costs a missed repeat, over-indexing
+    puts file content in the operator's face as a false "already tried".
+    """
+    lines = (block or "").splitlines()
+    kept: list[str] = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        i += 1
+        if not ln.strip():
+            continue
+        kept.append(ln)
+        m = _HEREDOC_START_RE.search(ln)
+        if not m:
+            continue
+        delim = m.group(2)
+        while i < len(lines):
+            body = lines[i]
+            i += 1
+            # The terminator may carry trailing shell punctuation when the
+            # heredoc is nested inside a quoted `bash -c "…"` — live: `EOF"`.
+            if body.strip().rstrip("\"'`);") == delim:
+                break
+    return kept
+
+
 def _command_corpus(text_: str, *, fenced: bool) -> set[str]:
     """Normalized commands from a walkthrough (`fenced=True`) or from a raw
     newline/blank-line separated failed-command blob (`fenced=False`).
@@ -2526,7 +2579,11 @@ def _command_corpus(text_: str, *, fenced: bool) -> set[str]:
                 _is_readonly_command(ln) or _is_lifecycle_command(ln) for ln in lines):
             out.add(whole)
         if len(lines) > 1:
-            for ln in lines:
+            # §17.956 — the text a heredoc WRITES is data, not commands. The
+            # whole-block signature above still covers the full text (so two
+            # different files written to the same path stay different actions);
+            # only the per-LINE index skips the body.
+            for ln in _command_lines_only(block):
                 if _is_readonly_command(ln) or _is_lifecycle_command(ln):
                     continue
                 norm = " ".join(ln.split())
@@ -2846,6 +2903,148 @@ _PRIVILEGED_GUEST_RE = re.compile(
     r"ufw|timedatectl|hostnamectl)\b",
     re.IGNORECASE,
 )
+
+
+# §17.957 — bash history expansion eats the command before it ever runs.
+#
+# Live, session 613dd1df/T33 (2026-09-06 15:28). The engine handed over a
+# `cat > server.js <<'EOF'` heredoc containing, from the generated Express app:
+#
+#     if (!id) return res.status(400).json({ error: 'Invalid service' });
+#
+# The operator pasted it into their INTERACTIVE bash prompt and got:
+#
+#     -bash: !id: event not found
+#
+# History expansion runs while bash READS the line, before quoting or the
+# heredoc are considered — so a quoted delimiter does not protect the body, and
+# the whole paste died. What landed on their screen instead was the tail of the
+# command interpreted as a new one (`EOF"listen(3001, …`). Three attempts, same
+# wall, and nothing in the reply told them why.
+#
+# This is not a model mistake to prompt away: `!` is ordinary in JavaScript,
+# Python, JSON and shell tests, and any file the engine writes may contain it.
+# The remedy is one line, harmless, and belongs in the block the operator
+# copies — `set +H` turns history expansion off for their shell.
+#
+# Detection is deliberately loose in one direction and tight in the other: only
+# a `!` that bash would actually read as an event designator counts (`!=`, `!)`
+# and a trailing `!` are all inert), single-quoted spans are respected per line
+# the way bash reads them, and an already-prefixed block is left alone.
+
+_HISTORY_EVENT_TRIGGER = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-!?#{^"
+
+
+def _line_has_history_event(line: str) -> str | None:
+    """The first `!` on this line bash would expand, or None."""
+    in_single = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and not in_single:
+            i += 2                      # \! is literal inside double quotes
+            continue
+        if ch == "'":
+            in_single = not in_single
+            i += 1
+            continue
+        if ch == "!" and not in_single and i + 1 < len(line):
+            if line[i + 1] in _HISTORY_EVENT_TRIGGER:
+                return line[i:i + 12]
+        i += 1
+    return None
+
+
+def _history_scannable_lines(block: str) -> list[str]:
+    """Lines of a block that an interactive bash reads as COMMAND text.
+
+    The distinction decides this whole gate, and it is not the obvious one.
+    Measured under a pty:
+
+      * `cat > f <<'EOF'` … `EOF` — a real heredoc to the outer shell. Its body
+        is NOT history-expanded. `x !id y` passes through untouched.
+      * `bash -c "cat > f <<'EOF'` … `EOF"` — the `<<'EOF'` is INSIDE an open
+        double quote, so the outer shell never opens a heredoc at all; it is
+        reading a multi-line quoted string, and every continuation line goes
+        through history expansion. This is the live T33 construct, and it
+        reproduces the operator's `bash: !id: event not found` exactly.
+
+    So a heredoc body is skipped only when the heredoc genuinely belongs to the
+    outer shell — i.e. its `<<` was not itself inside quotes.
+    """
+    lines = (block or "").splitlines()
+    out: list[str] = []
+    in_s = in_d = False
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        i += 1
+        out.append(ln)
+        delim = None
+        j = 0
+        while j < len(ln):
+            c = ln[j]
+            if c == "\\":
+                j += 2
+                continue
+            if c == "'" and not in_d:
+                in_s = not in_s
+            elif c == '"' and not in_s:
+                in_d = not in_d
+            elif not in_s and not in_d and ln.startswith("<<", j):
+                m = _HEREDOC_START_RE.match(ln, j)
+                if m:
+                    delim = m.group(2)
+                    j = m.end()
+                    continue
+            j += 1
+        if delim and not in_s and not in_d:
+            while i < len(lines):                 # a true heredoc: body is safe
+                body = lines[i]
+                i += 1
+                if body.strip().rstrip("\"'`);") == delim:
+                    out.append(body)
+                    break
+    return out
+
+
+def find_history_expansion_hazards(text_out: str) -> list[dict]:
+    """Fenced blocks carrying a `!` an interactive bash would expand."""
+    hits: list[dict] = []
+    for m in re.finditer(r"```[a-z]*\n(.*?)```", text_out or "", re.S):
+        for raw in _history_scannable_lines(m.group(1)):
+            tok = _line_has_history_event(raw)
+            if tok:
+                hits.append({"line": " ".join(raw.split())[:120], "token": tok})
+                break
+    return hits
+
+
+def repair_history_expansion(text_out: str) -> tuple[str, list[str]]:
+    """Prefix `set +H` to any fenced block bash would mangle on paste."""
+    if not (text_out or "").strip():
+        return text_out, []
+    repaired = 0
+
+    def _fix(m: "re.Match") -> str:
+        nonlocal repaired
+        body = m.group(2)
+        if not any(_line_has_history_event(ln)
+                   for ln in _history_scannable_lines(body)):
+            return m.group(0)
+        if body.lstrip().startswith("set +H"):
+            return m.group(0)
+        repaired += 1
+        return f"```{m.group(1)}\nset +H\n{body}```"
+
+    out = re.sub(r"```([a-z]*)\n(.*?)```", _fix, text_out, flags=re.S)
+    if not repaired:
+        return text_out, []
+    return out, [
+        "prefixed `set +H` because this block contains `!`, which an "
+        "interactive bash would otherwise read as a history reference "
+        "(`event not found`) before the command ever runs"
+    ]
 
 
 def repair_console_commands(text_out: str) -> tuple[str, list[str]]:
@@ -4196,7 +4395,9 @@ async def generate_fix(
     text_out, _tool_notes = repair_unavailable_tools(text_out, environment)
     # §17.924 — console blocks are typed by hand: unchain them.
     text_out, _console_notes = repair_console_commands(text_out)
-    _tool_notes = list(_tool_notes) + list(_console_notes)
+    # §17.957 — a `!` in the block is an event designator to an interactive bash.
+    text_out, _histfix_notes = repair_history_expansion(text_out)
+    _tool_notes = list(_tool_notes) + list(_console_notes) + list(_histfix_notes)
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913
