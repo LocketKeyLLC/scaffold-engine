@@ -1161,6 +1161,11 @@ async def run_step_research(
     if (res.get("answer") or "").strip():
         _fixed, _notes = assist_guide.repair_unavailable_tools(
             res["answer"], environment)
+        # §17.957/960 — the ask path hands over file-writing heredocs too, and
+        # it had only two of the four paste repairs the guide/fix paths get.
+        _fixed, _hx = assist_guide.repair_history_expansion(_fixed)
+        _fixed, _esc = assist_guide.repair_unescaped_expansions(_fixed)
+        _notes = list(_notes) + list(_hx) + list(_esc)
         _shell = assist_guide.find_shell_unsafe_commands(_fixed)
         if _shell:
             logger.warning(

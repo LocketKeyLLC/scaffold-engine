@@ -534,3 +534,70 @@ def apply_plan_authority(system: str, *, enabled: bool = True) -> str:
     if not enabled:
         return system
     return system + _PLAN_AUTHORITY_DIRECTIVE
+
+
+# §17.958 — a command that stops and waits is not a command that failed.
+_INTERACTIVE_PROMPT_DIRECTIVE = (
+    "\n\nTHE OPERATOR IS SITTING AT AN INTERACTIVE PROMPT RIGHT NOW. Their last "
+    "message shows a command that STOPPED and is waiting for input — it has not "
+    "failed and it has not finished.\n"
+    "- Do NOT re-issue that command, or any variation of it. They are already "
+    "inside it; running it again would abandon the run they are in and start "
+    "over.\n"
+    "- Your immediate action is a KEYSTROKE, not a shell command. Lead with "
+    "exactly what to press.\n"
+    "- The prompt in front of them is {how}\n"
+    "- If you cannot tell from their paste which option is correct, say which "
+    "one you recommend and why, in one line. Do not list every option.\n"
+    "- Only after the prompt is answered does a shell command make sense again."
+)
+
+
+def apply_interactive_prompt(system: str, *, prompt: dict | None,
+                             enabled: bool = True) -> str:
+    """§17.958 — steer the reply to keystrokes while a prompt is pending.
+
+    Live: an arrow-key menu answered with "simply type `eslint` and press
+    Enter", alongside an instruction to re-run the command they were already
+    halfway through. The keystroke advice is computed deterministically from
+    the prompt KIND, so the model is told the right keys rather than guessing.
+    """
+    if not enabled or not prompt:
+        return system
+    return system + _INTERACTIVE_PROMPT_DIRECTIVE.format(
+        how=prompt.get("how") or "a prompt waiting for input.")
+
+
+# §17.959 — answer the question in the interface it was asked about.
+_INTERFACE_FIDELITY_DIRECTIVE = (
+    "\n\nTHE OPERATOR ASKED ABOUT A GRAPHICAL INTERFACE. Answer it THERE, in "
+    "that interface, before anything else.\n"
+    "- Give the exact navigation path, naming each thing they click in order "
+    "(e.g. `Datacenter` → `Firewall` → `Security Group` → `Add`).\n"
+    "- Name EVERY field on the screen they must fill or change, say what to put "
+    "in each, and say plainly which of the remaining options to leave alone — "
+    "'there are far more options than you are telling me about' is the "
+    "complaint this rule exists to answer.\n"
+    "- Do NOT substitute a command-line workaround for the answer, and do not "
+    "tell them to skip the interface because it is confusing. If you believe "
+    "the CLI or a config file is the better route, ANSWER THE GUI QUESTION "
+    "FIRST, completely, and then offer the alternative as a choice they can "
+    "make.\n"
+    "- If you genuinely do not know the current layout of that screen, say so "
+    "and ask them to paste or describe what they see. That is a real answer; "
+    "redirecting them to a different interface is not."
+)
+
+
+def apply_interface_fidelity(system: str, *, gui: bool,
+                             enabled: bool = True) -> str:
+    """§17.959 — a GUI question gets a GUI answer.
+
+    Live: *"I need a better explanation on implementing the firewall in the web
+    browser… not enough context"* was answered with "the Web UI is confusing,
+    skip the security groups for now" plus a `pct start`. The CLI may be the
+    better route; declining to answer is still declining to answer.
+    """
+    if not enabled or not gui:
+        return system
+    return system + _INTERFACE_FIDELITY_DIRECTIVE

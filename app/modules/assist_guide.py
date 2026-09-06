@@ -193,6 +193,8 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     apply_ground_or_ask,
     apply_screen_grounding,
     apply_location_callout,
+    apply_interactive_prompt,  # §17.958
+    apply_interface_fidelity,  # §17.959
     apply_recommendation,  # §17.903
     promote_inline_commands,  # §17.897
     strip_operator_meta_preamble,  # §17.908
@@ -2319,7 +2321,10 @@ async def generate_guidance(
     text_out, _console_notes = repair_console_commands(text_out)
     # §17.957 — a `!` in the block is an event designator to an interactive bash.
     text_out, _histfix_notes = repair_history_expansion(text_out)
-    _tool_notes = list(_tool_notes) + list(_console_notes) + list(_histfix_notes)
+    # §17.960 — and it would expand `$…`/backticks straight into the file.
+    text_out, _escape_notes = repair_unescaped_expansions(text_out)
+    _tool_notes = (list(_tool_notes) + list(_console_notes)
+                   + list(_histfix_notes) + list(_escape_notes))
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913
@@ -3006,6 +3011,125 @@ def _history_scannable_lines(block: str) -> list[str]:
                     out.append(body)
                     break
     return out
+
+
+# §17.960 — the same nested construct corrupts the file SILENTLY.
+#
+# `bash -c "cat > f <<'EOF' … EOF"` puts the heredoc inside an open double
+# quote, so the OUTER shell expands `$…` and backticks before the inner shell
+# ever sees them — and a quoted `<<'EOF'` delimiter cannot protect what has
+# already been substituted. Measured under a pty, a file meant to contain
+#
+#     const home = ${HOME};
+#     const t = `date`;
+#
+# was written as `const home = /home/aedefruscio;` and
+# `const t = Sun Sep  6 12:49:04 PM EDT 2026;`. No error, no warning, a broken
+# file, and a diagnosis loop that cannot see why.
+#
+# The model DOES usually escape these (live T33 got every `\$` and `` \` ``
+# right), which is the problem: it is one omission away from silent corruption
+# every time, and the failure surfaces as mystery JavaScript errors rather than
+# as a shell error. So escape it in code instead of hoping.
+#
+# Only lines that BEGIN inside an open double quote are touched — the command
+# line itself is left exactly as written, and a true outer-level heredoc (which
+# needs no escaping at all) is never in scope.
+
+
+def _dquote_continuation_lines(block: str) -> set[int]:
+    """Indexes of lines that begin inside an open double-quoted string."""
+    inside: set[int] = set()
+    in_s = in_d = False
+    for idx, ln in enumerate(block.splitlines()):
+        if in_d and not in_s:
+            inside.add(idx)
+        j = 0
+        while j < len(ln):
+            c = ln[j]
+            if c == "\\":
+                j += 2
+                continue
+            if c == "'" and not in_d:
+                in_s = not in_s
+            elif c == '"' and not in_s:
+                in_d = not in_d
+            j += 1
+    return inside
+
+
+def _escape_expansions(line: str) -> tuple[str, int]:
+    """Backslash-escape `$` and backticks the outer shell would act on."""
+    out: list[str] = []
+    fixed = 0
+    j = 0
+    while j < len(line):
+        c = line[j]
+        if c == "\\" and j + 1 < len(line):
+            out.append(line[j:j + 2])
+            j += 2
+            continue
+        if c in "$`":
+            # A lone `$` before whitespace or end-of-line is inert to the shell.
+            if c == "$" and (j + 1 >= len(line) or line[j + 1] in " \t\"'"):
+                out.append(c)
+                j += 1
+                continue
+            out.append("\\" + c)
+            fixed += 1
+            j += 1
+            continue
+        out.append(c)
+        j += 1
+    return "".join(out), fixed
+
+
+def find_unescaped_expansions(text_out: str) -> list[dict]:
+    """Heredoc lines the outer double quote would expand before the file lands."""
+    hits: list[dict] = []
+    for m in re.finditer(r"```[a-z]*\n(.*?)```", text_out or "", re.S):
+        body = m.group(1)
+        lines = body.splitlines()
+        for idx in sorted(_dquote_continuation_lines(body)):
+            _, n = _escape_expansions(lines[idx])
+            if n:
+                hits.append({"line": " ".join(lines[idx].split())[:120], "count": n})
+                break
+    return hits
+
+
+def repair_unescaped_expansions(text_out: str) -> tuple[str, list[str]]:
+    """Escape what the outer shell would otherwise substitute into the file."""
+    if not (text_out or "").strip():
+        return text_out, []
+    total = 0
+
+    def _fix(m: "re.Match") -> str:
+        nonlocal total
+        body = m.group(2)
+        lines = body.splitlines(keepends=True)
+        targets = _dquote_continuation_lines(body)
+        if not targets:
+            return m.group(0)
+        out: list[str] = []
+        for idx, raw in enumerate(lines):
+            if idx not in targets:
+                out.append(raw)
+                continue
+            stripped = raw.rstrip("\n")
+            tail = raw[len(stripped):]
+            fixed, n = _escape_expansions(stripped)
+            total += n
+            out.append(fixed + tail)
+        return f"```{m.group(1)}\n{''.join(out)}```"
+
+    out_text = re.sub(r"```([a-z]*)\n(.*?)```", _fix, text_out, flags=re.S)
+    if not total:
+        return text_out, []
+    return out_text, [
+        f"escaped {total} `$`/backtick character(s) inside a quoted heredoc so "
+        "the outer shell writes them to the file instead of substituting them"
+    ]
 
 
 def find_history_expansion_hazards(text_out: str) -> list[dict]:
@@ -4094,7 +4218,16 @@ async def generate_fix(
     # §17.903 — the fix path also carries the answer-and-lean rule: the blocked
     # flow routes through here, and a blocked operator asking "should we start
     # over?" needs a recommendation, not a balanced menu.
-    fix_system = apply_recommendation(apply_location_callout(  # §17.852
+    # §17.958/959 — the fix path receives operator pastes too, so a stopped
+    # command or a GUI question can arrive here as easily as on the ask path.
+    from app.modules import assist_policy as _pol
+    _pending_prompt = _pol.detect_interactive_prompt(error_text or "")
+    _gui_question = _pol.looks_like_gui_question(error_text or "")
+    if _pending_prompt:
+        logger.info("assist_fix_interactive_prompt node_key=%s kind=%s",
+                    node_key, _pending_prompt.get("kind"))
+    fix_system = apply_interface_fidelity(apply_interactive_prompt(
+      apply_recommendation(apply_location_callout(  # §17.852
         apply_screen_grounding(  # §17.758
             apply_ground_or_ask(  # §17.756
                 apply_problem_solving(  # §17.742
@@ -4104,7 +4237,8 @@ async def generate_fix(
                     enabled=settings.assist_problem_solving_enabled),
                 is_decision=False, enabled=settings.assist_ground_or_ask_enabled),
             is_decision=False, enabled=settings.assist_screen_grounding_enabled),
-        is_decision=False, enabled=settings.assist_location_callout_enabled))
+        is_decision=False, enabled=settings.assist_location_callout_enabled)),
+      prompt=_pending_prompt), gui=_gui_question)
 
     async def _draw_fix(messages):
         return await chat_until_nonempty(
@@ -4397,7 +4531,10 @@ async def generate_fix(
     text_out, _console_notes = repair_console_commands(text_out)
     # §17.957 — a `!` in the block is an event designator to an interactive bash.
     text_out, _histfix_notes = repair_history_expansion(text_out)
-    _tool_notes = list(_tool_notes) + list(_console_notes) + list(_histfix_notes)
+    # §17.960 — and it would expand `$…`/backticks straight into the file.
+    text_out, _escape_notes = repair_unescaped_expansions(text_out)
+    _tool_notes = (list(_tool_notes) + list(_console_notes)
+                   + list(_histfix_notes) + list(_escape_notes))
     text_out = strip_operator_meta_preamble(text_out)  # §17.908
     text_out = promote_inline_commands(text_out)
     text_out += unavailable_tools_note(_tool_notes)  # §17.913
