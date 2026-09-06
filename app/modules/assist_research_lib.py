@@ -24,6 +24,7 @@ from app.modules.assist_directives import (  # §17.897 — full output contract
     apply_ground_or_ask,
     apply_interactive_prompt,  # §17.958
     apply_interface_fidelity,  # §17.959
+    apply_truncated_paste,  # §17.962
     apply_location_callout,
     apply_next_callout,
     apply_problem_solving,
@@ -501,6 +502,7 @@ async def research_one(
         from app.modules import assist_policy as _pol
         _pending_prompt = _pol.detect_interactive_prompt(question)
         _gui_question = _pol.looks_like_gui_question(question)
+        _truncated = _pol.detect_truncated_paste(question)   # §17.962
         if _pending_prompt:
             logger.info("assist_interactive_prompt_detected node_key=%s kind=%s",
                         node_key, _pending_prompt.get("kind"))
@@ -527,7 +529,8 @@ async def research_one(
                 # both live failures were on THIS path. A pending interactive
                 # prompt makes the immediate action a keystroke, and a question
                 # asked about the web UI has to be answered about the web UI.
-                {"role": "system", "content": apply_interface_fidelity(
+                {"role": "system", "content": apply_truncated_paste(
+                  apply_interface_fidelity(
                   apply_interactive_prompt(
                     apply_recommendation(
                       apply_location_callout(  # §17.852
@@ -543,7 +546,7 @@ async def research_one(
                             is_decision=False, enabled=settings.assist_screen_grounding_enabled),
                         is_decision=False, enabled=settings.assist_location_callout_enabled)),
                     prompt=_pending_prompt),
-                  gui=_gui_question)},
+                  gui=_gui_question), truncated=_truncated)},
                 {"role": "user", "content": (
                     f"{ctx_block}"
                     f"Question: {question}\n\n"

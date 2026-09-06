@@ -821,3 +821,76 @@ def answer_dodges_the_interface(answer: str, question: str) -> bool:
     if not looks_like_gui_question(question) or not (answer or "").strip():
         return False
     return not _GUI_NAV_RE.search(answer)
+
+
+# ── §17.962 — the paste never made it into the shell intact ───────────────
+#
+# Live, session 613dd1df, T34 at 17:56 and again at 19:20 — byte-identical
+# corruption both times, at the tail of a ~3.6 KB heredoc:
+#
+#     ...>Loading Lab StaEOFort default App;>ton onClick={() => handlePower(
+#
+# Three fragments spliced together: line 48 cut at "Loading Lab Sta", then the
+# terminator `EOF`, then the tail of "export default App;", then part of a
+# `<button onClick=` line. The engine's own output was CLEAN — verified, lines
+# 48 and 77 intact — so this happened in the operator's terminal on the way in.
+# Both pastes also open with `^C`: they had to interrupt a hung shell.
+#
+# The consequence is worse than a failed command, because nothing reports an
+# error: `App.jsx` was written CORRUPT, the page came up blank, and the engine
+# spent the next turns debugging React against a source file that was garbage.
+#
+# A mangled paste also means the command never ran as written — so under
+# §17.916's rule ("already TRIED must mean the OPERATOR RAN IT") the attempt
+# cannot count as tried, and re-issuing the same write is the correct fix
+# rather than a repeat.
+
+_TRUNCATED_PASTE_RE = re.compile(
+    r"[A-Za-z0-9_)}\]'\"]\s?"
+    r"(?:EOF|EOT|XEOF|PYEOF|INNER_EOF|HEREDOC|SCRIPT)"
+    r"\s?[A-Za-z0-9_({\[<]"
+)
+_ABORTED_PASTE_RE = re.compile(r"(?:^|\n)\s*\^C")
+
+
+# The operator's description of the symptom: "the one command left the user in
+# what appeared to be a program requiring the ^C." That is the SECOND half of
+# the same failure and worth detecting on its own. When the paste is clipped,
+# the terminator never arrives on a line of its own, so bash stays inside the
+# heredoc at its `>` continuation prompt — no error, no exit, just a shell that
+# looks hung. Ctrl-C is the only way out, and it leaves the file half-written.
+_CONTINUATION_PROMPT_RE = re.compile(r"(?:^|\n)>\s?\S", re.MULTILINE)
+
+
+def detect_truncated_paste(text: str) -> dict | None:
+    """Did the operator's terminal mangle the paste on the way in?
+
+    Requires a heredoc somewhere in the text before firing — every signature
+    here is only meaningful when a delimiter was in play. Any ONE of three is
+    enough, because they are the same event seen from different angles:
+
+    * the delimiter glued INTO a word (`StatuEOFort`) — the clip itself;
+    * a `^C` — the operator breaking out of the shell it left hanging;
+    * a run of `>` continuation prompts — the hang, still in progress.
+
+    Returns ``{"evidence", "aborted", "hung"}`` or None.
+    """
+    if not (text or "").strip() or "<<" not in text:
+        return None
+    spliced = _TRUNCATED_PASTE_RE.search(text)
+    aborted = bool(_ABORTED_PASTE_RE.search(text))
+    # Two or more: one `>` line is ordinary output (`> npx`, diff context).
+    hung = len(_CONTINUATION_PROMPT_RE.findall(text)) >= 2
+    if not (spliced or aborted or hung):
+        return None
+    if spliced:
+        evidence = text[max(0, spliced.start() - 40):spliced.end() + 40]
+    elif aborted:
+        evidence = "the paste was interrupted with Ctrl-C"
+    else:
+        evidence = "the shell was left at its `>` heredoc continuation prompt"
+    return {
+        "evidence": evidence.replace("\n", " ").strip(),
+        "aborted": aborted,
+        "hung": hung or aborted,
+    }

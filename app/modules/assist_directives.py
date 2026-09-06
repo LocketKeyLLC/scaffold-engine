@@ -601,3 +601,39 @@ def apply_interface_fidelity(system: str, *, gui: bool,
     if not enabled or not gui:
         return system
     return system + _INTERFACE_FIDELITY_DIRECTIVE
+
+
+# §17.962 — the paste was clipped on the way into the shell.
+_TRUNCATED_PASTE_DIRECTIVE = (
+    "\n\nTHE OPERATOR'S LAST PASTE WAS TRUNCATED BY THEIR TERMINAL — not by "
+    "anything wrong with the command. Evidence: {evidence}\n"
+    "- The heredoc terminator never arrived on a line of its own, so the shell "
+    "stayed inside the heredoc at its `>` continuation prompt. That is why it "
+    "looked like a hung program and needed Ctrl-C.\n"
+    "- The file on disk is therefore INCOMPLETE or EMPTY. Any symptom "
+    "downstream of it — a blank page, a parse error, a service that will not "
+    "start — is explained by that, and debugging the application instead is "
+    "chasing a ghost.\n"
+    "- Do NOT treat the command as wrong and do NOT switch approach. It was "
+    "never executed as written.\n"
+    "- Your next action is to have them CHECK the file (a byte count or the "
+    "first and last lines), then re-send the write in SMALL pieces they paste "
+    "one at a time. Never re-send the whole file as one block.\n"
+    "- Say plainly, in one line, that their terminal clipped the paste, so they "
+    "are not left thinking they mistyped something."
+)
+
+
+def apply_truncated_paste(system: str, *, truncated: dict | None,
+                          enabled: bool = True) -> str:
+    """§17.962 — name the real failure instead of debugging its shadow.
+
+    Live: a ~3.6 KB heredoc arrived spliced, `App.jsx` was written corrupt, the
+    page came up blank, and the following turns debugged React against garbage
+    while the operator asked "did you read through the whole pasted command
+    sequence?".
+    """
+    if not enabled or not truncated:
+        return system
+    return system + _TRUNCATED_PASTE_DIRECTIVE.format(
+        evidence=(truncated.get("evidence") or "the paste is incomplete")[:200])
