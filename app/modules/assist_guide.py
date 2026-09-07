@@ -212,6 +212,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
 # re-exported so assist_guide.<NAME> and the external callers keep resolving.
 from app.modules.assist_render import (  # noqa: F401,E402
     render_environment_block,
+    render_research_grounding,  # §17.975
     render_facts_block,
     render_operator_notes_block,
     _operator_reset_intent,
@@ -2134,7 +2135,7 @@ async def generate_guidance(
             # actual system so a DECISION step's options are system-specific, not
             # a generic textbook list. render_environment_block folds in the
             # §17.709 facts ledger; "" when unknown (fail-soft, generic queries).
-            environment_block=render_environment_block(environment),
+            environment_block=render_research_grounding(environment),  # §17.975
             # §17.912 — the guide path is the one that loses retrieval when the
             # query generator declines on a confident-sounding step.
             floor_when_empty=True,
@@ -4485,6 +4486,7 @@ async def generate_fix(
     failed_commands: Optional[str] = None,
     prescribed_commands: Optional[str] = None,  # §17.898
     recent_replies: Optional[list[str]] = None,  # §17.925
+    hypotheses: Optional[dict] = None,  # §17.973
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -4512,8 +4514,31 @@ async def generate_fix(
         max_q = settings.assist_guide_max_research_queries
         if escalated:
             max_q = max(3, max_q)
+        # §17.974 — research the REMAINING space, not the same symptom again.
+        #
+        # Verified before writing this: the prepass was fed the step prompt plus
+        # the operator's latest error, and — only once escalated — a generic
+        # "previous fixes did not resolve it". It never named WHICH causes had
+        # been eliminated, so every turn re-grounded on the same symptom and the
+        # model kept drawing from the same well. That is why T34 re-diagnosed
+        # "App.jsx is corrupted" four times: the research behind each of those
+        # fixes was asking the same question.
+        #
+        # §17.973 now knows exactly what is closed. Naming it here is the whole
+        # connection — the queries are generated from this text.
+        _elim = list((hypotheses or {}).get("eliminated") or [])
+        _elim_block = ""
+        if _elim:
+            _elim_block = (
+                "\n\nCauses ALREADY tested on this step and eliminated — do NOT "
+                "research these again, and do not look for variations of them:\n"
+                + "\n".join(f"- {d}" for d in _elim[-8:])
+                + "\nSearch for causes that are NOT in that list, including ones "
+                  "UPSTREAM of this step and ones in the files or services this "
+                  "session itself created.")
         sources = await _research_prepass(
             task_text=f"{ctx.base_prompt}\n\nOperator hit this error:\n{error_text}"
+                      + _elim_block
                       + ("\n\n(Note: this is a REPEATED failure — previous fixes did "
                          "not resolve it; look up the current OFFICIAL method, not "
                          "variations of the failing one.)" if escalated else ""),
@@ -4522,6 +4547,12 @@ async def generate_fix(
             max_queries=max_q,
             node_key=node_key,
             domain=domain,
+            # §17.975 — the fix path had NO environment grounding. §17.771 gave
+            # it to guide/decision and §17.854 restored it on the stream path;
+            # this call was never included, so every troubleshooting query was
+            # generated blind to the operator's actual system — on the one path
+            # that only runs when something is already wrong.
+            environment_block=render_research_grounding(environment),
             deep=True,  # §17.500 — troubleshooting wants real doc content, not snippets
         )
         # §17.882 — one DETERMINISTIC error-derived query, always. The
@@ -4536,6 +4567,17 @@ async def generate_fix(
                 ))
         except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
             logger.debug("assist_fix_error_query_failed: %s", exc)
+        # §17.974b — a durable record of what this fix actually researched.
+        # `guidance_meta.research_sources` is returned by this function and then
+        # dropped: the fix caller never persists it, and `assist_steps.
+        # guidance_meta` holds the GUIDE's sources (empty `[]` on T34). So the
+        # 54 fix turns in this session left no trace of what any of them looked
+        # up — §17.909's own triage instruction, "read the actual query", had
+        # nothing to read. Logged, so it is greppable per node.
+        logger.info(
+            "assist_fix_research node_key=%s queries=%r eliminated_known=%d",
+            node_key, [s.get("query") for s in sources][:6], len(_elim),
+        )
 
     parts = [ctx.assembled_prompt]
     if job_digest and job_digest.strip():   # §17.653 — project-wide context
@@ -4660,6 +4702,14 @@ async def generate_fix(
             "playbook, or the operator's own output.\n\n```\n"
             + failed_commands.strip()[:3000] + "\n```"
         )
+    # §17.973 — what this step has already eliminated, and the demand to name
+    # what is left. Placed last in the user prompt so it is the final constraint
+    # read before the model writes its Diagnosis.
+    from app.modules.assist_hypotheses import (
+        find_retested_hypothesis, render_tested_hypotheses)
+    _hyp_block = render_tested_hypotheses(hypotheses)
+    if _hyp_block:
+        parts.append(_hyp_block)
     parts.append(_FIX_USER_TRAILER)
     user = "\n\n".join(parts)
 
@@ -4753,6 +4803,14 @@ async def generate_fix(
                  if failure_streak >= 1 and (failed_commands or "").strip() else [])
         # §17.954 — warn only about a repeat the operator is told to run NOW.
         hits_ = _repeats_in_primary_action(draft, hits_)
+        # §17.973 — re-diagnosing a cause this step already eliminated. Same
+        # class of loop, one level up from the command: T34 re-diagnosed
+        # "App.jsx is corrupted" three times after ruling it out.
+        for _h in find_retested_hypothesis(draft, hypotheses):
+            _hm = (f"a cause already tested and eliminated on this step "
+                   f"({_h['previous'][:90]})")
+            if _hm not in hits_:
+                hits_.append(_hm)
         # §17.967 — rewriting a file the operator has PROVEN correct is the
         # loop this gate exists to stop. Folded into the repeat class so it
         # rides the existing regenerate-then-warn machinery.
@@ -5647,7 +5705,7 @@ async def generate_guidance_stream(
             # environment grounding the non-stream path passes, so a streamed
             # DECISION step (the SPA path) researched generic textbook options
             # instead of system-specific ones. Restored to parity.
-            environment_block=render_environment_block(environment),
+            environment_block=render_research_grounding(environment),  # §17.975
         )
 
     system = apply_verbosity(

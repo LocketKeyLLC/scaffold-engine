@@ -1870,9 +1870,33 @@ async def run_step_fix(
     except Exception as e:  # noqa: BLE001 — steering is never a blocker
         logger.warning("assist_recent_replies_failed session_id=%s err=%r",
                        session_id, e)
+    # §17.973 — every cause this step has already tested and eliminated. Derived
+    # from the turns on read (no new capture, so it cannot drift), because the
+    # engine states each hypothesis under `## Diagnosis` and then forgets it:
+    # T34 spent 11 fix turns re-diagnosing "App.jsx is corrupted" four separate
+    # times, twice AFTER concluding the file was complete and correct.
+    hypotheses: dict = {"eliminated": [], "current": ""}
+    try:
+        from app.modules.assist_hypotheses import harvest
+        _hrows = (await db.execute(
+            text("""
+                SELECT content FROM assist_turns
+                 WHERE session_id = :sid AND node_key = :nk
+                   AND role = 'assistant' AND kind = 'fix'
+                 ORDER BY created_at ASC, id ASC LIMIT 40
+            """),
+            {"sid": session_id, "nk": nk},
+        )).mappings().all()
+        hypotheses = harvest([r.get("content") or "" for r in _hrows])
+        if hypotheses["eliminated"]:
+            logger.info("assist_hypotheses node_key=%s eliminated=%d",
+                        nk, len(hypotheses["eliminated"]))
+    except Exception as e:  # noqa: BLE001 — a ledger is never a blocker
+        logger.warning("assist_hypotheses_failed session_id=%s err=%r", session_id, e)
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
+        hypotheses=hypotheses,  # §17.973
         research=research,
         environment=mem.environment,
         failure_streak=streak,
@@ -2728,7 +2752,8 @@ async def run_step_decision(
                 role=settings.assist_guide_model_role,
                 max_queries=settings.assist_guide_max_research_queries,
                 node_key=node_key, domain=None,
-                environment_block=assist_guide.render_environment_block(mem.environment),
+                # §17.975 — the playbook belongs in the QUERY, not only the prompt.
+                environment_block=assist_guide.render_research_grounding(mem.environment),
             )
             research_block = assist_guide._render_research_block(sources)
         except Exception as exc:  # research must never trap the commit
