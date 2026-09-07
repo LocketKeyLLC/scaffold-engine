@@ -204,3 +204,79 @@ test("moveItem swaps up and down and reports success", async () => {
   assert.deepEqual(order, ["T2", "T1", "T3"]);
   assert.equal(moveItem(order, 0, -1), false, "moving the first item up is a no-op");
 });
+
+// ── §17.963/966 — a chunked file write has to render as separate, copyable
+// pastes. The operator follows these one at a time; if the headers were buried
+// inside a block, or the blocks shared one copy button, the whole point of
+// splitting the paste is lost.
+
+const CHUNKED_REPLY = [
+  "## 👉 Do this next",
+  "",
+  "**Paste 1 of 3** — wait for the prompt to come back before the next one." +
+    " If the prompt turns into `>` instead of coming back, the paste was" +
+    " clipped — press Ctrl-C and tell me.",
+  "",
+  "```bash",
+  'pct exec 111 -- bash -c "cat > /opt/a/App.jsx" <<\'EOF\'',
+  "const a = 1;",
+  "EOF",
+  "```",
+  "",
+  "**Paste 2 of 3** — wait for the prompt to come back before the next one.",
+  "",
+  "```bash",
+  'pct exec 111 -- bash -c "cat >> /opt/a/App.jsx" <<\'EOF\'',
+  "const b = 2;",
+  "EOF",
+  "```",
+  "",
+  "**Then confirm it arrived intact** — this must print `2287`.",
+  "",
+  "```bash",
+  'pct exec 111 -- bash -c "wc -c /opt/a/App.jsx"',
+  "```",
+].join("\n");
+
+test("a chunked write renders one copyable block per paste (§17.963)", () => {
+  const out = mdToHtml(CHUNKED_REPLY);
+  const blocks = out.match(/<pre class="md-pre">/g) || [];
+  const copies = out.match(/class="md-copy"/g) || [];
+  assert.equal(blocks.length, 3);
+  assert.equal(copies.length, 3, "every paste needs its own copy button");
+  assert.ok(!out.includes("undefined"));
+});
+
+test("paste headers stay outside the code blocks", () => {
+  const out = mdToHtml(CHUNKED_REPLY);
+  // The header is prose: bold, and never inside a <code> element.
+  assert.ok(out.includes("<strong>Paste 1 of 3</strong>"));
+  assert.ok(out.includes("<strong>Paste 2 of 3</strong>"));
+  for (const m of out.matchAll(/<code>([\s\S]*?)<\/code>/g)) {
+    assert.ok(!m[1].includes("Paste 1 of 3"),
+      "a header inside a block would be copied into the shell");
+  }
+});
+
+test("the chunks keep their order and their append redirects", () => {
+  const out = mdToHtml(CHUNKED_REPLY);
+  const first = out.indexOf("cat &gt; /opt/a/App.jsx");
+  const second = out.indexOf("cat &gt;&gt; /opt/a/App.jsx");
+  assert.ok(first >= 0, "chunk 1 must create the file");
+  assert.ok(second > first, "chunk 2 must append, and come after chunk 1");
+});
+
+test("the byte-count check survives as inline code, not a fence (§17.965)", () => {
+  const out = mdToHtml(CHUNKED_REPLY);
+  assert.ok(out.includes("<code>2287</code>"));
+  assert.ok(out.includes("wc -c /opt/a/App.jsx"));
+});
+
+test("the §17.966 dedupe pointer renders as prose, not a broken block", () => {
+  const out = mdToHtml(
+    "*(the same `cat > /opt/a/App.jsx` block as above — run it once, not twice.)*");
+  assert.ok(out.includes("<em>"), "should be emphasised prose");
+  assert.ok(out.includes("<code>cat &gt; /opt/a/App.jsx</code>"));
+  assert.ok(!out.includes("<pre"), "a pointer must not become a copyable block");
+  assert.ok(!out.includes("undefined"));
+});
