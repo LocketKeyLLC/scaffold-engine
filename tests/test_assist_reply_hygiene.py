@@ -73,9 +73,26 @@ def test_handles_empty_and_none():
 
 
 def test_wired_into_every_operator_facing_surface():
-    """Guide, fix and the ask/research answer all emit prose to the operator."""
+    """Guide, fix and the ask/research answer all emit prose to the operator.
+
+    §17.979 — this asserted `count(...) == 2` against the whole module. Its own
+    docstring names THREE surfaces, and `assist_guide` has three producers:
+    generate_guidance, generate_fix and generate_guidance_stream. The stream
+    path — the SPA path the operator actually uses — had none of the nine output
+    repairs, and this count enshrined that absence as correct: the test passed
+    precisely because the wiring was missing, and failed the moment it was
+    fixed.
+
+    A magic count proves a patch applied N times and says nothing about whether
+    N was right. Enumerate the producers and check each one instead.
+    """
     import inspect
+
     from app.modules import assist_guide, assist_research_lib
-    guide_src = inspect.getsource(assist_guide)
-    assert guide_src.count("strip_operator_meta_preamble(text_out)") == 2
+
+    for fn in (assist_guide.generate_guidance,
+               assist_guide.generate_fix,
+               assist_guide.generate_guidance_stream):
+        assert "strip_operator_meta_preamble(text_out)" in inspect.getsource(fn), \
+            fn.__name__
     assert "strip_operator_meta_preamble(answer)" in inspect.getsource(assist_research_lib)

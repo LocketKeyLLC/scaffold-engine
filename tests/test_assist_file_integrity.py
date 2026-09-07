@@ -267,8 +267,14 @@ def test_a_matching_paste_marks_the_file_verified():
 def test_a_differing_paste_is_reported_as_such():
     st = _ledger("const a = 1;\nconst b = 2;", "const a = 1;")
     assert verified_files(st) == []
-    assert find_content_mismatches(st) == [
-        {"path": "/opt/a/App.jsx", "expected_lines": 2, "observed_lines": 1}]
+    hit = find_content_mismatches(st)[0]
+    assert hit["path"] == "/opt/a/App.jsx"
+    assert hit["expected_lines"] == 2 and hit["observed_lines"] == 1
+    # §17.978 — a directive-ready sentence. Without it this function was DEAD in
+    # production: the render block inlined its own sha comparison and only the
+    # tests called this, which made it look wired when nothing but the suite
+    # ever ran it.
+    assert "does NOT match" in hit["detail"]
     assert "does NOT match" in render_file_writes(st)
 
 
@@ -308,3 +314,27 @@ def test_the_gate_and_the_ledger_reach_the_fix_path():
     assert "verified_files" in fix
     assert "pasted back by the operator and match" in fix   # regeneration notice
     assert "parse_file_contents" in inspect.getsource(assist_memory)
+
+
+def test_a_content_mismatch_drives_the_directive_like_a_size_one():
+    """§17.978 — the asymmetry the orphan audit exposed: a file whose SIZE came
+    back wrong produced a directive, a file whose CONTENT came back wrong
+    produced only prose."""
+    from app.modules import assist_guide
+
+    src = inspect.getsource(assist_guide.generate_fix)
+    assert "find_content_mismatches" in src
+    i = src.index("_size_bad = ")
+    assert "find_content_mismatches" in src[i:i + 200]
+
+
+def test_the_directive_accepts_both_mismatch_shapes():
+    from app.modules.assist_directives import apply_file_mismatch
+
+    size = [{"path": "/x", "expected": 10, "observed": 4, "short": True,
+             "missing": 6}]
+    content = [{"path": "/y", "expected_lines": 5, "observed_lines": 2,
+                "detail": "`/y` was pasted back and does NOT match what you wrote."}]
+    assert "bytes but measures" in apply_file_mismatch("", mismatches=size)
+    assert "does NOT match" in apply_file_mismatch("", mismatches=content)
+    assert "Do NOT debug the application" in apply_file_mismatch("", mismatches=content)

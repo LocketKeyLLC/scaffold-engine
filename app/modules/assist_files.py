@@ -273,9 +273,22 @@ def find_content_mismatches(state: dict | None) -> list[dict]:
             continue
         sha, obs = rec.get("sha"), rec.get("observed_sha")
         if sha and obs and sha != obs:
-            hits.append({"path": path,
-                         "expected_lines": rec.get("lines"),
-                         "observed_lines": rec.get("observed_lines")})
+            exp_l, obs_l = rec.get("lines"), rec.get("observed_lines")
+            hits.append({
+                "path": path,
+                "expected_lines": exp_l,
+                "observed_lines": obs_l,
+                # §17.978 — a directive-ready sentence. Without it this function
+                # was dead in production: the render block inlined its own sha
+                # comparison, and only the TESTS called this, which made it look
+                # wired when nothing but the suite ever ran it.
+                "detail": (
+                    f"`{path}` was pasted back and does NOT match what you "
+                    f"wrote"
+                    + (f" ({obs_l} lines on disk vs {exp_l} written)"
+                       if isinstance(exp_l, int) and isinstance(obs_l, int) else "")
+                    + "."),
+            })
     return hits
 
 

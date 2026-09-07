@@ -385,3 +385,63 @@ def test_one_file_yields_one_chunked_sequence():
     deduped, _ = dedupe_repeated_file_writes(reply)
     chunked, _ = split_large_paste_blocks(deduped)
     assert chunked.count("**Paste 1 of") == 1
+
+
+# ── §17.979 — the SPA path had none of the output repairs ─────────────────
+#
+# Found by auditing every repair against every producer before merging:
+# generate_guidance and generate_fix each ran all nine, generate_guidance_stream
+# ran ZERO. It is the SPA path, so every walkthrough the operator actually
+# received skipped §17.897 copy-pasteable blocks, §17.908 preamble stripping,
+# §17.913 unavailable-tool repair, §17.924 console unchaining, and — added the
+# same night and wired only to the other two — §17.957 `set +H`, §17.960
+# escaping, §17.963 chunking, §17.964 non-terminating commands, §17.966 dedupe.
+
+_REPAIRS = [
+    "repair_unavailable_tools", "repair_console_commands",
+    "repair_history_expansion", "repair_unescaped_expansions",
+    "repair_nonterminating_commands", "dedupe_repeated_file_writes",
+    "split_large_paste_blocks", "strip_operator_meta_preamble",
+    "promote_inline_commands",
+]
+
+
+def _repairs_in(fn):
+    import inspect
+
+    src = inspect.getsource(fn)
+    return [r for r in _REPAIRS if re.search(r"(?<!def )\b%s\(" % r, src)]
+
+
+def test_every_producer_runs_every_repair():
+    from app.modules import assist_guide
+
+    for fn in (assist_guide.generate_guidance,
+               assist_guide.generate_fix,
+               assist_guide.generate_guidance_stream):
+        assert _repairs_in(fn) == _REPAIRS, (fn.__name__, _repairs_in(fn))
+
+
+def test_the_three_producers_agree_on_order():
+    """Order matters — chunking must come after every rewrite (§17.963) and
+    dedupe before it (§17.966). Three copies of a nine-step pipeline is exactly
+    where drift happens, and it already did."""
+    from app.modules import assist_guide
+
+    a = _repairs_in(assist_guide.generate_guidance)
+    b = _repairs_in(assist_guide.generate_fix)
+    c = _repairs_in(assist_guide.generate_guidance_stream)
+    assert a == b == c
+
+
+def test_the_stream_repairs_before_it_persists():
+    """§17.851's own reasoning: the durable copy is what load() re-renders and
+    what the client shows on its post-stream reload, so repairing before
+    persist is how this path has always corrected streamed text."""
+    import inspect
+
+    from app.modules import assist_guide
+
+    src = inspect.getsource(assist_guide.generate_guidance_stream)
+    assert src.index("split_large_paste_blocks(") < src.index("await persist_guidance")
+    assert src.index("promote_inline_commands(") < src.index("await persist_guidance")
