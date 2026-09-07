@@ -147,15 +147,79 @@ def array_ops_on(text: str, var: str) -> set[str]:
         rf"\b{re.escape(var)}\.({'|'.join(_ARRAY_ONLY_METHODS)})\(", text or "")}
 
 
+# §17.972 — a placeholder the engine wrote and never came back for.
+#
+# Live, T33. The engine composed `server.js` containing
+#
+#     const PVE_TOKEN_ID = '<PVE_TOKEN_ID>';
+#     const PVE_TOKEN_SECRET = '<PVE_TOKEN_SECRET>';
+#
+# and the operator pasted that file back, placeholders intact, across EIGHT
+# turns (1725-1741). Nothing ever resolved them. The backend authenticates to
+# Proxmox with the literal string `<PVE_TOKEN_ID>`, every call fails, `/status`
+# returns its error payload, the frontend `.catch` leaves `services` empty, and
+# the panel renders every service as "unknown" — which is exactly what the
+# operator reported, twenty turns and one whole step later:
+#
+#   "the control panel page is loaded now … though i'm unsure why if its all
+#    connected its unsure what is currently on."
+#
+# §17.851b resolves placeholders in COMMANDS the engine emits. A placeholder
+# written into a FILE escapes that entirely: it is syntactically valid, nothing
+# errors at write time, and it fails silently at runtime as a permission or
+# auth problem several steps downstream — the hardest possible thing to trace
+# back to its cause.
+#
+# The engine wrote the file and put the marker there itself. Finding it needs no
+# model and no research; it needs someone to look.
+
+_PLACEHOLDER_RE = re.compile(r"<([A-Z][A-Z0-9_]{2,63})>")
+# Uppercase HTML/JSX tags are the only realistic collision; `<div>`, `<Button>`,
+# `Array<String>` and `a < B` already miss on case or length.
+_TAG_WORDS = frozenset({
+    "HTML", "HEAD", "BODY", "DIV", "SPAN", "TABLE", "THEAD", "TBODY", "FORM",
+    "INPUT", "SCRIPT", "STYLE", "TITLE", "META", "LINK", "PRE", "CODE", "MAIN",
+    "HEADER", "FOOTER", "SECTION", "ARTICLE", "NAV", "BUTTON", "LABEL", "IMG",
+    "DOCTYPE", "BLOCKQUOTE", "TEXTAREA", "SELECT", "OPTION", "IFRAME", "SVG",
+})
+
+
+def find_unresolved_placeholders(artefacts: dict[str, str]) -> list[dict]:
+    """Files the engine wrote that still carry a `<PLACEHOLDER>` marker."""
+    out: list[dict] = []
+    for path, body in (artefacts or {}).items():
+        names = sorted({
+            n for n in _PLACEHOLDER_RE.findall(body or "")
+            if n not in _TAG_WORDS
+        })
+        if names:
+            out.append({
+                "kind": "placeholder", "client": path, "names": names,
+                "detail": (
+                    f"`{path}` still contains the placeholder"
+                    + ("s " if len(names) > 1 else " ")
+                    + ", ".join(f"`<{n}>`" for n in names)
+                    + " — the literal marker, not a real value. Whatever reads "
+                      "that file is using the text `<" + names[0] + ">` as if it "
+                      "were the setting, so it fails at RUNTIME, silently, and "
+                      "usually looks like an auth or permission problem "
+                      "somewhere else entirely. Ask the operator for the value "
+                      "and write it in.")})
+    return out
+
+
 def find_contract_conflicts(artefacts: dict[str, str]) -> list[dict]:
     """Contradictions between files the engine wrote. Deterministic; no model.
 
     ``artefacts`` is ``{path: body}``. Findings carry the two paths involved so
     the operator is told which pair disagrees, not merely that something is off.
     """
-    if not artefacts or len(artefacts) < 2:
+    if not artefacts:
         return []
     out: list[dict] = []
+    if len(artefacts) < 2:
+        # Cross-checks need a pair; a placeholder does not.
+        return find_unresolved_placeholders(artefacts)
 
     served: dict[str, str] = {}          # endpoint -> file that serves it
     shapes: dict[str, tuple[str, str]] = {}   # endpoint -> (shape, file)
@@ -167,6 +231,9 @@ def find_contract_conflicts(artefacts: dict[str, str]) -> list[dict]:
             shapes.setdefault(ep, (shape, path))
         for port in _ports_in(body):
             listen.setdefault(port, path)
+
+    # §17.972 — highest priority: a marker the engine left in its own file.
+    out.extend(find_unresolved_placeholders(artefacts))
 
     for path, body in artefacts.items():
         calls = client_endpoints(body)
