@@ -894,3 +894,74 @@ def detect_truncated_paste(text: str) -> dict | None:
         "aborted": aborted,
         "hung": hung or aborted,
     }
+
+
+# ── §17.970 — the operator's words, not the terminal output stapled to them ──
+#
+# Operator: *"The engine still is having issues CONFIRMing with what the user
+# pasted back that the task was completed."*
+#
+# Live, T35, 2026-09-07 18:01, answering a staged completion offer:
+#
+#     "based on the previous commands i believe it is done, as well as the
+#      following:
+#      root@pve:~# pct exec 120 -- sh -c "cat /etc/caddy/Caddyfile"
+#      …"
+#
+# Measured on that exact message: `looks_like_confirmation` False (it is
+# anchored at the start, so a prefixed claim cannot match), and
+# `looks_like_completion_claim` False (§17.890 rejects paste-shaped input and
+# anything over 280 chars, deliberately). So the offer fell through to "anything
+# else supersedes" and was CLEARED — then re-staged one turn later, three times
+# running. The operator was answering the question every time.
+#
+# The tempting fix is `has_advancement_signal`, which IS True here. Measuring it
+# across all 83 operator messages in the session says no: it fires on 34 of
+# them, including bare pastes like `lspci -nn | grep -i nvidia`. It is loose on
+# purpose — §17.950 layers it as a VETO over the tracker's own verdict, where it
+# can never advance anything by itself. Wired into offer resolution it would
+# confirm the step on any paste at all.
+#
+# What separates the real answers is where the words are. A completion claim
+# lives in the PROSE the operator typed; the terminal output pasted underneath
+# is evidence, not assertion. Splitting there and re-asking §17.890's own
+# narrow question of the prose alone matched 3 of 83 messages — precisely the
+# three genuine claims, with the failure report "It is still a blank page, here
+# is the commands sent:" correctly among the 80 that did not.
+
+_PASTE_START_RE = re.compile(
+    r"^\s*(?:\S+@\S+:[^\n]*?[#$]\s"      # user@host:~$  /  root@pve:~#
+    r"|[#$]\s"                            # a bare prompt
+    r"|```"                               # a fenced block
+    r"|[-a-z]+@[-a-z0-9]+:~)",            # prompt with no trailing marker
+    re.IGNORECASE,
+)
+
+
+def prose_prefix(msg: str) -> str:
+    """What the operator TYPED, before the terminal output they pasted under it.
+
+    Empty when the message is a bare paste — which is the point: there is no
+    assertion in it to honour.
+    """
+    out: list[str] = []
+    for line in (msg or "").splitlines():
+        if _PASTE_START_RE.match(line):
+            break
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def claims_completion_in_prose(msg: str) -> bool:
+    """§17.970 — a completion claim in the operator's own words, with evidence
+    attached underneath.
+
+    Consulted ONLY while a completion offer is staged (§17.951), which is what
+    makes it safe: the engine has just asked "is this done?", so a claim in that
+    window is an answer to that question. Outside it, §17.890's narrow bare
+    claim still governs, because widening THAT is the §17.891 incident.
+    """
+    prose = prose_prefix(msg)
+    if not prose:
+        return False
+    return looks_like_completion_claim(prose)
