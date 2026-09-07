@@ -674,3 +674,34 @@ def apply_file_mismatch(system: str, *, mismatches: list[dict] | None,
         + (f" — {h['missing']} bytes missing" if h.get("short") else "")
         for h in mismatches[:3])
     return system + _FILE_MISMATCH_DIRECTIVE.format(detail=detail)
+
+
+# §17.968 — two files the engine wrote disagree with each other.
+_CONTRACT_CONFLICT_DIRECTIVE = (
+    "\n\nTWO FILES THIS SESSION WROTE CONTRADICT EACH OTHER. {detail}\n"
+    "- This was read from their actual contents, not inferred from the "
+    "symptom. It is a fact about the code, and it is the most likely cause of "
+    "whatever is not working.\n"
+    "- Rewriting either file unchanged cannot fix it, and neither can "
+    "restarting anything. One side has to change to match the other.\n"
+    "- Lead with the smaller change, say plainly which side you changed and "
+    "why that side, and do not touch anything else in the same step.\n"
+    "- Do not ask the operator to investigate the symptom. You wrote both of "
+    "these files; the disagreement is yours to resolve."
+)
+
+
+def apply_contract_conflict(system: str, *, conflicts: list[dict] | None,
+                            enabled: bool = True) -> str:
+    """§17.968 — make a contradiction between the engine's own artefacts the
+    dominant fact of the turn.
+
+    Live: `server.js` returned an object from `/status` while `App.jsx` called
+    `.find()` on it. React threw, the page went blank, and the engine spent
+    three turns rewriting a third file that was already correct — with both
+    contradicting files sitting in its own transcript.
+    """
+    if not enabled or not conflicts:
+        return system
+    detail = " ".join(c.get("detail", "") for c in conflicts[:2]).strip()
+    return system + _CONTRACT_CONFLICT_DIRECTIVE.format(detail=detail)

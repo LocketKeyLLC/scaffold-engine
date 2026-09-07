@@ -70,10 +70,18 @@ def render_environment_block(environment: dict | None) -> str:
             parts.append(block)
     # §17.965 — expected vs measured file sizes, same ground-truth tier.
     from app.modules.assist_files import render_file_writes
-    _fw = render_file_writes(environment.get("file_writes")
-                             if isinstance(environment.get("file_writes"), dict) else {})
+    _fw_state = (environment.get("file_writes")
+                 if isinstance(environment.get("file_writes"), dict) else {})
+    _fw = render_file_writes(_fw_state)
     if _fw:
         parts.append(_fw)
+    # §17.968 — and where two of those files disagree with each other.
+    from app.modules.assist_contracts import (
+        bounded_artefacts, find_contract_conflicts, render_contract_conflicts)
+    _cc = render_contract_conflicts(
+        find_contract_conflicts(bounded_artefacts(_fw_state)))
+    if _cc:
+        parts.append(_cc)
     if missing:
         parts.append(
             "### NOT AVAILABLE on the operator's system (the shell reported "
@@ -237,10 +245,17 @@ def render_session_memory(
     state_block = render_system_state(environment.get("system_state")
                                       if isinstance(environment.get("system_state"), dict) else {})
     from app.modules.assist_files import render_file_writes   # §17.965
-    _fw_block = render_file_writes(environment.get("file_writes")
-                                   if isinstance(environment.get("file_writes"), dict) else {})
+    _fws = (environment.get("file_writes")
+            if isinstance(environment.get("file_writes"), dict) else {})
+    _fw_block = render_file_writes(_fws)
     if _fw_block:
         state_block = (state_block + "\n\n" + _fw_block) if state_block else _fw_block
+    from app.modules.assist_contracts import (  # §17.968
+        bounded_artefacts, find_contract_conflicts, render_contract_conflicts)
+    _cc_block = render_contract_conflicts(
+        find_contract_conflicts(bounded_artefacts(_fws)))
+    if _cc_block:
+        state_block = (state_block + "\n\n" + _cc_block) if state_block else _cc_block
     missing = [m for m in (environment.get("missing_tools") or [])
                if isinstance(m, dict) and str(m.get("tool") or "").strip()]
     missing_block = ""

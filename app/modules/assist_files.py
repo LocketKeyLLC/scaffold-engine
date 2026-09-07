@@ -50,6 +50,12 @@ _STAT_ECHO_RE = re.compile(
     re.MULTILINE)
 
 _MAX_TRACKED = 25
+# §17.968 — retained bodies are the expensive part of this ledger: they ride in
+# `assist_sessions.metadata` and are read every turn. Bounded on both axes, and
+# only the most recent files keep their text (older ones keep hash + size,
+# which is all §17.965/967 ever needed).
+_MAX_BODY_CHARS = 8000
+_MAX_BODIES = 6
 
 
 def parse_file_writes(assistant_text: str) -> dict[str, dict[str, Any]]:
@@ -97,8 +103,13 @@ def parse_file_writes(assistant_text: str) -> dict[str, dict[str, Any]]:
             out[path] = {"expected": nbytes, "lines": len(body_lines),
                          "body": disk_body,
                          "sha": content_fingerprint(disk_body)}
+    # §17.968 — KEEP the text. §17.967 hashed it and threw it away, which made
+    # the hash the only thing the engine could ever say about a file it wrote —
+    # and the live defect was not inside any one file, it was between two of
+    # them. Bounded, because this rides in the session metadata blob.
     for rec in out.values():
-        rec.pop("body", None)          # the hash is the record; the text is not
+        if isinstance(rec.get("body"), str):
+            rec["body"] = rec["body"][:_MAX_BODY_CHARS]
     return out
 
 
@@ -221,6 +232,7 @@ def merge_file_writes(current: dict | None,
         merged[path] = {"expected": rec.get("expected"),
                         "lines": rec.get("lines"),
                         "sha": rec.get("sha"),
+                        "body": (rec.get("body") or "")[:_MAX_BODY_CHARS] or None,
                         "observed": None,
                         "observed_sha": None}
     for path, size in (observed or {}).items():
@@ -230,7 +242,12 @@ def merge_file_writes(current: dict | None,
         merged.setdefault(path, {"expected": None, "lines": None, "sha": None})
         merged[path]["observed_sha"] = content_fingerprint(body)
         merged[path]["observed_lines"] = len(normalize_content(body).splitlines())
-    return dict(list(merged.items())[-_MAX_TRACKED:])
+    trimmed = dict(list(merged.items())[-_MAX_TRACKED:])
+    # Only the newest few keep their text; the rest stay as hash + size.
+    for path in list(trimmed)[:-_MAX_BODIES]:
+        if isinstance(trimmed[path], dict):
+            trimmed[path].pop("body", None)
+    return trimmed
 
 
 def verified_files(state: dict | None) -> list[str]:

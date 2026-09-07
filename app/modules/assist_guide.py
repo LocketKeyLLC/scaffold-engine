@@ -197,6 +197,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     apply_interface_fidelity,  # §17.959
     apply_truncated_paste,  # §17.962
     apply_file_mismatch,  # §17.965
+    apply_contract_conflict,  # §17.968
     apply_recommendation,  # §17.903
     promote_inline_commands,  # §17.897
     strip_operator_meta_preamble,  # §17.908
@@ -4681,12 +4682,17 @@ async def generate_fix(
                  if isinstance((environment or {}).get("file_writes"), dict) else {})
     _size_bad = find_size_mismatches(_fw_state)
     _verified = verified_files(_fw_state)   # §17.967
+    from app.modules.assist_contracts import bounded_artefacts, find_contract_conflicts
+    _conflicts = find_contract_conflicts(bounded_artefacts(_fw_state))  # §17.968
+    if _conflicts:
+        logger.warning("assist_contract_conflict node_key=%s kinds=%r", node_key,
+                       [c.get("kind") for c in _conflicts[:3]])
     if _size_bad:
         logger.warning("assist_file_size_mismatch node_key=%s %r", node_key, _size_bad[:2])
     if _truncated:
         logger.warning("assist_truncated_paste node_key=%s hung=%s", node_key,
                        _truncated.get("hung"))
-    fix_system = apply_file_mismatch(apply_truncated_paste(
+    fix_system = apply_contract_conflict(apply_file_mismatch(apply_truncated_paste(
       apply_interface_fidelity(apply_interactive_prompt(
       apply_recommendation(apply_location_callout(  # §17.852
         apply_screen_grounding(  # §17.758
@@ -4700,7 +4706,7 @@ async def generate_fix(
             is_decision=False, enabled=settings.assist_screen_grounding_enabled),
         is_decision=False, enabled=settings.assist_location_callout_enabled)),
       prompt=_pending_prompt), gui=_gui_question), truncated=_truncated),
-      mismatches=_size_bad)
+      mismatches=_size_bad), conflicts=_conflicts)
 
     async def _draw_fix(messages):
         return await chat_until_nonempty(
