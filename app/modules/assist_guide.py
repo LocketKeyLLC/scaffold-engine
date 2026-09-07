@@ -4513,8 +4513,31 @@ async def generate_fix(
         max_q = settings.assist_guide_max_research_queries
         if escalated:
             max_q = max(3, max_q)
+        # §17.974 — research the REMAINING space, not the same symptom again.
+        #
+        # Verified before writing this: the prepass was fed the step prompt plus
+        # the operator's latest error, and — only once escalated — a generic
+        # "previous fixes did not resolve it". It never named WHICH causes had
+        # been eliminated, so every turn re-grounded on the same symptom and the
+        # model kept drawing from the same well. That is why T34 re-diagnosed
+        # "App.jsx is corrupted" four times: the research behind each of those
+        # fixes was asking the same question.
+        #
+        # §17.973 now knows exactly what is closed. Naming it here is the whole
+        # connection — the queries are generated from this text.
+        _elim = list((hypotheses or {}).get("eliminated") or [])
+        _elim_block = ""
+        if _elim:
+            _elim_block = (
+                "\n\nCauses ALREADY tested on this step and eliminated — do NOT "
+                "research these again, and do not look for variations of them:\n"
+                + "\n".join(f"- {d}" for d in _elim[-8:])
+                + "\nSearch for causes that are NOT in that list, including ones "
+                  "UPSTREAM of this step and ones in the files or services this "
+                  "session itself created.")
         sources = await _research_prepass(
             task_text=f"{ctx.base_prompt}\n\nOperator hit this error:\n{error_text}"
+                      + _elim_block
                       + ("\n\n(Note: this is a REPEATED failure — previous fixes did "
                          "not resolve it; look up the current OFFICIAL method, not "
                          "variations of the failing one.)" if escalated else ""),
@@ -4537,6 +4560,17 @@ async def generate_fix(
                 ))
         except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
             logger.debug("assist_fix_error_query_failed: %s", exc)
+        # §17.974b — a durable record of what this fix actually researched.
+        # `guidance_meta.research_sources` is returned by this function and then
+        # dropped: the fix caller never persists it, and `assist_steps.
+        # guidance_meta` holds the GUIDE's sources (empty `[]` on T34). So the
+        # 54 fix turns in this session left no trace of what any of them looked
+        # up — §17.909's own triage instruction, "read the actual query", had
+        # nothing to read. Logged, so it is greppable per node.
+        logger.info(
+            "assist_fix_research node_key=%s queries=%r eliminated_known=%d",
+            node_key, [s.get("query") for s in sources][:6], len(_elim),
+        )
 
     parts = [ctx.assembled_prompt]
     if job_digest and job_digest.strip():   # §17.653 — project-wide context

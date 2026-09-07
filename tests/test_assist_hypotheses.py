@@ -160,3 +160,65 @@ def test_the_fix_path_derives_it_from_the_turns():
     src = inspect.getsource(assist_agent)
     assert "assist_hypotheses import harvest" in src
     assert "kind = 'fix'" in src
+
+
+# ── §17.974 — the ledger has to reach RESEARCH, not just the prompt ───────
+#
+# Verified before writing it: the fix prepass was fed the step prompt plus the
+# operator's latest error, and only once escalated a generic "previous fixes did
+# not resolve it". It never named WHICH causes were eliminated, so every turn
+# re-grounded on the same symptom. That is why T34 re-diagnosed "App.jsx is
+# corrupted" four times — the research behind each of those fixes was asking the
+# same question.
+
+
+def test_the_eliminated_causes_reach_the_research_prepass():
+    from app.modules import assist_guide
+
+    src = inspect.getsource(assist_guide.generate_fix)
+    assert "_elim_block" in src
+    # Built from the ledger, and consumed by the prepass that generates queries.
+    assert src.index("_elim = list") < src.index("_research_prepass(")
+    seg = src[src.index("_elim = list"):src.index("_research_prepass(")]
+    assert "hypotheses" in seg
+    assert "do NOT" in seg and "research these again" in seg
+
+
+def test_research_is_pointed_at_what_remains():
+    """Naming what is closed is only half — the query generator has to be told
+    where to look instead."""
+    from app.modules import assist_guide
+
+    src = inspect.getsource(assist_guide.generate_fix)
+    seg = src[src.index("_elim = list"):src.index("_research_prepass(")]
+    assert "NOT in that list" in seg
+    assert "UPSTREAM" in seg
+    assert "session itself created" in seg
+
+
+def test_the_prepass_still_carries_the_error_and_the_escalation_note():
+    """§17.909 (research the operator's symptom) and §17.881 (escalation) must
+    both survive — this adds to the task text, it does not replace it."""
+    from app.modules import assist_guide
+
+    src = inspect.getsource(assist_guide.generate_fix)
+    i = src.index("_research_prepass(")
+    window = src[i:i + 700]
+    assert "Operator hit this error" in window
+    assert "REPEATED failure" in window
+    assert "_elim_block" in window
+
+
+def test_fix_research_is_recorded():
+    """§17.974b — generate_fix returns research_sources in guidance_meta and the
+    caller drops it; assist_steps.guidance_meta holds the GUIDE's sources (empty
+    on T34). 54 fix turns left no trace of what any of them looked up, so
+    §17.909's triage instruction had nothing to read."""
+    from app.modules import assist_guide
+
+    src = inspect.getsource(assist_guide.generate_fix)
+    assert "assist_fix_research" in src
+    i = src.index("assist_fix_research")
+    window = src[i:i + 260]
+    assert "node_key" in window and "queries" in window
+    assert "eliminated_known" in window
