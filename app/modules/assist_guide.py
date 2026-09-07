@@ -212,6 +212,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
 # re-exported so assist_guide.<NAME> and the external callers keep resolving.
 from app.modules.assist_render import (  # noqa: F401,E402
     render_environment_block,
+    render_research_grounding,  # §17.975
     render_facts_block,
     render_operator_notes_block,
     _operator_reset_intent,
@@ -2134,7 +2135,7 @@ async def generate_guidance(
             # actual system so a DECISION step's options are system-specific, not
             # a generic textbook list. render_environment_block folds in the
             # §17.709 facts ledger; "" when unknown (fail-soft, generic queries).
-            environment_block=render_environment_block(environment),
+            environment_block=render_research_grounding(environment),  # §17.975
             # §17.912 — the guide path is the one that loses retrieval when the
             # query generator declines on a confident-sounding step.
             floor_when_empty=True,
@@ -4546,6 +4547,12 @@ async def generate_fix(
             max_queries=max_q,
             node_key=node_key,
             domain=domain,
+            # §17.975 — the fix path had NO environment grounding. §17.771 gave
+            # it to guide/decision and §17.854 restored it on the stream path;
+            # this call was never included, so every troubleshooting query was
+            # generated blind to the operator's actual system — on the one path
+            # that only runs when something is already wrong.
+            environment_block=render_research_grounding(environment),
             deep=True,  # §17.500 — troubleshooting wants real doc content, not snippets
         )
         # §17.882 — one DETERMINISTIC error-derived query, always. The
@@ -5698,7 +5705,7 @@ async def generate_guidance_stream(
             # environment grounding the non-stream path passes, so a streamed
             # DECISION step (the SPA path) researched generic textbook options
             # instead of system-specific ones. Restored to parity.
-            environment_block=render_environment_block(environment),
+            environment_block=render_research_grounding(environment),  # §17.975
         )
 
     system = apply_verbosity(

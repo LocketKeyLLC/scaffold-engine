@@ -688,3 +688,47 @@ def render_status_panel(recap: str | None) -> str:
     if p["next"]:
         lines.append("- 👉 **Next:** " + p["next"])
     return "\n".join(lines) + "\n"
+
+
+def render_research_grounding(environment: dict | None) -> str:
+    """§17.975 — what a research QUERY needs to know about this system.
+
+    Two gaps, both verified against the live session before writing this.
+
+    **The playbook never reached any query.** `render_environment_block` — the
+    grounding every guide and decision prepass passes — carries the §17.709
+    facts and stops there. The playbook's `ruled_out` is described in its own
+    code as a BINDING prohibition and is rendered into the model's prompt by
+    §17.751, but the component that decides WHAT TO LOOK UP never saw it. So
+    research could, and did, keep fetching material for approaches this system
+    had already proven wouldn't work.
+
+    **The fix path had no grounding at all.** §17.771 gave the guide/decision
+    prepass an environment block and §17.854 restored it on the stream path;
+    `generate_fix` was never included. Every troubleshooting query across
+    T31–T35 was generated without knowing the operator is on a Proxmox host
+    running Debian 12 containers — the one path where being system-specific
+    matters most, because it only runs when something is already wrong.
+
+    Framed for query generation rather than for narration: ruled-out approaches
+    are things NOT to search for, proven ones are things to build on.
+    """
+    parts: list[str] = []
+    base = (render_environment_block(environment) or "").strip()
+    if base:
+        parts.append(base)
+    pb = (environment or {}).get("playbook")
+    pb = pb if isinstance(pb, dict) else {}
+    ruled = [str(r).strip() for r in (pb.get("ruled_out") or []) if str(r).strip()]
+    proven = [str(p).strip() for p in (pb.get("proven") or []) if str(p).strip()]
+    if ruled:
+        parts.append(
+            "### Approaches already RULED OUT on this system — do NOT search "
+            "for these, or for variations of them:\n"
+            + "\n".join(f"- {r[:200]}" for r in ruled[-8:]))
+    if proven:
+        parts.append(
+            "### Methods already PROVEN to work on this system — prefer "
+            "queries that build on these over queries about alternatives:\n"
+            + "\n".join(f"- {p[:200]}" for p in proven[-6:]))
+    return "\n\n".join(parts).strip()
