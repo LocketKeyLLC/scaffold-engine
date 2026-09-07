@@ -4485,6 +4485,7 @@ async def generate_fix(
     failed_commands: Optional[str] = None,
     prescribed_commands: Optional[str] = None,  # §17.898
     recent_replies: Optional[list[str]] = None,  # §17.925
+    hypotheses: Optional[dict] = None,  # §17.973
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -4660,6 +4661,14 @@ async def generate_fix(
             "playbook, or the operator's own output.\n\n```\n"
             + failed_commands.strip()[:3000] + "\n```"
         )
+    # §17.973 — what this step has already eliminated, and the demand to name
+    # what is left. Placed last in the user prompt so it is the final constraint
+    # read before the model writes its Diagnosis.
+    from app.modules.assist_hypotheses import (
+        find_retested_hypothesis, render_tested_hypotheses)
+    _hyp_block = render_tested_hypotheses(hypotheses)
+    if _hyp_block:
+        parts.append(_hyp_block)
     parts.append(_FIX_USER_TRAILER)
     user = "\n\n".join(parts)
 
@@ -4753,6 +4762,14 @@ async def generate_fix(
                  if failure_streak >= 1 and (failed_commands or "").strip() else [])
         # §17.954 — warn only about a repeat the operator is told to run NOW.
         hits_ = _repeats_in_primary_action(draft, hits_)
+        # §17.973 — re-diagnosing a cause this step already eliminated. Same
+        # class of loop, one level up from the command: T34 re-diagnosed
+        # "App.jsx is corrupted" three times after ruling it out.
+        for _h in find_retested_hypothesis(draft, hypotheses):
+            _hm = (f"a cause already tested and eliminated on this step "
+                   f"({_h['previous'][:90]})")
+            if _hm not in hits_:
+                hits_.append(_hm)
         # §17.967 — rewriting a file the operator has PROVEN correct is the
         # loop this gate exists to stop. Folded into the repeat class so it
         # rides the existing regenerate-then-warn machinery.
