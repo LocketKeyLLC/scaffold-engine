@@ -190,3 +190,72 @@ def test_the_ledger_actually_keeps_the_text_now():
     got = parse_file_writes(
         "```bash\ncat > /opt/a/server.js <<'EOF'\napp.listen(3001);\nEOF\n```")
     assert got["/opt/a/server.js"].get("body")
+
+
+# ── §17.972 — a placeholder the engine wrote and never came back for ──────
+#
+# Live T33: the engine composed server.js with `<PVE_TOKEN_ID>` /
+# `<PVE_TOKEN_SECRET>`, and the operator pasted that file back with the markers
+# intact across EIGHT turns (1725-1741). Nothing resolved them. The backend
+# authenticates with the literal string `<PVE_TOKEN_ID>`, every call fails,
+# /status returns its error payload, the frontend .catch leaves `services`
+# empty, and the panel renders every service "unknown" — reported twenty turns
+# and a whole step later as "its unsure what is currently on".
+
+from app.modules.assist_contracts import find_unresolved_placeholders  # noqa: E402
+
+_SERVER_WITH_PLACEHOLDER = """
+const PVE_HOST = '192.168.1.25';
+const PVE_TOKEN_ID = '<PVE_TOKEN_ID>';
+const PVE_TOKEN_SECRET = '<PVE_TOKEN_SECRET>';
+app.listen(3001);
+"""
+
+
+def test_the_live_unresolved_tokens_are_found():
+    hits = find_unresolved_placeholders({_BE: _SERVER_WITH_PLACEHOLDER})
+    assert len(hits) == 1
+    assert hits[0]["names"] == ["PVE_TOKEN_ID", "PVE_TOKEN_SECRET"]
+    assert "runtime" in hits[0]["detail"].lower()
+
+
+def test_a_placeholder_needs_no_second_file():
+    """Cross-checks need a pair; this does not — and the live file sat alone in
+    the ledger for eight turns."""
+    assert find_contract_conflicts({_BE: _SERVER_WITH_PLACEHOLDER})
+
+
+def test_it_is_reported_before_the_shape_conflict():
+    """Both are real, but the placeholder is what is failing RIGHT NOW: it keeps
+    /status erroring, which masks the shape bug entirely."""
+    conflicts = find_contract_conflicts(
+        {_BE: _SERVER_WITH_PLACEHOLDER + _SERVER, _FE: _CLIENT})
+    kinds = [c["kind"] for c in conflicts]
+    assert kinds[0] == "placeholder"
+    assert "shape" in kinds
+
+
+@pytest.mark.parametrize("body", [
+    "<div>hello</div>",                     # lowercase tags
+    "return <Button onClick={x} />;",       # JSX component
+    "const t: Array<String> = [];",         # generics
+    "if (a < B && c > d) return;",          # comparison
+    "<h1>Title</h1>\n<br>",
+    "<HTML><BODY></BODY></HTML>",           # uppercase tags are excluded
+    "const x = 1;",
+])
+def test_real_code_is_not_flagged(body):
+    assert find_unresolved_placeholders({"/opt/a/f.js": body}) == []
+
+
+def test_the_real_frontend_is_clean():
+    """Measured: App.jsx as actually written contains no placeholders, so JSX
+    does not trip this."""
+    assert find_unresolved_placeholders({_FE: _CLIENT}) == []
+
+
+def test_the_finding_names_the_value_to_ask_for():
+    block = render_contract_conflicts(
+        find_unresolved_placeholders({_BE: _SERVER_WITH_PLACEHOLDER}))
+    assert "PVE_TOKEN_ID" in block
+    assert "Ask the operator for the value" in block
