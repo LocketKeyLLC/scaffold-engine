@@ -5706,6 +5706,14 @@ async def generate_guidance_stream(
             # DECISION step (the SPA path) researched generic textbook options
             # instead of system-specific ones. Restored to parity.
             environment_block=render_research_grounding(environment),  # §17.975
+            # §17.976 — the §17.912 floor, which this path never asked for.
+            # Measured: `floor_when_empty=True` appeared at exactly ONE call
+            # site, the NON-stream guide. The stream path is the SPA path — the
+            # one the operator actually uses — so whenever the query generator
+            # declined, its walkthrough was written with zero research and
+            # nothing recorded that it had happened. Third instance of this same
+            # stream-vs-non-stream divergence after §17.854 and §17.975.
+            floor_when_empty=True,
         )
 
     system = apply_verbosity(
