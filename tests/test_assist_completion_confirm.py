@@ -340,3 +340,104 @@ async def test_project_complete_message_is_captured():
     assert any("the project is complete" in a for a in answers)
     assert any("the project is complete" in (c.kwargs.get("content") or "")
                for c in capture.await_args_list), "completion message not persisted"
+
+
+# ── §17.970 — the claim is in their words, not the paste under them ───────
+#
+# Live T35, 2026-09-07 18:01, answering a staged offer:
+#   "based on the previous commands i believe it is done, as well as the
+#    following:\nroot@pve:~# pct exec 120 -- sh -c "cat /etc/caddy/Caddyfile"…"
+# `looks_like_confirmation` is anchored and said False; §17.890's claim
+# detector rejects paste-shaped input and said False. The offer was cleared as
+# "something else" and re-staged, three turns running.
+
+from app.modules.assist_policy import (  # noqa: E402
+    claims_completion_in_prose,
+    prose_prefix,
+)
+
+_LIVE_1800 = (
+    "based on the previous commands i believe it is done, as well as the "
+    "following:\n\n"
+    'root@pve:~# pct exec 120 -- sh -c "cat /etc/caddy/Caddyfile"\n'
+    "# Reverse proxy\njellyfin.local {\n  reverse_proxy 192.168.1.101:8096\n}\n"
+)
+
+
+def test_the_live_answer_is_read_as_a_confirmation():
+    assert claims_completion_in_prose(_LIVE_1800)
+    assert prose_prefix(_LIVE_1800) == (
+        "based on the previous commands i believe it is done, as well as the "
+        "following:")
+
+
+def test_a_bare_paste_asserts_nothing():
+    """34 of 83 real messages were bare pastes. None may confirm a step."""
+    for paste in (
+        "root@pve:~# lspci -nn | grep -i nvidia\n02:00.0 3D controller",
+        "aedefruscio@aiserver:~$ nvidia-smi\n+---------------------+",
+        "root@pve:~# pct exec 111 -- node -v\nv18.20.4",
+        "```bash\npct list\n```",
+    ):
+        assert prose_prefix(paste) == "", paste
+        assert not claims_completion_in_prose(paste), paste
+
+
+def test_a_failure_report_with_a_paste_does_not_confirm():
+    """Live turn 1747 has a prose prefix too — and it is the opposite of a
+    completion claim."""
+    msg = ("It is still a blank page, here is the commands sent:\n\n"
+           'root@pve:~# pct exec 111 -- bash -c "cat > /opt/a/App.jsx"\n')
+    assert prose_prefix(msg)
+    assert not claims_completion_in_prose(msg)
+
+
+def test_prose_only_claims_still_work():
+    """§17.890's own shapes must keep resolving an offer."""
+    for msg in ("confirm it worked!",
+                "i believe it is complete but am unsure."):
+        assert claims_completion_in_prose(msg)
+
+
+def test_the_offer_resolution_consults_it():
+    import inspect
+
+    from app.modules import assist_turn
+
+    src = inspect.getsource(assist_turn._run_turn_inner)
+    # Both have to be branches of the SAME condition — a claim reaching the
+    # resolution by any other route would not be scoped to the staged offer.
+    assert ("assist_policy.looks_like_confirmation(text_)\n"
+            "                    or assist_policy.claims_completion_in_prose(text_)"
+            ) in src
+
+
+@pytest.mark.asyncio
+async def test_a_claim_with_evidence_commits_and_advances():
+    """End to end: the shape that failed live now takes the confirm path."""
+    from app.modules import assist_turn
+
+    submit = AsyncMock(return_value={"committed": True, "status": "committed"})
+    with patch("app.modules.assist_notes.get_pending_completion_confirm",
+               new=AsyncMock(return_value={"node_key": "T35", "reason": "r"})), \
+         patch("app.modules.assist_notes.clear_pending_completion_confirm",
+               new=AsyncMock()), \
+         patch("app.routers.assist.assist_submit", new=submit), \
+         patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_agent.get_session",
+               new=AsyncMock(return_value={"current_node_key": None,
+                                           "status": "active"})), \
+         patch("app.routers.assist.assist_next",
+               new=AsyncMock(return_value={"node_key": None,
+                                           "status": "completed"})), \
+         patch("app.modules.assist_agent.capture_assistant_reply", new=AsyncMock()):
+        out = []
+        async for name, data in assist_turn.run_turn(
+            session_id=_OFFER_SID, message=_LIVE_1800, command="message",
+            node_key="T35", history=[], db=AsyncMock(),
+        ):
+            out.append((name, data))
+
+    assert submit.await_count == 1, "the operator's claim must commit the step"
+    assert submit.await_args.args[1].action == "submit"
+    assert out[-1][1].get("handled") == "completion_confirmed"

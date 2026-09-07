@@ -315,7 +315,14 @@ async def _run_turn_inner(
             _offer = None
         if _offer:
             _onk = _offer.get("node_key")
-            if assist_policy.looks_like_confirmation(text_):
+            # §17.970 — accept the claim wherever the operator put it. The
+            # anchored `looks_like_confirmation` misses "based on the previous
+            # commands i believe it is done, as well as the following: <paste>",
+            # which is how they actually answered — three times, each of which
+            # SUPERSEDED the offer instead of resolving it. Scoped to the staged
+            # window, so §17.890's narrow bare claim still governs elsewhere.
+            if (assist_policy.looks_like_confirmation(text_)
+                    or assist_policy.claims_completion_in_prose(text_)):
                 yield _ev(ASSIST_TURN_STATUS, {
                     "text": "Marking this step complete on your word…"})
                 await _clear_completion_confirm(session_id, db)
