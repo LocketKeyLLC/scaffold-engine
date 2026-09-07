@@ -281,7 +281,19 @@ _CLAIM_PHRASE_RE = re.compile(
     # §17.950 — the construction listed only "done"; "finished with that" and
     # "complete with this" are the same claim in the same shape.
     r"|\b(?:done|finished|complete[d]?)\s+with\s+(?:this|that|it|everything|the)\b"
-    r"|\b(?:on\s+to|onto)\s+the\s+next\b",
+    r"|\b(?:on\s+to|onto)\s+the\s+next\b"
+    # §17.971 — the HEDGED assertion. Live (T35, 18:50): "it appears to be
+    # done" scored False, because the connector list ran `it (is|was|has been)
+    # done` and had no room for "appears to be". Hedging is how people assert
+    # something they cannot fully verify — §17.890's own founding example was
+    # "i believe it is complete but am unsure", which only matched because
+    # "it is complete" happened to be inside it. The disqualifier still guards
+    # the far more common inverse ("it appears to be broken", "seems to have
+    # failed"), so this adds the connector, not a new kind of claim.
+    r"|\b(?:it|that|this|everything|the\s+\w+)\s+"
+    r"(?:appears|seems|looks)\s+(?:to\s+be\s+|to\s+have\s+been\s+|like\s+it(?:'?s|\s+is)\s+)?"
+    r"(?:all\s+|already\s+|now\s+)?"
+    r"(?:done|complete[d]?|finished|installed|configured|set\s+up|in\s+place)\b",
     re.IGNORECASE,
 )
 

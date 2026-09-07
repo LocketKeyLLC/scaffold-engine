@@ -441,3 +441,95 @@ async def test_a_claim_with_evidence_commits_and_advances():
     assert submit.await_count == 1, "the operator's claim must commit the step"
     assert submit.await_args.args[1].action == "submit"
     assert out[-1][1].get("handled") == "completion_confirmed"
+
+
+# ── §17.971 — the affirmation travels as DATA, not as prose to re-parse ───
+#
+# Live T35, 2026-09-07 18:53:55, in the orchestrator log:
+#
+#   completion_confirm_not_committed nk=T35
+#     res="{'status': 'step_incomplete', 'committed': False, …}"
+#
+# §17.970 made the offer resolve on "i think its complete due to the following:
+# <paste>". The resolution then built
+# `output="Operator confirmed this step is complete: <that whole message>"` and
+# submitted it — and the §17.890 exemption, which re-runs
+# looks_like_completion_claim over the SUBMITTED TEXT, said False: 228 chars
+# carrying a shell paste is not a bare claim. So the verify hard-block held,
+# the confirm path fell through, the turn continued into a normal submit, and
+# the offer was re-staged. The operator answered three times and was asked
+# again each time. §17.951's comment asserted this path was exempt; it never
+# was, because it round-tripped its own intent through a strict prose detector.
+
+
+def test_the_confirm_path_sends_the_flag():
+    import inspect
+
+    from app.modules import assist_turn
+
+    src = inspect.getsource(assist_turn._run_turn_inner)
+    i = src.index("Operator confirmed this step is complete")
+    assert "operator_affirmed=True" in src[i:i + 600]
+
+
+def test_the_submit_model_carries_it_and_defaults_off():
+    from app.routers.assist import AssistSubmitInput
+
+    assert AssistSubmitInput(node_key="T1").operator_affirmed is False
+    assert AssistSubmitInput(node_key="T1", operator_affirmed=True).operator_affirmed
+
+
+def test_the_exemption_reads_the_flag_not_only_the_prose():
+    """The regression that produced the live loop: the exemption consulted ONLY
+    looks_like_completion_claim(body.output), and the confirm path's own output
+    can never satisfy it once the operator attaches evidence."""
+    import inspect
+
+    from app.routers import assist as assist_router
+
+    src = inspect.getsource(assist_router.assist_submit)
+    assert "operator_affirmed" in src
+    i = src.index("if _blocked and (")
+    window = src[i:i + 260]
+    assert "_affirmed" in window
+    assert "looks_like_completion_claim" in window, "the prose route must remain"
+
+
+def test_the_constructed_confirm_output_is_not_a_bare_claim():
+    """Pins WHY the flag is needed — if this ever became True by accident the
+    flag would look redundant and someone would remove it."""
+    from app.modules.assist_policy import looks_like_completion_claim
+
+    constructed = (
+        "Operator confirmed this step is complete: i think its complete due to "
+        'the following:\n\nroot@pve:~# pct exec 120 -- sh -c "cat /etc/caddy/'
+        'Caddyfile"\njellyfin.local {\n  reverse_proxy 192.168.1.101:8096\n}')
+    assert not looks_like_completion_claim(constructed)
+
+
+# ── §17.971b — the hedged assertion ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("msg", [
+    "it appears to be done",            # live T35, 18:50 — scored False
+    "it seems to be done",
+    "this appears complete",
+    "it looks like its done",
+    "the install appears done",
+])
+def test_a_hedged_claim_is_still_a_claim(msg):
+    from app.modules.assist_policy import looks_like_completion_claim
+
+    assert looks_like_completion_claim(msg), msg
+
+
+@pytest.mark.parametrize("msg", [
+    "it appears to be broken",
+    "it seems to have failed",
+    "it appears to be running",         # in progress, not complete
+    "it appears to be stuck",
+])
+def test_the_hedged_inverse_is_never_a_claim(msg):
+    from app.modules.assist_policy import looks_like_completion_claim
+
+    assert not looks_like_completion_claim(msg), msg

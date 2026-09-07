@@ -338,6 +338,11 @@ async def _run_turn_inner(
                             node_key=_onk,
                             output=(f"Operator confirmed this step is complete: "
                                     f"{text_.strip()[:200]}"),
+                            # §17.971 — say so as DATA. The text above embeds
+                            # their message (paste and all), so re-deriving the
+                            # §17.890 exemption from it fails exactly when the
+                            # operator answers with evidence attached.
+                            operator_affirmed=True,
                             action="submit", history=history),
                         db=db,
                     ) or {}

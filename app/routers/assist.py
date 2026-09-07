@@ -85,6 +85,15 @@ class AssistSubmitInput(BaseModel):
     evidence_meta: dict = Field(default_factory=dict)
     action: Literal["submit", "skip"] = "submit"
     friction_note: Optional[str] = None
+    operator_affirmed: bool = Field(
+        default=False,
+        description=(
+            "§17.971 — the operator has EXPLICITLY affirmed this step is done, "
+            "in answer to a staged completion offer (§17.951). Carries the "
+            "§17.890 exemption from the verify hard-block as DATA rather than "
+            "leaving it to be re-derived from the submitted text."
+        ),
+    )
     history: list[dict] = Field(
         default_factory=list,
         description=(
@@ -850,13 +859,32 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         # evidence that SHOWS unfinished work; it must never overrule a human
         # asserting completion of work the engine cannot see. Commit, tag the
         # verdict operator_affirmed, and leave an honest friction-trail entry.
-        if _blocked and assist_policy.looks_like_completion_claim(body.output or ""):
+        # §17.971 — the affirmation arrives as a FLAG, not as prose to re-parse.
+        #
+        # Live (T35, 2026-09-07 18:53:55): the §17.951 confirm path resolved the
+        # operator's "i think its complete due to the following: <paste>",
+        # constructed `output="Operator confirmed this step is complete: …"`
+        # with their message embedded, and submitted it — and this very line
+        # said False, because that string is 228 chars and carries a shell
+        # paste, so it is not a BARE claim. The submit came back
+        # `step_incomplete, committed: False`, the confirm path fell through,
+        # the turn continued into a normal submit, and the offer was re-staged.
+        # The operator answered the question three times and was asked again
+        # each time. §17.951's own comment asserted this path was exempt; it
+        # never was, because it round-tripped its intent through a detector
+        # whose entire job is to be strict about prose.
+        _affirmed = bool(getattr(body, "operator_affirmed", False))
+        if _blocked and (
+                _affirmed
+                or assist_policy.looks_like_completion_claim(body.output or "")):
             _blocked = False
             verdict["operator_affirmed"] = True
             await assist_agent.record_friction(
                 session_id=session_id, node_key=body.node_key,
                 note=(f"verify said {_v_outcome} but the operator explicitly "
-                      f"affirmed completion — committed on their word: "
+                      f"affirmed completion"
+                      + (" (answering the completion offer)" if _affirmed else "")
+                      + f" — committed on their word: "
                       f"{verdict.get('reason', '')}"), db=db,
             )
         if _blocked:

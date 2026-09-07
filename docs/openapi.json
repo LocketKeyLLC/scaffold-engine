@@ -698,6 +698,12 @@
             "title": "Node Key",
             "type": "string"
           },
+          "operator_affirmed": {
+            "default": false,
+            "description": "§17.971 — the operator has EXPLICITLY affirmed this step is done, in answer to a staged completion offer (§17.951). Carries the §17.890 exemption from the verify hard-block as DATA rather than leaving it to be re-derived from the submitted text.",
+            "title": "Operator Affirmed",
+            "type": "boolean"
+          },
           "output": {
             "default": "",
             "description": "Human-supplied evidence (required for action='submit')",
