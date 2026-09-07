@@ -1888,9 +1888,28 @@ async def run_step_fix(
             {"sid": session_id, "nk": nk},
         )).mappings().all()
         hypotheses = harvest([r.get("content") or "" for r in _hrows])
-        if hypotheses["eliminated"]:
-            logger.info("assist_hypotheses node_key=%s eliminated=%d",
-                        nk, len(hypotheses["eliminated"]))
+        # §17.977 — and what the REST of the project has already disproved.
+        # Derived on read like the per-step ledger, so every existing session
+        # recovers its whole history the moment this ships: 124 causes across 19
+        # nodes in the live session, against 3 in the project playbook.
+        from app.modules.assist_hypotheses import (
+            cross_step_eliminated, harvest_session)
+        _srows = (await db.execute(
+            text("""
+                SELECT node_key, content FROM assist_turns
+                 WHERE session_id = :sid AND node_key IS NOT NULL
+                   AND role = 'assistant' AND kind = 'fix'
+                 ORDER BY created_at ASC, id ASC LIMIT 400
+            """),
+            {"sid": session_id},
+        )).mappings().all()
+        hypotheses["cross_step"] = cross_step_eliminated(
+            harvest_session([(r.get("node_key"), r.get("content") or "")
+                             for r in _srows]), nk)
+        if hypotheses["eliminated"] or hypotheses["cross_step"]:
+            logger.info(
+                "assist_hypotheses node_key=%s eliminated=%d cross_step=%d",
+                nk, len(hypotheses["eliminated"]), len(hypotheses["cross_step"]))
     except Exception as e:  # noqa: BLE001 — a ledger is never a blocker
         logger.warning("assist_hypotheses_failed session_id=%s err=%r", session_id, e)
     res = await assist_guide.generate_fix(

@@ -4706,10 +4706,17 @@ async def generate_fix(
     # what is left. Placed last in the user prompt so it is the final constraint
     # read before the model writes its Diagnosis.
     from app.modules.assist_hypotheses import (
-        find_retested_hypothesis, render_tested_hypotheses)
+        find_retested_hypothesis, render_cross_step_eliminated,
+        render_tested_hypotheses)
     _hyp_block = render_tested_hypotheses(hypotheses)
     if _hyp_block:
         parts.append(_hyp_block)
+    # §17.977 — what the rest of the project disproved. Informational, and
+    # AFTER the same-step ledger, which is the part that binds.
+    _cross_block = render_cross_step_eliminated(
+        (hypotheses or {}).get("cross_step"))
+    if _cross_block:
+        parts.append(_cross_block)
     parts.append(_FIX_USER_TRAILER)
     user = "\n\n".join(parts)
 
