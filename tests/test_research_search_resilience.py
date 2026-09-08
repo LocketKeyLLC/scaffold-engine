@@ -166,3 +166,100 @@ def test_a_degraded_backend_does_not_flip_the_top_level_status():
     # The status computation must not consider it.
     tail = src[i:]
     assert 'searxng' not in tail.split('"status"')[-1][:400]
+
+
+# ---------------------------------------------------------------------------
+# §17.985 — the probe must report on the engines research ACTUALLY queries,
+# and must not eat the container healthcheck's budget.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_health_probes_the_engine_set_research_actually_queries():
+    """§17.985 — it sent a bare /search with NO `engines`, i.e. the default set
+    §17.984 had just stopped using, so it graded engines no caller queries.
+
+    Measured live, same query same minute: default set 0 results, the backbone
+    10 — /health said "research will return nothing" while planning research
+    was returning results_found=30.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app import health
+    from app.modules.research_extractors import _engines_for_category
+
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"results": [{"url": "x"}], "unresponsive_engines": []}
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+    with patch("app.utils.http_clients.get_searxng_client", return_value=client):
+        await health._check_searxng()
+
+    params = client.get.await_args.kwargs["params"]
+    assert params["engines"] == _engines_for_category("general")
+    # The default set is what got CAPTCHA'd; asking for it by omission is the bug.
+    assert "categories" not in params
+
+
+@pytest.mark.asyncio
+async def test_health_probe_is_bounded_by_a_total_budget():
+    """§17.985 — httpx applies `timeout=` PER PHASE, so a slow connect plus a
+    slow read can exceed it. Measured with searxng paused, the old 8.0 per-phase
+    timeout put /health at 8.03s against the healthcheck's 10s budget.
+    """
+    import asyncio as _a
+    from unittest.mock import MagicMock, patch
+
+    from app import health
+
+    async def _never_answers(*a, **kw):
+        await _a.sleep(30)
+
+    client = MagicMock()
+    client.get = _never_answers
+    with patch("app.utils.http_clients.get_searxng_client", return_value=client), \
+            patch.object(health, "_SEARXNG_PROBE_BUDGET_S", 0.05):
+        out = await _a.wait_for(health._check_searxng(), timeout=5)
+
+    assert out["status"] == "down"
+    assert "timeout" in out["error"]
+
+
+def test_health_probe_runs_concurrently_with_the_other_checks():
+    """§17.985 — it was `await _check_searxng()` AFTER the gather, so its
+    latency ADDED to the endpoint rather than overlapping."""
+    from app import health
+
+    src = inspect.getsource(health.build_health_response)
+    gather = src[src.index("await asyncio.gather("):]
+    gather = gather[:gather.index("return_exceptions=True")]
+    assert "_check_searxng()" in gather, "probe must be gathered, not awaited after"
+    assert "searxng = await _check_searxng()" not in src
+
+
+def test_health_probe_hint_does_not_overclaim():
+    """§17.985 — the old hint asserted "research will return nothing until this
+    clears", which the live run disproved: both callers retry on the wider
+    SEARXNG_FALLBACK_ENGINES net, a superset of the backbone this probes."""
+    from app import health
+
+    src = inspect.getsource(health._check_searxng)
+    assert "research will return nothing until this clears" not in src
+
+
+@pytest.mark.asyncio
+async def test_health_probe_error_string_has_no_dangling_colon():
+    """§17.985 — several httpx errors carry an empty str(), which rendered in
+    the operator's face as a bare "ReadTimeout: "."""
+    from unittest.mock import MagicMock, patch
+
+    import httpx
+
+    from app import health
+
+    client = MagicMock()
+    client.get = MagicMock(side_effect=httpx.ReadTimeout(""))
+    with patch("app.utils.http_clients.get_searxng_client", return_value=client):
+        out = await health._check_searxng()
+    assert out["status"] == "down"
+    assert out["error"] == "ReadTimeout"
