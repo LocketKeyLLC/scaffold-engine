@@ -734,6 +734,7 @@ async def _search_queries(
                 )
                 if resp.status_code == 200:
                     results = resp.json().get("results", [])[:10]
+                    _last_resp = None   # §17.983 — the fallback's reply, if made
                     # §17.712 — 0-results fallback. The category engines returned
                     # nothing (commonly a transient CAPTCHA/rate-limit on the
                     # general engines). Retry ONCE with the widest general net so
@@ -746,6 +747,7 @@ async def _search_queries(
                                 params={"q": query_text, "format": "json",
                                         "engines": SEARXNG_FALLBACK_ENGINES},
                             )
+                            _last_resp = fb
                             if fb.status_code == 200:
                                 results = fb.json().get("results", [])[:10]
                                 if results:
@@ -764,6 +766,41 @@ async def _search_queries(
                     # only real hits; an empty stays a cache-miss so it re-queries.
                     if results:
                         await _searxng_cache_set(query_text, results)
+                    # §17.983 — an empty result is not a finding, it is usually
+                    # an OUTAGE, and SearXNG says so in the same response.
+                    #
+                    # Live, found by the §17.982 end-to-end run: planning
+                    # research reported `queries_run=3 results_found=0` and the
+                    # DAG was built with no research at all. A direct call
+                    # returned HTTP 200 with:
+                    #
+                    #   unresponsive_engines: [["brave","Suspended: too many
+                    #   requests"], ["duckduckgo","CAPTCHA"], ["google",
+                    #   "Suspended: access denied"], ["startpage","Suspended:
+                    #   CAPTCHA"]]
+                    #
+                    # Every engine blocked. `unresponsive_engines` appears
+                    # NOWHERE in this codebase, so the §17.712 fallback fired,
+                    # also got nothing, and logged `results=0` — indistinguishable
+                    # from a genuinely obscure query. That is why §17.976 found
+                    # 19 guided steps with zero sources and no failure logged
+                    # against any of them.
+                    if not results:
+                        _dead = []
+                        for _r in (_last_resp, resp):
+                            if _r is None:
+                                continue
+                            try:
+                                _dead = _r.json().get("unresponsive_engines") or []
+                            except Exception:  # noqa: BLE001
+                                _dead = []
+                            if _dead:
+                                break
+                        logger.warning(
+                            "searxng_empty: query=%r suspended_engines=%r — an "
+                            "empty result with engines suspended is an outage, "
+                            "not an absence of material",
+                            query_text[:120], [list(d)[:2] for d in _dead][:6])
                     logger.info("searxng_cache_miss: query=%s results=%d", query_text, len(results))
                     state.search_history.add(query_key)
                     # §17.837 — gate AFTER the raw cache write above.
