@@ -117,6 +117,14 @@ def _model_role_warnings(pulled: set[str]) -> list[str]:
 
 
 
+# §17.985 — total wall-clock budget for the SearXNG probe. The orchestrator's
+# container healthcheck is `curl -f /health` with a 10s timeout, so the probe
+# must stay well inside it: /health was ~76ms before this check existed and a
+# hung searxng took it to 8.03s. Also gathered with the other probes (not
+# awaited after them), so this is overlap, not addition.
+_SEARXNG_PROBE_BUDGET_S = 5.0
+
+
 async def _check_searxng() -> dict:
     """§17.983 — SearXNG was the one dependency /health never watched.
 
@@ -131,6 +139,21 @@ async def _check_searxng() -> dict:
     ENGINES answer is. `degraded` rather than `down` because the process is up
     and a suspension usually clears on its own, and because §17.171 already
     established that a sidecar's state must not flip the top-level status.
+
+    §17.985 — the probe asked for the DEFAULT engine set (no `engines` param),
+    which is the flood-prone, CAPTCHA'd set §17.984 had just stopped using. So
+    it reported on engines no caller queries any more. Measured live, same
+    query, same minute: default set 0 results, `_engines_for_category("general")`
+    10 — /health said `degraded` + "research will return nothing until this
+    clears" while planning research was returning `results_found=30`. Since some
+    engine in that rotation is nearly always suspended, that also pinned the
+    check at `degraded` more or less permanently — on the one signal the triage
+    path says to read first. It now probes the set research ACTUALLY queries.
+
+    The hint is softened to match what a suspended primary set really means:
+    `search_searxng` / `_search_queries` both retry on the wider
+    SEARXNG_FALLBACK_ENGINES net (a superset), so a degraded backbone is
+    "research is running on the fallback", not "research is dead".
     """
     import time as _t
 
@@ -138,8 +161,21 @@ async def _check_searxng() -> dict:
     t0 = _t.monotonic()
     try:
         from app.utils.http_clients import get_searxng_client
-        resp = await get_searxng_client().get(
-            "/search", params={"q": "healthcheck", "format": "json"}, timeout=8.0)
+        from app.modules.research_extractors import _engines_for_category
+        # §17.985 — bounded by an OUTER wait_for, not just httpx's timeout:
+        # httpx applies `timeout=` PER PHASE (connect/read/write/pool), so a
+        # slow connect followed by a slow read can exceed it. Measured with
+        # searxng paused, the old 8.0 per-phase timeout put /health at 8.03s
+        # against the container healthcheck's 10s budget (it was ~76ms before
+        # the probe existed). One total bound, comfortably inside that.
+        resp = await asyncio.wait_for(
+            get_searxng_client().get(
+                "/search",
+                params={"q": "healthcheck", "format": "json",
+                        "engines": _engines_for_category("general")},
+                timeout=_SEARXNG_PROBE_BUDGET_S),
+            timeout=_SEARXNG_PROBE_BUDGET_S,
+        )
         out["latency_ms"] = int((_t.monotonic() - t0) * 1000)
         if resp.status_code != 200:
             out["status"] = "down"
@@ -153,12 +189,19 @@ async def _check_searxng() -> dict:
         # every engine suspended is the exact shape of the live outage.
         out["status"] = "up" if (out["results"] or not dead) else "degraded"
         if out["status"] == "degraded":
-            out["hint"] = ("every search engine is suspended or CAPTCHA'd — "
-                           "research will return nothing until this clears")
+            out["hint"] = ("the primary search engines are suspended or "
+                           "CAPTCHA'd — research is falling back to the wider "
+                           "engine net and may return less, or nothing")
+    except asyncio.TimeoutError:
+        out["latency_ms"] = int((_t.monotonic() - t0) * 1000)
+        out["status"] = "down"
+        out["error"] = f"timeout after {_SEARXNG_PROBE_BUDGET_S}s"
     except Exception as e:  # noqa: BLE001 — health never raises
         out["latency_ms"] = int((_t.monotonic() - t0) * 1000)
         out["status"] = "down"
-        out["error"] = f"{type(e).__name__}: {e}"[:160]
+        # §17.985 — several httpx errors carry an empty str(), which rendered
+        # as a bare "ReadTimeout: " with a dangling colon in the operator's face.
+        out["error"] = (f"{type(e).__name__}: {e}".rstrip(": ") or type(e).__name__)[:160]
     return out
 
 
@@ -470,10 +513,16 @@ async def build_health_response(app, migration_state) -> dict:
                 "by_comm": {},
             }
 
-    pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys, calibration, oom_alerts, host_oom_alerts = await asyncio.gather(
+    (pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys, calibration,
+     oom_alerts, host_oom_alerts, searxng) = await asyncio.gather(
         _check_pg(), _check_ollama(), _check_milvus(), _check_redis(),
         _check_ngspice(), _check_verilator(), _check_symbiyosys(),
         _check_calibration(), _check_oom_alerts(), _check_host_oom_alerts(),
+        # §17.985 — was `await _check_searxng()` AFTER this gather, so its
+        # latency ADDED to the endpoint instead of overlapping. Gathered here,
+        # a slow searxng costs /health nothing the other probes weren't
+        # already spending.
+        _check_searxng(),
         return_exceptions=True,
     )
     # §17.171 — defensive unpack. If _check_redis raises a BaseException
@@ -533,8 +582,13 @@ async def build_health_response(app, migration_state) -> dict:
     if isinstance(milvus, BaseException):
         logger.warning("health_milvus_check_raised: %s", milvus)
         milvus = {"status": "down", "latency_ms": 0}
+    # §17.985 — same fail-safe guard the other gathered probes get above; a
+    # BaseException in place of the dict would TypeError-500 the
+    # unauthenticated /health when it is dereferenced downstream (§17.603).
+    if isinstance(searxng, BaseException):
+        logger.warning("health_searxng_check_raised: %s", searxng)
+        searxng = {"status": "down", "latency_ms": 0}
     reranker = _check_reranker_state(getattr(app, "state", None))
-    searxng = await _check_searxng()   # §17.983
     checks = {
         "postgresql": pg, "ollama": ollama, "milvus": milvus,
         "redis": redis_info, "embedding_cache": cache_stats,
