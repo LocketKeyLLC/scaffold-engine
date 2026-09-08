@@ -573,6 +573,12 @@ async def distill_entries(
         tools=[RECORD_DISTILLED_ENTRIES_TOOL],
         temperature=0.2,
         max_tokens=4096,
+        # §17.986 — distilling N search results into ZERO entries is a failed
+        # draw, not an answer, so redraw on it. §17.583's redraw only fires when
+        # there are no tool args at all; `{"entries": []}` reads as a good draw
+        # and returned on the first attempt, which is how a job logged
+        # `results_found=30 facts_extracted=0` with nothing else in the log.
+        require_nonempty="entries",
         **route,
     )
     if not resp.success:
@@ -585,9 +591,29 @@ async def distill_entries(
             topic, (resp.text or "")[:200],
         )
         return []
-    entries = [e for e in args["entries"] if isinstance(e, dict)]
+    # §17.986 — the two drops below were SILENT. `entry_count=0` was the only
+    # trace an entirely inert distillation stage left, which is the same class
+    # of silence as §17.983/§17.985: a caller cannot tell "the model emitted no
+    # objects" from "there was nothing to distill". The legacy generate path
+    # this replaced did log it (`phase2_distill_shape_drift: raw=10 kept=0
+    # dropped=10`) — the native-tool-call rewrite lost the signal along with the
+    # bug it was watching for.
+    raw = args["entries"]
+    entries = [e for e in raw if isinstance(e, dict)]
     if not entries:
+        logger.warning(
+            "distill_entries: empty_after_filter topic=%r raw_count=%d "
+            "element_types=%r finish_reason=%r — the model emitted the tool "
+            "call but no usable objects",
+            topic, len(raw), sorted({type(x).__name__ for x in raw})[:4],
+            getattr(resp, "finish_reason", None),
+        )
         return []
+    if len(entries) < len(raw):
+        logger.warning(
+            "distill_entries: shape_drift topic=%r raw=%d kept=%d dropped=%d",
+            topic, len(raw), len(entries), len(raw) - len(entries),
+        )
     return _normalize_legacy_keys(entries)
 
 
