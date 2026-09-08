@@ -382,6 +382,19 @@ async def _research_prepass(
             logger.warning("assist_guide_confirm_query_failed: %s", b)
             continue
         sources.extend(b)
+    # §17.976 — the missing instrument. The line above logs how many QUERIES were
+    # generated and nothing logs how many SOURCES came back, so "the searches ran
+    # and returned nothing" was invisible: 19 guided steps in this database
+    # carry an empty `research_sources`, interleaved with steps carrying 2-6, and
+    # no failure was ever logged for any of them. A count at zero is the whole
+    # signal — say it loudly enough to grep.
+    if not sources:
+        logger.warning(
+            "assist_research_empty node_key=%s queries=%d deep=%s q=%r",
+            node_key, len(queries), deep, [q[:80] for q in queries][:3])
+    else:
+        logger.info("assist_research_sources node_key=%s queries=%d sources=%d",
+                    node_key, len(queries), len(sources))
     return sources
 
 

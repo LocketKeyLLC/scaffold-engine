@@ -247,7 +247,8 @@ def test_environment_from_metadata_variants():
                    "substitutions_by_node": {},  # §17.892 — node-scoped pins
                    "banned_values": [], "missing_tools": [], "system_state": {},  # §17.893 — ruled-out values
                    "facts": ["Existing PVE 9.2.6"],
-                   "playbook": {}}  # §17.881b — playbook round-trips
+                   "playbook": {},  # §17.881b — playbook round-trips
+                   "file_writes": {}}  # §17.981 — the file ledger must too
     # tolerates a JSON string body
     got2 = assist_agent._environment_from_metadata('{"environment": {"profile": "X"}}')
     assert got2["profile"] == "X"
@@ -337,6 +338,12 @@ async def test_get_environment_returns_shape():
     out = await assist_agent.get_environment(session_id="s", db=db)
     assert out == {"profile": "P", "substitutions": {}, "substitutions_by_node": {},
                    "banned_values": [], "missing_tools": [], "system_state": {}, "facts": [], "playbook": {},
+                   # §17.981 — file_writes was MISSING from the deserializer, so
+                   # the §17.965-972 ledger was written, dropped on read, then
+                   # erased by the next fact fold. This literal is the shape
+                   # that let it hide; tests/test_assist_environment_roundtrip.py
+                   # is the guard that enumerates instead of listing.
+                   "file_writes": {},
                    "verbosity": "normal"}  # §17.881b/892/893
 
 

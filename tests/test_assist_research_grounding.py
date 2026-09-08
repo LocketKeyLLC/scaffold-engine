@@ -116,3 +116,84 @@ def test_no_prepass_site_is_left_on_the_old_grounding():
         for line in src.splitlines():
             if "environment_block=" in line and "render_environment_block" in line:
                 raise AssertionError(f"{mod.__name__}: {line.strip()}")
+
+
+# ── §17.976 — the guide paths must not diverge, and empty must be loud ────
+#
+# Measured before writing: 19 guided steps in the database carry an EMPTY
+# `research_sources`, interleaved with steps carrying 2–6 — not a time-clustered
+# outage, and no research failure was ever logged for any of them (0 ×
+# confirm_query_failed, 0 × searxng_failed, 0 × detect_unknowns_failed). Source
+# kinds where research did work: milvus 40, searxng 35, web 1 — the machinery is
+# functional.
+#
+# The cause was a parity gap: `floor_when_empty=True` appeared at exactly ONE
+# call site, the NON-stream guide. The stream path is the SPA path the operator
+# actually uses, so when the query generator declined it produced a walkthrough
+# with zero research — silently, because nothing logs a source COUNT.
+
+
+def _prepass_call_args():
+    import re
+
+    from app.modules import assist_guide
+
+    src = inspect.getsource(assist_guide)
+    out = []
+    for m in re.finditer(r"await _research_prepass\((.*?)\n        \)", src, re.S):
+        body = re.sub(r"#[^\n]*", "", m.group(1))
+        out.append(set(re.findall(r"(\w+)=", body)))
+    return out
+
+
+def test_there_are_exactly_three_prepass_sites_in_the_guide_module():
+    """If a fourth appears, it has to be looked at against the others rather
+    than inheriting whatever the nearest example happened to pass."""
+    assert len(_prepass_call_args()) == 3
+
+
+def test_both_guide_paths_ask_for_the_floor():
+    """The stream path never did. §17.912's fallback existed only on the path
+    the operator does not use."""
+    calls = _prepass_call_args()
+    with_floor = [c for c in calls if "floor_when_empty" in c]
+    assert len(with_floor) == 2, "guide + guide_stream both need the floor"
+
+
+def test_the_two_guide_calls_pass_the_same_flags():
+    """Third instance of this divergence: §17.854 (environment_block),
+    §17.975 (environment_block on fix), and now the floor. Pin the pair."""
+    calls = _prepass_call_args()
+    guides = [c for c in calls if "floor_when_empty" in c]
+    assert guides[0] == guides[1], (guides[0] ^ guides[1])
+
+
+def test_the_fix_path_keeps_its_deliberate_differences():
+    """`deep=True` (§17.500 — troubleshooting wants doc content) and NO floor
+    (§17.912 says only the guide path carries that defect) are intentional."""
+    calls = _prepass_call_args()
+    fix = [c for c in calls if "deep" in c]
+    assert len(fix) == 1
+    assert "floor_when_empty" not in fix[0]
+    assert "environment_block" in fix[0]      # §17.975
+
+
+def test_an_empty_research_result_is_logged_loudly():
+    """A count at zero is the whole signal, and nothing recorded it."""
+    from app.modules import assist_research_lib
+
+    src = inspect.getsource(assist_research_lib)
+    assert "assist_research_empty" in src
+    i = src.index("assist_research_empty")
+    window = src[i - 200:i + 260]
+    assert "logger.warning" in window          # not info — this is a defect
+    assert "queries=" in window and "node_key=" in window
+
+
+def test_a_non_empty_result_records_the_count():
+    from app.modules import assist_research_lib
+
+    src = inspect.getsource(assist_research_lib)
+    assert "assist_research_sources" in src
+    i = src.index("assist_research_sources")
+    assert "sources=" in src[i:i + 200]

@@ -4706,10 +4706,17 @@ async def generate_fix(
     # what is left. Placed last in the user prompt so it is the final constraint
     # read before the model writes its Diagnosis.
     from app.modules.assist_hypotheses import (
-        find_retested_hypothesis, render_tested_hypotheses)
+        find_retested_hypothesis, render_cross_step_eliminated,
+        render_tested_hypotheses)
     _hyp_block = render_tested_hypotheses(hypotheses)
     if _hyp_block:
         parts.append(_hyp_block)
+    # §17.977 — what the rest of the project disproved. Informational, and
+    # AFTER the same-step ledger, which is the part that binds.
+    _cross_block = render_cross_step_eliminated(
+        (hypotheses or {}).get("cross_step"))
+    if _cross_block:
+        parts.append(_cross_block)
     parts.append(_FIX_USER_TRAILER)
     user = "\n\n".join(parts)
 
@@ -4727,10 +4734,13 @@ async def generate_fix(
     _truncated = _pol.detect_truncated_paste(error_text or "")
     # §17.965 — a size the engine can check itself outranks any symptom report.
     from app.modules.assist_files import (
-        find_size_mismatches, find_verified_file_rewrites, verified_files)
+        find_content_mismatches, find_size_mismatches,
+        find_verified_file_rewrites, verified_files)
     _fw_state = ((environment or {}).get("file_writes")
                  if isinstance((environment or {}).get("file_writes"), dict) else {})
-    _size_bad = find_size_mismatches(_fw_state)
+    # §17.978 — a file whose CONTENT came back wrong deserves the same directive
+    # as one whose SIZE did. §17.967 detected it and only ever put it in prose.
+    _size_bad = find_size_mismatches(_fw_state) + find_content_mismatches(_fw_state)
     _verified = verified_files(_fw_state)   # §17.967
     from app.modules.assist_contracts import bounded_artefacts, find_contract_conflicts
     _conflicts = find_contract_conflicts(bounded_artefacts(_fw_state))  # §17.968
@@ -5706,6 +5716,14 @@ async def generate_guidance_stream(
             # DECISION step (the SPA path) researched generic textbook options
             # instead of system-specific ones. Restored to parity.
             environment_block=render_research_grounding(environment),  # §17.975
+            # §17.976 — the §17.912 floor, which this path never asked for.
+            # Measured: `floor_when_empty=True` appeared at exactly ONE call
+            # site, the NON-stream guide. The stream path is the SPA path — the
+            # one the operator actually uses — so whenever the query generator
+            # declined, its walkthrough was written with zero research and
+            # nothing recorded that it had happened. Third instance of this same
+            # stream-vs-non-stream divergence after §17.854 and §17.975.
+            floor_when_empty=True,
         )
 
     system = apply_verbosity(
@@ -5846,6 +5864,38 @@ async def generate_guidance_stream(
             text=text_out, session_id=session_id, environment=environment,
             step_title=ctx.title, role=role, db=db, node_key=node_key,  # §17.892
         )
+
+    # §17.979 — the nine output repairs, which this path had NONE of.
+    #
+    # Found by auditing every repair against every producer: `generate_guidance`
+    # and `generate_fix` each ran all nine; `generate_guidance_stream` ran zero.
+    # It is the SPA path, so every walkthrough the operator actually received
+    # skipped §17.897 copy-pasteable blocks, §17.908 preamble stripping, §17.913
+    # unavailable-tool repair, §17.924 console unchaining, and — added tonight
+    # and wired only to the other two — §17.957 `set +H`, §17.960 escaping,
+    # §17.963 paste chunking, §17.964 non-terminating commands and §17.966
+    # de-duplication.
+    #
+    # Applied HERE, beside §17.851's placeholder resolution, for the reason that
+    # comment gives: the durable copy is what `load()` re-renders and what the
+    # client shows on its post-stream reload, so repairing before persist is how
+    # this path has always corrected streamed text.
+    if text_out:
+        text_out, _tn = repair_unavailable_tools(text_out, environment)
+        text_out, _cn = repair_console_commands(text_out)
+        text_out, _hn = repair_history_expansion(text_out)
+        text_out, _en = repair_unescaped_expansions(text_out)
+        text_out, _nn = repair_nonterminating_commands(text_out)
+        text_out, _dn = dedupe_repeated_file_writes(text_out)
+        text_out, _sn = split_large_paste_blocks(text_out)
+        text_out = strip_operator_meta_preamble(text_out)
+        text_out = promote_inline_commands(text_out)
+        _stream_notes = (list(_tn) + list(_cn) + list(_hn) + list(_en)
+                         + list(_nn) + list(_dn) + list(_sn))
+        if _stream_notes:
+            text_out += unavailable_tools_note(_stream_notes)
+            logger.info("assist_stream_repairs node_key=%s applied=%d",
+                        node_key, len(_stream_notes))
 
     status = "ready" if (text_out and not stream_broken) else "failed"  # §17.887(#7)
     meta: dict[str, Any] = {

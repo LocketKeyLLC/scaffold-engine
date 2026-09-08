@@ -168,3 +168,74 @@ def find_retested_hypothesis(draft: str, ledger: dict | None) -> list[dict]:
             hits.append({"previous": prev, "overlap": round(overlap, 2),
                          "shared": sorted(new & old)[:6]})
     return sorted(hits, key=lambda h: -h["overlap"])[:2]
+
+
+# ── §17.977 — the project, not just the node ─────────────────────────────
+#
+# Operator: *"is there a way to fix the older logs and implement research
+# information into it? Perhaps creating an update path within the system
+# correcting the OVERALL project instead of just the singular node."*
+#
+# Measured: harvesting every node's fix turns in the live session recovers
+# **124 eliminated causes across 19 nodes**. The project-level playbook holds
+# **3**. Everything the engine has disproved in three days of work exists in its
+# own transcript and is visible to nothing beyond the step that produced it.
+#
+# The update path is that there is no path: these are DERIVED on read, exactly
+# like the per-step ledger, so every existing session recovers its full history
+# the moment the code ships. Nothing to migrate, nothing to backfill, and no
+# stored copy that can disagree with what actually happened.
+#
+# **What is deliberately NOT done.** These are not merged into the playbook's
+# `ruled_out`. That list is a BINDING prohibition on METHODS that failed on this
+# system ("apt.servarr.com fails DNS inside container 102") and it is enforced;
+# an eliminated hypothesis is a CAUSE that was considered and disproved, which
+# is a different claim and often a narrower one. "App.jsx is corrupted" was
+# disproved on T34 and would be actively wrong as a standing prohibition — the
+# file WAS corrupted twice before it wasn't. Promoting step-scoped reasoning
+# into a project-wide ban is how a knowledge store starts lying.
+#
+# So the cross-step view is INFORMATIONAL and says so: what was disproved
+# elsewhere, on which step, offered as orientation. Only the same-step ledger
+# (§17.973) gates anything.
+
+_MAX_CROSS_STEP = 12
+
+
+def harvest_session(rows: list[tuple[str, str]]) -> dict[str, dict]:
+    """Per-node ledgers from every fix turn in a session.
+
+    ``rows`` is ``[(node_key, reply)]`` oldest-first.
+    """
+    by_node: dict[str, list[str]] = {}
+    for nk, reply in rows or []:
+        if nk:
+            by_node.setdefault(nk, []).append(reply)
+    return {nk: harvest(replies) for nk, replies in by_node.items()}
+
+
+def cross_step_eliminated(session_ledgers: dict[str, dict],
+                          current_node: str | None) -> list[tuple[str, str]]:
+    """(node, cause) pairs disproved on OTHER steps, newest nodes last."""
+    out: list[tuple[str, str]] = []
+    for nk, led in (session_ledgers or {}).items():
+        if nk == current_node:
+            continue
+        for cause in (led or {}).get("eliminated") or []:
+            out.append((nk, cause))
+    return out[-_MAX_CROSS_STEP:]
+
+
+def render_cross_step_eliminated(pairs: list[tuple[str, str]] | None) -> str:
+    """Orientation, not prohibition — the distinction is the whole design."""
+    if not pairs:
+        return ""
+    lines = [
+        "### DISPROVED ELSEWHERE IN THIS PROJECT — context, not a rule. Each of "
+        "these was tested on the step named and did not explain the problem "
+        "there. That does NOT mean it cannot be the cause here; it means the "
+        "engine has already paid to learn about it, so do not re-derive it from "
+        "scratch, and say so explicitly if you are proposing one again:",
+    ]
+    lines += [f"- [{nk}] {cause}" for nk, cause in pairs]
+    return "\n".join(lines)

@@ -669,9 +669,10 @@ def apply_file_mismatch(system: str, *, mismatches: list[dict] | None,
     if not enabled or not mismatches:
         return system
     detail = "; ".join(
-        f"`{h['path']}` should be {h['expected']} bytes but measures "
-        f"{h['observed']}"
-        + (f" — {h['missing']} bytes missing" if h.get("short") else "")
+        h["detail"] if h.get("detail") else (
+            f"`{h['path']}` should be {h['expected']} bytes but measures "
+            f"{h['observed']}"
+            + (f" — {h['missing']} bytes missing" if h.get("short") else ""))
         for h in mismatches[:3])
     return system + _FILE_MISMATCH_DIRECTIVE.format(detail=detail)
 

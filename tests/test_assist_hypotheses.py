@@ -222,3 +222,99 @@ def test_fix_research_is_recorded():
     window = src[i:i + 260]
     assert "node_key" in window and "queries" in window
     assert "eliminated_known" in window
+
+
+# ── §17.977 — the project, not just the node ─────────────────────────────
+#
+# Operator: *"is there a way to fix the older logs … correcting the OVERALL
+# project instead of just the singular node."*
+#
+# Measured: harvesting every node's fix turns in the live session recovers 124
+# eliminated causes across 19 nodes. The project playbook holds 3. There is no
+# migration because these are DERIVED on read — every existing session recovers
+# its whole history the moment the code ships.
+
+from app.modules.assist_hypotheses import (  # noqa: E402
+    cross_step_eliminated,
+    harvest_session,
+    render_cross_step_eliminated,
+)
+
+_ROWS = [
+    ("T33", _reply("The heredoc terminator never arrived.")),
+    ("T33", _reply("The file was written to the wrong path entirely.")),
+    ("T34", _reply("The App.jsx file is corrupted beyond recovery.")),
+    ("T34", _reply("The backend process is missing from the PM2 manager.")),
+]
+
+
+def test_every_node_is_harvested_not_just_the_current_one():
+    led = harvest_session(_ROWS)
+    assert set(led) == {"T33", "T34"}
+    assert len(led["T33"]["eliminated"]) == 1
+    assert len(led["T34"]["eliminated"]) == 1
+
+
+def test_the_current_step_is_excluded_from_its_own_cross_step_view():
+    """The same-step ledger already covers it, and it is the half that binds."""
+    pairs = cross_step_eliminated(harvest_session(_ROWS), "T34")
+    assert pairs == [("T33", "The heredoc terminator never arrived.")]
+
+
+def test_no_current_node_still_works():
+    assert len(cross_step_eliminated(harvest_session(_ROWS), None)) == 2
+
+
+def test_rows_without_a_node_are_ignored():
+    rows = _ROWS + [(None, _reply("Something with no step attached at all."))]
+    assert set(harvest_session(rows)) == {"T33", "T34"}
+
+
+def test_the_cross_step_view_is_bounded():
+    rows = [(f"T{i}", _reply(f"Cause number {i} which failed on that step."))
+            for i in range(40)]
+    rows += [(f"T{i}", _reply(f"Second cause {i} on that same step.")) for i in range(40)]
+    assert len(cross_step_eliminated(harvest_session(rows), "T1")) <= 12
+
+
+def test_it_is_framed_as_context_and_never_as_a_prohibition():
+    """The design decision this entry turns on: an eliminated CAUSE is not a
+    ruled-out METHOD. "App.jsx is corrupted" was disproved on T34 and would be
+    actively wrong as a standing project-wide ban — the file WAS corrupted twice
+    before it wasn't."""
+    block = render_cross_step_eliminated(
+        cross_step_eliminated(harvest_session(_ROWS), "T34"))
+    assert "context, not a rule" in block
+    assert "does NOT mean it cannot be the cause here" in block
+    assert "[T33]" in block                       # attributed to its step
+    # No prohibition language — that belongs to the same-step ledger alone.
+    assert "Do NOT propose" not in block
+
+
+def test_nothing_disproved_elsewhere_renders_nothing():
+    assert render_cross_step_eliminated([]) == ""
+    assert render_cross_step_eliminated(None) == ""
+
+
+def test_the_same_step_ledger_still_comes_first_and_still_binds():
+    """Ordering is the safety property: the binding list is read before the
+    informational one, and the trailer stays last."""
+    from app.modules import assist_guide
+
+    src = inspect.getsource(assist_guide.generate_fix)
+    i = src.index("parts.append(_hyp_block)")
+    j = src.index("parts.append(_cross_block)")
+    assert i < j < src.index("_FIX_USER_TRAILER")
+
+
+def test_the_project_view_is_derived_from_history_not_stored():
+    """The 'update path' is that there isn't one — no migration, no backfill,
+    and no stored copy that can disagree with the transcript."""
+    from app.modules import assist_agent
+
+    src = inspect.getsource(assist_agent)
+    assert "harvest_session" in src
+    i = src.index("harvest_session")
+    window = src[i - 900:i + 200]
+    assert "FROM assist_turns" in window
+    assert "node_key IS NOT NULL" in window

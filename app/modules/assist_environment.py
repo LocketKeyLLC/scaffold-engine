@@ -144,6 +144,19 @@ def _environment_from_metadata(metadata: Any) -> dict:
         # proven servarr pattern derived, then clobbered by T13's write
         # seconds later — only the last step's entries survived).
         "playbook": playbook if isinstance(playbook, dict) else {},
+        # §17.981 — the §17.965/967/968/972 file ledger. It MUST round-trip for
+        # the same §17.881b reason spelled out directly above, and it did not:
+        # this deserializer returns a FIXED key list, so `file_writes` was
+        # written by set_environment, dropped on the next read, and then erased
+        # by the following fact fold — because set_environment writes the whole
+        # env dict back. Expected sizes, content hashes, retained bodies and
+        # therefore every cross-artefact contract check were dead in production
+        # from the moment they shipped. Every unit test passed: none of them
+        # round-tripped through the real store, which is exactly what the
+        # §17.980 integration test was written to catch, and did, on its first
+        # run.
+        "file_writes": (env.get("file_writes")
+                        if isinstance(env.get("file_writes"), dict) else {}),
     }
 
 
