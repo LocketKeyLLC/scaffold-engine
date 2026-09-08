@@ -769,6 +769,7 @@ async def tool_call(
     tool_choice: str = "auto",
     fallback: str | None = None,
     draws: int = 3,
+    require_nonempty: str | None = None,
 ) -> ModelResponse:
     """Call an LLM with native tool-calling, falling back to JSON-coaxing
     for providers that don't support native tools.
@@ -794,6 +795,12 @@ async def tool_call(
     failure, ``tool_calls`` stays empty — callers treat that as "no
     tool selected" or a soft failure.
 
+    §17.986 — ``require_nonempty="<key>"`` widens that retry to a tool call
+    whose args are well-formed but whose payload list is EMPTY (or holds no
+    objects). Off by default: an empty list is a legitimate answer for some
+    callers, so only the ones for which "zero items" means "the draw failed"
+    opt in.
+
     §17.583 — built-in retry-on-empty-args. A thinking model
     (``qwen3.5:397b-cloud``) can return ``success=True`` yet no usable tool
     arguments (reasoning eats the budget; the coax parse finds no JSON). This
@@ -815,12 +822,31 @@ async def tool_call(
         )
         # Only re-draw the "success but no usable tool args" variance. Hard
         # failures and the empty-tools short-circuit are returned as-is.
-        if not tools or not resp.success or read_tool_args(resp) is not None:
+        if not tools or not resp.success:
+            return resp
+        _args = read_tool_args(resp)
+        _usable = _args is not None
+        # §17.986 — ``require_nonempty`` extends the §17.583 redraw one level
+        # deeper: a tool call carrying ``{"entries": []}`` has perfectly good
+        # args, so the check above returned it on the FIRST draw and the caller
+        # got nothing. Measured on the live ideation path, same idea and box
+        # minutes apart: one run distilled 0 entries in 0.59s, the next 4 in
+        # 1.28s. Not an inert stage — an intermittent empty draw that silently
+        # zeroed research for that job. Opt-in, because for some callers an
+        # empty list is a legitimate answer ("no options", "nothing stale").
+        if _usable and require_nonempty:
+            _val = _args.get(require_nonempty)
+            _usable = isinstance(_val, list) and any(
+                isinstance(x, dict) for x in _val)
+        if _usable:
             return resp
         if d + 1 < attempts:
             logger.warning(
-                "tool_call_empty_redraw: model/role=%s draw=%d/%d (no tool args, §17.583)",
+                "tool_call_empty_redraw: model/role=%s draw=%d/%d "
+                "(%s, §17.583/§17.986)",
                 role or model or settings.model_general, d + 1, attempts,
+                f"empty {require_nonempty!r} payload" if require_nonempty
+                and _args is not None else "no tool args",
             )
     return resp
 
