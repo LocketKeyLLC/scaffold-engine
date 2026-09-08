@@ -117,6 +117,51 @@ def _model_role_warnings(pulled: set[str]) -> list[str]:
 
 
 
+async def _check_searxng() -> dict:
+    """§17.983 — SearXNG was the one dependency /health never watched.
+
+    Found by the §17.982 end-to-end run: every engine suspended, every query
+    returning HTTP 200 with zero results, and the container reporting `healthy`
+    because its own healthcheck only proves the process is listening. The
+    engine's entire research capability had been silently inert — §17.976's 19
+    guided steps with no sources, planning research at `results_found=0`, and a
+    DAG built with no research at all — with no signal anywhere.
+
+    Liveness is not the useful question for a metasearch proxy; whether its
+    ENGINES answer is. `degraded` rather than `down` because the process is up
+    and a suspension usually clears on its own, and because §17.171 already
+    established that a sidecar's state must not flip the top-level status.
+    """
+    import time as _t
+
+    out: dict = {"status": "unknown", "latency_ms": 0}
+    t0 = _t.monotonic()
+    try:
+        from app.utils.http_clients import get_searxng_client
+        resp = await get_searxng_client().get(
+            "/search", params={"q": "healthcheck", "format": "json"}, timeout=8.0)
+        out["latency_ms"] = int((_t.monotonic() - t0) * 1000)
+        if resp.status_code != 200:
+            out["status"] = "down"
+            out["http_status"] = resp.status_code
+            return out
+        body = resp.json()
+        dead = [list(d)[:2] for d in (body.get("unresponsive_engines") or [])]
+        out["results"] = len(body.get("results") or [])
+        out["suspended_engines"] = dead[:6]
+        # Engines answering is the signal; a zero-result healthcheck query with
+        # every engine suspended is the exact shape of the live outage.
+        out["status"] = "up" if (out["results"] or not dead) else "degraded"
+        if out["status"] == "degraded":
+            out["hint"] = ("every search engine is suspended or CAPTCHA'd — "
+                           "research will return nothing until this clears")
+    except Exception as e:  # noqa: BLE001 — health never raises
+        out["latency_ms"] = int((_t.monotonic() - t0) * 1000)
+        out["status"] = "down"
+        out["error"] = f"{type(e).__name__}: {e}"[:160]
+    return out
+
+
 async def build_health_response(app, migration_state) -> dict:
     """Build the /health response dict. ``app`` supplies ``app.state``
     (reranker prewarm); ``migration_state`` is main.py's startup-migration
@@ -489,6 +534,7 @@ async def build_health_response(app, migration_state) -> dict:
         logger.warning("health_milvus_check_raised: %s", milvus)
         milvus = {"status": "down", "latency_ms": 0}
     reranker = _check_reranker_state(getattr(app, "state", None))
+    searxng = await _check_searxng()   # §17.983
     checks = {
         "postgresql": pg, "ollama": ollama, "milvus": milvus,
         "redis": redis_info, "embedding_cache": cache_stats,
@@ -496,6 +542,10 @@ async def build_health_response(app, migration_state) -> dict:
         "rag_result_cache": rag_cache_stats,
         "fetch_cache": fetch_cache_stats,
         "reranker": reranker,
+        # §17.983 — research's search backend. Like the §17.171 sidecars this
+        # is surfaced for visibility and does NOT flip the top-level status: a
+        # suspended engine set is degraded research, not a dead engine.
+        "searxng": searxng,
         # §17.171 — sim sidecars surfaced for operator visibility. Their
         # state does NOT affect the top-level `status` field below: a wedged
         # sidecar leaves /health "healthy" so legacy/scaffold workflows

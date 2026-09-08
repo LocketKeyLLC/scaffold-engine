@@ -126,12 +126,31 @@ RECORD_DISTILLED_ENTRIES_TOOL = Tool(
 # ---------------------------------------------------------------------------
 
 async def search_searxng(query: str, max_results: int = 10) -> list[dict]:
-    """Query SearXNG and return result list."""
+    """Query SearXNG and return result list.
+
+    §17.984 — brought in line with `execution_agent._searxng_search` (§17.712)
+    and `assist_research_lib` (§17.729), which is where this pattern has now
+    been fixed twice before. This was the last caller still asking for
+    `categories=general` — the broad default set, which floods with
+    keyword-matchers AND is exactly the set that gets CAPTCHA'd — with no
+    0-results fallback.
+
+    It is the one that feeds PLANNING. Found by the §17.982 end-to-end run:
+    `phase2_complete queries_run=3 results_found=0 facts_extracted=0`, and the
+    DAG was then generated with no research at all. Measured against the live
+    instance at that moment: the default set was entirely suspended (brave, ddg,
+    google, startpage) while `bing` returned 10 results for the same query — and
+    `bing` was already in the fallback backbone this function never used.
+    """
+    from app.modules.research_extractors import (
+        _engines_for_category, SEARXNG_FALLBACK_ENGINES,
+    )
     try:
         client = get_searxng_client()
         resp = await client.get(
             "/search",
-            params={"q": query, "format": "json", "categories": "general"},
+            params={"q": query, "format": "json",
+                    "engines": _engines_for_category("general")},
         )
         if resp.status_code != 200:
             logger.warning("SearXNG returned %d for query: %s", resp.status_code, query)
@@ -139,6 +158,31 @@ async def search_searxng(query: str, max_results: int = 10) -> list[dict]:
 
         data = resp.json()
         results = data.get("results", [])[:max_results]
+        # §17.712 — one retry on the widest net, so a single blocked engine
+        # cannot zero a planning query. Only on empty, so it is free normally.
+        if not results:
+            try:
+                fb = await client.get(
+                    "/search",
+                    params={"q": query, "format": "json",
+                            "engines": SEARXNG_FALLBACK_ENGINES},
+                )
+                if fb.status_code == 200:
+                    data = fb.json()
+                    results = data.get("results", [])[:max_results]
+                    if results:
+                        logger.info("gt_searxng_fallback_recovered: query=%r results=%d",
+                                    query[:100], len(results))
+            except Exception as e:  # noqa: BLE001 — the fallback never blocks
+                logger.warning("gt_searxng_fallback_failed: query=%r err=%s",
+                               query[:100], e)
+        # §17.983 — an empty result with engines suspended is an OUTAGE, and the
+        # response says which. Without this the planning phase reported
+        # `results_found=0` indistinguishably from a genuinely obscure query.
+        if not results:
+            dead = [list(d)[:2] for d in (data.get("unresponsive_engines") or [])]
+            logger.warning(
+                "gt_searxng_empty: query=%r suspended_engines=%r", query[:100], dead[:6])
         return [
             {
                 "title": r.get("title", ""),
