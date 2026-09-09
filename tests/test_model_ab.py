@@ -519,3 +519,54 @@ def test_model_general_is_graded_on_a_job_it_runs():
 
     assert settings.ideation_model_role == "model_general"
     assert ROLE_TASKS["model_general"] == "extraction"
+
+
+# ── §17.995 — the model-pick RECORDS must not drift from the code ────────
+
+
+def test_every_tuned_cloud_pick_names_a_model_the_repo_still_ships():
+    """`app/config.py` records each role's tuned cloud pick in a comment. Those
+    comments are the only durable record of an operator-local `.env` — a rebuild
+    starts from the local-safe defaults (§17.819) and someone reads these to
+    restore the measured configuration.
+
+    Three of them went stale in one day: §17.994 corrected model_router and
+    model_research_extract after swapping them, and §17.995 then found
+    model_general still naming deepseek-v4-pro:cloud while the live pin had long
+    since moved to gemma4:cloud. This pins the SHAPE — a pick must at least name
+    a model the repo mentions somewhere else — so a pick referring to nothing
+    real (a retired tag, a typo) fails here rather than at a rebuild.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).parent.parent
+    cfg = (root / "app" / "config.py").read_text()
+    picks = dict(re.findall(r"^\s*(model_\w+): str = .*?tuned cloud pick: ([^,)]+)",
+                            cfg, re.M))
+    assert picks, "the tuned-pick comments vanished — that record is load-bearing"
+    # .env.example is not mounted into the dev test image, so read what is
+    # present rather than depending on the lane's mount list.
+    corpus = cfg
+    for extra in ((root / ".env.example"),
+                  (root / "app" / "modules" / "profiles.py")):
+        if extra.exists():
+            corpus += extra.read_text()
+    for role, pick in picks.items():
+        pick = pick.strip()
+        assert pick in corpus, (
+            f"{role}'s tuned cloud pick {pick!r} is named nowhere else in the "
+            "repo — likely a stale or mistyped tag")
+
+
+def test_the_quick_profile_pins_only_known_roles():
+    """§17.995 — the quick profile is a second model map, tuned at a different
+    time from config.py's, and it drifted the same way: it pinned
+    gpt-oss:20b-cloud on routing and research_extract, both of which its own
+    goldens now rate worse AND slower than alternatives that did not exist when
+    it was written."""
+    from app.config import SWITCHABLE_ROLE_FIELDS
+    from app.modules.profiles import quick_model_map
+
+    unknown = set(quick_model_map()) - set(SWITCHABLE_ROLE_FIELDS)
+    assert not unknown, f"quick profile pins unknown roles: {unknown}"
