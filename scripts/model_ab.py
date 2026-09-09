@@ -100,14 +100,29 @@ async def _score_codegen(golden: dict, resp: Any) -> dict:
 # extraction task (§17.557) — tool_call(DISTILL_*) + entries-produced
 # ---------------------------------------------------------------------------
 
-def score_extraction(args: dict | None) -> dict:
-    """Pure scoring: a parsed tool-args dict → verdict. ``passed`` iff the model
-    emitted a non-empty ``entries`` list of objects (native OR coaxed; the
-    read_tool_args wrapper hides which). Import-light for unit-testability."""
+def score_extraction(args: dict | None, expect: str = "entries") -> dict:
+    """Pure scoring: a parsed tool-args dict → verdict. Import-light for
+    unit-testability.
+
+    ``expect="entries"`` (default, and every pre-§17.992 golden): passed iff the
+    model emitted a non-empty ``entries`` list of objects — reliability, native
+    OR coaxed, the read_tool_args wrapper hides which.
+
+    ``expect="empty"`` (§17.992): passed iff it emitted NOTHING. Added because
+    the reliability-only gate could not express the failure that mattered most.
+    §17.990 measured a corpus where the search engine returned the Greek titan,
+    the 2012 Ridley Scott film and IMDb for `prometheus histogram buckets`;
+    gemma4 correctly refused it, while another model produced four accurate but
+    entirely off-topic entries ("Prometheus is a monitoring toolkit"). Under the
+    old scoring the padding model PASSED and the correct one FAILED — exactly
+    backwards, because padding makes a plan look grounded while containing
+    nothing that addresses the topic.
+    """
     entries = []
     if args and isinstance(args.get("entries"), list):
         entries = [e for e in args["entries"] if isinstance(e, dict)]
-    return {"passed": bool(entries), "entries": len(entries),
+    passed = (not entries) if expect == "empty" else bool(entries)
+    return {"passed": passed, "entries": len(entries), "expect": expect,
             "metric": "entries", "metric_value": len(entries)}
 
 
@@ -135,7 +150,8 @@ async def _dispatch_extraction(model: str, golden: dict, *, temperature: float,
 
 async def _score_extraction(golden: dict, resp: Any) -> dict:
     from app.utils.tool_call_args import read_tool_args
-    return score_extraction(read_tool_args(resp))
+    # §17.992 — goldens without `expect` keep the original reliability meaning.
+    return score_extraction(read_tool_args(resp), golden.get("expect", "entries"))
 
 
 # ---------------------------------------------------------------------------
