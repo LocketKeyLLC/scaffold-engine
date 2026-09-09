@@ -1,24 +1,209 @@
 {
   "version": "extraction-1.0",
-  "note": "§17.557 — goldens for `model_ab.py --task extraction`. Each item feeds gt_extractor's DISTILL_SYSTEM/DISTILL_PROMPT + RECORD_DISTILLED_ENTRIES_TOOL (the production distill path). Scoring is reliability, not correctness: did the model emit a parseable non-empty `entries` tool-call (native or coaxed). Use it to A/B a role/model change before shipping it (cf. §17.556 — coaxed qwen3.5 5/5 vs native kimi 1/5 on this prompt).",
+  "note": "§17.557 — goldens for `model_ab.py --task extraction`. Each item feeds gt_extractor's DISTILL_SYSTEM/DISTILL_PROMPT + RECORD_DISTILLED_ENTRIES_TOOL (the production distill path). Scoring is reliability, not correctness: did the model emit a parseable non-empty `entries` tool-call (native or coaxed). Use it to A/B a role/model change before shipping it (cf. §17.556 — coaxed qwen3.5 5/5 vs native kimi 1/5 on this prompt). §17.992 — goldens may set `expect: \"empty\"`, meaning a corpus with nothing on-topic where REFUSING is the correct answer; a model that pads off-topic entries fails those.",
   "goldens": [
     {
       "id": "x86-real-mode",
       "topic": "x86 real-mode programming",
       "results": [
-        {"title": "8086 Memory Segmentation Explained", "url": "https://ex.com/8086-seg", "content": "The 8086 uses a segmented memory model. A 20-bit physical address is formed by shifting the 16-bit segment register left 4 bits and adding the 16-bit offset, yielding a 1 MB address space from 16-bit registers."},
-        {"title": "DOS INT 21h Services", "url": "https://ex.com/int21", "content": "INT 21h is the primary DOS API interrupt. AH selects the function: 01h read char, 02h write char, 09h print string, 4Ch terminate. Parameters pass in registers."},
-        {"title": "BIOS Keyboard Interrupt 16h", "url": "https://ex.com/int16", "content": "INT 16h provides BIOS keyboard services. AH=00h waits for and reads a keystroke (scan code in AH, ASCII in AL); AH=01h checks status without blocking."},
-        {"title": "Real Mode vs Protected Mode", "url": "https://ex.com/modes", "content": "Real mode uses segment:offset addressing with a 1 MB limit. Protected mode (80286+) adds descriptor tables, privilege levels, and access to extended memory beyond 1 MB."}
+        {
+          "title": "8086 Memory Segmentation Explained",
+          "url": "https://ex.com/8086-seg",
+          "content": "The 8086 uses a segmented memory model. A 20-bit physical address is formed by shifting the 16-bit segment register left 4 bits and adding the 16-bit offset, yielding a 1 MB address space from 16-bit registers."
+        },
+        {
+          "title": "DOS INT 21h Services",
+          "url": "https://ex.com/int21",
+          "content": "INT 21h is the primary DOS API interrupt. AH selects the function: 01h read char, 02h write char, 09h print string, 4Ch terminate. Parameters pass in registers."
+        },
+        {
+          "title": "BIOS Keyboard Interrupt 16h",
+          "url": "https://ex.com/int16",
+          "content": "INT 16h provides BIOS keyboard services. AH=00h waits for and reads a keystroke (scan code in AH, ASCII in AL); AH=01h checks status without blocking."
+        },
+        {
+          "title": "Real Mode vs Protected Mode",
+          "url": "https://ex.com/modes",
+          "content": "Real mode uses segment:offset addressing with a 1 MB limit. Protected mode (80286+) adds descriptor tables, privilege levels, and access to extended memory beyond 1 MB."
+        }
       ]
     },
     {
       "id": "rag-retrieval",
       "topic": "retrieval-augmented generation",
       "results": [
-        {"title": "Hybrid retrieval: dense + sparse fusion", "url": "https://ex.com/hybrid", "content": "Hybrid search combines a dense vector leg (semantic embeddings) with a sparse leg (BM25 lexical scoring) and fuses the two rank lists with Reciprocal Rank Fusion (RRF), which is robust to differing score scales."},
-        {"title": "Reranking with cross-encoders", "url": "https://ex.com/rerank", "content": "A cross-encoder reranker jointly encodes the query and each candidate document, producing a relevance score. It is more accurate than bi-encoder retrieval but quadratically more expensive, so it is applied only to the top-k candidates."},
-        {"title": "Chunking strategies for RAG", "url": "https://ex.com/chunk", "content": "Document chunking trades recall against precision: small chunks improve precision but fragment context; overlap between chunks preserves cross-boundary context at the cost of redundancy."}
+        {
+          "title": "Hybrid retrieval: dense + sparse fusion",
+          "url": "https://ex.com/hybrid",
+          "content": "Hybrid search combines a dense vector leg (semantic embeddings) with a sparse leg (BM25 lexical scoring) and fuses the two rank lists with Reciprocal Rank Fusion (RRF), which is robust to differing score scales."
+        },
+        {
+          "title": "Reranking with cross-encoders",
+          "url": "https://ex.com/rerank",
+          "content": "A cross-encoder reranker jointly encodes the query and each candidate document, producing a relevance score. It is more accurate than bi-encoder retrieval but quadratically more expensive, so it is applied only to the top-k candidates."
+        },
+        {
+          "title": "Chunking strategies for RAG",
+          "url": "https://ex.com/chunk",
+          "content": "Document chunking trades recall against precision: small chunks improve precision but fragment context; overlap between chunks preserves cross-boundary context at the cost of redundancy."
+        }
+      ]
+    },
+    {
+      "id": "leading-term-junk-prometheus",
+      "expect": "empty",
+      "topic": "prometheus histogram buckets",
+      "_why": "Observed live 2026-09-08, reproduced FAITHFULLY. With four of five engines suspended, bing keyword-matched the LEADING word: ten of fifteen results matched only 'prometheus' and NOT ONE mentioned histogram or buckets. Crucially the corpus mixes mythology and the film with PLAUSIBLE monitoring pages (prometheus.io, the GitHub repo, Grafana) — that mixture is what discriminates. gemma4 refused it 3/3; deepseek-v4-flash produced four accurate-but-off-topic entries from exactly those pages ('Prometheus is an open-source systems monitoring toolkit built at SoundCloud'), which is worse than zero because it makes a plan look grounded on a topic it never addresses. A first cut of this golden used pure mythology/film and every model correctly refused it — too easy to separate anything.",
+      "results": [
+        {
+          "title": "Prometheus - Wikipedia",
+          "url": "https://en.wikipedia.org/wiki/Prometheus",
+          "content": "In Greek mythology, Prometheus is a Titan best known for defying the Olympian gods by stealing fire and giving it to humanity."
+        },
+        {
+          "title": "Prometheus - Monitoring system & time series database",
+          "url": "https://prometheus.io/",
+          "content": "Prometheus is an open-source systems monitoring and alerting toolkit originally built at SoundCloud. It uses a dimensional data model, a flexible query language and an efficient time series database."
+        },
+        {
+          "title": "Prometheus (2012 film) - Wikipedia",
+          "url": "https://en.wikipedia.org/wiki/Prometheus_(2012_film)",
+          "content": "Prometheus is a 2012 science fiction film directed by Ridley Scott, starring Noomi Rapace and Michael Fassbender."
+        },
+        {
+          "title": "Prometheus | God, Description, Meaning, & Myth | Britannica",
+          "url": "https://www.britannica.com/topic/Prometheus-Greek-god",
+          "content": "Prometheus, in Greek religion, one of the Titans, the supreme trickster and a god of fire."
+        },
+        {
+          "title": "Overview | Prometheus",
+          "url": "https://prometheus.io/docs/introduction/overview/",
+          "content": "Prometheus collects and stores its metrics as time series data. It is a Cloud Native Computing Foundation project and has an active developer and user community."
+        },
+        {
+          "title": "Prometheus (2012) - IMDb",
+          "url": "https://www.imdb.com/title/tt1446714/",
+          "content": "Prometheus: Directed by Ridley Scott. Cast and crew, reviews and ratings."
+        },
+        {
+          "title": "GitHub - prometheus/prometheus: The Prometheus monitoring system",
+          "url": "https://github.com/prometheus/prometheus",
+          "content": "The Prometheus monitoring system and time series database. Written in Go, licensed Apache 2.0, a CNCF graduated project."
+        },
+        {
+          "title": "Prometheus (2012) | Rotten Tomatoes",
+          "url": "https://www.rottentomatoes.com/m/prometheus_2012",
+          "content": "Ridley Scott returns to the genre he helped define. Critic reviews and audience score."
+        },
+        {
+          "title": "Prometheus - World History Encyclopedia",
+          "url": "https://www.worldhistory.org/Prometheus/",
+          "content": "Prometheus was one of the Titans of Greek mythology, a champion of humanity known for his wily intelligence."
+        },
+        {
+          "title": "Grafana Labs - Full-stack observability",
+          "url": "https://grafana.com/",
+          "content": "Grafana is an open-source analytics and visualization web application that connects to time series databases and other data sources."
+        },
+        {
+          "title": "Download Grafana",
+          "url": "https://grafana.com/grafana/download",
+          "content": "Download Grafana for Linux, Windows, macOS or run it with Docker."
+        },
+        {
+          "title": "Project Prometheus: Jeff Bezos' AI Startup Explained",
+          "url": "https://example.com/bezos-prometheus",
+          "content": "Project Prometheus is a newly announced AI startup backed by Jeff Bezos, focused on engineering and manufacturing applications."
+        }
+      ]
+    },
+    {
+      "id": "leading-term-junk-superlative",
+      "expect": "empty",
+      "topic": "markdown to pdf conversion library",
+      "_why": "Observed live 2026-09-08. The generated query led with 'best', so the keyword-matcher returned an electronics retailer and two dictionary entries. This is the corpus that produced `phase2_distill entry_count=0` with `results_found=40` and no explanation, and it is why §17.989 made the generator lead with the distinctive term.",
+      "results": [
+        {
+          "title": "Best Buy | Official Online Store | Shop Now & Save",
+          "url": "https://www.bestbuy.com/",
+          "content": "Shop Best Buy for electronics, computers, appliances, cell phones, video games and more new tech. In-store pickup and free shipping on thousands of items."
+        },
+        {
+          "title": "BEST Definition & Meaning - Merriam-Webster",
+          "url": "https://www.merriam-webster.com/dictionary/best",
+          "content": "The meaning of BEST is excelling all others. How to use best in a sentence. Synonym discussion of best."
+        },
+        {
+          "title": "BEST | English meaning - Cambridge Dictionary",
+          "url": "https://dictionary.cambridge.org/dictionary/english/best",
+          "content": "BEST definition: 1. of the highest quality, or being the most suitable, pleasing, or effective type of thing or person."
+        },
+        {
+          "title": "Best Buy Store Locator: Store Hours, Directions & Events",
+          "url": "https://stores.bestbuy.com/",
+          "content": "Use the Best Buy store locator to find stores in your area. Then, visit each Best Buy store's page to see store hours, directions, news and events."
+        },
+        {
+          "title": "Best - definition of best by The Free Dictionary",
+          "url": "https://www.thefreedictionary.com/best",
+          "content": "best- (superlative of good) having the most positive qualities; the best film of the year; the best solution."
+        }
+      ]
+    },
+    {
+      "id": "thin-on-topic-signal",
+      "expect": "entries",
+      "topic": "sqlite fts5 full text search",
+      "_why": "The mirror case: mostly noise, but real material IS present. A model that refuses this is over-refusing, which §17.990's grounding diagnosis would misreport as `results_off_topic`.",
+      "results": [
+        {
+          "title": "SQLite Home Page",
+          "url": "https://www.sqlite.org/",
+          "content": "SQLite is a C-language library that implements a small, fast, self-contained SQL database engine."
+        },
+        {
+          "title": "SQLite FTS5 Extension",
+          "url": "https://www.sqlite.org/fts5.html",
+          "content": "FTS5 is an SQLite virtual table module that provides full-text search. A tokenizer splits text; the 'porter' tokenizer applies English stemming. Use MATCH with bm25() to rank results."
+        },
+        {
+          "title": "SQLite Download Page",
+          "url": "https://www.sqlite.org/download.html",
+          "content": "Download prebuilt binaries and the amalgamation source for SQLite."
+        },
+        {
+          "title": "SQLite - Wikipedia",
+          "url": "https://en.wikipedia.org/wiki/SQLite",
+          "content": "SQLite is a database engine written in the C programming language, not a standalone app but a library."
+        }
+      ]
+    },
+    {
+      "id": "dense-technical-versions",
+      "expect": "entries",
+      "topic": "postgresql logical replication slots",
+      "_why": "Dense, version-bearing facts — DISTILL_SYSTEM asks for numbers and versions specifically, so this exercises the part of the prompt the clean goldens do not.",
+      "results": [
+        {
+          "title": "PostgreSQL: Documentation: Logical Replication",
+          "url": "https://www.postgresql.org/docs/current/logical-replication.html",
+          "content": "Logical replication was introduced in PostgreSQL 10. It replicates changes based on replication identity, usually a primary key, rather than block addresses."
+        },
+        {
+          "title": "Replication Slots",
+          "url": "https://www.postgresql.org/docs/current/warm-standby.html",
+          "content": "A replication slot retains WAL segments until consumed. An inactive slot can cause unbounded WAL growth; max_slot_wal_keep_size (PostgreSQL 13+) bounds it."
+        },
+        {
+          "title": "pg_replication_slots view",
+          "url": "https://www.postgresql.org/docs/current/view-pg-replication-slots.html",
+          "content": "The pg_replication_slots view shows slot_name, plugin, slot_type (physical or logical), active, and restart_lsn for every slot."
+        },
+        {
+          "title": "wal2json output plugin",
+          "url": "https://github.com/eulerto/wal2json",
+          "content": "wal2json is a logical decoding output plugin that produces JSON objects per transaction; format-version 2 emits one object per change."
+        }
       ]
     }
   ]

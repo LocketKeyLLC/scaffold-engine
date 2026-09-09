@@ -318,3 +318,58 @@ async def test_dispatch_routing_uses_route_tool_and_scores(monkeypatch):
     assert captured["temperature"] == 0.0        # harness temp ignored, prod is deterministic
     assert captured["model"] == "qwen3.5:397b-cloud"
     assert s["passed"] is True and s["verdict"] == "status"
+
+
+# ── §17.992 — `expect: "empty"` goldens: refusing IS the correct answer ──
+
+
+def test_score_extraction_expect_empty_passes_on_a_refusal():
+    """§17.990 measured a corpus where the search engine returned the Greek
+    titan, the 2012 Ridley Scott film and IMDb for `prometheus histogram
+    buckets`. Refusing that is right; padding it with off-topic entries is
+    worse than zero, because it makes a plan LOOK grounded on a topic it never
+    addresses. The reliability-only scorer graded those exactly backwards."""
+    s = score_extraction({"entries": []}, expect="empty")
+    assert s["passed"] is True
+    assert s["entries"] == 0
+    assert s["expect"] == "empty"
+
+
+def test_score_extraction_expect_empty_fails_a_padding_model():
+    s = score_extraction(
+        {"entries": [{"title": "prometheus-open-source-monitoring",
+                      "content": "Prometheus is a monitoring toolkit"}]},
+        expect="empty")
+    assert s["passed"] is False, "off-topic padding must not score as a pass"
+
+
+def test_score_extraction_expect_empty_passes_when_no_tool_call_at_all():
+    assert score_extraction(None, expect="empty")["passed"] is True
+
+
+def test_score_extraction_default_is_unchanged():
+    """Every pre-§17.992 golden omits `expect` and must keep the original
+    reliability meaning — non-empty entries is a pass."""
+    assert score_extraction({"entries": [{"t": 1}]})["passed"] is True
+    assert score_extraction({"entries": []})["passed"] is False
+    assert score_extraction(None)["passed"] is False
+    assert score_extraction({"entries": [{"t": 1}]})["expect"] == "entries"
+
+
+def test_every_extraction_golden_declares_a_reachable_expectation():
+    """A typo in `expect` would silently fall back to "entries" and invert the
+    meaning of a refusal golden — the exact inversion this feature exists to
+    fix."""
+    import json
+    import pathlib
+
+    p = (pathlib.Path(__file__).parent / "fixtures" / "extraction_goldens.json")
+    goldens = json.loads(p.read_text())["goldens"]
+    assert len(goldens) >= 6, "the gate was starved at 2 goldens (§17.992)"
+    for g in goldens:
+        assert g.get("expect", "entries") in {"entries", "empty"}, g["id"]
+        assert g.get("results"), g["id"]
+    # Both directions must be represented, or the gate cannot catch a model
+    # that either over-refuses or over-pads.
+    kinds = {g.get("expect", "entries") for g in goldens}
+    assert kinds == {"entries", "empty"}, kinds
