@@ -288,20 +288,61 @@ def _window(turns: list[dict[str, str]], n: int) -> list[dict[str, str]]:
     return pinned + tail
 
 
+# §17.999 — the 4-section contract TRIAGE_SYSTEM_PROMPT demands of every
+# response. Kept next to the prompt it enforces so the two cannot drift apart.
+_TRIAGE_REQUIRED_SECTIONS = ("Scope so far", "Options", "Gaps", "My pick")
+# One retry. Measured across 8 candidate models on the §17.997 goldens, every
+# alternative to the current pin lands at 7-8/10 while the pin is 10/10 — and
+# re-running the exact failures passes them, so the misses are INTERMITTENT, not
+# capability. Without a retry that variance reaches the operator as "I couldn't
+# reach the planner just now", which is why the surface looked like it depended
+# on one specific model.
+_TRIAGE_DRAWS = 2
+
+
+def _has_triage_sections(text: str) -> bool:
+    """All four headers present, in order. Cheap, and the same check the
+    `--task triage` gate scores, so production and the gate agree."""
+    low = (text or "").lower()
+    at = -1
+    for header in _TRIAGE_REQUIRED_SECTIONS:
+        i = low.find(header.lower(), at + 1)
+        if i <= at:
+            return False
+        at = i
+    return True
+
+
 async def run_triage(messages: list[dict[str, Any]]) -> AsyncIterator[str]:
     """Emit one 4-section triage block for the conversation so far."""
     turns = _turns(messages)
     windowed = _window(turns, settings.triage_history_window)
     chat_messages = [{"role": "system", "content": TRIAGE_SYSTEM_PROMPT}] + windowed
-    resp = await model_router.chat(
-        chat_messages, role="model_triage", temperature=0.7, max_tokens=_TRIAGE_MAX_TOKENS,
-    )
-    text = _strip_think(resp.text) if resp.success else ""
-    if not text:
-        logger.warning("native_triage_empty: success=%s", resp.success)
-        yield "I couldn't reach the planner just now. Type `/go` to launch directly, or try again."
+    text = ""
+    for draw in range(_TRIAGE_DRAWS):
+        resp = await model_router.chat(
+            chat_messages, role="model_triage", temperature=0.7,
+            max_tokens=_TRIAGE_MAX_TOKENS,
+        )
+        candidate = _strip_think(resp.text) if resp.success else ""
+        if candidate and _has_triage_sections(candidate):
+            yield candidate
+            return
+        # §17.999 — keep the best thing seen. A response that is merely missing a
+        # header is still far more useful to the operator than the canned
+        # apology, so it is held as a floor rather than discarded.
+        text = text or candidate
+        logger.warning(
+            "native_triage_redraw: draw=%d/%d success=%s empty=%s sections_ok=%s",
+            draw + 1, _TRIAGE_DRAWS, resp.success, not candidate,
+            bool(candidate) and _has_triage_sections(candidate),
+        )
+    if text:
+        logger.warning("native_triage_degraded: serving a response missing a section")
+        yield text
         return
-    yield text
+    logger.warning("native_triage_empty: exhausted %d draws", _TRIAGE_DRAWS)
+    yield "I couldn't reach the planner just now. Type `/go` to launch directly, or try again."
 
 
 async def synthesize(messages: list[dict[str, Any]]) -> tuple[str, bool]:

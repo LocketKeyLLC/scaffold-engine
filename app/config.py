@@ -389,7 +389,15 @@ class Settings(BaseSettings):
     # roles it had just swapped and did not sweep the rest, which is the same
     # miss in miniature. gemma4 measured 18/18 on the grown extraction goldens
     # (§17.992) — the ideation distill prompt this role actually runs.
-    model_general: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: gemma4:cloud, §17.995)
+    # §17.999 — DELIBERATE DIVERSIFICATION. §17.998 left gemma4 holding four
+    # roles; a portability matrix across 8 candidates then showed routing (7/8
+    # models perfect), verifier (6/8) and extraction (5/8) are all
+    # well-covered, so concentrating them bought latency at the cost of blast
+    # radius. model_general and model_verifier moved to models that measured
+    # level on their own gates, taking the engine from 4-roles-on-one-model to
+    # 5 distinct models, max 2 roles each. Verified end to end with gemma4
+    # removed ENTIRELY: 3/3 grounded, 9-10 facts, DAGs of 10-12 nodes.
+    model_general: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: deepseek-v4-pro:cloud, §17.999)
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit
     # #6.1 default, slower on CPU). "model_general" = the flagship cloud
@@ -445,7 +453,7 @@ class Settings(BaseSettings):
     # 36/39, rubber-stamping an enumerated-requirement miss 3/3. gemma4 and
     # kimi-k2.7-code then tied at 65/65 over 5 repeats, so latency decided:
     # 0.87s vs 1.83s.
-    model_verifier: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: gemma4:cloud, §17.998)
+    model_verifier: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: glm-5.3-flash:cloud, §17.999)
     # §17.548 — research extraction (record_entries tool call) points at a
     # tool-CAPABLE model (native tool_calls) rather than the thinking
     # model_verifier (qwen3.5, which never does — see §17.547), so the
