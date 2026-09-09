@@ -135,6 +135,13 @@ FEASIBILITY_SYSTEM = (
     "1. Is this achievable with local CPU-only LLM infrastructure (Ollama, Milvus, SearXNG)?\n"
     "2. What are the risks or unknowns?\n"
     "3. What clarifications would improve the plan?\n\n"
+    # §17.989 — the research queries this pass emits are fed straight to
+    # SearXNG, so their PHRASING decides whether Phase 2 grounds the plan or
+    # distils nothing. See the field description on the tool schema.
+    "Research queries must be short KEYWORD searches (concrete nouns, no "
+    "superlatives, no leading filler), not questions or sentences, and must "
+    "LEAD with the most distinctive term — never with a broad language or "
+    "platform name.\n\n"
     "Emit your assessment via the emit_feasibility_assessment tool."
 )
 
@@ -174,7 +181,52 @@ FEASIBILITY_TOOL = Tool(
             "recommended_research_queries": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Search queries to ground the plan in Phase 2",
+                # §17.989 — this said only "Search queries to ground the plan",
+                # so the model wrote them as prose ("best local markdown to pdf
+                # libraries for python cpu"). Keyword engines match the LEADING
+                # word: that query returned Best Buy's storefront and two
+                # dictionary entries for "best", and the §17.988 relevance gate
+                # then correctly dropped all ten. Measured on the real failing
+                # queries, raw hits vs hits surviving the gate:
+                #
+                #   "best local markdown to pdf libraries for python cpu" 10 -> 0
+                #   "markdown pdf libraries python"                       10 -> 10
+                #   "using puppeteer with ollama for styled document gen"  10 -> 0
+                #   "puppeteer ollama styled document generation"           7 -> 7
+                #
+                # The engine always returns ~10; it is relevance that collapses.
+                #
+                # The leading word keeps mattering even once the filler is gone,
+                # and the §17.988 gate CANNOT save this case — the junk contains
+                # a real query token, so it is legitimately kept. Same words,
+                # different first word, measured (junk = landing pages for the
+                # leading term):
+                #
+                #   "python markdown pdf library"   kept=10 junk=6
+                #   "markdown pdf library python"   kept=10 junk=0
+                #   "python csv parquet converter"  kept=10 junk=6
+                #   "parquet csv converter python"  kept=10 junk=0
+                #   "nodejs markdown pdf renderer"  kept=1
+                #   "markdown pdf renderer nodejs"  kept=10
+                "description": (
+                    "Web-search queries to ground the plan in Phase 2. Write "
+                    "each as KEYWORDS someone would type into a search engine "
+                    "— concrete nouns only: tool and library names, the "
+                    "specific technology, file formats, error text. NOT a "
+                    "question and NOT a sentence. Never open with a superlative "
+                    "or filler word ('best', 'top', 'using', 'how to', "
+                    "'converting', 'implementing'): keyword engines match the "
+                    "leading word, so 'best markdown to pdf libraries' returns "
+                    "an electronics retailer. For the same reason, LEAD WITH "
+                    "THE MOST DISTINCTIVE TERM — the format, library, protocol "
+                    "or error — and put broad language/platform names (python, "
+                    "nodejs, java, docker, linux) LAST, never first: 'python "
+                    "markdown pdf library' returns python.org's homepage and "
+                    "download page, while 'markdown pdf library python' returns "
+                    "the actual material. Same words, different first word. "
+                    "Keep a version or 'latest' when it genuinely matters. "
+                    "3-6 words each."
+                ),
             },
             "summary": {
                 "type": "string",
