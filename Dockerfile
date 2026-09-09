@@ -193,6 +193,13 @@ COPY --chown=root:root cli/           /code/cli/
 # PermissionError on the valves.json write). Mirrors local dev, where
 # docker-compose.dev.yml bind-mounts ./pipelines writable.
 COPY --chown=scaffold:scaffold pipelines/ /code/pipelines/
+# §17.1002 — presets/ and .env.example are READ by the suite: the
+# preset<->config sync check is what stops a recorded model pick going stale
+# (it caught a fourth one on its first run). Without them in the image the
+# test errors in CI while passing locally behind docker-compose.dev.yml's bind
+# mount — which is exactly what happened on the v1.6.0 PR.
+COPY --chown=root:root presets/       /code/presets/
+COPY --chown=root:root .env.example   /code/.env.example
 COPY --chown=root:root Makefile       /code/Makefile
 COPY --chown=root:root pyproject.toml /code/pyproject.toml
 
