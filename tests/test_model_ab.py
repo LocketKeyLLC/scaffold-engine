@@ -484,3 +484,38 @@ def test_the_role_is_graded_on_the_task_it_actually_runs():
     from app.modules.model_role_learning import ROLE_TASKS
 
     assert ROLE_TASKS["model_research_extract"] == "research_extract"
+
+
+# ── §17.994 — every task is claimed, every role's task exists ────────────
+
+
+def test_every_role_maps_to_a_task_that_exists():
+    from app.modules.model_role_learning import ROLE_TASKS
+
+    unknown = {r: t for r, t in ROLE_TASKS.items() if t not in TASKS}
+    assert not unknown, f"roles mapped to non-existent A/B tasks: {unknown}"
+
+
+def test_no_task_is_orphaned():
+    """A task no role references is a gate nobody runs. `extraction` became one
+    the moment §17.993 gave model_research_extract its own task — which is how
+    a carefully-grown golden set quietly stops being a gate at all."""
+    from app.modules.model_role_learning import ROLE_TASKS
+
+    claimed = set(ROLE_TASKS.values())
+    orphaned = set(TASKS) - claimed
+    assert not orphaned, (
+        f"A/B tasks referenced by no role: {sorted(orphaned)} — either map a "
+        "role to it or delete it; an unreferenced gate rots silently")
+
+
+def test_model_general_is_graded_on_a_job_it_runs():
+    """It was mapped to `routing` as a proxy. Its own highest-stakes job is the
+    ideation distill — `gt_extractor.distill_entries` runs under
+    `ideation_model_role`, which is model_general — and that is what the
+    `extraction` task dispatches."""
+    from app.config import settings
+    from app.modules.model_role_learning import ROLE_TASKS
+
+    assert settings.ideation_model_role == "model_general"
+    assert ROLE_TASKS["model_general"] == "extraction"

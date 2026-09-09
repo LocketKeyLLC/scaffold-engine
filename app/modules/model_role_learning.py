@@ -62,7 +62,14 @@ ROLE_TASKS: dict[str, str] = {
     # 9/12 and fails confidence-grading 3/3.
     "model_research_extract": "research_extract",
     "model_router": "routing",           # real job: route_command classification
-    "model_general": "routing",          # real structured job: assist_classify/decide
+    # §17.994 — was "routing", a PROXY. model_general's own highest-stakes job is
+    # the ideation distill (`gt_extractor.distill_entries` runs under
+    # `ideation_model_role`, which is model_general) — the pass that decides
+    # whether a DAG is grounded at all. `extraction` dispatches exactly that
+    # prompt, and after §17.992 it carries the refusal goldens too. Routing stays
+    # covered by model_router / model_triage / model_fallback, so nothing is lost
+    # and the `extraction` task stops being referenced by no role at all.
+    "model_general": "extraction",
     "model_cloud_heavy": "codegen",      # proxy: escalation = hard-node capability
     "model_cloud_alt": "codegen",        # proxy: alternate heavy-cloud capability
     "model_fallback": "routing",         # proxy: light capability; LOCAL candidates only

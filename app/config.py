@@ -372,7 +372,11 @@ class Settings(BaseSettings):
     # model_fallback stays local on purpose — fallback should be DIFFERENT from
     # primary to actually help when primary fails (cloud → cloud fallback gives
     # no failure-mode diversity).
-    model_router: str = "qwen3:4b"  # §17.819 local-safe (tuned cloud pick: qwen3.5:397b-cloud)
+    # §17.993 — tuned cloud pick moved qwen3.5:397b-cloud -> gemma4:cloud.
+    # Routing goldens (12, repeat 2) tied at 24/24 for gemma4 / qwen3.5:397b /
+    # deepseek-v4-flash / glm-5.3-flash, so latency decided: gemma4 0.95s vs the
+    # incumbent's 3.84s, on the path that gates every NL command.
+    model_router: str = "qwen3:4b"  # §17.819 local-safe (tuned cloud pick: gemma4:cloud, §17.993)
     model_embedder_pipeline: str = "nomic-embed-text"
     model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     model_coder: str = "qwen2.5-coder:7b"  # §17.819 local-safe (tuned cloud pick: kimi-k2.7-code:cloud, §17.575/498)
@@ -446,7 +450,18 @@ class Settings(BaseSettings):
     # at 30/30 AND fastest of the perfect-reliability models (5.9s; vs
     # minimax-m3 30/30@9.5s, deepseek-v4-pro 30/30@6.4s, qwen3.5 30/30@52.8s;
     # glm-5.2 was 28/30). NOT in tool_call_coax_models → native tool-call path.
-    model_research_extract: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: glm-5.1:cloud, §17.631)
+    # §17.993 CORRECTS the §17.631 measurement above. That A/B ran
+    # `--task extraction`, which dispatches gt_extractor's DISTILL_SYSTEM and the
+    # 4-field `record_distilled_entries` — the IDEATION distill path, run by
+    # model_general. THIS role runs research_agent._extract_entries:
+    # EXTRACT_SYSTEM_V1 and the 7-field `record_entries`, which also demands a
+    # calibrated confidence_score and a source_type from a fixed enum. So the
+    # 30/30 above was earned on a strictly easier job than the role performs.
+    # Re-A/B'd on the real contract (`--task research_extract`, 4 goldens x 6):
+    # deepseek-v4-flash 24/24 @3.75s and glm-5.1 24/24 @10.27s were the only
+    # perfect scorers; gemma4 scored 9/12 and failed confidence-grading 3/3,
+    # glm-5.3-flash took the §17.854 attribution bait 2/3.
+    model_research_extract: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: deepseek-v4-flash:cloud, §17.993)
     model_cloud_heavy: str = "qwen3.5:latest"  # §17.819 local-safe: escalation target = biggest local tag
     model_cloud_alt: str = "qwen3.5:latest"  # §17.819 local-safe (tuned cloud pick: qwen3.5:397b-cloud)
     model_fallback: str = "qwen3.5:latest"
