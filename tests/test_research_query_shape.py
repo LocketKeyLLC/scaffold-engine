@@ -72,3 +72,50 @@ def test_the_relevance_gate_cannot_catch_leading_term_junk():
     # Move the broad term off the front and the same pages stop being returned
     # at all — which is the fix, and is not something a filter can do.
     assert len(relevant_search_results("markdown pdf library python", junk)) == 2
+
+
+# ── §17.994 — drift, not just deletion ──────────────────────────────────
+
+# sha256[:16] of the query-shape guidance as measured. These are REVIEW PINS,
+# not correctness checks: the §17.989 guards above catch a rule being deleted,
+# but someone can reword this text, keep every asserted keyword, and regress
+# search quality with CI green — the guidance is prompt copy, so its behaviour
+# lives in measurement, not in an assertion.
+#
+# If this fails you changed the text. That is allowed. The ask is to re-measure
+# before updating the hash, because the numbers behind it were expensive:
+#
+#   "best local markdown to pdf libraries for python cpu"  10 raw ->  0 usable
+#   "markdown pdf libraries python"                        10 raw -> 10 usable
+#   "python markdown pdf library"   kept=10 junk=6   (python.org landing pages)
+#   "markdown pdf library python"   kept=10 junk=0   (same words, new first word)
+#
+# Re-measure with: for each query, GET searxng /search with
+# engines=_engines_for_category("general"), then relevant_search_results(q, raw)
+# and count how many survive. Then paste the new hash here with the new numbers.
+_QUERY_GUIDANCE_SHA = "f719c4c52019c00b"
+_FEASIBILITY_SYSTEM_SHA = "01d36df61e544faa"
+
+
+def _sha16(s: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(s.encode()).hexdigest()[:16]
+
+
+def test_the_query_guidance_has_not_drifted_unmeasured():
+    from app.modules import ideation_workflow as iw
+
+    desc = iw.FEASIBILITY_TOOL.input_schema["properties"][
+        "recommended_research_queries"]["description"]
+    assert _sha16(desc) == _QUERY_GUIDANCE_SHA, (
+        "the research-query guidance changed. That is allowed — but re-measure "
+        "junk-per-query before updating _QUERY_GUIDANCE_SHA (see the note above "
+        "this test). A keyword-only guard would have let this through green.")
+
+
+def test_the_feasibility_system_prompt_has_not_drifted_unmeasured():
+    from app.modules import ideation_workflow as iw
+
+    assert _sha16(iw.FEASIBILITY_SYSTEM) == _FEASIBILITY_SYSTEM_SHA, (
+        "FEASIBILITY_SYSTEM changed; re-measure before updating the hash.")
