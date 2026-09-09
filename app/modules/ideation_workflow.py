@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import asyncio
 import logging
+import re
 
 # third-party
 from sqlalchemy import text
@@ -413,6 +414,80 @@ async def analyze_and_confirm(
     }
 
 
+# §17.990 — how much on-topic material must be present before a zero is the
+# DISTILLER's fault rather than the search engine's. Three is deliberately low:
+# the distiller is asked for 5-10 entries, so three genuinely relevant results
+# is already enough to expect at least one fact out of it.
+_MIN_ON_TOPIC_FOR_DISTILLER_BLAME = 3
+
+
+def _diagnose_grounding(topic: str, all_results: list[dict],
+                        entries: list[dict]) -> dict:
+    """§17.990 — say WHY a plan is ungrounded, instead of only that it is.
+
+    `facts_extracted=0` conflated three different situations, and the operator
+    could not tell them apart from the response or the log:
+
+      * search returned nothing at all (an outage, or a genuinely dead query)
+      * search returned results that are not ABOUT the topic — measured live,
+        `prometheus histogram buckets` came back as the Greek titan, the 2012
+        Ridley Scott film, IMDb and Rotten Tomatoes; 10 of 15 matched only the
+        leading term and not one mentioned `histogram` or `buckets`
+      * the distiller drew empty on material that WAS on topic
+
+    Only the third is a defect. The first two are the engine correctly refusing
+    to invent facts, and §17.987 established the distiller is right to return
+    nothing for them: pointed at that corpus, a different model produced four
+    accurate-but-off-topic entries ("Prometheus is a monitoring toolkit"),
+    which is worse than zero — it makes a plan LOOK grounded while containing
+    nothing that addresses the topic.
+
+    Advisory only. It never changes the flow, never raises, and never blocks a
+    job; it is the label an operator reads to know which of the three happened.
+    """
+    if entries:
+        return {"status": "grounded", "facts": len(entries)}
+    if not all_results:
+        return {"status": "ungrounded", "reason": "search_returned_nothing",
+                "detail": "no search result survived the §17.988 relevance gate"}
+    try:
+        from app.modules.research_extractors import _query_tokens
+        want = _query_tokens(topic or "")
+        on_topic = 0
+        if want:
+            for r in all_results:
+                hay = f"{r.get('title', '')} {r.get('content', '')}".lower()
+                have = {t for t in re.split(r"[^a-z0-9]+", hay) if len(t) >= 3}
+                if len(want & have) >= 2:
+                    on_topic += 1
+    except Exception:  # noqa: BLE001 — advisory only, never breaks Phase 2
+        return {"status": "ungrounded", "reason": "distiller_returned_nothing"}
+    if want and on_topic == 0:
+        return {
+            "status": "ungrounded", "reason": "results_off_topic",
+            "detail": (f"{len(all_results)} results, none matching 2+ terms of "
+                       f"{sorted(want)} — the search engine returned material "
+                       f"that is not about this topic"),
+        }
+    # A handful of on-topic hits in a mostly-irrelevant corpus is still a SEARCH
+    # outcome, not a distiller defect. First calibration said "defect" at 1-of-20
+    # on topic, which is not a fair thing to say about a distiller handed 19
+    # irrelevant results — it is the same misattribution §17.987 spent the day
+    # unwinding, in a smaller form.
+    if want and on_topic < _MIN_ON_TOPIC_FOR_DISTILLER_BLAME:
+        return {
+            "status": "ungrounded", "reason": "results_thin_on_topic",
+            "detail": (f"only {on_topic} of {len(all_results)} results are about "
+                       f"{sorted(want)} — too little on-topic material to "
+                       "distil, and the search engine is the reason"),
+        }
+    return {
+        "status": "ungrounded", "reason": "distiller_returned_nothing",
+        "detail": (f"{on_topic} of {len(all_results)} results are on topic, but "
+                   "the distiller produced no entries — this one IS a defect"),
+    }
+
+
 async def research_and_compile(
     job_id: str,
     db: AsyncSession,
@@ -542,6 +617,14 @@ async def research_and_compile(
             logger.info(
                 "phase2_distill: job_id=%s entry_count=%d", job_id, len(entries),
             )
+        # §17.990 — classify the outcome once, here, so the response and the log
+        # agree and an operator never has to guess which of the three it was.
+        _grounding = _diagnose_grounding(
+            brief.get("title", ""), all_results, entries)
+        if _grounding["status"] != "grounded":
+            logger.warning(
+                "phase2_ungrounded: job_id=%s reason=%s detail=%s",
+                job_id, _grounding["reason"], _grounding.get("detail", ""))
 
         # §17.663 — surface the key operator DECISION from the researched facts
         # so the DAG can build an explicit `decision` node for it (reuses the
@@ -728,6 +811,8 @@ async def research_and_compile(
             "queries_run": len(queries[:query_cap]),
             "results_found": len(all_results),
             "facts_extracted": len(entries),
+            # §17.990 — WHY the plan is (un)grounded, not just that it is.
+            "grounding": _grounding,
             "milvus_ingested": ingest_count,
             "toon_rows": len(toon_rows),
             "github": gh_result,
