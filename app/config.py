@@ -438,7 +438,14 @@ class Settings(BaseSettings):
     # compounds. (kimi was flaky on EXTRACTION (§17.566) but perfect on the
     # lenient presence-check verify task — per-task reliability differs.) Not in
     # tool_call_coax_models, so it uses the native path.
-    model_verifier: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: kimi-k2.7-code:cloud, §17.567)
+    # §17.998 — tuned cloud pick moved kimi-k2.7-code:cloud -> gemma4:cloud. The
+    # §17.567 pick was made on 6 unambiguous goldens that every candidate aced;
+    # hardened to 13 (both directions: plausible-but-wrong must FAIL,
+    # correct-but-unusual must PASS) the gate finally separates — deepseek-v4-flash
+    # 36/39, rubber-stamping an enumerated-requirement miss 3/3. gemma4 and
+    # kimi-k2.7-code then tied at 65/65 over 5 repeats, so latency decided:
+    # 0.87s vs 1.83s.
+    model_verifier: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: gemma4:cloud, §17.998)
     # §17.548 — research extraction (record_entries tool call) points at a
     # tool-CAPABLE model (native tool_calls) rather than the thinking
     # model_verifier (qwen3.5, which never does — see §17.547), so the

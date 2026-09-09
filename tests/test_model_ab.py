@@ -648,3 +648,56 @@ def test_triage_goldens_cover_both_prompts():
         assert g.get("messages"), g["id"]
         if g["mode"] == "synthesis":
             assert g.get("forbidden") or g.get("required"), g["id"]
+
+
+# ── §17.998 — the verifier gate must be able to fail somebody ────────────
+
+
+def _verifier_goldens():
+    import json
+    import pathlib
+
+    p = pathlib.Path(__file__).parent / "fixtures" / "verifier_goldens.json"
+    return json.loads(p.read_text())["goldens"]
+
+
+def test_the_verifier_gate_probes_both_directions():
+    """The original six were unambiguous enough that every candidate scored
+    24/24 — a gate nothing fails ranks nothing. Hardened, it separates:
+    deepseek-v4-flash 36/39, rubber-stamping an enumerated-requirement miss 3/3.
+
+    Both directions must stay represented. A gate of only hard FAIL cases
+    rewards a verifier that fails more, which in production means nodes retried
+    three times and blocked for no reason; a gate of only PASS cases rewards the
+    rubber-stamping §17.731 was written about."""
+    from collections import Counter
+
+    goldens = _verifier_goldens()
+    assert len(goldens) >= 12, "the gate was starved at 6 goldens (§17.998)"
+    counts = Counter(g["expected"] for g in goldens)
+    assert counts["pass"] >= 5 and counts["fail"] >= 5, counts
+
+
+def test_the_hard_cases_that_make_it_discriminate_are_present():
+    ids = {g["id"] for g in _verifier_goldens()}
+    for required in ("merge-wrong-semantics-fail",          # right shape, wrong substance
+                     "claimed-not-delivered-fail",          # §17.731 rubber-stamp
+                     "enumerated-requirement-missing-fail",  # VERIFY_SYSTEM Example 3
+                     "different-valid-approach-pass",       # catches over-strictness
+                     "exceeds-scope-pass"):
+        assert required in ids, required
+
+
+def test_the_withdrawn_ambiguous_golden_stays_withdrawn():
+    """A first cut asked for a conversion "with error handling" and delivered only
+    the conversion, marked `expected: pass`. Four of five models called it FAIL
+    and had VERIFY_SYSTEM's own Example 3 on their side. Ranking models on a
+    golden reasonable readers disagree about is worse than not ranking them."""
+    ids = {g["id"] for g in _verifier_goldens()}
+    assert "partial-but-present-pass" not in ids
+
+
+def test_every_verifier_golden_has_a_verdict_and_a_rationale():
+    for g in _verifier_goldens():
+        assert g["expected"] in {"pass", "fail"}, g["id"]
+        assert g.get("task") and g.get("output"), g["id"]

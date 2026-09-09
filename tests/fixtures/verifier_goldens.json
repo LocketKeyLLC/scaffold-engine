@@ -1,5 +1,5 @@
 {
-  "_comment": "§17.567 — verdict-match goldens for the model_ab.py 'verifier' task. Each golden is a (task, output) pair with an unambiguous known-correct verdict ('pass' or 'fail'), mirroring app/modules/execution_verify.py VERIFY_SYSTEM (lenient presence-checker: PASS if the required functionality is present even partially; FAIL only if missing or fundamentally incorrect). A good model_verifier candidate matches `expected` on all of them.",
+  "_comment": "§17.567 — verdict-match goldens for the model_ab.py 'verifier' task. Each golden is a (task, output) pair with an unambiguous known-correct verdict ('pass' or 'fail'), mirroring app/modules/execution_verify.py VERIFY_SYSTEM (lenient presence-checker: PASS if the required functionality is present even partially; FAIL only if missing or fundamentally incorrect). A good model_verifier candidate matches `expected` on all of them. §17.998 — hardened: the original six were unambiguous enough that every candidate scored 24/24, so the gate ranked nothing. The added goldens probe BOTH directions — plausible-but-fundamentally-wrong (must fail) and correct-but-unusual (must pass) — so neither a lenient nor a strict verifier can score well by reflex. One first-cut golden ('convert CSV to Parquet WITH error handling', expected pass) was withdrawn as genuinely ambiguous — 4 of 5 models read the omitted requirement as a FAIL and had Example 3 on their side — and replaced by one unambiguous golden per half.",
   "goldens": [
     {
       "id": "sorts-present-pass",
@@ -36,6 +36,55 @@
       "task": "Define a REST endpoint to create a user — give the HTTP method and path.",
       "output": "REST APIs commonly use HTTP verbs such as GET to read and POST to write, and they exchange JSON payloads over HTTPS.",
       "expected": "fail"
+    },
+    {
+      "id": "merge-wrong-semantics-fail",
+      "expected": "fail",
+      "_why": "Right shape, wrong semantics — the single most gameable case. A verifier skimming for 'a function that takes two lists and returns a list' passes it. VERIFY_SYSTEM's FAIL clause is 'fundamentally incorrect', and concatenating two sorted lists without merging is exactly that.",
+      "task": "Write a Python function that merges two sorted lists into one sorted list.",
+      "output": "def merge_sorted(a, b):\n    return a + b\n"
+    },
+    {
+      "id": "claimed-not-delivered-fail",
+      "expected": "fail",
+      "_why": "§17.731 — the success-verifier rubber-stamping work that was only CLAIMED. The output asserts the artifact exists and describes it accurately; the artifact itself is absent, so the required functionality is completely missing. This is the failure mode that motivated the `incomplete` outcome.",
+      "task": "Write a Dockerfile that installs Python 3.12 and runs app.py on container start.",
+      "output": "I've created the Dockerfile as requested. It uses the official Python 3.12 slim base image, copies the application source into /app, installs the dependencies from requirements.txt, and sets the entrypoint so that app.py runs when the container starts. Let me know if you'd like multi-stage builds or a non-root user added."
+    },
+    {
+      "id": "wrong-http-verb-fail",
+      "expected": "fail",
+      "_why": "Answers the right QUESTION with the wrong VALUE. A verifier matching on 'contains an HTTP method and a path' passes it; creating a user with GET is fundamentally incorrect.",
+      "task": "Define a REST endpoint to create a user — give the HTTP method and path.",
+      "output": "GET /users — retrieves the list of users from the server."
+    },
+    {
+      "id": "different-valid-approach-pass",
+      "expected": "pass",
+      "_why": "Correct, but not the shape a naive checker expects: iterative rather than recursive, differently named, with type hints and a docstring. A gate with only fail-side hard cases would reward a verifier that simply fails more.",
+      "task": "Write a Python function that returns the nth Fibonacci number.",
+      "output": "def nth_fib(n: int) -> int:\n    \"\"\"Return the nth Fibonacci number (0-indexed) iteratively.\"\"\"\n    prev, cur = 0, 1\n    for _ in range(n):\n        prev, cur = cur, prev + cur\n    return prev\n"
+    },
+    {
+      "id": "exceeds-scope-pass",
+      "expected": "pass",
+      "_why": "VERIFY_SYSTEM says explicitly that additional content beyond the requirement is acceptable and expected. A table with complexities still lists three algorithms.",
+      "task": "List three sorting algorithms.",
+      "output": "| Algorithm | Best | Average | Worst |\n|---|---|---|---|\n| Bubble sort | O(n) | O(n²) | O(n²) |\n| Merge sort | O(n log n) | O(n log n) | O(n log n) |\n| Quicksort | O(n log n) | O(n log n) | O(n²) |\n\nAll three are comparison-based."
+    },
+    {
+      "id": "shorter-than-expected-pass",
+      "expected": "pass",
+      "_why": "The lenient half, made unambiguous. The first cut of this golden asked for a conversion 'with error handling' and delivered only the conversion — 4 of 5 models called that FAIL, and they had a real case: VERIFY_SYSTEM's own Example 3 fails 'list 3 algorithms' answered with one, i.e. an explicitly ENUMERATED requirement left out. Ranking models on a golden reasonable readers disagree about is worse than not ranking them. Here nothing enumerated is omitted — the answer is just brief.",
+      "task": "Summarize the benefits of database connection pooling.",
+      "output": "Connection pooling reuses established connections instead of opening a new one per request, which removes the TCP and authentication handshake from the hot path and bounds the number of concurrent connections the database has to service."
+    },
+    {
+      "id": "enumerated-requirement-missing-fail",
+      "expected": "fail",
+      "_why": "The strict half, stated the way VERIFY_SYSTEM's Example 3 states it: the task enumerates three deliverables and the output supplies one. This is the case the ambiguous golden was reaching for, without the ambiguity.",
+      "task": "Write a Python function to parse an ISO-8601 timestamp. Provide three things: the function, a docstring, and two example calls.",
+      "output": "from datetime import datetime\n\ndef parse_iso(s):\n    return datetime.fromisoformat(s)\n"
     }
   ]
 }
