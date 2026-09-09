@@ -263,3 +263,76 @@ async def test_health_probe_error_string_has_no_dangling_colon():
         out = await health._check_searxng()
     assert out["status"] == "down"
     assert out["error"] == "ReadTimeout"
+
+
+# ── §17.988 — every SearXNG path applies the §17.729 relevance gate ──────
+
+
+def test_no_searxng_caller_is_left_without_the_relevance_gate():
+    """The sweep, by DISCOVERY rather than by a hand-kept list.
+
+    `relevant_search_results` documents itself as defending "every SearXNG
+    path against keyword-matcher pollution". It did not: `gt_extractor` — the
+    one feeding PLANNING — never called it, which is the same module and the
+    same function family §17.984 found missing the curated engine list. A
+    hard-coded list of modules is how a fifth copy survives four fixes, so
+    this walks the package and asks every module that queries SearXNG.
+    """
+    import pathlib
+
+    # The ONE justified non-research caller. `_check_searxng` (§17.985) asks a
+    # fixed `q=healthcheck` and counts whether ENGINES answered; it never feeds
+    # results downstream, so a relevance gate there would filter the very
+    # signal it exists to measure. Exempted by name and explained, rather than
+    # replacing the sweep with a hand-kept list of modules to check — the sweep
+    # still discovers every new caller on its own.
+    exempt = {"app/health.py"}
+
+    app_dir = pathlib.Path(inspect.getsourcefile(
+        __import__("app.modules.gt_extractor", fromlist=["x"]))).parent.parent
+    offenders = []
+    for path in sorted(app_dir.rglob("*.py")):
+        src = path.read_text()
+        # A module that issues a SearXNG /search query must also gate results.
+        if "get_searxng_client" not in src or '"/search"' not in src:
+            continue
+        rel = str(path.relative_to(app_dir.parent))
+        if rel in exempt:
+            continue
+        if "relevant_search_results" not in src:
+            offenders.append(rel)
+    assert not offenders, (
+        "these modules query SearXNG but never apply the §17.729 relevance "
+        f"gate: {offenders}")
+
+
+def test_the_gate_drops_keyword_matcher_junk():
+    """The live failure, as data: with four of five engines suspended, `bing`
+    keyword-matched the LEADING word of the query and returned an electronics
+    retailer and two dictionaries for a markdown-to-PDF question."""
+    from app.modules.research_extractors import relevant_search_results
+
+    query = "best local markdown to pdf libraries for python cpu"
+    results = [
+        {"title": "Best Buy | Official Online Store",
+         "content": "Shop Best Buy for electronics, computers, appliances"},
+        {"title": "BEST Definition & Meaning - Merriam-Webster",
+         "content": "The meaning of BEST is excelling all others."},
+        {"title": "BEST | English meaning - Cambridge Dictionary",
+         "content": "BEST definition: of the highest quality"},
+        {"title": "GitHub - jgm/pandoc: Universal markup converter",
+         "content": "Pandoc converts markdown to pdf and many other formats"},
+    ]
+    kept = relevant_search_results(query, results)
+    assert len(kept) == 1, [r["title"] for r in kept]
+    assert kept[0]["title"].startswith("GitHub - jgm/pandoc")
+
+
+def test_the_gate_is_applied_on_both_the_primary_and_fallback_paths():
+    """The 0-results fallback re-queries a WIDER engine net — the one most
+    likely to return junk — so gating only the primary would leak it back in."""
+    from app.modules import gt_extractor
+
+    src = inspect.getsource(gt_extractor.search_searxng)
+    assert src.count("relevant_search_results(") == 2, (
+        "expected the gate on both the primary query and the fallback re-query")
