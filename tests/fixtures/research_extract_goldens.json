@@ -1,0 +1,94 @@
+{
+  "version": "research-extract-1.0",
+  "note": "§17.993 — goldens for `model_ab.py --task research_extract`. These feed research_agent's EXTRACT_SYSTEM_V1 / EXTRACT_PROMPT_V1 / RECORD_ENTRIES_TOOL — the path `model_research_extract` actually runs. Distinct from `--task extraction`, which dispatches gt_extractor's DISTILL prompt and a 4-field tool; that one belongs to the ideation distill path. Scoring is the production contract: entries emitted, `source_type` inside the enum, `confidence_score` numeric in [0,1] AND not constant across entries, and `source` a URL actually present in the batch (§17.854 — a fact attributed to a URL that was never in the batch earns a domain confidence boost it has not earned).",
+  "goldens": [
+    {
+      "id": "mixed-authority-versions",
+      "topic": "postgresql logical replication slots",
+      "_why": "Mixes an official doc, a vendor blog and a forum post so a calibrated confidence_score is actually available to get right — official_doc should not score the same as a forum opinion. A constant 0.9 across all three is the failure this golden exists to catch.",
+      "results": [
+        {
+          "title": "PostgreSQL: Documentation: Logical Replication",
+          "url": "https://www.postgresql.org/docs/current/logical-replication.html",
+          "content": "Logical replication was introduced in PostgreSQL 10. It replicates changes based on replication identity, usually a primary key. A replication slot retains WAL until the subscriber consumes it."
+        },
+        {
+          "title": "Why our replica lagged for six hours - engineering blog",
+          "url": "https://example-vendor.com/blog/replica-lag",
+          "content": "We found an inactive replication slot had retained 400 GB of WAL. Setting max_slot_wal_keep_size to 100GB (PostgreSQL 13+) bounded it."
+        },
+        {
+          "title": "Re: slot bloat - pgsql-general mailing list",
+          "url": "https://www.postgresql.org/message-id/example",
+          "content": "In my experience you should just drop unused slots, monitoring them is a waste of time. Others disagree and say pg_replication_slots should be alerted on."
+        }
+      ],
+      "expect_graded_confidence": true
+    },
+    {
+      "id": "official-docs-only",
+      "topic": "sqlite fts5 full text search",
+      "_why": "Uniformly high-authority material — a model that never assigns high confidence is as miscalibrated as one that always does.",
+      "results": [
+        {
+          "title": "SQLite FTS5 Extension",
+          "url": "https://www.sqlite.org/fts5.html",
+          "content": "FTS5 is an SQLite virtual table module providing full-text search. The 'porter' tokenizer applies English stemming. Use MATCH with bm25() to rank."
+        },
+        {
+          "title": "SQLite Query Language: SELECT",
+          "url": "https://www.sqlite.org/lang_select.html",
+          "content": "A SELECT statement may include an ORDER BY clause; with FTS5 the bm25() auxiliary function returns a negative score where smaller is a better match."
+        },
+        {
+          "title": "The SQLite Amalgamation",
+          "url": "https://www.sqlite.org/amalgamation.html",
+          "content": "The amalgamation is a single C source file exceeding 200,000 lines, which the SQLite developers recommend for most applications."
+        }
+      ]
+    },
+    {
+      "id": "source-attribution-pressure",
+      "topic": "kubernetes pod security admission",
+      "_why": "§17.854 — one snippet explicitly names a HIGH-TRUST url that is NOT in the batch. A model that copies it into `source` earns a domain confidence boost it has not earned, and the pass/fail-on-non-empty gate could never see it.",
+      "results": [
+        {
+          "title": "Pod Security Admission - random blog",
+          "url": "https://some-blog.example.com/psa",
+          "content": "Pod Security Admission replaced PodSecurityPolicy, which was removed in Kubernetes 1.25. For the authoritative write-up see https://kubernetes.io/docs/concepts/security/pod-security-admission/ which documents the enforce, audit and warn modes."
+        },
+        {
+          "title": "PSA labels cheatsheet",
+          "url": "https://some-blog.example.com/psa-labels",
+          "content": "Namespaces opt in with the label pod-security.kubernetes.io/enforce set to privileged, baseline or restricted."
+        }
+      ]
+    },
+    {
+      "id": "noise-heavy-marketing",
+      "topic": "object storage lifecycle policies",
+      "_why": "EXTRACT_SYSTEM_V1 says 'discard noise, opinions, marketing language'. Half this batch is marketing copy carrying no fact; a model that dutifully records 'the leading cloud platform' as an entry is not following the prompt, though it still emits a non-empty list.",
+      "results": [
+        {
+          "title": "S3 Lifecycle configuration",
+          "url": "https://docs.aws.example/s3-lifecycle",
+          "content": "A lifecycle configuration is a set of rules that define actions applied to a group of objects. Transition actions move objects to another storage class; expiration actions delete them after a defined number of days."
+        },
+        {
+          "title": "The leading cloud platform for modern business",
+          "url": "https://example-cloud.com/",
+          "content": "Trusted by thousands of enterprises worldwide. Unlock innovation, accelerate transformation and drive value with our industry-leading solutions. Contact sales today."
+        },
+        {
+          "title": "Why we are the #1 choice",
+          "url": "https://example-cloud.com/why-us",
+          "content": "Award-winning support, unmatched reliability and a partner ecosystem second to none. See why customers choose us."
+        }
+      ],
+      "forbidden_sources": [
+        "https://example-cloud.com/",
+        "https://example-cloud.com/why-us"
+      ]
+    }
+  ]
+}

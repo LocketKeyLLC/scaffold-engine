@@ -252,6 +252,136 @@ async def _score_routing(golden: dict, resp: Any) -> dict:
 # task registry
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# research_extract task (§17.993) — the prompt `model_research_extract` ACTUALLY runs
+# ---------------------------------------------------------------------------
+
+def _allowed_source_types() -> set[str]:
+    """The enum, read from RECORD_ENTRIES_TOOL itself — never transcribed.
+
+    §17.993 — the first cut of this gate hardcoded the set from a hand-read of
+    EXTRACT_SYSTEM_V1 that had been truncated mid-word ("official_docs|curated"
+    → "official_doc"). Every model then failed the gate for emitting the
+    CORRECT value, and it read like a finding about the models. Deriving it
+    from the schema the model is actually shown makes that class of error
+    impossible: if the prompt's enum changes, the gate changes with it.
+    """
+    from app.modules.research_agent import RECORD_ENTRIES_TOOL
+    desc = (RECORD_ENTRIES_TOOL.input_schema["properties"]["entries"]["items"]
+            ["properties"]["source_type"].get("description") or "")
+    return {t.strip() for t in desc.split("|") if t.strip()}
+
+
+def score_research_extract(args: dict | None, batch_urls: set[str], *,
+                           expect_graded_confidence: bool = False,
+                           forbidden_sources: set[str] | None = None) -> dict:
+    """Score the REAL research-extract contract, not a simpler stand-in.
+
+    §17.993 — `--task extraction` dispatches gt_extractor's DISTILL prompt and
+    4-field `record_distilled_entries`. But `model_research_extract` runs
+    `research_agent._extract_entries`, which uses EXTRACT_SYSTEM_V1 and the
+    7-field `record_entries` — and asks for two judgments the distill prompt
+    never requests: a calibrated `confidence_score` (1.0 verified / 0.7
+    secondary / 0.4 opinion) and a `source_type` from a fixed enum. So the gate
+    that chose this role's model (§17.631, glm-5.1 at 30/30) never exercised the
+    hard half of the role's job, and `model_role_learning` mapped the role to
+    that same task, which would repeat the error on every future auto-A/B.
+
+    Scored here, in production's own terms:
+      * emitted a non-empty `entries` list at all
+      * every `source_type` inside the allowed enum
+      * every `confidence_score` a number in [0, 1]
+      * every `source` a URL actually present in the batch — §17.854 found
+        fetched-page content can talk a model into attributing a fact to a
+        high-trust URL that was never in the batch, which then earns a domain
+        confidence boost it has not earned
+      * `confidence_score` not constant across entries — a model that stamps
+        0.9 on everything has not made the judgment the prompt asked for, and
+        that is invisible to a pass/fail-on-non-empty gate
+    """
+    entries = []
+    if args and isinstance(args.get("entries"), list):
+        entries = [e for e in args["entries"] if isinstance(e, dict)]
+    if not entries:
+        return {"passed": False, "entries": 0, "reason": "no_entries",
+                "metric": "valid_entries", "metric_value": 0}
+
+    allowed = _allowed_source_types()
+    bad_type = [e.get("source_type") for e in entries
+                if allowed and e.get("source_type") not in allowed]
+    confs = [e.get("confidence_score") for e in entries]
+    bad_conf = [c for c in confs
+                if not isinstance(c, (int, float)) or not (0.0 <= float(c) <= 1.0)]
+    spoofed = [e.get("source") for e in entries
+               if batch_urls and e.get("source") not in batch_urls]
+    numeric = [float(c) for c in confs if isinstance(c, (int, float))]
+    # §17.993 — a CONSTANT confidence is only evidence of miscalibration when
+    # the corpus itself has mixed authority. The first cut applied it to every
+    # golden and failed models for the correct answer: `official-docs-only` is
+    # three sqlite.org pages, where 1.0 across the board is right, and on
+    # `noise-heavy-marketing` glm-5.1 kept only the three AWS-doc facts and
+    # discarded the marketing — exactly what EXTRACT_SYSTEM_V1 asks for — and
+    # was failed for it. Opt-in per golden.
+    graded = True
+    if expect_graded_confidence and len(numeric) > 1:
+        graded = len(set(numeric)) > 1
+    # §17.993 — the direct test of "discard noise, opinions, marketing
+    # language": a page carrying no fact must not appear as a source at all.
+    # Schema checks alone cannot see this — a dutifully-recorded marketing
+    # slogan is perfectly well-formed.
+    noise = [e.get("source") for e in entries
+             if forbidden_sources and e.get("source") in forbidden_sources]
+
+    reasons = []
+    if bad_type:
+        reasons.append(f"source_type×{len(bad_type)}")
+    if bad_conf:
+        reasons.append(f"confidence×{len(bad_conf)}")
+    if spoofed:
+        reasons.append(f"source_not_in_batch×{len(spoofed)}")
+    if not graded:
+        reasons.append("confidence_constant")
+    if noise:
+        reasons.append(f"recorded_marketing×{len(noise)}")
+    passed = not reasons
+    return {"passed": passed, "entries": len(entries),
+            "reason": ",".join(reasons) or "ok",
+            "metric": "valid_entries", "metric_value": len(entries) if passed else 0}
+
+
+async def _dispatch_research_extract(model: str, golden: dict, *,
+                                     temperature: float, max_tokens: int) -> Any:
+    from app import model_router
+    from app.modules.research_agent import (
+        EXTRACT_SYSTEM_V1, EXTRACT_PROMPT_V1, RECORD_ENTRIES_TOOL, _sys,
+    )
+    results_text = "\n\n".join(
+        f"Title: {r.get('title', '')}\nURL: {r.get('url', '')}\n"
+        f"Snippet: {r.get('content', '')}"
+        for r in golden["results"]
+    )
+    return await model_router.tool_call(
+        messages=[
+            {"role": "system", "content": _sys(EXTRACT_SYSTEM_V1)},
+            {"role": "user",
+             "content": EXTRACT_PROMPT_V1.format(topic=golden["topic"],
+                                                 results=results_text)},
+        ],
+        tools=[RECORD_ENTRIES_TOOL],
+        model=model, temperature=temperature, max_tokens=max_tokens,
+    )
+
+
+async def _score_research_extract(golden: dict, resp: Any) -> dict:
+    from app.utils.tool_call_args import read_tool_args
+    urls = {r.get("url", "") for r in golden["results"] if r.get("url")}
+    return score_research_extract(
+        read_tool_args(resp), urls,
+        expect_graded_confidence=bool(golden.get("expect_graded_confidence")),
+        forbidden_sources=set(golden.get("forbidden_sources") or ()),
+    )
+
+
 @dataclass
 class Task:
     name: str
@@ -269,6 +399,10 @@ TASKS: dict[str, Task] = {
                      _dispatch_verifier, _score_verifier),
     "routing": Task("routing", _FIXTURES / "routing_goldens.json",
                     _dispatch_routing, _score_routing),
+    # §17.993 — the prompt `model_research_extract` actually runs.
+    "research_extract": Task("research_extract",
+                             _FIXTURES / "research_extract_goldens.json",
+                             _dispatch_research_extract, _score_research_extract),
 }
 
 

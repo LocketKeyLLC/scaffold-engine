@@ -373,3 +373,114 @@ def test_every_extraction_golden_declares_a_reachable_expectation():
     # that either over-refuses or over-pads.
     kinds = {g.get("expect", "entries") for g in goldens}
     assert kinds == {"entries", "empty"}, kinds
+
+
+# ── §17.993 — the research_extract task tests the REAL production contract ──
+
+
+def _rx(**kw):
+    e = {"title": "t", "content": "c", "tags": "", "source": "https://a.example/1",
+         "confidence_score": 0.9, "source_type": "tech_docs"}
+    e.update(kw)
+    return e
+
+
+def _score_rx(entries, urls=("https://a.example/1", "https://a.example/2"), **kw):
+    from scripts.model_ab import score_research_extract
+    return score_research_extract({"entries": entries}, set(urls), **kw)
+
+
+def test_research_extract_accepts_a_well_formed_batch():
+    v = _score_rx([_rx(), _rx(source="https://a.example/2", confidence_score=0.7)])
+    assert v["passed"] is True, v["reason"]
+
+
+def test_research_extract_rejects_a_source_type_outside_the_enum():
+    v = _score_rx([_rx(source_type="official_doc")])   # singular — not the enum
+    assert v["passed"] is False
+    assert "source_type" in v["reason"]
+
+
+def test_the_enum_is_read_from_the_tool_schema_not_transcribed():
+    """§17.993 — the first cut hardcoded this set from a hand-read of
+    EXTRACT_SYSTEM_V1 that had been truncated mid-word ("official_docs|curated"
+    → "official_doc"). Every model then failed for emitting the CORRECT value,
+    and it read like a finding about the models. Deriving it from the schema the
+    model is actually shown makes that class of error impossible."""
+    from scripts.model_ab import _allowed_source_types
+
+    from app.modules.research_agent import RECORD_ENTRIES_TOOL
+
+    allowed = _allowed_source_types()
+    assert "official_docs" in allowed and "curated" in allowed
+    assert "official_doc" not in allowed
+    desc = (RECORD_ENTRIES_TOOL.input_schema["properties"]["entries"]["items"]
+            ["properties"]["source_type"]["description"])
+    assert allowed == {t.strip() for t in desc.split("|") if t.strip()}
+
+
+def test_research_extract_rejects_a_source_that_was_not_in_the_batch():
+    """§17.854 — fetched-page content can talk a model into attributing a fact
+    to a high-trust URL that was never in the batch, which then earns a domain
+    confidence boost it has not earned. The `source-attribution-pressure`
+    golden plants exactly that bait; glm-5.3-flash took it 2/3."""
+    v = _score_rx([_rx(source="https://kubernetes.io/docs/concepts/security/")])
+    assert v["passed"] is False
+    assert "source_not_in_batch" in v["reason"]
+
+
+def test_research_extract_rejects_confidence_out_of_range():
+    assert _score_rx([_rx(confidence_score=1.4)])["passed"] is False
+    assert _score_rx([_rx(confidence_score="high")])["passed"] is False
+
+
+def test_constant_confidence_only_fails_where_authority_actually_varies():
+    """A constant confidence is evidence of miscalibration only on a
+    mixed-authority corpus. The first cut applied it everywhere and failed
+    models for the right answer: `official-docs-only` is three sqlite.org pages
+    where 1.0 across the board is correct."""
+    flat = [_rx(confidence_score=1.0),
+            _rx(confidence_score=1.0, source="https://a.example/2")]
+    assert _score_rx(flat)["passed"] is True
+    v = _score_rx(flat, expect_graded_confidence=True)
+    assert v["passed"] is False and "confidence_constant" in v["reason"]
+    graded = [_rx(confidence_score=1.0),
+              _rx(confidence_score=0.4, source="https://a.example/2")]
+    assert _score_rx(graded, expect_graded_confidence=True)["passed"] is True
+
+
+def test_recording_a_marketing_page_fails():
+    """The direct test of "discard noise, opinions, marketing language" — schema
+    checks alone cannot see it, because a dutifully-recorded slogan is perfectly
+    well-formed."""
+    v = _score_rx([_rx(source="https://example-cloud.com/")],
+                  urls=("https://a.example/1", "https://example-cloud.com/"),
+                  forbidden_sources={"https://example-cloud.com/"})
+    assert v["passed"] is False
+    assert "recorded_marketing" in v["reason"]
+
+
+def test_research_extract_goldens_are_well_formed():
+    import json
+    import pathlib
+
+    p = pathlib.Path(__file__).parent / "fixtures" / "research_extract_goldens.json"
+    goldens = json.loads(p.read_text())["goldens"]
+    assert len(goldens) >= 4
+    for g in goldens:
+        assert g.get("topic") and g.get("results"), g["id"]
+        for u in (g.get("forbidden_sources") or []):
+            assert any(r.get("url") == u for r in g["results"]), (g["id"], u)
+    # Both discriminating properties must stay represented, or the gate silently
+    # degrades back to a schema-only check.
+    assert any(g.get("expect_graded_confidence") for g in goldens)
+    assert any(g.get("forbidden_sources") for g in goldens)
+
+
+def test_the_role_is_graded_on_the_task_it_actually_runs():
+    """It was mapped to "extraction", which dispatches gt_extractor's DISTILL
+    prompt and a 4-field tool — a strictly easier job than the 7-field
+    `record_entries` this role runs in production."""
+    from app.modules.model_role_learning import ROLE_TASKS
+
+    assert ROLE_TASKS["model_research_extract"] == "research_extract"
