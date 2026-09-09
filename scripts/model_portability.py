@@ -35,6 +35,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 MIN_VIABLE_DEFAULT = 2
 
 
+# §17.1001 — how many attempts each role's PRODUCTION surface makes.
+#
+# §17.1000 shipped `--draws` as a hand-typed flag "meant to be set to the retry
+# count of the surface the role runs behind" — a correspondence nothing
+# enforced. Set it too low and the guard under-reports viability and cries
+# single-vendor; too high and it hides a real dependency. Either way it is a
+# transcribed constant, which is the failure §17.994/§17.995 spent two entries
+# on.
+#
+# Most roles need no entry: their gate dispatches through `model_router.
+# tool_call`, which performs the §17.583 redraw itself (draws=3), so the gate
+# already measures the retried path production gets. A role whose gate goes
+# through `model_router.chat` gets NO internal redraw, so its surface's own
+# constant has to be named here — and is IMPORTED, so changing the surface
+# changes the guard with it. A test fails if a chat-dispatched role is missing.
+_SURFACE_DRAW_SOURCES: dict[str, tuple[str, str]] = {
+    "model_triage": ("app.native_chat.triage", "_TRIAGE_DRAWS"),
+}
+
+
+def surface_draws(role: str) -> int:
+    """Attempts the production surface makes for ``role``. Never transcribed."""
+    src = _SURFACE_DRAW_SOURCES.get(role)
+    if src is None:
+        return 1
+    import importlib
+
+    module, attr = src
+    return int(getattr(importlib.import_module(module), attr))
+
+
 def summarize_viability(rows: list[dict], min_viable: int) -> dict:
     """Pure: per-role trial rows -> viability verdict. Unit-testable, no I/O.
 
@@ -90,12 +121,11 @@ async def main() -> int:
     ap.add_argument("--models", nargs="+", default=None,
                     help="skip discovery and probe these tags")
     ap.add_argument("--repeat", type=int, default=2)
-    ap.add_argument("--draws", type=int, default=1,
-                    help=("attempts per golden before counting it failed. Set this to "
-                          "the retry count of the SURFACE the role runs behind — "
-                          "run_triage redraws twice (§17.999), so `--roles model_triage "
-                          "--draws 2` measures what the operator actually gets. Default 1 "
-                          "is the raw model signal, which is what model_ab.py ranks on."))
+    ap.add_argument("--draws", type=int, default=None,
+                    help=("attempts per golden before counting it failed. Defaults, per "
+                          "role, to what that role's PRODUCTION surface actually does "
+                          "(§17.1001) — resolved from the code, not typed here. Pass a "
+                          "number to override for a raw-model comparison."))
     ap.add_argument("--min-viable", type=int, default=MIN_VIABLE_DEFAULT)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -131,7 +161,8 @@ async def main() -> int:
         print("discovering live models (probing, because a retired tag keeps listing)…")
         models = await _live_models(settings.ollama_base_url)
     print(f"\nroles: {len(roles)} | models: {len(models)} | repeat: {args.repeat} "
-          f"| draws: {args.draws} | min-viable: {args.min_viable}\n")
+          f"| draws: {args.draws or 'per-surface'} "
+          f"| min-viable: {args.min_viable}\n")
 
     from app.utils.http_clients import init_clients, close_clients
     init_res = init_clients()
@@ -142,6 +173,10 @@ async def main() -> int:
         for role in roles:
             task = TASKS[ROLE_TASKS[role]]
             goldens = _load_goldens(task.default_goldens)
+            # §17.1001 — the surface decides, not the caller.
+            role_draws = max(1, args.draws if args.draws else surface_draws(role))
+            print(f"  {role:24} gate={ROLE_TASKS[role]:18} draws={role_draws}"
+                  f"{' (surface default)' if not args.draws else ' (overridden)'}")
             for model in models:
                 for _ in range(args.repeat):
                     for g in goldens:
@@ -154,7 +189,7 @@ async def main() -> int:
                         # something other than what the operator receives is the
                         # same defect this whole arc has been unwinding.
                         passed = False
-                        for _draw in range(max(1, args.draws)):
+                        for _draw in range(role_draws):
                             try:
                                 resp = await task.dispatch(model, g, temperature=0.2,
                                                            max_tokens=4096)
