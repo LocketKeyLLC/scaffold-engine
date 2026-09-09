@@ -143,7 +143,7 @@ async def search_searxng(query: str, max_results: int = 10) -> list[dict]:
     `bing` was already in the fallback backbone this function never used.
     """
     from app.modules.research_extractors import (
-        _engines_for_category, SEARXNG_FALLBACK_ENGINES,
+        _engines_for_category, SEARXNG_FALLBACK_ENGINES, relevant_search_results,
     )
     try:
         client = get_searxng_client()
@@ -157,7 +157,21 @@ async def search_searxng(query: str, max_results: int = 10) -> list[dict]:
             return []
 
         data = resp.json()
-        results = data.get("results", [])[:max_results]
+        # §17.988 — the §17.729 relevance gate, which `execution_agent`,
+        # `research_agent` and `assist_research_lib` all apply and this path
+        # never did. Its docstring claims it "defends EVERY SearXNG path";
+        # this was the one it never reached — the same omission §17.984 found
+        # here for the engine list, in the same function family.
+        #
+        # Measured live: with four of five engines suspended, `bing` is the
+        # sole responder and keyword-matches the LEADING word. The query
+        # "best local markdown to pdf libraries for python cpu" returned Best
+        # Buy's storefront, the Merriam-Webster and Cambridge entries for
+        # "best", and a Best Buy store locator. `results_found=40` looked
+        # healthy; the content was worthless, and the distiller correctly
+        # returned zero entries from it 6 times out of 6. "best" is already in
+        # `_QUERY_FILLER`, so this gate drops every one of those.
+        results = relevant_search_results(query, data.get("results", []))[:max_results]
         # §17.712 — one retry on the widest net, so a single blocked engine
         # cannot zero a planning query. Only on empty, so it is free normally.
         if not results:
@@ -169,7 +183,8 @@ async def search_searxng(query: str, max_results: int = 10) -> list[dict]:
                 )
                 if fb.status_code == 200:
                     data = fb.json()
-                    results = data.get("results", [])[:max_results]
+                    results = relevant_search_results(
+                        query, data.get("results", []))[:max_results]
                     if results:
                         logger.info("gt_searxng_fallback_recovered: query=%r results=%d",
                                     query[:100], len(results))

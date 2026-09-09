@@ -757,6 +757,51 @@ async def stream_chat(
         yield chunk
 
 
+def _empty_draw_diag(resp) -> str:
+    """§17.987 — what an EMPTY tool-call draw actually was.
+
+    §17.986 made empty draws visible and retried; driving the live ideation
+    path then showed 6 of 10 runs distilling nothing while every isolated
+    replay of the same topic, route and function succeeded 5/5. The one hard
+    signal was timing: live draws returned in 0.32-0.56s where a direct call
+    to the same cloud model takes 1.1-2.6s. That is too fast to be a
+    generation, so the question is whether the model produced nothing or was
+    never really asked — and `raw` already carries the answer.
+
+    Ollama's own counters settle it: ``eval_count`` ~0 means the model emitted
+    no tokens, ``prompt_eval_count`` ~0 means it never even read the prompt
+    (a cached or refused turn), and ``done_reason`` names which. Defensive on
+    every field — a diagnostic must never be the thing that raises.
+    """
+    try:
+        raw = getattr(resp, "raw", None) or {}
+        bits = [
+            f"provider={getattr(resp, 'provider', None)}",
+            f"model={getattr(resp, 'model', None)}",
+            f"elapsed_ms={getattr(resp, 'total_duration_ms', None)}",
+            f"tok_prompt={getattr(resp, 'tokens_prompt', None)}",
+            f"tok_completion={getattr(resp, 'tokens_completion', None)}",
+            f"done_reason={raw.get('done_reason')!r}",
+            f"done={raw.get('done')!r}",
+        ]
+        for k in ("load_duration", "prompt_eval_duration", "eval_duration"):
+            v = raw.get(k)
+            if isinstance(v, (int, float)):
+                bits.append(f"{k}_ms={int(v / 1_000_000)}")
+        msg = (raw.get("message") or {}) if isinstance(raw, dict) else {}
+        tcs = msg.get("tool_calls") or []
+        bits.append(f"raw_tool_calls={len(tcs)}")
+        if tcs:
+            fn = (tcs[0] or {}).get("function") or {}
+            args = fn.get("arguments")
+            bits.append(f"fn={fn.get('name')!r}")
+            bits.append(f"arg_keys={sorted(args)[:6] if isinstance(args, dict) else type(args).__name__}")
+        bits.append(f"content={((msg.get('content') or '')[:160])!r}")
+        return " ".join(bits)
+    except Exception as exc:  # noqa: BLE001 — never let a diagnostic raise
+        return f"diag_failed={type(exc).__name__}"
+
+
 async def tool_call(
     messages: list[dict[str, str]],
     tools: list[Tool],
@@ -840,14 +885,18 @@ async def tool_call(
                 isinstance(x, dict) for x in _val)
         if _usable:
             return resp
-        if d + 1 < attempts:
-            logger.warning(
-                "tool_call_empty_redraw: model/role=%s draw=%d/%d "
-                "(%s, §17.583/§17.986)",
-                role or model or settings.model_general, d + 1, attempts,
-                f"empty {require_nonempty!r} payload" if require_nonempty
-                and _args is not None else "no tool args",
-            )
+        # §17.987 — the redraw warning said an empty draw HAPPENED but not what
+        # it WAS, which is the difference between "the model produced nothing"
+        # and "the model was never really asked". Log the evidence on every
+        # empty draw, including the last one (which previously returned mute).
+        logger.warning(
+            "tool_call_empty_redraw: model/role=%s draw=%d/%d (%s, "
+            "§17.583/§17.986) %s",
+            role or model or settings.model_general, d + 1, attempts,
+            f"empty {require_nonempty!r} payload" if require_nonempty
+            and _args is not None else "no tool args",
+            _empty_draw_diag(resp),
+        )
     return resp
 
 
