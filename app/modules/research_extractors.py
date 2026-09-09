@@ -80,17 +80,31 @@ DEFAULT_SOURCE_SCORE = 0.50
 # Category-specific engines (github/arxiv/scholar) are ADDED to the backbone,
 # not used alone. `bing` is included (the §17.503 "google/bing dead" note is
 # stale — bing is currently the most reliable general engine here).
-_GENERAL_BACKBONE = "duckduckgo,bing,brave,startpage,mojeek"
+# §17.991 — duckduckgo REMOVED. It blackholes this host: html.duckduckgo.com,
+# lite.duckduckgo.com and duckduckgo.com all time out at 20s (3/3 direct
+# attempts from the searxng container) while bing (0.41s) and wikipedia (0.30s)
+# answer fine from the same place, so it is not egress. SearXNG waits for the
+# slowest engine, so naming a dead one cost EVERY search the full 3.0s
+# request_timeout: measured back-to-back, 3.006s / 3.006s / 0.181s — the third
+# only fast because ddg had finally self-suspended.
+#
+# Disabling it in searxng's settings.yml is NOT sufficient and that was worth
+# learning: `disabled: true` governs the DEFAULT engine set, and every caller
+# here passes an explicit `engines=` list, which overrides it. Verified both
+# ways — a default-set search does not query ddg; an explicit one still does.
+_GENERAL_BACKBONE = "bing,brave,startpage,mojeek"
 CATEGORY_ENGINES: dict[str, str] = {
     "it": f"{_GENERAL_BACKBONE},github",
     "science": f"arxiv,google scholar,{_GENERAL_BACKBONE}",
-    "news": f"duckduckgo news,{_GENERAL_BACKBONE}",
+    # §17.991 — "duckduckgo news" is the same blocked host and times out
+    # identically; dropped with the rest of the ddg engines.
+    "news": _GENERAL_BACKBONE,
     "general": _GENERAL_BACKBONE,
 }
 # §17.712 — the 0-results fallback set: the widest general net (adds qwant +
 # wikipedia). Retried once when the category engines return nothing, so a single
 # transient CAPTCHA can't zero a query.
-SEARXNG_FALLBACK_ENGINES = "duckduckgo,bing,brave,startpage,mojeek,qwant,wikipedia"
+SEARXNG_FALLBACK_ENGINES = "bing,brave,startpage,mojeek,qwant,wikipedia"   # §17.991
 
 # §17.729 — generic filler that carries no topic signal, so a result matching
 # ONLY these isn't really relevant. Kept small + deliberately tech-flavored:

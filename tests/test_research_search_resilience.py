@@ -336,3 +336,81 @@ def test_the_gate_is_applied_on_both_the_primary_and_fallback_paths():
     src = inspect.getsource(gt_extractor.search_searxng)
     assert src.count("relevant_search_results(") == 2, (
         "expected the gate on both the primary query and the fallback re-query")
+
+
+# ── §17.991 — the probe must not be a share of the load it watches ──────
+
+
+@pytest.mark.asyncio
+async def test_the_probe_reuses_a_recent_reading_instead_of_requerying():
+    """§17.985 pointed the probe at the same engine backbone research uses, and
+    a FAILED search is not cached by SearXNG — so every /health poll became five
+    real upstream engine requests. Measured on this box: `duckduckgo: engine
+    timeout` fired every 15s around the clock (4.6/min) with the engine
+    completely idle, which is what `brave: too many requests` and startpage's
+    hour-long CAPTCHA suspension were responding to. After: 0.0/min.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app import health
+
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"results": [{"url": "x"}], "unresponsive_engines": []}
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+
+    with patch("app.utils.http_clients.get_searxng_client", return_value=client):
+        first = await health._check_searxng()
+        for _ in range(9):
+            again = await health._check_searxng()
+
+    assert client.get.await_count == 1, (
+        "ten polls must cost ONE upstream search, not ten")
+    assert first["status"] == again["status"] == "up"
+    # The age of the reading is reported, so a cached value is never mistaken
+    # for a live one.
+    assert "cached_age_s" not in first
+    assert "cached_age_s" in again
+
+
+@pytest.mark.asyncio
+async def test_the_cached_reading_expires():
+    """A frozen cache would be worse than none — /health would report a stale
+    `up` through a real outage."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from app import health
+
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {"results": [{"url": "x"}], "unresponsive_engines": []}
+    client = MagicMock()
+    client.get = AsyncMock(return_value=resp)
+
+    with patch("app.utils.http_clients.get_searxng_client", return_value=client), \
+            patch.object(health, "_SEARXNG_PROBE_TTL_S", 0.0):
+        await health._check_searxng()
+        await health._check_searxng()
+
+    assert client.get.await_count == 2, "an expired reading must be re-probed"
+
+
+@pytest.mark.asyncio
+async def test_a_failure_is_cached_too_so_an_outage_is_not_hammered():
+    """The pathological case: an engine outage makes every probe fail, and an
+    uncached failure path would re-query hardest exactly when the engines are
+    least able to answer."""
+    from unittest.mock import MagicMock, patch
+
+    from app import health
+
+    client = MagicMock()
+    client.get = MagicMock(side_effect=RuntimeError("connection refused"))
+    with patch("app.utils.http_clients.get_searxng_client", return_value=client):
+        first = await health._check_searxng()
+        again = await health._check_searxng()
+
+    assert first["status"] == "down"
+    assert client.get.call_count == 1, "a failed probe must not be retried per poll"
+    assert again["status"] == "down"

@@ -265,3 +265,26 @@ def realistic_settings():
     mutations never leak across tests."""
     from app.config import settings as _live
     return _live.model_copy(deep=True)
+
+
+@pytest.fixture(autouse=True)
+def _clear_searxng_probe_cache():
+    """§17.991 — the /health SearXNG probe caches its reading in module-level
+    state for 5 minutes so that polling /health does not re-query live search
+    engines every 15 seconds.
+
+    That cache is process-wide, so without this the FIRST test to call
+    ``_check_searxng`` poisons every later one: five tests in
+    test_research_search_resilience.py failed on their predecessor's cached
+    result, each asserting against a response its own mock never produced.
+    Cleared around every test rather than in one file, so a future test that
+    touches /health cannot be silently served a stale reading.
+    """
+    try:
+        from app import health
+    except Exception:  # pragma: no cover — app not importable in some lanes
+        yield
+        return
+    health._searxng_probe_cache.update(at=0.0, result=None)
+    yield
+    health._searxng_probe_cache.update(at=0.0, result=None)
