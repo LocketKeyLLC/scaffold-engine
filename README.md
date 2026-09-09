@@ -369,9 +369,9 @@ The default `docker compose up -d` brings up everything below — there's no opt
 
 ## Status
 
-Actively developed. Latest release: v1.5.0 (2026-08-29) — see [CHANGELOG.md](./CHANGELOG.md). API contract at v1.5.0 (`docs/openapi.json`) — additive over v1.4.0 (slow-box probe assessment on `POST /models/probe`); the retired `/web` HTML console (redirects in v1.4.0) is removed, and the operator UI's job surfaces consolidated into the `#/job/:id` hub. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
+Actively developed. Latest release: v1.6.0 (2026-09-09) — see [CHANGELOG.md](./CHANGELOG.md). API contract at v1.6.0 (`docs/openapi.json`) — additive over v1.5.0: `research_summary.grounding` explains an ungrounded plan, and `/health` gains a `searxng` check. Note `results_found` reads LOWER than v1.5.0 on the same queries: it now counts material the distiller can use rather than raw hits. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
 
-`main` is ahead of the last tag. Landed since v1.5.0 and visible if you run from `main` rather than the tag:
+v1.6.0 is the research-grounding release — see [CHANGELOG.md](./CHANGELOG.md). In short:
 
 - **`/health` watches the search backend.** `checks.searxng` asks whether the engines answer, not whether the container is listening, and names suspended engines — the signal that tells you a plan is about to be built without research. Cached 5 minutes so the probe is not itself part of the load.
 - **Research says when it is ungrounded, and why.** `research_summary.grounding` separates "the search engine returned nothing about your topic" from "the distiller failed", instead of a bare `facts_extracted: 0`.

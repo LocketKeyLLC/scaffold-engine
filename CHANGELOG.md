@@ -4,6 +4,67 @@ Notable changes to scaffold-engine. Format follows [Keep a Changelog](https://ke
 
 Day-to-day development is tracked at sprint granularity in the commit log (`fix(§X.Y)` / `feat(§X.Y)` references). This file records the release-level view.
 
+## [1.6.0] — 2026-09-09
+
+Research had been returning nothing, and nothing said so. This release is the
+investigation that followed: the search path, the signals that should have
+caught it, and the model gates that were grading every role on the wrong job.
+PRs #400–#411.
+
+### Fixed
+
+- **The planning path was distilling search-engine junk.** With most SearXNG
+  engines rate-limited, the sole responder is a keyword matcher, and a generated
+  query leading with a broad word (`best local markdown to pdf libraries…`) came
+  back with an electronics retailer and two dictionary entries. The §17.729
+  relevance gate — whose docstring claims it defends *every* SearXNG path — was
+  never called by the planning path. Now it is, on both the primary query and
+  the 0-results fallback (#398).
+- **Generated research queries lead with the distinctive term.** Same words,
+  different first word: `python markdown pdf library` returns python.org's
+  homepage; `markdown pdf library python` returns the material (#399).
+- **DuckDuckGo blackholes some hosts and taxed every search 3.0s**, because
+  SearXNG waits for the slowest engine. Removed from the engine lists — a
+  `disabled: true` in searxng's own config is not enough, since callers passing
+  an explicit `engines=` list override it (#401).
+- **`/health` no longer hammers the engines it watches.** The §17.985 probe ran
+  on every poll — five real upstream requests every 15 seconds, around the clock,
+  with the engine idle — which is what the rate-limiting was responding to. Now
+  cached 5 minutes, with the age reported (#401).
+- **An empty tool-call payload is retried instead of silently accepted.**
+  `tool_call(require_nonempty=…)` widens the existing redraw to a well-formed
+  call whose payload list is empty (#397).
+
+### Added
+
+- **`research_summary.grounding`** — when a plan comes back with no facts, the
+  engine says which of four things happened, and which one is actually its own
+  fault rather than the search engine's (#400).
+- **`/health` watches SearXNG**, asking whether the engines *answer* rather than
+  whether the container is listening, and naming suspended engines (#396).
+- **Model roles are graded on the prompts they actually run.**
+  `model_ab.py --task research_extract` and `--task triage` dispatch the real
+  production prompts; the extraction and verifier golden sets were hardened
+  until they could tell candidates apart (#403, #407, #408).
+- **`make model-portability`** — for every role, how many models could do its
+  job right now; exits non-zero when a role is down to one (#410, #411).
+- **`make apply-preset PRESET=tuned-cloud`** — the measured model picks, tracked
+  in the repo and applied idempotently to `.env`, so a rebuild restores them
+  instead of falling back to the local-safe defaults (#412).
+
+### Changed
+
+- **Model pins re-measured on the real contracts**, then deliberately spread
+  across five models rather than concentrated. Verified end to end with the
+  previously-dominant model removed entirely (#409).
+
+### Notes
+
+The API contract is unchanged apart from the additive `research_summary.
+grounding` field. `results_found` will read LOWER than before on the same
+queries — it now counts material the distiller can use rather than raw hits,
+which is the fix working.
+
 ## [1.5.0] — 2026-08-29
 
 UI consolidation lands its second act: the job hub gives every job one URL, the retired `/web` console's grace-period redirects are removed, and fresh installs on underpowered hardware get an honest warning instead of a mystery failure (§17.857–§17.859, PRs #297–#299).
