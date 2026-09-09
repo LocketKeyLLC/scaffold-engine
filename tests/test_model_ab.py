@@ -765,3 +765,66 @@ def test_the_guard_covers_every_role_the_engine_actually_has():
     assert set(ROLE_TASKS).issubset(set(ROLE_TASKS)), "sanity"
     for role, task in ROLE_TASKS.items():
         assert task in TASKS, f"{role} maps to a gate the guard cannot run: {task}"
+
+
+# ── §17.1001 — the guard's draw count is derived, not transcribed ────────
+
+
+def test_a_chat_dispatched_role_must_declare_its_surface_draws():
+    """§17.1000 shipped `--draws` as a hand-typed flag "meant to be set to the
+    retry count of the surface" — a correspondence nothing enforced.
+
+    Roles whose gate dispatches through `model_router.tool_call` need no entry:
+    tool_call performs the §17.583 redraw itself, so the gate already measures
+    the retried path. A role dispatched through `model_router.chat` gets NO
+    internal redraw, so the guard would measure raw draws while production
+    retries — which is exactly how §17.1000's first run reported triage as
+    single-sourced. This fails when such a role is added and nobody maps it.
+    """
+    import inspect
+
+    from app.modules.model_role_learning import ROLE_TASKS
+    from scripts.model_portability import _SURFACE_DRAW_SOURCES
+
+    unmapped = []
+    for role, task_name in ROLE_TASKS.items():
+        src = inspect.getsource(TASKS[task_name].dispatch)
+        dispatches_via_chat = (
+            "model_router.chat(" in src and "model_router.tool_call(" not in src)
+        if dispatches_via_chat and role not in _SURFACE_DRAW_SOURCES:
+            unmapped.append((role, task_name))
+    assert not unmapped, (
+        "these roles dispatch through model_router.chat, which does NOT redraw, "
+        f"and declare no surface draw count: {unmapped}")
+
+
+def test_each_declared_surface_constant_actually_exists():
+    """The point of importing rather than transcribing is that a renamed or
+    deleted constant fails loudly instead of silently reverting the guard to 1."""
+    import importlib
+
+    from scripts.model_portability import _SURFACE_DRAW_SOURCES, surface_draws
+
+    for role, (module, attr) in _SURFACE_DRAW_SOURCES.items():
+        mod = importlib.import_module(module)
+        assert hasattr(mod, attr), f"{role}: {module}.{attr} is gone"
+        assert isinstance(getattr(mod, attr), int), f"{role}: {attr} is not an int"
+        assert surface_draws(role) == getattr(mod, attr)
+
+
+def test_the_triage_guard_tracks_the_surface_if_it_changes():
+    """The value is read from run_triage's own constant, so raising the surface's
+    retry count raises the guard's with it — no second edit, no drift."""
+    from app.native_chat import triage as tr
+    from scripts.model_portability import surface_draws
+
+    assert surface_draws("model_triage") == tr._TRIAGE_DRAWS >= 2
+
+
+def test_a_role_with_no_surface_retry_defaults_to_one_draw():
+    from scripts.model_portability import surface_draws
+
+    assert surface_draws("model_router") == 1, (
+        "tool_call already redraws internally; adding more would overstate "
+        "viability")
+    assert surface_draws("nonexistent_role") == 1
