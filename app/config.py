@@ -519,7 +519,13 @@ class Settings(BaseSettings):
     # §17.791 — native triage/synthesis model (mirrors the OWUI pipeline's live
     # triage_model). A thinking model; the native path strips <think> and uses a
     # generous max_tokens so it doesn't return empty-after-strip.
-    model_triage: str = "qwen3:4b"  # §17.819 local-safe (tuned cloud pick: qwen3.5:397b-cloud)
+    # §17.1002 — this still read qwen3.5:397b-cloud, the pin §17.997 REPLACED.
+    # Caught by the preset<->config sync test on its first run, which is the
+    # fourth stale tuned-pick comment in this arc (§17.994 fixed two, §17.995 a
+    # third). On its own gate qwen3.5:397b scored 6/10 at 55.9s and returned
+    # success=True with an EMPTY body on the first turn of a new chat; gemma4 is
+    # 10/10 at 1.03s.
+    model_triage: str = "qwen3:4b"  # §17.819 local-safe (tuned cloud pick: gemma4:cloud, §17.997)
     model_triage_provider: ProviderName = "ollama"
     # §17.791 — triage history window (turns). Pins every user turn (facts) +
     # the last N turns to bound CPU-only thinking-model latency. Mirror of the

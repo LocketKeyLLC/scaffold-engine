@@ -57,6 +57,8 @@ services:
       - ./cli:/code/cli:ro
       - ./sdk:/code/sdk:ro
       - ./scripts:/code/scripts:ro
+      - ./presets:/code/presets:ro
+      - ./.env.example:/code/.env.example:ro
       - ./db:/code/db:ro
       # Pipeline + repo-shape inputs probed by tests.
       - ./pipelines:/code/pipelines:ro
