@@ -85,8 +85,20 @@ PROFILES: dict[str, Profile] = {
             # the tag list. kimi-k2.7-code:cloud is live + code-specialized.
             "model_coder": "kimi-k2.7-code:cloud",
             "model_verifier": "kimi-k2.6:cloud",      # operator speed-verified
-            "model_router": "gpt-oss:20b-cloud",
-            "model_research_extract": "gpt-oss:20b-cloud",
+            # §17.995 — both were gpt-oss:20b-cloud, which this profile's own
+            # "<5 min end-to-end" goal argues against. Measured on the goldens
+            # each role is graded by:
+            #   routing           gpt-oss:20b 35/36 @2.47s | gemma4 36/36 @0.54s
+            #   research_extract  gpt-oss:20b  6/8  @16.1s | deepseek-v4-flash 24/24 @3.75s
+            # gpt-oss:20b is not broken — the 120b sibling returns 5/5 EMPTY tool
+            # calls, this one does not — it is simply slower and less accurate
+            # than models that were not available when the profile was written.
+            "model_router": "gemma4:cloud",
+            "model_research_extract": "deepseek-v4-flash:cloud",
+            # NOT changed: neither role has a golden set of its own
+            # (cloud_alt is a capability proxy, fallback is graded on routing
+            # but exists for failure-mode DIVERSITY — sharing a model with the
+            # primary would defeat it). Left on gpt-oss:20b-cloud deliberately.
             "model_cloud_alt": "gpt-oss:20b-cloud",
             "model_fallback": "gpt-oss:20b-cloud",
             # model_cloud_heavy intentionally left at its default — node

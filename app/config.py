@@ -384,7 +384,12 @@ class Settings(BaseSettings):
     # deepseek-v4-pro:cloud is 3.4× faster (5.6s vs 19.2s) at equal reliability
     # (5/5 non-empty) and equal/better synthesis quality with clean punctuation.
     # Env-overridable (docker-compose MODEL_GENERAL is decisive — 3-site sync).
-    model_general: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: deepseek-v4-pro:cloud, §17.632)
+    # §17.995 — the tuned cloud pick here read deepseek-v4-pro:cloud (§17.632)
+    # while the live pin had moved to gemma4:cloud. §17.994 corrected the two
+    # roles it had just swapped and did not sweep the rest, which is the same
+    # miss in miniature. gemma4 measured 18/18 on the grown extraction goldens
+    # (§17.992) — the ideation distill prompt this role actually runs.
+    model_general: str = "qwen2.5:7b"  # §17.819 local-safe (tuned cloud pick: gemma4:cloud, §17.995)
     # Ideation phase model role (Apr 26 2026): which ROLE_FIELDS entry to
     # use for analyze/distill/compile. "model_router" = local 4b (audit
     # #6.1 default, slower on CPU). "model_general" = the flagship cloud
