@@ -570,3 +570,81 @@ def test_the_quick_profile_pins_only_known_roles():
 
     unknown = set(quick_model_map()) - set(SWITCHABLE_ROLE_FIELDS)
     assert not unknown, f"quick profile pins unknown roles: {unknown}"
+
+
+# ── §17.997 — the triage task tests the prompts model_triage actually runs ──
+
+
+_TRIAGE_OK = ("**Scope so far:** A CLI.\n\n**Options:**\n- A\n- B\n\n"
+              "**Gaps:**\nWHAT: which formats?\n\n**My pick:** A.")
+
+
+def _score_tri(text, **g):
+    from scripts.model_ab import score_triage
+    return score_triage(text, g)
+
+
+def test_triage_accepts_the_four_section_contract():
+    assert _score_tri(_TRIAGE_OK, mode="triage")["passed"] is True
+
+
+def test_triage_rejects_a_dropped_my_pick():
+    """TRIAGE_SYSTEM_PROMPT is explicit that "My pick" is never dropped, including
+    when elaborating or answering a follow-up — the failure mode is a model
+    treating a follow-up as a plain chat reply."""
+    v = _score_tri(_TRIAGE_OK.replace("**My pick:** A.", ""), mode="triage")
+    assert v["passed"] is False and "My pick" in v["reason"]
+
+
+def test_triage_rejects_out_of_order_headers():
+    swapped = ("**Gaps:**\nx\n\n**Scope so far:** y\n\n**Options:**\n- A\n\n"
+               "**My pick:** A.")
+    v = _score_tri(swapped, mode="triage")
+    assert v["passed"] is False and v["reason"] == "headers_out_of_order"
+
+
+def test_triage_rejects_components_on_a_single_focus_build():
+    """`Components` is the one optional extra and only legal when the build
+    genuinely splits into parts."""
+    with_comp = _TRIAGE_OK.replace("**Options:**", "**Components:**\na — x\n\n**Options:**")
+    assert _score_tri(with_comp, mode="triage", expect_components=True)["passed"] is True
+    v = _score_tri(with_comp, mode="triage", expect_components=False)
+    assert v["passed"] is False and "components_on_single_focus" in v["reason"]
+
+
+def test_triage_catches_the_empty_response_that_started_this():
+    """The incumbent returned success=True with ZERO characters on the first
+    turn of a new chat — twice out of two, after ~90s — and production answers
+    that with a canned "I couldn't reach the planner just now". The routing gate
+    it was graded on could not see this at all: there it tied at 24/24."""
+    v = _score_tri("", mode="triage")
+    assert v["passed"] is False and v["reason"] == "empty"
+
+
+def test_synthesis_fails_when_a_superseded_detail_survives():
+    """§17.694 — the conversation is a TIMELINE. A problem the user later reports
+    RESOLVED must not be carried, nor escalated into a from-scratch rebuild."""
+    v = _score_tri("Plan: reinstall the OS on the Proxmox box.",
+                   mode="synthesis", required=["proxmox"],
+                   forbidden=["reinstall the os"])
+    assert v["passed"] is False and "carried_superseded" in v["reason"]
+    ok = _score_tri("Plan: clean up the old tenant on the running Proxmox host.",
+                    mode="synthesis", required=["proxmox"],
+                    forbidden=["reinstall the os"])
+    assert ok["passed"] is True
+
+
+def test_triage_goldens_cover_both_prompts():
+    import json
+    import pathlib
+
+    p = pathlib.Path(__file__).parent / "fixtures" / "triage_goldens.json"
+    goldens = json.loads(p.read_text())["goldens"]
+    modes = {g.get("mode") for g in goldens}
+    assert modes == {"triage", "synthesis"}, (
+        "the role runs BOTH prompts; a gate covering one of them is how this "
+        "role ended up graded on `routing` in the first place")
+    for g in goldens:
+        assert g.get("messages"), g["id"]
+        if g["mode"] == "synthesis":
+            assert g.get("forbidden") or g.get("required"), g["id"]

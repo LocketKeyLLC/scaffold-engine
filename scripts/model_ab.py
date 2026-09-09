@@ -382,6 +382,109 @@ async def _score_research_extract(golden: dict, resp: Any) -> dict:
     )
 
 
+# ---------------------------------------------------------------------------
+# triage task (§17.997) — the two prompts `model_triage` ACTUALLY runs
+# ---------------------------------------------------------------------------
+
+# The 4-section contract TRIAGE_SYSTEM_PROMPT demands of EVERY response, in
+# order. `Components` is the one optional extra, allowed only right after Scope.
+_TRIAGE_HEADERS = ("Scope so far", "Options", "Gaps", "My pick")
+
+
+def score_triage(text: str, golden: dict) -> dict:
+    """Score the contract model_triage is actually held to.
+
+    §17.997 — this role was graded on `routing`, a structured tool-call gate,
+    while it runs TRIAGE_SYSTEM_PROMPT (free text, streamed, temperature 0.7)
+    and SYNTHESIS_SYSTEM_PROMPT. That is the §17.994 mismatch in a third place,
+    and it mattered: gemma4 is 4x faster on the routing gate, which licensed
+    nothing because the gate was not measuring triage's job.
+
+    Both prompts do have deterministic contracts:
+
+      mode="triage"    — every response carries ALL FOUR headers in order, and
+                         "My pick" is never dropped. `Components` is optional
+                         and only legal directly after `Scope so far`.
+      mode="synthesis" — §17.694: the conversation is a TIMELINE. When a later
+                         user message corrects an earlier one, the later wins;
+                         a problem the user later reports RESOLVED must not be
+                         carried, nor escalated into a from-scratch rebuild.
+                         Scored as `forbidden` substrings that must be absent
+                         and `required` ones that must be present.
+    """
+    t = (text or "").strip()
+    if not t:
+        return {"passed": False, "reason": "empty", "metric": "sections",
+                "metric_value": 0}
+    low = t.lower()
+
+    if golden.get("mode") == "synthesis":
+        missing = [s for s in golden.get("required", []) if s.lower() not in low]
+        carried = [s for s in golden.get("forbidden", []) if s.lower() in low]
+        reasons = []
+        if missing:
+            reasons.append(f"dropped×{len(missing)}:{missing[:2]}")
+        if carried:
+            reasons.append(f"carried_superseded×{len(carried)}:{carried[:2]}")
+        return {"passed": not reasons, "reason": ",".join(reasons) or "ok",
+                "metric": "sections", "metric_value": 0 if reasons else 1}
+
+    # triage mode — headers present, in order, none dropped
+    positions = []
+    for h in _TRIAGE_HEADERS:
+        i = low.find(h.lower())
+        if i < 0:
+            return {"passed": False, "reason": f"missing_header:{h}",
+                    "metric": "sections", "metric_value": len(positions)}
+        positions.append(i)
+    if positions != sorted(positions):
+        return {"passed": False, "reason": "headers_out_of_order",
+                "metric": "sections", "metric_value": len(positions)}
+    # `Components` is legal ONLY between Scope and Options, and only when the
+    # golden says the build genuinely splits into parts.
+    ci = low.find("components")
+    if ci >= 0:
+        if not golden.get("expect_components"):
+            return {"passed": False, "reason": "components_on_single_focus_build",
+                    "metric": "sections", "metric_value": len(positions)}
+        if not (positions[0] < ci < positions[1]):
+            return {"passed": False, "reason": "components_misplaced",
+                    "metric": "sections", "metric_value": len(positions)}
+    elif golden.get("expect_components"):
+        return {"passed": False, "reason": "components_missing_on_multipart",
+                "metric": "sections", "metric_value": len(positions)}
+    return {"passed": True, "reason": "ok", "metric": "sections",
+            "metric_value": len(_TRIAGE_HEADERS)}
+
+
+async def _dispatch_triage(model: str, golden: dict, *, temperature: float,
+                           max_tokens: int) -> Any:
+    from app import model_router
+    from app.native_chat.triage import (
+        TRIAGE_SYSTEM_PROMPT, SYNTHESIS_SYSTEM_PROMPT,
+    )
+    if golden.get("mode") == "synthesis":
+        transcript = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+            for m in golden["messages"])
+        msgs = [{"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+                {"role": "user", "content":
+                 "Here is the planning conversation. Extract the final "
+                 f"agreed-upon plan:\n\n{transcript}"}]
+        temp = 0.3   # production uses 0.3 for synthesis, 0.7 for triage
+    else:
+        msgs = [{"role": "system", "content": TRIAGE_SYSTEM_PROMPT}] + golden["messages"]
+        temp = temperature
+    return await model_router.chat(msgs, model=model, temperature=temp,
+                                   max_tokens=max_tokens)
+
+
+async def _score_triage(golden: dict, resp: Any) -> dict:
+    from app.native_chat.triage import _strip_think
+    text = _strip_think(resp.text) if getattr(resp, "success", False) else ""
+    return score_triage(text, golden)
+
+
 @dataclass
 class Task:
     name: str
@@ -403,6 +506,9 @@ TASKS: dict[str, Task] = {
     "research_extract": Task("research_extract",
                              _FIXTURES / "research_extract_goldens.json",
                              _dispatch_research_extract, _score_research_extract),
+    # §17.997 — the prompts `model_triage` actually runs.
+    "triage": Task("triage", _FIXTURES / "triage_goldens.json",
+                   _dispatch_triage, _score_triage),
 }
 
 
