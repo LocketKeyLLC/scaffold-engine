@@ -51,7 +51,16 @@ logger = logging.getLogger("scaffold.model_role_learning")
 ROLE_TASKS: dict[str, str] = {
     "model_coder": "codegen",
     "model_verifier": "verifier",
-    "model_research_extract": "extraction",
+    # §17.993 — was "extraction", which dispatches gt_extractor's DISTILL prompt
+    # and its 4-field `record_distilled_entries`. This role runs
+    # research_agent._extract_entries: EXTRACT_SYSTEM_V1 and the 7-field
+    # `record_entries`, which additionally asks for a calibrated
+    # `confidence_score` and a `source_type` from a fixed enum. The old mapping
+    # graded the role on a strictly easier task, so every candidate looked
+    # identical (10/10 across four models) and a swap to the fastest would have
+    # been a real regression — measured on the REAL contract, gemma4 scores
+    # 9/12 and fails confidence-grading 3/3.
+    "model_research_extract": "research_extract",
     "model_router": "routing",           # real job: route_command classification
     "model_general": "routing",          # real structured job: assist_classify/decide
     "model_cloud_heavy": "codegen",      # proxy: escalation = hard-node capability
