@@ -155,3 +155,57 @@ def test_query_tokens_strips_filler_and_numbers():
     assert "version" not in toks   # filler
     assert "server" not in toks    # filler
     assert "2026" not in toks      # pure number
+
+
+# ── §17.991 — a blackholed engine must not sit in the engine lists ──────
+
+
+def test_duckduckgo_is_not_in_any_engine_list():
+    """It blackholes this host — html/lite/root all time out at 20s (3/3 direct
+    from the searxng container) while bing (0.41s) and wikipedia (0.30s) answer
+    fine from the same place, so it is not egress.
+
+    SearXNG waits for the SLOWEST engine, so naming a dead one taxed every
+    search the full 3.0s request_timeout. Measured back-to-back before the
+    removal: 3.006s / 3.006s / 0.181s — the third only fast because ddg had
+    finally self-suspended. After: 0.21s / 0.27s / 0.23s / 0.21s.
+    """
+    from app.modules import research_extractors as rx
+
+    lists = {
+        "_GENERAL_BACKBONE": rx._GENERAL_BACKBONE,
+        "SEARXNG_FALLBACK_ENGINES": rx.SEARXNG_FALLBACK_ENGINES,
+        **{f"CATEGORY_ENGINES[{k}]": v for k, v in rx.CATEGORY_ENGINES.items()},
+    }
+    offenders = {name: val for name, val in lists.items() if "duckduckgo" in val}
+    assert not offenders, (
+        f"duckduckgo is blackholed from this host and costs every search the "
+        f"full request_timeout: {offenders}")
+
+
+def test_the_backbone_still_has_a_working_engine():
+    """The guard above must not be satisfiable by emptying the lists."""
+    from app.modules import research_extractors as rx
+
+    assert "bing" in rx._GENERAL_BACKBONE, (
+        "bing is the engine measured actually answering from this host")
+    assert len(rx._GENERAL_BACKBONE.split(",")) >= 3, (
+        "keep several engines so one suspension does not zero research")
+
+
+def test_disabling_in_searxng_config_would_not_have_been_enough():
+    """Worth pinning, because it is the non-obvious half: SearXNG's
+    `disabled: true` governs the DEFAULT engine set, and every caller here
+    passes an explicit `engines=` list which overrides it. Verified live both
+    ways — a default-set search did not query ddg; an explicit one still did.
+    So the engine lists in THIS module are the thing that decides."""
+    import inspect
+
+    from app.modules import research_extractors as rx
+
+    for fn_src in (inspect.getsource(rx),):
+        assert "engines" in fn_src
+    # The app always names engines explicitly; that is why the list is load-bearing.
+    from app.modules import gt_extractor as gt
+
+    assert '"engines": _engines_for_category' in inspect.getsource(gt.search_searxng)

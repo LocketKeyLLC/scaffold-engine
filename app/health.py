@@ -124,6 +124,20 @@ def _model_role_warnings(pulled: set[str]) -> list[str]:
 # awaited after them), so this is overlap, not addition.
 _SEARXNG_PROBE_BUDGET_S = 5.0
 
+# §17.991 — how long a probe result is reused. /health is polled roughly every
+# 15s here (container healthcheck + the SPA), and §17.985 pointed the probe at
+# the SAME engine backbone research uses. A FAILED search is not cached by
+# SearXNG, so every poll became five real upstream engine requests — ~28,800 a
+# day, around the clock, even with the engine completely idle. That is load the
+# engines answer with 403/429, and it is why `brave` reported "too many
+# requests" and `startpage` sat on an hour-long CAPTCHA suspension.
+#
+# A degraded-engine signal does not need 15-second resolution. One real probe
+# per 5 minutes cuts the probe's own contribution by ~95%; the age of the
+# reading is reported so nobody mistakes a cached value for a live one.
+_SEARXNG_PROBE_TTL_S = 300.0
+_searxng_probe_cache: dict = {"at": 0.0, "result": None}
+
 
 async def _check_searxng() -> dict:
     """§17.983 — SearXNG was the one dependency /health never watched.
@@ -157,6 +171,14 @@ async def _check_searxng() -> dict:
     """
     import time as _t
 
+    # §17.991 — serve a recent reading rather than re-querying live engines on
+    # every poll. The probe must not be a meaningful share of the load it exists
+    # to watch.
+    _now = _t.monotonic()
+    _cached = _searxng_probe_cache.get("result")
+    if _cached is not None and (_now - _searxng_probe_cache["at"]) < _SEARXNG_PROBE_TTL_S:
+        return {**_cached, "cached_age_s": int(_now - _searxng_probe_cache["at"])}
+
     out: dict = {"status": "unknown", "latency_ms": 0}
     t0 = _t.monotonic()
     try:
@@ -180,6 +202,7 @@ async def _check_searxng() -> dict:
         if resp.status_code != 200:
             out["status"] = "down"
             out["http_status"] = resp.status_code
+            _searxng_probe_cache.update(at=_now, result=out)
             return out
         body = resp.json()
         dead = [list(d)[:2] for d in (body.get("unresponsive_engines") or [])]
@@ -202,6 +225,7 @@ async def _check_searxng() -> dict:
         # §17.985 — several httpx errors carry an empty str(), which rendered
         # as a bare "ReadTimeout: " with a dangling colon in the operator's face.
         out["error"] = (f"{type(e).__name__}: {e}".rstrip(": ") or type(e).__name__)[:160]
+    _searxng_probe_cache.update(at=_now, result=out)
     return out
 
 
