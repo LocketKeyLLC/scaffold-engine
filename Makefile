@@ -18,7 +18,7 @@ API_URL   ?= http://localhost:8000
 # §17.854 (audit H7) — completed the phony list: coverage/backup/restore/rebaseline/ci-smoke/
 # test-ui/lint-migrations/check-env-example/check-version/clean-pyc/bench-check-rag-* were real
 # targets missing here, so a same-named file at repo root would make them silently no-op.
-.PHONY: _ensure_dev test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
+.PHONY: _ensure_dev test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -226,6 +226,10 @@ doctor: ## Health audit: probe every dep + verify key sync + cold-backup mount g
 
 doctor-explain: ## Same as doctor, but with a one-liner per check explaining what it verifies
 	@bash scripts/doctor.sh --explain
+
+model-portability: ## §17.1000 — how many models could serve each role? Fails when a role is down to one. Live model calls; run when the catalog moves.
+	@printf '\033[1m▶ per-role model portability (live calls — see --dry-run for the trial count)\033[0m\n'
+	@docker exec scaffold-orchestrator python scripts/model_portability.py $(ARGS)
 
 init: ## Provider/model wizard: user-mode + compute profile + per-role provider + keys, update .env
 	@bash scripts/init.sh
