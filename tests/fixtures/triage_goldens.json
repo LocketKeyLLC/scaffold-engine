@@ -1,0 +1,106 @@
+{
+  "version": "triage-1.0",
+  "note": "§17.997 — goldens for `model_ab.py --task triage`. These feed the two prompts `model_triage` actually runs: TRIAGE_SYSTEM_PROMPT (mode=triage, temp 0.7) and SYNTHESIS_SYSTEM_PROMPT (mode=synthesis, temp 0.3), both from app/native_chat/triage.py. The role was previously graded on `routing`, a structured tool-call gate it never runs. Both prompts have deterministic contracts: triage must emit all four headers in order and never drop 'My pick'; synthesis must treat the conversation as a TIMELINE (§17.694) where a later correction supersedes an earlier statement.",
+  "goldens": [
+    {
+      "id": "vague-single-focus",
+      "mode": "triage",
+      "expect_components": false,
+      "_why": "The first turn of a new chat — the prompt says all four headers apply even when no prior assistant message exists. A single-focus build must NOT get a Components section.",
+      "messages": [
+        {
+          "role": "user",
+          "content": "I want to build a tool that backs up my photos."
+        }
+      ]
+    },
+    {
+      "id": "multipart-build",
+      "mode": "triage",
+      "expect_components": true,
+      "_why": "A build that clearly splits into parts — Components is required, and only legal directly after 'Scope so far'.",
+      "messages": [
+        {
+          "role": "user",
+          "content": "I want a self-hosted media system: a web UI to browse, a transcoding service, and a nightly backup job to an external drive. All three on one Linux box."
+        }
+      ]
+    },
+    {
+      "id": "follow-up-keeps-my-pick",
+      "mode": "triage",
+      "expect_components": false,
+      "_why": "The prompt is explicit that 'My pick' must not be dropped when elaborating or answering a follow-up — the failure mode is a model treating a follow-up as a plain chat reply.",
+      "messages": [
+        {
+          "role": "user",
+          "content": "I want a CLI that converts markdown to PDF."
+        },
+        {
+          "role": "assistant",
+          "content": "**Scope so far:** A CLI that converts markdown files to PDF.\n\n**Options:**\n- WeasyPrint — CSS control\n- Pandoc — format breadth\n\n**Gaps:**\nHARDWARE: what OS will this run on?\n\n**My pick:** WeasyPrint, for CSS control."
+        },
+        {
+          "role": "user",
+          "content": "Tell me more about the CSS control."
+        }
+      ]
+    },
+    {
+      "id": "synthesis-resolved-problem",
+      "mode": "synthesis",
+      "_why": "§17.694 / §17.698 — the user reports a problem and LATER says it is fixed. The resolved problem must not be carried, and must not be escalated into a from-scratch reinstall. 'Start over fresh' on a reachable system means fresh SERVICES, not a fresh OS.",
+      "required": [
+        "proxmox"
+      ],
+      "forbidden": [
+        "reinstall the os",
+        "reinstall proxmox",
+        "bare-metal",
+        "wipe the disk",
+        "fresh install of the os",
+        "cannot log in",
+        "locked out"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": "My Proxmox box has an IP conflict and I can't log into the web UI at all."
+        },
+        {
+          "role": "assistant",
+          "content": "**Scope so far:** Recover access to a Proxmox host."
+        },
+        {
+          "role": "user",
+          "content": "Update: the IP issue is fixed, I can log in now. What I actually want is to wipe the old tenant user and all their VMs and data, then set the box up fresh for me."
+        }
+      ]
+    },
+    {
+      "id": "synthesis-later-choice-wins",
+      "mode": "synthesis",
+      "_why": "A plain supersession: the user names one technology, then changes to another. The superseded one must not survive into the plan.",
+      "required": [
+        "postgres"
+      ],
+      "forbidden": [
+        "sqlite"
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "content": "Build an inventory tracker. Use SQLite for storage."
+        },
+        {
+          "role": "assistant",
+          "content": "**Scope so far:** An inventory tracker on SQLite."
+        },
+        {
+          "role": "user",
+          "content": "Actually scratch SQLite — two people will use it concurrently, so use Postgres instead."
+        }
+      ]
+    }
+  ]
+}

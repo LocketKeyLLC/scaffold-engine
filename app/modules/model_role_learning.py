@@ -73,7 +73,12 @@ ROLE_TASKS: dict[str, str] = {
     "model_cloud_heavy": "codegen",      # proxy: escalation = hard-node capability
     "model_cloud_alt": "codegen",        # proxy: alternate heavy-cloud capability
     "model_fallback": "routing",         # proxy: light capability; LOCAL candidates only
-    "model_triage": "routing",           # §17.791 real job: conversational intent classification
+    # §17.997 — was "routing", a structured tool-call gate this role never runs.
+    # model_triage runs TRIAGE_SYSTEM_PROMPT and SYNTHESIS_SYSTEM_PROMPT (free
+    # text, streamed, temp 0.7/0.3). On `routing` the incumbent tied at 24/24;
+    # on its OWN prompts it scored 6/10 and returned success=True with ZERO
+    # characters on the first turn of a new chat, twice out of two, after ~90s.
+    "model_triage": "triage",
 }
 
 
