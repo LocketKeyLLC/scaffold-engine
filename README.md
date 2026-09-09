@@ -126,11 +126,22 @@ This runs an end-to-end audit. The script opens with an 11-section banner listin
 curl -H "X-API-Key: $SCAFFOLD_API_KEY" http://localhost:8000/health
 ```
 
-Returns a JSON object with `status: "healthy"` and per-dependency latency numbers. Postgres, Milvus, Redis, and Ollama should all show `up`.
+Returns a JSON object with `status: "healthy"` and per-dependency latency numbers. Postgres, Milvus, Redis, Ollama **and SearXNG** should all show `up`.
+
+`checks.searxng` is worth knowing about: it asks whether the search *engines* answer, not just whether the container is listening. A container reporting `healthy` proves only that the process is up, which is not the useful question for a metasearch proxy. When engines are rate-limited or CAPTCHA'd it reads `degraded` and names them:
+
+```json
+"searxng": {"status": "degraded", "results": 0, "cached_age_s": 143,
+            "suspended_engines": [["brave", "Suspended: too many requests"]],
+            "hint": "the primary search engines are suspended or CAPTCHA'd — research is falling back to the wider engine net and may return less, or nothing"}
+```
+
+The reading is cached for 5 minutes (`cached_age_s` tells you how old it is) so that polling `/health` doesn't itself hammer the engines it is watching.
 
 > **What can go wrong:**
 > - `Cannot reach orchestrator` → run `docker ps` to confirm all containers are up. Check `docker logs scaffold-orchestrator` for startup errors.
 > - `ollama: down` → host Ollama isn't running, or the bridge gateway isn't reaching it. Confirm `ollama list` works on the host. If yes, check that `OLLAMA_BASE_URL` in `.env` points at the bridge gateway (default `http://172.18.0.1:11434` for Pop!_OS / native Docker).
+> - `searxng: degraded` → the container is fine; the public search engines are refusing it. Usually clears on its own (suspensions are 3 minutes, an hour for a CAPTCHA). It is **not** fatal — research falls back to a wider engine net — but plans built during it may come back with little or no research, and the engine will tell you so (see "ungrounded" below). If it never clears, an engine may be blocking your IP outright: `docker logs searxng | grep -i suspend` names which and why.
 
 ### 6. Open the UI
 
@@ -189,6 +200,7 @@ Check progress at any time with:
 > - Phase 2 (research) can take 10–25 minutes on CPU. The chat shows a visible "⏳ Phase 2 — researching + ingesting… (Xm YYs elapsed)" marker every ~2 minutes. For sub-step detail, tail the orchestrator (`docker logs -f scaffold-orchestrator`) — it logs each SearXNG query, distillation batch, and Milvus ingest as it happens.
 > - If the system says `awaiting_confirmation` and won't move forward, you skipped step 6 (the `/confirm` command).
 > - If a DAG node fails after three auto-retries, it goes to `blocked`. Run `/results <job_id>` for a copy-pasteable retry or skip command.
+> - If research finishes with **no facts** (`facts_extracted: 0`), the response's `research_summary.grounding` says which of four things happened, so you are not left guessing: `search_returned_nothing` (nothing survived the relevance gate), `results_off_topic` (the search engine returned material that is not about your topic — common when only one engine is live, see `searxng: degraded` above), `results_thin_on_topic`, or `distiller_returned_nothing` (the only one that is actually a bug in the engine). The plan still builds; it is just ungrounded, and now it says so.
 
 > **Guided by default.** The chat exposes a small core set — `/go`, `/idea`, `/confirm`, `/execute`, `/assist`, `/here`, `/next`, `/resume`, `/results`, `/cancel`, `/help`. The ~45 power commands (`/research`, `/jobs`, `/model`, `/schedule`, `/rag`, …) are one toggle away: type **`/advanced on`** (it sticks across restarts). `/help` lists the core; `/help` after `/advanced on` lists everything. Full reference: [USER_GUIDE.md](./USER_GUIDE.md).
 
@@ -358,6 +370,13 @@ The default `docker compose up -d` brings up everything below — there's no opt
 ## Status
 
 Actively developed. Latest release: v1.5.0 (2026-08-29) — see [CHANGELOG.md](./CHANGELOG.md). API contract at v1.5.0 (`docs/openapi.json`) — additive over v1.4.0 (slow-box probe assessment on `POST /models/probe`); the retired `/web` HTML console (redirects in v1.4.0) is removed, and the operator UI's job surfaces consolidated into the `#/job/:id` hub. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
+
+`main` is ahead of the last tag. Landed since v1.5.0 and visible if you run from `main` rather than the tag:
+
+- **`/health` watches the search backend.** `checks.searxng` asks whether the engines answer, not whether the container is listening, and names suspended engines — the signal that tells you a plan is about to be built without research. Cached 5 minutes so the probe is not itself part of the load.
+- **Research says when it is ungrounded, and why.** `research_summary.grounding` separates "the search engine returned nothing about your topic" from "the distiller failed", instead of a bare `facts_extracted: 0`.
+- **Search results are relevance-gated on the planning path.** Keyword-matcher pollution (a query leading with a broad word returning an unrelated retailer or a dictionary entry) is dropped before it reaches distillation, and generated research queries lead with the distinctive term.
+- **Model role picks are re-measured against the prompt each role actually runs** (`scripts/model_ab.py --task research_extract` grades the 7-field production contract, not a simpler stand-in). The tuned cloud picks are recorded in `.env.example` and `app/config.py` with the numbers behind them.
 
 ## License
 
