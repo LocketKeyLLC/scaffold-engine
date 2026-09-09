@@ -701,3 +701,67 @@ def test_every_verifier_golden_has_a_verdict_and_a_rationale():
     for g in _verifier_goldens():
         assert g["expected"] in {"pass", "fail"}, g["id"]
         assert g.get("task") and g.get("output"), g["id"]
+
+
+# ── §17.1000 — the portability guard ────────────────────────────────────
+
+
+def _rows(spec):
+    """spec: {role: {model: [pass, pass, ...]}} -> flat trial rows."""
+    return [{"role": r, "model": m, "passed": p}
+            for r, ms in spec.items() for m, res in ms.items() for p in res]
+
+
+def test_viability_counts_only_models_that_scored_full_marks():
+    """Viable means "could serve this role", not "is best" — ranking is
+    model_ab.py's job. A model that missed even one golden is not an escape
+    hatch you would want to reach for."""
+    from scripts.model_portability import summarize_viability
+
+    s = summarize_viability(_rows({
+        "model_router": {"a": [True, True], "b": [True, False], "c": [True, True]},
+    }), min_viable=2)["model_router"]
+    assert s["viable"] == ["a", "c"]
+    assert s["count"] == 2 and s["ok"] is True
+    assert s["tested"] == ["a", "b", "c"], "the pool tested is reported too"
+
+
+def test_a_role_with_one_usable_model_fails_the_guard():
+    """§17.999 — gemma4 looked like the only model that could run triage. It was
+    not; the dependency was a missing retry. This is the check that would have
+    said so out loud instead of leaving it to be noticed."""
+    from scripts.model_portability import summarize_viability
+
+    s = summarize_viability(_rows({
+        "model_triage": {"gemma4": [True], "other": [False], "third": [False]},
+    }), min_viable=2)["model_triage"]
+    assert s["count"] == 1 and s["ok"] is False
+
+
+def test_a_role_nobody_could_serve_fails_rather_than_passing_vacuously():
+    from scripts.model_portability import summarize_viability
+
+    s = summarize_viability(_rows({"model_coder": {"a": [False], "b": [False]}}),
+                            min_viable=1)["model_coder"]
+    assert s["viable"] == [] and s["ok"] is False
+
+
+def test_the_threshold_is_honoured():
+    from scripts.model_portability import summarize_viability
+
+    spec = {"model_general": {"a": [True], "b": [True]}}
+    assert summarize_viability(_rows(spec), min_viable=2)["model_general"]["ok"] is True
+    assert summarize_viability(_rows(spec), min_viable=3)["model_general"]["ok"] is False
+
+
+def test_the_guard_covers_every_role_the_engine_actually_has():
+    """The guard walks ROLE_TASKS, so a role added later is covered without
+    anyone remembering to add it here — the failure mode that left `extraction`
+    orphaned in §17.994."""
+    from app.modules.model_role_learning import ROLE_TASKS
+    from scripts.model_portability import MIN_VIABLE_DEFAULT
+
+    assert MIN_VIABLE_DEFAULT >= 2, "one usable model is the thing being guarded against"
+    assert set(ROLE_TASKS).issubset(set(ROLE_TASKS)), "sanity"
+    for role, task in ROLE_TASKS.items():
+        assert task in TASKS, f"{role} maps to a gate the guard cannot run: {task}"
