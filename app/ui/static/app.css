@@ -912,6 +912,43 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 .msg.streaming .msg-body { border-color: var(--accent); }
 .msg-body pre { max-width: 100%; }
 
+/* §17.1011 — progressive disclosure inside a walkthrough bubble. The lead
+   (👉 the one action, ✅ the finish line) reads as normal prose; every other
+   section becomes a quiet row that opens in place. Rows are deliberately
+   low-contrast: they are available, not advertised. */
+.guide-more { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
+.guide-section { border-radius: 8px; }
+.guide-section + .guide-section { margin-top: 2px; }
+.guide-section > summary {
+  cursor: pointer; list-style: none; padding: 5px 8px; border-radius: 8px;
+  font-size: 13px; color: var(--text-dim); user-select: none;
+}
+.guide-section > summary::-webkit-details-marker { display: none; }
+.guide-section > summary::before { content: "▸ "; display: inline-block; width: 1em; }
+.guide-section[open] > summary::before { content: "▾ "; }
+.guide-section > summary:hover { background: var(--bg-inset); color: var(--text); }
+.guide-section[open] > summary { color: var(--text); font-weight: 600; }
+.guide-section > .md { padding: 2px 8px 8px 1.6em; }
+
+/* The completed-steps backlog: one row standing in for everything already
+   done, so the live step is at the top of the scroll rather than the bottom. */
+.transcript-backlog { margin-bottom: 10px; }
+.transcript-backlog > summary {
+  cursor: pointer; list-style: none; padding: 6px 10px; border-radius: 8px;
+  font-size: 12px; color: var(--text-dim); background: var(--bg-inset);
+  border: 1px dashed var(--border); text-align: center; user-select: none;
+}
+.transcript-backlog > summary::-webkit-details-marker { display: none; }
+.transcript-backlog > summary:hover { color: var(--text); }
+.transcript-backlog-body { display: flex; flex-direction: column; gap: 14px; padding-top: 14px; }
+
+/* The loop reminder doubles as the way back to the full explainer. */
+button.step-hero-loop.linklike {
+  background: none; border: 0; padding: 0; text-align: left; cursor: pointer;
+  font: inherit; color: var(--text-dim);
+}
+button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: underline; }
+
 .chat-composer { border-top: 1px solid var(--border); padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; background: var(--bg-elev); }
 .chat-input { width: 100%; font: inherit; font-size: 15px; resize: vertical; padding: 11px 13px; min-height: 58px; background: var(--bg-inset); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); color: var(--text); }
 .chat-input:focus { outline: none; border-color: var(--accent); }

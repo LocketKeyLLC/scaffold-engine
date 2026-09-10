@@ -1321,6 +1321,29 @@ class Settings(BaseSettings):
     # tell me what it shows", which never tells the operator the step is
     # over; finished steps stayed open and the session read as stuck.
     assist_done_criterion_enabled: bool = False
+    # §17.1011 — one step is ONE action. Live evidence (the homelab job, node
+    # T35 "Configure reverse proxy"): a single step's guidance ran 4,817 chars
+    # across NINE sections and was internally divided into "Phase A / Phase B /
+    # Phase C" — get a domain + point DNS + open router ports, then find an IP
+    # and rewrite a Caddyfile, then apply a firewall group and test from a
+    # phone on cellular. Four execution contexts (host shell, router admin
+    # page, Proxmox web UI, external device) in one step the operator is asked
+    # to complete before advancing. Its "👉 Do this next" headline (`cat` the
+    # Caddyfile) and its "✅ Done when" close (public HTTPS loads from outside)
+    # were not even the same piece of work.
+    #
+    # Verbosity does NOT address this: `terse` shortens the prose but still
+    # emits Phase A/B/C, because the defect is SCOPE, not word count. When on,
+    # the walkthrough may not sub-divide into phases, is capped at
+    # `assist_single_action_max_steps` numbered actions in one place, and its
+    # headline action must match its finish line. Code default off; live via
+    # compose.
+    assist_single_action_enabled: bool = False
+    # Cap on numbered actions in one walkthrough's "Run this" (§17.1011). T35
+    # had 8 across three phases; 5 leaves room for a genuinely multi-command
+    # single action (backup → edit → reload → verify) without licensing a
+    # phased project.
+    assist_single_action_max_steps: int = Field(default=5, ge=2, le=12)
     # §17.742 — problem-solving discipline for TANGLED, multi-attempt steps. Live
     # evidence (P40/T14: 48 assistant turns on one step, 4 approaches tried+failed)
     # showed the engine THRASHING — re-proposing ruled-out approaches and asking

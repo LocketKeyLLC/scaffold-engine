@@ -15,6 +15,7 @@ The claim is the bug. `skip` is what retires a step; saying so is not.
 """
 import pytest
 
+from app.modules import assist_guide
 from app.modules.assist_directives import apply_plan_authority
 from app.modules.assist_guide import (
     claims_plan_mutation,
@@ -136,8 +137,33 @@ def test_correction_runs_before_the_no_action_offer():
 
 
 def test_directive_is_applied_wherever_guidance_is_generated():
-    """Both generation sites, or the model keeps making the claim on one path."""
+    """Both generation sites, or the model keeps making the claim on one path.
+
+    §17.1011 — this used to assert ``src.count("apply_plan_authority(system)")
+    == 2``, one per generator. The two directive stacks were byte-identical and
+    have been collapsed into ``_build_guide_system``, so the literal now appears
+    ONCE and the count said "regression" about a refactor that made the drift
+    impossible. Counting occurrences was always the weaker check anyway: it
+    passes just as happily when both copies are wrong. Assert the property the
+    count was standing in for — that each generator routes through the shared
+    builder, and that the builder actually emits the directive.
+    """
+    import inspect
     import pathlib
 
     src = pathlib.Path("app/modules/assist_guide.py").read_text()
-    assert src.count("apply_plan_authority(system)") == 2
+    assert src.count("apply_plan_authority(system)") == 1, (
+        "expected exactly one application, in the shared builder"
+    )
+    for fn in ("generate_guidance", "generate_guidance_stream"):
+        fsrc = inspect.getsource(getattr(assist_guide, fn))
+        assert "_build_guide_system(" in fsrc, (
+            f"{fn} no longer routes through the shared directive builder — it "
+            f"can now silently miss a directive (§17.1011)"
+        )
+
+    class _Ctx:
+        tool = "shell"
+
+    system = assist_guide._build_guide_system(_Ctx(), "normal", is_decision=False)
+    assert "YOU CANNOT CHANGE THE PLAN BY SAYING SO" in system
