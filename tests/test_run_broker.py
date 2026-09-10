@@ -24,8 +24,12 @@ from app.modules import run_broker
 def _clean_registry():
     """Each test owns the registry — these are module-level singletons."""
     run_broker._runs.clear()
+    run_broker._redis_client = None   # §17.1009 — the client is now shared+cached
+    run_broker._redis_failed = False
     yield
     run_broker._runs.clear()
+    run_broker._redis_client = None
+    run_broker._redis_failed = False
 
 
 def make_source(frames: int = 5, delay: float = 0.01, emitted: list | None = None):
@@ -257,3 +261,69 @@ async def test_reconcile_on_startup_never_raises(monkeypatch):
 
     monkeypatch.setattr("app.database.async_session", boom)
     await run_broker.reconcile_on_startup()  # must not raise
+
+
+# ── Durable replay (§17.1009) ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_replay_returns_empty_when_redis_is_unavailable(monkeypatch):
+    """Persistence is a nicety, not a duty. A cache being down must cost the
+    replay and nothing else — an empty list means 'no record', and every caller
+    is documented to treat it that way rather than as 'nothing happened'."""
+    monkeypatch.setattr(run_broker, "_redis", lambda: None)
+    assert await run_broker.replay("job-x") == []
+
+
+@pytest.mark.asyncio
+async def test_publish_never_waits_on_redis():
+    """`publish` runs inside the executor's own loop. A slow or unreachable
+    Redis must not hold up node execution, so the write is fire-and-forget."""
+    slow_calls: list[str] = []
+
+    class SlowPipe:
+        def rpush(self, *a): slow_calls.append("rpush")
+        def ltrim(self, *a): slow_calls.append("ltrim")
+        def expire(self, *a): slow_calls.append("expire")
+        async def execute(self):
+            await asyncio.sleep(5)  # far longer than the run should ever wait
+
+    class SlowRedis:
+        def pipeline(self): return SlowPipe()
+        async def aclose(self): pass
+
+    original = run_broker._redis
+    run_broker._redis = lambda: SlowRedis()
+    try:
+        run = run_broker.start("job-redis", make_source(frames=3, delay=0.01))
+        # The run completes on its own schedule regardless of the slow mirror.
+        await asyncio.wait_for(run.done.wait(), timeout=3)
+        assert len(run.frames) == 3
+    finally:
+        run_broker._redis = original
+
+
+@pytest.mark.asyncio
+async def test_replay_reads_back_what_was_published(monkeypatch):
+    stored: dict[str, list[str]] = {}
+
+    class FakePipe:
+        def __init__(self, key): self.key = key
+        def rpush(self, key, frame): stored.setdefault(key, []).append(frame)
+        def ltrim(self, *a): pass
+        def expire(self, *a): pass
+        async def execute(self): pass
+
+    class FakeRedis:
+        def pipeline(self): return FakePipe(None)
+        async def lrange(self, key, a, b): return stored.get(key, [])
+        async def aclose(self): pass
+
+    class KeyedPipe(FakePipe):
+        def rpush(self, key, frame): stored.setdefault(key, []).append(frame)
+
+    monkeypatch.setattr(run_broker, "_redis", lambda: FakeRedis())
+    run = run_broker.start("job-replay", make_source(frames=4, delay=0.01))
+    await asyncio.wait_for(run.done.wait(), timeout=3)
+    await asyncio.sleep(0.1)  # let the fire-and-forget writes land
+    frames = await run_broker.replay("job-replay")
+    assert len(frames) == 4, f"expected the published frames back, got {frames}"

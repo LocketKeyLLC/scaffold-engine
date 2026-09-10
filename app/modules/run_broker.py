@@ -36,15 +36,21 @@ Scope and limits, stated plainly
   module-level registry is sufficient. If this ever runs multi-worker, a
   subscriber could land on a worker that does not host the run — it would see
   the durable node state and no live frames. Redis pub/sub is the upgrade path.
-* **Not durable across restarts.** The frame buffer is memory. Node state is in
-  Postgres and survives; the *event log* of a run does not — replaying a run's
-  events across a restart would need Redis, and nothing yet needs it.
+* **A restart still kills the run** — the task dies with the process, and
+  nothing can resurrect it. Two consequences used to follow from that, and
+  neither does now.
 
-  What a restart used to leave behind was worse than a lost event log, though:
-  a job sitting at ``running`` with no task behind it, invisible as such, until
-  the stale-job reaper noticed — and on this host the reaper's threshold is
-  hours, not the 30 minutes the defaults suggest. ``reconcile_on_startup()``
-  now settles those rows at boot (§17.1008), so "running" means running.
+  The row it left said ``running`` with no task behind it, invisible as such
+  until the stale-job reaper noticed — and on this host the reaper's threshold
+  is hours, not the 30 minutes the defaults suggest. ``reconcile_on_startup()``
+  settles those rows at boot (§17.1008), so "running" means running.
+
+  And the event log died with the buffer, so the operator got "failed:
+  interrupted by a restart" and no account of what the run had actually done.
+  §17.1009 mirrors every frame into Redis (capped, expiring, fail-soft) and
+  serves it from ``GET /exec/events/{job_id}``, so the record survives even
+  though the run does not. Redis being down costs the replay and nothing else:
+  every path below works exactly as it did without it.
 * **Bounded.** ``MAX_FRAMES`` per run, and finished runs are evicted after
   ``RETAIN_AFTER_END_S`` so a late attacher still sees the terminal frame.
 """
@@ -57,6 +63,14 @@ from collections import deque
 from typing import AsyncGenerator, AsyncIterator, Callable
 
 logger = logging.getLogger("scaffold")
+
+#: Redis key holding a run's frames. §17.1009 — the durable half of the buffer.
+_REDIS_KEY = "runframes:{job_id}"
+
+#: How long a persisted event log outlives its run. Long enough that an
+#: operator returning the next morning to a restart-killed job can still read
+#: what it did; short enough that the engine is not a log store.
+REPLAY_TTL_S = 86_400
 
 # A long run emits a few frames per node plus progress ticks; 2000 covers a
 # 40-node run with room to spare, and caps a runaway producer's memory.
@@ -87,6 +101,7 @@ class _Run:
 
     def publish(self, frame: str) -> None:
         self.frames.append(frame)
+        _persist(self.job_id, frame)
         for q in list(self.subscribers):
             try:
                 q.put_nowait(frame)
@@ -108,6 +123,92 @@ class _Run:
 
 
 _runs: dict[str, _Run] = {}
+
+# ── Durable mirror (§17.1009) ─────────────────────────────────────────
+# Best-effort by construction: every entry point swallows its own errors and
+# the in-memory path never waits on Redis. A broker that could be broken by a
+# cache being down would be a worse broker than one with no cache.
+_persist_tasks: set[asyncio.Task] = set()
+
+
+_redis_client = None
+_redis_failed = False
+
+
+def _redis():
+    """One shared client, lazily opened.
+
+    The first version built a NEW client per frame and closed it again. On a
+    40-node run that is a few hundred connect/close cycles against Redis to
+    write a few hundred short strings — pure churn, on the executor's own loop,
+    for a mirror that is supposed to be free. `redis.asyncio.from_url` already
+    manages a connection pool; one client for the process is what it is for.
+
+    A single failure to construct the client disables persistence for the
+    process rather than retrying on every frame: if Redis is misconfigured, the
+    right cost is losing the replay, not paying a failed connect per event.
+    """
+    global _redis_client, _redis_failed
+    if _redis_failed:
+        return None
+    if _redis_client is not None:
+        return _redis_client
+    try:
+        import redis.asyncio as aioredis
+
+        from app.config import settings
+
+        _redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+        return _redis_client
+    except Exception:  # noqa: BLE001
+        _redis_failed = True
+        return None
+
+
+def _persist(job_id: str, frame: str) -> None:
+    """Mirror one frame to Redis without blocking the run.
+
+    Fire-and-forget: `publish` is called from the executor's own loop, and a
+    slow or unreachable Redis must never hold up node execution. Strong refs
+    are kept so the tasks are not garbage-collected mid-flight.
+    """
+    async def _write() -> None:
+        client = _redis()
+        if client is None:
+            return
+        try:
+            key = _REDIS_KEY.format(job_id=job_id)
+            pipe = client.pipeline()
+            pipe.rpush(key, frame)
+            pipe.ltrim(key, -MAX_FRAMES, -1)
+            pipe.expire(key, REPLAY_TTL_S)
+            await pipe.execute()
+        except Exception:  # noqa: BLE001 — persistence is a nicety, not a duty
+            pass
+
+    try:
+        task = asyncio.create_task(_write())
+    except RuntimeError:
+        return  # no running loop (unit tests calling publish directly)
+    _persist_tasks.add(task)
+    task.add_done_callback(_persist_tasks.discard)
+
+
+async def replay(job_id: str) -> list[str]:
+    """The persisted frames for a job, oldest first.
+
+    This is what makes a restart-killed run legible: the task is gone and
+    cannot come back, but what it did before it died is still readable.
+    Returns [] when Redis is unavailable or the log has expired — callers must
+    treat an empty list as "no record", never as "nothing happened".
+    """
+    client = _redis()
+    if client is None:
+        return []
+    try:
+        return await client.lrange(_REDIS_KEY.format(job_id=job_id), 0, -1)
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _evict_stale() -> None:
@@ -280,3 +381,10 @@ async def shutdown_all() -> None:
     for job_id in list(_runs):
         await cancel(job_id)
     _runs.clear()
+    global _redis_client
+    if _redis_client is not None:
+        try:
+            await _redis_client.aclose()
+        except Exception:  # noqa: BLE001
+            pass
+        _redis_client = None

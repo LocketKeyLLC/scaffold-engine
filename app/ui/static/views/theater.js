@@ -199,6 +199,30 @@ export function renderTheater(container, jobId, ctx = {}) {
     });
   }
 
+  // §17.1009 — render the persisted event log of a finished/interrupted run.
+  // Deliberately quiet on an empty result: an empty list means "no record"
+  // (Redis down, or the 24h log expired), never "nothing happened", so it must
+  // not be rendered as an empty-but-authoritative stream.
+  async function replayPastRun() {
+    try {
+      const { frames } = await api.get(`/exec/events/${jobId}`);
+      if (!Array.isArray(frames) || !frames.length || disposed) return;
+      log("queued", `Replaying ${frames.length} event(s) from this run — it is not live.`, "warn");
+      for (const frame of frames) {
+        const ev = /^event:\s*(\S+)/m.exec(frame);
+        const dm = /^data:\s*(.*)$/m.exec(frame);
+        if (!ev) continue;
+        let payload = {};
+        try { payload = dm ? JSON.parse(dm[1]) : {}; } catch { /* keep {} */ }
+        const key = payload.node_key ? `${payload.node_key} · ` : "";
+        log(ev[1], `${key}${payload.title || payload.message || payload.error || ev[1]}`,
+            ev[1].includes("fail") || ev[1] === "error" ? "err" : "");
+      }
+    } catch {
+      /* replay is a nicety — never break the Run tab over it */
+    }
+  }
+
   async function loadInitial() {
     try {
       const data = await api.get(`/exec/status/${jobId}`);
@@ -236,6 +260,16 @@ export function renderTheater(container, jobId, ctx = {}) {
         log("warning",
           "This job is marked running but nothing is executing — the engine restarted mid-run. Press ▶ to carry on with the remaining steps.",
           "warn");
+      }
+      // §17.1009 — replay what a run that is no longer in flight actually did.
+      //
+      // A detached run dies with its process and takes its in-memory frame
+      // buffer with it, so a job the engine restarted under showed a status of
+      // failed and an EMPTY event stream — no account of which steps ran or
+      // why the last one stopped. Frames are mirrored to Redis as they are
+      // produced; this reads them back when there is nothing live to stream.
+      if (!data.detached_running && !running && !logEl.childElementCount) {
+        replayPastRun();
       }
       // §17.818 (plan 5.5) — one-shot auto-run handoff from the approve gate.
       if (sessionStorage.getItem("scaffold_autorun") === jobId) {

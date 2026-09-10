@@ -7560,6 +7560,49 @@
         ]
       }
     },
+    "/exec/events/{job_id}": {
+      "get": {
+        "description": "§17.1009 — the event log of a run that is no longer in flight.\n\nA detached run dies with its process, and its in-memory frame buffer with\nit, so an engine restart mid-run left the operator with \"failed:\ninterrupted by a restart\" and no account of what the run had done. Frames\nare mirrored to Redis as they are produced; this serves them back.\n\nNot a substitute for `/exec/status`: node state lives in Postgres and is\nauthoritative. This is the narrative — which nodes started, what failed and\nwhy — for a run nobody was watching when it stopped.\n\nAn empty list means \"no record\" (Redis down, or the log expired), never\n\"nothing happened\", and the client must not render it as the latter.",
+        "operationId": "exec_events_exec_events__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Exec Events"
+      }
+    },
     "/exec/nodes/{job_id}": {
       "get": {
         "description": "§17.471 — per-node output text (T1..Tn) for a job.\n\nDistinct from ``/exec/status``, which is summary-only (counts + node\nstatuses, no output bodies). Backs the scaffold_router\n``/results <job_id> nodes`` view so operators can pull up every\nnode's full work product, not just the compiled deliverable — which\n``execution_compile`` Strategy 0 limits to the ``is_output_node`` DAG\nleaves, dropping every interior node from a multi-leaf job.",
