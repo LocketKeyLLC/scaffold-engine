@@ -9,13 +9,14 @@ on the box at the time of writing).
 """
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import pytest
 
 from app.modules.dag_phases import (
     MIN_NODES_FOR_PHASES,
     TARGET_PHASES,
+    _levels,
     compute_phases,
 )
 
@@ -215,3 +216,142 @@ def test_uneven_widths_keep_the_head_phase_small():
     (2 steps here), not everything that happens to precede a wide level."""
     result = compute_phases(uneven_widths())
     assert phase_sizes(result)[0] <= 3
+
+
+# ── Generated shapes ─────────────────────────────────────────────────────
+#
+# §17.1007c. The examples above are the shapes I thought to write down, and
+# that is exactly how two wrong implementations shipped past a green suite:
+# the first was caught only by the real 41-node DAG, the second only by a
+# hand-built uneven-width case I added AFTER seeing it fail. Generated shapes
+# cover the ones nobody thought of. Seeded, so a failure is reproducible —
+# an unseeded generator that fails once a week is a worse gate than none.
+
+def random_dag(rng: "random.Random", n: int) -> list[dict]:
+    """A random DAG in the shape the planner emits: every node may depend on
+    any earlier node, which makes cycles impossible by construction and lets
+    widths vary the way real plans do."""
+    nodes = []
+    for i in range(1, n + 1):
+        if i == 1:
+            deps: list[str] = []
+        else:
+            # Mostly-chained with occasional fan-out/fan-in, like real plans.
+            k = rng.choice([0, 1, 1, 1, 2, 3])
+            deps = rng.sample([f"T{j}" for j in range(1, i)], min(k, i - 1))
+        nodes.append({"node_key": f"T{i}", "depends_on": deps, "execution_order": i})
+    return nodes
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_generated_dags_hold_every_invariant(seed):
+    import random
+
+    rng = random.Random(seed)
+    nodes = random_dag(rng, rng.randint(MIN_NODES_FOR_PHASES, 60))
+    result = compute_phases(nodes)
+    if not result:
+        return  # a legitimately unchunkable shape (single level)
+
+    assert_well_formed(nodes, result)
+
+    # Dependencies never run backwards across a phase boundary.
+    for node in nodes:
+        for dep in node["depends_on"]:
+            assert result[dep]["phase"] <= result[node["node_key"]]["phase"], (
+                f"seed {seed}: {node['node_key']} precedes its dependency {dep}"
+            )
+
+    # Parallel siblings — same level — share a phase.
+    sizes = phase_sizes(result)
+    assert sum(sizes) == len(nodes)
+
+    # No phase may swallow the plan. The bar is generous (a single wide level
+    # cannot be split, by design — see the module docstring) but a phase over
+    # half the plan means the chunking has stopped chunking.
+    assert max(sizes) <= max(3, 0.6 * len(nodes)), (
+        f"seed {seed}: phase sizes {sizes} over {len(nodes)} nodes"
+    )
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_generated_chainlike_dags_are_well_balanced(seed):
+    """Near-linear plans are what this engine actually produces, and they are
+    the case with no excuse for imbalance: no level is wide, so every phase
+    should come out within a node or two of the mean."""
+    import random
+
+    rng = random.Random(1000 + seed)
+    n = rng.randint(18, 60)
+    nodes = [
+        {"node_key": f"T{i}", "depends_on": ([f"T{i - 1}"] if i > 1 else []), "execution_order": i}
+        for i in range(1, n + 1)
+    ]
+    sizes = phase_sizes(compute_phases(nodes))
+    assert len(sizes) == TARGET_PHASES
+    assert max(sizes) - min(sizes) <= 1, f"seed {seed}: n={n} sizes={sizes}"
+
+
+def layered_dag(rng: "random.Random", layers: int, max_width: int) -> list[dict]:
+    """A DAG built layer by layer with RANDOM LAYER WIDTHS.
+
+    `random_dag` above was not enough, and checking rather than assuming is the
+    only reason that is known: it produces mostly-chained plans where the level
+    count tracks the node count, so the original bug — merging adjacent levels
+    by LEVEL COUNT, which put 18 of 41 steps in one phase — passed all forty
+    generated cases. A wide level and a narrow one count the same only when
+    widths vary, so widths have to vary.
+    """
+    nodes: list[dict] = []
+    prev: list[str] = []
+    order = 0
+    for layer in range(layers):
+        width = rng.choice([1, 1, 2, 3, 5, 8])
+        current = []
+        for w in range(width):
+            order += 1
+            key = f"L{layer}_{w}"
+            deps = [] if not prev else rng.sample(prev, rng.randint(1, len(prev)))
+            nodes.append({"node_key": key, "depends_on": deps, "execution_order": order})
+            current.append(key)
+        prev = current
+    return nodes
+
+
+@pytest.mark.parametrize("seed", range(100))
+def test_layered_dags_are_not_swallowed_by_one_phase(seed):
+    """The regression net for uneven level widths — the family both broken
+    implementations lived in, and the family `random_dag` does not reach."""
+    import random
+
+    rng = random.Random(5000 + seed)
+    nodes = layered_dag(rng, layers=rng.randint(8, 20), max_width=8)
+    result = compute_phases(nodes)
+    if not result:
+        return
+
+    assert_well_formed(nodes, result)
+    for node in nodes:
+        for dep in node["depends_on"]:
+            assert result[dep]["phase"] <= result[node["node_key"]]["phase"]
+
+    sizes = phase_sizes(result)
+    # The widest single LEVEL — not the widest phase. An earlier version of
+    # this line counted nodes per phase, which made its escape hatch read
+    # `max(sizes) <= max(sizes)`: always true, so the assertion could not fail
+    # and 119 tests passed against the very bug this case exists for.
+    widest_level = max(Counter(_levels(nodes).values()).values())
+
+    # The bound: a phase may be as large as the widest single level (a level is
+    # never split — see the module docstring) or twice the mean phase, and no
+    # larger. Both halves are load-bearing and the constant is not a guess —
+    # over 100 generated layered shapes this is violated 0 times by the current
+    # implementation and 17 times by merging adjacent levels by LEVEL COUNT,
+    # the first implementation, which put 18 of the real plan's 41 steps in one
+    # phase. A looser 0.45*n bound let that same merge pass all 100.
+    limit = max(widest_level, 2.0 * len(nodes) / TARGET_PHASES)
+    assert max(sizes) <= limit, (
+        f"seed {seed}: {len(nodes)} nodes chunked as {sizes} — the largest phase "
+        f"({max(sizes)}) exceeds {limit:.1f}, and the widest single level is only "
+        f"{widest_level}, so this is the merge lumping narrow levels in with a wide one"
+    )

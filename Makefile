@@ -32,11 +32,23 @@ API_URL   ?= http://localhost:8000
 # to scaffold-engine:dev (via the dev compose overlay) when needed; it's
 # a no-op when dev is already loaded. After the test run the user can
 # flip back to prod via `make build` (or `docker compose up -d`).
+# §17.1007c — this guard checked the IMAGE TAG only, and the tag is not what
+# the suite depends on. A container can run scaffold-engine:dev while having
+# been created WITHOUT the dev overlay, so it carries none of the overlay's
+# bind mounts. That is exactly the state this box was in: the overlay declares
+# ./presets:/code/presets:ro (docker-compose.dev.yml) and the running container
+# had zero presets mounts, so `make test` reported 13 test_preset_sync failures
+# on a missing directory while this guard printed "✓ dev image already loaded".
+#
+# The check now requires BOTH the dev image AND a mount only the overlay
+# provides. /code/presets is the probe because it is the mount whose absence
+# actually broke the suite; any overlay-only path would do.
 _ensure_dev:
-	@if docker inspect $(CONTAINER) --format '{{.Config.Image}}' 2>/dev/null | grep -q ':dev$$'; then \
-		printf '\033[2m✓ dev image already loaded\033[0m\n'; \
+	@if docker inspect $(CONTAINER) --format '{{.Config.Image}}' 2>/dev/null | grep -q ':dev$$' \
+	   && docker inspect $(CONTAINER) --format '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' 2>/dev/null | grep -qx '/code/presets'; then \
+		printf '\033[2m✓ dev image + overlay mounts already loaded\033[0m\n'; \
 	else \
-		printf '\033[1;36m→ switching scaffold-orchestrator to dev image (B5)\033[0m\n'; \
+		printf '\033[1;36m→ (re)creating scaffold-orchestrator with the dev image + overlay (B5, §17.1007c)\033[0m\n'; \
 		$(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml up -d $(CONTAINER); \
 		until docker ps --filter name=^$(CONTAINER)$$ --format '{{.Status}}' | grep -qE 'healthy|Up'; do sleep 2; done; \
 	fi
@@ -187,6 +199,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_settings_patch_scan.py \
 			tests/test_spa_route_inventory.py \
 			tests/test_openapi_route_inventory.py \
+			tests/test_operator_field_inventory.py \
 			tests/test_ci_mount_parity.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
 	else \
