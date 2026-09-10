@@ -151,6 +151,27 @@ ASSIST_STEP_INTERNAL_FIELDS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# GET /jobs — app/schemas.py::JobSummary (list rows)
+# ---------------------------------------------------------------------------
+# The highest-traffic operator payload after job detail: every dashboard tile,
+# every filtered list, the CLI's `jobs` table and the OWUI listing read these.
+JOB_SUMMARY_OPERATOR_FIELDS: dict[str, frozenset[str]] = {
+    "id":              frozenset({SPA, CLI, OWUI}),
+    "title":           frozenset({SPA, CLI, OWUI}),
+    "status":          frozenset({SPA, CLI, OWUI}),
+    "node_count":      frozenset({SPA, CLI, OWUI}),
+    "created_at":      frozenset({SPA, CLI}),
+    "updated_at":      frozenset({SPA, OWUI}),
+    "completed_at":    frozenset({SPA}),
+    # §17.525 decomposition links, wired into the SPA by §17.1008.
+    "parent_job_id":   frozenset({SPA}),
+    "component_index": frozenset({SPA}),
+}
+
+JOB_SUMMARY_INTERNAL_FIELDS: dict[str, str] = {}
+
+
+# ---------------------------------------------------------------------------
 # Registry consumed by tests/test_operator_field_inventory.py
 # ---------------------------------------------------------------------------
 # `kind` tells the test how to find the producer's field names:
@@ -170,15 +191,22 @@ PAYLOADS: dict[str, dict] = {
         "operator_fields": JOB_DETAIL_OPERATOR_FIELDS,
         "internal_fields": JOB_DETAIL_INTERNAL_FIELDS,
     },
+    "job_summary": {
+        "kind": "pydantic",
+        "model": "JobSummary",
+        "operator_fields": JOB_SUMMARY_OPERATOR_FIELDS,
+        "internal_fields": JOB_SUMMARY_INTERNAL_FIELDS,
+    },
     "assist_step": {
         # `list_steps` projects SQL columns (`dict(r)` over a row mapping) and
-        # then merges in the computed phase keys — there is no dict literal to
-        # parse and no response model to read. Rather than hand-roll a SQL
-        # parser that would give false confidence about what the producer
-        # emits, this payload runs the CONSUMER guard only. Stated as a
-        # limitation rather than papered over: a new column added to that
-        # SELECT will not be caught here.
-        "kind": "consumer_only",
+        # then merges in the computed phase keys. §17.1008 left this
+        # consumer-only, declining to parse SQL. §17.1009 reconsidered: a
+        # GENERAL SQL parser would be brittle, but this shape is narrow — an
+        # explicit column list whose output names are the alias after `AS` or
+        # the bare column. A projection the scan cannot read (SELECT *, a
+        # dynamic list) fails loudly instead of passing quietly, which is the
+        # difference between a stated limitation and a hole.
+        "kind": "sql_projection",
         "producer": "app/modules/assist_agent.py",
         "function": "list_steps",
         "operator_fields": ASSIST_STEP_OPERATOR_FIELDS,

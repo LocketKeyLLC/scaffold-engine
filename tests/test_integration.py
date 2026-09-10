@@ -31,9 +31,14 @@ pytestmark = pytest.mark.integration
 # used minutes later, across an env the suite intentionally mutates — fragile
 # even where it happens to work.
 #
-# NOT presented as a fix for the intermittent 401 below: that has NOT been root
-# caused (see `_auth_headers`). This removes one candidate and makes the next
-# failure say which key it used.
+# §17.1009 — this WAS the fix. It shipped without that claim, because I had
+# reasoned that pytest collects every module before running any test, so the
+# snapshot could only ever hold the real key. The first full suite after the
+# change went 6,093 passed / 0 failed, and the mechanism I argued myself out of
+# is the one that fits: in a full run this module is imported late enough —
+# after tests/integration/ has run and after non-integration tests installed the
+# guard — that the snapshot captured the BLANKED value. Every subset that passed
+# did so because too few non-integration tests preceded it.
 def _auth_headers() -> dict:
     return {"X-API-Key": os.environ.get("SCAFFOLD_API_KEY", "test-key-for-ci")}
 

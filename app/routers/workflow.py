@@ -504,6 +504,39 @@ async def exec_status(
     return result
 
 
+@router.get("/exec/events/{job_id}")
+async def exec_events(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1009 — the event log of a run that is no longer in flight.
+
+    A detached run dies with its process, and its in-memory frame buffer with
+    it, so an engine restart mid-run left the operator with "failed:
+    interrupted by a restart" and no account of what the run had done. Frames
+    are mirrored to Redis as they are produced; this serves them back.
+
+    Not a substitute for `/exec/status`: node state lives in Postgres and is
+    authoritative. This is the narrative — which nodes started, what failed and
+    why — for a run nobody was watching when it stopped.
+
+    An empty list means "no record" (Redis down, or the log expired), never
+    "nothing happened", and the client must not render it as the latter.
+    """
+    try:
+        parsed_id = UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+    await assert_visible(db, principal, str(parsed_id), detail=f"job not found: {job_id}")
+    frames = await run_broker.replay(str(parsed_id))
+    return {
+        "job_id": str(parsed_id),
+        "frames": frames,
+        "detached_running": run_broker.is_running(str(parsed_id)),
+    }
+
+
 @router.get("/exec/nodes/{job_id}")
 async def exec_nodes(
     job_id: str,

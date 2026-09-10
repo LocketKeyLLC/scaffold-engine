@@ -101,15 +101,44 @@ async def _await_run_end(client: httpx.AsyncClient, job_id: str, budget_s: float
 
 
 async def _cleanup(job_id: str) -> None:
+    """Remove the probe job — and VERIFY it is gone.
+
+    §17.1009. The first version of this fired a cancel, issued two DELETEs and
+    assumed. It left a completed probe job behind on the operator's box, which
+    is precisely the thing §17.1008 had just fixed in `test_job_submission`
+    ("a live test may spend inference but must not grow the operator's job
+    list"). A cleanup nobody checks is a cleanup that silently stops working.
+
+    Two changes: wait for the run to actually stop before deleting — deleting
+    rows out from under a live executor is how a row comes back, since its next
+    UPDATE races the DELETE — and assert afterwards that nothing remains, so a
+    future leak fails the test that caused it rather than accumulating quietly.
+    """
     try:
         async with httpx.AsyncClient(base_url=BASE_URL, headers=AUTH, timeout=60) as client:
             await client.post(f"/jobs/{job_id}/cancel", json={})
+            # A cancelled or finished run may still be unwinding; its finally
+            # writes job status. Delete only once it has stopped.
+            for _ in range(30):
+                if not await _detached_running(client, job_id):
+                    break
+                await asyncio.sleep(1)
     except Exception:  # cleanup must not mask a real failure
         pass
+
     async with async_session() as db:
         await db.execute(text("DELETE FROM dag_nodes WHERE job_id = :j"), {"j": job_id})
         await db.execute(text("DELETE FROM jobs WHERE id = :j"), {"j": job_id})
         await db.commit()
+
+    async with async_session() as db:
+        left = (await db.execute(
+            text("SELECT count(*) FROM jobs WHERE id = :j"), {"j": job_id},
+        )).scalar()
+    assert left == 0, (
+        f"probe job {job_id} survived cleanup — a live test must not leave rows "
+        "on the operator's engine (§17.1009)"
+    )
 
 
 async def _node_statuses(job_id: str) -> dict[str, str]:

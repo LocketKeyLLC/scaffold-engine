@@ -107,6 +107,59 @@ def _consumers_of(field: str, surface: str) -> list[str]:
 
 # ── Guard 1: the producer cannot emit an undeclared field ────────────────
 
+def _sql_projection_keys(spec: dict) -> set[str]:
+    """Column names a SQL-projecting producer emits.
+
+    §17.1009. This payload was originally `consumer_only` — I declined to parse
+    SQL on the grounds that a brittle parser gives false confidence. That was
+    half right: a general SQL parser would be brittle, but the shape here is
+    narrow and checkable. The producer selects an explicit column list and
+    returns `dict(row)`, so the emitted keys are exactly the SELECT's output
+    names: the alias after `AS` where there is one, the bare column name
+    otherwise. Anything the function then merges in (the computed phase keys)
+    is picked up by the dict-literal scan below, so both halves are covered.
+
+    A projection this scan cannot read (a `SELECT *`, a dynamic column list)
+    fails loudly rather than silently passing — that is the difference between
+    a limitation and a hole.
+    """
+    source = (REPO_ROOT / spec["producer"]).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == spec["function"]:
+            selects = [
+                m.group(1)
+                for const in ast.walk(node)
+                if isinstance(const, ast.Constant) and isinstance(const.value, str)
+                for m in [re.search(r"SELECT\s+(.*?)\s+FROM", const.value, re.S | re.I)]
+                if m
+            ]
+            if not selects:
+                pytest.fail(f"{spec['function']}(): no readable SELECT found")
+            keys: set[str] = set()
+            for projection in selects:
+                if "*" in projection:
+                    pytest.fail(
+                        f"{spec['function']}(): SELECT * cannot be checked — name the "
+                        "columns, or move this payload to a response model"
+                    )
+                for part in projection.split(","):
+                    part = part.strip().rstrip(")")
+                    if not part:
+                        continue
+                    alias = re.search(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", part, re.I)
+                    if alias:
+                        keys.add(alias.group(1))
+                        continue
+                    bare = re.match(r"^[A-Za-z_][A-Za-z0-9_]*\.([A-Za-z_][A-Za-z0-9_]*)$", part)
+                    if bare:
+                        keys.add(bare.group(1))
+                    elif re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", part):
+                        keys.add(part)
+            return keys
+    pytest.fail(f"{spec['function']}() not found in {spec['producer']}")
+
+
 def _pydantic_model_fields(spec: dict) -> set[str]:
     """Declared field names of a Pydantic response model.
 
@@ -130,11 +183,15 @@ def _pydantic_model_fields(spec: dict) -> set[str]:
 def test_producer_keys_are_declared(name):
     spec = PAYLOADS[name]
     declared = set(spec["operator_fields"]) | set(spec["internal_fields"])
-    if spec.get("kind") == "consumer_only":
-        pytest.skip(
-            f"{name}: producer is a SQL projection with no statically-readable "
-            "field list — consumer guard only (see app/operator_fields.py)"
+    if spec.get("kind") == "sql_projection":
+        emitted = _sql_projection_keys(spec)
+        undeclared = sorted(emitted - declared)
+        assert not undeclared, (
+            f"{name}: {spec['function']}() selects these columns but "
+            f"app/operator_fields.py does not declare them:\n"
+            + "\n".join(f"  - {k}" for k in undeclared)
         )
+        return
     if spec.get("kind") == "pydantic":
         undeclared = sorted(_pydantic_model_fields(spec) - declared)
         assert not undeclared, (
