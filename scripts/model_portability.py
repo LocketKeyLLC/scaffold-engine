@@ -66,6 +66,23 @@ def surface_draws(role: str) -> int:
     return int(getattr(importlib.import_module(module), attr))
 
 
+def _candidates_from_preset() -> dict:
+    """Role->candidates as declared by presets/tuned-cloud.env (repo-checkable)."""
+    import json
+    import pathlib as _p
+
+    preset = _p.Path(__file__).resolve().parent.parent / "presets" / "tuned-cloud.env"
+    if not preset.exists():
+        return {}
+    for line in preset.read_text().splitlines():
+        if line.startswith("MODEL_ROLE_LEARNING_CANDIDATES="):
+            try:
+                return json.loads(line.split("=", 1)[1])
+            except Exception:
+                return {}
+    return {}
+
+
 def summarize_viability(rows: list[dict], min_viable: int) -> dict:
     """Pure: per-role trial rows -> viability verdict. Unit-testable, no I/O.
 
@@ -128,6 +145,11 @@ async def main() -> int:
                           "number to override for a raw-model comparison."))
     ap.add_argument("--min-viable", type=int, default=MIN_VIABLE_DEFAULT)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--static", action="store_true",
+                    help=("check only what can be checked WITHOUT model calls: every "
+                          "role maps to a gate that exists, every gate has goldens, and "
+                          "every role declares at least one alternative candidate. Safe "
+                          "for CI, which has no models."))
     args = ap.parse_args()
 
     from app.config import settings
@@ -141,6 +163,48 @@ async def main() -> int:
         return 1
 
     from scripts.model_ab import TASKS as _T  # noqa: F811 — goldens for the estimate
+
+    if args.static:
+        # §17.1003 — the live matrix needs models, so nothing ran it on a
+        # schedule and it only helped whoever remembered. This half needs
+        # nothing but the repo, so CI can hold the line on configuration rot:
+        # a role pointing at a gate that does not exist, a gate whose goldens
+        # were emptied, or a role left with no alternative declared.
+        from app.config import settings as _s
+
+        cands = _s.model_role_learning_candidates or {}
+        if not cands:
+            # §17.1003 — CI has no `.env`, so live settings are empty there. The
+            # tracked preset is the repo's own declaration of these, and is what
+            # `make apply-preset` would install, so it is the right source when
+            # there is no operator config to read.
+            cands = _candidates_from_preset()
+        problems: list[str] = []
+        print(f"{'role':24} {'gate':18} {'goldens':>7}  candidates")
+        print("-" * 78)
+        for role in roles:
+            gate = ROLE_TASKS[role]
+            if gate not in _T:
+                problems.append(f"{role}: gate {gate!r} does not exist")
+                print(f"{role:24} {gate:18} {'?':>7}  (gate missing)")
+                continue
+            n = len(_load_goldens(_T[gate].default_goldens))
+            declared = cands.get(role) or []
+            if n == 0:
+                problems.append(f"{role}: gate {gate!r} has no goldens")
+            # model_fallback is LOCAL on purpose (§17.819) — a :cloud candidate
+            # would defeat the failure-mode diversity it exists for.
+            if not declared and role != "model_fallback":
+                problems.append(f"{role}: no alternative candidate declared")
+            print(f"{role:24} {gate:18} {n:7}  "
+                  f"{', '.join(declared) or ('(local-only, by design)' if role == 'model_fallback' else '(none)')}")
+        if problems:
+            print("\nSTATIC CHECK FAILED:")
+            for p_ in problems:
+                print(f"  - {p_}")
+            return 2
+        print("\nevery role maps to a real gate with goldens and a declared alternative.")
+        return 0
 
     if args.dry_run:
         # Do NOT probe on a dry-run: discovery is 1 live call per tag, which is

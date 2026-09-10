@@ -27,6 +27,27 @@ def _preset_keys() -> dict[str, str]:
     return out
 
 
+def _preset_candidates() -> dict:
+    """Candidates parsed from THE SAME file `_preset_keys()` reads.
+
+    §17.1004 — these tests originally took the pin from `_preset_keys()` (path
+    resolved from this test file) and the candidates from
+    `scripts.model_portability._candidates_from_preset` (path resolved from that
+    module). Two resolutions of "the preset" can disagree — and did: CI compared
+    a current pin against a stale candidate list and failed on a bug that had
+    already been fixed. One source, or the comparison is meaningless.
+    """
+    import json
+
+    for line in _PRESET.read_text().splitlines():
+        if line.startswith("MODEL_ROLE_LEARNING_CANDIDATES="):
+            try:
+                return json.loads(line.split("=", 1)[1])
+            except Exception:
+                return {}
+    return {}
+
+
 def _recorded_picks() -> dict[str, str]:
     """role -> the pick app/config.py documents, e.g. MODEL_ROUTER -> gemma4:cloud."""
     src = (_ROOT / "app" / "config.py").read_text()
@@ -87,3 +108,42 @@ def test_the_apply_script_is_executable_and_idempotent_by_construction():
     body = script.read_text()
     assert "cp \"$ENV_FILE\" \"$BACKUP\"" in body, "must back up before touching .env"
     assert "already matches preset" in body, "must no-op cleanly when nothing changed"
+
+
+# ── §17.1003 — the static half of the portability guard, runnable in CI ──
+
+
+def test_every_role_declares_an_alternative_in_the_preset():
+    """§17.1000's guard needs live models, so nothing ran it on a schedule and
+    it only helped whoever remembered. This is the half that needs nothing but
+    the repo, so CI holds the line on configuration rot.
+
+    `model_fallback` is exempt on purpose: §17.819 keeps it LOCAL, and a
+    `:cloud` candidate would defeat the failure-mode diversity it exists for.
+    """
+    from app.modules.model_role_learning import ROLE_TASKS
+
+    declared = _preset_candidates()
+    assert declared, "the preset declares no candidates at all"
+    missing = [r for r in ROLE_TASKS
+               if r != "model_fallback" and not declared.get(r)]
+    assert not missing, (
+        f"roles with no declared alternative: {missing} — a role with one usable "
+        "model is a single-vendor dependency nobody chose")
+
+
+def test_no_declared_candidate_is_also_the_incumbent():
+    """A candidate identical to the pin makes the A/B compare a model with
+    itself — it would look like a passing gate while testing nothing."""
+    preset = _preset_keys()
+    for role, cands in _preset_candidates().items():
+        pin = preset.get(role.upper())
+        if pin:
+            assert pin not in cands, (
+                f"{role}: {pin!r} is both the pin and its own candidate")
+
+
+def test_the_fallback_role_stays_candidate_free():
+    assert not _preset_candidates().get("model_fallback"), (
+        "§17.819 — model_fallback is the LOCAL resilience role; giving it a "
+        "cloud candidate is how failure-mode diversity gets optimised away")

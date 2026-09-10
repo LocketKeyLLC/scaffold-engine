@@ -265,6 +265,9 @@ jobs:
             -v "$PWD/pipelines:/code/pipelines" \
             -v "$PWD/docs:/code/docs:ro" \
             -v "$PWD/pyproject.toml:/code/pyproject.toml:ro" \
+            -v "$PWD/presets:/code/presets:ro" \
+            -v "$PWD/.env.example:/code/.env.example:ro" \
+            -v "$PWD/Makefile:/code/Makefile:ro" \
             scaffold-orchestrator:ci \
             pytest tests/ --timeout=30 -v \
               -m "not integration" \

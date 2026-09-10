@@ -328,6 +328,34 @@ EOF
     ok "wrote $ENV_FILE (chmod 600)"
 fi
 
+# §17.1003 — offer the measured cloud model picks.
+#
+# §17.819 keeps the CODE defaults LOCAL-safe on purpose: a box with no cloud
+# account must come up working. That is right, and it also meant the tuned picks
+# lived only on the machine that measured them — §17.994 wrote them into
+# .env.example as comments, §17.995 then found a third stale one, and §17.1002
+# made them an applied preset. This is the last step: a fresh install is ASKED,
+# instead of being left to discover `make apply-preset` in a doc.
+#
+# Opt-in, because these are :cloud tags and require an Ollama Cloud account —
+# applying them on a local-only box would swap a working config for a broken
+# one. --yes therefore SKIPS it and says so.
+PRESET_FILE="$REPO_ROOT/presets/tuned-cloud.env"
+if [[ -f "$PRESET_FILE" ]]; then
+    APPLY_PRESET=0
+    if [[ $NONINTERACTIVE -eq 1 ]]; then
+        info "--yes: keeping the local-safe model defaults. Run 'make apply-preset PRESET=tuned-cloud' if you have an Ollama Cloud account."
+    else
+        printf '%s?%s Use the measured Ollama-Cloud model picks instead of the local defaults? Needs a cloud account. [y/N] ' "$C_INFO" "$C_RST"
+        read -r preset_reply
+        [[ "$preset_reply" == "y" || "$preset_reply" == "Y" ]] && APPLY_PRESET=1
+    fi
+    if [[ $APPLY_PRESET -eq 1 ]]; then
+        bash "$REPO_ROOT/scripts/apply_preset.sh" tuned-cloud || \
+            warn "preset failed to apply — the local-safe defaults are still in place"
+    fi
+fi
+
 # ---- bring up the stack ---------------------------------------------
 hdr "Stack"
 

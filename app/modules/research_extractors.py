@@ -680,9 +680,86 @@ async def _searxng_cache_set(query: str, results) -> None:
         logger.debug("searxng_cache_set_failed: query=%s error=%s", query, e)
 
 
+# §17.1003 — adaptive engine cooldown.
+#
+# SearXNG suspends an engine that refuses it, but the ENGINE still names that
+# engine in every `engines=` list, so each query pays for it again: a request is
+# attempted, refused, and the suspension refreshed. §17.991 handled the extreme
+# case by hand — duckduckgo blackholes this host, so it was removed from the
+# lists outright — but a hand-edit only works for a permanent block someone
+# noticed. `mojeek` has been 403-ing for a day; `startpage` cycles in and out on
+# its own. Neither deserves a code change, and both deserve to stop being asked
+# every single query.
+#
+# So: an engine that comes back unresponsive `_COOLDOWN_AFTER_STREAK` times in a
+# row is dropped from the PRIMARY engine list for `_COOLDOWN_S`, then tried
+# again. Purely in-process and advisory — a restart forgets everything, which is
+# the right default for a transient upstream.
+#
+# Two deliberate limits:
+#   * The 0-results FALLBACK is never filtered. That path exists to be the
+#     widest possible net, and narrowing the rescue is how §17.984 happened.
+#   * Filtering never drops below `_MIN_ENGINES`. A total outage would
+#     otherwise cool everything down and query nothing at all, converting a
+#     transient upstream failure into a self-inflicted one.
+_COOLDOWN_AFTER_STREAK = 3
+_COOLDOWN_S = 900.0
+_MIN_ENGINES = 2
+_engine_streak: dict[str, int] = {}
+_engine_cooldown_until: dict[str, float] = {}
+
+
+def note_engine_health(requested: str, unresponsive: list) -> None:
+    """Record which of the engines we ASKED for actually answered.
+
+    ``unresponsive`` is SearXNG's own ``unresponsive_engines`` — a list of
+    ``[name, reason]`` pairs. Engines we asked for that are absent from it
+    answered, and their streak resets: recovery is as important to notice as
+    failure, or a blip becomes a permanent exclusion.
+    """
+    import time as _t
+
+    asked = {e.strip() for e in (requested or "").split(",") if e.strip()}
+    if not asked:
+        return
+    dead = set()
+    for item in unresponsive or ():
+        name = item[0] if isinstance(item, (list, tuple)) and item else item
+        if isinstance(name, str):
+            dead.add(name.strip())
+    for engine in asked:
+        if engine in dead:
+            _engine_streak[engine] = _engine_streak.get(engine, 0) + 1
+            if _engine_streak[engine] >= _COOLDOWN_AFTER_STREAK:
+                _engine_cooldown_until[engine] = _t.monotonic() + _COOLDOWN_S
+                logger.info(
+                    "searxng_engine_cooldown: engine=%s streak=%d for=%ds",
+                    engine, _engine_streak[engine], int(_COOLDOWN_S))
+        else:
+            if _engine_streak.pop(engine, 0):
+                _engine_cooldown_until.pop(engine, None)
+                logger.info("searxng_engine_recovered: engine=%s", engine)
+
+
+def _engines_in_cooldown() -> set[str]:
+    import time as _t
+
+    now = _t.monotonic()
+    return {e for e, until in _engine_cooldown_until.items() if until > now}
+
+
 def _engines_for_category(category: str) -> str:
     # §17.712 — unmapped categories fall back to the broad general backbone.
-    return CATEGORY_ENGINES.get(category, _GENERAL_BACKBONE)
+    engines = CATEGORY_ENGINES.get(category, _GENERAL_BACKBONE)
+    # §17.1003 — drop engines in cooldown, but never below the floor.
+    cooling = _engines_in_cooldown()
+    if not cooling:
+        return engines
+    listed = [e.strip() for e in engines.split(",") if e.strip()]
+    kept = [e for e in listed if e not in cooling]
+    if len(kept) < _MIN_ENGINES:
+        return engines
+    return ",".join(kept)
 
 
 # =============================================================================
