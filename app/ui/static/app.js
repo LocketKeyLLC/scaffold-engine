@@ -7,11 +7,12 @@ import { mountCommandPalette } from "./command_palette.js";
 import { toast } from "./components.js";
 import { NAV, NAV_GROUPS } from "./nav.js";
 import { execMode, setExecMode } from "./exec_mode.js";
+import * as notify from "./notify.js";
 
 // Visible build stamp (sidebar foot). Bump per UI change round — it exists so
 // "is my tab running the latest UI?" is answerable at a glance instead of by
 // diffing pixels (the §17.840/§17.842 stale-module debugging sink).
-const UI_BUILD = "r5";
+const UI_BUILD = "r6";
 
 // ── Global error surface ──────────────────────────────────────────────
 // A backstop so anything that escapes a view's own try/catch becomes a
@@ -77,6 +78,7 @@ let cleanup = () => {}; // teardown hook returned by the active view
 // which previously leaked one interval (fetching /health forever against a
 // detached DOM) and one duplicate Escape handler per re-auth.
 let healthTimer = null;
+let attentionTimer = null; // §17.1007 — replaced, not stacked, per chrome rebuild
 let escHandler = null;
 let jobPinHandler = null; // §17.896 — replaced, not stacked, per chrome rebuild
 
@@ -392,7 +394,7 @@ function buildChrome() {
             el("span", { class: "identity-role", text: ` (${p.role})` })
           )
         : null,
-      el("div", { class: "foot-controls" }, themeToggle(), densityToggle()),
+      el("div", { class: "foot-controls" }, themeToggle(), densityToggle(), notifyToggle()),
       el("div", { class: "health" }, healthDot, healthText, el("span", { class: "faint mono ui-build", text: ` · ui ${UI_BUILD}` })),
       el("button", {
         class: "btn btn-ghost btn-sm",
@@ -445,6 +447,7 @@ function buildChrome() {
   mount(root, el("div", { class: "shell" }, topbar, sidebar, scrim, outlet));
   mountCommandPalette(); // idempotent; overlay lives on document.body
   startHealthPolling(healthDot, healthText);
+  startAttentionPolling(); // §17.1007
 }
 
 // ── Theme + density toggles ───────────────────────────────────────────
@@ -504,6 +507,117 @@ function execModeToggle() {
     );
   });
   return btn;
+}
+
+// §17.1007 — opt-in desktop notifications. The permission request MUST ride a
+// real click (browsers reject load-time prompts and Chrome penalises the origin
+// permanently), so this is a button, not a boot-time ask. The TITLE badge needs
+// no permission and is always on — this toggle governs the louder channel only.
+function notifyToggle() {
+  const label = () => (notify.notifyEnabled() ? "⚑ Alerts on" : "⚐ Alerts off");
+  const btn = el("button", {
+    class: "btn btn-ghost",
+    title:
+      "Desktop alerts when a job needs you — the gate opens, a run finishes or fails, " +
+      "a walkthrough parks. The tab title always updates; this adds a system notification.",
+    text: label(),
+  });
+  if (!notify.notifySupported()) {
+    btn.disabled = true;
+    btn.title = "This browser has no Notification API — the tab title still updates.";
+    return btn;
+  }
+  btn.addEventListener("click", async () => {
+    if (notify.notifyEnabled()) {
+      notify.disableNotifications();
+      toast("Desktop alerts off — the tab title still updates.", "ok");
+    } else {
+      const ok = await notify.enableNotifications();
+      toast(
+        ok
+          ? "Desktop alerts on — you'll be called back when a job needs you."
+          : "The browser blocked notifications for this site. Allow them in site settings, then try again.",
+        ok ? "ok" : "err"
+      );
+    }
+    btn.textContent = label();
+  });
+  return btn;
+}
+
+// §17.1007 — the global attention watcher.
+//
+// Deliberately does NOT skip hidden tabs, which inverts the §17.818 rule that
+// governs every other poller here. That rule exists to stop a backgrounded tab
+// burning cycles rendering things nobody is looking at; this loop exists
+// PRECISELY for the operator who is looking elsewhere, and skipping it while
+// hidden would disable the one feature it provides. The 30s cadence (vs the
+// dashboard's 10s) is the concession.
+const ATTENTION_LABEL = {
+  awaiting_confirmation: "plan ready to approve",
+  awaiting_assist: "waiting on you",
+  assisted_paused: "walkthrough paused",
+  blocked: "blocked",
+  failed: "run failed",
+  completed: "run finished",
+};
+
+function startAttentionPolling() {
+  // jobId -> status as of the previous tick. The FIRST tick only seeds this:
+  // without that, every reload would announce every already-finished job in
+  // the recent list as though it had just happened.
+  let seen = null;
+
+  async function tick() {
+    let jobs;
+    try {
+      const st = await api.get("/status");
+      jobs = st.recent_jobs || [];
+    } catch {
+      return; // transient — the health dot already reports reachability
+    }
+    const now = new Map(jobs.map((j) => [j.id, j.status]));
+    if (seen === null) {
+      seen = now;
+      return;
+    }
+    let announced = 0;
+    let lastLabel = "";
+    for (const [id, status] of now) {
+      const before = seen.get(id);
+      const label = ATTENTION_LABEL[status];
+      // Only a real transition INTO an attention state counts. An unchanged
+      // status is the poller re-observing what it already reported.
+      if (!label || before === undefined || before === status) continue;
+      const job = jobs.find((j) => j.id === id);
+      const title = (job && job.title) || "Untitled job";
+      const fired = notify.announce({
+        key: `${id}:${status}`,
+        count: announced + 1,
+        label,
+        title: `${title} — ${label}`,
+        body:
+          status === "awaiting_confirmation"
+            ? "The engine refined your idea and has questions. Open the gate to review and approve."
+            : status === "completed"
+            ? "The run finished. The compiled output is ready."
+            : status === "failed"
+            ? "The run stopped. The Run tab has the reason and the recovery verbs."
+            : "This job is parked and needs you to continue it.",
+        href: `#/job/${id}`,
+      });
+      if (fired) {
+        announced += 1;
+        lastLabel = label;
+      }
+    }
+    if (announced) notify.setBadge(announced, lastLabel);
+    seen = now;
+  }
+
+  tick();
+  if (attentionTimer) clearInterval(attentionTimer);
+  attentionTimer = setInterval(tick, 30000);
 }
 
 function densityToggle() {
