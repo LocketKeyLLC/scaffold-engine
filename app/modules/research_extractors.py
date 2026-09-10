@@ -92,9 +92,36 @@ DEFAULT_SOURCE_SCORE = 0.50
 # learning: `disabled: true` governs the DEFAULT engine set, and every caller
 # here passes an explicit `engines=` list, which overrides it. Verified both
 # ways — a default-set search does not query ddg; an explicit one still does.
-_GENERAL_BACKBONE = "bing,brave,startpage,mojeek"
+# §17.1005 — the Q&A/code engines added. This engine's queries are
+# overwhelmingly technical (it plans and executes build tasks), and SearXNG has
+# 88 engines enabled while we were using five. Measured on real work from the
+# live homelab job, same query, same minute:
+#
+#   "proxmox reverse proxy nginx"   bing 10  |  +github,stackoverflow,superuser,askubuntu 32
+#   "wireguard vpn server setup"    bing 10  |  +the same four                            58
+#
+# and the titles are the difference between a vendor download page and "Why
+# can't I get Nginx reverse proxy...". These four also have no commercial
+# incentive to rate-limit a self-hoster, which is the failure mode that took
+# out brave/mojeek/startpage/qwant/google here.
+#
+# NOT added, though they answer: `mdn` and `docker hub` return 20 results for
+# anything, with titles like "Setup | Environment Setup" — loose keyword
+# matches, the same shape as the §17.988 Best Buy corpus. Responsive is not the
+# same as useful.
+#
+# `brave`/`startpage`/`mojeek` are kept in the list on purpose: they are
+# currently refused by IP or CAPTCHA, but §17.1003's cooldown drops them
+# automatically after three consecutive failures and retries them later, so
+# they cost little while blocked and return on their own if the block lifts.
+_GENERAL_BACKBONE = ("bing,brave,startpage,mojeek,"
+                     "github,stackoverflow,superuser,askubuntu")
 CATEGORY_ENGINES: dict[str, str] = {
-    "it": f"{_GENERAL_BACKBONE},github",
+    # §17.1005 — github/stackoverflow/superuser/askubuntu moved INTO the
+    # backbone, so `it` no longer needs to append them. Kept as a distinct
+    # entry (rather than aliasing the backbone) so a future IT-only engine has
+    # somewhere obvious to go.
+    "it": _GENERAL_BACKBONE,
     "science": f"arxiv,google scholar,{_GENERAL_BACKBONE}",
     # §17.991 — "duckduckgo news" is the same blocked host and times out
     # identically; dropped with the rest of the ddg engines.
