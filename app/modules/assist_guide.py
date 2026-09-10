@@ -49,6 +49,52 @@ from app.utils.tool_call_args import read_tool_args
 logger = logging.getLogger("scaffold.assist_guide")
 
 
+def _build_guide_system(ctx, verbosity, *, is_decision: bool) -> str:
+    """Assemble the guidance system prompt: base-for-tool + every directive.
+
+    §17.1011 — this stack existed VERBATIM at two call sites (the non-stream
+    guide and the stream guide, which is the SPA path the operator actually
+    uses). That duplication is the shape behind §17.854, §17.975, §17.976 and
+    §17.984, where a directive added to one path silently did not apply on the
+    other; §17.976's note records the stream path having generated walkthroughs
+    with a grounding the non-stream path had. Adding a directive here now
+    reaches both paths by construction rather than by remembering.
+    """
+    system = apply_verbosity(
+        guide_system_for_tool(ctx.tool, is_decision=is_decision), verbosity
+    )
+    system = apply_next_callout(  # §17.741 — lead with the immediate action
+        system, is_decision=is_decision,
+        enabled=settings.assist_next_callout_enabled,
+    )
+    system = apply_single_action(  # §17.1011 — one action, one place, no phases
+        system, is_decision=is_decision,
+        enabled=settings.assist_single_action_enabled,
+        max_steps=settings.assist_single_action_max_steps,
+    )
+    system = apply_done_criterion(  # §17.932 — and say when the step is FINISHED
+        system, is_decision=is_decision,
+        enabled=settings.assist_done_criterion_enabled,
+    )
+    system = apply_plan_authority(system)  # §17.937 — never narrate a plan change
+    system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
+        system, enabled=settings.assist_problem_solving_enabled,
+    )
+    system = apply_ground_or_ask(  # §17.756 — placeholder + ask, never guess a value
+        system, is_decision=is_decision,
+        enabled=settings.assist_ground_or_ask_enabled,
+    )
+    system = apply_screen_grounding(  # §17.758 — confirm the on-screen state first
+        system, is_decision=is_decision,
+        enabled=settings.assist_screen_grounding_enabled,
+    )
+    system = apply_location_callout(  # §17.852 — say WHERE, announce switches
+        system, is_decision=is_decision,
+        enabled=settings.assist_location_callout_enabled,
+    )
+    return system
+
+
 # §17.855 — human-facing prompts moved to app/modules/assist_prompts.py;
 # re-exported here so assist_guide.<NAME> and the tests keep resolving.
 from app.modules.assist_prompts import (  # noqa: F401,E402
@@ -188,6 +234,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     guide_system_for_tool,
     apply_problem_solving,
     apply_done_criterion,
+    apply_single_action,  # §17.1011
     apply_next_callout,
     apply_plan_authority,
     apply_ground_or_ask,
@@ -206,6 +253,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
     _GROUND_OR_ASK_DIRECTIVE,
     _SCREEN_GROUNDING_DIRECTIVE,
     _LOCATION_CALLOUT_DIRECTIVE,
+    _SINGLE_ACTION_DIRECTIVE,  # §17.1011
 )
 
 # §17.856 — the block renderers moved to app/modules/assist_render.py;
@@ -2156,33 +2204,7 @@ async def generate_guidance(
         except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
             logger.warning("assist_guide_blocker_query_failed: %s", exc)
 
-    system = apply_verbosity(
-        guide_system_for_tool(ctx.tool, is_decision=is_decision), verbosity
-    )
-    system = apply_next_callout(  # §17.741 — lead with the immediate action
-        system, is_decision=is_decision,
-        enabled=settings.assist_next_callout_enabled,
-    )
-    system = apply_done_criterion(  # §17.932 — and say when the step is FINISHED
-        system, is_decision=is_decision,
-        enabled=settings.assist_done_criterion_enabled,
-    )
-    system = apply_plan_authority(system)  # §17.937 — never narrate a plan change
-    system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
-        system, enabled=settings.assist_problem_solving_enabled,
-    )
-    system = apply_ground_or_ask(  # §17.756 — placeholder + ask, never guess a value
-        system, is_decision=is_decision,
-        enabled=settings.assist_ground_or_ask_enabled,
-    )
-    system = apply_screen_grounding(  # §17.758 — confirm the on-screen state first
-        system, is_decision=is_decision,
-        enabled=settings.assist_screen_grounding_enabled,
-    )
-    system = apply_location_callout(  # §17.852 — say WHERE, announce switches
-        system, is_decision=is_decision,
-        enabled=settings.assist_location_callout_enabled,
-    )
+    system = _build_guide_system(ctx, verbosity, is_decision=is_decision)
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
@@ -5726,33 +5748,7 @@ async def generate_guidance_stream(
             floor_when_empty=True,
         )
 
-    system = apply_verbosity(
-        guide_system_for_tool(ctx.tool, is_decision=is_decision), verbosity
-    )
-    system = apply_next_callout(  # §17.741 — lead with the immediate action
-        system, is_decision=is_decision,
-        enabled=settings.assist_next_callout_enabled,
-    )
-    system = apply_done_criterion(  # §17.932 — and say when the step is FINISHED
-        system, is_decision=is_decision,
-        enabled=settings.assist_done_criterion_enabled,
-    )
-    system = apply_plan_authority(system)  # §17.937 — never narrate a plan change
-    system = apply_problem_solving(  # §17.742 — don't thrash on tangled steps
-        system, enabled=settings.assist_problem_solving_enabled,
-    )
-    system = apply_ground_or_ask(  # §17.756 — placeholder + ask, never guess a value
-        system, is_decision=is_decision,
-        enabled=settings.assist_ground_or_ask_enabled,
-    )
-    system = apply_screen_grounding(  # §17.758 — confirm the on-screen state first
-        system, is_decision=is_decision,
-        enabled=settings.assist_screen_grounding_enabled,
-    )
-    system = apply_location_callout(  # §17.852 — say WHERE, announce switches
-        system, is_decision=is_decision,
-        enabled=settings.assist_location_callout_enabled,
-    )
+    system = _build_guide_system(ctx, verbosity, is_decision=is_decision)
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,

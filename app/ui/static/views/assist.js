@@ -95,9 +95,55 @@ function renderPicker(container) {
 // How-assist-works onboarding (research: new users need the human/AI contract
 // stated up front — the #1 confusion is "does it control my machine?").
 // Dismissed once per browser.
+// Split markdown on TOP-LEVEL `## ` headings only (`###` stays inside its
+// parent section, so a phased runbook's sub-steps don't each become a row).
+// Sections that stay OPEN in a folded walkthrough: the one action to take
+// (§17.741) and the finish line that says how to advance (§17.932).
+export const GUIDE_OPEN_SECTION = /(?:\u{1F449}|\u2705|do this next|done when)/iu;
+
+export function splitGuideSections(md) {
+  const lines = String(md || "").split("\n");
+  const lead = [];
+  const sections = [];
+  let cur = null;
+  let inFence = false;
+  for (const line of lines) {
+    if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
+    const m = !inFence && /^##\s+(?!#)(.+?)\s*$/.exec(line);
+    if (m) {
+      cur = { title: m[1].trim(), body: [] };
+      sections.push(cur);
+      continue;
+    }
+    (cur ? cur.body : lead).push(line);
+  }
+  return { lead: lead.join("\n"), sections };
+}
+
+// A short count for the row label ("Prerequisites (3)") so the operator can
+// judge whether it is worth opening without opening it.
+export function sectionCount(body) {
+  const items = (body.match(/^\s*(?:[-*]|\d+\.)\s+\S/gm) || []).length;
+  return items > 1 ? ` (${items})` : "";
+}
+
+// §17.1011 — how many trailing turns stay expanded; older ones fold into
+// one backlog row. 6 keeps the current step's guide + the operator's paste
+// + the reply visible without re-mounting the whole session.
+const ASSIST_RECENT_TURNS = 6;
 const ASSIST_ONBOARD_KEY = "scaffold_assist_onboarded";
-function contractCard(onDismiss) {
-  if (localStorage.getItem(ASSIST_ONBOARD_KEY)) return null;
+function contractCard(onDismiss, session, force) {
+  if (!force && localStorage.getItem(ASSIST_ONBOARD_KEY)) return null;
+  // §17.1011 — retire it once the operator has DONE the loop. Measured on the
+  // live homelab session: this four-step "how assist mode works" card was
+  // still on screen at step 37 of 41, directly above a step header that
+  // re-explains the same loop ("✦ Guide me → do it on your machine → paste
+  // what happened → ✓ Submit results"). Dismissal was per-browser localStorage
+  // only, so any new browser, profile or cleared storage re-taught the loop to
+  // someone two-thirds through a 41-step build. Committed steps are proof they
+  // know it; the ? in the step header brings it back on demand.
+  const sc = (session && session.step_counts) || {};
+  if (!force && ((sc.committed || 0) + (sc.done || 0)) > 0) return null;
   const step = (n, t, b) =>
     el("div", { class: "welcome-step" },
       el("div", { class: "welcome-step-n", text: String(n) }),
@@ -406,7 +452,7 @@ export function renderChat(container, sessionId) {
   // §17.845 — the editable living brief rides with the session (mounted once
   // the session tells us its job).
   const briefSlot = el("div", { class: "assist-brief-slot" });
-  mount(container, header, contractCard(), stepHero, main, briefSlot, belowGrid);
+  mount(container, header, contractCard(null, session), stepHero, main, briefSlot, belowGrid);
   let briefMounted = false;
 
   // 📍 Current-step hero — where am I, what's the loop position (§17.738/741
@@ -528,7 +574,22 @@ export function renderChat(container, sessionId) {
             renderStepPicker(nk))
         : null,
       nk
-        ? el("div", { class: "step-hero-loop dim", text: "The loop: ✦ Guide me → do it on your machine → paste what happened → ✓ Submit results" })
+        // §17.1011 — the one-line loop stays (it is compact and it is the
+        // reminder that earns its place next to the work), and it is now the
+        // way BACK to the full explainer the card used to hold. Clicking it
+        // clears the retire flag and re-renders, so the four-step contract is
+        // always one click away instead of permanently on screen.
+        ? el("button", {
+            class: "step-hero-loop dim linklike",
+            title: "How assist mode works",
+            text: "The loop: ✦ Guide me → do it on your machine → paste what happened → ✓ Submit results  ?",
+            onClick: () => {
+              const host = stepHero.parentNode;
+              if (!host || host.querySelector(".assist-contract")) return;
+              const card = contractCard(null, session, true);
+              if (card) host.insertBefore(card, stepHero);
+            },
+          })
         : null
     );
   }
@@ -547,13 +608,61 @@ export function renderChat(container, sessionId) {
     stick();
   }
 
+  // §17.1011 — progressive disclosure for walkthrough bubbles.
+  //
+  // The live homelab job showed why: node T35's guidance was 4,817 chars over
+  // NINE top-level sections, and the Run tab held 448 code blocks / 526 buttons
+  // because every one of 41 steps rendered in full. The operator's actual
+  // question — "what do I type right now" — was one line inside all of it.
+  //
+  // The engine already computes the answer: §17.741 leads every walkthrough
+  // with `## 👉 Do this next` (one command), and §17.932 closes it with
+  // `## ✅ Done when` (the finish line + how to advance). Those two stay open;
+  // every other section collapses to a titled row the operator can open. This
+  // HIDES nothing — the full runbook is one click away and still in the DOM —
+  // it just stops the page shouting all nine sections at once.
+
+  function guideBody(content) {
+    const { lead, sections } = splitGuideSections(content);
+    // Nothing to fold (short guidance, or no headings at all) — render as-is.
+    const foldable = sections.filter((s) => !GUIDE_OPEN_SECTION.test(s.title));
+    if (!foldable.length) return el("div", { class: "msg-body md", html: mdToHtml(content || "") });
+
+    const open = sections.filter((s) => GUIDE_OPEN_SECTION.test(s.title));
+    const openMd = [lead.trim(), ...open.map((s) => `## ${s.title}\n${s.body.join("\n")}`)]
+      .filter(Boolean).join("\n\n");
+
+    return el(
+      "div",
+      { class: "msg-body md" },
+      el("div", { class: "guide-lead", html: mdToHtml(openMd) }),
+      el(
+        "div",
+        { class: "guide-more" },
+        ...foldable.map((s) =>
+          el(
+            "details",
+            { class: "guide-section" },
+            el("summary", { text: s.title + sectionCount(s.body.join("\n")) }),
+            el("div", { class: "md", html: mdToHtml(s.body.join("\n")) })
+          )
+        )
+      )
+    );
+  }
+
   function bubble(role, kind, content, ts) {
     const cls = role === "operator" ? "op" : role === "assistant" ? "as" : "sys";
     return el(
       "div",
       { class: `msg ${cls}` },
       el("div", { class: "msg-meta" }, el("span", { class: "msg-role", text: role }), kind && kind !== "message" ? el("span", { class: "msg-kind", text: kind }) : null, el("span", { class: "msg-time faint", text: ts ? timeAgo(ts) : "" })),
-      el("div", { class: "msg-body md", html: mdToHtml(content || "") })
+      // §17.1011 — only walkthrough-shaped turns fold; an operator paste, a
+      // committed notice or a one-line note has no sections and must not gain
+      // a disclosure row it does not need.
+      (kind === "guide" || kind === "fix")
+        ? guideBody(content)
+        : el("div", { class: "msg-body md", html: mdToHtml(content || "") })
     );
   }
 
@@ -581,7 +690,44 @@ export function renderChat(container, sessionId) {
       );
       return;
     }
-    mount(transcript, ...turns.map((t) => bubble(t.role, t.kind, t.content, t.created_at)));
+    // §17.1011 — fold the BACKLOG. Measured on the live homelab session at
+    // step 37 of 41, the Run tab held 526 buttons, 518 headings, 448 code
+    // blocks and 1,319 links, because every prior step's full walkthrough was
+    // mounted. The operator scrolls ~40 completed runbooks to reach the one
+    // they are working. Recent turns stay open (the current step and the
+    // exchange around it); everything older goes behind ONE row that says how
+    // much is in there. Nothing is dropped — opening the row renders it all,
+    // in order, and `stick()` still lands the view on the newest turn.
+    const recent = turns.slice(-ASSIST_RECENT_TURNS);
+    const older = turns.slice(0, turns.length - recent.length);
+    if (older.length) {
+      // Build the backlog body LAZILY. A closed <details> still mounts all of
+      // its children: folding alone took the measured Run tab from 518 visible
+      // headings to 199 but left buttons at 527, code blocks at 448 and links
+      // at 1,319, because 40 walkthroughs were still in the DOM behind a
+      // closed row. Rendering on first open keeps the page light until the
+      // operator actually asks for the history.
+      const backlogBody = el("div", { class: "transcript-backlog-body" });
+      const backlog = el(
+        "details",
+        { class: "transcript-backlog" },
+        el("summary", { text: `earlier in this session — ${older.length} messages` }),
+        backlogBody
+      );
+      let backlogFilled = false;
+      backlog.addEventListener("toggle", () => {
+        if (!backlog.open || backlogFilled) return;
+        backlogFilled = true;
+        for (const t of older) backlogBody.append(bubble(t.role, t.kind, t.content, t.created_at));
+      });
+      mount(
+        transcript,
+        backlog,
+        ...recent.map((t) => bubble(t.role, t.kind, t.content, t.created_at))
+      );
+    } else {
+      mount(transcript, ...turns.map((t) => bubble(t.role, t.kind, t.content, t.created_at)));
+    }
     // §17.870 — the ephemeral tail: output the CURRENT turn rendered live that
     // is not (yet, or ever) in the durable transcript. The live incident: a
     // cached walkthrough replay streamed to the screen, then the end-of-turn
@@ -748,6 +894,15 @@ export function renderChat(container, sessionId) {
       if (disposed) return;
       session = s;
       turns = t.turns || [];
+      // §17.1011 — retire the onboarding card once the session says the
+      // operator has actually done the loop. The mount-time check cannot fire:
+      // `session` is still null when the shell is first mounted (it is only
+      // assigned here), which is why a four-step "how assist mode works"
+      // explainer was still on screen at step 37 of 41 on the live job.
+      const _sc = s.step_counts || {};
+      if (((_sc.committed || 0) + (_sc.done || 0)) > 0) {
+        container.querySelector(".assist-contract")?.remove();
+      }
       // Transient checklist/env fetch failures keep the last known value —
       // a blip must not blank the needs-from-you panel mid-session.
       if (cl !== null) checklist = cl;

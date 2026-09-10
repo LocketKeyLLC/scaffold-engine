@@ -500,6 +500,17 @@ services:
       ASSIST_STATUS_PANEL_ENABLED: "${ASSIST_STATUS_PANEL_ENABLED:-true}"
       ASSIST_NEXT_CALLOUT_ENABLED: "${ASSIST_NEXT_CALLOUT_ENABLED:-true}"
       ASSIST_DONE_CRITERION_ENABLED: "${ASSIST_DONE_CRITERION_ENABLED:-true}"  # §17.932
+      # §17.1011 — one step is ONE action: no invented Phase A/B/C inside a
+      # single walkthrough, capped numbered actions, one execution context.
+      # Measured A/B on the live T35 node against model_general, 3 trials each:
+      # a Phase/Part/Stage heading appeared in 3/3 runs with this off and 0/3
+      # with it on, and numbered actions went from an erratic [0,6,0] to a
+      # consistent [5,5,5]. It does NOT reliably shorten the text (chars were
+      # [2501,2683,2471] off vs [2400,2670,2801] on) — the length the operator
+      # feels comes from the SPA folding the runbook body behind disclosure
+      # rows; this bounds the step's SCOPE, which verbosity never did.
+      ASSIST_SINGLE_ACTION_ENABLED: "${ASSIST_SINGLE_ACTION_ENABLED:-true}"
+      ASSIST_SINGLE_ACTION_MAX_STEPS: "${ASSIST_SINGLE_ACTION_MAX_STEPS:-5}"
       # §17.742 — problem-solving discipline for tangled, multi-attempt steps:
       # honor confirmed CONSTRAINTS, stop cycling once approaches have failed
       # (commit to one path), match the operator's real capability. Recap gains

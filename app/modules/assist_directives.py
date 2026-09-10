@@ -517,6 +517,58 @@ _PLAN_AUTHORITY_DIRECTIVE = (
 )
 
 
+_SINGLE_ACTION_DIRECTIVE = (
+    "\n\nONE STEP IS ONE ACTION. The operator performs what you write on a real "
+    "machine before they advance, and they cannot see the plan — so a walkthrough "
+    "holding several self-contained pieces of work reads as one enormous task with "
+    "no clear stopping point, and they lose track of where they are in it.\n"
+    "  1. NEVER divide a walkthrough into phases, parts or stages. If you are about "
+    "to write `Phase A`, `Part 2`, `Stage 1`, `First half`, or a SECOND `## Run "
+    "this` heading — stop. That impulse is the signal that this step covers more "
+    "than one action. Write ONLY the first piece of work and end there.\n"
+    "  2. Keep `## Run this` to at most {max_steps} numbered actions. A single "
+    "action MAY need a few commands (back up, edit, reload, check) — that is one "
+    "action and it is fine. {max_steps} SEPARATE objectives is not.\n"
+    "  3. ONE place. Every action in a walkthrough happens in the SAME place: one "
+    "shell, or one web UI, or one physical device. Never mix a host shell with a "
+    "router's admin page, a hypervisor's web console, or 'now go to a phone on "
+    "cellular data' in the same step. If the work genuinely changes place, the "
+    "step ends where the place changes.\n"
+    "  4. Your `👉 Do this next` action and your `✅ Done when` condition must "
+    "describe the SAME piece of work. If the finish line is not the visible "
+    "result of the action you opened with, you have written more than one step.\n"
+    "  5. Work you are NOT covering here: mention it in at most ONE closing line "
+    "so the operator knows it is coming ('Publishing this externally comes "
+    "next'). Do not write the instructions for it, and do not claim you have "
+    "added, created or scheduled a step — you have not changed the plan."
+)
+
+
+def apply_single_action(
+    system: str, *, is_decision: bool, enabled: bool, max_steps: int = 5,
+) -> str:
+    """§17.1011 — hold a walkthrough to ONE action, in one place.
+
+    The live homelab job showed the failure this prevents: node T35
+    ("Configure reverse proxy") emitted 4,817 chars over nine sections,
+    internally split into ``Phase A`` (register a domain, point DNS, forward
+    two router ports), ``Phase B`` (discover an IP, rewrite the Caddyfile,
+    reload) and ``Phase C`` (apply a firewall group, then test over HTTPS from
+    a phone on cellular). Three phases, eight numbered actions, four different
+    execution contexts — presented as one step to finish before advancing.
+
+    Note this is NOT what ``apply_verbosity`` controls: ``terse`` shortens the
+    prose of each phase and leaves all three in place, because the defect is
+    the step's SCOPE rather than its word count.
+
+    No-op for decision nodes — their deliverable is a choice, not an action,
+    and ``GUIDE_SYSTEM_DECISION`` already holds them to one choice at a time.
+    """
+    if not enabled or is_decision:
+        return system
+    return system + _SINGLE_ACTION_DIRECTIVE.format(max_steps=max_steps)
+
+
 def apply_plan_authority(system: str, *, enabled: bool = True) -> str:
     """§17.937 — forbid the model from narrating plan mutations it cannot perform.
 

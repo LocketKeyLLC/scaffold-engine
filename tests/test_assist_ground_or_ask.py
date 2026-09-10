@@ -2,6 +2,7 @@
 section for any operator-specific value not in the confirmed facts, instead of
 hardcoding a stale guess lifted from the transcript (the `ai-defruscio` leak).
 """
+from app.config import settings
 from app.modules import assist_guide
 
 _BASE = "You are a co-pilot. Write the walkthrough."
@@ -37,12 +38,35 @@ def test_every_operator_facing_generator_applies_ground_or_ask():
     """§17.760 — ground-or-ask must reach EVERY operator-facing generation path,
     including the /research (ask) answer, not just the walkthrough generators — a
     research answer can hardcode an unconfirmed value too. Enforce structurally so
-    a new generation site can't skip it."""
+    a new generation site can't skip it.
+
+    §17.1011 — the two walkthrough generators now share `_build_guide_system`
+    rather than each repeating the directive stack, so "the literal
+    `apply_ground_or_ask(` appears in this function" is no longer how the
+    property holds for them. Accept EITHER the direct call or delegation to the
+    shared builder — and then prove the builder really emits the directive, so
+    delegating somewhere that quietly drops it still fails.
+    """
     import inspect
     for fn in ("generate_guidance", "generate_guidance_stream", "generate_fix",
                "research_one"):
         src = inspect.getsource(getattr(assist_guide, fn))
-        assert "apply_ground_or_ask(" in src, (
+        assert ("apply_ground_or_ask(" in src or "_build_guide_system(" in src), (
             f"{fn} does not apply ground-or-ask — it can hardcode an unconfirmed "
             f"operator value (§17.760)"
         )
+
+    # Delegation only counts if the delegate actually applies it.
+    class _Ctx:
+        tool = "shell"
+
+    prev = settings.assist_ground_or_ask_enabled
+    try:
+        settings.assist_ground_or_ask_enabled = True
+        system = assist_guide._build_guide_system(_Ctx(), "normal", is_decision=False)
+    finally:
+        settings.assist_ground_or_ask_enabled = prev
+    assert "GROUND OR ASK" in system, (
+        "the shared builder no longer applies ground-or-ask — every generator "
+        "that delegates to it is now unprotected (§17.760/§17.1011)"
+    )

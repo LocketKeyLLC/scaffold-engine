@@ -32,6 +32,18 @@ const TABS = [
   ["costs", "Costs"],
 ];
 
+// §17.1011 — synonyms an operator (or an old link) may use for a real tab.
+// Every value MUST be a key in TABS; `resolveTab` is the single resolver.
+export const TAB_ALIASES = {
+  assist: "run", walkthrough: "run", theater: "run", exec: "run",
+  execute: "run", results: "output", dag: "plan", nodes: "plan",
+};
+
+export function resolveTab(raw) {
+  const t = raw || "overview";
+  return TAB_ALIASES[t] || t;
+}
+
 // Statuses where the job is driven through an assist session — the Run tab
 // embeds the assist walkthrough instead of the autonomous theater. /assist/
 // start is idempotent per job, so resolving the session this way is safe for
@@ -136,7 +148,14 @@ function renderRun(container, jobId, job, ctx) {
 // ── Hub shell ────────────────────────────────────────────────────────
 export default function jobHub(container, params) {
   const jobId = params && params.jobId;
-  const tab = (params && params.tab) || "overview";
+  // §17.1011 — an unknown tab silently rendered Overview. `#/job/:id/assist`
+  // is the natural guess for the walkthrough (assist lives in Run, and every
+  // other surface calls it "assist"), and guessing it landed the operator on
+  // the brief editor with no indication they had missed. Same failure shape as
+  // §17.859, where a retired hash route rendered the dashboard rather than an
+  // error and the idea→approve link was dead for weeks. Alias the known
+  // synonyms; anything still unknown falls back to Overview as before.
+  const tab = resolveTab(params && params.tab);
   let disposed = false;
   let childDispose = null;
 
