@@ -369,7 +369,7 @@ The default `docker compose up -d` brings up everything below — there's no opt
 
 ## Status
 
-Actively developed. Latest release: v1.6.0 (2026-09-09) — see [CHANGELOG.md](./CHANGELOG.md). API contract at v1.6.0 (`docs/openapi.json`) — additive over v1.5.0: `research_summary.grounding` explains an ungrounded plan, and `/health` gains a `searxng` check. Note `results_found` reads LOWER than v1.5.0 on the same queries: it now counts material the distiller can use rather than raw hits. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
+Actively developed. Latest release: v1.6.1 (2026-09-10) — see [CHANGELOG.md](./CHANGELOG.md). API contract at v1.6.0 (`docs/openapi.json`) — additive over v1.5.0: `research_summary.grounding` explains an ungrounded plan, and `/health` gains a `searxng` check. Note `results_found` reads LOWER than v1.5.0 on the same queries: it now counts material the distiller can use rather than raw hits. For current test-suite counts and any known issues, see [OVERVIEW.md](./OVERVIEW.md).
 
 v1.6.0 is the research-grounding release — see [CHANGELOG.md](./CHANGELOG.md). In short:
 

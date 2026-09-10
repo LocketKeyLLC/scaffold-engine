@@ -4,6 +4,47 @@ Notable changes to scaffold-engine. Format follows [Keep a Changelog](https://ke
 
 Day-to-day development is tracked at sprint granularity in the commit log (`fix(§X.Y)` / `feat(§X.Y)` references). This file records the release-level view.
 
+## [1.6.1] — 2026-09-10
+
+Search quality. v1.6.0 fixed *what the engine did with* search results; this
+fixes the results themselves. PRs #413–#415.
+
+### Fixed
+
+- **SearXNG was six months stale, not IP-blocked.** `brave`, `startpage` and
+  `google` had been diagnosed as banned on the evidence of 429/403/CAPTCHA.
+  Asking their *search* endpoints directly returned HTTP 200 with clean bodies —
+  the network was fine; the pinned image's engine implementations were broken.
+  Repinned to a current digest: brave 0 → 20 results, startpage 0 → 10,
+  google 0 → 10, and `/health` from `results=10` to `results=90`.
+- **Blocked engines are no longer re-asked every query.** An engine unresponsive
+  three times running is dropped from the primary list for 15 minutes and then
+  retried; recovery resets the streak. The 0-results fallback is never narrowed,
+  and filtering never drops below a floor.
+- **A test asserted something false.** `test_no_dead_engines_referenced` listed
+  seven "dead" engines; five measurably work (google, stackoverflow, crossref,
+  google news, bing news). It would have blocked adding a working engine.
+
+### Added
+
+- **Technical engines in the search backbone** — `github`, `stackoverflow`,
+  `superuser`, `askubuntu`. On real queries: 10 → 32 and 10 → 58 results, with
+  Q&A titles instead of vendor download pages.
+- **`make apply-preset`** and a bootstrap prompt, so the measured model picks
+  survive a rebuild instead of living only in one operator's `.env`.
+- **`make model-portability`** — for every role, how many models could do its
+  job right now; exits non-zero when a role is down to one. A `--static` half
+  runs in CI.
+
+### Notes
+
+`SEARXNG_EGRESS_PROXY` was introduced and then **removed** in the same release
+cycle: measured against a proxy's access log it never routed engine traffic,
+because SearXNG ignores `HTTP_PROXY`. Proxying is configured in searxng's own
+`settings.yml` (`outgoing.proxies`) — documented in `.env.example`, verified end
+to end. `mojeek` and `qwant` still refuse this host's IP and only a different
+egress address will change that.
+
 ## [1.6.0] — 2026-09-09
 
 Research had been returning nothing, and nothing said so. This release is the
