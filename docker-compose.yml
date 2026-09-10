@@ -38,6 +38,15 @@
 # Raise a single cap if /health or restart-loop logs indicate a real
 # workload genuinely exceeds it; don't raise all of them in lockstep —
 # the point is to localize OOMs, not push them back onto the host.
+# §17.1010 — two corrections to the math above, which is now stale.
+# (a) The sum is ~19 GiB across 12 services, not ~15.5: the orchestrator
+# went 6g → 8g here, and the sandbox + observability sidecars the note
+# treats as optional profiles are running. Verify rather than trust:
+#   grep -oP 'mem_limit:\s*\K[0-9.]+[gm]' docker-compose.yml
+# (b) "swap stays as the last-resort overflow" does not hold on this
+# host — see the §17.1010 note on the orchestrator's mem_limit. Swap can
+# be fully consumed by something that has nothing to do with the engine,
+# and when it is, an overcommit is an unconstrained host OOM.
 x-default-logging: &default-logging
   driver: json-file
   options:
@@ -276,7 +285,38 @@ services:
     # risk. Score sidecar runs throughout §17.230–§17.231 used --memory 6g
     # and ran identical reranker workload without crash, which is the
     # empirical baseline the new cap matches.
-    mem_limit: 6g
+    #
+    # §17.1010 — raised 6g → 8g. The test suite was being SIGKILLed at the
+    # cgroup boundary (`OOMKilled: true`, exit 137) whenever it started on a
+    # warm container: the orchestrator accumulates ~2.5 GiB of reranker weights
+    # and caches while it runs, so a suite launched after a few hours of use had
+    # ~2.7 GiB of headroom and did not fit. From a fresh restart it starts at
+    # ~780 MiB and completes in 6 GiB — which is why this only ever bit on a
+    # long-lived container and read as a flaky test runner.
+    #
+    # The trade-off, stated because the note above understates it: caps are
+    # limits, not reservations, and the sum across compose is now ~19 GiB on a
+    # 15.5 GiB host. That was ALREADY oversubscribed at ~17 GiB before this
+    # change (the "~15.5 GiB design ceiling" line above is stale), and it works
+    # because every other service sits far below its cap -- measured idle when
+    # this cap was raised: orchestrator 2.49 GiB of 8, milvus 287 MiB of 3,
+    # redis 14 MiB of 2.5, postgres 59 MiB of 1, all others under 150 MiB.
+    #
+    # But the §17.160 header above promises something this host does NOT have:
+    # "swap stays as the last-resort overflow." Measured here, swap is 36 MiB
+    # free of 19.5 GiB. A leaked desktop applet (cosmic-applet-minimize, with
+    # 14.56 GiB of VmSwap after 7 days' uptime) has consumed the whole pool --
+    # zram0 15.47 of 15.5 GiB, the dm-2 partition 3.99 of 4.0. zram compresses
+    # it to under 1 GiB of real RAM so it costs almost no memory, but it means
+    # the overflow this cap math leans on is GONE: a host-level overcommit has
+    # nowhere to spill and goes straight to the kernel OOM killer choosing a
+    # victim, which is NOT contained to one cgroup. That is host hygiene, not
+    # an engine bug, and restarting the applet reclaims it -- but while it
+    # holds, do not run a full suite and heavy host-side Ollama inference at
+    # once. Restarting the orchestrator before a long run remains the cheaper
+    # habit; this cap is the backstop for the warm-container case, not a
+    # licence to run both at once.
+    mem_limit: 8g
     # §17.93 — bind to loopback only. The API surface is operator-only;
     # `/web/*`, `/health`, `/metrics`, `/` are auth-exempt and shouldn't
     # be reachable from the LAN. Other containers reach the orchestrator
