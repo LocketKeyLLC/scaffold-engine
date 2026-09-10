@@ -144,6 +144,7 @@ async def search_searxng(query: str, max_results: int = 10) -> list[dict]:
     """
     from app.modules.research_extractors import (
         _engines_for_category, SEARXNG_FALLBACK_ENGINES, relevant_search_results,
+        note_engine_health,
     )
     try:
         client = get_searxng_client()
@@ -157,6 +158,10 @@ async def search_searxng(query: str, max_results: int = 10) -> list[dict]:
             return []
 
         data = resp.json()
+        # §17.1003 — feed the cooldown tracker. Recording only failures would
+        # make a blip permanent, so this records which engines ANSWERED too.
+        note_engine_health(_engines_for_category("general"),
+                           data.get("unresponsive_engines") or [])
         # §17.988 — the §17.729 relevance gate, which `execution_agent`,
         # `research_agent` and `assist_research_lib` all apply and this path
         # never did. Its docstring claims it "defends EVERY SearXNG path";

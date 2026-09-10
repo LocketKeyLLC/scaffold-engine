@@ -87,3 +87,47 @@ def test_the_apply_script_is_executable_and_idempotent_by_construction():
     body = script.read_text()
     assert "cp \"$ENV_FILE\" \"$BACKUP\"" in body, "must back up before touching .env"
     assert "already matches preset" in body, "must no-op cleanly when nothing changed"
+
+
+# ── §17.1003 — the static half of the portability guard, runnable in CI ──
+
+
+def test_every_role_declares_an_alternative_in_the_preset():
+    """§17.1000's guard needs live models, so nothing ran it on a schedule and
+    it only helped whoever remembered. This is the half that needs nothing but
+    the repo, so CI holds the line on configuration rot.
+
+    `model_fallback` is exempt on purpose: §17.819 keeps it LOCAL, and a
+    `:cloud` candidate would defeat the failure-mode diversity it exists for.
+    """
+    from app.modules.model_role_learning import ROLE_TASKS
+    from scripts.model_portability import _candidates_from_preset
+
+    declared = _candidates_from_preset()
+    assert declared, "the preset declares no candidates at all"
+    missing = [r for r in ROLE_TASKS
+               if r != "model_fallback" and not declared.get(r)]
+    assert not missing, (
+        f"roles with no declared alternative: {missing} — a role with one usable "
+        "model is a single-vendor dependency nobody chose")
+
+
+def test_no_declared_candidate_is_also_the_incumbent():
+    """A candidate identical to the pin makes the A/B compare a model with
+    itself — it would look like a passing gate while testing nothing."""
+    from scripts.model_portability import _candidates_from_preset
+
+    preset = _preset_keys()
+    for role, cands in _candidates_from_preset().items():
+        pin = preset.get(role.upper())
+        if pin:
+            assert pin not in cands, (
+                f"{role}: {pin!r} is both the pin and its own candidate")
+
+
+def test_the_fallback_role_stays_candidate_free():
+    from scripts.model_portability import _candidates_from_preset
+
+    assert not _candidates_from_preset().get("model_fallback"), (
+        "§17.819 — model_fallback is the LOCAL resilience role; giving it a "
+        "cloud candidate is how failure-mode diversity gets optimised away")

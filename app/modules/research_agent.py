@@ -733,7 +733,14 @@ async def _search_queries(
                     },
                 )
                 if resp.status_code == 200:
-                    results = resp.json().get("results", [])[:10]
+                    _body = resp.json()
+                    results = _body.get("results", [])[:10]
+                    # §17.1003 — same tracker as the planning path; an engine
+                    # refusing us repeatedly stops being asked for a while.
+                    from app.modules.research_extractors import note_engine_health
+                    note_engine_health(
+                        _engines_for_category(q.get("search_category", "general")),
+                        _body.get("unresponsive_engines") or [])
                     _last_resp = None   # §17.983 — the fallback's reply, if made
                     # §17.712 — 0-results fallback. The category engines returned
                     # nothing (commonly a transient CAPTCHA/rate-limit on the
