@@ -127,23 +127,22 @@ export default function jobHub(container, params) {
   let disposed = false;
   let childDispose = null;
 
-  // §17.854 (audit G2) carried into the hub: the theater sets a guard message
-  // while a run is streaming (leaving the surface disconnects the SSE stream,
-  // which the server treats as cancel-by-design). Every hub-owned navigation
-  // (tabs, back link) asks first.
-  let navGuardMsg = null;
-  const ctx = { setNavGuard: (msg) => (navGuardMsg = msg) };
-  function guardClick(e) {
-    if (navGuardMsg && !confirm(navGuardMsg)) e.preventDefault();
-  }
+  // §17.1007 — the §17.854 G2 nav guard is gone with the reason for it. It
+  // asked "leaving STOPS the run — leave anyway?" on every tab and back click,
+  // which was true while the SSE response WAS the run. The run is now a
+  // detached background task (run_broker) and navigation costs nothing, so the
+  // confirm would be a dialog protecting against something that cannot happen.
+  // `setNavGuard` stays on ctx as a no-op: renderTheater is also mounted from
+  // outside the hub, and a missing method there would be a TypeError.
+  const ctx = { setNavGuard: () => {} };
 
   const titleEl = el("h1", { text: "Job" });
   const subEl = el("div", { class: "sub mono", text: shortId(jobId) });
   const pillSlot = el("span", {});
   const backLink = el("a", { class: "btn btn-sm btn-ghost", href: "#/jobs", text: "← Jobs" });
-  backLink.addEventListener("click", guardClick);
+
   const compareLink = el("a", { class: "btn btn-sm btn-ghost", href: `#/compare/${jobId}`, text: "⚖ Compare" });
-  compareLink.addEventListener("click", guardClick);
+
 
   const tabRow = el(
     "div",
@@ -156,7 +155,6 @@ export default function jobHub(container, params) {
         role: "tab",
         "aria-selected": key === tab ? "true" : "false",
       });
-      a.addEventListener("click", guardClick);
       return a;
     })
   );

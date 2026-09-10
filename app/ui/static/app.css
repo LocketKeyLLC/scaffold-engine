@@ -1472,3 +1472,26 @@ a.strip-item:hover { background: var(--bg-elev-2); }
   animation: busydot 1.6s ease-in-out infinite;
 }
 @keyframes busydot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+/* §17.1007b — the gate's third verb. Cancel is still available and still red
+   in its text, but it no longer wears a filled danger button as the ONLY
+   alternative to approving. */
+.btn-quiet-danger { color: var(--err); }
+.btn-quiet-danger:hover { border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.08); }
+.revise-box { margin-top: var(--sp-3); border-left: 3px solid var(--accent); display: flex; flex-direction: column; gap: var(--sp-2); }
+.revise-title { font-weight: var(--fw-semi); }
+.revise-hint { margin: 0; font-size: var(--fs-sm); max-width: 72ch; }
+.revise-notes { width: 100%; resize: vertical; }
+.revise-actions { gap: var(--sp-2); }
+
+/* §17.1007c — walkthrough phases + the sanctioned stopping point. */
+.phase-tag { color: var(--accent); border-color: var(--accent-dim); background: var(--accent-soft); }
+.step-hero-stop {
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-left: 3px solid var(--ok);
+  background: rgba(63, 185, 80, 0.08);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}

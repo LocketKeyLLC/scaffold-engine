@@ -189,7 +189,12 @@ function buildQuestionsCard(brief, feas, onAnyInput) {
     const note = extra.value.trim();
     return [...answered, note].filter(Boolean).join("\n\n") || null;
   };
-  return { node, collect };
+  // §17.1007 — `note()` exposes JUST the free-form box, so "Send back for
+  // changes" can carry over a correction the operator already typed there
+  // instead of making them write it twice. `collect()` (Q/A pairs + note) is
+  // still what the approve path sends as feedback.
+  const note = () => extra.value.trim();
+  return { node, collect, note };
 }
 
 // ── List (no jobId) ──────────────────────────────────────────────────
@@ -296,7 +301,43 @@ export function renderApprovalDetail(container, jobId) {
   // §17.895 — flipping the sidebar toggle while the gate is open must not
   // leave the button describing the other mode's destination.
   const offExecMode = onExecModeChange(() => refreshApproveLabel());
-  const rejectBtn = el("button", { class: "btn btn-danger", text: "✕ Reject (cancel)", onClick: () => reject() });
+  // §17.1007 — the gate used to offer approve or reject-and-cancel, and the
+  // most common correct answer at a gate is neither: it is "not yet, change
+  // this". With that option missing and the only alternative painted in the
+  // error colour and named after a cancellation, loss aversion pushed
+  // operators into approving briefs they had doubts about. Cancel stays — it
+  // is just no longer the only way to say no, and no longer shouts.
+  const rejectBtn = el("button", { class: "btn btn-ghost btn-quiet-danger", text: "✕ Cancel this job", onClick: () => reject() });
+
+  const reviseNotes = el("textarea", {
+    class: "input revise-notes",
+    rows: "3",
+    placeholder: "What should change? e.g. \u201cIt assumed Docker — this host runs LXC only\u201d or \u201cdrop the alerting scope, just metrics for now\u201d",
+  });
+  const reviseSend = el("button", { class: "btn btn-primary btn-sm", text: "↩ Send it back", onClick: () => revise() });
+  const reviseBox = el(
+    "div",
+    { class: "card card-pad revise-box hidden" },
+    el("div", { class: "revise-title", text: "Send this brief back for another pass" }),
+    el("p", { class: "dim revise-hint", text: "The job keeps its id and history — it goes back through the same refinement it just came out of, with your correction folded in. Nothing is thrown away." }),
+    reviseNotes,
+    el("div", { class: "row revise-actions" },
+      reviseSend,
+      el("button", { class: "btn btn-ghost btn-sm", text: "Never mind", onClick: () => reviseBox.classList.add("hidden") }))
+  );
+  const reviseBtn = el("button", {
+    class: "btn",
+    text: "↩ Send back for changes",
+    title: "Not ready to approve? Say what is wrong and the engine refines it again — the job is not cancelled.",
+    onClick: () => {
+      reviseBox.classList.remove("hidden");
+      // Carry over anything already typed in the gate's free-form note: the
+      // operator who wrote "this assumed Docker" there meant exactly this.
+      const carried = qa && qa.note ? qa.note() : "";
+      if (carried && !reviseNotes.value.trim()) reviseNotes.value = carried;
+      reviseNotes.focus();
+    },
+  });
 
   let waitingShown = false; // dedupe re-renders while polling the waiting state
 
@@ -395,7 +436,10 @@ export function renderApprovalDetail(container, jobId) {
           // 3. Decision controls directly after the questions — answer, approve,
           // no scrolling past the reference material to act.
           progress,
-          el("div", { class: "drawer-actions approval-actions" }, approveBtn, rejectBtn, autoRunLabel),
+          // §17.1007 — three ways forward, weighted: approve leads, "send back"
+          // is the ordinary second answer, cancel is the quiet last resort.
+          el("div", { class: "drawer-actions approval-actions" }, approveBtn, reviseBtn, autoRunLabel, el("span", { class: "spacer" }), rejectBtn),
+          reviseBox,
           // 4. Reference material last, collapsed with counts.
           el(
             "div",
@@ -487,6 +531,7 @@ export function renderApprovalDetail(container, jobId) {
     busy = on;
     approveBtn.disabled = on;
     rejectBtn.disabled = on;
+    reviseBtn.disabled = on; // §17.1007
   }
 
   function showProgress(msg) {
@@ -592,6 +637,38 @@ export function renderApprovalDetail(container, jobId) {
       if (pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
+      }
+    }
+  }
+
+  async function revise() {
+    if (busy) return;
+    const notes = reviseNotes.value.trim();
+    if (!notes) {
+      toast("Say what should change — the engine needs something to act on.", "err");
+      reviseNotes.focus();
+      return;
+    }
+    setBusy(true);
+    reviseSend.disabled = true;
+    showProgress("Sending it back — refining again with your notes… (usually 1–9 min)");
+    try {
+      await api.post("/ideate/revise", { job_id: jobId, notes });
+      if (disposed) return;
+      toast("Sent back — the engine is refining it again with your correction.", "ok");
+      reviseBox.classList.add("hidden");
+      reviseNotes.value = "";
+      waitingShown = false; // force the wait panel to render over this gate
+      await load();
+    } catch (e) {
+      if (!disposed) {
+        toast(`Could not send it back: ${e.detail || e.message}`, "err");
+        progress.classList.add("hidden");
+      }
+    } finally {
+      if (!disposed) {
+        setBusy(false);
+        reviseSend.disabled = false;
       }
     }
   }

@@ -1026,6 +1026,32 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         # pipeline can confirm it ("noted: you're on root@pve").
         if captured_ctx and isinstance(result, dict):
             result["execution_context"] = captured_ctx
+        # §17.1007 — what the operator just ACCOMPLISHED, in words, on commit.
+        #
+        # Closing a step incremented a counter and said nothing else. A number
+        # is scorekeeping, not acknowledgement, and this is the one place in the
+        # engine where the work was done by the operator's own hands. The §17.738
+        # recap already distils a DONE list from the whole step transcript; it
+        # was computed, stored, and read by nothing on this path.
+        #
+        # Reads the CACHED recap directly rather than calling get_step_recap(),
+        # which can trigger an LLM refresh — a commit must not pay for that. A
+        # short step with no recap yet returns nothing and the client renders
+        # nothing: an empty list is honest, an invented one would not be.
+        if (isinstance(result, dict) and result.get("status") == "committed"
+                and body.node_key):
+            try:
+                from app.modules.assist_render import parse_recap
+                row = (await db.execute(
+                    text("SELECT progress_recap FROM assist_steps "
+                         "WHERE session_id = :sid AND node_key = :nk"),
+                    {"sid": session_id, "nk": body.node_key},
+                )).mappings().first()
+                done = parse_recap((row or {}).get("progress_recap"))["done"]
+                if done:
+                    result["recap_done"] = done
+            except Exception:  # never fail a commit on the acknowledgement step
+                pass
         return result
     except ValueError as exc:
         msg = str(exc)

@@ -19,6 +19,8 @@ Routes:
   POST /execute/all        — execute_all_endpoint (Step 15, SSE)
   POST /skip               — skip_node_endpoint (Step 15)
 """
+import json
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -48,6 +50,7 @@ from app.modules.execution_agent import (
     _sse_event,  # §17.855 (F6) — shared SSE frame formatter for /jobs/{id}/advance
 )
 from app.modules.execution_handler import execution_status, node_outputs
+from app.modules import run_broker
 from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.ideation_workflow import (
     analyze_and_confirm,
@@ -68,12 +71,15 @@ from app.schemas import (
     ExecRetryInput,
     ExecuteNextInput,
     ExecutionResult,
+    ReviseInput,
     IdeaInput,
     PromptOptimizeInput,
     PromptOptimizeResult,
     SkipNodeInput,
 )
 from app.utils.model_validation import _require_valid_models
+
+logger = logging.getLogger("scaffold")
 
 router = APIRouter()
 
@@ -227,6 +233,99 @@ async def decompose_endpoint(
     )
     result["decomposed"] = True
     return result
+
+
+@router.post("/ideate/revise")
+async def ideate_revise_endpoint(
+    body: ReviseInput,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1007 — send a brief back for another refinement pass.
+
+    The approval gate offered exactly two verbs: approve, or reject-and-cancel.
+    But the most common correct answer at a gate is neither — it is *not yet,
+    change this*. With that option missing and the only alternative painted in
+    the error colour and labelled with a cancellation, loss aversion did the
+    rest: operators approved briefs they had doubts about, because the only way
+    out read as throwing the work away.
+
+    This is that third path, and it is genuinely non-destructive: the job keeps
+    its id, its history and its ownership, and goes back through the SAME
+    Phase-1 machinery that produced the brief in the first place
+    (``spawn_phase1_background``, which reuses an existing row —
+    ``idea_refinement.refine_idea`` skips its INSERT when handed a ``job_id``).
+
+    The operator's notes are APPENDED to ``input_text`` rather than replacing
+    it, for two reasons: the refinement pass needs the original intent as well
+    as the correction, and a second revision must build on the first instead of
+    silently discarding it. The gate's "Original request" panel then shows the
+    accumulated ask, which is the truth about what the engine was told.
+
+    Status codes:
+      - 200 ``{job_id, status: "refining", revisions: n}`` on success
+      - 404 if no such job (or not visible to this principal)
+      - 409 if the job is not at ``awaiting_confirmation`` — revising a job
+        that is already researching would race Phase 2 for the same row
+      - 422 on malformed UUID or empty notes (schema-enforced)
+    """
+    try:
+        UUID(body.job_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+    await assert_visible(db, principal, body.job_id, detail=f"job not found: {body.job_id}")
+
+    row = (await db.execute(
+        text("SELECT status, input_text, metadata FROM jobs WHERE id = :id"),
+        {"id": body.job_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"job not found: {body.job_id}")
+    if row["status"] != "awaiting_confirmation":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"job is {row['status']!r}; only a job waiting at the approval "
+                "gate can be sent back for changes"
+            ),
+        )
+
+    meta = dict(row["metadata"] or {})
+    revisions = int(meta.get("revisions") or 0) + 1
+    meta["revisions"] = revisions
+
+    # Cumulative, and labelled so the refinement pass can tell the original ask
+    # from the correction rather than reading one run-on paragraph.
+    revised_text = (
+        f"{(row['input_text'] or '').strip()}\n\n"
+        f"--- Revision {revisions} requested by the operator ---\n"
+        f"{body.notes.strip()}"
+    ).strip()
+
+    await db.execute(
+        text("""
+            UPDATE jobs
+               SET input_text = :txt,
+                   status = 'refining',
+                   refined_brief = NULL,
+                   research_data = COALESCE(research_data, '{}'::jsonb) - 'feasibility',
+                   error_summary = NULL,
+                   metadata = :meta,
+                   updated_at = NOW()
+             WHERE id = :id
+        """),
+        {"txt": revised_text, "meta": json.dumps(meta), "id": body.job_id},
+    )
+    await db.commit()
+
+    overrides = body.model_overrides
+    await _require_valid_models(overrides)
+    spawn_phase1_background(body.job_id, revised_text, model_overrides=overrides)
+    logger.info(
+        "ideate_revise: job=%s revision=%d notes_preview=%r",
+        body.job_id, revisions, body.notes[:80],
+    )
+    return {"job_id": body.job_id, "status": "refining", "revisions": revisions}
 
 
 @router.post("/ideate/confirm")
@@ -395,6 +494,13 @@ async def exec_status(
     result = await execution_status(parsed_id, db)
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
+    # §17.1007 — is a DETACHED run actually in flight for this job right now?
+    #
+    # `job_status == "running"` alone cannot answer that: after a process
+    # restart the row still says running while no task exists. The client needs
+    # the difference, because attaching to a live run is pure observation while
+    # "starting" one is an action nobody asked for on page load.
+    result["detached_running"] = run_broker.is_running(str(parsed_id))
     return result
 
 
@@ -524,8 +630,23 @@ async def execute_all_endpoint(
     # §17.809 — --quick jobs execute every node on the fast model map.
     overrides = await resolve_job_overrides(body.job_id, body.model_overrides)
     await _require_valid_models(overrides)
+    # §17.1007 — the run is a background task; this response only SUBSCRIBES to
+    # it. Before this, the response *was* the run: a disconnect cancelled the
+    # generator, whose finally marked the job cancelled, so a 10-25 minute
+    # autonomous run was hostage to a browser tab. Closing the tab now drops a
+    # subscriber and nothing else; reconnecting re-attaches (and the client
+    # re-seeds durable node state from /exec/status). Stopping a run is an
+    # explicit act again: POST /jobs/{id}/cancel.
+    #
+    # start() is idempotent per job, so two tabs pressing Run, or a reconnect
+    # racing the original request, attach to ONE run instead of executing the
+    # DAG twice.
+    run = run_broker.start(
+        body.job_id,
+        lambda: execute_all_nodes(body.job_id, model_overrides=overrides),
+    )
     return StreamingResponse(
-        execute_all_nodes(body.job_id, model_overrides=overrides),
+        run_broker.subscribe(run),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},  # disable nginx buffering
     )

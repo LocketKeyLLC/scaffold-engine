@@ -52,13 +52,12 @@ export function renderTheater(container, jobId, ctx = {}) {
   });
   const statusPill = el("span", {});
 
-  // §17.854 (audit G2) — a live run dies with the SSE stream, so the hub is
-  // told to confirm on tab/back navigation (ctx.setNavGuard) and the browser
-  // warns on tab-close/reload.
-  const GUARD_MSG = "A run is streaming. Leaving this page STOPS it. Leave anyway?";
-  function beforeUnload(e) {
-    if (running) { e.preventDefault(); e.returnValue = ""; return ""; }
-  }
+  // §17.1007 — the §17.854 G2 nav guard and beforeunload warning are GONE,
+  // because the thing they warned about no longer happens: the run is a
+  // detached background task (app/modules/run_broker.py) and this stream is
+  // only a subscriber to it. Closing the tab drops the subscriber. Warning an
+  // operator away from a door that is no longer a trapdoor is worse than not
+  // warning them — it teaches them the console's warnings are noise.
 
   const header = el(
     "div",
@@ -218,6 +217,26 @@ export function renderTheater(container, jobId, ctx = {}) {
         });
       renderNodes();
       setProgress(data.progress);
+      // §17.1007 — a run is in flight for this job RIGHT NOW: attach to it.
+      //
+      // This is the payoff of detaching. Open the Run tab on a job that is
+      // already executing and you now see it live, whether you started it, or
+      // closed the tab twenty minutes ago, or are on a different machine.
+      //
+      // Gated on `detached_running`, NOT on job_status === "running": after a
+      // restart the row still says running while no task exists, and attaching
+      // there would silently START execution — an action nobody asked for on
+      // page load. When that is the case we offer the verb instead (below).
+      if (data.detached_running && !running) {
+        log("queued", "Attaching to the run already in progress…", "ok");
+        attachRun();
+      } else if (data.job_status === "running" && !running) {
+        // Row says running, no live task — the process restarted mid-run.
+        // Say so honestly and let the operator decide to pick it up.
+        log("warning",
+          "This job is marked running but nothing is executing — the engine restarted mid-run. Press ▶ to carry on with the remaining steps.",
+          "warn");
+      }
       // §17.818 (plan 5.5) — one-shot auto-run handoff from the approve gate.
       if (sessionStorage.getItem("scaffold_autorun") === jobId) {
         sessionStorage.removeItem("scaffold_autorun");
@@ -234,9 +253,22 @@ export function renderTheater(container, jobId, ctx = {}) {
     }
   }
 
-  function toggleRun() {
+  async function toggleRun() {
     if (running) {
-      if (abort) abort.abort();
+      // §17.1007 — stopping used to mean "disconnect and let the server infer
+      // it". Now that a disconnect is just a detach, stopping has to say so.
+      if (!confirm("Stop this run? Completed steps are kept; the rest stay pending.")) return;
+      runBtn.disabled = true;
+      runBtn.textContent = "Stopping…";
+      try {
+        await api.post(`/jobs/${jobId}/cancel`, {});
+        toast("Run stopped.", "ok");
+      } catch (e) {
+        toast(`Could not stop the run: ${e.detail || e.message}`, "err");
+      } finally {
+        runBtn.disabled = false;
+        if (abort) abort.abort(); // drop our subscriber; the run is already cancelled
+      }
       return;
     }
     // §17.853 — the global mode gate: in Assist mode, Run means "start the
@@ -249,23 +281,25 @@ export function renderTheater(container, jobId, ctx = {}) {
     startRun();
   }
 
-  async function startRun() {
+  // §17.1007 — attaching and starting issue the SAME request: run_broker.start()
+  // returns the in-flight run when there is one. The client does not need to
+  // know which happened, and must not race to guess.
+  function attachRun() { return startRun({ attach: true }); }
+
+  async function startRun({ attach = false } = {}) {
     running = true;
-    if (ctx.setNavGuard) ctx.setNavGuard(GUARD_MSG);  // §17.859 — hub tabs ask first
-    window.addEventListener("beforeunload", beforeUnload);  // §17.854 G2
     summaryEl.classList.add("hidden");
-    // §17.1007 — the contract, stated UP FRONT. Leaving this surface stops the
-    // run (the SSE stream IS the run's liveness, §17.854 G2), and until that
-    // changes server-side the operator deserves to know the deal before they
-    // commit twenty minutes to it — not in the dialog that fires once they
-    // have already tried to leave.
-    log("warning", "Keep this tab open — closing it or leaving this page stops the run.", "warn");
+    // §17.1007 — the contract, stated up front, and it is now the good one:
+    // the run outlives this tab. (An earlier pass in this same change told the
+    // operator the opposite, which was true right up until the run was
+    // detached server-side.)
+    log("queued", "This run keeps going if you close the tab — reopen it any time to watch. ⚑ Alerts will tell you when it ends.", "ok");
     runBtn.textContent = "■ Stop";
     runBtn.classList.remove("btn-primary");
     runBtn.classList.add("btn-danger");
     abort = new AbortController();
-    logEl.replaceChildren();
-    log("queued", "Starting execution…");
+    if (!attach) logEl.replaceChildren();
+    log("queued", attach ? "Attached — streaming live events." : "Starting execution…");
 
     // cancelled jobs resume; everything else runs execute/all
     const cancelled = lastJobStatus === "cancelled";
@@ -288,8 +322,6 @@ export function renderTheater(container, jobId, ctx = {}) {
 
   function finishRun() {
     running = false;
-    if (ctx.setNavGuard) ctx.setNavGuard(null);  // §17.859
-    window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     abort = null;
     currentKey = null;
     runBtn.textContent = "▶ Run all";
@@ -489,8 +521,7 @@ export function renderTheater(container, jobId, ctx = {}) {
   return () => {
     disposed = true;
     offExecMode();  // §17.854 S4
-    if (ctx.setNavGuard) ctx.setNavGuard(null);  // §17.859
-    window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
+    // §17.1007 — aborting here detaches THIS subscriber. The run continues.
     if (abort) abort.abort();
   };
 }

@@ -1416,6 +1416,7 @@ async def list_steps(*, session_id: str, db) -> list[dict]:
                        s.status              AS step_status,
                        n.status              AS node_status,
                        n.execution_order,
+                       n.depends_on,
                        (COALESCE(s.guidance, '') <> '') AS has_guidance
                   FROM assist_steps s
                   JOIN dag_nodes n
@@ -1426,7 +1427,22 @@ async def list_steps(*, session_id: str, db) -> list[dict]:
             """),
             {"sid": session_id},
         )).mappings().all()
-        return [dict(r) for r in rows]
+        steps = [dict(r) for r in rows]
+        # §17.1007 — annotate each step with its phase, so a 41-step session
+        # has a gradient the operator can feel instead of one flat counter.
+        # Compute-on-read (§17.811 precedent) and fail-soft: a picker must
+        # never break the view, so a phase failure just leaves the plain
+        # totals the client already knows how to render.
+        try:
+            from app.modules.dag_phases import compute_phases
+            for key, info in compute_phases(steps).items():
+                for st in steps:
+                    if st["node_key"] == key:
+                        st.update(info)
+                        break
+        except Exception as e:  # noqa: BLE001
+            logger.warning("assist_phase_annotate_failed session_id=%s err=%r", session_id, e)
+        return steps
     except Exception as e:  # noqa: BLE001 — a picker must never break the view
         logger.warning("assist_list_steps_failed session_id=%s err=%r", session_id, e)
         return []
