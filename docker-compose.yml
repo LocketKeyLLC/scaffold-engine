@@ -167,20 +167,15 @@ services:
     # via the bridge (`http://searxng:8080`).
     ports:
       - "127.0.0.1:8888:8080"
-    # §17.1005 — optional egress proxy. SearXNG's HTTP client (httpx) honours
-    # the standard proxy env vars, so pointing these at a VPN/proxy endpoint
-    # routes every ENGINE request through it while leaving the rest of the
-    # stack on the host network. Empty by default = direct, unchanged.
-    #
-    # Why you might: engines block by source IP. Upgrading the image recovered
-    # brave/startpage/google (§17.1005 — they were never IP-banned, the
-    # six-month-old engine implementations were broken), but `mojeek` and
-    # `qwant` still 403 this host on a plain browser request, which is a real
-    # IP-level refusal that only a different egress address can fix.
-    environment:
-      HTTP_PROXY: '${SEARXNG_EGRESS_PROXY:-}'
-      HTTPS_PROXY: '${SEARXNG_EGRESS_PROXY:-}'
-      NO_PROXY: 'localhost,127.0.0.1,searxng'
+    # §17.1006 — there is deliberately NO proxy env var here. §17.1005 shipped
+    # HTTP_PROXY/HTTPS_PROXY on this container believing httpx would honour
+    # them; measured against a proxy's access log, ENGINE hostnames NEVER
+    # appeared — SearXNG builds its own clients and ignores the environment.
+    # An operator setting it would have believed their search traffic was
+    # routed when it was not. Egress proxying is configured in searxng's own
+    # settings.yml (`outgoing.proxies`) — see .env.example for the block, and
+    # note it must be reachable BEFORE searxng starts, because the client pools
+    # are built at boot.
     # 977 is the searxng user baked into the upstream image; the host
     # config dir (settings.yml) must be owned by uid/gid 977 to be readable.
     user: "977:977"
