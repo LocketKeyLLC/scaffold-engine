@@ -73,11 +73,24 @@ function renderOverview(container, jobId, job) {
         metaRow("domain", job.domain),
         metaRow("deliverable", job.deliverable_kind),
         metaRow("nodes", job.node_count),
+        // §17.1008 — the decomposition breadcrumb. `parent_job_id` and
+        // `component_index` have been on every job-detail read since umbrellas
+        // existed and were rendered by nothing, so an operator looking at a
+        // component job could not tell it was part of a larger build, which
+        // part it was, or how to get back to the whole. Found by extending the
+        // §17.1007c field inventory to this payload.
+        job.component_index != null ? metaRow("part of", `component ${job.component_index}`) : null,
         metaRow("created", timeAgo(job.created_at)),
         metaRow("updated", timeAgo(job.updated_at)),
         metaRow("completed", job.completed_at ? timeAgo(job.completed_at) : null)
       )
     ),
+    // §17.1008 — a link back to the umbrella, not just a note that one exists.
+    job.parent_job_id
+      ? el("div", { class: "card card-pad umbrella-link" },
+          el("span", { text: "This job is one component of a larger build. " }),
+          el("a", { href: `#/job/${job.parent_job_id}`, text: "Open the umbrella job →" }))
+      : null,
     // §17.843 receipt — the approval-gate answers as the server holds them.
     job.user_feedback
       ? el(

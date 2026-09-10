@@ -425,12 +425,18 @@ export function renderChat(container, sessionId) {
 
   function renderStepPicker(currentKey) {
     if (!steps.length) return null;
-    const sel = el("select", { class: "step-picker", title: "Jump to a step" });
+    const sel = el("select", { class: "step-picker", title: "Jump to a step — ✎ marks steps whose walkthrough is already written" });
     for (const st of steps) {
       const icon = STEP_ICON[st.step_status] || "○";
       const terminal = !["pending", "presented", "awaiting_input"].includes(st.step_status);
       const running = st.node_status === "running";
+      // §17.1008 — `has_guidance` is selected by list_steps and was rendered by
+      // nothing. It answers the question the jump-to picker actually raises:
+      // does this step already have a walkthrough waiting, or will landing on
+      // it mean generating one? (§17.901 keeps a stored walkthrough rather than
+      // regenerating, so the distinction is real.)
       const label = `${icon} ${st.node_key} — ${(st.title || "").slice(0, 58)}`
+        + (st.has_guidance ? "  ✎" : "")
         + (running ? "  (engine is running this)" : "");
       const opt = el("option", { value: st.node_key, text: label });
       if (terminal || running) opt.disabled = true;

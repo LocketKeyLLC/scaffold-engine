@@ -92,14 +92,97 @@ EXEC_STATUS_NODE_INTERNAL_FIELDS: dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
+# GET /jobs/{job_id} — app/schemas.py::JobDetailResponse
+# ---------------------------------------------------------------------------
+# A Pydantic response model, so the producer scan reads `model_fields` rather
+# than parsing a dict literal. Extending the gate here immediately found two
+# more of exactly the drift it was written for: `parent_job_id` and
+# `component_index` were serialised on every job-detail read and rendered by
+# NOTHING — an operator looking at a component job could not see that it
+# belonged to an umbrella, or which part of it this was. §17.1008 wires them.
+JOB_DETAIL_OPERATOR_FIELDS: dict[str, frozenset[str]] = {
+    "id":                  frozenset({SPA, CLI, OWUI}),
+    "title":               frozenset({SPA, CLI, OWUI}),
+    "status":              frozenset({SPA, CLI, OWUI}),
+    "input_text":          frozenset({SPA}),
+    "refined_brief":       frozenset({SPA, OWUI}),
+    "feasibility":         frozenset({SPA, CLI, OWUI}),
+    # §17.843 — the operator's gate answers, echoed back from the server.
+    "user_feedback":       frozenset({SPA}),
+    "deliverable_kind":    frozenset({SPA}),
+    "has_compiled_output": frozenset({SPA}),
+    "node_count":          frozenset({SPA, CLI, OWUI}),
+    "created_at":          frozenset({SPA, CLI}),
+    "updated_at":          frozenset({SPA, OWUI}),
+    "completed_at":        frozenset({SPA}),
+    # §17.1008 — the decomposition breadcrumb. Produced since umbrellas
+    # existed; read by no surface until now.
+    "parent_job_id":       frozenset({SPA}),
+    "component_index":     frozenset({SPA}),
+    "metadata":            frozenset({SPA, OWUI}),
+}
+
+JOB_DETAIL_INTERNAL_FIELDS: dict[str, str] = {}
+
+
+# ---------------------------------------------------------------------------
+# GET /assist/{session_id}/steps — assist_agent::list_steps rows
+# ---------------------------------------------------------------------------
+ASSIST_STEP_OPERATOR_FIELDS: dict[str, frozenset[str]] = {
+    "node_key":        frozenset({SPA}),
+    "title":           frozenset({SPA}),
+    "step_status":     frozenset({SPA}),
+    "node_status":     frozenset({SPA}),
+    "execution_order": frozenset({SPA}),
+    "has_guidance":    frozenset({SPA}),
+    # §17.1007 — the phase chunking the walkthrough badge renders.
+    "phase":           frozenset({SPA}),
+    "phase_total":     frozenset({SPA}),
+    "phase_pos":       frozenset({SPA}),
+    "phase_size":      frozenset({SPA}),
+}
+
+ASSIST_STEP_INTERNAL_FIELDS: dict[str, str] = {
+    "depends_on": (
+        "Selected only to feed dag_phases.compute_phases() server-side; the "
+        "client renders the derived phase numbers, never the raw edges."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Registry consumed by tests/test_operator_field_inventory.py
 # ---------------------------------------------------------------------------
+# `kind` tells the test how to find the producer's field names:
+#   "dict_literal" — ast-parse the named function and take the payload dict
+#   "pydantic"     — read the model's declared fields
 PAYLOADS: dict[str, dict] = {
     "exec_status_node": {
+        "kind": "dict_literal",
         "producer": "app/modules/execution_handler.py",
         "function": "execution_status",
         "operator_fields": EXEC_STATUS_NODE_OPERATOR_FIELDS,
         "internal_fields": EXEC_STATUS_NODE_INTERNAL_FIELDS,
+    },
+    "job_detail": {
+        "kind": "pydantic",
+        "model": "JobDetailResponse",
+        "operator_fields": JOB_DETAIL_OPERATOR_FIELDS,
+        "internal_fields": JOB_DETAIL_INTERNAL_FIELDS,
+    },
+    "assist_step": {
+        # `list_steps` projects SQL columns (`dict(r)` over a row mapping) and
+        # then merges in the computed phase keys — there is no dict literal to
+        # parse and no response model to read. Rather than hand-roll a SQL
+        # parser that would give false confidence about what the producer
+        # emits, this payload runs the CONSUMER guard only. Stated as a
+        # limitation rather than papered over: a new column added to that
+        # SELECT will not be caught here.
+        "kind": "consumer_only",
+        "producer": "app/modules/assist_agent.py",
+        "function": "list_steps",
+        "operator_fields": ASSIST_STEP_OPERATOR_FIELDS,
+        "internal_fields": ASSIST_STEP_INTERNAL_FIELDS,
     },
 }
 

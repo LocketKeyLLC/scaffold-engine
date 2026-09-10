@@ -198,17 +198,57 @@ def uneven_widths() -> list[dict]:
 
 
 def test_a_wide_level_does_not_absorb_the_levels_before_it():
-    """A level too wide to share a bucket must stand alone, not annex its
-    narrow predecessors. Placing levels by preceding work instead of by
-    midpoint puts A0/A1 in the same phase as the 12-wide fan-out."""
+    """A level too wide to share a bucket must not annex its narrow
+    predecessors. Placing levels by preceding work instead of by midpoint puts
+    A0/A1 in the same phase as the 12-wide fan-out.
+
+    §17.1008 — the wide level may now be SPLIT across several phases, so this
+    no longer asserts it is exactly one phase. What must still hold is that
+    whatever phases it occupies contain nothing but its own nodes.
+    """
     nodes = uneven_widths()
     result = compute_phases(nodes)
     assert_well_formed(nodes, result)
-    wide_phase = result["W1"]["phase"]
-    in_wide_phase = {k for k, v in result.items() if v["phase"] == wide_phase}
-    assert in_wide_phase == {f"W{i}" for i in range(1, 13)}, (
-        "the wide level should be its own phase, got " + repr(sorted(in_wide_phase))
+    wide = {f"W{i}" for i in range(1, 13)}
+    wide_phases = {result[k]["phase"] for k in wide}
+    occupants = {k for k, v in result.items() if v["phase"] in wide_phases}
+    assert occupants == wide, (
+        "phases holding the wide level must hold nothing else, got "
+        + repr(sorted(occupants - wide))
     )
+
+
+def test_a_dominant_level_is_split_rather_than_left_as_a_flat_bar():
+    """§17.1008 — the shape this splitting exists for: 25 steps at one level out
+    of 27. Before, that collapsed to a single 25-step phase, which is the flat
+    progress bar this module was written to remove."""
+    nodes = [{"node_key": "A", "depends_on": [], "execution_order": 1}]
+    nodes += [
+        {"node_key": f"W{i}", "depends_on": ["A"], "execution_order": 1 + i}
+        for i in range(1, 26)
+    ]
+    nodes.append({"node_key": "Z", "depends_on": [f"W{i}" for i in range(1, 26)], "execution_order": 99})
+
+    result = compute_phases(nodes)
+    assert_well_formed(nodes, result)
+    sizes = phase_sizes(result)
+    assert max(sizes) < 25, f"the dominant level was left whole: {sizes}"
+    # Splitting inside ONE level is safe because a level has no internal
+    # dependencies — but it must not reorder anything that IS ordered.
+    for node in nodes:
+        for dep in node["depends_on"]:
+            assert result[dep]["phase"] <= result[node["node_key"]]["phase"]
+
+
+def test_a_small_parallel_group_is_never_split():
+    """The floor: five steps that can be done in any order read as one thing,
+    and cutting them buys no gradient while losing a true statement."""
+    nodes = linear(12)
+    nodes += [
+        {"node_key": f"P{i}", "depends_on": ["T3"], "execution_order": 4} for i in range(1, 5)
+    ]
+    result = compute_phases(nodes)
+    assert len({result[f"P{i}"]["phase"] for i in range(1, 5)}) == 1
 
 
 def test_uneven_widths_keep_the_head_phase_small():

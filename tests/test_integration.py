@@ -22,8 +22,60 @@ import os
 # run, exactly as the old `-k "not integration"` name-substring match did.
 pytestmark = pytest.mark.integration
 
+# §17.1008 — read the key at CALL time, not at import time.
+#
+# `_live_write_guard.install()` deliberately blanks SCAFFOLD_API_KEY in the test
+# process so a unit test that escapes its mocks cannot authenticate as the
+# operator (§17.934), and `uninstall()` restores it for `integration`-marked
+# tests. A module-level snapshot is therefore a value captured at collection and
+# used minutes later, across an env the suite intentionally mutates — fragile
+# even where it happens to work.
+#
+# NOT presented as a fix for the intermittent 401 below: that has NOT been root
+# caused (see `_auth_headers`). This removes one candidate and makes the next
+# failure say which key it used.
+def _auth_headers() -> dict:
+    return {"X-API-Key": os.environ.get("SCAFFOLD_API_KEY", "test-key-for-ci")}
+
+
+class _AuthHeaders(dict):
+    """Behaves like the dict it replaced, but resolves at use rather than at
+    import — every existing `headers=AUTH_HEADERS` call site keeps working."""
+
+    def __init__(self):
+        super().__init__()
+
+    def __iter__(self):
+        return iter(_auth_headers())
+
+    def keys(self):
+        return _auth_headers().keys()
+
+    def items(self):
+        return _auth_headers().items()
+
+    def __getitem__(self, k):
+        return _auth_headers()[k]
+
+    def __len__(self):
+        return len(_auth_headers())
+
+
 SCAFFOLD_API_KEY = os.environ.get("SCAFFOLD_API_KEY", "test-key-for-ci")
-AUTH_HEADERS = {"X-API-Key": SCAFFOLD_API_KEY}
+AUTH_HEADERS = _AuthHeaders()
+
+
+def _auth_diagnosis() -> str:
+    """Describe the key WITHOUT printing it, for a 401's error message."""
+    raw = os.environ.get("SCAFFOLD_API_KEY")
+    if raw is None:
+        return "SCAFFOLD_API_KEY is UNSET in this process"
+    if raw == "":
+        return (
+            "SCAFFOLD_API_KEY is EMPTY — _live_write_guard.install() blanks it "
+            "and uninstall() should have restored it for this integration-marked test"
+        )
+    return f"SCAFFOLD_API_KEY is set (length {len(raw)})"
 
 from app.main import app
 
@@ -140,8 +192,26 @@ async def test_reranker_direct():
 # 4. Job submission
 # ---------------------------------------------------------------------------
 
+# §17.1008 — two problems with this test, both found by it failing ~1 run in 2
+# while passing in isolation:
+#
+# 1. THE TIMEOUT WAS SHORTER THAN THE WORK. `/ideas` runs Phase 1 SYNCHRONOUSLY
+#    — refinement plus a feasibility pass, two LLM calls — and the console's own
+#    copy tells operators to expect 1-9 minutes for it. The client was capped at
+#    120s inside a 180s pytest budget. Alone on an idle box a trivial idea
+#    squeaks under; inside the full suite, competing for the same CPU
+#    inference, it does not. Nothing was wrong with the engine: the assertion
+#    was just being made before the work could finish. Both budgets now match
+#    the documented window (`timeout(900)` is the convention for live tests
+#    here).
+#
+# 2. IT LEFT ITS JOB BEHIND. Every full-suite run created a real job and never
+#    cleaned it up — 14 of them had accumulated in this database, each having
+#    burned a real Phase 1. A live test may spend inference; it should not
+#    quietly grow the operator's job list forever. It now cancels what it
+#    created, in a finally so a failed assertion still cleans up.
 @pytest.mark.validate
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(900)
 @pytest.mark.asyncio
 async def test_job_submission():
     """POST /ideas creates a job and returns job_id + status 'awaiting_confirmation'."""
@@ -149,15 +219,35 @@ async def test_job_submission():
         "idea": "List three sorting algorithms",
         "domain": "eng",
     }
+    job_id = None
     async with httpx.AsyncClient(
-        base_url="http://localhost:8000", timeout=120.0,
+        base_url="http://localhost:8000", timeout=600.0,
         headers=AUTH_HEADERS
     ) as live:
-        resp = await live.post("/ideas", json=payload)
-    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+        try:
+            resp = await live.post("/ideas", json=payload)
+            assert resp.status_code == 200, (
+                f"Expected 200, got {resp.status_code}: {resp.text}\n"
+                # §17.1008 — this test fails in the FULL suite and passes both
+                # in isolation and against every subset tried (all 189
+                # test_*.py files before it; the whole tests/integration/ dir
+                # before it). It has not been root caused. When it next fails,
+                # this line says whether auth was the reason.
+                f"auth diagnosis: {_auth_diagnosis()}"
+            )
 
-    body = resp.json()
-    assert "job_id" in body, f"Response missing job_id: {body}"
-    assert body.get("status") == "awaiting_confirmation", f"Expected status 'awaiting_confirmation', got {body.get('status')}"
-    assert isinstance(body["job_id"], str)
-    assert len(body["job_id"]) > 0
+            body = resp.json()
+            assert "job_id" in body, f"Response missing job_id: {body}"
+            job_id = body["job_id"]
+            assert body.get("status") == "awaiting_confirmation", f"Expected status 'awaiting_confirmation', got {body.get('status')}"
+            assert isinstance(body["job_id"], str)
+            assert len(body["job_id"]) > 0
+        finally:
+            # Clean up regardless of outcome. Cancel is idempotent and
+            # non-destructive (the brief is preserved), so this is safe even if
+            # the assertions above never ran.
+            if job_id:
+                try:
+                    await live.post(f"/jobs/{job_id}/cancel", json={})
+                except Exception:  # never let cleanup mask the real failure
+                    pass
