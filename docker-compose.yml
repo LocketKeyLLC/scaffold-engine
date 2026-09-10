@@ -159,7 +159,7 @@ services:
     networks:
       - ai-network
   searxng:
-    image: searxng/searxng@sha256:b6db575bb821d35279474090270db9e53e92432a66d19e7da51c0ef1b5ddb806
+    image: searxng/searxng@sha256:3547509b419cd6a67333d6d68bd1ffad8d46d3669d82e7a7bd538f7b45827432
     container_name: searxng
     logging: *default-logging
     mem_limit: 256m
@@ -167,6 +167,20 @@ services:
     # via the bridge (`http://searxng:8080`).
     ports:
       - "127.0.0.1:8888:8080"
+    # §17.1005 — optional egress proxy. SearXNG's HTTP client (httpx) honours
+    # the standard proxy env vars, so pointing these at a VPN/proxy endpoint
+    # routes every ENGINE request through it while leaving the rest of the
+    # stack on the host network. Empty by default = direct, unchanged.
+    #
+    # Why you might: engines block by source IP. Upgrading the image recovered
+    # brave/startpage/google (§17.1005 — they were never IP-banned, the
+    # six-month-old engine implementations were broken), but `mojeek` and
+    # `qwant` still 403 this host on a plain browser request, which is a real
+    # IP-level refusal that only a different egress address can fix.
+    environment:
+      HTTP_PROXY: '${SEARXNG_EGRESS_PROXY:-}'
+      HTTPS_PROXY: '${SEARXNG_EGRESS_PROXY:-}'
+      NO_PROXY: 'localhost,127.0.0.1,searxng'
     # 977 is the searxng user baked into the upstream image; the host
     # config dir (settings.yml) must be owned by uid/gid 977 to be readable.
     user: "977:977"

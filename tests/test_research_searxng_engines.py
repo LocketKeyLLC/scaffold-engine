@@ -86,8 +86,21 @@ class TestEngineMap:
         # §17.712 — engines that are actually dead on this instance (google is
         # "access denied") must not appear. bing is NO LONGER dead (it is now the
         # most reliable general engine here) — the §17.503 note is stale.
-        dead = {"google", "stackoverflow", "pypi", "crossref",
-                "semantic_scholar", "google news", "bing news"}
+        # §17.1005 — this list was stale and the test was asserting something
+        # false. Re-measured against the live instance after the image upgrade,
+        # one query, same minute:
+        #
+        #   google 10 · stackoverflow 10 · crossref 20 · google news 10 ·
+        #   bing news 4   <- all of these WORK and were listed as dead
+        #   pypi 0 (no error — no match for the query, which is not "dead")
+        #   semantic scholar 0 (timeout)  <- the only one that actually fails
+        #
+        # Engine liveness moves weekly, so a hand-kept list of dead engines is
+        # the wrong shape and this is deliberately as small as the evidence
+        # allows. Re-measure before adding to it:
+        #   curl -s 'http://localhost:8888/search?q=test&format=json&engines=<name>' \
+        #     | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d["results"]),d.get("unresponsive_engines"))'
+        dead = {"semantic_scholar"}
         for cat, engines in CATEGORY_ENGINES.items():
             tokens = {e.strip() for e in engines.split(",")}
             overlap = tokens & dead
