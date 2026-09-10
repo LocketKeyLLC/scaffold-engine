@@ -93,7 +93,20 @@ export default function compose(container) {
       el(
         "div",
         { class: "starter-chips compose-starters" },
+        // §17.1007 — the four chips seeded a sentence fragment, which anchored
+        // operators to fragment-sized ideas: people calibrate their level of
+        // detail to whatever example is in front of them. The first chip is now
+        // a COMPLETE brief — real hardware, real constraint, real deliverable —
+        // so the anchor points at the specification level the engine actually
+        // rewards. The rest keep their fragments for operators who just want a
+        // running start.
         ...[
+          [
+            "See a full example",
+            "Deploy a Prometheus + Grafana monitoring stack on my Proxmox host (Debian 12, 32GB RAM, already running 4 LXC containers). " +
+              "It should scrape node-exporter on three existing VMs, keep 30 days of metrics, and come up automatically after a host reboot. " +
+              "I want a runbook I can follow myself plus the compose file — I have shell access but I'm not confident with systemd units.",
+          ],
           ["CLI tool", "A command-line tool that "],
           ["Home-lab service", "Deploy and configure "],
           ["Data pipeline", "A pipeline that ingests "],
@@ -111,6 +124,16 @@ export default function compose(container) {
       el("div", {
         class: "compose-hint faint",
         text: "Auto-detect works for most ideas — override only if you know the target domain.",
+      }),
+      // §17.1007 — a thin idea and a thick one cost the same keystrokes HERE
+      // and diverge by twenty minutes LATER, and nothing on this screen said
+      // so. This is effort justification, and it is honest: what you leave out
+      // is exactly what the approval gate comes back and asks you for.
+      el("p", {
+        class: "compose-cost dim",
+        text:
+          "Detail pays for itself: what you leave out here is what the engine stops and asks you at the approval gate. " +
+          "Hardware, constraints, what you already have running, and what you want out the other end are the four that matter most.",
       }),
       el("div", { class: "compose-actions row" }, submit, status)
     )

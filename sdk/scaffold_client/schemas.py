@@ -599,6 +599,19 @@ class ConfirmInput(BaseModel):
     model_overrides: dict | None = None
 
 
+class ReviseInput(BaseModel):
+    """§17.1007 — body for POST /ideate/revise: send a brief back for another
+    refinement pass instead of approving it or cancelling the job.
+
+    `notes` is what the operator wants changed. It is REQUIRED: a revise with
+    nothing to act on would burn a full Phase-1 pass to produce the same brief.
+    """
+    model_config = ConfigDict(protected_namespaces=())
+    job_id: str
+    notes: str = Field(min_length=1, max_length=MAX_LLM_TEXT_LEN)
+    model_overrides: dict | None = None
+
+
 class AdvanceInput(BaseModel):
     """§17.855 (audit F6) — body for POST /jobs/{id}/advance (job_id is the path
     param). The server-side auto-chain: confirm(research+compile) → plan(DAG) →

@@ -96,6 +96,43 @@ function dedupeQuestions(qs) {
   return kept;
 }
 
+// §17.1007 — confidence, bound to a consequence.
+//
+// A bare "78%" invites over-reliance from confident operators and dismissal
+// from sceptical ones, because nothing on screen says what 78 licenses that 45
+// would not. Three bands, each naming the action it recommends. The thresholds
+// are deliberately coarse: the underlying number is a model's self-report, and
+// implying more resolution than that would be its own kind of lie.
+const CONF_BANDS = [
+  { min: 0.75, key: "high", label: "high confidence" },
+  { min: 0.45, key: "med", label: "moderate confidence" },
+  { min: 0, key: "low", label: "low confidence" },
+];
+
+function confidenceBand(c) {
+  const v = typeof c === "number" ? c : 0;
+  return CONF_BANDS.find((b) => v >= b.min) || CONF_BANDS[CONF_BANDS.length - 1];
+}
+
+const CONF_ADVICE = {
+  high: "The engine has a clear picture of this one. Answering the questions below will still sharpen it, but approving as-is is reasonable.",
+  med: "Worth answering the questions below before you approve — at this confidence they are load-bearing, not optional polish.",
+  low: "The engine is unsure what you want. Anything you leave blank here becomes a decision point that pauses the run later to ask you — answering now is what prevents that.",
+};
+
+function confidenceAdvice(c) {
+  if (typeof c !== "number") return null;
+  const band = confidenceBand(c);
+  return el(
+    "div",
+    { class: `card card-pad conf-advice conf-${band.key}` },
+    el("div", { class: "conf-advice-head" },
+      el("span", { class: "conf-pct mono", text: `${Math.round(c * 100)}%` }),
+      el("span", { class: "conf-band-label", text: band.label })),
+    el("p", { class: "conf-advice-body", text: CONF_ADVICE[band.key] })
+  );
+}
+
 // Per-question answer fields (operator: "what information it needs, needs to
 // be more defined... to assist the user in knowing what to give"). Each
 // question is answerable in place; blank means "let research / the plan
@@ -118,16 +155,31 @@ function buildQuestionsCard(brief, feas, onAnyInput) {
     placeholder: "Anything else the engine should know or do differently? (optional)",
     onInput: onAnyInput,
   });
+  // §17.1007 — a flat list of eight gets the first two answered carefully, the
+  // next two skimmed, and the rest abandoned — and a skipped question is
+  // indistinguishable from a deliberate blank. `clarifications_needed` (the
+  // engine's own explicit asks) already sorts ahead of `ambiguities` in the
+  // dedupe above, so the first three ARE the highest-value three: show those,
+  // and put the tail one click away instead of in the way.
+  const LEAD = 3;
+  const item = ({ q, input }) =>
+    el("li", { class: "qa-item" }, el("div", { class: "qa-question", text: q }), input);
+  const lead = pairs.slice(0, LEAD);
+  const tail = pairs.slice(LEAD);
   const node = el(
     "div",
     { class: "card card-pad brief-block questions-card" },
     el("h3", { class: "brief-heading", text: `The engine needs your input — ${qs.length} open question${qs.length === 1 ? "" : "s"}` }),
     el("p", { class: "dim questions-hint", text: "Answer any of these in plain words. Blank ones are fine — research fills the gaps, or they become explicit decision points that pause the run and ask you." }),
-    el(
-      "ol",
-      { class: "questions-list qa-list" },
-      ...pairs.map(({ q, input }) => el("li", { class: "qa-item" }, el("div", { class: "qa-question", text: q }), input))
-    ),
+    el("ol", { class: "questions-list qa-list" }, ...lead.map(item)),
+    tail.length
+      ? el(
+          "details",
+          { class: "brief-details questions-more" },
+          el("summary", {}, `${tail.length} more question${tail.length === 1 ? "" : "s"} — lower impact, answer if you know`),
+          el("ol", { class: "questions-list qa-list", start: String(LEAD + 1) }, ...tail.map(item))
+        )
+      : null,
     extra
   );
   const collect = () => {
@@ -137,7 +189,12 @@ function buildQuestionsCard(brief, feas, onAnyInput) {
     const note = extra.value.trim();
     return [...answered, note].filter(Boolean).join("\n\n") || null;
   };
-  return { node, collect };
+  // §17.1007 — `note()` exposes JUST the free-form box, so "Send back for
+  // changes" can carry over a correction the operator already typed there
+  // instead of making them write it twice. `collect()` (Q/A pairs + note) is
+  // still what the approve path sends as feedback.
+  const note = () => extra.value.trim();
+  return { node, collect, note };
 }
 
 // ── List (no jobId) ──────────────────────────────────────────────────
@@ -244,9 +301,72 @@ export function renderApprovalDetail(container, jobId) {
   // §17.895 — flipping the sidebar toggle while the gate is open must not
   // leave the button describing the other mode's destination.
   const offExecMode = onExecModeChange(() => refreshApproveLabel());
-  const rejectBtn = el("button", { class: "btn btn-danger", text: "✕ Reject (cancel)", onClick: () => reject() });
+  // §17.1007 — the gate used to offer approve or reject-and-cancel, and the
+  // most common correct answer at a gate is neither: it is "not yet, change
+  // this". With that option missing and the only alternative painted in the
+  // error colour and named after a cancellation, loss aversion pushed
+  // operators into approving briefs they had doubts about. Cancel stays — it
+  // is just no longer the only way to say no, and no longer shouts.
+  const rejectBtn = el("button", { class: "btn btn-ghost btn-quiet-danger", text: "✕ Cancel this job", onClick: () => reject() });
+
+  const reviseNotes = el("textarea", {
+    class: "input revise-notes",
+    rows: "3",
+    placeholder: "What should change? e.g. \u201cIt assumed Docker — this host runs LXC only\u201d or \u201cdrop the alerting scope, just metrics for now\u201d",
+  });
+  const reviseSend = el("button", { class: "btn btn-primary btn-sm", text: "↩ Send it back", onClick: () => revise() });
+  const reviseBox = el(
+    "div",
+    { class: "card card-pad revise-box hidden" },
+    el("div", { class: "revise-title", text: "Send this brief back for another pass" }),
+    el("p", { class: "dim revise-hint", text: "The job keeps its id and history — it goes back through the same refinement it just came out of, with your correction folded in. Nothing is thrown away." }),
+    reviseNotes,
+    el("div", { class: "row revise-actions" },
+      reviseSend,
+      el("button", { class: "btn btn-ghost btn-sm", text: "Never mind", onClick: () => reviseBox.classList.add("hidden") }))
+  );
+  const reviseBtn = el("button", {
+    class: "btn",
+    text: "↩ Send back for changes",
+    title: "Not ready to approve? Say what is wrong and the engine refines it again — the job is not cancelled.",
+    onClick: () => {
+      reviseBox.classList.remove("hidden");
+      // Carry over anything already typed in the gate's free-form note: the
+      // operator who wrote "this assumed Docker" there meant exactly this.
+      const carried = qa && qa.note ? qa.note() : "";
+      if (carried && !reviseNotes.value.trim()) reviseNotes.value = carried;
+      reviseNotes.focus();
+    },
+  });
 
   let waitingShown = false; // dedupe re-renders while polling the waiting state
+
+  // §17.1007 — elapsed-vs-expected for the refining wait. Lives outside the
+  // render so the 4s poll can update it in place without rebuilding the panel
+  // (which is what `waitingShown` exists to prevent).
+  const waitMeta = el("div", { class: "wait-meta" });
+  const REFINE_TYPICAL_MAX_MIN = 9;
+
+  function renderWaitMeta(job) {
+    const startedAt = Date.parse(job.created_at || job.updated_at || "");
+    if (!startedAt) {
+      mount(waitMeta, el("span", { class: "faint", text: "Usually 1–9 min. This page updates itself." }));
+      return;
+    }
+    const mins = Math.max(0, Math.floor((Date.now() - startedAt) / 60000));
+    const over = mins > REFINE_TYPICAL_MAX_MIN;
+    mount(
+      waitMeta,
+      el("span", { class: "wait-elapsed mono", text: `${mins}m elapsed` }),
+      el("span", { class: over ? "wait-expect warn" : "wait-expect faint",
+        text: over
+          // Past the window, keep being honest rather than repeating a promise
+          // the run has already broken.
+          ? `· longer than the usual 1–9 min. Still running — CPU inference times vary a lot with model and load.`
+          : `· usually 1–9 min` }),
+      el("span", { class: "faint", text: "· this page updates itself" })
+    );
+  }
 
   function startWaitPoll() {
     if (pollTimer) return;
@@ -280,9 +400,14 @@ export function renderApprovalDetail(container, jobId) {
                 "span",
                 { class: feas.feasible ? "tag tag-ok" : "tag tag-err" },
                 feas.feasible ? "✓ Feasible" : "✕ Not feasible",
-                feas.confidence != null ? ` · ${Math.round(feas.confidence * 100)}% confidence` : ""
+                feas.confidence != null ? ` · ${confidenceBand(feas.confidence).label}` : ""
               )
             : null;
+        // §17.1007 — the raw scalar told the operator nothing they could act
+        // on: the same approve block was offered at 30% as at 95%. The band
+        // names what to DO, which is the only form of a confidence number a
+        // non-specialist can calibrate against.
+        const advice = confidenceAdvice(feas.confidence);
         mount(
           outlet,
           fg,
@@ -295,6 +420,7 @@ export function renderApprovalDetail(container, jobId) {
             brief.complexity ? el("span", { class: "tag", text: `complexity: ${brief.complexity}` }) : null,
             job.deliverable_kind ? el("span", { class: "tag", text: job.deliverable_kind }) : null
           ),
+          advice, // §17.1007 — what this confidence means for what you do next
           // 1. What the engine understood + its assessment — prose first.
           (brief.description || feas.summary)
             ? el(
@@ -310,7 +436,10 @@ export function renderApprovalDetail(container, jobId) {
           // 3. Decision controls directly after the questions — answer, approve,
           // no scrolling past the reference material to act.
           progress,
-          el("div", { class: "drawer-actions approval-actions" }, approveBtn, rejectBtn, autoRunLabel),
+          // §17.1007 — three ways forward, weighted: approve leads, "send back"
+          // is the ordinary second answer, cancel is the quiet last resort.
+          el("div", { class: "drawer-actions approval-actions" }, approveBtn, reviseBtn, autoRunLabel, el("span", { class: "spacer" }), rejectBtn),
+          reviseBox,
           // 4. Reference material last, collapsed with counts.
           el(
             "div",
@@ -342,13 +471,25 @@ export function renderApprovalDetail(container, jobId) {
               "div",
               { class: "approval-progress" },
               el("span", { class: "spin" }),
-              el("span", { class: "progress-msg", text: "Refining your idea — the engine is assessing feasibility and will list the questions it needs YOU to answer. Usually 1–9 min; this page updates itself." })
+              el("span", { class: "progress-msg", text: "Refining your idea — the engine is assessing feasibility and will list the questions it needs YOU to answer." })
             ),
+            // §17.1007 — two things the bare spinner left the operator guessing
+            // at. First, elapsed-vs-expected: naming "1–9 min" and then showing
+            // nothing meant that at minute twelve the operator could not tell
+            // whether they were inside the promise or past it, which silently
+            // converts a bounded wait back into an unbounded one. Second, and
+            // more important: this wait is SAFE TO LEAVE — refinement runs
+            // server-side and the job persists. The theater's run is not, and
+            // the console never said which was which, so operators learned to
+            // sit and stare at both.
+            waitMeta,
+            el("p", { class: "dim wait-leave" }, "Safe to close this tab — the job keeps going, and it'll be here when you come back."),
             job.input_text ? el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Original request" }), el("div", { class: "md", html: mdToHtml(job.input_text) })) : null,
             el("div", { class: "drawer-actions" }, rejectBtn)
           );
           waitingShown = true;
         }
+        renderWaitMeta(job);
         startWaitPoll();
         return;
       }
@@ -390,6 +531,7 @@ export function renderApprovalDetail(container, jobId) {
     busy = on;
     approveBtn.disabled = on;
     rejectBtn.disabled = on;
+    reviseBtn.disabled = on; // §17.1007
   }
 
   function showProgress(msg) {
@@ -495,6 +637,38 @@ export function renderApprovalDetail(container, jobId) {
       if (pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
+      }
+    }
+  }
+
+  async function revise() {
+    if (busy) return;
+    const notes = reviseNotes.value.trim();
+    if (!notes) {
+      toast("Say what should change — the engine needs something to act on.", "err");
+      reviseNotes.focus();
+      return;
+    }
+    setBusy(true);
+    reviseSend.disabled = true;
+    showProgress("Sending it back — refining again with your notes… (usually 1–9 min)");
+    try {
+      await api.post("/ideate/revise", { job_id: jobId, notes });
+      if (disposed) return;
+      toast("Sent back — the engine is refining it again with your correction.", "ok");
+      reviseBox.classList.add("hidden");
+      reviseNotes.value = "";
+      waitingShown = false; // force the wait panel to render over this gate
+      await load();
+    } catch (e) {
+      if (!disposed) {
+        toast(`Could not send it back: ${e.detail || e.message}`, "err");
+        progress.classList.add("hidden");
+      }
+    } finally {
+      if (!disposed) {
+        setBusy(false);
+        reviseSend.disabled = false;
       }
     }
   }

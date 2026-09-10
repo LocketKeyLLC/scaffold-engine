@@ -582,6 +582,13 @@ async def lifespan(app: FastAPI):
             await _mcp_ctx.__aexit__(None, None, None)
         except Exception as exc:
             logger.warning('event="mcp_session_manager_exit_failed" error=%s', exc)
+    # §17.1007 — stop every detached run so each generator's finally moves its
+    # job out of `running` here, instead of leaving it for the stale-job reaper.
+    try:
+        from app.modules.run_broker import shutdown_all
+        await shutdown_all()
+    except Exception as exc:
+        logger.warning('event="run_broker_shutdown_failed" error=%s', exc)
     _cleanup_task.cancel()
     try:
         await _cleanup_task

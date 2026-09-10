@@ -209,7 +209,19 @@ export function renderChat(container, sessionId) {
     });
     const st = res?.status;
     if (st === "committed") {
-      toast(`✓ Step ${nk} committed.`, "ok");
+      // §17.1007 — name what was ACCOMPLISHED, not just that a counter moved.
+      // `recap_done` is the §17.738 recap's DONE list, distilled from the whole
+      // step transcript server-side and, until now, read by nothing on this
+      // path. Absent on short steps that never built a recap — then this falls
+      // back to the plain toast rather than inventing an achievement.
+      const done = Array.isArray(res.recap_done) ? res.recap_done : [];
+      if (done.length) {
+        appendBubble("assistant", "committed",
+          `✓ **Step ${nk} closed.** What you got done:\n\n` +
+          done.map((d) => `- ${d}`).join("\n"));
+      } else {
+        toast(`✓ Step ${nk} committed.`, "ok");
+      }
       await load();
       if (session?.status !== "completed") await claimAndGuideNext();
       return true;
@@ -460,6 +472,36 @@ export function renderChat(container, sessionId) {
       + (sc.skipped || 0) + (sc.handed_off || 0);
     const totalN = Object.values(sc).reduce((a, b) => a + b, 0);
     const cur = steps.find((x) => x.node_key === nk);
+    // §17.1007 — the phase badge. `doneN/totalN` across a 41-step session is a
+    // gradient nobody can feel: 12→13 of 41 is perceptually the same as 13→14,
+    // so the effect that drives effort as a goal nears never engages. The
+    // server chunks the plan by its dependency structure (dag_phases.py,
+    // compute-on-read) and this renders the near summit — six times a session
+    // instead of once. Absent on short plans, where the plain total is already
+    // legible and phases would be ceremony.
+    const isTerminal = (st) => !["pending", "presented", "awaiting_input"].includes(st);
+    let phaseTag = null;
+    let stopHint = null;
+    if (cur && cur.phase && cur.phase_total > 1) {
+      const inPhase = steps.filter((x) => x.phase === cur.phase);
+      const donePhase = inPhase.filter((x) => isTerminal(x.step_status)).length;
+      phaseTag = el("span", {
+        class: "tag phase-tag",
+        title: `Phases follow the plan's dependencies — a boundary means the next group could not start until this one finished.`,
+        text: `Phase ${cur.phase} of ${cur.phase_total} · step ${cur.phase_pos} of ${cur.phase_size}`,
+      });
+      // §17.1007 — a sanctioned place to stop. A session runs until the
+      // operator quits mid-step, and an unfinished step stays mentally open:
+      // quitting between phases feels like a pause, quitting mid-step feels
+      // like failing, and nothing in the console told them which was which.
+      // Only offered where it is TRUE — the last step of a phase with the rest
+      // of that phase already behind them.
+      if (cur.phase_pos === cur.phase_size && donePhase >= inPhase.length - 1
+          && cur.phase < cur.phase_total) {
+        stopHint = el("div", { class: "step-hero-stop" },
+          `⏸ Finish this one and Phase ${cur.phase} is done — a clean place to stop. Your progress is saved; ✦ pick it up here whenever.`);
+      }
+    }
     stepHero.classList.remove("hidden");
     mount(
       stepHero,
@@ -470,8 +512,10 @@ export function renderChat(container, sessionId) {
               (cur?.title || session.current_node_title) ? ` — ${cur?.title || session.current_node_title}` : "")
           : el("span", { class: "step-hero-title dim", text: session.status === "completed" ? "Session complete 🎉" : "No step claimed — press Next step to begin" }),
         el("span", { class: "spacer" }),
-        totalN ? el("span", { class: "tag", text: `${doneN}/${totalN} steps done` }) : null,
+        phaseTag,
+        totalN ? el("span", { class: phaseTag ? "tag faint" : "tag", text: `${doneN}/${totalN} overall` }) : null,
         statusBadge(session.status)),
+      stopHint,
       steps.length
         ? el("div", { class: "row row-wrap step-hero-nav" },
             el("span", { class: "dim small", text: "Jump to:" }),

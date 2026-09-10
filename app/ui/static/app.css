@@ -1389,3 +1389,109 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 .step-picker:hover { border-color: var(--border-strong); }
 .step-picker:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .step-picker option:disabled { color: var(--text-faint); }
+
+/* ── §17.1007 — operator-psychology pass ──────────────────────────────
+   Seven changes from the design review. NO new colour values: every rule
+   below draws from the tokens already declared at the top of this file. */
+
+/* Why a node failed. `failure_reason` has been on the /exec/status wire
+   since §17.450 and the SPA never read it — this is where it lands. */
+.node-reason {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--err);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-3);
+}
+.node-reason-label {
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--err);
+  margin-bottom: var(--sp-1);
+}
+.node-reason-text { color: var(--text); font-size: var(--fs-sm); white-space: pre-wrap; word-break: break-word; }
+
+/* Endings get equal weight: a failed run terminates on a card, not on a
+   red line in a scrolling log. */
+.summary-failed { border-color: rgba(248, 81, 73, 0.4); }
+.summary-failed .summary-title { color: var(--err); }
+.summary-partial { border-color: rgba(210, 153, 34, 0.4); }
+.summary-partial .summary-title { color: var(--warn); }
+.summary-where { font-size: var(--fs-sm); color: var(--text-dim); }
+.summary-actions { gap: var(--sp-2); }
+
+/* Confidence, bound to a consequence rather than shown as a bare scalar. */
+.conf-advice { display: flex; flex-direction: column; gap: var(--sp-2); border-left: 3px solid var(--border-strong); }
+.conf-advice-head { display: flex; align-items: baseline; gap: var(--sp-2); }
+.conf-pct { font-size: var(--fs-xl); font-weight: var(--fw-bold); font-variant-numeric: tabular-nums; }
+.conf-band-label {
+  font-family: var(--mono);
+  font-size: var(--fs-2xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.conf-advice-body { margin: 0; color: var(--text-dim); font-size: var(--fs-sm); }
+.conf-high { border-left-color: var(--ok); }
+.conf-high .conf-pct { color: var(--ok); }
+.conf-med { border-left-color: var(--warn); }
+.conf-med .conf-pct { color: var(--warn); }
+.conf-low { border-left-color: var(--err); }
+.conf-low .conf-pct { color: var(--err); }
+
+/* The refining wait: bounded, and explicitly safe to walk away from. */
+.wait-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; font-size: var(--fs-sm); margin-top: var(--sp-2); }
+.wait-elapsed { color: var(--text); font-variant-numeric: tabular-nums; }
+.wait-expect.faint { color: var(--text-faint); }
+.wait-expect.warn { color: var(--warn); }
+.wait-leave { margin: var(--sp-2) 0 0; font-size: var(--fs-sm); }
+
+/* Gate questions: three lead, the tail is one click away. */
+.questions-more { margin-top: var(--sp-3); }
+.questions-more .qa-list { margin-top: var(--sp-3); }
+
+/* What vagueness costs, said where it is being paid. */
+.compose-cost { margin: var(--sp-2) 0 0; font-size: var(--fs-sm); max-width: 68ch; }
+
+/* Violet carried two unrelated meanings: --accent (#a78bfa) means "you can
+   act on this", --purple (#bc8cff) means "the engine is busy, hands off".
+   Fourteen points apart, indistinguishable at badge size. Rather than change
+   either hue, separate them by FORM — interactive stays a solid fill, and
+   engine-busy states get a breathing dot, which reads as machine activity
+   rather than as an affordance. The global prefers-reduced-motion rule above
+   already neutralises this. */
+.badge.st-pending::before,
+.badge.st-refining::before,
+.badge.st-planning::before,
+.badge.st-researching::before,
+.badge.st-aggregating::before,
+.badge.st-active::before {
+  animation: busydot 1.6s ease-in-out infinite;
+}
+@keyframes busydot { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+/* §17.1007b — the gate's third verb. Cancel is still available and still red
+   in its text, but it no longer wears a filled danger button as the ONLY
+   alternative to approving. */
+.btn-quiet-danger { color: var(--err); }
+.btn-quiet-danger:hover { border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.08); }
+.revise-box { margin-top: var(--sp-3); border-left: 3px solid var(--accent); display: flex; flex-direction: column; gap: var(--sp-2); }
+.revise-title { font-weight: var(--fw-semi); }
+.revise-hint { margin: 0; font-size: var(--fs-sm); max-width: 72ch; }
+.revise-notes { width: 100%; resize: vertical; }
+.revise-actions { gap: var(--sp-2); }
+
+/* §17.1007c — walkthrough phases + the sanctioned stopping point. */
+.phase-tag { color: var(--accent); border-color: var(--accent-dim); background: var(--accent-soft); }
+.step-hero-stop {
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-left: 3px solid var(--ok);
+  background: rgba(63, 185, 80, 0.08);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}

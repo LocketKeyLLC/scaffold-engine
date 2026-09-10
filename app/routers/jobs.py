@@ -172,6 +172,16 @@ async def cancel_job_endpoint(
         parsed_id = UUID(job_id)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+    # §17.1007 — with the run detached from its SSE response (run_broker), a
+    # closed tab no longer stops execution, so cancel has to actually stop it.
+    # Cancelling the task lets execute_all_nodes' own finally settle the job
+    # status; the DB flip below is then the authority for everything else
+    # (and still correct when there is no in-flight task to cancel).
+    try:
+        from app.modules import run_broker
+        await run_broker.cancel(job_id)
+    except Exception as exc:  # a cancel must never 500 on the broker
+        logger.warning('event="run_broker_cancel_failed" job=%s error=%s', job_id, exc)
 
     # §17.810 — ownership gate (404 for non-owner, matching the not-found shape).
     await assert_visible(db, principal, str(parsed_id), detail=f"job not found: {job_id}")

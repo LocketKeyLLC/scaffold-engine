@@ -4022,6 +4022,39 @@
         "title": "ResumeJobInput",
         "type": "object"
       },
+      "ReviseInput": {
+        "description": "§17.1007 — body for POST /ideate/revise: send a brief back for another\nrefinement pass instead of approving it or cancelling the job.\n\n`notes` is what the operator wants changed. It is REQUIRED: a revise with\nnothing to act on would burn a full Phase-1 pass to produce the same brief.",
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "model_overrides": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Overrides"
+          },
+          "notes": {
+            "maxLength": 50000,
+            "minLength": 1,
+            "title": "Notes",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "notes"
+        ],
+        "title": "ReviseInput",
+        "type": "object"
+      },
       "RoleModelInput": {
         "properties": {
           "model": {
@@ -8123,6 +8156,48 @@
           }
         ],
         "summary": "Ideate Confirm Endpoint"
+      }
+    },
+    "/ideate/revise": {
+      "post": {
+        "description": "§17.1007 — send a brief back for another refinement pass.\n\nThe approval gate offered exactly two verbs: approve, or reject-and-cancel.\nBut the most common correct answer at a gate is neither — it is *not yet,\nchange this*. With that option missing and the only alternative painted in\nthe error colour and labelled with a cancellation, loss aversion did the\nrest: operators approved briefs they had doubts about, because the only way\nout read as throwing the work away.\n\nThis is that third path, and it is genuinely non-destructive: the job keeps\nits id, its history and its ownership, and goes back through the SAME\nPhase-1 machinery that produced the brief in the first place\n(``spawn_phase1_background``, which reuses an existing row —\n``idea_refinement.refine_idea`` skips its INSERT when handed a ``job_id``).\n\nThe operator's notes are APPENDED to ``input_text`` rather than replacing\nit, for two reasons: the refinement pass needs the original intent as well\nas the correction, and a second revision must build on the first instead of\nsilently discarding it. The gate's \"Original request\" panel then shows the\naccumulated ask, which is the truth about what the engine was told.\n\nStatus codes:\n  - 200 ``{job_id, status: \"refining\", revisions: n}`` on success\n  - 404 if no such job (or not visible to this principal)\n  - 409 if the job is not at ``awaiting_confirmation`` — revising a job\n    that is already researching would race Phase 2 for the same row\n  - 422 on malformed UUID or empty notes (schema-enforced)",
+        "operationId": "ideate_revise_endpoint_ideate_revise_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviseInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Ideate Revise Endpoint"
       }
     },
     "/ideate/start": {

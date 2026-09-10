@@ -9,6 +9,7 @@ import { statusBadge, loading, errorPanel, makeClickable } from "../components.j
 import { flowGuide } from "./flow_guide.js";
 import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
 import { toast } from "../components.js";
+import * as notify from "../notify.js";
 
 const TERMINAL = new Set(["pipeline_complete", "execution_failed", "error", "budget_exhausted", "awaiting_assist"]);
 
@@ -51,13 +52,12 @@ export function renderTheater(container, jobId, ctx = {}) {
   });
   const statusPill = el("span", {});
 
-  // §17.854 (audit G2) — a live run dies with the SSE stream, so the hub is
-  // told to confirm on tab/back navigation (ctx.setNavGuard) and the browser
-  // warns on tab-close/reload.
-  const GUARD_MSG = "A run is streaming. Leaving this page STOPS it. Leave anyway?";
-  function beforeUnload(e) {
-    if (running) { e.preventDefault(); e.returnValue = ""; return ""; }
-  }
+  // §17.1007 — the §17.854 G2 nav guard and beforeunload warning are GONE,
+  // because the thing they warned about no longer happens: the run is a
+  // detached background task (app/modules/run_broker.py) and this stream is
+  // only a subscriber to it. Closing the tab drops the subscriber. Warning an
+  // operator away from a door that is no longer a trapdoor is worse than not
+  // warning them — it teaches them the console's warnings are noise.
 
   const header = el(
     "div",
@@ -104,7 +104,9 @@ export function renderTheater(container, jobId, ctx = {}) {
   );
   // §17.850 — flow guide on the Run surface too (carry-through sweep).
   const flowSlot = el("div", {});
+  let jobTitle = ""; // §17.1007 — names the job in the notification, not a UUID
   api.get(`/jobs/${jobId}`).then((job) => {
+    jobTitle = job.title || "";
     const fg = flowGuide(job, { here: `#/job/${jobId}/run` });
     if (fg) mount(flowSlot, fg);
   }).catch(() => {});
@@ -114,6 +116,20 @@ export function renderTheater(container, jobId, ctx = {}) {
   function setStatusPill(status) {
     lastJobStatus = status;
     mount(statusPill, statusBadge(status));
+  }
+
+  // §17.1007 — call the operator back when a run ends while they are looking
+  // elsewhere. announce() is a no-op on a focused tab (they watched it happen)
+  // and dedupes per transition, so a reconnect cannot re-announce.
+  function announceTerminal(label, body) {
+    notify.announce({
+      key: `${jobId}:theater:${label}`,
+      count: 1,
+      label,
+      title: `${jobTitle || "Job"} — ${label}`,
+      body,
+      href: `#/job/${jobId}/run`,
+    });
   }
 
   function log(ev, text, cls) {
@@ -134,6 +150,7 @@ export function renderTheater(container, jobId, ctx = {}) {
           el("span", { class: "tn-title", text: n.title || "" }),
           statusBadge(n.status)
         );
+        if (n.status === "failed" && n.reason) row.title = n.reason; // §17.1007
         makeClickable(row, () => showNode(key),  // §17.854 G6
           { label: `View node ${key}` });
         return row;
@@ -147,7 +164,22 @@ export function renderTheater(container, jobId, ctx = {}) {
     currentKey = key;
     stageTitle.classList.remove("dim");
     mount(stageTitle, el("span", { class: "mono", text: key }), el("span", { text: " · " + (n.title || "") }), statusBadge(n.status));
-    mount(stageBody, n.output ? el("div", { class: "md", html: mdToHtml(n.output) }) : el("div", { class: "dim", text: n.status === "running" ? "Running…" : "No output yet." }));
+    // §17.1007 — on a failed node the REASON leads. The partial output that
+    // tripped the verifier is still below it, but the operator's actual
+    // question ("why did this stop?") is answered before they have to read it.
+    const reasonPanel =
+      n.status === "failed" && n.reason
+        ? el("div", { class: "node-reason" },
+            el("div", { class: "node-reason-label", text: "Why it failed" }),
+            el("div", { class: "node-reason-text", text: n.reason }))
+        : null;
+    mount(
+      stageBody,
+      reasonPanel,
+      n.output
+        ? el("div", { class: "md", html: mdToHtml(n.output) })
+        : el("div", { class: "dim", text: n.status === "running" ? "Running…" : "No output yet." })
+    );
     renderNodes();
   }
 
@@ -173,9 +205,38 @@ export function renderTheater(container, jobId, ctx = {}) {
       if (disposed) return;
       setStatusPill(data.job_status);
       nodeState.clear();
-      for (const n of data.nodes || []) nodeState.set(n.node_key, { status: n.status, title: n.title, tool: n.tool, order: n.execution_order, output: "" });
+      // §17.1007 — `failure_reason` has been in this exact payload since
+      // §17.450 (execution_handler.py:153, from dag_nodes.last_verification_reason)
+      // and the SPA read every OTHER field of it. The CLI renders it
+      // (cli/scaffold_cli/main.py:3372); the console dropped it, so "why did
+      // this fail" meant grepping Postgres.
+      for (const n of data.nodes || [])
+        nodeState.set(n.node_key, {
+          status: n.status, title: n.title, tool: n.tool,
+          order: n.execution_order, output: "", reason: n.failure_reason || "",
+        });
       renderNodes();
       setProgress(data.progress);
+      // §17.1007 — a run is in flight for this job RIGHT NOW: attach to it.
+      //
+      // This is the payoff of detaching. Open the Run tab on a job that is
+      // already executing and you now see it live, whether you started it, or
+      // closed the tab twenty minutes ago, or are on a different machine.
+      //
+      // Gated on `detached_running`, NOT on job_status === "running": after a
+      // restart the row still says running while no task exists, and attaching
+      // there would silently START execution — an action nobody asked for on
+      // page load. When that is the case we offer the verb instead (below).
+      if (data.detached_running && !running) {
+        log("queued", "Attaching to the run already in progress…", "ok");
+        attachRun();
+      } else if (data.job_status === "running" && !running) {
+        // Row says running, no live task — the process restarted mid-run.
+        // Say so honestly and let the operator decide to pick it up.
+        log("warning",
+          "This job is marked running but nothing is executing — the engine restarted mid-run. Press ▶ to carry on with the remaining steps.",
+          "warn");
+      }
       // §17.818 (plan 5.5) — one-shot auto-run handoff from the approve gate.
       if (sessionStorage.getItem("scaffold_autorun") === jobId) {
         sessionStorage.removeItem("scaffold_autorun");
@@ -192,9 +253,22 @@ export function renderTheater(container, jobId, ctx = {}) {
     }
   }
 
-  function toggleRun() {
+  async function toggleRun() {
     if (running) {
-      if (abort) abort.abort();
+      // §17.1007 — stopping used to mean "disconnect and let the server infer
+      // it". Now that a disconnect is just a detach, stopping has to say so.
+      if (!confirm("Stop this run? Completed steps are kept; the rest stay pending.")) return;
+      runBtn.disabled = true;
+      runBtn.textContent = "Stopping…";
+      try {
+        await api.post(`/jobs/${jobId}/cancel`, {});
+        toast("Run stopped.", "ok");
+      } catch (e) {
+        toast(`Could not stop the run: ${e.detail || e.message}`, "err");
+      } finally {
+        runBtn.disabled = false;
+        if (abort) abort.abort(); // drop our subscriber; the run is already cancelled
+      }
       return;
     }
     // §17.853 — the global mode gate: in Assist mode, Run means "start the
@@ -207,17 +281,25 @@ export function renderTheater(container, jobId, ctx = {}) {
     startRun();
   }
 
-  async function startRun() {
+  // §17.1007 — attaching and starting issue the SAME request: run_broker.start()
+  // returns the in-flight run when there is one. The client does not need to
+  // know which happened, and must not race to guess.
+  function attachRun() { return startRun({ attach: true }); }
+
+  async function startRun({ attach = false } = {}) {
     running = true;
-    if (ctx.setNavGuard) ctx.setNavGuard(GUARD_MSG);  // §17.859 — hub tabs ask first
-    window.addEventListener("beforeunload", beforeUnload);  // §17.854 G2
     summaryEl.classList.add("hidden");
+    // §17.1007 — the contract, stated up front, and it is now the good one:
+    // the run outlives this tab. (An earlier pass in this same change told the
+    // operator the opposite, which was true right up until the run was
+    // detached server-side.)
+    log("queued", "This run keeps going if you close the tab — reopen it any time to watch. ⚑ Alerts will tell you when it ends.", "ok");
     runBtn.textContent = "■ Stop";
     runBtn.classList.remove("btn-primary");
     runBtn.classList.add("btn-danger");
     abort = new AbortController();
-    logEl.replaceChildren();
-    log("queued", "Starting execution…");
+    if (!attach) logEl.replaceChildren();
+    log("queued", attach ? "Attached — streaming live events." : "Starting execution…");
 
     // cancelled jobs resume; everything else runs execute/all
     const cancelled = lastJobStatus === "cancelled";
@@ -240,8 +322,6 @@ export function renderTheater(container, jobId, ctx = {}) {
 
   function finishRun() {
     running = false;
-    if (ctx.setNavGuard) ctx.setNavGuard(null);  // §17.859
-    window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     abort = null;
     currentKey = null;
     runBtn.textContent = "▶ Run all";
@@ -250,6 +330,15 @@ export function renderTheater(container, jobId, ctx = {}) {
     renderNodes();
     // refresh authoritative status
     api.get(`/exec/status/${jobId}`).then((d) => !disposed && setStatusPill(d.job_status)).catch(() => {});
+    // §17.1007 — and the flow guide with it: it was rendered once at mount, so
+    // after a run it kept describing the pre-run state ("Plan ready, nothing
+    // run yet") above a terminal success or failure card.
+    api.get(`/jobs/${jobId}`).then((job) => {
+      if (disposed) return;
+      jobTitle = job.title || jobTitle;
+      const fg = flowGuide(job, { here: `#/job/${jobId}/run` });
+      if (fg) mount(flowSlot, fg);
+    }).catch(() => {});
   }
 
   function ensureNode(key, patch) {
@@ -299,8 +388,11 @@ export function renderTheater(container, jobId, ctx = {}) {
         renderNodes();
         break;
       case "node_failed":
-        ensureNode(data.node_key, { status: "failed" });
+        // §17.1007 — keep the live reason, so a node that fails mid-stream
+        // explains itself without waiting for a /exec/status refetch.
+        ensureNode(data.node_key, { status: "failed", reason: data.error || data.message || "" });
         log("node_failed", `${data.node_key} failed — ${data.error || data.message || ""}`, "err");
+        if (data.node_key === currentKey) showNode(data.node_key); // §17.1007 — parity with node_done
         renderNodes();
         break;
       case "budget_exhausted":
@@ -308,13 +400,27 @@ export function renderTheater(container, jobId, ctx = {}) {
         break;
       case "awaiting_assist":
         log("awaiting_assist", "Parked — awaiting assist (human-in-the-loop).", "warn");
+        announceTerminal("waiting on you", "The run parked and needs you to drive the next step."); // §17.1007
         break;
-      case "pipeline_complete":
-        showSummary(data);
-        log("pipeline_complete", `Complete — ${data.passed ?? "?"}/${data.total_nodes ?? "?"} passed`, "ok");
+      case "pipeline_complete": {
+        const nFailed = Number(data.failed || 0);
+        // §17.1007 — a "complete" pipeline carrying failed nodes is a failure
+        // the operator has to act on; give it the failure card, not the trophy.
+        if (nFailed > 0) showFailure(data);
+        else showSummary(data);
+        log("pipeline_complete", `Complete — ${data.passed ?? "?"}/${data.total_nodes ?? "?"} passed`, nFailed ? "warn" : "ok");
+        announceTerminal(
+          nFailed ? "run finished with failures" : "run finished",
+          nFailed
+            ? `${nFailed} step${nFailed === 1 ? "" : "s"} failed. The Run tab has the reason and the recovery verbs.`
+            : "The run completed. The compiled output is ready."
+        );
         break;
+      }
       case "execution_failed":
         log("execution_failed", `Execution failed — ${data.error || data.message || ""}`, "err");
+        showFailure(data); // §17.1007 — endings get equal weight
+        announceTerminal("run failed", data.error || data.message || "The run stopped. Open the Run tab for the reason.");
         break;
       case "error":
         log("error", data.message || data.error || "Error", "err");
@@ -331,10 +437,13 @@ export function renderTheater(container, jobId, ctx = {}) {
 
   function showSummary(d) {
     summaryEl.classList.remove("hidden");
+    // §17.1007 — "Pipeline complete" over 3 passed / 2 failed was the card
+    // claiming a win the run did not have. The heading now reads the counts.
+    const failed = Number(d.failed || 0);
     mount(
       summaryEl,
-      el("div", { class: "card card-pad summary-card" },
-        el("div", { class: "summary-title", text: "Pipeline complete" }),
+      el("div", { class: "card card-pad summary-card" + (failed ? " summary-partial" : "") },
+        el("div", { class: "summary-title", text: failed ? `Finished with ${failed} failed step${failed === 1 ? "" : "s"}` : "Pipeline complete" }),
         el("div", { class: "summary-stats" },
           stat("Status", d.status || "completed"),
           stat("Nodes", fmtNum(d.total_nodes)),
@@ -349,13 +458,70 @@ export function renderTheater(container, jobId, ctx = {}) {
     return el("div", { class: "sum-item" }, el("div", { class: "sum-v", text: String(v) }), el("div", { class: "sum-k", text: k }));
   }
 
+  // §17.1007 — a failed run used to end on a red line in a scrolling event log
+  // while a successful one ended on a summary card. Endings are weighted
+  // heavily in memory, and that asymmetry made every failure feel like an
+  // abandonment. Failure now terminates with the same weight as success, and
+  // carries the two things the operator actually needs: the reason, and a verb.
+  function showFailure(d) {
+    const failedKeys = [...nodeState.entries()].filter(([, v]) => v.status === "failed");
+    const [firstKey, firstNode] = failedKeys[0] || [];
+    const reason =
+      (firstNode && firstNode.reason) || d.error || d.message || "No reason was recorded for this failure.";
+
+    const retryBtn = firstKey
+      ? el("button", { class: "btn btn-sm btn-primary", text: `↻ Retry ${firstKey}` })
+      : null;
+    if (retryBtn) {
+      retryBtn.addEventListener("click", async () => {
+        retryBtn.disabled = true;
+        retryBtn.textContent = "Resetting…";
+        try {
+          await api.post("/exec/retry", { job_id: jobId, node_key: firstKey });
+          toast(`${firstKey} reset to pending — press Run to pick it up.`, "ok");
+          summaryEl.classList.add("hidden");
+          await loadInitial();
+        } catch (e) {
+          toast(`Retry failed: ${e.detail || e.message}`, "err");
+          retryBtn.disabled = false;
+          retryBtn.textContent = `↻ Retry ${firstKey}`;
+        }
+      });
+    }
+
+    summaryEl.classList.remove("hidden");
+    mount(
+      summaryEl,
+      el("div", { class: "card card-pad summary-card summary-failed" },
+        el("div", { class: "summary-title", text: failedKeys.length > 1 ? `Run stopped — ${failedKeys.length} steps failed` : "Run stopped" }),
+        firstKey
+          ? el("div", { class: "summary-where" },
+              el("span", { class: "mono", text: firstKey }),
+              el("span", { text: ` · ${(firstNode && firstNode.title) || ""}` }))
+          : null,
+        el("div", { class: "node-reason" },
+          el("div", { class: "node-reason-label", text: "Why it failed" }),
+          el("div", { class: "node-reason-text", text: reason })),
+        el("div", { class: "row row-wrap summary-actions" },
+          retryBtn,
+          el("a", { class: "btn btn-sm", href: `#/job/${jobId}/plan`, text: "Edit the step" }),
+          firstKey
+            ? el("button", {
+                class: "btn btn-sm btn-ghost",
+                text: "View its output",
+                onClick: () => showNode(firstKey),
+              })
+            : null)
+      )
+    );
+  }
+
   loadInitial();
 
   return () => {
     disposed = true;
     offExecMode();  // §17.854 S4
-    if (ctx.setNavGuard) ctx.setNavGuard(null);  // §17.859
-    window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
+    // §17.1007 — aborting here detaches THIS subscriber. The run continues.
     if (abort) abort.abort();
   };
 }
