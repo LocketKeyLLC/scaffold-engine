@@ -4,6 +4,66 @@ Notable changes to scaffold-engine. Format follows [Keep a Changelog](https://ke
 
 Day-to-day development is tracked at sprint granularity in the commit log (`fix(§X.Y)` / `feat(§X.Y)` references). This file records the release-level view.
 
+## [1.7.0] — 2026-09-10
+
+The operator console, reworked around how people actually use it. A design
+review found that one job passes through six psychological regimes — compose,
+wait, decide, watch, do, receive — and the console rendered all six in one
+register. PR #416 and follow-ups.
+
+**The palette is unchanged.** Nothing here required a new colour value.
+
+### Added
+
+- **The console calls you back.** A tab-title badge (always on) and opt-in
+  desktop alerts fire when a job needs you: the gate opens, a run ends, a
+  walkthrough parks. Previously nothing did — no `document.title` write or
+  Notification call existed anywhere in the SPA, while every poller already
+  skipped hidden tabs.
+- **Runs survive the tab.** `POST /execute/all` is now a background task the
+  response merely subscribes to. Closing the browser no longer cancels a
+  10–25 minute run; reopening re-attaches to it. Stopping a run is an explicit
+  `POST /jobs/{id}/cancel`. `/exec/status` gained `detached_running` so a
+  client can tell a live run from a row left behind by a restart, and an
+  interrupted run is now settled at startup instead of waiting for the reaper.
+- **`POST /ideate/revise`** — send a brief back for another refinement pass
+  instead of approving it or cancelling the job. Non-destructive: the job keeps
+  its id, history and ownership, and your notes are folded into the next pass.
+- **Phased walkthroughs.** Assist sessions chunk their steps by the plan's
+  dependency structure ("Phase 2 of 6 · step 3 of 7") instead of showing one
+  flat counter across 41 steps, and mark the phase boundaries as good places to
+  stop.
+- **Confidence you can act on.** The approval gate's feasibility score is
+  rendered as a band that names what to do at that confidence, rather than a
+  bare percentage.
+
+### Fixed
+
+- **`failure_reason` is finally shown.** It has been on the `/exec/status` wire
+  since §17.450 and rendered by the CLI, but the operator console dropped it —
+  so "why did this step fail" meant reading the database. Failed runs now end
+  on a card carrying the reason and the recovery verbs, with the same weight as
+  the success card.
+- The refining wait shows elapsed-vs-expected time, stays honest once it passes
+  its own estimate, and says plainly that it is safe to leave.
+- Approval-gate questions lead with the three highest-impact ones instead of a
+  flat list nobody finishes.
+- Component jobs link back to their umbrella; the walkthrough's jump-to picker
+  marks steps whose guidance is already written.
+- A node that failed mid-run no longer renders as "Running…", and the flow
+  guide no longer claims "nothing run yet" above a failed run.
+
+### Internal
+
+- New drift gate: operator-facing payload fields must be rendered by the
+  surfaces that declare them, per (field, surface) pair. `failure_reason` went
+  three months unrendered because the CLI read it and no gate asked whether the
+  console did.
+- `make test` no longer silently runs against a container missing the dev
+  overlay's mounts.
+- Live integration tests clean up the jobs they create instead of leaving
+  one behind on every full-suite run.
+
 ## [1.6.1] — 2026-09-10
 
 Search quality. v1.6.0 fixed *what the engine did with* search results; this

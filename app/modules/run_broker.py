@@ -37,8 +37,14 @@ Scope and limits, stated plainly
   subscriber could land on a worker that does not host the run — it would see
   the durable node state and no live frames. Redis pub/sub is the upgrade path.
 * **Not durable across restarts.** The frame buffer is memory. Node state is in
-  Postgres and survives; the *event log* of a run does not. A restart mid-run
-  leaves the job in ``running`` for the stale-job reaper, exactly as before.
+  Postgres and survives; the *event log* of a run does not — replaying a run's
+  events across a restart would need Redis, and nothing yet needs it.
+
+  What a restart used to leave behind was worse than a lost event log, though:
+  a job sitting at ``running`` with no task behind it, invisible as such, until
+  the stale-job reaper noticed — and on this host the reaper's threshold is
+  hours, not the 30 minutes the defaults suggest. ``reconcile_on_startup()``
+  now settles those rows at boot (§17.1008), so "running" means running.
 * **Bounded.** ``MAX_FRAMES`` per run, and finished runs are evicted after
   ``RETAIN_AFTER_END_S`` so a late attacher still sees the terminal frame.
 """
@@ -206,6 +212,65 @@ async def cancel(job_id: str) -> bool:
     run.finish()       # release subscribers even if the task is still unwinding
     logger.info("run_broker_cancel_requested job=%s", job_id)
     return True
+
+
+async def reconcile_on_startup() -> None:
+    """§17.1008 — settle jobs the previous process left mid-run.
+
+    Detaching a run from its response means a restart is now the only way to
+    lose one, and the row it leaves says ``running`` while nothing is running.
+    Every consumer reads that as live: the reaper waits out its threshold
+    (hours on this host), ``/exec/status`` reports ``detached_running: false``
+    beside a running status, and the operator is told the engine restarted
+    mid-run but the job never leaves the active list.
+
+    Runs in-process at lifespan startup, BEFORE anything can start a new run,
+    so there is no window where a fresh run could be mistaken for a stale row.
+    Marks the job ``failed`` (not ``cancelled``: nobody chose this) with an
+    error_summary that says what happened, and fails any node still claiming to
+    be running. Fail-soft — a reconciliation problem must never stop boot.
+    """
+    from sqlalchemy import text
+
+    from app.database import async_session
+
+    try:
+        async with async_session() as db:
+            rows = (await db.execute(text(
+                "SELECT id FROM jobs WHERE status IN ('running', 'executing')"
+            ))).scalars().all()
+            if not rows:
+                return
+            job_ids = [str(r) for r in rows]
+            await db.execute(
+                text("""
+                    UPDATE jobs
+                       SET status = 'failed',
+                           error_summary = COALESCE(error_summary, '')
+                                         || 'interrupted by an engine restart mid-run',
+                           updated_at = NOW()
+                     WHERE id = ANY(:ids)
+                """),
+                {"ids": job_ids},
+            )
+            await db.execute(
+                text("""
+                    UPDATE dag_nodes SET status = 'failed', completed_at = NOW(),
+                           last_verification_reason = COALESCE(
+                               last_verification_reason,
+                               'The engine restarted while this step was running, so its result was never recorded. Retry it.')
+                     WHERE job_id = ANY(:ids) AND status = 'running'
+                """),
+                {"ids": job_ids},
+            )
+            await db.commit()
+            logger.warning(
+                "run_broker_reconciled_on_startup: %d job(s) left mid-run by a "
+                "previous process settled to failed: %s",
+                len(job_ids), ", ".join(job_ids[:10]),
+            )
+    except Exception:  # noqa: BLE001 — never block startup
+        logger.exception("run_broker_reconcile_on_startup_failed")
 
 
 async def shutdown_all() -> None:

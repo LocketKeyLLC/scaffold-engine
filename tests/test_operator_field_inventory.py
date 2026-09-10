@@ -107,10 +107,42 @@ def _consumers_of(field: str, surface: str) -> list[str]:
 
 # ── Guard 1: the producer cannot emit an undeclared field ────────────────
 
+def _pydantic_model_fields(spec: dict) -> set[str]:
+    """Declared field names of a Pydantic response model.
+
+    Read from app/schemas.py by ast rather than by importing it: this gate runs
+    in ci-tier-0 with --noconftest and no services, and importing the schemas
+    module drags in the app's dependency tree for no benefit.
+    """
+    source = (REPO_ROOT / "app" / "schemas.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == spec["model"]:
+            return {
+                stmt.target.id
+                for stmt in node.body
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+            }
+    pytest.fail(f"model {spec['model']} not found in app/schemas.py")
+
+
 @pytest.mark.parametrize("name", sorted(PAYLOADS))
 def test_producer_keys_are_declared(name):
     spec = PAYLOADS[name]
     declared = set(spec["operator_fields"]) | set(spec["internal_fields"])
+    if spec.get("kind") == "consumer_only":
+        pytest.skip(
+            f"{name}: producer is a SQL projection with no statically-readable "
+            "field list — consumer guard only (see app/operator_fields.py)"
+        )
+    if spec.get("kind") == "pydantic":
+        undeclared = sorted(_pydantic_model_fields(spec) - declared)
+        assert not undeclared, (
+            f"{name}: {spec['model']} declares these fields, but "
+            f"app/operator_fields.py does not:\n"
+            + "\n".join(f"  - {k}" for k in undeclared)
+        )
+        return
     emitted = _producer_keys(spec)
     # The producer function builds more than one dict (the response envelope,
     # SQL params, counters). Only flag keys that look like payload fields the

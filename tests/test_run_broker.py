@@ -205,3 +205,55 @@ async def test_frame_buffer_is_bounded():
         assert len(run.frames) <= 10
     finally:
         run_broker.MAX_FRAMES = original
+
+
+# ── Startup reconciliation (§17.1008) ────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_reconcile_on_startup_settles_jobs_left_mid_run(monkeypatch):
+    """A restart is now the only way to lose a run, and the row it leaves says
+    `running` while nothing is. Every consumer reads that as live — including
+    the reaper, whose threshold on this host is hours."""
+    executed: list[tuple[str, dict]] = []
+
+    class FakeResult:
+        def scalars(self):
+            class S:
+                def all(self_inner):
+                    return ["job-a", "job-b"]
+            return S()
+
+    class FakeSession:
+        async def execute(self, stmt, params=None):
+            executed.append((str(stmt), params or {}))
+            return FakeResult()
+
+        async def commit(self):
+            executed.append(("COMMIT", {}))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("app.database.async_session", lambda: FakeSession())
+    await run_broker.reconcile_on_startup()
+
+    sql = " ".join(s for s, _ in executed)
+    assert "status IN ('running', 'executing')" in sql, "must look for interrupted rows"
+    assert "status = 'failed'" in sql, "an interrupted run is not a completed one"
+    assert "restart" in sql, "the row must say WHY it failed"
+    assert "COMMIT" in [s for s, _ in executed]
+    ids = [p.get("ids") for _, p in executed if p.get("ids")]
+    assert ids and ids[0] == ["job-a", "job-b"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_on_startup_never_raises(monkeypatch):
+    """It runs inside lifespan; a reconciliation problem must not stop boot."""
+    def boom():
+        raise RuntimeError("database is down")
+
+    monkeypatch.setattr("app.database.async_session", boom)
+    await run_broker.reconcile_on_startup()  # must not raise

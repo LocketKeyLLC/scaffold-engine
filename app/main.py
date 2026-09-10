@@ -574,6 +574,14 @@ async def lifespan(app: FastAPI):
             # lifespan, i.e. TestClient). Skip the live session manager.
             logger.warning('event="mcp_session_manager_reentry_skipped" error=%s', exc)
             _mcp_ctx = None
+    # §17.1008 — settle any job the previous process left mid-run. Before the
+    # yield, so no freshly-started run can be mistaken for a stale row.
+    try:
+        from app.modules.run_broker import reconcile_on_startup
+        await reconcile_on_startup()
+    except Exception as exc:
+        logger.warning('event="run_broker_reconcile_failed" error=%s', exc)
+
     yield
 
     # Shutdown
@@ -641,7 +649,7 @@ app = FastAPI(
     # /device-sizings/*/report, /digital-sizings/*/report). The §17.174
     # router refactor itself introduces no OpenAPI changes — paths,
     # function names, tags, response_models all preserved verbatim.
-    version="1.6.1",
+    version="1.7.0",
     lifespan=lifespan,
 )
 

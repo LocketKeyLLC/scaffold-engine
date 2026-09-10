@@ -1495,3 +1495,6 @@ a.strip-item:hover { background: var(--bg-elev-2); }
   font-size: var(--fs-sm);
   color: var(--text-dim);
 }
+
+/* §17.1008 — the decomposition breadcrumb on a component job. */
+.umbrella-link { border-left: 3px solid var(--purple); font-size: var(--fs-sm); color: var(--text-dim); }
