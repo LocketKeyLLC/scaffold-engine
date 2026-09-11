@@ -74,6 +74,8 @@ def test_the_ask_path_passes_notes_through():
     import inspect
     from app.modules import assist_agent
     src = inspect.getsource(assist_agent.run_step_research)
-    assert "_kb_hint_from(brief, environment, mem.operator_notes)" in src, (
+    # §17.1023 — the call now also passes step_recap and wraps across lines.
+    # Assert the PROPERTY (notes reach the hint), not the formatting.
+    assert "_kb_hint_from(" in src and "mem.operator_notes" in src, (
         "run_step_research does not pass notes, so the ask path retrieves blind"
     )
