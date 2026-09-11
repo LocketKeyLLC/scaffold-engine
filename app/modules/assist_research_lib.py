@@ -480,10 +480,46 @@ async def _focus_web_query(question: str, *, role: str, hint: str = "") -> str:
     return q
 
 
+_GOAL_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with", "is",
+    "are", "was", "were", "be", "been", "it", "its", "this", "that", "operator",
+    "cannot", "can", "not", "only", "still", "unreachable", "fields", "visible",
+    "yet", "from", "into", "at", "by", "but", "their", "they",
+})
+
+
+def _goal_keywords(goal_terms: str, limit: int = 4) -> list[str]:
+    """§17.1023 — the few words from a recap's OPEN line worth adding to a query.
+
+    Multi-word technical phrases first ("port forwarding"), then bare nouns.
+    Capped hard: the point is to aim the search, not to paste a sentence into it.
+    """
+    import re as _re
+    low = " ".join((goal_terms or "").lower().split())
+    phrases = [ph for ph in ("port forwarding", "dns record", "dynamic dns",
+                             "reverse proxy", "static ip", "bridge mode",
+                             "nat loopback", "double nat")
+               if ph in low]
+    words: list[str] = []
+    for w in _re.findall(r"[a-z][a-z0-9-]{3,}", low):
+        if w in _GOAL_STOPWORDS or any(w in ph for ph in phrases):
+            continue
+        if w not in words:
+            words.append(w)
+    return (phrases + words)[:limit]
+
+
+def _cap_query(q: str, max_words: int = 12) -> str:
+    """§17.1023 — keyword engines degrade with length; hold the query short."""
+    parts = (q or "").split()
+    return " ".join(parts[:max_words])
+
+
 async def research_one(
     *, question: str, node_key: str = "?", domain: Optional[str] = None,
     synthesize: bool = True, job_context: Optional[str] = None,
-    context_hint: Optional[str] = None,
+    context_hint: Optional[str] = None, operator_notes: Optional[list] = None,
+    goal_terms: Optional[str] = None,
 ) -> dict:
     """Confirm a single operator-supplied question and optionally synthesize
     a short cited answer. Does not persist — this is a side query.
@@ -499,6 +535,56 @@ async def research_one(
     # question (which returns nothing → stale-memory fallback). The original
     # `question` still drives synthesis below; only the retrieval query changes.
     web_q = await _focus_web_query(question, role=role, hint=context_hint or "")
+    # §17.1021 — ENFORCE the operator's model number into the web query.
+    #
+    # §17.1019 put it in `context_hint`, which reaches `_focus_web_query` as
+    # "PROJECT: SAX1V1K ES2251 …". Measured against the live session: the hint
+    # carried the model and the generator dropped it anyway —
+    #
+    #   hint      : "SAX1V1K ES2251 Secure Home Lab & Media/Game/AI Server"
+    #   web query : "Spectrum app primary server secondary server"
+    #
+    # so the operator's question about their router searched the open web with
+    # no model in it, twice, and got generic advice both times. A hint is a
+    # request the model may decline; this is the house rule applied to the one
+    # place it had not been. Subject-matched, so an unrelated question
+    # ("pm2: command not found") is untouched.
+    try:
+        from app.modules.assist_render import hardware_for_text
+        _hw = [m for m in hardware_for_text(question, operator_notes)
+               if m.lower() not in (web_q or "").lower()]
+        if _hw:
+            web_q = " ".join(_hw) + " " + (web_q or question)
+            logger.info("assist_web_query_hardware_enforced node_key=%s models=%s",
+                        node_key, _hw)
+    except Exception as exc:  # noqa: BLE001 — grounding is fail-soft
+        logger.warning("assist_web_query_hardware_failed: %s", exc)
+
+    # §17.1023 — ENFORCE the goal too, and CAP the result.
+    #
+    # The operator's question is a symptom ("I only see two fields"); what they
+    # are trying to DO lives in the step recap's OPEN line ("cannot find port
+    # forwarding"). Measured: searching the symptom returns Spectrum DNS pages;
+    # adding "port forwarding" returns the SAX1V1K port-forwarding guides. The
+    # goal was handed to the query generator as a hint three times and dropped
+    # three times — a hint is a request, so this appends deterministically.
+    #
+    # The cap matters as much as the terms: an unbounded query accumulated
+    # "...SAX1V1K ES2251 PM2 Debian 12 LXC" and matched nothing. Keyword
+    # engines degrade with length, so the query is held to the most specific
+    # terms — hardware and goal first, the generator's phrasing after.
+    try:
+        gt = " ".join((goal_terms or "").split())
+        if gt:
+            have = (web_q or "").lower()
+            add = [w for w in _goal_keywords(gt) if w.lower() not in have]
+            if add:
+                web_q = (web_q or question) + " " + " ".join(add)
+                logger.info("assist_web_query_goal_enforced node_key=%s terms=%s",
+                            node_key, add)
+        web_q = _cap_query(web_q)
+    except Exception as exc:  # noqa: BLE001 — grounding is fail-soft
+        logger.warning("assist_web_query_goal_failed: %s", exc)
     sources = await _confirm_query(
         question, node_key=node_key, domain=domain, deep=True,
         kb_query_extra=context_hint, web_query=web_q,

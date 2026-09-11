@@ -1141,11 +1141,33 @@ async def run_step_research(
         context_parts.append(recap_block)
     job_context = "\n\n".join(context_parts) or None
 
+    # §17.1022 — the step's own recap names what the operator is TRYING to do.
+    # Their question is a symptom ("I only see two fields"); the goal is in the
+    # recap's GOAL/OPEN lines ("router not forwarding ports 80/443 … operator
+    # cannot find port forwarding"). Searching the symptom retrieved DNS pages;
+    # searching the goal retrieves the port-forwarding guides.
+    _recap = ""
+    if nk:
+        try:
+            _rr = (await db.execute(
+                text("SELECT progress_recap FROM assist_steps "
+                     "WHERE session_id = :sid AND node_key = :nk"),
+                {"sid": session_id, "nk": nk},
+            )).mappings().first()
+            _recap = ((_rr or {}).get("progress_recap") or "").strip()
+        except Exception as exc:  # noqa: BLE001 — a hint never breaks a turn
+            logger.warning("assist_recap_hint_failed: %s", exc)
+
     res = await assist_guide.research_one(
         question=question, node_key=nk or "?", domain=domain,
         job_context=job_context,
         # §17.1019 — the retrieval side needs the hardware too.
-        context_hint=_kb_hint_from(brief, environment, mem.operator_notes),
+        context_hint=_kb_hint_from(brief, environment, mem.operator_notes,
+                                   step_recap=_recap),
+        # §17.1021 — and the notes themselves, so the WEB query can enforce the
+        # model number rather than ask the query generator to keep it.
+        operator_notes=mem.operator_notes,
+        goal_terms=_recap_goal_terms(_recap),  # §17.1023 — aim the search at the GOAL
     )
     # §17.851b — research how-to answers carry commands too: same
     # code-enforced placeholder resolution as walkthroughs and fixes.
@@ -2172,8 +2194,47 @@ async def _job_digest_for(
         return ""
 
 
+_RECAP_SECTION_RE = __import__("re").compile(
+    r"^(GOAL|OPEN)\s*:?\s*$|^(GOAL|OPEN)\s*:", __import__("re").IGNORECASE)
+
+
+def _recap_goal_terms(step_recap: str | None, limit: int = 220) -> str:
+    """§17.1022 — the GOAL and OPEN lines of a step recap, as query terms.
+
+    DONE lines are excluded on purpose: they describe work already finished and
+    would steer retrieval at solved problems.
+    """
+    if not (step_recap or "").strip():
+        return ""
+    buckets: dict[str, list[str]] = {"OPEN": [], "GOAL": []}
+    cur = None
+    for ln in step_recap.splitlines():
+        st = ln.strip()
+        if not st:
+            continue
+        head = st.split(":", 1)[0].strip().upper()
+        if head in ("GOAL", "OPEN", "DONE", "CONSTRAINTS", "NEXT"):
+            cur = head if head in buckets else None
+            st = st.split(":", 1)[1].strip() if ":" in st else ""
+            if not st:
+                continue
+        if cur:
+            buckets[cur].append(st.lstrip("-• ").strip())
+    # OPEN before GOAL: OPEN is what is BLOCKING right now ("operator cannot
+    # find port forwarding"), GOAL is the whole step ("validate the entire
+    # build") and would eat the budget describing work that is already done.
+    terms = " ".join(" ".join(buckets["OPEN"] + buckets["GOAL"]).split())
+    # §17.1023 — cut on a WORD boundary. A hard slice ended this at "port
+    # forwardin", which loses the one phrase the whole query is aimed at —
+    # the same mid-word truncation §17.1012 fixed in the blocker query.
+    if len(terms) > limit:
+        terms = terms[:limit].rsplit(" ", 1)[0]
+    return terms.strip()
+
+
 def _kb_hint_from(brief: dict, environment: dict,
-                  operator_notes: list | None = None) -> str:
+                  operator_notes: list | None = None,
+                  step_recap: str | None = None) -> str:
     """A short project-entity string to bias local-KB retrieval (§17.650).
 
     Pulls the brief goal/title and the environment substitution KEYS (not
@@ -2200,13 +2261,25 @@ def _kb_hint_from(brief: dict, environment: dict,
     models = hardware_identifiers(operator_notes)
     if models:
         bits.append(" ".join(models))
+    # §17.1022 — what the operator is TRYING to do, from the step recap's
+    # GOAL/OPEN lines. Placed after the models and before the project title so
+    # a 300-char cap keeps the two most retrieval-relevant things.
+    goal = _recap_goal_terms(step_recap)
+    if goal:
+        bits.append(goal)
     goal = (brief or {}).get("description") or (brief or {}).get("title") or ""
     if isinstance(goal, str) and goal.strip():
         bits.append(goal.strip())
     subs = (environment or {}).get("substitutions") or {}
     if isinstance(subs, dict) and subs:
         bits.append(" ".join(str(k) for k in subs.keys()))
-    return " ".join(bits)[:300].strip()
+    # §17.1023 — 300 was sized before the hint carried hardware + goal; the two
+    # most retrieval-relevant things were being trimmed to make room for the
+    # project title. Cut on a word boundary, and leave them space.
+    hint = " ".join(" ".join(bits).split())
+    if len(hint) > 420:
+        hint = hint[:420].rsplit(" ", 1)[0]
+    return hint.strip()
 
 
 # §17.856 — the environment concern (accessors + exec-context monitor) moved to

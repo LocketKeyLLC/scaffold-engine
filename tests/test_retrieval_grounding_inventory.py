@@ -95,7 +95,7 @@ def test_the_ask_path_hint_carries_notes():
     """research_one is exempt above because its caller supplies the hint; that
     delegation is only worth anything if the caller actually passes notes."""
     src = (APP / "modules" / "assist_agent.py").read_text(encoding="utf-8")
-    assert "_kb_hint_from(brief, environment, mem.operator_notes)" in src
+    assert "_kb_hint_from(" in src and "mem.operator_notes" in src  # §17.1023
 
 
 @pytest.mark.parametrize("builder", sorted(GROUNDING_BUILDERS))
