@@ -2788,7 +2788,8 @@ async def run_step_decision(
                 max_queries=settings.assist_guide_max_research_queries,
                 node_key=node_key, domain=None,
                 # §17.975 — the playbook belongs in the QUERY, not only the prompt.
-                environment_block=assist_guide.render_research_grounding(mem.environment),
+                environment_block=assist_guide.render_research_grounding(
+                    mem.environment, mem.operator_notes),  # §17.1018
             )
             research_block = assist_guide._render_research_block(sources)
         except Exception as exc:  # research must never trap the commit

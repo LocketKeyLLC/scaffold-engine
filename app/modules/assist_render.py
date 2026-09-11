@@ -727,7 +727,47 @@ def render_status_panel(recap: str | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def render_research_grounding(environment: dict | None) -> str:
+# §17.1018 — a model/part number the operator has NAMED, next to the kind of
+# thing it is. Shape: letters AND digits, no dots (excludes IPs and versions
+# like "22.04"), adjacent to a hardware noun in the same note. Measured on the
+# live session's 44 notes: 5 model-shaped tokens overall, of which the
+# hardware-adjacency test keeps exactly the two real ones (SAX1V1K, ES2251) and
+# drops `apt-secure` and `RestartSec`.
+_MODEL_TOKEN_RE = re.compile(
+    r"\b(?=[A-Za-z0-9-]{4,24}\b)(?=[^\s]*[A-Za-z]{2})(?=[^\s]*\d)"
+    r"[A-Za-z][A-Za-z0-9-]{3,23}\b")
+_HARDWARE_NOUN_RE = re.compile(
+    r"\b(router|modem|switch|gateway|motherboard|mainboard|server|chassis|gpu|"
+    r"graphics\s+card|nic|adapter|controller|enclosure|drive|ssd|hdd|cpu|"
+    r"processor|access\s+point|appliance)\b", re.IGNORECASE)
+
+
+def hardware_identifiers(operator_notes: list | None) -> list[str]:
+    """§17.1018 — the exact models the operator has stated, for use in searches.
+
+    The live failure: asked where port forwarding lives, the engine answered
+    with generic advice ("try 192.168.1.1, look for Advanced or NAT, default
+    admin/admin"). The operator's router is a **Spectrum SAX1V1K**, and that
+    string exists in exactly ONE place in the session — the NOTES. Research
+    grounding is built from `environment` (facts, profile, substitutions,
+    playbook) and has never read notes, so the single token that makes the
+    question answerable never reached a query.
+
+    Returns [] when nothing qualifies, so callers append nothing.
+    """
+    out: list[str] = []
+    for n in (operator_notes or []):
+        text_ = (n.get("text") if isinstance(n, dict) else str(n)) or ""
+        if not _HARDWARE_NOUN_RE.search(text_):
+            continue
+        for tok in _MODEL_TOKEN_RE.findall(text_):
+            if tok not in out:
+                out.append(tok)
+    return out[:8]
+
+
+def render_research_grounding(environment: dict | None,
+                              operator_notes: list | None = None) -> str:
     """§17.975 — what a research QUERY needs to know about this system.
 
     Two gaps, both verified against the live session before writing this.
@@ -768,4 +808,14 @@ def render_research_grounding(environment: dict | None) -> str:
             "### Methods already PROVEN to work on this system — prefer "
             "queries that build on these over queries about alternatives:\n"
             + "\n".join(f"- {p[:200]}" for p in proven[-6:]))
+    # §17.1018 — the operator's own hardware, which lives in NOTES and has never
+    # reached a query. Named models are the highest-value term a search can
+    # carry: "SAX1V1K port forwarding" answers a question that "spectrum router
+    # port forwarding" does not.
+    models = hardware_identifiers(operator_notes)
+    if models:
+        parts.append(
+            "### Hardware the operator has named — search the EXACT model, not "
+            "a generic category:\n" + "\n".join(f"- {m}" for m in models))
+
     return "\n\n".join(parts).strip()
