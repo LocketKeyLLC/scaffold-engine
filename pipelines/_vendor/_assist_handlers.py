@@ -1058,6 +1058,21 @@ def assist_submit(
         )
         yield msg + hint
         return
+    # §17.1016 — hard-block path: the verdict was 'unclear' AND the operator
+    # said they could not tell. Nothing broke and nothing is known to be
+    # unfinished — the engine simply cannot see it. Framed as neither a failure
+    # nor a commit, and points at the step's own Verify check.
+    if d.get("status") == "step_unverified":
+        v = d.get("success_verdict") or {}
+        msg = (
+            f"🔎 Step `{node_key}` is still open — I couldn't verify it from "
+            f"what you sent, so I haven't marked it done.\n\n"
+            f"_{v.get('reason', 'Nothing in the message shows the step finished.')}_\n\n"
+            "Run the step's **Verify** check and paste what you see. If you'd "
+            "rather I take your word for it, reply `confirm`; `/assist skip` "
+            "sets the step aside instead."
+        )
+        yield msg; return
     # §17.731 — hard-block path: the evidence shows the step's deliverable
     # isn't done yet (setup/earlier phase only), so the node was NOT marked
     # done. Distinct framing from a failure — nothing broke, there's just more

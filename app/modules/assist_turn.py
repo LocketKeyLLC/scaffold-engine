@@ -469,7 +469,8 @@ async def _run_turn_inner(
                 if e[0] == ASSIST_STEP_OUTCOME:
                     if e[1].get("status") == "committed":
                         done = True
-                    elif e[1].get("status") in ("step_incomplete", "verification_failed"):
+                    elif e[1].get("status") in ("step_incomplete", "verification_failed",
+                                                "step_unverified"):  # §17.1016
                         blocked_reason = e[1].get("verify_reason") or "the step's goal isn't met yet"
                 yield e
             if done:
