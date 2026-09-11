@@ -298,6 +298,43 @@ _CLAIM_PHRASE_RE = re.compile(
 )
 
 
+# §17.1014 — an explicit DISCLAIMER of certainty, which is not a hedge.
+#
+# §17.971 widened the claim matcher to accept hedged assertions ("it appears to
+# be done"), on the sound reasoning that hedging is how people assert something
+# they cannot fully verify. But there is a line between softening an assertion
+# and declining to make one, and the widened matcher crossed it. Live (ADD3,
+# 2026-09-11 02:03): the operator wrote
+#
+#     "i believe it is done but am unsure."
+#
+# which scored as a completion claim, exempted the submit from the §17.731
+# incomplete-block, and COMMITTED a Caddyfile-rewrite step on which no work had
+# been done — desynchronising the plan from the machine for every step after.
+# §17.890's exemption is premised on the operator's explicit word outranking a
+# verifier that cannot see their machine. "I am unsure" is not that word: there
+# is no assertion for it to outrank.
+#
+# Precision-first, like its neighbours: this matches STATED uncertainty about
+# the work, not ordinary hedging.
+_UNCERTAIN_RE = re.compile(
+    r"\b(?:un(?:sure|certain)|not\s+(?:sure|certain|positive)|"
+    r"no\s+idea|dunno|don'?t\s+know|do\s+not\s+know|"
+    r"can'?t\s+tell|cannot\s+tell|hard\s+to\s+tell|"
+    r"i\s+guess|i\s+think\s+so|hopefully|maybe|might\s+be|"
+    r"assume\s+(?:so|it)|should\s+(?:be|have)\s+(?:done|worked|installed))\b",
+    re.IGNORECASE,
+)
+
+
+def expresses_uncertainty(msg: str) -> bool:
+    """§17.1014 — True when the operator states they do not know whether the
+    work is done. The cue to CHECK, never the cue to advance."""
+    if not msg:
+        return False
+    return bool(_UNCERTAIN_RE.search(normalize_punct(msg)))
+
+
 def looks_like_completion_claim(msg: str) -> bool:
     """§17.890 — True when `msg` is the operator's bare ASSERTION that the
     current step is complete (vs pasted evidence, a question, or an error
@@ -324,6 +361,10 @@ def looks_like_completion_claim(msg: str) -> bool:
     if looks_like_howto_question(m) or looks_like_help_request(m):
         return False            # "how do I know it's done" is help-seeking
     if _CLAIM_DISQUALIFY_RE.search(m):     # negation / failure wording
+        return False
+    # §17.1014 — stated uncertainty is not an assertion, so there is nothing
+    # for §17.890's "the operator's word outranks the verifier" to honour.
+    if expresses_uncertainty(m):
         return False
     return bool(_CLAIM_PHRASE_RE.search(m))
 

@@ -487,13 +487,37 @@ async def _run_turn_inner(
                 # invitation leads; they still get the help underneath it if it
                 # genuinely is not done.
                 _offer_made = False
+                # §17.1014 — if the operator just told us they cannot tell,
+                # leading with "reply `confirm`" hands the question back to the
+                # one person who has already said they cannot answer it. Live
+                # (ADD3/T35, 2026-09-11 02:03–02:11): "i believe it is done but
+                # am unsure" and "all i could do was add a security group i am
+                # unsure where dmz came from" were each answered with the
+                # confirm offer, twice, and the operator reported the engine
+                # could not help them CHECK. The step's own `## Verify` section
+                # is the answer to their actual question and is already stored.
+                _check = ""
+                if assist_policy.expresses_uncertainty(text_ or ""):
+                    try:
+                        from app.modules import assist_guide  # deferred: cycle-safe
+                        _check = await assist_guide.how_to_check_block(
+                            session_id=session_id, node_key=nk, db=db)
+                    except Exception as exc:  # noqa: BLE001 — a hint never blocks
+                        logger.warning("how_to_check_failed sid=%s err=%r",
+                                       session_id, exc)
                 _confirm_offer_text = (
-                    f"I couldn't verify this step myself — {blocked_reason}\n\n"
-                    "**If it IS done, reply `confirm`** and I'll mark it "
-                    "complete on your word and move to the next step. You "
-                    "know your machine; I only see what you paste.\n\n"
-                    "If something is still outstanding, here's where I'd "
-                    "look next:")
+                    (f"I couldn't verify this step myself — {blocked_reason}\n\n"
+                     + _check + "\n\n"
+                     "Once you can see the result, paste it and I'll take it "
+                     "from there. **If you'd rather I take your word for it, "
+                     "reply `confirm`** and I'll mark it complete and move on.")
+                    if _check else
+                    (f"I couldn't verify this step myself — {blocked_reason}\n\n"
+                     "**If it IS done, reply `confirm`** and I'll mark it "
+                     "complete on your word and move to the next step. You "
+                     "know your machine; I only see what you paste.\n\n"
+                     "If something is still outstanding, here's where I'd "
+                     "look next:"))
                 try:
                     from app.modules import assist_notes
                     await assist_notes.stage_completion_confirm(
