@@ -470,6 +470,13 @@ services:
       # overrides a false block. Code defaults stay off (legacy + tests).
       ASSIST_BLOCK_ON_FAILED_VERIFY: "${ASSIST_BLOCK_ON_FAILED_VERIFY:-true}"
       ASSIST_BLOCK_ON_INCOMPLETE_VERIFY: "${ASSIST_BLOCK_ON_INCOMPLETE_VERIFY:-true}"
+      # §17.1016 — hold the step when the verdict is 'unclear' AND the operator
+      # said they cannot tell. Surface-verified gap: "i believe it is done but
+      # am unsure" produced outcome='unclear', which was in neither block, so
+      # the step committed with that sentence as its evidence. NOT "block every
+      # unclear" — that is also the fallback when verification is unavailable,
+      # which §17.731 designed to never block. `confirm` still commits.
+      ASSIST_BLOCK_ON_UNCLEAR_WHEN_UNSURE: "${ASSIST_BLOCK_ON_UNCLEAR_WHEN_UNSURE:-true}"
       # §17.771 (Phase 2) — the unified assist decision as LIVE authority. One
       # /decide call routes each turn; a low-confidence/unavailable decision falls
       # through to the deterministic cascade (retained safety net). Code default

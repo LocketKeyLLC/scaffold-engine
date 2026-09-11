@@ -846,10 +846,21 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
         # downloaded / is at its boot menu). Each is independently valve-gated;
         # the step stays 'presented' so the operator finishes it (or /assist
         # skip to override a false block).
+        # §17.1016 — 'unclear' + the operator saying they cannot tell. See the
+        # valve's note in config.py: an evidence-free hedge never reaches
+        # 'incomplete', so without this the step commits on a non-answer.
+        _unsure = assist_policy.expresses_uncertainty(body.output or "")
         _blocked = (
             (_v_outcome == "failed" and settings.assist_block_on_failed_verify)
             or (_v_outcome == "incomplete" and settings.assist_block_on_incomplete_verify)
+            or (_v_outcome == "unclear" and _unsure
+                and settings.assist_block_on_unclear_when_unsure)
         )
+        if _blocked and _v_outcome == "unclear":
+            logger.info(
+                "assist_block_unclear_unsure node_key=%s — verdict unclear and "
+                "the operator stated uncertainty; holding the step open",
+                body.node_key)
         # §17.890 — the operator's explicit word outranks the verifier. A bare
         # completion CLAIM ("I did that already", "it's installed") carries no
         # evidence for the verifier to judge, so it reliably comes back
@@ -897,7 +908,12 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
             return {
                 "session_id": session_id,
                 "node_key": body.node_key,
+                # §17.1016 — an 'unclear' verdict is NOT a failure. Reporting
+                # "verification_failed" to an operator who said they could not
+                # tell states that their work failed, which the verifier never
+                # claimed; its own reason is "there is no evidence to verify".
                 "status": ("step_incomplete" if _v_outcome == "incomplete"
+                           else "step_unverified" if _v_outcome == "unclear"
                            else "verification_failed"),
                 "committed": False,
                 "no_op": False,

@@ -291,10 +291,16 @@ export function renderChat(container, sessionId) {
       if (session?.status !== "completed") await claimAndGuideNext();
       return true;
     }
-    if (st === "verification_failed" || st === "step_incomplete") {
+    if (st === "verification_failed" || st === "step_incomplete" || st === "step_unverified") {
       const v = res.success_verdict || {};
       appendBubble("assistant", "verify",
-        `⚠ Not committed — the verifier judged this step **${st === "step_incomplete" ? "incomplete" : "not successful"}**.` +
+        // §17.1016 — "unverified" is its own outcome: the verifier did not
+        // judge the work bad, it could not tell, and saying "not successful"
+        // to an operator who already said they were unsure is a third wrong
+        // answer in a row.
+        `⚠ Not committed — ${st === "step_unverified"
+          ? "I couldn't verify this step from what you sent"
+          : `the verifier judged this step **${st === "step_incomplete" ? "incomplete" : "not successful"}**`}.` +
         (v.reason || v.summary ? `\n\n${v.reason || v.summary}` : "") +
         `\n\nAdd more evidence and press ✓ again, use 🔧 Fix error if something failed, or ⏩ Skip to move on anyway.`);
       return false;

@@ -1067,6 +1067,26 @@ class Settings(BaseSettings):
     # via compose. The step stays claimable so the operator finishes it — or
     # `/assist skip` to override a false block.
     assist_block_on_incomplete_verify: bool = False
+    # §17.1016 — block a commit when the verdict is 'unclear' AND the operator's
+    # own message says they cannot tell. Surface-verified gap: §17.1014 stopped
+    # "i believe it is done but am unsure" counting as a completion CLAIM, which
+    # removes the §17.890 exemption — but that exemption only ever applied to a
+    # 'failed'/'incomplete' verdict. An evidence-free hedge produces 'unclear',
+    # which was never in `_blocked` at all, so the fix was inert for the exact
+    # input it was written for. Driving the live API proved it: submitting that
+    # sentence to a claimed Shell step returned status=committed with
+    # outcome='unclear' and reason "there is no evidence to verify PM2 was
+    # installed" — while capturing the fact "PM2 installation status is
+    # UNKNOWN/unverified" in the same response.
+    #
+    # Deliberately NOT "block every 'unclear'": 'unclear' is also the
+    # conservative fallback when verification is UNAVAILABLE (model down, parse
+    # failure), and §17.731 designed that to never block a submit. Gating on the
+    # operator's stated uncertainty keeps a verifier outage non-blocking while
+    # catching the case where the human has said, in words, that they do not
+    # know. `confirm` (operator_affirmed) still commits — an explicit decision
+    # outranks this, a hedge does not. Code default off; live via compose.
+    assist_block_on_unclear_when_unsure: bool = False
     # §17.490 — after a submit, extract the concrete values the operator
     # actually used (the IP/path/name they filled into a <PLACEHOLDER> the
     # walkthrough emitted) from their evidence and fold them into the session
