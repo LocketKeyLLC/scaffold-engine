@@ -3748,6 +3748,12 @@ async def _add_blocker_research(
         logger.warning("assist_guide_blocker_query_failed: %s", exc)
 
 
+# §17.1014 — line shapes for pulling a section out of stored guidance.
+_FENCE_LINE_RE = re.compile(r"^\s*(?:```|~~~)")
+_H2_LINE_RE = re.compile(r"^##\s+(?!#)")
+_VERIFY_HEADING_RE = re.compile(r"verify|how\s+to\s+check|check\s+it", re.IGNORECASE)
+
+
 # §17.1012 — how many trailing facts/notes the blocker search may consider, and
 # the query length cap. The window is what stops a resolved problem from being
 # researched forever; 8 covers the current step and the couple before it.
@@ -5586,6 +5592,56 @@ def no_action_footer(next_step: Optional[dict], title: str) -> str:
         "does NOT claim the work happened. If you think it IS still needed, say "
         "what is missing and I will work it instead."
     )
+
+
+async def how_to_check_block(*, session_id: str, node_key: str, db) -> str:
+    """§17.1014 — the step's own "how would I know" instructions, for an
+    operator who has just said they cannot tell.
+
+    Every walkthrough already carries a ``## Verify`` section: the exact checks
+    that answer "is this done?". When the operator submits uncertainty, that
+    section is the answer to their actual question, and the engine already has
+    it on disk. Before this, the blocked path replied *"If it IS done, reply
+    `confirm`… You know your machine; I only see what you paste"* — handing the
+    question back to the person who had just said they could not answer it.
+
+    Returns "" when the step has no stored walkthrough or no Verify section, so
+    the caller falls through to the existing offer unchanged.
+    """
+    try:
+        row = (await db.execute(
+            text("SELECT guidance FROM assist_steps "
+                 "WHERE session_id = :sid AND node_key = :nk"),
+            {"sid": session_id, "nk": node_key},
+        )).mappings().first()
+    except Exception as exc:  # noqa: BLE001 — a hint never blocks a turn
+        logger.warning("assist_how_to_check_failed: %s", exc)
+        return ""
+    guidance = (row or {}).get("guidance") or ""
+    if not guidance.strip():
+        return ""
+
+    # Pull the `## Verify` section, tracking fences so a `##` inside a heredoc
+    # is not mistaken for a heading (the §17.1011 lesson, server-side).
+    out: list[str] = []
+    in_verify = False
+    in_fence = False
+    for line in guidance.split("\n"):
+        if _FENCE_LINE_RE.match(line):
+            in_fence = not in_fence
+            if in_verify:
+                out.append(line)
+            continue
+        if not in_fence and _H2_LINE_RE.match(line):
+            in_verify = bool(_VERIFY_HEADING_RE.search(line))
+            continue
+        if in_verify:
+            out.append(line)
+    body = "\n".join(out).strip()
+    if not body:
+        return ""
+    return ("**You said you are not sure — here is how to find out.** Run or "
+            "check this, then paste what you see:\n\n" + body)
 
 
 async def apply_post_generation_guards(

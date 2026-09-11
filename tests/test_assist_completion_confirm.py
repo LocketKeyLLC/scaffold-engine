@@ -394,9 +394,26 @@ def test_a_failure_report_with_a_paste_does_not_confirm():
 
 def test_prose_only_claims_still_work():
     """§17.890's own shapes must keep resolving an offer."""
-    for msg in ("confirm it worked!",
-                "i believe it is complete but am unsure."):
+    for msg in ("confirm it worked!", "it appears to be complete"):
         assert claims_completion_in_prose(msg)
+
+
+def test_an_uncertain_answer_does_not_resolve_the_offer():
+    """§17.1014 — this function is consulted ONLY while a completion offer is
+    staged, i.e. the engine has just asked "is this done?". Answering that
+    question with "I am unsure" is not a yes, and resolving the offer on it
+    commits the step on the operator's non-answer.
+
+    It was §17.890's founding example and an assertion in this file, which is
+    how it survived: live on 2026-09-11, "i believe it is done but am unsure"
+    committed ADD3 ("Rewrite the Caddyfile in pieces") with zero work done, and
+    every later step planned against a machine state that did not exist.
+
+    Falling through is the point — the submit path verifies, blocks, and
+    §17.1014 answers with the step's own `## Verify` checks instead of asking
+    the uncertain operator to decide again."""
+    assert not claims_completion_in_prose("i believe it is complete but am unsure.")
+    assert not claims_completion_in_prose("i think that did it but not sure")
 
 
 def test_the_offer_resolution_consults_it():
