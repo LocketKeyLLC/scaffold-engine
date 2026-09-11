@@ -80,7 +80,12 @@ def test_offer_survives_no_next_step():
 def test_wired_into_ensure_guidance_and_fail_soft():
     import inspect
     from app.modules import assist_guide
-    src = inspect.getsource(assist_guide.ensure_guidance)
+    # §17.1013 — the guards live in the shared helper now, so BOTH guide
+    # paths run them; the stream path never did before.
+    src = inspect.getsource(assist_guide.apply_post_generation_guards)
+    for _fn in ("ensure_guidance", "generate_guidance_stream"):
+        assert "apply_post_generation_guards(" in inspect.getsource(
+            getattr(assist_guide, _fn)), f"{_fn} skips the guards"
     assert "concludes_no_action_required" in src
     assert "_next_claimable_step" in src
     # the offer must never break a guide

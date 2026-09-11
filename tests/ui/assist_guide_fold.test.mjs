@@ -81,3 +81,53 @@ test("sectionCount counts list items, and stays silent for prose", () => {
   assert.equal(sectionCount("just a sentence"), "");
   assert.equal(sectionCount("- only one"), "");
 });
+
+// ── §17.1013 — a FIX turn folds by its own shape ─────────────────────────
+// The fixture is the real fix turn the operator was looking at when they
+// reported "without ANY walk through, though it is hidden under Fix". A guide
+// puts the whole immediate action in `## 👉 Do this next`, so folding
+// `## Run this` under it loses nothing; a fix puts a one-line summary there and
+// the actual steps in `## Fix`, so the walkthrough rule hid them.
+const FIXTURE_FIX = readFileSync(join(here, "fixtures", "fix_turn_t35.md"), "utf8");
+const { openSectionFor, FIX_OPEN_SECTION } =
+  await import("../../app/ui/static/views/assist.js");
+
+test("the real fix turn keeps its action section open", () => {
+  const { sections } = splitGuideSections(FIXTURE_FIX);
+  const re = openSectionFor("fix");
+  const open = sections.filter((s) => re.test(s.title)).map((s) => s.title);
+  const folded = sections.filter((s) => !re.test(s.title)).map((s) => s.title);
+
+  assert.ok(open.some((t) => /^Fix$/i.test(t)),
+    `the 'Fix' section (the walkthrough) must stay open, got open=${open}`);
+  assert.ok(open.some((t) => /Do this next/i.test(t)));
+  // Context stays folded — the point is still to quiet the bubble.
+  for (const ctx of ["Diagnosis", "Then", "If that fails"]) {
+    assert.ok(folded.includes(ctx), `${ctx} should fold, got folded=${folded}`);
+  }
+});
+
+test("folding a fix reveals materially more than the guide rule did", () => {
+  const { lead, sections } = splitGuideSections(FIXTURE_FIX);
+  const visible = (re) => lead.trim().length + sections
+    .filter((s) => re.test(s.title))
+    .reduce((a, s) => a + s.body.join("\n").trim().length, 0);
+  // The regression: under the guide rule only the 👉 one-liner survived.
+  assert.ok(visible(openSectionFor("fix")) > visible(openSectionFor("guide")) * 1.8,
+    "the fix rule must surface the steps the guide rule hid");
+});
+
+test("guide turns are unaffected by the fix rule", () => {
+  const { sections } = splitGuideSections(T35);
+  const re = openSectionFor("guide");
+  const open = sections.filter((s) => re.test(s.title)).map((s) => s.title);
+  assert.equal(open.length, 2);          // 👉 + ✅ Done when, as before
+  assert.ok(!open.some((t) => /Run this/i.test(t)), "Run this must still fold");
+});
+
+test("openSectionFor defaults to the walkthrough rule", () => {
+  for (const k of ["guide", "message", "ask", undefined, null, ""]) {
+    assert.equal(openSectionFor(k), GUIDE_OPEN_SECTION, `kind ${k}`);
+  }
+  assert.equal(openSectionFor("fix"), FIX_OPEN_SECTION);
+});

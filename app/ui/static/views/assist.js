@@ -101,6 +101,25 @@ function renderPicker(container) {
 // (§17.741) and the finish line that says how to advance (§17.932).
 export const GUIDE_OPEN_SECTION = /(?:\u{1F449}|\u2705|do this next|done when)/iu;
 
+// §17.1013 — a FIX turn is not shaped like a walkthrough, and folding it with
+// the walkthrough's rule hid the thing the operator needed.
+//
+// A guide leads with `## 👉 Do this next` carrying the whole immediate action,
+// so folding `## Run this` underneath it loses nothing. A fix leads with a
+// one-line summary and puts the actual steps in `## Fix` — so the same rule
+// collapsed the only actionable section behind a row reading "Fix (6)". Live
+// report: "without ANY walk through, though it is hidden under Fix." Measured
+// on the turn they were looking at: 390 of 2,062 chars visible, with the six
+// numbered clicks folded away.
+export const FIX_OPEN_SECTION =
+  /(?:\u{1F449}|\u2705|do this next|done when|^fix$|^steps?$|^what to do)/iu;
+
+// The open-section rule for a bubble kind. Anything not explicitly shaped like
+// a fix keeps the walkthrough rule.
+export function openSectionFor(kind) {
+  return kind === "fix" ? FIX_OPEN_SECTION : GUIDE_OPEN_SECTION;
+}
+
 export function splitGuideSections(md) {
   const lines = String(md || "").split("\n");
   const lead = [];
@@ -622,13 +641,14 @@ export function renderChat(container, sessionId) {
   // HIDES nothing — the full runbook is one click away and still in the DOM —
   // it just stops the page shouting all nine sections at once.
 
-  function guideBody(content) {
+  function guideBody(content, kind) {
     const { lead, sections } = splitGuideSections(content);
+    const openRe = openSectionFor(kind);
     // Nothing to fold (short guidance, or no headings at all) — render as-is.
-    const foldable = sections.filter((s) => !GUIDE_OPEN_SECTION.test(s.title));
+    const foldable = sections.filter((s) => !openRe.test(s.title));
     if (!foldable.length) return el("div", { class: "msg-body md", html: mdToHtml(content || "") });
 
-    const open = sections.filter((s) => GUIDE_OPEN_SECTION.test(s.title));
+    const open = sections.filter((s) => openRe.test(s.title));
     const openMd = [lead.trim(), ...open.map((s) => `## ${s.title}\n${s.body.join("\n")}`)]
       .filter(Boolean).join("\n\n");
 
@@ -661,7 +681,7 @@ export function renderChat(container, sessionId) {
       // committed notice or a one-line note has no sections and must not gain
       // a disclosure row it does not need.
       (kind === "guide" || kind === "fix")
-        ? guideBody(content)
+        ? guideBody(content, kind)
         : el("div", { class: "msg-body md", html: mdToHtml(content || "") })
     );
   }
