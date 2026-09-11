@@ -79,6 +79,27 @@ _PLACEHOLDER_RESOLVER_SYSTEM = (
 )
 
 
+def _supported_by_facts(value: str, facts: list, env: dict) -> bool:
+    """§17.1015 — is `value` literally present in the grounding it claims?
+
+    The resolver is told to return a known value "EXACTLY as stated", so a
+    genuine kind=known value is a substring of the facts, the profile, or an
+    existing pinned substitution. Case-insensitive; everything else about the
+    comparison is deliberately literal, because the failure being prevented is
+    a plausible-looking value that resembles the facts without appearing in
+    them.
+    """
+    v = (value or "").strip().lower()
+    if not v:
+        return False
+    hay = " \n ".join([
+        *(str(f) for f in (facts or [])),
+        str((env or {}).get("profile") or ""),
+        *(f"{k} {x}" for k, x in ((env or {}).get("substitutions") or {}).items()),
+    ]).lower()
+    return v in hay
+
+
 async def resolve_placeholders(
     *, text: str, session_id: str, environment: Optional[dict],
     step_title: str = "", role: str = "model_general", db=None,
@@ -155,6 +176,26 @@ async def resolve_placeholders(
                     if (tok in tokens and kind in ("known", "suggested") and val
                             and len(val) <= 200
                             and not _UNSAFE_RESOLVER_VALUE_RE.search(val)):
+                        # §17.1015 — ENFORCE the system prompt's own rule:
+                        # "Never invent a kind=known value that is not literally
+                        # supported by the facts." It was a request, and the
+                        # model declined it. Live (T35, 2026-09-11 02:09): the
+                        # facts list `jellyfin.local`, `panel.local` etc. from
+                        # the Caddyfile; the resolver returned
+                        # YOUR_DOMAIN=home.local as kind=known, and the operator
+                        # was told `home.local` came "from your environment".
+                        # `home.local` appears 0 times in the 40 facts.
+                        #
+                        # A value is only KNOWN if it is literally in the
+                        # grounding it claims to come from. Anything else is a
+                        # proposal, and is labelled as one — the value still
+                        # fills in (an unresolved <PLACEHOLDER> helps nobody),
+                        # but it stops carrying the authority of an observation.
+                        if kind == "known" and not _supported_by_facts(val, facts, env):
+                            logger.warning(
+                                "assist_placeholder_unfounded_known token=%s "
+                                "value=%r -> downgraded to suggested", tok, val[:60])
+                            kind = "suggested"
                         out = out.replace(f"<{tok}>", val)
                         # source="model" — a model-suggested value; tagged so the
                         # SPA pin editor / meta can flag it as not operator-set
