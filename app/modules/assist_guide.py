@@ -3834,6 +3834,11 @@ def blocker_research_query(
     subject = " ".join(w for w in subject_src.split()
                        if w.lower() not in _GENERIC_TITLE_WORDS)[:60]
     query = f"{subject} {blocker}".strip() if subject else blocker
+    # §17.1020 — and the model, when the blocker is about that device.
+    from app.modules.assist_render import hardware_for_text
+    _hw = hardware_for_text(query, operator_notes)
+    if _hw:
+        query = " ".join(_hw) + " " + query
     # §17.1012 — cut on a WORD boundary. A hard [:180] ended queries mid-token
     # ("... plus it app"), and a dangling fragment is a term the search engine
     # matches on.
@@ -4299,7 +4304,8 @@ def _symptom_tokens(line: str) -> list[str]:
     return out
 
 
-def _error_focus_query(title: str, error_text: str) -> str:
+def _error_focus_query(title: str, error_text: str,
+                       operator_notes: list | None = None) -> str:
     """§17.882/909 — a DETERMINISTIC research query from the operator's symptom.
 
     Leads with what the operator described; the step title is appended ONLY when
@@ -4348,6 +4354,14 @@ def _error_focus_query(title: str, error_text: str) -> str:
         body = (f"{lead} {line}"
                 if lead and not line.lower().startswith(lead.lower())
                 else line)
+    # §17.1020 — lead with the operator's own model when the symptom is about
+    # that device. This is the fix path's LAST line of grounding: when the LLM
+    # query generator declines, §17.882's deterministic query is the only one
+    # that runs, and it knew nothing about the hardware.
+    from app.modules.assist_render import hardware_for_text
+    _models = hardware_for_text(f"{title} {line}", operator_notes)
+    if _models:
+        body = " ".join(_models) + " " + body
     body = _re.sub(r"\s+", " ", body)
     # Filler removal leaves orphaned punctuation ("again. , it was on the …").
     body = _re.sub(r"\s+([,;:.])", r"\1", body)
@@ -4697,7 +4711,7 @@ async def generate_fix(
         # row live; grounding on the ACTUAL error must not depend on it.
         try:
             from app.modules.assist_research_lib import _confirm_query
-            eq = _error_focus_query(ctx.title, error_text)
+            eq = _error_focus_query(ctx.title, error_text, operator_notes)
             if eq and eq not in {s.get("query") for s in sources}:
                 sources.extend(await _confirm_query(
                     eq, node_key=node_key, domain=domain, deep=True,

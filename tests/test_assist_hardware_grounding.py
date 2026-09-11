@@ -113,3 +113,63 @@ def test_the_query_does_not_repeat_its_own_opening():
     q = _error_focus_query("Validate entire build",
                            "caddy-proxy level error could not get certificate")
     assert q.lower().count("caddy-proxy level error") <= 1, q
+
+
+# ── §17.1020 — subject-matched hardware for the deterministic queries ─────
+from app.modules.assist_guide import blocker_research_query
+from app.modules.assist_render import hardware_for_text
+
+HW_NOTE = {"text": ("abandon the VLAN approach — the Spectrum SAX1V1K router cannot "
+                    "trunk tagged VLANs and the ES2251 modem has no usable LAN port.")}
+
+
+@pytest.mark.parametrize("text", [
+    "i am in the spectrum app under the router, which is where the DNS forwarding is",
+    "where do i set up port forwarding on my router",
+    "the modem has no usable LAN port",
+])
+def test_hardware_attaches_when_the_text_is_about_that_device(text):
+    assert hardware_for_text(text, [HW_NOTE]) == ["SAX1V1K", "ES2251"]
+
+
+@pytest.mark.parametrize("text", [
+    "pm2: command not found",
+    "caddy could not get certificate",
+    "npm install failed with EACCES",
+])
+def test_hardware_stays_out_of_unrelated_queries(text):
+    """Bolting every named model onto every query is worse than none:
+    'SAX1V1K pm2: command not found' retrieves nothing."""
+    assert hardware_for_text(text, [HW_NOTE]) == []
+
+
+def test_no_notes_is_silent():
+    assert hardware_for_text("anything about the router", None) == []
+    assert hardware_for_text("", [HW_NOTE]) == []
+
+
+def test_the_fix_query_leads_with_the_model():
+    q = _error_focus_query(
+        "Configure port forwarding",
+        "i am in the spectrum app under the router and only see Primary DNS Server",
+        [HW_NOTE])
+    assert q.startswith("SAX1V1K"), q[:80]
+
+
+def test_an_unrelated_fix_query_is_unchanged_by_hardware():
+    with_notes = _error_focus_query("Install PM2", "pm2: command not found", [HW_NOTE])
+    without = _error_focus_query("Install PM2", "pm2: command not found")
+    assert with_notes == without
+
+
+def test_the_blocker_query_leads_with_the_model():
+    notes = [HW_NOTE, {"text": "the router port forwarding page fails to save the "
+                               "rule and returns an error"}]
+    q = blocker_research_query(None, notes, "Configure port forwarding")
+    assert q.startswith("SAX1V1K"), q[:80]
+
+
+def test_an_unrelated_blocker_is_unchanged_by_hardware():
+    notes = [HW_NOTE, {"text": "pm2 install failed with a permission error"}]
+    q = blocker_research_query(None, notes, "Install PM2")
+    assert "SAX1V1K" not in q

@@ -766,6 +766,39 @@ def hardware_identifiers(operator_notes: list | None) -> list[str]:
     return out[:8]
 
 
+def hardware_for_text(text: str, operator_notes: list | None) -> list[str]:
+    """§17.1020 — the named models RELEVANT to `text`, for a deterministic query.
+
+    `hardware_identifiers` returns everything the operator has named; bolting all
+    of it onto every query would be worse than none ("SAX1V1K pm2: command not
+    found" retrieves nothing). A model earns its place only when the text is
+    plainly about that device — measured by sharing a distinctive word with the
+    note the model was found in.
+
+    So "i am in the spectrum app under the router…" picks up SAX1V1K (its note
+    says "Spectrum … router"), and "pm2: command not found" picks up nothing.
+    """
+    low = " ".join((text or "").lower().split())
+    if not low:
+        return []
+    out: list[str] = []
+    for n in (operator_notes or []):
+        note = (n.get("text") if isinstance(n, dict) else str(n)) or ""
+        if not _HARDWARE_NOUN_RE.search(note):
+            continue
+        models = [m for m in _MODEL_TOKEN_RE.findall(note) if m not in out]
+        if not models:
+            continue
+        # Distinctive words of the note: the hardware nouns it uses plus any
+        # capitalised vendor-ish token, both lowercased for the overlap test.
+        cues = {w.lower() for w in _HARDWARE_NOUN_RE.findall(note)}
+        cues |= {w.strip(".,;:()").lower() for w in note.split()
+                 if w[:1].isupper() and w.isalpha() and len(w) > 3}
+        if any(c in low for c in cues) or any(m.lower() in low for m in models):
+            out.extend(models)
+    return out[:3]
+
+
 def render_research_grounding(environment: dict | None,
                               operator_notes: list | None = None) -> str:
     """§17.975 — what a research QUERY needs to know about this system.
