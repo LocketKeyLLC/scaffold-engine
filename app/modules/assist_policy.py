@@ -335,13 +335,14 @@ def expresses_uncertainty(msg: str) -> bool:
     return bool(_UNCERTAIN_RE.search(normalize_punct(msg)))
 
 
-def looks_like_completion_claim(msg: str) -> bool:
-    """§17.890 — True when `msg` is the operator's bare ASSERTION that the
-    current step is complete (vs pasted evidence, a question, or an error
-    report). Deterministic, precision-first: used to (a) route such messages to
-    submit and (b) exempt them from the §17.731 incomplete/failed hard-block —
-    the operator's explicit word outranks a verifier that, by construction,
-    cannot see their machine."""
+def _completion_shape(msg: str) -> bool:
+    """§17.1017 — everything §17.890 requires of a completion report EXCEPT
+    whether the operator is sure of it: short, not a question, not paste-shaped,
+    not help-seeking, not a failure report, and carrying completion wording.
+
+    Split out so the confident and the hedged readings cannot drift apart —
+    they are the same message shape with opposite certainty, and they must be
+    judged by the same guards."""
     if not msg:
         return False
     m = normalize_punct(msg).strip()
@@ -360,13 +361,45 @@ def looks_like_completion_claim(msg: str) -> bool:
         return False            # "once it's done…" is a plan, not a claim
     if looks_like_howto_question(m) or looks_like_help_request(m):
         return False            # "how do I know it's done" is help-seeking
-    if _CLAIM_DISQUALIFY_RE.search(m):     # negation / failure wording
-        return False
-    # §17.1014 — stated uncertainty is not an assertion, so there is nothing
-    # for §17.890's "the operator's word outranks the verifier" to honour.
-    if expresses_uncertainty(m):
+    # §17.1017 — the negation guard exists for FAILURE wording ("it did not
+    # work"), but it matches on bare `not`, so "i am not sure" was being read
+    # as a failure report and the message fell out of the shape entirely —
+    # neither a claim nor a hedged report, so nothing routed it. Judge the
+    # negation on the text with the uncertainty phrasing removed: "it did not
+    # work and i am not sure why" still disqualifies on "did not work".
+    if _CLAIM_DISQUALIFY_RE.search(_UNCERTAIN_RE.sub(" ", m)):
         return False
     return bool(_CLAIM_PHRASE_RE.search(m))
+
+
+def looks_like_completion_claim(msg: str) -> bool:
+    """§17.890 — True when `msg` is the operator's bare ASSERTION that the
+    current step is complete (vs pasted evidence, a question, or an error
+    report). Deterministic, precision-first: used to (a) route such messages to
+    submit and (b) exempt them from the §17.731 incomplete/failed hard-block —
+    the operator's explicit word outranks a verifier that, by construction,
+    cannot see their machine.
+
+    §17.1014 — stated uncertainty is not an assertion, so there is nothing for
+    that exemption to honour. Such a message is a `hedged_completion_report`.
+    """
+    return _completion_shape(msg) and not expresses_uncertainty(msg)
+
+
+def hedged_completion_report(msg: str) -> bool:
+    """§17.1017 — the operator reporting this step is PROBABLY done, and saying
+    they cannot vouch for it ("i believe it is done but am unsure").
+
+    The same message shape as a completion claim, opposite certainty — so it
+    routes the same way (to submit, which RECORDS and verifies) but carries no
+    exemption from the hard-block. Live: driving `/assist/{id}/message` with
+    that sentence twice routed it to `action: "fix"`, because a hedge reads as
+    "something may be wrong". There is nothing to fix — the operator does not
+    know whether there is anything to fix, which is a question the verifier and
+    the step's own `## Verify` section can answer and a troubleshooting
+    diagnosis cannot.
+    """
+    return _completion_shape(msg) and expresses_uncertainty(msg)
 
 
 # ── Advancement signal (§17.891) ─────────────────────────────────────────────
@@ -631,6 +664,23 @@ def _override(action: str, message: str, signals: dict) -> tuple[str, str | None
     if action in ("question", "ask", "note", "status", "advance") \
             and looks_like_completion_claim(msg):
         return "submit", "completion_claim", {"evidence": msg.strip()}
+    # 3b. §17.1017 — the same shape, hedged. "i believe it is done but am
+    #     unsure" is a report about THIS step's completion, so it belongs on the
+    #     submit path: that records what they did and lets the verifier judge,
+    #     and when the verdict comes back 'unclear' §17.1016 holds the step open
+    #     and §17.1014 hands them the step's own `## Verify` checks.
+    #
+    #     `fix` IS overridable here, unlike gate 3 above. That exclusion exists
+    #     because an error guard disqualifies a confident claim, so a claim and
+    #     a fix cannot co-occur. A hedge is different: there is no error at all,
+    #     only an operator who cannot tell — and live, /message routed this
+    #     exact sentence to `fix` twice, answering "I don't know if it worked"
+    #     with a troubleshooting diagnosis for a problem nobody had reported.
+    #     A REAL error still reaches fix through gate 1, which returns first on
+    #     `shell_paste` + `shell_error`.
+    if action in ("question", "ask", "note", "status", "advance", "fix") \
+            and hedged_completion_report(msg):
+        return "submit", "hedged_completion", {"evidence": msg.strip()}
     # 4. A declarative or question-framed pivot reshapes the plan → note (§17.679/
     #    §17.691). Fires on skip/question/ask: the live A/B (§17.855) showed the
     #    /decide model routes QUESTION-FRAMED pivots ("can't we just … instead?")
