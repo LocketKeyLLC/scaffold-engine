@@ -88,14 +88,51 @@ def test_coerce_notes_tolerates_str_none_list():
 
 @pytest.mark.asyncio
 async def test_record_note_appends_and_commits():
+    """§17.1013 — dedupe is now the DEFAULT, so the happy path is two queries:
+    the existence check (finds nothing) and then the append. The previous mock
+    returned a row for EVERY execute, which under the new default reads as a
+    duplicate — model the two calls separately instead."""
     db = AsyncMock()
-    db.execute = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=("s",))))
+    db.execute = AsyncMock(side_effect=[
+        MagicMock(first=MagicMock(return_value=None)),   # no duplicate exists
+        MagicMock(first=MagicMock(return_value=("s",))),  # the append
+    ])
     db.commit = AsyncMock()
     note = await assist_agent.record_note(
         session_id="s", text_="only 2 NICs", kind="constraint", node_key="T2", db=db,
     )
     assert note == {"kind": "constraint", "node_key": "T2", "text": "only 2 NICs"}
     db.commit.assert_awaited_once()
+    assert db.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_record_note_dedupes_without_being_asked():
+    """The live session held "wants to build a markdown linter" four times.
+    A caller that does not opt out must not be able to re-record it."""
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=(1,))))
+    db.commit = AsyncMock()
+    note = await assist_agent.record_note(
+        session_id="s", text_="wants to build a markdown linter",
+        kind="addition", db=db,
+    )
+    assert note.get("deduped") is True
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_record_note_dedupe_can_be_opted_out():
+    """A genuinely repeatable observation can still be appended twice."""
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=MagicMock(first=MagicMock(return_value=("s",))))
+    db.commit = AsyncMock()
+    note = await assist_agent.record_note(
+        session_id="s", text_="disk filled again", kind="constraint",
+        dedupe=False, db=db,
+    )
+    assert "deduped" not in note
+    db.execute.assert_awaited_once()   # no existence check when opted out
 
 
 @pytest.mark.asyncio

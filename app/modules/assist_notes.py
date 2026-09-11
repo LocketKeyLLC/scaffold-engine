@@ -64,7 +64,7 @@ async def list_friction(*, session_id: str, db) -> list[dict]:
 
 async def record_note(
     *, session_id: str, text_: str, kind: str = "note",
-    node_key: str | None = None, dedupe: bool = False, db,
+    node_key: str | None = None, dedupe: bool = True, db,
 ) -> dict | None:
     """§17.654 — append a session-level note/addition. Project-scoped (not tied
     to a step's lifecycle like friction): a new requirement or constraint the
@@ -76,7 +76,17 @@ async def record_note(
     §17.854 (audit C4) — ``dedupe`` skips the append if an identical (kind,text)
     note already exists. Used by the pivot path (detect_reroute), where a
     re-sent already-dismissed pivot message otherwise re-recorded the SAME
-    decision note every turn — and every note thereafter rides every prompt."""
+    decision note every turn — and every note thereafter rides every prompt.
+
+    §17.1013 — ``dedupe`` now defaults to **True**. The argument §17.854 makes
+    for the pivot path is not specific to it: re-recording a byte-identical
+    (kind, text) note adds nothing and costs a line in every subsequent
+    prompt. The live homelab session held the note "wants to build a markdown
+    linter" **four times** despite `assemble_generation_memory` already
+    deduping in Python against the known set — so the in-process bookkeeping is
+    not a reliable guarantee, and this check is, because it reads the row it is
+    about to append to. Pass ``dedupe=False`` for a genuinely repeatable
+    observation."""
     from app.modules.assist_agent import _NOTE_KINDS  # §17.856 re-exports (patch-safe deferred)
     note_text = (text_ or "").strip()
     if not note_text:

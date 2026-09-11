@@ -108,18 +108,31 @@ def test_directive_can_be_disabled():
 # ── wiring ────────────────────────────────────────────────────────────────
 
 
-def test_wired_into_ensure_guidance_and_fail_soft():
+def test_wired_into_both_guide_paths_and_fail_soft():
+    """§17.1013 — the guards moved out of `ensure_guidance` into the shared
+    `apply_post_generation_guards`, because the STREAM path (the SPA path the
+    operator drives) does not call `ensure_guidance` and so never ran them at
+    all. Assert the guard body plus the delegation from both generators."""
     import inspect
 
     from app.modules import assist_guide
 
-    src = inspect.getsource(assist_guide.ensure_guidance)
-    assert "claims_plan_mutation" in src
-    assert "false_plan_claim_banner" in src
-    # the claim is only FALSE while the node is still live
-    assert '"skipped", "done"' in src
+    guards = inspect.getsource(assist_guide.apply_post_generation_guards)
+    assert "claims_plan_mutation" in guards
+    assert "false_plan_claim_banner" in guards
+    # §17.1013 — 'skipped' means the claim is TRUE. 'done' does NOT: a
+    # COMPLETED step was not "removed from the plan", and that conflation
+    # shielded the false claim on the live ADD3 once Done was pressed.
+    assert '!= "skipped"' in guards
+    assert '"skipped", "done"' not in guards, (
+        "a done node was never 'removed from the plan' (§17.1013)"
+    )
     # a correction must never break a guide
-    assert "assist_false_plan_claim_check_failed" in src
+    assert "assist_false_plan_claim_check_failed" in guards
+
+    for fn in ("ensure_guidance", "generate_guidance_stream"):
+        src = inspect.getsource(getattr(assist_guide, fn))
+        assert "apply_post_generation_guards(" in src, f"{fn} skips the guards"
 
 
 def test_correction_runs_before_the_no_action_offer():
@@ -131,7 +144,7 @@ def test_correction_runs_before_the_no_action_offer():
 
     from app.modules import assist_guide
 
-    src = inspect.getsource(assist_guide.ensure_guidance)
+    src = inspect.getsource(assist_guide.apply_post_generation_guards)
     assert src.index("claims_plan_mutation") < src.index(
         "concludes_no_action_required")
 

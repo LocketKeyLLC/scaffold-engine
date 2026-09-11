@@ -5588,6 +5588,98 @@ def no_action_footer(next_step: Optional[dict], title: str) -> str:
     )
 
 
+async def apply_post_generation_guards(
+    guidance: str, *, session_id: str, node_key: str, title: str, db,
+    banner_position: str = "prepend",
+) -> tuple[str, dict]:
+    """The three post-generation guards every walkthrough must pass.
+
+    §17.937 false-plan-claim correction · §17.927 no-action offer · §17.932
+    advance footer. Returns the corrected text plus the meta flags to merge.
+
+    §17.1013 — these ran ONLY inside ``ensure_guidance``, which
+    ``generate_guidance_stream`` does not call; the stream path is the SPA path
+    the operator drives. Live consequence on the homelab job: node ADD3
+    ("Rewrite the Caddyfile…") was told *"This step has been removed from the
+    project plan"* across six generations over eleven days. The node was live
+    the whole time, the detector fires on that exact sentence, and the
+    correction banner exists — it simply never ran on that path. The operator
+    pressed Done on a Caddyfile rewrite that had never happened, and the file is
+    still corrupt (21 lines on disk vs 15 written).
+
+    Sixth instance of the same stream-vs-non-stream divergence (§17.854,
+    §17.975, §17.976, §17.984, §17.1012), so it is a shared function rather
+    than a second copy.
+
+    ``banner_position`` is "prepend" for a non-streamed answer, which the
+    operator reads whole, and "append" for a streamed one, which they have
+    already watched go by — a correction cannot be inserted above text that is
+    on screen, so it follows it.
+    """
+    meta: dict = {}
+    out = guidance or ""
+    if not out.strip():
+        return out, meta
+
+    # §17.937 — the engine may not assert a plan change it did not make. Checked
+    # against the ACTUAL node status: if the walkthrough says this step was
+    # removed and the node is still live, the claim is false and is corrected.
+    # Runs BEFORE the §17.927 offer so the operator reads "the plan has NOT
+    # changed — reply `skip` to retire it" as one coherent instruction, instead
+    # of a skip offer stapled under a confident false statement.
+    try:
+        if claims_plan_mutation(out):
+            _job_row = (await db.execute(
+                text("SELECT job_id FROM assist_sessions WHERE id = :sid"),
+                {"sid": session_id},
+            )).mappings().first()
+            _node_status = (await db.execute(
+                text("SELECT status FROM dag_nodes "
+                     "WHERE job_id = :jid AND node_key = :nk"),
+                {"jid": str(_job_row["job_id"]), "nk": node_key},
+            )).scalar() if _job_row else None
+            # 'skipped' means the claim is TRUE — leave it alone. 'done' does
+            # NOT: a COMPLETED step was not "removed from the plan", and
+            # §17.1013 found that conflation shielding the false claim on ADD3.
+            if _node_status is not None and _node_status != "skipped":
+                banner = false_plan_claim_banner(title)
+                out = (out + "\n\n" + banner) if banner_position == "append" \
+                    else (banner + out)
+                meta["false_plan_claim"] = True
+                logger.warning(  # LOUD: the model asserted state it cannot set
+                    "assist_false_plan_claim node_key=%s node_status=%s",
+                    node_key, _node_status)
+    except Exception as exc:  # noqa: BLE001 — a correction must never fail a guide
+        logger.warning("assist_false_plan_claim_check_failed: %s", exc)
+
+    # §17.927 — a "no action required" conclusion must carry the action that
+    # acts on it, or the operator is parked on a dead step (live turn 1497).
+    try:
+        if concludes_no_action_required(out):
+            _job = (await db.execute(
+                text("SELECT job_id FROM assist_sessions WHERE id = :sid"),
+                {"sid": session_id},
+            )).mappings().first()
+            _nxt = await _next_claimable_step(
+                db=db, job_id=str(_job["job_id"]), exclude=node_key,
+            ) if _job else None
+            out = out + no_action_footer(_nxt, title)
+            meta["no_action_offer"] = True
+            logger.info("assist_no_action_offer node_key=%s next=%r",
+                        node_key, (_nxt or {}).get("node_key"))
+    except Exception as exc:  # noqa: BLE001 — the offer must never fail a guide
+        logger.warning("assist_no_action_offer_failed: %s", exc)
+
+    # §17.932 — state the finish line and the control that ends the step. Runs
+    # AFTER the §17.927 no-action offer on purpose: a step that needs no work is
+    # retired with `skip`, not finished by observation, so that footer owns the
+    # close and this one stands down. Idempotent — `_with_advance_footer`
+    # no-ops when the text already states a finish line.
+    if not meta.get("no_action_offer"):
+        out = _with_advance_footer(out, title)
+    return out, meta
+
+
 async def ensure_guidance(
     *,
     session_id: str,
@@ -5677,60 +5769,12 @@ async def ensure_guidance(
         status=res["status"],
         db=db,
     )
-    # §17.937 — the engine may not assert a plan change it did not make. Checked
-    # against the ACTUAL node status: if the walkthrough says this step was
-    # removed and the node is still live, the claim is false and leads with a
-    # correction. Runs BEFORE the §17.927 offer so the operator reads "the plan
-    # has NOT changed — reply `skip` to retire it" as one coherent instruction,
-    # instead of a skip offer stapled under a confident false statement.
-    try:
-        _g = res.get("guidance") or ""
-        if _g and claims_plan_mutation(_g):
-            _job_row = (await db.execute(
-                text("SELECT job_id FROM assist_sessions WHERE id = :sid"),
-                {"sid": session_id},
-            )).mappings().first()
-            _node_status = (await db.execute(
-                text("SELECT status FROM dag_nodes "
-                     "WHERE job_id = :jid AND node_key = :nk"),
-                {"jid": str(_job_row["job_id"]), "nk": node_key},
-            )).scalar() if _job_row else None
-            # 'skipped'/'done' mean the claim is TRUE — leave it alone.
-            if _node_status is not None and _node_status not in ("skipped", "done"):
-                res["guidance"] = false_plan_claim_banner(
-                    ctx.title or node_key) + _g
-                res.setdefault("guidance_meta", {})["false_plan_claim"] = True
-                logger.warning(  # LOUD: the model asserted state it cannot set
-                    "assist_false_plan_claim node_key=%s node_status=%s",
-                    node_key, _node_status)
-    except Exception as exc:  # noqa: BLE001 — a correction must never fail a guide
-        logger.warning("assist_false_plan_claim_check_failed: %s", exc)
-    # §17.927 — a "no action required" conclusion must carry the action that
-    # acts on it, or the operator is parked on a dead step (live turn 1497).
-    try:
-        if concludes_no_action_required(res.get("guidance") or ""):
-            _job = (await db.execute(
-                text("SELECT job_id FROM assist_sessions WHERE id = :sid"),
-                {"sid": session_id},
-            )).mappings().first()
-            _nxt = await _next_claimable_step(
-                db=db, job_id=str(_job["job_id"]), exclude=node_key,
-            ) if _job else None
-            res["guidance"] = (res["guidance"] or "") + no_action_footer(
-                _nxt, ctx.title or node_key)
-            res.setdefault("guidance_meta", {})["no_action_offer"] = True
-            logger.info(
-                "assist_no_action_offer node_key=%s next=%r",
-                node_key, (_nxt or {}).get("node_key"))
-    except Exception as exc:  # noqa: BLE001 — the offer must never fail a guide
-        logger.warning("assist_no_action_offer_failed: %s", exc)
-    # §17.932 — state the finish line and the control that ends the step. Runs
-    # AFTER the §17.927 no-action offer on purpose: a step that needs no work
-    # is retired with `skip`, not finished by observation, so that footer owns
-    # the close and this one stands down.
-    if not res.get("guidance_meta", {}).get("no_action_offer"):
-        res["guidance"] = _with_advance_footer(
-            res.get("guidance"), ctx.title or node_key)
+    res["guidance"], _guard_meta = await apply_post_generation_guards(
+        res.get("guidance") or "", session_id=session_id, node_key=node_key,
+        title=ctx.title or node_key, db=db, banner_position="prepend",
+    )
+    res.setdefault("guidance_meta", {}).update(_guard_meta)
+
     res["cached"] = False
     return res
 
@@ -5985,6 +6029,25 @@ async def generate_guidance_stream(
     }
     if status == "failed":
         meta["error"] = "empty model output"
+
+    # §17.1013 — the post-generation guards the non-stream path has always run
+    # and this one never did: the §17.937 false-plan-claim correction, the
+    # §17.927 no-action offer, the §17.932 advance footer. They live in
+    # `ensure_guidance`, which this generator does not call, so a streamed
+    # walkthrough asserting "this step has been removed from the project plan"
+    # reached the operator uncorrected. Position is "append" because they have
+    # already watched the text stream past; the added text is yielded as one
+    # final delta so the screen matches what gets persisted.
+    if status != "failed":
+        _before = text_out
+        text_out, _guard_meta = await apply_post_generation_guards(
+            text_out, session_id=session_id, node_key=node_key,
+            title=ctx.title or node_key, db=db, banner_position="append",
+        )
+        meta.update(_guard_meta)
+        if len(text_out) > len(_before):
+            yield {"type": "delta", "text": text_out[len(_before):]}
+
     await persist_guidance(
         session_id=session_id, node_key=node_key, guidance=text_out,
         guidance_meta=meta, status=status, db=db,
