@@ -1143,7 +1143,9 @@ async def run_step_research(
 
     res = await assist_guide.research_one(
         question=question, node_key=nk or "?", domain=domain,
-        job_context=job_context, context_hint=_kb_hint_from(brief, environment),
+        job_context=job_context,
+        # §17.1019 — the retrieval side needs the hardware too.
+        context_hint=_kb_hint_from(brief, environment, mem.operator_notes),
     )
     # §17.851b — research how-to answers carry commands too: same
     # code-enforced placeholder resolution as walkthroughs and fixes.
@@ -2170,15 +2172,34 @@ async def _job_digest_for(
         return ""
 
 
-def _kb_hint_from(brief: dict, environment: dict) -> str:
+def _kb_hint_from(brief: dict, environment: dict,
+                  operator_notes: list | None = None) -> str:
     """A short project-entity string to bias local-KB retrieval (§17.650).
 
     Pulls the brief goal/title and the environment substitution KEYS (not
     values — the keys name the entities, e.g. HOST_A/HOST_B, without leaking
     concrete secrets into the query). Capped so it augments, not dominates,
     the operator's actual question.
+
+    §17.1019 — and the operator's NAMED HARDWARE, first. This hint anchors
+    `_focus_web_query`, whose own note says it "anchors the query on the RIGHT
+    stack — without it 'fix the VM' drifted to VirtualBox/VMware instead of
+    Proxmox". A model number is the strongest anchor there is, and this builder
+    could not see one: it reads the brief and `environment` (facts, profile,
+    substitutions), while the operator's router model lives in NOTES.
+
+    Live: asked twice how to set up port forwarding, the engine twice returned
+    generic advice ("try 192.168.1.1, look for Advanced or NAT") and closed by
+    asking the operator for "the router model number from the sticker" —
+    naming SAX1V1K in its own text as one of the possibilities, because
+    §17.1018 had put it in the GENERATION prompt while this, the RETRIEVAL
+    side of the same turn, still had no idea.
     """
     bits: list[str] = []
+    from app.modules.assist_render import hardware_identifiers
+    models = hardware_identifiers(operator_notes)
+    if models:
+        bits.append(" ".join(models))
     goal = (brief or {}).get("description") or (brief or {}).get("title") or ""
     if isinstance(goal, str) and goal.strip():
         bits.append(goal.strip())
