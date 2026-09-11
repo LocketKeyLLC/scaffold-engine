@@ -61,9 +61,15 @@ def test_no_recap_is_silent():
 
 
 # ── goal → a few query keywords, not a pasted sentence ───────────────────
-def test_the_technical_phrase_leads():
+def test_a_multiword_phrase_leads_and_the_blocker_is_present():
+    """§17.1025 — asserting `kw[0] == "port forwarding"` was the answer key in
+    test form: it pinned ONE operator's phrase to first place, and it passed
+    only because the implementation carried that phrase in a literal list.
+    The general property is that a multi-word phrase leads (phrases retrieve
+    better than bare nouns) and the blocker's own wording is represented."""
     kw = _goal_keywords(_recap_goal_terms(REAL_RECAP))
-    assert kw[0] == "port forwarding", kw
+    assert " " in kw[0], f"a bare noun leads instead of a phrase: {kw}"
+    assert any("forwarding" in k for k in kw), kw
     assert len(kw) <= 4, f"a query is not a sentence: {kw}"
 
 
