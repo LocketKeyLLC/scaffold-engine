@@ -2188,21 +2188,10 @@ async def generate_guidance(
             # query generator declines on a confident-sounding step.
             floor_when_empty=True,
         )
-        # §17.918 — ONE deterministic query about the BLOCKER, always, when the
-        # session records one. The prepass is anchored on the step's task text
-        # and therefore researches the task; a step the operator is STUCK on
-        # needs the stuck-ness researched. Mirrors §17.882 on the fix path.
-        try:
-            bq = blocker_research_query(environment, operator_notes, ctx.title)
-            if bq and bq not in {s.get("query") for s in sources}:
-                from app.modules.assist_research_lib import _confirm_query
-                sources.extend(await _confirm_query(
-                    bq, node_key=node_key, domain=domain, deep=True,
-                ))
-                logger.info("assist_guide_blocker_query node_key=%s q=%r",
-                            node_key, bq[:120])
-        except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
-            logger.warning("assist_guide_blocker_query_failed: %s", exc)
+        await _add_blocker_research(
+            sources, environment=environment, operator_notes=operator_notes,
+            ctx=ctx, node_key=node_key, domain=domain,
+        )
 
     system = _build_guide_system(ctx, verbosity, is_decision=is_decision)
     user = _build_guide_user_prompt(
@@ -3715,9 +3704,55 @@ _BLOCKER_FACT_RE = re.compile(
 _BLOCKER_NOISE_RE = re.compile(
     r"^\s*(?:operator (?:has )?(?:decided|wants|attempted)|i (?:think|want))\b"
     r"|\byou (?:still )?(?:have not|haven'?t|keep|are not|aren'?t)\b"
-    r"|\bnot fixed\b|\bperhaps we should\b",
+    r"|\bnot fixed\b|\bperhaps we should\b"
+    # §17.1012 — a QUESTION or a REQUEST is not a symptom. Live miss: "can we
+    # switch to ssh so i can copy and paste? and there seems to be an error to
+    # long for me to sit here and type out" passed the symptom filter on the
+    # word "error" and, being the longest recent note, won the blocker slot on
+    # every step. It describes the operator's console ergonomics, which no
+    # search engine can act on.
+    r"|^\s*(?:can|could|should|would|will|do|does|did|how|why|what|is|are)\s+"
+    r"(?:we|i|you|it|this|that)\b"
+    r"|\bso i can\b|\bfor me to\b|\bcopy and paste\b",
     re.IGNORECASE,
 )
+
+
+async def _add_blocker_research(
+    sources: list, *, environment, operator_notes, ctx, node_key, domain,
+) -> None:
+    """§17.918 — append ONE deterministic query about what is BLOCKING this step.
+
+    The prepass is anchored on the step's task text and therefore researches the
+    TASK; a step the operator is stuck on needs the stuck-ness researched.
+    Mirrors §17.882 on the fix path. Fail-soft: extra grounding must never break
+    walkthrough generation.
+
+    §17.1012 — extracted so both guide paths call it. It had lived inline in the
+    NON-stream generator only, so the SPA path — `generate_guidance_stream`, the
+    one the operator actually drives — never ran blocker research at all. That
+    is the same stream-vs-non-stream divergence as §17.854 (environment
+    grounding), §17.975 (research grounding) and §17.976 (the §17.912 floor),
+    which is why this one is a shared function rather than a second copy.
+    """
+    try:
+        bq = blocker_research_query(environment, operator_notes, ctx.title)
+        if bq and bq not in {s.get("query") for s in sources}:
+            from app.modules.assist_research_lib import _confirm_query
+            sources.extend(await _confirm_query(
+                bq, node_key=node_key, domain=domain, deep=True,
+            ))
+            logger.info("assist_guide_blocker_query node_key=%s q=%r",
+                        node_key, bq[:120])
+    except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
+        logger.warning("assist_guide_blocker_query_failed: %s", exc)
+
+
+# §17.1012 — how many trailing facts/notes the blocker search may consider, and
+# the query length cap. The window is what stops a resolved problem from being
+# researched forever; 8 covers the current step and the couple before it.
+_BLOCKER_RECENT_WINDOW = 8
+_BLOCKER_QUERY_MAX = 180
 
 
 def blocker_research_query(
@@ -3741,10 +3776,20 @@ def blocker_research_query(
                 out.append(t)
         return out
 
-    candidates = _pick((environment or {}).get("facts") or [])
+    # §17.1012 — bound the search to RECENT entries before ranking. Facts and
+    # notes are append-ordered, so the tail is the current state of the work.
+    # Without this the ranking below runs over the session's entire history: on
+    # the live homelab job that was 50 notes, and the winner was a resolved
+    # VM-110 reboot hang that then rode along on the reverse-proxy, VPN,
+    # validation and documentation steps alike. A blocker nobody is blocked on
+    # is not a blocker; if nothing recent records one, returning "" is correct.
+    facts = list((environment or {}).get("facts") or [])[-_BLOCKER_RECENT_WINDOW:]
+    notes = list(operator_notes or [])[-_BLOCKER_RECENT_WINDOW:]
+    candidates = _pick(facts)
+    from_notes = False
     if not candidates:
-        candidates = _pick(
-            (n or {}).get("text") or "" for n in (operator_notes or []))
+        candidates = _pick((n or {}).get("text") or "" for n in notes)
+        from_notes = True
     if not candidates:
         return ""
     # Prefer the MOST SPECIFIC blocker, not merely the newest: "installation
@@ -3752,7 +3797,24 @@ def blocker_research_query(
     # installing security updates" retrieves an answer; "installation is hung on
     # rebooting" retrieves noise. Length is a crude but reliable proxy for how
     # much a symptom narrows a search; recency breaks ties.
-    blocker = max(candidates, key=lambda c: (len(c[:220]), candidates.index(c)))
+    #
+    # §17.1012 — but RELEVANCE TO THIS STEP outranks both. Length alone made the
+    # session's most rambling sentence win permanently, regardless of which step
+    # was being researched. A blocker that shares a distinctive word with the
+    # step's title is about this step; one that shares none is somebody else's
+    # problem, and searching it spends the step's one blocker query on noise.
+    topic = _distinctive(title)
+    blocker = max(candidates, key=lambda c: (
+        len(topic & _distinctive(c)), len(c[:220]), candidates.index(c)))
+    # §17.1012 — FACTS are distilled system observations, trusted even when they
+    # share no wording with the step ("Caddy fails to start" on a step titled
+    # "Configure reverse proxy"). A raw NOTE is whatever the operator typed, so
+    # it earns the step's one blocker query only by being ABOUT this step. With
+    # no overlap and no fact, the honest answer is that this step records no
+    # blocker — which is exactly what "" means here.
+    if from_notes and topic and not (topic & _distinctive(blocker)):
+        logger.info("assist_blocker_query_off_topic node=%r skipped", title)
+        return ""
     # Instance identifiers ("VM 106") are noise to a search engine; the
     # technology and the symptom are the signal.
     blocker = re.sub(r"\b(?:VM|CT|container)\s+\d{2,5}\b", "", blocker,
@@ -3764,7 +3826,13 @@ def blocker_research_query(
                          title or "", flags=re.IGNORECASE)
     subject = " ".join(w for w in subject_src.split()
                        if w.lower() not in _GENERIC_TITLE_WORDS)[:60]
-    return (f"{subject} {blocker}".strip() if subject else blocker)[:180]
+    query = f"{subject} {blocker}".strip() if subject else blocker
+    # §17.1012 — cut on a WORD boundary. A hard [:180] ended queries mid-token
+    # ("... plus it app"), and a dangling fragment is a term the search engine
+    # matches on.
+    if len(query) > _BLOCKER_QUERY_MAX:
+        query = query[:_BLOCKER_QUERY_MAX].rsplit(" ", 1)[0]
+    return query.strip(" .,:;-")
 
 
 # §17.919 — the walkthrough asserts the step's OWN GOAL is already achieved.
@@ -5746,6 +5814,12 @@ async def generate_guidance_stream(
             # nothing recorded that it had happened. Third instance of this same
             # stream-vs-non-stream divergence after §17.854 and §17.975.
             floor_when_empty=True,
+        )
+        # §17.1012 — the blocker query the non-stream path had and this one did
+        # not. Fourth instance of the same divergence (§17.854/975/976).
+        await _add_blocker_research(
+            sources, environment=environment, operator_notes=operator_notes,
+            ctx=ctx, node_key=node_key, domain=domain,
         )
 
     system = _build_guide_system(ctx, verbosity, is_decision=is_decision)
