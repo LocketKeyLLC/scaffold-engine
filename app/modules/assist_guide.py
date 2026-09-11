@@ -2183,7 +2183,8 @@ async def generate_guidance(
             # actual system so a DECISION step's options are system-specific, not
             # a generic textbook list. render_environment_block folds in the
             # §17.709 facts ledger; "" when unknown (fail-soft, generic queries).
-            environment_block=render_research_grounding(environment),  # §17.975
+            environment_block=render_research_grounding(
+                environment, operator_notes),  # §17.975 · §17.1018 hardware
             # §17.912 — the guide path is the one that loses retrieval when the
             # query generator declines on a confident-sounding step.
             floor_when_empty=True,
@@ -4213,6 +4214,27 @@ _SYMPTOM_LINE_RE = (
     r"no progress|never finish|won't boot|wont boot|loop"
 )
 
+# §17.1018 — tokens that are unique to ONE occurrence of an event. A timestamp,
+# a unix epoch or a PID cannot match any document, and including them costs the
+# query the terms that could. Live queries this stripped:
+#   'caddy-proxy level error Sep 11 14:41:01 caddy-proxy caddy[1797]:
+#    {"level":"error","ts":1789137661.7748446,"logger":"tls.obtain'
+#   'root@pve:~# echo "=== Firewall ==='
+_VOLATILE_TOKEN_RE = __import__("re").compile(
+    r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?"   # ISO
+    r"|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+"
+    r"\d{2}:\d{2}:\d{2}"                                                  # syslog
+    r"|\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b"                                  # bare clock
+    r"|\b1[0-9]{9}(?:\.\d+)?\b"                                            # unix epoch
+    r"|\[\d{2,7}\]"                                                        # [1797] pid
+    r"|\b[0-9a-f]{12,}\b",                                                 # long hex ids
+    __import__("re").IGNORECASE,
+)
+
+# A pasted shell prompt is the operator's machine, not the subject of a search.
+_SHELL_PROMPT_PREFIX_RE = __import__("re").compile(
+    r"^\s*(?:\[?[\w.-]+@[\w.-]+[^$#>]*\]?\s*[$#>]|PS\s+[A-Z]:\\[^>]*>)\s*")
+
 # Hedges and first-person narration carry no retrieval signal and crowd out the
 # terms that do.
 _QUERY_FILLER_RE = __import__("re").compile(
@@ -4220,7 +4242,15 @@ _QUERY_FILLER_RE = __import__("re").compile(
     r"mistaken|viewed\s+the\s+full\s+logs\s+and)|it\s+(?:appears?|seems?)"
     r"(?:\s+to\s+be|\s+that|\s+as\s+though)?|perhaps|maybe|however|actually|"
     r"basically|i\s+would|we\s+should|it\s+would\s+be\s+best\s+to|"
-    r"when\s+(?:attempting|trying)\s+to|now\s+its|now\s+it's)\b",
+    r"when\s+(?:attempting|trying)\s+to|now\s+its|now\s+it's"
+    # §17.1018 — narration that describes where the operator IS looking. Live:
+    # "i am in the spectrum app under the router, which is where the DNS server
+    # forwarding is but it only lists Primary DNS Server and Secondary DNS
+    # server" went to the search engine verbatim, 148 chars of first person.
+    r"|i(?:'?m|\s+am)\s+(?:in|on|at|under|looking\s+at)|i\s+(?:see|went\s+to|"
+    r"clicked|opened|checked|found|only\s+see)|which\s+is\s+where|"
+    r"but\s+it\s+only\s+(?:lists?|shows?|has)|it\s+only\s+(?:lists?|shows?|has)|"
+    r"there\s+(?:is|are)\s+only)\b",
     __import__("re").IGNORECASE,
 )
 
@@ -4290,6 +4320,10 @@ def _error_focus_query(title: str, error_text: str) -> str:
     without_proposal = _PROPOSAL_CLAUSE_RE.sub(" ", line)
     if without_proposal.strip(" ,.;:-"):
         line = without_proposal
+    # §17.1018 — strip the machine's own bookkeeping before the filler pass:
+    # a prompt prefix, then timestamps/epochs/PIDs that can match no document.
+    line = _SHELL_PROMPT_PREFIX_RE.sub("", line)
+    line = _VOLATILE_TOKEN_RE.sub(" ", line)
     line = _re.sub(r"\s+", " ", _QUERY_FILLER_RE.sub(" ", line)).strip(" ,.;:-'\"")
     if not line:
         return " ".join((title or "").split()[:6]).strip()
@@ -4307,7 +4341,13 @@ def _error_focus_query(title: str, error_text: str) -> str:
         title_part = " ".join((title or "").split()[:6])
         body = f"{title_part} {line}"
     else:
-        body = f"{lead} {line}" if lead else line
+        # §17.1018 — `lead` is drawn FROM `line`, so prefixing it repeated the
+        # query's own opening words: "caddy-proxy level error caddy-proxy level
+        # error Sep 11 …". It only earns its place when it surfaces terms the
+        # line does not already start with.
+        body = (f"{lead} {line}"
+                if lead and not line.lower().startswith(lead.lower())
+                else line)
     body = _re.sub(r"\s+", " ", body)
     # Filler removal leaves orphaned punctuation ("again. , it was on the …").
     body = _re.sub(r"\s+([,;:.])", r"\1", body)
@@ -4648,7 +4688,8 @@ async def generate_fix(
             # this call was never included, so every troubleshooting query was
             # generated blind to the operator's actual system — on the one path
             # that only runs when something is already wrong.
-            environment_block=render_research_grounding(environment),
+            environment_block=render_research_grounding(
+                environment, operator_notes),  # §17.975 · §17.1018 hardware
             deep=True,  # §17.500 — troubleshooting wants real doc content, not snippets
         )
         # §17.882 — one DETERMINISTIC error-derived query, always. The
@@ -5905,7 +5946,8 @@ async def generate_guidance_stream(
             # environment grounding the non-stream path passes, so a streamed
             # DECISION step (the SPA path) researched generic textbook options
             # instead of system-specific ones. Restored to parity.
-            environment_block=render_research_grounding(environment),  # §17.975
+            environment_block=render_research_grounding(
+                environment, operator_notes),  # §17.975 · §17.1018 hardware
             # §17.976 — the §17.912 floor, which this path never asked for.
             # Measured: `floor_when_empty=True` appeared at exactly ONE call
             # site, the NON-stream guide. The stream path is the SPA path — the

@@ -85,7 +85,9 @@ def test_the_fix_path_now_grounds_its_research():
     src = inspect.getsource(assist_guide.generate_fix)
     i = src.index("_research_prepass(")
     window = src[i:i + 1200]
-    assert "environment_block=render_research_grounding(environment)" in window
+    # §17.1018 — the call now also passes operator_notes, so it wraps across
+    # lines. Assert the CALL is made, not how it happens to be formatted.
+    assert "environment_block=render_research_grounding(" in window
 
 
 def test_both_guide_paths_use_it():
@@ -94,7 +96,7 @@ def test_both_guide_paths_use_it():
     for fn in (assist_guide.generate_guidance,
                assist_guide.generate_guidance_stream):
         src = inspect.getsource(fn)
-        assert "render_research_grounding(environment)" in src, fn.__name__
+        assert "render_research_grounding(" in src, fn.__name__  # §17.1018
         assert "environment_block=render_environment_block" not in src, fn.__name__
 
 
@@ -102,7 +104,7 @@ def test_the_decision_path_uses_it():
     from app.modules import assist_agent
 
     src = inspect.getsource(assist_agent.run_step_decision)
-    assert "render_research_grounding(mem.environment)" in src
+    assert "render_research_grounding(" in src  # §17.1018
     assert "render_environment_block(mem.environment)" not in src
 
 
