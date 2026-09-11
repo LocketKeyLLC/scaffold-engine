@@ -594,9 +594,33 @@ async def research_one(
     # question answerable purely from the project's own prior work must not be
     # dropped just because the open web returned nothing.
     if synthesize and (sources or (job_context or "").strip()):
+        # §17.1024 — BOUND the project context and put it BEHIND the sources.
+        #
+        # Measured on the live session, one variable changed and nothing else:
+        #
+        #   job_context = 30,255 chars -> "go to 192.168.1.1 ... check the sticker"
+        #   job_context = dropped      -> "Services -> Router -> Advanced Settings
+        #                                  -> Port Forwarding & IP Reservations"
+        #
+        # The retrieval was never the problem by then: the engine had already
+        # fetched reddit.com/r/Spectrum/.../how_to_set_sax1v1k_port_forwarding.
+        # The prompt put 30 KB of the project's OWN PRIOR OUTPUT first and the
+        # two fresh sources last, so the model restated what the project had
+        # already said — including the wrong claim it had made three times.
+        # Every wrong answer is digested into the project context and steers
+        # the next one; that loop is why the operator got byte-similar text on
+        # three consecutive asks.
+        _ctx_raw = (job_context or "").strip()
+        _cap = max(1000, int(getattr(settings, "assist_job_context_max_chars", 6000)))
+        if len(_ctx_raw) > _cap:
+            _ctx_raw = _ctx_raw[:_cap].rsplit("\n", 1)[0]
+            logger.info("assist_research_ctx_trimmed node_key=%s from=%d to=%d",
+                        node_key, len(job_context or ""), len(_ctx_raw))
         ctx_block = (
-            f"{job_context.strip()}\n\n" if (job_context or "").strip() else ""
-        )
+            "## Project background (what THIS build has already established — "
+            "use it for our own values and decisions, NOT as a source of "
+            "external product facts)\n" + _ctx_raw + "\n\n"
+        ) if _ctx_raw else ""
         # §17.958/959 — read the operator's own words BEFORE answering them.
         from app.modules import assist_policy as _pol
         _pending_prompt = _pol.detect_interactive_prompt(question)
@@ -647,9 +671,14 @@ async def research_one(
                     prompt=_pending_prompt),
                   gui=_gui_question), truncated=_truncated)},
                 {"role": "user", "content": (
-                    f"{ctx_block}"
+                    # §17.1024 — question first, then the FRESH sources, then
+                    # project background. The retrieved material is what can
+                    # answer a question about someone else's product; the
+                    # project's own history cannot, and leading with 30 KB of
+                    # it buried the sources the search had just fetched.
                     f"Question: {question}\n\n"
-                    f"{_render_research_block(sources)}"
+                    f"{_render_research_block(sources)}\n\n"
+                    f"{ctx_block}"
                 )},
             ],
             {"role": role},
