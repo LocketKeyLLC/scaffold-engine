@@ -21,6 +21,19 @@ from app.config import settings
 logger = logging.getLogger("scaffold.assist_guide")
 
 
+# §17.1015 — wording that marks a fact as NOT established. Kept tight: these
+# are the shapes the fact distiller actually emits when it records a doubt,
+# plus the operator's own "unsure"/"not sure" carried through verbatim.
+_UNCERTAIN_FACT_RE = re.compile(
+    r"\b(?:un(?:sure|certain|verified|confirmed|known)|"
+    r"not\s+(?:sure|certain|verified|confirmed|established|known)|"
+    r"no\s+idea|could\s+not\s+(?:be\s+)?(?:verify|verified|confirm|confirmed)|"
+    r"inconclusive|unclear|may\s+not\s+be|might\s+not\s+be|"
+    r"has\s+not\s+been\s+(?:verified|confirmed))\b",
+    re.IGNORECASE,
+)
+
+
 def render_environment_block(environment: dict | None) -> str:
     """§17.487 — the operator's environment so the model emits concrete commands.
 
@@ -50,12 +63,36 @@ def render_environment_block(environment: dict | None) -> str:
     # on these; never assume a fresh/empty system when facts describe an existing
     # one (or say a check was inconclusive).
     if facts:
-        parts.append(
-            "### Known facts about the operator's system (OBSERVED — ground on "
-            "these; do NOT assume a fresh/empty system, and treat anything marked "
-            "unknown/unverified as still open):\n"
-            + "\n".join(f"- {f}" for f in facts)
-        )
+        # §17.1015 — split SETTLED observations from OPEN ones. The header
+        # already said "treat anything marked unknown/unverified as still open",
+        # and the model read straight past it. Live (T35, 2026-09-11 02:09) the
+        # ledger held, verbatim:
+        #
+        #   "A security group was added (operator is unsure where the 'dmz'
+        #    security group came from)."
+        #
+        # and the walkthrough answered "the `dmz` group was created earlier in
+        # the project" — asserting the provenance the fact records as UNKNOWN,
+        # to the operator who had just said they did not know. A caveat inside a
+        # heading is a request; putting the open items under their own heading
+        # is structure, and structure survives a model skimming bullets.
+        settled = [f for f in facts if not _UNCERTAIN_FACT_RE.search(f)]
+        open_items = [f for f in facts if _UNCERTAIN_FACT_RE.search(f)]
+        if settled:
+            parts.append(
+                "### Known facts about the operator's system (OBSERVED — ground "
+                "on these; do NOT assume a fresh/empty system):\n"
+                + "\n".join(f"- {f}" for f in settled)
+            )
+        if open_items:
+            parts.append(
+                "### OPEN — recorded as uncertain, NOT established\n"
+                "These are things nobody has confirmed yet. Do NOT state them as "
+                "settled fact, do NOT explain where they came from, and do NOT "
+                "reassure the operator about them. If one matters to this step, "
+                "give them a command or a screen that SETTLES it:\n"
+                + "\n".join(f"- {f}" for f in open_items)
+            )
     # §17.913 — WITHOUT this the ledger never reaches the model, and the engine
     # only "knows" a tool is missing on the one turn whose error text mentions
     # it. Live: `sudo lvextend …` was emitted to a root@pve shell, died with
