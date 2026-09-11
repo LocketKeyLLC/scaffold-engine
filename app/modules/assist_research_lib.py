@@ -426,8 +426,11 @@ _FOCUS_QUERY_SYSTEM = (
     "query — the keywords a person would actually type. Drop filler ('can you "
     "walk me through', 'step by step', 'how do I'), keep the concrete nouns: "
     "product/tool names, the specific action, error text, versions. If PROJECT "
-    "keywords are given, fold in the ones that pin down the RIGHT tech (e.g. the "
-    "platform 'Proxmox') so the search doesn't drift to a different tool — but "
+    "keywords are given, fold in the ones that pin down the RIGHT tech — the "
+    "platform, product or model name they contain — so the search doesn't drift "
+    "to a different tool (§17.1025: the example here used to name one "
+    "operator's hypervisor, which taught every other operator's query to lean "
+    "that way) — but "
     "don't pad with every keyword. If the question asks for the CURRENT/LATEST/"
     "newest of something, keep that word — it matters. Reply with ONLY the "
     "query, no quotes, no preamble."
@@ -480,29 +483,60 @@ async def _focus_web_query(question: str, *, role: str, hint: str = "") -> str:
     return q
 
 
+# §17.1025 — LANGUAGE-level function words, deliberately not domain terms.
+# The distinction is the operator's objection: a list of English connectives
+# generalises to every subject, a list of networking phrases encodes the answer
+# to one. Nothing here names a technology.
 _GOAL_STOPWORDS = frozenset({
+    # articles / conjunctions / prepositions
     "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with", "is",
-    "are", "was", "were", "be", "been", "it", "its", "this", "that", "operator",
-    "cannot", "can", "not", "only", "still", "unreachable", "fields", "visible",
-    "yet", "from", "into", "at", "by", "but", "their", "they",
+    "are", "was", "were", "be", "been", "it", "its", "this", "that", "yet",
+    "from", "into", "at", "by", "but", "their", "they", "as", "so", "than",
+    "then", "when", "while", "after", "before", "during", "via", "per",
+    # pronouns / speaker framing
+    "operator", "user", "we", "our", "you", "your", "me", "my", "i",
+    # modals / auxiliaries / generic verbs that pair into junk bigrams
+    "cannot", "can", "could", "will", "would", "should", "must", "may", "might",
+    "not", "does", "did", "has", "have", "had", "keeps", "keep", "find", "finds",
+    "see", "sees", "get", "gets", "got", "make", "makes", "use", "uses", "using",
+    "try", "tries", "trying", "need", "needs", "want", "wants", "seem", "seems",
+    # generic state adjectives that carry no retrieval signal on their own
+    "only", "still", "again", "just", "very", "more", "most", "some", "any",
+    "unreachable", "fields", "visible", "available", "missing", "wrong", "bad",
 })
 
 
 def _goal_keywords(goal_terms: str, limit: int = 4) -> list[str]:
-    """§17.1023 — the few words from a recap's OPEN line worth adding to a query.
+    """§17.1025 — the few terms from a recap's OPEN line worth adding to a query.
 
-    Multi-word technical phrases first ("port forwarding"), then bare nouns.
-    Capped hard: the point is to aim the search, not to paste a sentence into it.
+    Multi-word phrases first, then bare nouns. Capped hard: the point is to aim
+    the search, not to paste a sentence into it.
+
+    §17.1025 — the phrases are DERIVED from the text, not matched against a
+    list. The first cut carried a literal tuple — ``("port forwarding", "dns
+    record", "bridge mode", "nat loopback", …)`` — assembled by reading the one
+    operator transcript this was written for. The operator's objection was
+    exact: that is handing the engine the answer to their question, and it
+    helps nobody whose problem is a kernel panic or a boot order or a disk
+    passthrough. Adjacent non-stopword tokens ARE the technical phrase in
+    English prose, in any domain, so the bigram is extracted rather than
+    recognised.
     """
     import re as _re
     low = " ".join((goal_terms or "").lower().split())
-    phrases = [ph for ph in ("port forwarding", "dns record", "dynamic dns",
-                             "reverse proxy", "static ip", "bridge mode",
-                             "nat loopback", "double nat")
-               if ph in low]
+    toks = _re.findall(r"[a-z][a-z0-9-]{2,}", low)
+    phrases: list[str] = []
+    for a, b in zip(toks, toks[1:]):
+        if a in _GOAL_STOPWORDS or b in _GOAL_STOPWORDS:
+            continue
+        ph = f"{a} {b}"
+        # Only a phrase that survives verbatim in the prose — adjacency in the
+        # token stream can jump punctuation, which is not a phrase.
+        if ph in low and ph not in phrases:
+            phrases.append(ph)
     words: list[str] = []
-    for w in _re.findall(r"[a-z][a-z0-9-]{3,}", low):
-        if w in _GOAL_STOPWORDS or any(w in ph for ph in phrases):
+    for w in toks:
+        if len(w) < 4 or w in _GOAL_STOPWORDS or any(w in ph for ph in phrases):
             continue
         if w not in words:
             words.append(w)
