@@ -27,6 +27,11 @@ export function flowState(job) {
     return { i: 1, hint: "The engine is refining your idea — the approval gate opens next.", action: { label: "Watch the approval gate", href: `#/job/${id}` } };
   if (st === "awaiting_confirmation")
     return { i: 1, hint: "Review the brief, answer what you can, then approve.", action: { label: "Open approval gate", href: `#/job/${id}` } };
+  if (st === "planning" && nodes === 0 && stalledFor(job) > 2 * 60 * 1000)
+    // §17.1036 — research finished, no plan, nothing moved for minutes: the
+    // chain that should have planned is gone (a closed tab, a restart). The
+    // server's resume loop will pick it up; this lets the operator do it now.
+    return { i: 2, hint: "Research finished but the plan never started — resume planning and it lands in the Plan tab.", action: { label: "Resume planning", href: `#/job/${id}/plan`, resume: true } };
   if (["researching", "planning"].includes(st))
     return { i: 2, hint: "Researching and drawing the plan — it lands in the Plan tab.", action: { label: "Open plan", href: `#/job/${id}/plan` } };
   if (st === "executing" && nodes > 0)
@@ -53,15 +58,36 @@ export function flowState(job) {
 
 /** Render the stepper. `activeHref` suppresses the action button when it
  * points at the surface it's mounted on (no "go where you already are"). */
+function stalledFor(job) {
+  const ts = Date.parse(job.updated_at || job.created_at || "");
+  return Number.isFinite(ts) ? Date.now() - ts : 0;
+}
+
 export function flowGuide(job, { here = "" } = {}) {
   if (!job || !job.status) return null;
   const { i, hint, action, secondary } = flowState(job);
   // A `start` action is a verb — it stays visible even on the surface it
   // points at, because pressing it CHANGES the job rather than navigating.
   const showAction =
-    action && (action.start || !(here && action.href.startsWith(here)));
+    action && (action.start || action.resume || !(here && action.href.startsWith(here)));
   let actionEl = null;
-  if (showAction && action.start) {
+  if (showAction && action.resume) {
+    // §17.1036 — restart the server-owned chain (planning-only from here).
+    const btn = el("button", { class: "btn btn-sm btn-primary", text: `${action.label} →` });
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "Resuming…";
+      try {
+        await api.post(`/jobs/${job.id}/approve`, {});
+        toast("Planning resumed — the plan lands in the Plan tab.", "ok");
+      } catch (e) {
+        toast(`Could not resume: ${e.detail || e.message}`, "err");
+        btn.disabled = false;
+        btn.textContent = `${action.label} →`;
+      }
+    });
+    actionEl = btn;
+  } else if (showAction && action.start) {
     const btn = el("button", { class: "btn btn-sm btn-primary", text: `${action.label} →` });
     btn.addEventListener("click", async () => {
       btn.disabled = true;
