@@ -158,3 +158,90 @@ def test_every_nullable_bound_parameter_in_the_module_is_cast():
     import re as _re
     bare = [m.group(0) for m in _re.finditer(r"(?<!CAST\()(?<!\w):(since|e)\b", src)]
     assert bare == [], bare
+
+
+# ---- §17.1044 — the decision trigger --------------------------------------
+
+NOTES = ("Options: (1) certbot --nginx (auto plugin) — fastest, but the plugin rewrites the server block; "
+         "(2) certbot certonly --webroot — leaves Nginx config untouched, needs a webroot path; "
+         "(3) DNS-01 with a Cloudflare token — no port 80 needed. Suggested: (2).")
+
+
+def test_options_are_parsed_with_labels():
+    opts = pr.parse_options(NOTES)
+    assert [o["n"] for o in opts] == [1, 2, 3]
+    assert opts[0]["label"].startswith("certbot --nginx") and opts[1]["label"].startswith("certbot certonly --webroot")
+    assert pr.parse_options("no options here") == [] and pr.parse_options("(1) only one") == []
+
+
+def test_the_trailing_suggestion_is_not_part_of_the_last_option():
+    """Live (T5 of scratch job 9cbfa37d): "… (2) DNS-01 validation: … Suggested:
+    certbot --nginx (HTTP-01). Record the operator's choice." made `certbot` and
+    `--nginx` look shared, so option 1 had no distinctive terms."""
+    notes = ("OPERATOR DECISION — options: (1) certbot --nginx (HTTP-01): Port 80 is reachable; tradeoff: no wildcard. "
+             "(2) DNS-01 validation: Port 80 blocked; tradeoff: more setup than HTTP-01. "
+             "Suggested: certbot --nginx (HTTP-01). Record the operator's choice.")
+    opts = pr.parse_options(notes)
+    assert [o["label"] for o in opts] == ["certbot --nginx (HTTP-01)", "DNS-01 validation"]
+    assert "certbot" not in opts[1]["text"]
+    assert {"certbot", "--nginx"} <= pr.option_terms(opts[0], [opts[1]])
+
+
+def test_numbered_lines_are_parsed_too():
+    opts = pr.parse_options("Choose:\n1. Caddy — automatic HTTPS\n2. Nginx — manual certbot\n")
+    assert [(o["n"], o["label"]) for o in opts] == [(1, "Caddy"), (2, "Nginx")]
+
+
+def test_the_choice_is_read_from_a_number_or_from_distinctive_terms():
+    opts = pr.parse_options(NOTES)
+    assert pr.choose(opts, "Decision: option 2 — certonly with the webroot at /var/www/html.")["n"] == 2
+    assert pr.choose(opts, "We will use the DNS-01 challenge with the Cloudflare token.")["n"] == 3
+    assert pr.choose(opts, "Decision: go ahead.") is None
+
+
+def test_decision_changes_add_the_directive_downstream_and_flag_rejected_option_steps():
+    opts = pr.parse_options(NOTES)
+    chosen, rejected = opts[1], [opts[0], opts[2]]
+    nodes = [
+        {"node_key": "T2", "status": "done", "prompt_template": NOTES},
+        {"node_key": "T5", "status": "pending", "prompt_template": "Write the HTTP block with the webroot location."},
+        {"node_key": "T8", "status": "pending", "prompt_template": "Run certbot --nginx -d status.example.net so the plugin rewrites the server block."},
+        {"node_key": "T14", "status": "pending", "prompt_template": "Configure monitors in the UI."},
+        {"node_key": "T3", "status": "done", "prompt_template": "certbot --nginx was considered"},
+    ]
+    steps = [{"node_key": "T8", "status": "pending", "guidance": "sudo certbot --nginx -d … the plugin rewrites"},
+             {"node_key": "T5", "status": "pending", "guidance": "tee the server block"}]
+    out = pr.decision_changes(nodes, steps, source_node_key="T2", downstream={"T5", "T8"},
+                              chosen=chosen, rejected=rejected)
+    keys = {u["node_key"]: u for u in out["node_updates"]}
+    assert set(keys) == {"T5", "T8"}
+    assert keys["T8"]["reason"] == "names a rejected option" and keys["T5"]["reason"] == "depends on the decision"
+    assert keys["T5"]["prompt_template"].endswith("do not apply as written.")
+    assert "chosen (2) certbot certonly --webroot" in keys["T5"]["prompt_template"]
+    assert out["guidance_resets"] == ["T8"]
+    # idempotent: a node already carrying the directive is not updated again
+    again = pr.decision_changes([dict(nodes[1], prompt_template=keys["T5"]["prompt_template"])], [],
+                                source_node_key="T2", downstream={"T5"}, chosen=chosen, rejected=rejected)
+    assert again["node_updates"] == []
+
+
+def test_render_note_for_a_decision_names_choice_flags_and_the_proposal():
+    note = pr.render_note({"trigger": "decision", "source_node_key": "T2",
+                           "chosen": {"n": 2, "label": "certbot certonly --webroot"},
+                           "node_updates": [{"node_key": "T5", "reason": "depends on the decision"},
+                                            {"node_key": "T8", "reason": "names a rejected option"}],
+                           "guidance_resets": ["T8"], "replan_proposal": {"proposals": [{}]}})
+    assert note.startswith("🔁 **Decision at step T2 applied to the plan** — chosen (2) certbot certonly --webroot.")
+    assert "T5, T8" in note and "T8 were written for an option you did not choose" in note
+    assert "walkthrough for T8 will be rewritten" in note and "plan-change proposal" in note
+
+
+def test_a_decision_commit_is_dispatched_by_node_type_and_the_turn_loop_forwards_the_proposal():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    src = (root / "app/modules/plan_reconcile.py").read_text()
+    body = src[src.index("async def reconcile_after_commit("):]
+    assert 'node_type") or "").strip().lower() == "decision"' in body and "_decision_trigger(" in body
+    assert body.index("_decision_trigger(") < body.index("_fix_context(")
+    assert "assess_note_impact(" in src  # structural impact goes through surface-and-ask, never applied silently
+    turn = (root / "app/modules/assist_turn.py").read_text()
+    assert 'rec.get("replan_proposal")' in turn and "ASSIST_REPLAN_PROPOSAL, {\"proposal\": rec[\"replan_proposal\"]}" in turn
