@@ -583,6 +583,7 @@ async def research_one(
     context_hint: Optional[str] = None, operator_notes: Optional[list] = None,
     goal_terms: Optional[str] = None,
     provenance: Optional[str] = None, flagged: Optional[set] = None,
+    sourced: Optional[set] = None,  # §17.1030 — the session's source-confirmed ledger
 ) -> dict:
     """Confirm a single operator-supplied question and optionally synthesize
     a short cited answer. Does not persist — this is a side query.
@@ -620,6 +621,7 @@ async def research_one(
     )
     sources = rank_evidence(sources, need, node_key=node_key)  # §17.1027
     answer: Optional[str] = None
+    grounding: Optional[dict] = None  # §17.1030 — the verifier's report, for the caller's ledger
     # Synthesize when we have web/KB sources OR project context to relay — a
     # question answerable purely from the project's own prior work must not be
     # dropped just because the open web returned nothing.
@@ -783,7 +785,7 @@ async def research_one(
                     (n.get("text") if isinstance(n, dict) else str(n)) or ""
                     for n in (operator_notes or []))
                 _trusted = question + "\n" + _render_research_block(sources)
-                answer, _ = await verify_answer(
+                answer, _vreport = await verify_answer(
                     answer, sources=sources,
                     corpus="\n".join([_trusted,
                                       (provenance if provenance is not None
@@ -792,8 +794,11 @@ async def research_one(
                     need=need, node_key=node_key, label="assist_research",
                     regenerate=_regen,
                     trusted=_trusted, flagged=flagged,  # §17.1028
+                    sourced=sourced,  # §17.1030
                 )
+                grounding = _vreport
             if answer:  # §17.897 — code-enforced copy-paste format
                 answer = strip_operator_meta_preamble(answer)  # §17.908
                 answer = promote_inline_commands(answer)
-    return {"question": question, "sources": sources, "answer": answer}
+    return {"question": question, "sources": sources, "answer": answer,
+            "grounding": grounding}

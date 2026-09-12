@@ -2219,6 +2219,7 @@ async def generate_guidance(
     )
 
     text_out = (resp.text or "").strip() if (resp and resp.success) else ""
+    _sourced_meta_guide: list[dict] = []  # §17.1030
     # §17.893 — banned-value enforcement: redraw once with the violation named;
     # a still-dirty draft gets the visible flag below.
     banned_meta: list[dict] = []
@@ -2358,12 +2359,15 @@ async def generate_guidance(
                 return ""  # a candidate that trips the §17.887 gate is not better
             return cand
 
-        from app.modules.assist_evidence import verify_answer
-        text_out, _ = await verify_answer(
+        from app.modules.assist_evidence import (
+            sourced_values_from_environment, verify_answer)
+        text_out, _vreport_guide = await verify_answer(
             text_out, sources=sources, corpus=_provenance, need=None,
             node_key=node_key, label="assist_guide", regenerate=_regen_guide,
             trusted=_trusted, flagged=flagged,
+            sourced=sourced_values_from_environment(environment),  # §17.1030
         )
+        _sourced_meta_guide = list(_vreport_guide.get("sourced_now") or [])
     # §17.897 — every command the operator is handed must be copy-pasteable,
     # whichever path produced it. The fenced-block mandate is a prompt rule and
     # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
@@ -2403,6 +2407,7 @@ async def generate_guidance(
         "banned_value_violations": banned_meta,
         # §17.898 — wrong-resource-type commands that survived the redraw.
         "resource_kind_violations": reskind_meta,
+        "sourced_values": _sourced_meta_guide,  # §17.1030
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
@@ -5026,6 +5031,7 @@ async def generate_fix(
     # diagnose-first directive → still dirty → a visible warning leads the
     # answer so the operator is never silently handed a guess.
     repeat_meta: list[str] = []
+    _sourced_meta_fix: list[dict] = []  # §17.1030
     banned_meta_fix: list[dict] = []  # §17.893
     novel_meta: list[str] = []
     reskind_meta_fix: list[dict] = []  # §17.898
@@ -5332,11 +5338,14 @@ async def generate_fix(
                 return ""
             return cand
 
-        text_out, _ = await verify_answer(
+        from app.modules.assist_evidence import sourced_values_from_environment
+        text_out, _vreport_fix = await verify_answer(
             text_out, sources=sources, corpus=_provenance, need=need,
             node_key=node_key, label="assist_fix", regenerate=_regen_grounded,
             trusted=_trusted, flagged=_flagged,  # §17.1028
+            sourced=sourced_values_from_environment(environment),  # §17.1030
         )
+        _sourced_meta_fix = list(_vreport_fix.get("sourced_now") or [])
     # §17.897 — every command the operator is handed must be copy-pasteable,
     # whichever path produced it. The fenced-block mandate is a prompt rule and
     # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
@@ -5397,6 +5406,7 @@ async def generate_fix(
         "guess_before_look_violations": look_meta_fix,  # §17.907
         "contradicted_fact_violations": contra_meta_fix,  # §17.908
         "redundant_discovery_violations": redundant_meta_fix,  # §17.914
+        "sourced_values": _sourced_meta_fix,  # §17.1030 — for the session ledger
     }
     if status == "failed":
         meta["error"] = (getattr(resp, "error", None) if resp else None) or "empty model output"
@@ -6281,14 +6291,17 @@ async def generate_guidance_stream(
             user.replace(_conv, "") if _conv else user, operator_conversation or ""])
         _trusted = "\n".join([ctx.base_prompt or "", node_description or "",
                               _render_research_block(sources)])
-        from app.modules.assist_evidence import verify_answer
+        from app.modules.assist_evidence import (
+            sourced_values_from_environment, verify_answer)
         _before = text_out
-        text_out, _ = await verify_answer(
+        text_out, _vreport_stream = await verify_answer(
             text_out, sources=sources, corpus=_provenance, need=None,
             node_key=node_key, label="assist_guide_stream",
             regenerate=None,  # annotate-only: the text is already on screen
             trusted=_trusted, flagged=flagged,
+            sourced=sourced_values_from_environment(environment),  # §17.1030
         )
+        meta["sourced_values"] = list(_vreport_stream.get("sourced_now") or [])
         if len(text_out) > len(_before):
             yield {"type": "delta", "text": text_out[len(_before):]}
 

@@ -332,6 +332,40 @@ async def test_verify_answer_carries_a_flag_across_turns(no_judge, valves):
     assert rep2["annotated"] and "`5.4.2`" in out2
 
 
+# ── §17.1030: a value a source confirmed earlier stays credited ──────────
+
+def test_sourced_now_reports_what_this_turns_sources_state():
+    src = [{"text": "npm registry: pm2 latest is 7.0.4 (2026-08-24)"}]
+    got = ev.sourced_now("Expect `7.0.4`; also try 192.168.9.9", src)
+    assert [g["value"] for g in got] == ["7.0.4"]
+    assert ev.sourced_now("Expect `7.0.4`", []) == []
+
+
+def test_a_value_sourced_on_an_earlier_turn_is_credited_without_refetching():
+    """Live: `7.0.4` was cited from the npm registry on the ask turn, then
+    flagged on the walkthrough because that turn's research did not refetch it."""
+    assert unsupported_specifics("Expect `7.0.4`.", "", sourced={"7.0.4"}) == []
+    assert [f["value"] for f in unsupported_specifics("Expect `7.0.4`.", "")] == ["7.0.4"]
+
+
+def test_sourced_values_from_environment_reads_the_ledger():
+    env = {"sourced_values": [{"value": "7.0.4", "kind": "version", "node_key": "T2"}, "1.2.3"]}
+    assert ev.sourced_values_from_environment(env) == {"7.0.4", "1.2.3"}
+    assert ev.sourced_values_from_environment({}) == set()
+
+
+@pytest.mark.asyncio
+async def test_verify_answer_reports_sourced_now_and_credits_the_ledger(no_judge, valves):
+    src = [{"text": "release notes: version 7.0.4 is current"}]
+    out, rep = await verify_answer("Install `7.0.4`.", sources=src, corpus="")
+    assert not rep["annotated"] and [s["value"] for s in rep["sourced_now"]] == ["7.0.4"]
+    out2, rep2 = await verify_answer("Still on `7.0.4`.", sources=[], corpus="",
+                                     sourced={"7.0.4"})
+    assert not rep2["annotated"] and rep2["unsupported"] == []
+    out3, rep3 = await verify_answer("Try `9.9.9`.", sources=[{"text": "nothing here"}], corpus="")
+    assert rep3["annotated"] and rep3["sourced_now"] == []
+
+
 # ── verify_answer: regenerate once, then annotate ─────────────────────────
 
 @pytest.fixture
@@ -434,3 +468,16 @@ def test_research_block_shows_publication_dates_and_the_freshness_rule():
     assert "published 2025-08-10" in block
     assert "[2] (web · https://b.example/y)" in block
     assert "prefer the newer one" in block
+
+
+# ── §17.1030: the ledger round-trips through the environment deserializer ──
+
+def test_sourced_values_round_trip_through_the_environment_reader():
+    """§17.881b lesson: set_environment writes the WHOLE env dict back, so a
+    key the reader drops is erased by the next fact fold."""
+    from app.modules.assist_environment import _environment_from_metadata
+    md = {"environment": {"facts": ["x"],
+                          "sourced_values": [{"value": "7.0.4", "kind": "version", "node_key": "T2"}]}}
+    env = _environment_from_metadata(md)
+    assert env["sourced_values"] == [{"value": "7.0.4", "kind": "version", "node_key": "T2"}]
+    assert _environment_from_metadata({"environment": {"sourced_values": "junk"}})["sourced_values"] == []

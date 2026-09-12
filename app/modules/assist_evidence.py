@@ -417,8 +417,64 @@ def operator_text(history: Optional[list]) -> str:
     )
 
 
+def sourced_values_from_environment(environment: Optional[dict]) -> set[str]:
+    """§17.1030 — the session's ledger of source-confirmed values, as a set."""
+    out: set[str] = set()
+    for v in ((environment or {}).get("sourced_values") or []):
+        val = v.get("value") if isinstance(v, dict) else v
+        if val and str(val).strip():
+            out.add(str(val).strip())
+    return out
+
+
+def extract_specifics(answer: str) -> list[dict]:
+    """Every concrete value the answer states — ``{kind, value}`` — before any
+    crediting. Placeholders, templated URLs, local URLs and example addresses
+    are not values (see the notes on each pattern above)."""
+    text = _PLACEHOLDER_RE.sub(" ", answer or "")
+    found: list[dict] = []
+
+    def _add(kind: str, value: str) -> None:
+        v = value.strip(".,;:)")
+        if v and not any(f["value"] == v for f in found):
+            found.append({"kind": kind, "value": v})
+
+    for u in _URL_RE.findall(text):
+        u = u.rstrip(".,;:)")
+        if _LOCAL_URL_RE.match(u) or "$" in u or "{" in u:
+            continue
+        _add("url", u)
+    text = _URL_RE.sub(" ", text)
+    for ip in _IPV4_RE.findall(text):
+        if not _EXAMPLE_IP_RE.match(ip):
+            _add("ip", ip)
+    text = _IPV4_RE.sub(" ", text)
+    for v in _VERSION_RE.findall(text):
+        _add("version", v)
+    for m in _PORT_RE.finditer(text):
+        p = m.group(1) or m.group(2)
+        if p and int(p) >= 1024:
+            _add("port", p)
+    return found
+
+
+def _in_word(v: str, hay: str) -> bool:
+    # Not glued to a preceding word/number ("3001" is not credited by
+    # "13001"); a trailing "." is a sentence end, and "22.04" is credited by
+    # "22.04.3" — a value consistent with the grounding is not from memory.
+    return re.search(r"(?<![\w.])" + re.escape(v.lower()) + r"(?!\w)", hay) is not None
+
+
+def _credited(item: dict, hay: str) -> bool:
+    v = item["value"].lower()
+    if item["kind"] == "url":
+        return v in hay or v.rstrip("/") in hay
+    return _in_word(v, hay)
+
+
 def unsupported_specifics(answer: str, corpus: str, *, trusted: str = "",
-                          flagged: Optional[set] = None) -> list[dict]:
+                          flagged: Optional[set] = None,
+                          sourced: Optional[set] = None) -> list[dict]:
     """Concrete values the answer states that its grounding never mentions.
 
     ``corpus`` is what the generation was given that counts as provenance:
@@ -433,61 +489,40 @@ def unsupported_specifics(answer: str, corpus: str, *, trusted: str = "",
     the footer) are credited ONLY by ``trusted`` text — the retrieved sources
     and the operator's current message — never by the wider corpus, which by
     then contains the flagged reply's echoes (recaps, digests).
+
+    ``sourced`` values (§17.1030: what a retrieved source confirmed on an
+    EARLIER turn, from the session ledger) are credited outright — a value a
+    source established does not become a guess because this turn's research
+    did not refetch that source.
     """
-    text = _PLACEHOLDER_RE.sub(" ", answer or "")
     trust = (trusted or "").lower()
     # Trusted text is provenance by definition (§17.1029): a value the task or
     # a source states is credited even if a caller's corpus omitted it.
     corp = (corpus or "").lower() + "\n" + trust
-    flagged = {v.lower() for v in (flagged or ())}
-    found: list[dict] = []
-
-    def _in(v: str, hay: str) -> bool:
-        return v.lower() in hay
-
-    def _in_word(v: str, hay: str) -> bool:
-        # Not glued to a preceding word/number ("3001" is not credited by
-        # "13001"); a trailing "." is a sentence end, and "22.04" is credited
-        # by "22.04.3" — a value consistent with the grounding is not from
-        # memory.
-        return re.search(r"(?<![\w.])" + re.escape(v.lower()) + r"(?!\w)", hay) is not None
-
-    def _known(v: str) -> bool:
-        if v.lower() in flagged:
-            return _in(v, trust)
-        return _in(v, corp)
-
-    def _known_word(v: str) -> bool:
-        if v.lower() in flagged:
-            return _in_word(v, trust)
-        return _in_word(v, corp)
-
-    def _add(kind: str, value: str) -> None:
-        v = value.strip(".,;:)")
-        if v and not any(f["value"] == v for f in found):
-            found.append({"kind": kind, "value": v})
-
-    for u in _URL_RE.findall(text):
-        u = u.rstrip(".,;:)")
-        if _LOCAL_URL_RE.match(u) or "$" in u or "{" in u:
+    flagged_l = {v.lower() for v in (flagged or ())}
+    sourced_l = {v.lower() for v in (sourced or ())}
+    out: list[dict] = []
+    for item in extract_specifics(answer):
+        v = item["value"].lower()
+        if v in sourced_l:
             continue
-        if not (_known(u) or _known(u.rstrip("/"))):
-            _add("url", u)
-    text = _URL_RE.sub(" ", text)
-    for ip in _IPV4_RE.findall(text):
-        if _EXAMPLE_IP_RE.match(ip):
-            continue
-        if not _known_word(ip):
-            _add("ip", ip)
-    text = _IPV4_RE.sub(" ", text)
-    for v in _VERSION_RE.findall(text):
-        if not _known_word(v):
-            _add("version", v)
-    for m in _PORT_RE.finditer(text):
-        p = m.group(1) or m.group(2)
-        if p and int(p) >= 1024 and not _known_word(p):
-            _add("port", p)
-    return found
+        hay = trust if v in flagged_l else corp
+        if not _credited(item, hay):
+            out.append(item)
+    return out
+
+
+def sourced_now(answer: str, sources: list) -> list[dict]:
+    """§17.1030 — the values in ``answer`` that THIS turn's retrieved sources
+    state, i.e. what the next turn may credit without refetching."""
+    if not (answer or "").strip() or not sources:
+        return []
+    hay = "\n".join(
+        str((s.get("text") or s.get("content") or "") if isinstance(s, dict) else s)
+        for s in sources).lower()
+    if not hay.strip():
+        return []
+    return [it for it in extract_specifics(answer) if _credited(it, hay)]
 
 
 async def citation_report(answer: str, sources: list) -> Optional[dict]:
@@ -563,6 +598,7 @@ async def verify_answer(
     regenerate: Optional[Callable[[str], Awaitable[str]]] = None,
     trusted: str = "",
     flagged: Optional[set] = None,
+    sourced: Optional[set] = None,
 ) -> tuple[str, dict]:
     """Check an answer against its grounding; regenerate once; else annotate.
 
@@ -578,11 +614,17 @@ async def verify_answer(
     value from nowhere.
     """
     report: dict = {"checked": False, "unsupported": [], "citation": None,
-                    "regenerated": False, "annotated": False}
+                    "regenerated": False, "annotated": False, "sourced_now": []}
     if not settings.assist_answer_verification_enabled or not (answer or "").strip():
         return answer, report
     report["checked"] = True
-    unsupported = unsupported_specifics(answer, corpus, trusted=trusted, flagged=flagged)
+    # §17.1030 — the sources this call is handed are trusted text by
+    # definition; a caller cannot forget to render them into the corpus.
+    trusted = (trusted or "") + "\n" + "\n".join(
+        str((s.get("text") or s.get("content") or "") if isinstance(s, dict) else s)
+        for s in (sources or []))
+    unsupported = unsupported_specifics(answer, corpus, trusted=trusted, flagged=flagged,
+                                        sourced=sourced)
     cite = await citation_report(answer, sources)
     _carried = [u["value"] for u in unsupported if u["value"].lower() in {v.lower() for v in (flagged or ())}]
     if _carried:
@@ -605,7 +647,8 @@ async def verify_answer(
             logger.warning("assist_answer_grounding_regen_failed: %s", exc)
             candidate = ""
         if candidate:
-            c_uns = unsupported_specifics(candidate, corpus, trusted=trusted, flagged=flagged)
+            c_uns = unsupported_specifics(candidate, corpus, trusted=trusted, flagged=flagged,
+                                          sourced=sourced)
             c_cite = await citation_report(candidate, sources)
             better = (not _fails(c_uns, c_cite)) or (
                 len(c_uns) < len(unsupported) and not (
@@ -619,10 +662,16 @@ async def verify_answer(
         report["annotated"] = True
     report["unsupported"] = unsupported
     report["citation"] = cite
+    # §17.1030 — what THIS turn's sources confirmed, for the session ledger.
+    # Computed on the final text, excluding anything still flagged.
+    _still = {u["value"].lower() for u in unsupported}
+    report["sourced_now"] = [it for it in sourced_now(answer, sources)
+                             if it["value"].lower() not in _still]
     logger.info(
         "assist_answer_grounding node_key=%s label=%s kind=%s unsupported=%d "
-        "cite_score=%s regenerated=%s annotated=%s values=%r",
+        "cite_score=%s regenerated=%s annotated=%s values=%r sourced_now=%r",
         node_key, label, getattr(need, "kind", "?"), len(unsupported),
         (cite or {}).get("score"), report["regenerated"], report["annotated"],
-        [u["value"] for u in unsupported][:6])
+        [u["value"] for u in unsupported][:6],
+        [it["value"] for it in report["sourced_now"]][:6])
     return answer, report

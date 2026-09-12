@@ -26,6 +26,7 @@ from app.modules.assist_environment import _environment_from_metadata
 # source so a new one cannot be added without this test noticing.
 WRITTEN = {"banned_values", "facts", "file_writes", "missing_tools", "playbook",
            "profile", "substitutions", "substitutions_by_node", "system_state",
+           "sourced_values",  # §17.1030 — the source-confirmed values ledger
            "verbosity"}
 
 # `verbosity` is the one that is NOT persisted inside the environment object: it
@@ -48,6 +49,7 @@ _SAMPLE = {
     "file_writes": {"/opt/a/server.js": {"expected": 120, "lines": 4,
                                          "sha": "abc123", "body": "app.listen(3001);",
                                          "observed": None, "observed_sha": None}},
+    "sourced_values": [{"value": "7.0.4", "kind": "version", "node_key": "T2"}],
     "verbosity": "normal",
 }
 
