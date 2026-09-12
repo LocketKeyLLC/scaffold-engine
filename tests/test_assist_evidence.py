@@ -523,6 +523,52 @@ async def test_verify_answer_regenerates_a_mismatched_command_then_flags(no_judg
     assert rep2["annotated"] and "Command mismatch" in out2 and "`python3 /opt/control-panel-backend/server.js`" in out2
 
 
+# ── §17.1034: a value only the plan vouches for is noted, not passed silently ──
+
+def test_ledger_text_is_the_operators_own_records_only():
+    env = {"facts": ["Proxmox host at 192.168.1.156"], "profile": "root@pve",
+           "substitutions": {"DOMAIN": "home.example"},
+           "system_state": {"106": {"kind": "vm"}}}
+    t = ev.ledger_text(env, [{"text": "router is at 10.0.0.1"}])
+    for s in ("192.168.1.156", "root@pve", "DOMAIN=home.example", "10.0.0.1", "106"):
+        assert s in t
+    assert ev.ledger_text({}, None) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_plan_only_value_is_noted_and_a_confirmed_one_is_not(no_judge, valves):
+    """Live: `192.168.1.1` was in the plan text and node outputs, in no fact,
+    note or source — it passed silently; now it is noted."""
+    plan = "Task: configure the router at 192.168.1.1 and expose the panel on 3001"
+    ans = "Type 192.168.1.1 into the primary field, then check port 3001."
+    out, rep = await verify_answer(ans, sources=[], corpus=plan, confirmed="")
+    assert not rep["annotated"] and rep["unsupported"] == []
+    assert [u["value"] for u in rep["plan_only"]] == ["192.168.1.1", "3001"]
+    assert "From the plan, not yet confirmed" in out and "`192.168.1.1`" in out
+    out2, rep2 = await verify_answer(ans, sources=[], corpus=plan,
+                                     confirmed="facts: gateway 192.168.1.1; backend listens on 3001")
+    assert rep2["plan_only"] == [] and "From the plan" not in out2
+    out3, rep3 = await verify_answer(ans, sources=[{"text": "router 192.168.1.1, port 3001"}],
+                                     corpus=plan, confirmed="")
+    assert rep3["plan_only"] == []
+
+
+@pytest.mark.asyncio
+async def test_plan_only_never_regenerates_and_unsupported_still_wins(no_judge, valves):
+    calls = []
+
+    async def regen(notice):
+        calls.append(notice)
+        return "unchanged"
+
+    plan = "Task: router at 192.168.1.1"
+    out, rep = await verify_answer("Use 192.168.1.1.", sources=[], corpus=plan, confirmed="",
+                                   regenerate=regen)
+    assert calls == [] and rep["plan_only"] and not rep["annotated"]
+    out2, rep2 = await verify_answer("Use 10.9.9.9.", sources=[], corpus=plan, confirmed="")
+    assert [u["value"] for u in rep2["unsupported"]] == ["10.9.9.9"] and rep2["plan_only"] == []
+
+
 # ── verify_answer: regenerate once, then annotate ─────────────────────────
 
 @pytest.fixture
@@ -542,7 +588,7 @@ def valves(monkeypatch):
 @pytest.mark.asyncio
 async def test_a_clean_answer_passes_untouched(no_judge, valves):
     ans = "Install 24.04 on 192.168.1.20 [1]."
-    out, rep = await verify_answer(ans, sources=[{"text": "x"}], corpus=CORPUS)
+    out, rep = await verify_answer(ans, sources=[{"text": "x"}], corpus=CORPUS, confirmed=CORPUS)
     assert out == ans
     assert rep["checked"] and not rep["annotated"] and not rep["regenerated"]
 

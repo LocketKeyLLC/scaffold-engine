@@ -473,6 +473,31 @@ def _url_host(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def ledger_text(environment: Optional[dict], operator_notes: Optional[list] = None) -> str:
+    """§17.1034 — the CONFIRMED tier of provenance: what the operator's own
+    ledger records. Facts (distilled from their output), notes (their words),
+    substitution values and profile (their pins), system state (read from
+    their own command output). NOT the plan, the digest or a recap — those are
+    what the engine assumed or distilled, and a value that traces only to them
+    is an assumption the operator has not confirmed on their system."""
+    env = environment or {}
+    parts: list[str] = [str(f) for f in (env.get("facts") or [])]
+    parts.append(str(env.get("profile") or ""))
+    subs = env.get("substitutions") or {}
+    if isinstance(subs, dict):
+        parts.extend(f"{k}={v}" for k, v in subs.items())
+    st = env.get("system_state") or {}
+    if isinstance(st, dict) and st:
+        import json as _json
+        try:
+            parts.append(_json.dumps(st))
+        except Exception:  # noqa: BLE001
+            parts.append(str(st))
+    for n in (operator_notes or []):
+        parts.append(str((n.get("text") if isinstance(n, dict) else n) or ""))
+    return "\n".join(p for p in parts if p)
+
+
 def owned_hosts(environment: Optional[dict], operator_notes: Optional[list] = None) -> set[str]:
     """§17.1032 — hostnames the OPERATOR'S ledger names: facts (distilled from
     their own output), notes (their own words), substitution values (their
@@ -742,9 +767,17 @@ def grounding_notice(unsupported: list[dict], cite: Optional[dict],
 
 def grounding_footer(unsupported: list[dict], cite: Optional[dict],
                      *, off_question: Optional[str] = None,
-                     shape: Optional[list] = None) -> str:
+                     shape: Optional[list] = None,
+                     plan_only: Optional[list] = None) -> str:
     """What the operator sees when the answer still fails after regeneration."""
     lines = ["\n\n---"]
+    if plan_only:
+        # §17.1034 — softer than the warning: the value is not from memory, it
+        # is from the plan — but nothing the operator has reported confirms it.
+        lines.append(
+            "ℹ️ **From the plan, not yet confirmed on your system** — "
+            + ", ".join(f"`{u['value']}` ({u['kind']})" for u in plan_only[:8])
+            + ". If any of these is not what your system actually shows, tell me.")
     if shape:
         lines.append(
             "⚠️ **Command mismatch** — these pair an interpreter with a file it "
@@ -781,6 +814,7 @@ async def verify_answer(
     flagged: Optional[set] = None,
     sourced: Optional[set] = None,
     owned_hosts: Optional[set] = None,
+    confirmed: str = "",
 ) -> tuple[str, dict]:
     """Check an answer against its grounding; regenerate once; else annotate.
 
@@ -797,7 +831,7 @@ async def verify_answer(
     """
     report: dict = {"checked": False, "unsupported": [], "citation": None,
                     "regenerated": False, "annotated": False, "sourced_now": [],
-                    "off_question": False, "command_shape": []}
+                    "off_question": False, "command_shape": [], "plan_only": []}
     if not settings.assist_answer_verification_enabled or not (answer or "").strip():
         return answer, report
     report["checked"] = True
@@ -856,12 +890,21 @@ async def verify_answer(
                 answer, unsupported, cite, off, shape = candidate, c_uns, c_cite, c_off, c_shape
                 report["regenerated"] = True
 
-    if _fails(unsupported, cite, off, shape):
+    # §17.1034 — the plan-only tier: credited by the corpus (task text, digest,
+    # recaps) but by NOTHING the operator has confirmed — not the sources, not
+    # their message, not their ledger. Not wrong, so no regeneration; noted.
+    _unconfirmed = unsupported_specifics(answer, confirmed or "", trusted=trusted,
+                                         flagged=flagged, sourced=sourced, owned=owned_hosts)
+    _uns_vals = {u["value"].lower() for u in unsupported}
+    plan_only = [u for u in _unconfirmed if u["value"].lower() not in _uns_vals]
+    if _fails(unsupported, cite, off, shape) or plan_only:
         answer = answer.rstrip() + grounding_footer(
-            unsupported, cite, off_question=_q if off else None, shape=shape)
-        report["annotated"] = True
+            unsupported, cite, off_question=_q if off else None, shape=shape,
+            plan_only=plan_only)
+        report["annotated"] = bool(_fails(unsupported, cite, off, shape))
     report["off_question"] = off
     report["command_shape"] = shape
+    report["plan_only"] = plan_only
     report["unsupported"] = unsupported
     report["citation"] = cite
     # §17.1030 — what THIS turn's sources confirmed, for the session ledger.
@@ -878,4 +921,7 @@ async def verify_answer(
         [u["value"] for u in unsupported][:6],
         [it["value"] for it in report["sourced_now"]][:6], report["off_question"],
         [s["command"] for s in shape][:4])
+    if report["plan_only"]:
+        logger.info("assist_answer_plan_only node_key=%s label=%s values=%r",
+                    node_key, label, [u["value"] for u in report["plan_only"]][:6])
     return answer, report
