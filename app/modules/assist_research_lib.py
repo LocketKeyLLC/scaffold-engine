@@ -221,7 +221,10 @@ async def _searxng_structured(query: str, max_results: int = 5) -> list[dict]:
                 results = fb.json().get("results") or []
         results = relevant_search_results(query, results)
         return [
-            {"title": r.get("title", ""), "content": r.get("content", ""), "url": r.get("url", "")}
+            {"title": r.get("title", ""), "content": r.get("content", ""),
+             "url": r.get("url", ""),
+             # §17.1027 — the engine's own publication date, when it has one.
+             "date": str(r.get("publishedDate") or "")}
             for r in results[:max_results]
             if r.get("url")
         ]
@@ -238,14 +241,30 @@ async def _deep_web_sources(query: str, *, top_n: int) -> list[dict]:
         return []
     try:
         from app.modules.research_agent import _fetch_and_extract
+        from app.modules.research_extractors import relevant_search_results
         pages = await _fetch_and_extract(results[:top_n])
+        # §17.1027 — the snippet passed §17.729's relevance filter; the PAGE
+        # must too. A result whose title matched can still fetch a page about
+        # something else (a forum index, a login wall), and feeding that to the
+        # synthesis as source [n] is how a confident wrong answer gets a
+        # citation.
+        pages = relevant_search_results(query, pages, title_key="url", content_key="content")
     except Exception as exc:
         logger.warning("assist_deep_fetch_failed: %s", exc)
         return []
-    return [
-        {"query": query, "kind": "web", "text": p["content"][:2000], "url": p.get("url", "")}
-        for p in pages if (p.get("content") or "").strip()
-    ]
+    by_url = {r.get("url"): r for r in results if r.get("url")}
+    out = []
+    for p in pages:
+        if not (p.get("content") or "").strip():
+            continue
+        hit = by_url.get(p.get("url")) or {}
+        out.append({
+            "query": query, "kind": "web", "text": p["content"][:2000],
+            "url": p.get("url", ""), "title": hit.get("title", ""),
+            # Prefer the page's own declared date; fall back to the engine's.
+            "date": (p.get("date") or hit.get("date") or "")[:10],
+        })
+    return out
 
 
 async def _confirm_query(
@@ -413,11 +432,20 @@ def _render_research_block(sources: list[dict]) -> str:
         "§17.729 CURRENCY: a version number, release name, or download URL that "
         "these sources do NOT confirm is likely STALE — do not state it from "
         "memory. Prefer telling the operator to fetch the current one (latest "
-        "LTS / newest driver) over naming a possibly-outdated specific value."
+        "LTS / newest driver) over naming a possibly-outdated specific value.\n"
+        "§17.1027 DATES: each source shows its publication date when known. "
+        "Where sources disagree, prefer the newer one and say so in one line. "
+        "When the operator asks for the CURRENT or LATEST state of something, "
+        "name the date of the source you relied on; an undated source cannot "
+        "establish what is current."
     ]
     for i, s in enumerate(sources, 1):
-        src = f"{s['kind']}: {s['url']}" if s.get("url") else s["kind"]
-        parts.append(f"[{i}] ({src}) query: {s['query']}\n{s['text']}")
+        bits = [s["kind"]]
+        if s.get("date"):
+            bits.append(f"published {str(s['date'])[:10]}")
+        if s.get("url"):
+            bits.append(s["url"])
+        parts.append(f"[{i}] ({' · '.join(bits)}) query: {s['query']}\n{s['text']}")
     return "\n\n".join(parts)
 
 
@@ -569,60 +597,20 @@ async def research_one(
     # question (which returns nothing → stale-memory fallback). The original
     # `question` still drives synthesis below; only the retrieval query changes.
     web_q = await _focus_web_query(question, role=role, hint=context_hint or "")
-    # §17.1021 — ENFORCE the operator's model number into the web query.
-    #
-    # §17.1019 put it in `context_hint`, which reaches `_focus_web_query` as
-    # "PROJECT: SAX1V1K ES2251 …". Measured against the live session: the hint
-    # carried the model and the generator dropped it anyway —
-    #
-    #   hint      : "SAX1V1K ES2251 Secure Home Lab & Media/Game/AI Server"
-    #   web query : "Spectrum app primary server secondary server"
-    #
-    # so the operator's question about their router searched the open web with
-    # no model in it, twice, and got generic advice both times. A hint is a
-    # request the model may decline; this is the house rule applied to the one
-    # place it had not been. Subject-matched, so an unrelated question
-    # ("pm2: command not found") is untouched.
-    try:
-        from app.modules.assist_render import hardware_for_text
-        _hw = [m for m in hardware_for_text(question, operator_notes)
-               if m.lower() not in (web_q or "").lower()]
-        if _hw:
-            web_q = " ".join(_hw) + " " + (web_q or question)
-            logger.info("assist_web_query_hardware_enforced node_key=%s models=%s",
-                        node_key, _hw)
-    except Exception as exc:  # noqa: BLE001 — grounding is fail-soft
-        logger.warning("assist_web_query_hardware_failed: %s", exc)
-
-    # §17.1023 — ENFORCE the goal too, and CAP the result.
-    #
-    # The operator's question is a symptom ("I only see two fields"); what they
-    # are trying to DO lives in the step recap's OPEN line ("cannot find port
-    # forwarding"). Measured: searching the symptom returns Spectrum DNS pages;
-    # adding "port forwarding" returns the SAX1V1K port-forwarding guides. The
-    # goal was handed to the query generator as a hint three times and dropped
-    # three times — a hint is a request, so this appends deterministically.
-    #
-    # The cap matters as much as the terms: an unbounded query accumulated
-    # "...SAX1V1K ES2251 PM2 Debian 12 LXC" and matched nothing. Keyword
-    # engines degrade with length, so the query is held to the most specific
-    # terms — hardware and goal first, the generator's phrasing after.
-    try:
-        gt = " ".join((goal_terms or "").split())
-        if gt:
-            have = (web_q or "").lower()
-            add = [w for w in _goal_keywords(gt) if w.lower() not in have]
-            if add:
-                web_q = (web_q or question) + " " + " ".join(add)
-                logger.info("assist_web_query_goal_enforced node_key=%s terms=%s",
-                            node_key, add)
-        web_q = _cap_query(web_q)
-    except Exception as exc:  # noqa: BLE001 — grounding is fail-soft
-        logger.warning("assist_web_query_goal_failed: %s", exc)
+    # §17.1027 — the need is derived ONCE and enforced into the query. This
+    # replaces the §17.1021 (hardware) and §17.1023 (goal terms + cap) blocks
+    # that lived here inline: same rules, now in `assist_evidence` where the
+    # fix path shares them instead of carrying its own copy.
+    from app.modules.assist_evidence import (
+        derive_need, finalize_query, rank_evidence, verify_answer)
+    need = derive_need(question, operator_notes=operator_notes,
+                       goal_terms=goal_terms, assume_question=True)
+    web_q = finalize_query(need, web_q, node_key=node_key)
     sources = await _confirm_query(
         question, node_key=node_key, domain=domain, deep=True,
         kb_query_extra=context_hint, web_query=web_q,
     )
+    sources = rank_evidence(sources, need, node_key=node_key)  # §17.1027
     answer: Optional[str] = None
     # Synthesize when we have web/KB sources OR project context to relay — a
     # question answerable purely from the project's own prior work must not be
@@ -760,6 +748,40 @@ async def research_one(
                 )
                 if _retry and _retry.success and (_retry.text or "").strip():
                     answer = _retry.text.strip()
+            if answer:
+                # §17.1027 — VERIFY the answer against what it was given, then
+                # regenerate once with the unsupported values named, then
+                # annotate what still cannot be traced. The corpus is the
+                # UNTRIMMED project context on purpose: provenance is anything
+                # this session knows, even the part the prompt could not fit.
+                _synth_system = apply_next_callout(
+                    _RESEARCH_SYNTH_SYSTEM, is_decision=False,
+                    enabled=settings.assist_next_callout_enabled)
+                _user_msg = (f"Question: {question}\n\n"
+                             f"{_render_research_block(sources)}\n\n{ctx_block}")
+
+                async def _regen(notice: str) -> str:
+                    r = await chat_until_nonempty(
+                        model_router.chat,
+                        [{"role": "system", "content": _synth_system},
+                         {"role": "user", "content": _user_msg + notice}],
+                        {"role": role}, temperature=0.2, max_tokens=8192,
+                        draws=2, label="assist_research_grounding_regen",
+                        think_off_rescue=True,
+                    )
+                    return (r.text or "").strip() if (r and r.success) else ""
+
+                _notes_text = "\n".join(
+                    (n.get("text") if isinstance(n, dict) else str(n)) or ""
+                    for n in (operator_notes or []))
+                answer, _ = await verify_answer(
+                    answer, sources=sources,
+                    corpus="\n".join([question, _render_research_block(sources),
+                                      job_context or "", _notes_text,
+                                      context_hint or ""]),
+                    need=need, node_key=node_key, label="assist_research",
+                    regenerate=_regen,
+                )
             if answer:  # §17.897 — code-enforced copy-paste format
                 answer = strip_operator_meta_preamble(answer)  # §17.908
                 answer = promote_inline_commands(answer)
