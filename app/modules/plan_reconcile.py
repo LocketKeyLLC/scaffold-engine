@@ -69,6 +69,18 @@ def values_in(text_value: str) -> list[dict]:
     return found
 
 
+def _prune_prefix_paths(values: list[str]) -> list[str]:
+    """A directory that only appears as the parent of a more specific path in
+    the same set is not a separate candidate (``/etc/nginx/conf.d`` next to
+    ``/etc/nginx/conf.d/site.conf``)."""
+    out = []
+    for v in values:
+        if any(o != v and o.startswith(v.rstrip("/") + "/") for o in values):
+            continue
+        out.append(v)
+    return out
+
+
 def _mentions(value: str, hay: str) -> bool:
     return re.search(r"(?<![\w.])" + re.escape(value) + r"(?![\w])", hay or "") is not None
 
@@ -91,19 +103,21 @@ def derive_corrections(*, failing_pastes: list[str], fix_replies: list[str],
     for it in values_in(fixes):
         if it["value"] not in by_kind_fix[it["kind"]]:
             by_kind_fix[it["kind"]].append(it["value"])
+    # OLD candidates come from what the operator pasted while failing; the
+    # plan text is what they get applied TO, never a source of candidates.
     by_kind_old: dict[str, list[str]] = {k: [] for k in KINDS}
-    for it in values_in(failing + "\n" + plan_text):
+    for it in values_in(failing):
         if it["value"] not in by_kind_old[it["kind"]]:
             by_kind_old[it["kind"]].append(it["value"])
     for kind in KINDS:
+        if kind == "path":
+            by_kind_fix[kind] = _prune_prefix_paths(by_kind_fix[kind])
+            by_kind_old[kind] = _prune_prefix_paths(by_kind_old[kind])
         # NEW: proposed by a fix AND stated by the operator's system afterwards.
         new = [v for v in by_kind_fix[kind] if _mentions(v, confirmed)]
-        # OLD: seen while failing (or in the plan), absent from the closing
-        # paste and from the confirmed facts, and not itself a proposed value.
-        old = [v for v in by_kind_old[kind]
-               if v not in new and not _mentions(v, confirmed)
-               and (_mentions(v, failing) or not by_kind_old[kind])]
-        old = [v for v in old if _mentions(v, failing)]
+        # OLD: seen while failing, absent from the closing paste and the
+        # confirmed facts, and not itself a proposed value.
+        old = [v for v in by_kind_old[kind] if v not in new and not _mentions(v, confirmed)]
         if not new or not old:
             continue
         if len(new) == 1 and len(old) == 1 and new[0] != old[0]:
@@ -182,7 +196,7 @@ async def _fix_context(*, db, session_id: str, node_key: str) -> Optional[dict]:
     rows = (await db.execute(text("""
         SELECT role, kind, content, created_at FROM assist_turns
          WHERE session_id = :sid AND node_key = :nk
-           AND (:since IS NULL OR created_at >= :since)
+           AND (CAST(:since AS timestamptz) IS NULL OR created_at >= CAST(:since AS timestamptz))
          ORDER BY created_at, id
     """), {"sid": session_id, "nk": node_key, "since": step["presented_at"]})).mappings().all()
     fixes = [r["content"] or "" for r in rows if r["role"] == "assistant" and r["kind"] == "fix"]

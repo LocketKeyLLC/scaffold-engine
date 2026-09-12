@@ -67,6 +67,20 @@ def test_a_port_correction_from_the_ledger_fact_counts_as_confirmed():
     assert corr == [{"kind": "port", "old": "8080", "new": "3001"}]
 
 
+def test_parent_directories_do_not_count_as_separate_path_candidates():
+    """Live (scratch session f745ee6a): the fix named `/etc/nginx/conf.d/x.conf`
+    and the operator listed `/etc/nginx/`; the parent directory must not make
+    the pair ambiguous."""
+    failing = ["ls: cannot access '/etc/nginx/sites-available/': No such file\nroot@u:~# ls /etc/nginx/\nconf.d nginx.conf"]
+    fix = ["Create it at `/etc/nginx/conf.d/status.hamlet-labs.net.conf` (the include is /etc/nginx/conf.d/*.conf)."]
+    closing = "root@u:~# ls -l /etc/nginx/conf.d/status.hamlet-labs.net.conf\n-rw-r--r-- 1 root root 210 status.hamlet-labs.net.conf\nOK"
+    corr, declined = pr.derive_corrections(failing_pastes=failing, fix_replies=fix, closing_paste=closing,
+                                           plan_text="Create /etc/nginx/sites-available/status.hamlet-labs.net")
+    assert declined == []
+    assert corr == [{"kind": "path", "old": "/etc/nginx/sites-available",
+                     "new": "/etc/nginx/conf.d/status.hamlet-labs.net.conf"}]
+
+
 def test_plan_changes_touch_pending_nodes_only_and_flag_stale_walkthroughs():
     corr = [{"kind": "path", "old": "/opt//opt/control-panel", "new": "/opt/control-panel-backend"}]
     nodes = [
@@ -134,3 +148,13 @@ def test_the_commit_path_and_both_surfaces_are_wired():
     assert "reconciliation_note" in router
     spa = (root / "app/ui/static/views/assist.js").read_text()
     assert "res.reconciliation_note" in spa
+
+
+def test_every_nullable_bound_parameter_in_the_module_is_cast():
+    """Live (scratch session f745ee6a): `(:since IS NULL OR created_at >= :since)`
+    raised AmbiguousParameterError under asyncpg and the trigger silently did
+    nothing on a real commit. Every `:since` / `:e` must be CAST."""
+    src = (pathlib.Path(__file__).resolve().parents[1] / "app/modules/plan_reconcile.py").read_text()
+    import re as _re
+    bare = [m.group(0) for m in _re.finditer(r"(?<!CAST\()(?<!\w):(since|e)\b", src)]
+    assert bare == [], bare
