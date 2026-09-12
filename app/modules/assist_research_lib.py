@@ -708,9 +708,15 @@ async def research_one(
                     # answer a question about someone else's product; the
                     # project's own history cannot, and leading with 30 KB of
                     # it buried the sources the search had just fetched.
+                    # §17.1031 — and the question AGAIN, last: the background
+                    # ends with the previous exchange, and live the model
+                    # answered that one instead. The last thing it reads is
+                    # now the question it is answering.
                     f"Question: {question}\n\n"
                     f"{_render_research_block(sources)}\n\n"
                     f"{ctx_block}"
+                    f"---\nAnswer THIS question (not an earlier one in the "
+                    f"conversation): {question}"
                 )},
             ],
             {"role": role},
@@ -768,7 +774,9 @@ async def research_one(
                     _RESEARCH_SYNTH_SYSTEM, is_decision=False,
                     enabled=settings.assist_next_callout_enabled)
                 _user_msg = (f"Question: {question}\n\n"
-                             f"{_render_research_block(sources)}\n\n{ctx_block}")
+                             f"{_render_research_block(sources)}\n\n{ctx_block}"
+                             f"---\nAnswer THIS question (not an earlier one in the "
+                             f"conversation): {question}")
 
                 async def _regen(notice: str) -> str:
                     r = await chat_until_nonempty(

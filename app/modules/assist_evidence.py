@@ -525,6 +525,54 @@ def sourced_now(answer: str, sources: list) -> list[dict]:
     return [it for it in extract_specifics(answer) if _credited(it, hay)]
 
 
+# §17.1031 — does the answer address the question that was ASKED?
+#
+# Live (scratch session, run d4b2cdb9): the operator asked for the current
+# Node.js LTS version; the research ran on Node; the reply told them to run
+# `pm2 web` and discussed the pm2 web port — the PREVIOUS turn's question,
+# which sat last in the prompt inside the conversation block. Nothing checked
+# that the answer and the question shared a single word.
+_QUESTION_TERM_STOP = frozenset({
+    "what", "which", "where", "when", "why", "how", "does", "did", "should",
+    "could", "would", "please", "help", "there", "their", "this", "that",
+    "with", "from", "into", "about", "right", "now", "know", "want", "need",
+    "make", "sure", "just", "also", "still", "again", "here", "then",
+})
+
+
+_MIN_JUDGED_WORDS = 25
+
+
+def question_terms(need: Optional["Need"]) -> set[str]:
+    """The distinctive words of the operator's QUESTION itself — not the goal
+    terms or hardware appended to the query, which come from the step recap
+    and would credit an answer about the step's other business."""
+    if need is None or need.kind != "question":
+        return set()
+    from app.modules.assist_research_lib import _GOAL_STOPWORDS
+    out: set[str] = set()
+    # No dots in a token: "nodejs.org" is the two words "nodejs" and "org", and
+    # an answer that says "nodejs" has addressed it.
+    for tok in re.findall(r"[a-z][a-z0-9-]{2,}", (need.subject or "").lower()):
+        tok = tok.strip("-")
+        if len(tok) >= 4 and tok not in _GOAL_STOPWORDS and tok not in _QUESTION_TERM_STOP:
+            out.add(tok)
+    return out
+
+
+def addresses_question(answer: str, need: Optional["Need"]) -> bool:
+    """True unless the question has distinctive terms and the answer shares
+    NONE of them. Deliberately lenient — one shared term passes, and a short
+    answer (under ``_MIN_JUDGED_WORDS``) is never judged: "Use 10.0.0.1" to
+    "which address do I connect to" shares no word and is the right answer —
+    so it catches an answer to a DIFFERENT question, not a terse right one."""
+    terms = question_terms(need)
+    if len(terms) < 2 or len((answer or "").split()) < _MIN_JUDGED_WORDS:
+        return True
+    hay = (answer or "").lower()
+    return any(re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", hay) for t in terms)
+
+
 async def citation_report(answer: str, sources: list) -> Optional[dict]:
     """§17.798's per-citation judge, fail-soft. ``None`` when the answer cites
     nothing (attribution undefined) or the judge could not run."""
@@ -546,9 +594,18 @@ def _citation_weak(cite: Optional[dict]) -> bool:
     return float(cite["score"]) < float(settings.assist_answer_min_citation_score)
 
 
-def grounding_notice(unsupported: list[dict], cite: Optional[dict]) -> str:
+def grounding_notice(unsupported: list[dict], cite: Optional[dict],
+                     *, off_question: Optional[str] = None) -> str:
     """The regeneration directive: the exact values, named."""
     parts = ["\n\n---\nGROUNDING NOTICE:"]
+    if off_question:
+        parts.append(
+            "Your previous answer did NOT address the question the operator just "
+            "asked — it answered something else (most likely an earlier message "
+            "in the conversation). The question to answer, and the ONLY one, is:\n"
+            f"    {off_question}\n"
+            "Answer that. If the sources and project context do not let you, say "
+            "so plainly for THAT question; do not answer a different one.")
     if unsupported:
         parts.append(
             "Your previous answer stated specific values that appear in NONE of "
@@ -571,9 +628,15 @@ def grounding_notice(unsupported: list[dict], cite: Optional[dict]) -> str:
     return "\n".join(parts)
 
 
-def grounding_footer(unsupported: list[dict], cite: Optional[dict]) -> str:
+def grounding_footer(unsupported: list[dict], cite: Optional[dict],
+                     *, off_question: Optional[str] = None) -> str:
     """What the operator sees when the answer still fails after regeneration."""
     lines = ["\n\n---"]
+    if off_question:
+        lines.append(
+            "⚠️ **This may not answer what you asked** — the reply above does not "
+            f"mention any of the specifics of your question (*{off_question[:160]}*). "
+            "Ask again in one sentence if it missed the point.")
     if unsupported:
         lines.append(
             "⚠️ **Unverified specifics** — these values appear in no source, "
@@ -614,7 +677,8 @@ async def verify_answer(
     value from nowhere.
     """
     report: dict = {"checked": False, "unsupported": [], "citation": None,
-                    "regenerated": False, "annotated": False, "sourced_now": []}
+                    "regenerated": False, "annotated": False, "sourced_now": [],
+                    "off_question": False}
     if not settings.assist_answer_verification_enabled or not (answer or "").strip():
         return answer, report
     report["checked"] = True
@@ -626,23 +690,29 @@ async def verify_answer(
     unsupported = unsupported_specifics(answer, corpus, trusted=trusted, flagged=flagged,
                                         sourced=sourced)
     cite = await citation_report(answer, sources)
+    off = not addresses_question(answer, need)  # §17.1031
+    if off:
+        logger.warning("assist_answer_offtopic node_key=%s label=%s question_terms=%r",
+                       node_key, label, sorted(question_terms(need))[:8])
     _carried = [u["value"] for u in unsupported if u["value"].lower() in {v.lower() for v in (flagged or ())}]
     if _carried:
         logger.info("assist_answer_grounding_flag_carried node_key=%s label=%s values=%r",
                     node_key, label, _carried[:6])
 
-    def _fails(uns: list, ct: Optional[dict]) -> bool:
-        return bool(uns) or _citation_weak(ct)
+    def _fails(uns: list, ct: Optional[dict], off_: bool = False) -> bool:
+        return bool(uns) or _citation_weak(ct) or off_
 
-    if _fails(unsupported, cite) and regenerate is not None \
+    _q = (need.subject if (need is not None and need.kind == "question") else "") or ""
+    if _fails(unsupported, cite, off) and regenerate is not None \
             and settings.assist_answer_verification_regenerate:
         logger.info(
             "assist_answer_grounding_regen node_key=%s label=%s unsupported=%r "
-            "cite_score=%s", node_key, label,
+            "cite_score=%s off_question=%s", node_key, label,
             [u["value"] for u in unsupported][:6],
-            (cite or {}).get("score"))
+            (cite or {}).get("score"), off)
         try:
-            candidate = (await regenerate(grounding_notice(unsupported, cite)) or "").strip()
+            candidate = (await regenerate(grounding_notice(
+                unsupported, cite, off_question=_q if off else None)) or "").strip()
         except Exception as exc:  # noqa: BLE001 — verification never breaks a turn
             logger.warning("assist_answer_grounding_regen_failed: %s", exc)
             candidate = ""
@@ -650,16 +720,20 @@ async def verify_answer(
             c_uns = unsupported_specifics(candidate, corpus, trusted=trusted, flagged=flagged,
                                           sourced=sourced)
             c_cite = await citation_report(candidate, sources)
-            better = (not _fails(c_uns, c_cite)) or (
-                len(c_uns) < len(unsupported) and not (
+            c_off = not addresses_question(candidate, need)
+            better = (not _fails(c_uns, c_cite, c_off)) or (
+                not c_off and off) or (
+                not c_off and len(c_uns) < len(unsupported) and not (
                     _citation_weak(c_cite) and not _citation_weak(cite)))
             if better:
-                answer, unsupported, cite = candidate, c_uns, c_cite
+                answer, unsupported, cite, off = candidate, c_uns, c_cite, c_off
                 report["regenerated"] = True
 
-    if _fails(unsupported, cite):
-        answer = answer.rstrip() + grounding_footer(unsupported, cite)
+    if _fails(unsupported, cite, off):
+        answer = answer.rstrip() + grounding_footer(
+            unsupported, cite, off_question=_q if off else None)
         report["annotated"] = True
+    report["off_question"] = off
     report["unsupported"] = unsupported
     report["citation"] = cite
     # §17.1030 — what THIS turn's sources confirmed, for the session ledger.
@@ -669,9 +743,9 @@ async def verify_answer(
                              if it["value"].lower() not in _still]
     logger.info(
         "assist_answer_grounding node_key=%s label=%s kind=%s unsupported=%d "
-        "cite_score=%s regenerated=%s annotated=%s values=%r sourced_now=%r",
+        "cite_score=%s regenerated=%s annotated=%s values=%r sourced_now=%r off_question=%s",
         node_key, label, getattr(need, "kind", "?"), len(unsupported),
         (cite or {}).get("score"), report["regenerated"], report["annotated"],
         [u["value"] for u in unsupported][:6],
-        [it["value"] for it in report["sourced_now"]][:6])
+        [it["value"] for it in report["sourced_now"]][:6], report["off_question"])
     return answer, report

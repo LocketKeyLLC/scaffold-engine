@@ -366,6 +366,76 @@ async def test_verify_answer_reports_sourced_now_and_credits_the_ledger(no_judge
     assert rep3["annotated"] and rep3["sourced_now"] == []
 
 
+# ── §17.1031: the answer must address the question that was asked ────────
+
+NODE_Q = ("what is the current Node.js LTS release version number on nodejs.org, "
+          "so I can check node -v matches it?")
+# the live reply run d4b2cdb9 gave to that question
+PM2_WEB_REPLY = ("## 👉 Do this next\n\n**Run this now:**\n\n```bash\npm2 web\n```\n\n"
+                 "Then tell me what it prints — the line with the URL will show the default port.\n\n"
+                 "---\n\nI don't have the PM2 web documentation in my research, so I can't "
+                 "confirm the default port from the provided sources.")
+NODE_REPLY = ("## 👉 Do this next\n\n```bash\nnode -v\n```\n\nI can't give you the LTS "
+              "version number from my research sources — none of them state it. Open "
+              "nodejs.org and look for the LTS label.")
+
+
+def test_the_live_wrong_answer_is_detected_and_the_right_one_passes():
+    need = derive_need(NODE_Q, assume_question=True)
+    assert ev.question_terms(need) >= {"node", "nodejs", "release", "version"}
+    assert not ev.addresses_question(PM2_WEB_REPLY, need)
+    assert ev.addresses_question(NODE_REPLY, need)
+
+
+def test_the_check_is_lenient_and_only_applies_to_questions():
+    # a question with fewer than two distinctive terms cannot be judged
+    assert ev.addresses_question("anything", derive_need("why?", assume_question=True))
+    # a terse direct answer is never judged — "Use 10.0.0.1" IS the answer
+    q = derive_need("which address should the second computer connect to?", assume_question=True)
+    assert ev.addresses_question("Use 10.0.0.1", q)
+    long_wrong = " ".join(["unrelated"] * 30)
+    assert not ev.addresses_question(long_wrong, q)
+    # non-question needs are never judged
+    assert ev.addresses_question("anything", Need(kind="goal", subject="backend not listening"))
+    assert ev.addresses_question("anything", None)
+
+
+@pytest.mark.asyncio
+async def test_verify_answer_regenerates_an_offtopic_answer_with_the_question_restated(no_judge, valves):
+    need = derive_need(NODE_Q, assume_question=True)
+    notices = []
+
+    async def regen(notice):
+        notices.append(notice)
+        return NODE_REPLY
+
+    out, rep = await verify_answer(PM2_WEB_REPLY, sources=[], corpus="", need=need, regenerate=regen)
+    assert rep["regenerated"] and not rep["annotated"] and not rep["off_question"]
+    assert "did NOT address the question" in notices[0] and NODE_Q in notices[0]
+    assert out == NODE_REPLY
+
+
+@pytest.mark.asyncio
+async def test_a_still_offtopic_answer_is_visibly_flagged(no_judge, valves):
+    need = derive_need(NODE_Q, assume_question=True)
+
+    async def regen(notice):
+        return PM2_WEB_REPLY
+
+    out, rep = await verify_answer(PM2_WEB_REPLY, sources=[], corpus="", need=need, regenerate=regen)
+    assert rep["annotated"] and rep["off_question"]
+    assert "may not answer what you asked" in out
+
+
+def test_the_synthesis_prompt_ends_with_the_question():
+    """§17.1031 — the conversation block used to be the last thing the model
+    read; the question is now restated after it. Source-scan, both draws."""
+    import inspect
+    from app.modules import assist_research_lib as lib
+    src = inspect.getsource(lib.research_one)
+    assert src.count("Answer THIS question (not an earlier one in the") == 2
+
+
 # ── verify_answer: regenerate once, then annotate ─────────────────────────
 
 @pytest.fixture
