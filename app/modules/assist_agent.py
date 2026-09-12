@@ -3221,6 +3221,17 @@ async def submit_step(
             {"sid": session_id, "nk": next_pending},
         )
         await db.commit()
+    # §17.1043 — fix confirmed: a step committed after fix replies applies the
+    # confirmed correction to every pending step (task text, cached walkthroughs,
+    # ledger fact, job change ledger). Runs LAST, after every other write of
+    # this commit is done. Fail-soft inside; None when nothing applied.
+    reconciliation = None
+    if action == "submit" and not verdict_failed:
+        from app.modules.plan_reconcile import reconcile_after_commit
+        reconciliation = await reconcile_after_commit(
+            db=db, session_id=session_id, job_id=job_id, node_key=node_key,
+            evidence=evidence,
+        )
     return {
         "session_id": session_id,
         "node_key": node_key,
@@ -3234,6 +3245,7 @@ async def submit_step(
         # that the dag_nodes row was NOT touched by this call. Always
         # present (default False) so callers can rely on the key.
         "mirror_divergence": mirror_divergence,
+        "reconciliation": reconciliation,  # §17.1043
     }
 
 

@@ -1068,6 +1068,15 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
                     result["recap_done"] = done
             except Exception:  # never fail a commit on the acknowledgement step
                 pass
+            # §17.1043 — the confirmed fix applied to the steps ahead, rendered
+            # once here so the SPA's button path and the turn loop say the same.
+            try:
+                from app.modules.plan_reconcile import render_note
+                note = render_note(result.get("reconciliation") or {})
+                if note:
+                    result["reconciliation_note"] = note
+            except Exception:  # noqa: BLE001
+                pass
         return result
     except ValueError as exc:
         msg = str(exc)

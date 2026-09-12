@@ -287,6 +287,9 @@ export function renderChat(container, sessionId) {
       } else {
         toast(`✓ Step ${nk} committed.`, "ok");
       }
+      // §17.1043 — the confirmed fix was applied to the steps ahead: say what
+      // changed and where (the turn-loop path renders the same note server-side).
+      if (res.reconciliation_note) appendBubble("assistant", "note", res.reconciliation_note);
       await load();
       if (session?.status !== "completed") await claimAndGuideNext();
       return true;
