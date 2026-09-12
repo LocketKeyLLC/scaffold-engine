@@ -465,6 +465,64 @@ async def test_verify_answer_takes_owned_hosts(no_judge, valves):
     assert not rep["annotated"]
 
 
+# ── §17.1033: an interpreter run on a file of another language ───────────
+
+LIVE_SHAPE_DRAFT = ("## Fix\n2. Start it with the virtual environment:\n\n```bash\n"
+                    "pct exec 111 -- bash -c 'cd /opt/control-panel-backend\n"
+                    "source /opt/control-panel-venv/bin/activate\n"
+                    "nohup python3 /opt/control-panel-backend/server.js > /var/log/control-panel.log 2>&1 &'\n"
+                    "```\n\nReplace `server.js` with the actual filename you saw.")
+
+
+def test_the_live_python3_server_js_command_is_flagged():
+    got = ev.command_shape_issues(LIVE_SHAPE_DRAFT)
+    assert len(got) == 1
+    assert got[0]["command"] == "python3 /opt/control-panel-backend/server.js"
+    assert got[0]["expects"] == ["py", "pyw"]
+
+
+@pytest.mark.parametrize("ok", [
+    "```bash\npython3 app.py\n```", "```bash\nnode server.js\n```",
+    "```bash\nbash install.sh\n```", "```bash\npython3 -m http.server 8080\n```",
+    "```bash\npython3 -c 'print(1)'\n```", "```bash\nnode --version\n```",
+    "```bash\nsudo /usr/bin/python3 /opt/x/main.py\n```",
+    "```bash\npython3 setup\n```",            # no extension: unknown, not judged
+    "```bash\nnode config.json\n```",       # not a script extension: not judged
+    "run `pm2 start server.js`",               # pm2 is not an interpreter
+])
+def test_matching_and_unjudgeable_commands_are_not_flagged(ok):
+    assert ev.command_shape_issues(ok) == [], ok
+
+
+@pytest.mark.parametrize("bad, cmd", [
+    ("```bash\nnode app.py\n```", "node app.py"),
+    ("```bash\nbash tool.py\n```", "bash tool.py"),
+    ("run `python3 build.sh` now", "python3 build.sh"),
+    ("```sh\nsh /opt/a/run.js\n```", "sh /opt/a/run.js"),
+])
+def test_cross_language_pairings_are_flagged(bad, cmd):
+    assert [g["command"] for g in ev.command_shape_issues(bad)] == [cmd]
+
+
+@pytest.mark.asyncio
+async def test_verify_answer_regenerates_a_mismatched_command_then_flags(no_judge, valves):
+    notices = []
+
+    async def regen_fixed(notice):
+        notices.append(notice)
+        return LIVE_SHAPE_DRAFT.replace("server.js", "app.py")
+
+    out, rep = await verify_answer(LIVE_SHAPE_DRAFT, sources=[], corpus="", regenerate=regen_fixed)
+    assert rep["regenerated"] and not rep["annotated"] and rep["command_shape"] == []
+    assert "CANNOT work as written" in notices[0] and "python3 /opt/control-panel-backend/server.js" in notices[0]
+
+    async def regen_same(notice):
+        return LIVE_SHAPE_DRAFT
+
+    out2, rep2 = await verify_answer(LIVE_SHAPE_DRAFT, sources=[], corpus="", regenerate=regen_same)
+    assert rep2["annotated"] and "Command mismatch" in out2 and "`python3 /opt/control-panel-backend/server.js`" in out2
+
+
 # ── verify_answer: regenerate once, then annotate ─────────────────────────
 
 @pytest.fixture
