@@ -1490,8 +1490,18 @@ async def execute_next_node(
     try:
         # Build raw prompt.
         raw_prompt = _build_prompt(node_snapshot, brief)
+        # §17.1042 — the optimizer may rewrite the TASK only. Grounding blocks
+        # and the upstream block are attached VERBATIM after it: live (parallel
+        # run 2e74196b) the "minimum tokens" rewrite of the whole assembled
+        # prompt dropped the mandatory upstream outputs and the dated sources —
+        # a 7 KB prompt became 1 KB, the report node wrote "upstream outputs
+        # were not present", and the validator node graded a report it never
+        # saw. Serial runs with skip_optimize had the block; every Run-tab run
+        # (parallel frontier, optimizer on by default) did not.
+        _task_prompt = raw_prompt
+        _grounding_blocks: list[str] = []
 
-        # Inject RAG grounding BEFORE optimize (optimizer should see grounded content).
+        # Grounding is gathered here and attached after the optimizer.
         project_goal = " ".join(brief.get("goals", [])) if brief else ""
         rag_query = f"{project_goal}: {title}" if project_goal else title
         job_domain = brief.get("domain") if brief else None
@@ -1507,7 +1517,7 @@ async def execute_next_node(
         if tool_lower == "milvus":
             rag_block = await _milvus_search(title, node_key=node_key, domain=node_snapshot.get("domain"))
             if rag_block:
-                raw_prompt = f"{raw_prompt}\n\n## Knowledge Base Results\n{rag_block}"
+                _grounding_blocks.append(f"\n\n## Knowledge Base Results\n{rag_block}")
                 logger.info("milvus_context_injected: chars=%d node='%s'", len(rag_block), title)
                 _node_sources.append({"kind": "milvus", "query": title, "text": rag_block})
         elif tool_lower == "searxng":
@@ -1516,15 +1526,17 @@ async def execute_next_node(
             _node_sources = await web_sources(
                 _node_need, node_key=node_key, domain=node_snapshot.get("domain"))
             search_results = render_node_sources(_node_sources) or "No search results found."
-            raw_prompt = f"{raw_prompt}\n\n## Web Search Results\n{search_results}"
+            _grounding_blocks.append(f"\n\n## Web Search Results\n{search_results}")
             logger.info("searxng_context_injected: chars=%d sources=%d node='%s'",
                         len(search_results), len(_node_sources), title)
         else:
             rag_context = await _fetch_rag_context(rag_query, top_k=settings.verifier_top_k, domain=grounding_domain)
             if rag_context:
-                raw_prompt = f"{raw_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
+                _grounding_blocks.append(f"\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}")
                 logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
                 _node_sources.append({"kind": "milvus", "query": rag_query, "text": rag_context})
+
+        raw_prompt = _task_prompt + "".join(_grounding_blocks)
 
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
         _upstream_block = _format_upstream_block(upstream_outputs, node_key)
@@ -1539,23 +1551,27 @@ async def execute_next_node(
         if not skip_optimize and settings.execution_optimize_enabled:
             try:
                 opt_result = await optimize_prompt(
-                    prompt=raw_prompt,
+                    prompt=_task_prompt,  # §17.1042 — the task only
                     skip_verify=True,
                     model_overrides=model_overrides,
                 )
-                exec_prompt = opt_result.optimized_prompt
+                _opt_body = opt_result.optimized_prompt
                 # §17.462 — never execute a node with an empty prompt. optimize_prompt
                 # now guards this at the source, but keep a belt-and-suspenders check
                 # on the critical path: a blank optimized prompt (thinking-model empty
                 # content, §17.453) would send the model only the system block, which
                 # it rightly rejects → node fails → blocks the job. Fall back to raw.
-                if not (exec_prompt or "").strip():
+                if not (_opt_body or "").strip():
                     logger.warning(
                         "prompt_optimize_empty: blank optimized prompt; using raw "
                         "(node=%s job=%s)", node_key, job_id,
                     )
-                    exec_prompt = raw_prompt
-                logger.info("Prompt optimized: %d -> %d tokens", opt_result.token_count_before, opt_result.token_count_after)
+                    _opt_body = _task_prompt
+                # §17.1042 — context re-attached verbatim around the rewritten task.
+                exec_prompt = _upstream_block + _opt_body + "".join(_grounding_blocks)
+                logger.info("Prompt optimized: %d -> %d tokens (task only; context verbatim: upstream=%d grounding=%d chars)",
+                            opt_result.token_count_before, opt_result.token_count_after,
+                            len(_upstream_block), sum(len(b) for b in _grounding_blocks))
             except Exception as e:
                 logger.warning("Prompt optimization failed, using raw: %s", e)
                 exec_prompt = raw_prompt
