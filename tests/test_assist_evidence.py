@@ -609,11 +609,14 @@ def test_the_ask_path_runs_a_documentation_query_when_none_was_fetched():
     import inspect
     from app.modules import assist_research_lib as lib
     src = inspect.getsource(lib.research_one)
-    assert "official documentation" in src and "max_source_authority(sources) < _DOC_AUTHORITY" in src
-    assert src.index("official documentation") < src.index("sources = rank_evidence(")
+    assert '"documentation "' in src and "max_source_authority(sources) < _DOC_AUTHORITY" in src
+    assert src.index('"documentation "') < src.index("sources = rank_evidence(")
     # §17.1037 — the documentation words must survive the 12-word cap: they
     # lead, and the base is held to nine words.
-    assert '_cap_query("official documentation "' in src and ".split()[:9]" in src
+    assert '_cap_query("documentation "' in src and ".split()[:10]" in src
+    # the snippet fallback runs whenever no FETCHED documentation page reached
+    # documentation authority — not only when nothing was fetched at all
+    assert "if max_source_authority(_doc_sources) < _DOC_AUTHORITY:" in src
     # and a documentation-grade snippet fallback exists for pages that extract to nothing
     assert "_searxng_structured(_doc_q" in src and "source_authority(r[\"url\"]) >= _DOC_AUTHORITY" in src
 
@@ -621,8 +624,8 @@ def test_the_ask_path_runs_a_documentation_query_when_none_was_fetched():
 def test_documentation_query_keeps_its_keywords_on_a_long_question():
     from app.modules.assist_research_lib import _cap_query
     base = "docker compose restart unless-stopped host reboot stop exit code 1 deployment approach"
-    q = _cap_query("official documentation " + " ".join(base.split()[:9]))
-    assert q.startswith("official documentation") and len(q.split()) <= 12
+    q = _cap_query("documentation " + " ".join(base.split()[:10]))
+    assert q.startswith("documentation") and len(q.split()) <= 12
 
 
 def test_brief_hostnames_are_operator_owned():

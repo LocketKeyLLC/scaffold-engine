@@ -635,13 +635,18 @@ async def research_one(
             # (live: 'docker compose restart unless-stopped host reboot stop
             # exit code 1 deployment approach' — twelve words, no
             # "documentation" in it). The base is held to nine words.
-            _doc_q = _cap_query("official documentation "
-                                + " ".join((web_q or question).split()[:9]))
+            # "documentation" alone: "official" drew dictionary pages for the
+            # word itself (merriam-webster, cambridge) into the results.
+            _doc_q = _cap_query("documentation "
+                                + " ".join((web_q or question).split()[:10]))
             _doc_sources = await _deep_web_sources(_doc_q, top_n=2)
-            if not _doc_sources:
+            if max_source_authority(_doc_sources) < _DOC_AUTHORITY:
                 # §17.1037 — vendor help centres are often script-rendered and
-                # extract to nothing; the search SNIPPET still names the page.
-                # Keep documentation-grade snippets only.
+                # extract to nothing, so the fetch keeps a blog instead (live:
+                # help.ui.com was the FIRST search result, extracted to nothing,
+                # and a blog with authority 0.50 was what survived). The search
+                # SNIPPET still names the page; keep documentation-grade
+                # snippets whenever no fetched page reaches that authority.
                 from app.modules.assist_evidence import source_authority
                 for r in await _searxng_structured(_doc_q, max_results=5):
                     if r.get("url") and source_authority(r["url"]) >= _DOC_AUTHORITY:
