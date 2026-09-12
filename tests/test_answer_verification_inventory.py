@@ -57,6 +57,16 @@ ANNOTATE_ONLY = {
 }
 
 
+# §17.1038 — sites OUTSIDE assist_* whose model-written text carries concrete
+# values into the engine's own downstream (a plan's task text, a node's
+# output). They carry no assist_ label, so discovery cannot find them; each is
+# registered here with the provenance pass it must call, and the test below
+# fails naming the function if the call goes missing.
+REGISTERED_SITES = {
+    ("dag_generator.py", "generate_dag"): "mark_assumed_values",
+}
+
+
 def _labels(fn: ast.AST) -> list[str]:
     out = []
     for sub in ast.walk(fn):
@@ -194,3 +204,15 @@ def test_the_verified_sites_regenerate_through_the_verifier(rel):
                     assert any(kw.arg == req for kw in node.keywords), \
                         f"{rel}:{node.lineno} verify_answer(...) without {req}="
     assert found, f"{rel}: no verify_answer call"
+
+
+def test_registered_non_assist_sites_run_their_provenance_pass():
+    missing = []
+    for (fname, func), required in REGISTERED_SITES.items():
+        tree = ast.parse((APP_MODULES / fname).read_text(encoding="utf-8"))
+        node = next((n for n in tree.body
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == func), None)
+        assert node is not None, f"{fname}: registered site {func}() does not exist"
+        if required not in _calls(node):
+            missing.append(f"{fname}:{node.lineno} {func}() no longer calls {required}()")
+    assert not missing, "\n  ".join(["registered provenance pass missing:"] + missing)

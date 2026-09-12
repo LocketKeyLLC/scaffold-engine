@@ -138,7 +138,8 @@ class TestGenerateDagParseErrorField:
         # brief + no existing nodes so we land at the LLM call cleanly.
         job_result = MagicMock()
         job_result.first.return_value = (
-            "planning", {"title": "test"}, None, None, 0,
+            # §17.1038 — input_text joined the SELECT (plan provenance corpus).
+            "planning", {"title": "test"}, None, None, None, 0,
         )
         db = AsyncMock()
         db.execute = AsyncMock(return_value=job_result)

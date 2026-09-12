@@ -1214,6 +1214,13 @@ class Settings(BaseSettings):
     advance_chain_enabled: bool = True
     advance_resume_after_minutes: int = Field(default=3, ge=1, le=120)
     advance_resume_interval_seconds: int = Field(default=60, ge=10, le=3600)
+    # §17.1038 — plan-level value provenance. After the DAG is generated, every
+    # address / port / version / URL a task states is traced to the brief, the
+    # operator's request and the research record; a value none of them
+    # mentions is kept but marked ASSUMED in the task's notes and carried as
+    # `assumed_values`, so the plan can no longer launder a model's guess into
+    # downstream provenance (the §17.1034 plan-only tier, closed at its source).
+    dag_value_provenance_enabled: bool = True
     # §17.687 — recent-conversation recall. The §17.650 digest recovers only
     # COMMITTED node output; notes recover only what the OPERATOR captured. So a
     # program the engine SUGGESTED a turn ago (a decision node's "## My

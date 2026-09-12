@@ -1344,6 +1344,7 @@ async def generate_dag(
     result = await db.execute(
         text("""
             SELECT j.status, j.refined_brief, j.dag_input_hash, j.research_data,
+                   j.input_text,
                    (SELECT COUNT(*) FROM dag_nodes WHERE job_id = j.id) AS node_count
             FROM jobs j
             WHERE j.id = :id
@@ -1356,7 +1357,7 @@ async def generate_dag(
         await db.rollback()
         return {"error": f"Job {job_id} not found"}
 
-    status, brief, stored_hash, research_data, node_count = row
+    status, brief, stored_hash, research_data, input_text, node_count = row
     # H6: accept 'planning' OR 'running' — execute_all_nodes flips to 'running'
     # before calling generate_dag on auto-gen path.
     if status not in ("planning", "running"):
@@ -1625,6 +1626,27 @@ async def generate_dag(
         )
         logger.warning(
             "dag_deliverable_overmark_cleared: job=%s nodes=%s", job_id, _demarked,
+        )
+
+    # §17.1038 — plan-level value provenance: every address / port / version /
+    # URL a task states is traced to the brief, the operator's request and the
+    # research record. A value none of them mentions is kept but marked ASSUMED
+    # in the task's notes (the node's prompt template, so every downstream
+    # prompt and the operator see it) and carried as `assumed_values`. Runs
+    # LAST so it sees the final task text, and BEFORE persistence so the mark
+    # is what gets stored.
+    from app.modules.plan_evidence import mark_assumed_values, plan_corpus
+    _assumed = mark_assumed_values(
+        normalized, plan_corpus(brief_data, input_text, research_data), job_id=job_id,
+    )
+    if _assumed:
+        warnings.append(
+            "plan_values_assumed: "
+            + "; ".join(
+                f"{m['id']} " + ", ".join(f"{u['value']} ({u['kind']})" for u in m["values"][:4])
+                for m in _assumed[:10])
+            + " — stated by the plan but by nothing the operator gave; marked "
+              "in the task notes for confirmation"
         )
 
     try:
