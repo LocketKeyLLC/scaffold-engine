@@ -352,6 +352,8 @@ async def _run_turn_inner(
                         logger.info(
                             "assist_completion_confirmed session_id=%s node_key=%s",
                             session_id, _onk)
+                        async for e in _reconciliation_note(session_id, _onk, res, db):
+                            yield e
                         async for e in _claim_and_guide(session_id, None, history,
                                                         db, orient=False):
                             yield e
@@ -1051,6 +1053,8 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
             # dispatch can CONTINUE a blocked submit instead of dead-ending.
             "verify_reason": (((res or {}).get("success_verdict") or {}).get("reason") or ""),
         })
+        async for e in _reconciliation_note(session_id, nk, res, db):  # §17.1043
+            yield e
         # §17.889(#3) — a deliberating decision step computed a needs-input
         # question and THREW IT AWAY (rendered as a bare toast). Surface +
         # capture it like any other engine answer.
@@ -1074,6 +1078,22 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
                 yield e
         except Exception:  # noqa: BLE001 — orientation is best-effort here
             logger.warning("turn_loop_refused_submit_orient_failed sid=%s", session_id)
+
+
+async def _reconciliation_note(session_id: str, nk, res, db) -> AsyncIterator[_Event]:
+    """§17.1043 — when a committed step's confirmed fix was applied to the
+    plan, say so in the transcript: what changed, in which steps."""
+    from app.modules.plan_reconcile import render_note
+    note = render_note((res or {}).get("reconciliation") or {})
+    if not note:
+        return
+    yield _ev(ASSIST_ANSWER, {"kind": "note", "text": note})
+    try:
+        from app.modules import assist_agent as _aa
+        await _aa.capture_assistant_reply(
+            session_id=session_id, node_key=nk, kind="note", content=note, db=db)
+    except Exception:  # noqa: BLE001 — capture never blocks
+        logger.warning("plan_reconcile_note_capture_failed sid=%s", session_id)
 
 
 async def _claim_and_guide(

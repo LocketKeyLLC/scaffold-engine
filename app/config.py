@@ -1238,6 +1238,14 @@ class Settings(BaseSettings):
     # banner at the top of the deliverable and recorded in
     # jobs.metadata.compile_evidence. Deterministic; no rewrite.
     compile_value_check_enabled: bool = True
+    # §17.1043 — plan reconciliation. When a step is committed after one or
+    # more fix replies, the correction the operator's closing paste confirms
+    # (old value → new value, by kind: ip/port/version/url/path) is applied to
+    # every PENDING step's task text, cached walkthroughs that mention the old
+    # value are regenerated, the correction becomes a ledger fact, and the
+    # change is recorded in jobs.metadata.reconciliation. Done steps are never
+    # touched. Deterministic; ambiguous candidate sets are logged, not applied.
+    plan_reconcile_enabled: bool = True
     # §17.687 — recent-conversation recall. The §17.650 digest recovers only
     # COMMITTED node output; notes recover only what the OPERATOR captured. So a
     # program the engine SUGGESTED a turn ago (a decision node's "## My
