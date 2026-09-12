@@ -373,6 +373,13 @@ _VERSION_RE = re.compile(r"\b\d{1,4}(?:\.\d{1,4}){2,}\b|\b\d{1,2}\.\d{2}\b")
 # answer may state; registered/ephemeral ports are instance-specific.
 _PORT_RE = re.compile(r"(?i)\bport\s*(\d{4,5})\b|(?<=[A-Za-z0-9\]}]):(\d{4,5})\b")
 _PLACEHOLDER_RE = re.compile(r"<[A-Z][A-Z0-9_]*>")
+# §17.1029 — measured on 43 stored walkthroughs: two classes of value that are
+# not claims. A URL carrying a shell variable (`https://${PVE_HOST}:8006/…`) is
+# a template the operator fills in; an RFC 5737 documentation address
+# (192.0.2.x, 198.51.100.x, 203.0.113.x), the wildcard 0.0.0.0 and loopback are
+# examples by definition and cannot be "confirmed" against anything.
+_EXAMPLE_IP_RE = re.compile(
+    r"^(?:192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|0\.0\.0\.0$|127\.)")
 # The operator's own network is not an external claim.
 _LOCAL_URL_RE = re.compile(
     r"^https?://(?:localhost|127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.|"
@@ -428,8 +435,10 @@ def unsupported_specifics(answer: str, corpus: str, *, trusted: str = "",
     then contains the flagged reply's echoes (recaps, digests).
     """
     text = _PLACEHOLDER_RE.sub(" ", answer or "")
-    corp = (corpus or "").lower()
     trust = (trusted or "").lower()
+    # Trusted text is provenance by definition (§17.1029): a value the task or
+    # a source states is credited even if a caller's corpus omitted it.
+    corp = (corpus or "").lower() + "\n" + trust
     flagged = {v.lower() for v in (flagged or ())}
     found: list[dict] = []
 
@@ -460,12 +469,14 @@ def unsupported_specifics(answer: str, corpus: str, *, trusted: str = "",
 
     for u in _URL_RE.findall(text):
         u = u.rstrip(".,;:)")
-        if _LOCAL_URL_RE.match(u):
+        if _LOCAL_URL_RE.match(u) or "$" in u or "{" in u:
             continue
         if not (_known(u) or _known(u.rstrip("/"))):
             _add("url", u)
     text = _URL_RE.sub(" ", text)
     for ip in _IPV4_RE.findall(text):
+        if _EXAMPLE_IP_RE.match(ip):
+            continue
         if not _known_word(ip):
             _add("ip", ip)
     text = _IPV4_RE.sub(" ", text)
