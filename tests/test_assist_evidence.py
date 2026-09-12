@@ -611,6 +611,34 @@ def test_the_ask_path_runs_a_documentation_query_when_none_was_fetched():
     src = inspect.getsource(lib.research_one)
     assert "official documentation" in src and "max_source_authority(sources) < _DOC_AUTHORITY" in src
     assert src.index("official documentation") < src.index("sources = rank_evidence(")
+    # §17.1037 — the documentation words must survive the 12-word cap: they
+    # lead, and the base is held to nine words.
+    assert '_cap_query("official documentation "' in src and ".split()[:9]" in src
+    # and a documentation-grade snippet fallback exists for pages that extract to nothing
+    assert "_searxng_structured(_doc_q" in src and "source_authority(r[\"url\"]) >= _DOC_AUTHORITY" in src
+
+
+def test_documentation_query_keeps_its_keywords_on_a_long_question():
+    from app.modules.assist_research_lib import _cap_query
+    base = "docker compose restart unless-stopped host reboot stop exit code 1 deployment approach"
+    q = _cap_query("official documentation " + " ".join(base.split()[:9]))
+    assert q.startswith("official documentation") and len(q.split()) <= 12
+
+
+def test_brief_hostnames_are_operator_owned():
+    env = {"facts": [], "_brief_text": "Deploy Nextcloud reachable at cloud.example-home.net behind Traefik"}
+    assert "cloud.example-home.net" in ev.owned_hosts(env, None)
+    assert unsupported_specifics("Open https://cloud.example-home.net/login", "",
+                                 owned=ev.owned_hosts(env, None)) == []
+
+
+def test_the_funnel_carries_the_brief_text_and_the_reader_never_persists_it():
+    import inspect
+    from app.modules import assist_agent
+    src = inspect.getsource(assist_agent.assemble_generation_memory)
+    assert '"_brief_text"' in src and "_brief_text(_brief)" in src
+    from app.modules.assist_environment import _environment_from_metadata
+    assert "_brief_text" not in _environment_from_metadata({"environment": {"_brief_text": "x"}})
 
 
 # ── verify_answer: regenerate once, then annotate ─────────────────────────
