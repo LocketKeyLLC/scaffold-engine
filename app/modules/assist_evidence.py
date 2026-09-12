@@ -322,7 +322,11 @@ def source_authority(url: str) -> float:
         base = 0.5
     m = re.match(r"https?://([^/?#]+)([^?#]*)", url.lower())
     if m and (_DOC_HOST_RE.match(m.group(1)) or _DOC_PATH_RE.search(m.group(2) or "")):
-        base = max(base, _DOC_AUTHORITY)
+        # §17.1037c — an encyclopedia's `/wiki/` path is not a product's
+        # documentation; live it satisfied the authority test with a page
+        # about the word "documentation" itself.
+        if not m.group(1).endswith("wikipedia.org"):
+            base = max(base, _DOC_AUTHORITY)
     return base
 
 
@@ -362,9 +366,16 @@ def content_terms(need: Optional[Need]) -> set[str]:
     into their words; hardware models count; stopwords do not."""
     if need is None:
         return set()
-    from app.modules.assist_research_lib import _GOAL_STOPWORDS
+    from app.modules.assist_research_lib import _GOAL_STOPWORDS, _goal_keywords
     out: set[str] = set()
-    for chunk in list(need.goal_terms) + [need.query]:
+    chunks = list(need.goal_terms) + [need.query]
+    if need.kind == "question":
+        # §17.1037c — a long question's own nouns are the relevance terms;
+        # the query keeps six of them and the live UniFi question judged
+        # relevance on "exact click current" while "port forward firewall"
+        # were in the question and not in the set.
+        chunks += _goal_keywords(need.subject, limit=12)
+    for chunk in chunks:
         for tok in re.findall(r"[a-z0-9][a-z0-9-]{2,}", (chunk or "").lower()):
             if len(tok) >= 4 and tok not in _GOAL_STOPWORDS:
                 out.add(tok)
@@ -861,6 +872,31 @@ def grounding_footer(unsupported: list[dict], cite: Optional[dict],
     return "\n".join(lines)
 
 
+# §17.1037d — the verifier OWNS the footer namespace. Earlier replies carry
+# these footers; they sit in the conversation block, and live the model copied
+# "ℹ️ No official documentation was retrieved…" into a fresh answer whose
+# retrieval HAD found documentation — the verifier's own log showed no such
+# flag. A footer line in a draft is therefore never the model's to write:
+# strip every footer-shaped line first, re-add only what is true now.
+_FOOTER_LINE_RE = re.compile(
+    r"^\s*(?:ℹ️|⚠️)\s*\*\*(?:No official documentation was retrieved|Unverified specifics|"
+    r"Weak sourcing|From the plan, not yet confirmed|Command mismatch|This may not answer what you asked)\b.*$",
+    re.MULTILINE)
+
+
+def strip_verifier_footers(answer: str) -> str:
+    """Remove footer lines the verifier itself writes (and a separator left
+    dangling right above one), so a draft that echoed an earlier reply's footer
+    is judged on its own content."""
+    if not answer or not _FOOTER_LINE_RE.search(answer):
+        return answer
+    out = _FOOTER_LINE_RE.sub("", answer)
+    # a `---` that now has nothing but whitespace after it, or is duplicated
+    out = re.sub(r"(?:\n\s*---\s*)+(?=\n\s*---\s*$|\s*$)", "", out.rstrip())
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.rstrip()
+
+
 async def verify_answer(
     answer: str,
     *,
@@ -896,6 +932,7 @@ async def verify_answer(
     if not settings.assist_answer_verification_enabled or not (answer or "").strip():
         return answer, report
     report["checked"] = True
+    answer = strip_verifier_footers(answer)  # §17.1037d
     # §17.1030 — the sources this call is handed are trusted text by
     # definition; a caller cannot forget to render them into the corpus.
     trusted = (trusted or "") + "\n" + "\n".join(
@@ -937,6 +974,7 @@ async def verify_answer(
             logger.warning("assist_answer_grounding_regen_failed: %s", exc)
             candidate = ""
         if candidate:
+            candidate = strip_verifier_footers(candidate)  # §17.1037d
             c_uns = unsupported_specifics(candidate, corpus, trusted=trusted, flagged=flagged,
                                           sourced=sourced, owned=owned_hosts)
             c_cite = await citation_report(candidate, sources)

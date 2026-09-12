@@ -577,6 +577,47 @@ def _cap_query(q: str, max_words: int = 12) -> str:
     return " ".join(parts[:max_words])
 
 
+async def _documentation_sources(need, base_query: str, sources: list, *, node_key: str = "?") -> list[dict]:
+    """§17.1036/1037 — when a QUESTION's fetched pages include no ON-TOPIC
+    documentation, run one more web query aimed at documentation and return
+    the extra sources (fetched pages, else documentation-grade search snippets).
+
+    §17.1037c, measured on the live UniFi question: the vendor help centre
+    returned 403 to the fetcher; an encyclopedia page whose path contains
+    `/wiki/` then counted as documentation and satisfied the authority test
+    BEFORE relevance filtering dropped it as off-topic — so the snippet
+    fallback never ran. The authority test now runs on the RANKED (on-topic)
+    set, on both the primary sources and the documentation fetch.
+    """
+    from app.modules.assist_evidence import (
+        _DOC_AUTHORITY, max_source_authority, rank_evidence, source_authority)
+    if need is None or need.kind != "question" or settings.assist_research_fetch_top_n <= 0:
+        return []
+    if max_source_authority(rank_evidence(list(sources), need)) >= _DOC_AUTHORITY:
+        return []
+    # "documentation" alone: "official" drew dictionary pages for the word
+    # itself. The keywords LEAD, so the 12-word cap cannot remove them.
+    doc_q = _cap_query("documentation " + " ".join((base_query or "").split()[:10]))
+    fetched = rank_evidence(await _deep_web_sources(doc_q, top_n=2), need)
+    extra: list[dict] = list(fetched)
+    if max_source_authority(fetched) < _DOC_AUTHORITY:
+        # Vendor help centres are often script-rendered or bot-blocked (403)
+        # and never extract; the search SNIPPET still names the page. Keep
+        # documentation-grade snippets, relevance-filtered like everything else.
+        snippets = []
+        for r in await _searxng_structured(doc_q, max_results=5):
+            if r.get("url") and source_authority(r["url"]) >= _DOC_AUTHORITY:
+                snippets.append({
+                    "query": doc_q, "kind": "searxng", "url": r["url"],
+                    "title": r.get("title", ""), "date": (r.get("date") or "")[:10],
+                    "text": f"{r.get('title', '')}\n{r.get('content', '')}".strip(),
+                })
+        extra.extend(rank_evidence(snippets, need)[:2])
+    logger.info("assist_research_docs_query node_key=%s q=%r pages=%d snippets=%d",
+                node_key, doc_q[:120], len(fetched), len(extra) - len(fetched))
+    return extra
+
+
 async def research_one(
     *, question: str, node_key: str = "?", domain: Optional[str] = None,
     synthesize: bool = True, job_context: Optional[str] = None,
@@ -621,41 +662,9 @@ async def research_one(
         question, node_key=node_key, domain=domain, deep=True,
         kb_query_extra=context_hint, web_query=web_q,
     )
-    # §17.1036 — a QUESTION about a program deserves its documentation, not
-    # only whatever forum thread ranked first. When no fetched page is
-    # documentation-shaped, run one more web query aimed at documentation and
-    # merge; ranking then puts the authoritative page first.
+    # §17.1036/1037 — a QUESTION about a program deserves its documentation.
     try:
-        from app.modules.assist_evidence import max_source_authority, _DOC_AUTHORITY
-        if (need.kind == "question" and settings.assist_research_fetch_top_n > 0
-                and max_source_authority(sources) < _DOC_AUTHORITY):
-            # §17.1037 — the documentation words go FIRST. Appended after the
-            # 12-word cap they were the words the cap removed, so on any long
-            # question the "documentation" query was the original query again
-            # (live: 'docker compose restart unless-stopped host reboot stop
-            # exit code 1 deployment approach' — twelve words, no
-            # "documentation" in it). The base is held to nine words.
-            _doc_q = _cap_query("official documentation "
-                                + " ".join((web_q or question).split()[:9]))
-            _doc_sources = await _deep_web_sources(_doc_q, top_n=2)
-            if not _doc_sources:
-                # §17.1037 — vendor help centres are often script-rendered and
-                # extract to nothing; the search SNIPPET still names the page.
-                # Keep documentation-grade snippets only.
-                from app.modules.assist_evidence import source_authority
-                for r in await _searxng_structured(_doc_q, max_results=5):
-                    if r.get("url") and source_authority(r["url"]) >= _DOC_AUTHORITY:
-                        _doc_sources.append({
-                            "query": _doc_q, "kind": "searxng", "url": r["url"],
-                            "title": r.get("title", ""), "date": (r.get("date") or "")[:10],
-                            "text": f"{r.get('title', '')}\n{r.get('content', '')}".strip(),
-                        })
-                        if len(_doc_sources) >= 2:
-                            break
-            logger.info("assist_research_docs_query node_key=%s q=%r pages=%d",
-                        node_key, _doc_q[:120], len(_doc_sources))
-            if _doc_sources:
-                sources.extend(_doc_sources)
+        sources.extend(await _documentation_sources(need, web_q or question, sources, node_key=node_key))
     except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
         logger.warning("assist_research_docs_query_failed: %s", exc)
     sources = rank_evidence(sources, need, node_key=node_key)  # §17.1027
