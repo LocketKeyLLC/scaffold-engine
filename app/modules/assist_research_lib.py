@@ -582,6 +582,7 @@ async def research_one(
     synthesize: bool = True, job_context: Optional[str] = None,
     context_hint: Optional[str] = None, operator_notes: Optional[list] = None,
     goal_terms: Optional[str] = None,
+    provenance: Optional[str] = None, flagged: Optional[set] = None,
 ) -> dict:
     """Confirm a single operator-supplied question and optionally synthesize
     a short cited answer. Does not persist — this is a side query.
@@ -591,6 +592,13 @@ async def research_one(
     relays what THIS project already established instead of a project-blind web
     lookup. ``context_hint`` biases only the local-KB retrieval (see
     ``_confirm_query``).
+
+    §17.1028 — ``provenance`` is the text that may CREDIT a value the answer
+    states (ledgers + the operator's own words, never the engine's earlier
+    replies); it defaults to ``job_context`` for callers that do not build
+    one. ``flagged`` is the set of values earlier replies already carried
+    under the Unverified footer; those are credited only by the sources and
+    the question itself.
     """
     role = settings.assist_guide_model_role
     # §17.729 — search on a keyword-focused query, not the raw conversational
@@ -774,13 +782,16 @@ async def research_one(
                 _notes_text = "\n".join(
                     (n.get("text") if isinstance(n, dict) else str(n)) or ""
                     for n in (operator_notes or []))
+                _trusted = question + "\n" + _render_research_block(sources)
                 answer, _ = await verify_answer(
                     answer, sources=sources,
-                    corpus="\n".join([question, _render_research_block(sources),
-                                      job_context or "", _notes_text,
-                                      context_hint or ""]),
+                    corpus="\n".join([_trusted,
+                                      (provenance if provenance is not None
+                                       else (job_context or "")),
+                                      _notes_text, context_hint or ""]),
                     need=need, node_key=node_key, label="assist_research",
                     regenerate=_regen,
+                    trusted=_trusted, flagged=flagged,  # §17.1028
                 )
             if answer:  # §17.897 — code-enforced copy-paste format
                 answer = strip_operator_meta_preamble(answer)  # §17.908

@@ -1134,12 +1134,25 @@ async def run_step_research(
     if mem.job_digest:
         context_parts.append(mem.job_digest)
     conversation = _conversation_block_for(mem.history)  # §17.687
+    # §17.1028 — what may CREDIT a value in the answer: the same context minus
+    # the engine's own earlier replies. The full dialogue still reaches the
+    # prompt (the model needs it to resolve "that one"); it just cannot vouch
+    # for a value the engine itself put there a turn ago.
+    from app.modules.assist_evidence import flagged_values, operator_text
+    provenance_parts = list(context_parts)
+    _op_text = operator_text(mem.history)
+    if _op_text:
+        provenance_parts.append("## Operator said\n" + _op_text)
     if conversation:
         context_parts.append(conversation)
     recap_block = assist_guide.render_step_recap_block(mem.recap)  # §17.738
     if recap_block:
         context_parts.append(recap_block)
+        provenance_parts.append(recap_block)
     job_context = "\n\n".join(context_parts) or None
+    provenance = "\n\n".join(provenance_parts)
+    flagged = flagged_values([m for m in (mem.history or [])
+                              if isinstance(m, dict) and m.get("role") == "assistant"])
 
     # §17.1022 — the step's own recap names what the operator is TRYING to do.
     # Their question is a symptom ("I only see two fields"); the goal is in the
@@ -1168,6 +1181,7 @@ async def run_step_research(
         # model number rather than ask the query generator to keep it.
         operator_notes=mem.operator_notes,
         goal_terms=_recap_goal_terms(_recap),  # §17.1023 — aim the search at the GOAL
+        provenance=provenance, flagged=flagged,  # §17.1028
     )
     # §17.851b — research how-to answers carry commands too: same
     # code-enforced placeholder resolution as walkthroughs and fixes.
@@ -1952,6 +1966,7 @@ async def run_step_fix(
                 nk, len(hypotheses["eliminated"]), len(hypotheses["cross_step"]))
     except Exception as e:  # noqa: BLE001 — a ledger is never a blocker
         logger.warning("assist_hypotheses_failed session_id=%s err=%r", session_id, e)
+    from app.modules.assist_evidence import operator_text as _operator_text  # §17.1028
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
@@ -1969,6 +1984,7 @@ async def run_step_fix(
         operator_notes=mem.operator_notes,  # §17.745 — notes + reset supersession
         conversation=mem.conversation,  # §17.687 + §17.738 recap
         step_recap=mem.recap,  # §17.1027 — the OPEN item is the research fallback
+        operator_conversation=_operator_text(mem.history),  # §17.1028
     )
     # §17.851b — fix commands get the same code-enforced placeholder
     # resolution as walkthroughs (carry-through: every operator-facing

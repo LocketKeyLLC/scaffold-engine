@@ -379,29 +379,79 @@ _LOCAL_URL_RE = re.compile(
     r"\[?::1\]?|[\w.-]+\.(?:local|lan|home|internal)(?::|/|$))", re.IGNORECASE)
 
 
-def unsupported_specifics(answer: str, corpus: str) -> list[dict]:
+# §17.1028 — the footer this module writes, parsed back: a value the engine
+# itself flagged as unverified stays unverified until a SOURCE or the OPERATOR
+# states it. Without this, the flagged reply is captured as a turn, the next
+# turn's conversation block contains it, and the corpus credits the engine's
+# own guess as known — observed live one turn after the footer first fired.
+_FLAG_FOOTER_RE = re.compile(r"Unverified specifics\*{0,2}[^\n]*?:\s*([^\n]+)")
+_FLAG_ITEM_RE = re.compile(r"`([^`\n]+)`\s*\((?:url|ip|version|port)\)")
+
+
+def flagged_values(replies: Optional[list]) -> set[str]:
+    """Every value a previous engine reply carried under an Unverified
+    specifics footer. Derived on read from the replies themselves — the footer
+    is the durable record, so every existing session recovers its ledger."""
+    out: set[str] = set()
+    for r in replies or []:
+        text = (r.get("content") if isinstance(r, dict) else r) or ""
+        for m in _FLAG_FOOTER_RE.finditer(str(text)):
+            out.update(v.strip() for v in _FLAG_ITEM_RE.findall(m.group(1)))
+    return out
+
+
+def operator_text(history: Optional[list]) -> str:
+    """The OPERATOR-authored half of a dialogue history (``{role, content}``
+    items, role ``user``/``operator``). Engine replies are not provenance for
+    the engine's next reply."""
+    return "\n".join(
+        (m.get("content") or "") for m in (history or [])
+        if isinstance(m, dict) and (m.get("role") or "").strip().lower() in ("user", "operator")
+    )
+
+
+def unsupported_specifics(answer: str, corpus: str, *, trusted: str = "",
+                          flagged: Optional[set] = None) -> list[dict]:
     """Concrete values the answer states that its grounding never mentions.
 
-    ``corpus`` is everything the generation was given: the rendered sources,
-    the project context, the operator's own message and notes. A value absent
-    from all of it came from the model's memory — the exact class of thing
-    §17.729's CURRENCY rule asks the model not to state, and which it states
-    anyway. Placeholders (``<SERVER_IP>``) are the correct way to leave a value
-    open and are never flagged.
+    ``corpus`` is what the generation was given that counts as provenance:
+    the rendered sources, the project ledgers (facts, notes, digest, recap)
+    and the operator's own words — NOT the engine's earlier replies (§17.1028).
+    A value absent from all of it came from the model's memory — the exact
+    class of thing §17.729's CURRENCY rule asks the model not to state, and
+    which it states anyway. Placeholders (``<SERVER_IP>``) are the correct way
+    to leave a value open and are never flagged.
+
+    ``flagged`` values (§17.1028: what earlier replies already carried under
+    the footer) are credited ONLY by ``trusted`` text — the retrieved sources
+    and the operator's current message — never by the wider corpus, which by
+    then contains the flagged reply's echoes (recaps, digests).
     """
     text = _PLACEHOLDER_RE.sub(" ", answer or "")
     corp = (corpus or "").lower()
+    trust = (trusted or "").lower()
+    flagged = {v.lower() for v in (flagged or ())}
     found: list[dict] = []
 
-    def _known(v: str) -> bool:
-        return v.lower() in corp
+    def _in(v: str, hay: str) -> bool:
+        return v.lower() in hay
 
-    def _known_word(v: str) -> bool:
+    def _in_word(v: str, hay: str) -> bool:
         # Not glued to a preceding word/number ("3001" is not credited by
         # "13001"); a trailing "." is a sentence end, and "22.04" is credited
         # by "22.04.3" — a value consistent with the grounding is not from
         # memory.
-        return re.search(r"(?<![\w.])" + re.escape(v.lower()) + r"(?!\w)", corp) is not None
+        return re.search(r"(?<![\w.])" + re.escape(v.lower()) + r"(?!\w)", hay) is not None
+
+    def _known(v: str) -> bool:
+        if v.lower() in flagged:
+            return _in(v, trust)
+        return _in(v, corp)
+
+    def _known_word(v: str) -> bool:
+        if v.lower() in flagged:
+            return _in_word(v, trust)
+        return _in_word(v, corp)
 
     def _add(kind: str, value: str) -> None:
         v = value.strip(".,;:)")
@@ -500,8 +550,14 @@ async def verify_answer(
     node_key: str = "?",
     label: str = "",
     regenerate: Optional[Callable[[str], Awaitable[str]]] = None,
+    trusted: str = "",
+    flagged: Optional[set] = None,
 ) -> tuple[str, dict]:
     """Check an answer against its grounding; regenerate once; else annotate.
+
+    ``trusted`` / ``flagged`` — §17.1028: values a previous reply already
+    flagged are credited only by the sources and the operator's current
+    message (``trusted``), never by the wider corpus.
 
     ``regenerate`` receives the grounding notice and returns a new draft, or
     "" to decline (a caller may reject a draft that fails its own gates). The
@@ -515,8 +571,12 @@ async def verify_answer(
     if not settings.assist_answer_verification_enabled or not (answer or "").strip():
         return answer, report
     report["checked"] = True
-    unsupported = unsupported_specifics(answer, corpus)
+    unsupported = unsupported_specifics(answer, corpus, trusted=trusted, flagged=flagged)
     cite = await citation_report(answer, sources)
+    _carried = [u["value"] for u in unsupported if u["value"].lower() in {v.lower() for v in (flagged or ())}]
+    if _carried:
+        logger.info("assist_answer_grounding_flag_carried node_key=%s label=%s values=%r",
+                    node_key, label, _carried[:6])
 
     def _fails(uns: list, ct: Optional[dict]) -> bool:
         return bool(uns) or _citation_weak(ct)
@@ -534,7 +594,7 @@ async def verify_answer(
             logger.warning("assist_answer_grounding_regen_failed: %s", exc)
             candidate = ""
         if candidate:
-            c_uns = unsupported_specifics(candidate, corpus)
+            c_uns = unsupported_specifics(candidate, corpus, trusted=trusted, flagged=flagged)
             c_cite = await citation_report(candidate, sources)
             better = (not _fails(c_uns, c_cite)) or (
                 len(c_uns) < len(unsupported) and not (

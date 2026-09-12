@@ -152,4 +152,10 @@ def test_the_verified_sites_regenerate_through_the_verifier(rel):
                 found = True
                 assert any(kw.arg == "regenerate" for kw in node.keywords), \
                     f"{rel}:{node.lineno} verify_answer(...) without regenerate="
+                # §17.1028 — and must say what may CREDIT a value (trusted=) and
+                # what earlier replies already flagged (flagged=), or the
+                # engine's own prior guess becomes provenance a turn later.
+                for req in ("trusted", "flagged"):
+                    assert any(kw.arg == req for kw in node.keywords), \
+                        f"{rel}:{node.lineno} verify_answer(...) without {req}="
     assert found, f"{rel}: no verify_answer call"

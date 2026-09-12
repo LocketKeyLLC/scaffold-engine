@@ -270,6 +270,60 @@ def test_ip_octets_are_not_mistaken_for_versions():
     assert found == []
 
 
+# ── §17.1028: a flagged value stays flagged until a source or the operator says it ──
+
+LIVE_FOOTER_REPLY = ("## Fix\n2. Check the version:\n```bash\npm2 -v\n```\n"
+                     "You should see a version number, for example `5.4.2`.\n\n---\n"
+                     "⚠️ **Unverified specifics** — these values appear in no source, fact, or "
+                     "note for this step; confirm each before relying on it: `5.4.2` (version)")
+
+
+def test_flagged_values_are_parsed_back_from_the_footer():
+    assert ev.flagged_values([LIVE_FOOTER_REPLY]) == {"5.4.2"}
+    assert ev.flagged_values([{"content": LIVE_FOOTER_REPLY}, "no footer here"]) == {"5.4.2"}
+    multi = LIVE_FOOTER_REPLY.replace("`5.4.2` (version)", "`5.4.2` (version), `192.168.0.1` (ip)")
+    assert ev.flagged_values([multi]) == {"5.4.2", "192.168.0.1"}
+    assert ev.flagged_values(None) == set()
+
+
+def test_the_engines_own_prior_reply_does_not_credit_the_value():
+    """Live: the fix reply that carried `5.4.2` under the footer was captured
+    as a turn; the next ask reply repeated it with NO footer because the
+    conversation block now contained it."""
+    corpus_with_echo = "## Conversation\nYou (assistant): " + LIVE_FOOTER_REPLY
+    found = unsupported_specifics("Run pm2 -v; you should see `5.4.2`.", corpus_with_echo,
+                                  trusted="", flagged=ev.flagged_values([LIVE_FOOTER_REPLY]))
+    assert [f["value"] for f in found] == ["5.4.2"]
+
+
+def test_a_flagged_value_is_credited_once_a_source_or_the_operator_states_it():
+    flagged = {"5.4.2"}
+    src = "[1] (web · published 2026-09-01 · https://x.example/rel) pm2 5.4.2 released"
+    assert unsupported_specifics("Install `5.4.2`.", src, trusted=src, flagged=flagged) == []
+    op = "Question: it printed 5.4.2, is that current?"
+    assert unsupported_specifics("Yes, `5.4.2`.", op, trusted=op, flagged=flagged) == []
+
+
+def test_operator_text_keeps_only_the_operators_half():
+    hist = [{"role": "user", "content": "it printed 3001"},
+            {"role": "assistant", "content": "try port 8211"},
+            {"role": "operator", "content": "ok"}]
+    out = ev.operator_text(hist)
+    assert "3001" in out and "ok" in out and "8211" not in out
+
+
+@pytest.mark.asyncio
+async def test_verify_answer_carries_a_flag_across_turns(no_judge, valves):
+    """Turn 1 flags it; turn 2's corpus contains turn 1's reply; still flagged."""
+    out1, rep1 = await verify_answer("You should see `5.4.2`.", sources=[], corpus="")
+    assert rep1["annotated"] and "`5.4.2`" in out1
+    flagged = ev.flagged_values([out1])
+    out2, rep2 = await verify_answer("As before, expect `5.4.2`.", sources=[],
+                                     corpus="You (assistant): " + out1, trusted="",
+                                     flagged=flagged)
+    assert rep2["annotated"] and "`5.4.2`" in out2
+
+
 # ── verify_answer: regenerate once, then annotate ─────────────────────────
 
 @pytest.fixture
