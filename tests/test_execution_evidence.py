@@ -13,6 +13,7 @@ import pathlib
 
 import pytest
 
+import app.modules.execution_agent  # noqa: F401 — load-bearing: binds the REAL app.database before any test module stubs it (test_status_logs.py setdefault()s a fake at collection time)
 from app.modules import execution_evidence as xe
 from app.modules import assist_evidence as ev
 
@@ -216,5 +217,10 @@ def test_the_status_payload_and_both_operator_surfaces_carry_the_report():
     assert "function evidenceLines" in spa and "Evidence check" in spa and "evidence: data.evidence" in spa
     cli = (root / "cli/scaffold_cli/main.py").read_text()
     assert 'n.get("evidence")' in cli and "unverified:" in cli
+    # The CLI node table reads the LOGS payload (NodeLog), not /exec/status —
+    # the field the CLI prints must exist on the model it actually receives.
+    logs = (root / "app/routers/status.py").read_text()
+    assert "evidence: Optional[dict] = None" in logs and "evidence=_evidence_dict(getattr(row, \"evidence\"" in logs
+    assert "status, domain, evidence," in logs
     mig = (root / "db/migrations/075_dag_nodes_evidence.sql").read_text()
     assert mig.count(";") == 0 and "ADD COLUMN IF NOT EXISTS evidence JSONB" in mig

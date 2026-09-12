@@ -6,6 +6,7 @@ GET /logs/{job_id}     — per-node execution history for a single job
 
 import logging
 from datetime import datetime, timezone
+import json
 from typing import Any, Optional
 from uuid import UUID
 
@@ -156,6 +157,24 @@ class NodeLog(BaseModel):
     # verification_reason (mig 026) was written on failure but never exposed by
     # any read API, so a failed job showed no "why" without grepping Postgres.
     failure_reason: Optional[str] = None
+    # §17.1040 — the executor's evidence report (§17.1039): unsupported /
+    # plan-only values, command shape, citation score, regenerated. This is
+    # the payload the CLI node table reads, so it must carry it too.
+    evidence: Optional[dict] = None
+
+
+def _evidence_dict(value) -> Optional[dict]:
+    """§17.1040 — a jsonb column arrives as a dict (asyncpg) or, from some
+    paths, as its JSON text; anything else is treated as absent."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else None
+        except ValueError:
+            return None
+    return None
 
 
 class LogsResponse(BaseModel):
@@ -415,7 +434,7 @@ async def get_logs(
     # 3. Node-level execution details, paginated
     nodes_result = await db.execute(
         text("""
-            SELECT node_key, title, tool, status, domain,
+            SELECT node_key, title, tool, status, domain, evidence,
                    output_text, confidence, updated_at,
                    last_verification_reason
             FROM dag_nodes
@@ -452,6 +471,7 @@ async def get_logs(
                 confidence=row.confidence,
                 updated_at=row.updated_at.isoformat() if row.updated_at else None,
                 failure_reason=row.last_verification_reason,
+                evidence=_evidence_dict(getattr(row, "evidence", None)),  # §17.1040
             )
         )
 

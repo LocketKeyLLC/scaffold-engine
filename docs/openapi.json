@@ -3430,6 +3430,18 @@
             ],
             "title": "Domain"
           },
+          "evidence": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence"
+          },
           "failure_reason": {
             "anyOf": [
               {
