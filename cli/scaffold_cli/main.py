@@ -3372,6 +3372,15 @@ def logs(
         reason = n.get("failure_reason")
         if reason and n.get("status") in ("failed", "blocked"):
             click.secho(f"{'':<10}↳ why: {str(reason)[:96]}", fg="yellow")
+        # §17.1040 — the executor's evidence report (§17.1039): values the
+        # node stated that nothing it was given supports, and plan-only ones.
+        ev = n.get("evidence") or {}
+        if ev.get("unsupported"):
+            click.secho(f"{'':<10}↳ unverified: {', '.join(str(v) for v in ev['unsupported'][:6])}", fg="yellow")
+        if ev.get("plan_only"):
+            click.secho(f"{'':<10}↳ from the plan, unconfirmed: {', '.join(str(v) for v in ev['plan_only'][:6])}", fg="blue")
+        if ev.get("command_shape"):
+            click.secho(f"{'':<10}↳ command mismatch: {', '.join(str(v) for v in ev['command_shape'][:4])}", fg="yellow")
 
     compiled = data.get("compiled_output")
     if compiled:

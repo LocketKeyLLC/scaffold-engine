@@ -2035,6 +2035,13 @@ async def execute_next_node(
                 f"regenerated={_evidence_summary.get('regenerated')}",
                 {"evidence": _evidence_summary},
             )
+            # §17.1040 — and on the node row, where the status endpoint, the
+            # SPA Run tab, the CLI and downstream nodes read it.
+            await db.execute(
+                text("UPDATE dag_nodes SET evidence = CAST(:ev AS jsonb) WHERE id = :nid"),
+                {"ev": json.dumps(_evidence_summary), "nid": str(node_id)},
+            )
+            await db.commit()
         logger.info(
             "verification_complete",
             extra=dict(
@@ -2339,6 +2346,7 @@ async def _run_parallel_frontier(
                     "model_used": res.get("model_used"),
                     "tool": res.get("tool"),
                     "runbook_only": _done_tool == "shell" and not settings.shell_tool_enabled,
+                    "evidence": res.get("evidence"),  # §17.1040
                 })
                 if _prog is not None:  # §17.811
                     _prog_done.append(res.get("title") or res.get("node_key") or "step")
@@ -2783,6 +2791,7 @@ async def execute_all_nodes(
                     "model_used": result.get("model_used"),
                     "tool": result.get("tool"),
                     "runbook_only": _done_tool == "shell" and not settings.shell_tool_enabled,
+                    "evidence": result.get("evidence"),  # §17.1040
                 })
                 if _prog is not None:  # §17.811
                     _prog_done.append(result.get("title") or result.get("node_key") or "step")

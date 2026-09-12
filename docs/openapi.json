@@ -1821,6 +1821,18 @@
             ],
             "title": "Error"
           },
+          "evidence": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence"
+          },
           "job_id": {
             "anyOf": [
               {
@@ -3417,6 +3429,18 @@
               }
             ],
             "title": "Domain"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence"
           },
           "failure_reason": {
             "anyOf": [
