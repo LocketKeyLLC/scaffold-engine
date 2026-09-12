@@ -465,16 +465,48 @@ def _in_word(v: str, hay: str) -> bool:
     return re.search(r"(?<![\w.])" + re.escape(v.lower()) + r"(?!\w)", hay) is not None
 
 
-def _credited(item: dict, hay: str) -> bool:
+_HOST_RE = re.compile(r"\b(?=[a-z0-9-]{1,63}\.)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,24}\b")
+
+
+def _url_host(url: str) -> str:
+    m = re.match(r"https?://([^/:?#]+)", (url or "").lower())
+    return m.group(1) if m else ""
+
+
+def owned_hosts(environment: Optional[dict], operator_notes: Optional[list] = None) -> set[str]:
+    """§17.1032 — hostnames the OPERATOR'S ledger names: facts (distilled from
+    their own output), notes (their own words), substitution values (their
+    own pins), profile. A URL on one of these hosts is a path on a machine or
+    domain that is theirs, not a product URL from memory. Deliberately NOT the
+    whole corpus: a source citing github.com must not make every github URL
+    credited — §17.883's invented-download-URL class lives there."""
+    env = environment or {}
+    parts: list[str] = []
+    parts.extend(str(f) for f in (env.get("facts") or []))
+    parts.append(str(env.get("profile") or ""))
+    subs = env.get("substitutions") or {}
+    if isinstance(subs, dict):
+        parts.extend(str(v) for v in subs.values())
+    for n in (operator_notes or []):
+        parts.append(str((n.get("text") if isinstance(n, dict) else n) or ""))
+    text = "\n".join(parts).lower()
+    return {h for h in _HOST_RE.findall(text) if not re.fullmatch(r"[\d.]+", h)}
+
+
+def _credited(item: dict, hay: str, owned: Optional[set] = None) -> bool:
     v = item["value"].lower()
     if item["kind"] == "url":
-        return v in hay or v.rstrip("/") in hay
+        if v in hay or v.rstrip("/") in hay:
+            return True
+        host = _url_host(v)
+        return bool(host) and host in (owned or set())
     return _in_word(v, hay)
 
 
 def unsupported_specifics(answer: str, corpus: str, *, trusted: str = "",
                           flagged: Optional[set] = None,
-                          sourced: Optional[set] = None) -> list[dict]:
+                          sourced: Optional[set] = None,
+                          owned: Optional[set] = None) -> list[dict]:
     """Concrete values the answer states that its grounding never mentions.
 
     ``corpus`` is what the generation was given that counts as provenance:
@@ -494,6 +526,9 @@ def unsupported_specifics(answer: str, corpus: str, *, trusted: str = "",
     EARLIER turn, from the session ledger) are credited outright — a value a
     source established does not become a guess because this turn's research
     did not refetch that source.
+
+    ``owned`` hosts (§17.1032: from the operator's own ledger) credit any URL
+    on them — a path on the operator's own domain is not a product claim.
     """
     trust = (trusted or "").lower()
     # Trusted text is provenance by definition (§17.1029): a value the task or
@@ -507,7 +542,7 @@ def unsupported_specifics(answer: str, corpus: str, *, trusted: str = "",
         if v in sourced_l:
             continue
         hay = trust if v in flagged_l else corp
-        if not _credited(item, hay):
+        if not _credited(item, hay, owned):
             out.append(item)
     return out
 
@@ -662,6 +697,7 @@ async def verify_answer(
     trusted: str = "",
     flagged: Optional[set] = None,
     sourced: Optional[set] = None,
+    owned_hosts: Optional[set] = None,
 ) -> tuple[str, dict]:
     """Check an answer against its grounding; regenerate once; else annotate.
 
@@ -688,7 +724,7 @@ async def verify_answer(
         str((s.get("text") or s.get("content") or "") if isinstance(s, dict) else s)
         for s in (sources or []))
     unsupported = unsupported_specifics(answer, corpus, trusted=trusted, flagged=flagged,
-                                        sourced=sourced)
+                                        sourced=sourced, owned=owned_hosts)
     cite = await citation_report(answer, sources)
     off = not addresses_question(answer, need)  # §17.1031
     if off:
@@ -718,7 +754,7 @@ async def verify_answer(
             candidate = ""
         if candidate:
             c_uns = unsupported_specifics(candidate, corpus, trusted=trusted, flagged=flagged,
-                                          sourced=sourced)
+                                          sourced=sourced, owned=owned_hosts)
             c_cite = await citation_report(candidate, sources)
             c_off = not addresses_question(candidate, need)
             better = (not _fails(c_uns, c_cite, c_off)) or (

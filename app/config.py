@@ -1176,7 +1176,12 @@ class Settings(BaseSettings):
     # for real doc content instead of search snippets. The auto-guide pre-pass
     # stays snippet-fast (not deep) so walkthroughs don't slow down. 0 = snippet-
     # only everywhere.
-    assist_research_fetch_top_n: int = Field(default=2, ge=0, le=5)
+    # §17.1032 — 2 → 4. Verified read-only on the operator's session: both live
+    # paths fetched ONE page each and dropped it as off-topic (§17.1027's
+    # post-fetch relevance filter), so the answer was grounded on the KB alone.
+    # Peak memory is bounded by research_fetch_concurrency (§17.801), not by
+    # this; each kept page is capped at 2,000 chars in the prompt.
+    assist_research_fetch_top_n: int = Field(default=4, ge=0, le=5)
     # §17.650 — project-aware assist Q&A. Both the /assist research ("ask")
     # path and the step-guidance turn were job-BLIND: they answered an operator
     # question with a raw KB/web lookup that carried none of the project's own

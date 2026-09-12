@@ -1172,6 +1172,7 @@ async def run_step_research(
     # for a value the engine itself put there a turn ago.
     from app.modules.assist_evidence import flagged_values, operator_text
     from app.modules.assist_evidence import sourced_values_from_environment as _ev_sourced
+    from app.modules.assist_evidence import owned_hosts as _ev_owned
     provenance_parts = list(context_parts)
     _op_text = operator_text(mem.history)
     if _op_text:
@@ -1216,6 +1217,7 @@ async def run_step_research(
         goal_terms=_recap_goal_terms(_recap),  # §17.1023 — aim the search at the GOAL
         provenance=provenance, flagged=flagged,  # §17.1028
         sourced=_ev_sourced(mem.environment),  # §17.1030
+        owned_hosts=_ev_owned(mem.environment, mem.operator_notes),  # §17.1032
     )
     # §17.1030 — the verifier's report is for the ledger, not the payload.
     _grounding = res.pop("grounding", None) or {}

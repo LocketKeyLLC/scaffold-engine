@@ -188,7 +188,8 @@ def test_the_verified_sites_regenerate_through_the_verifier(rel):
                 # what earlier replies already flagged (flagged=), or the
                 # engine's own prior guess becomes provenance a turn later.
                 # §17.1030 — and the session's source-confirmed ledger (sourced=).
-                for req in ("trusted", "flagged", "sourced"):
+                # §17.1032 — and the operator-owned hosts (owned_hosts=).
+                for req in ("trusted", "flagged", "sourced", "owned_hosts"):
                     assert any(kw.arg == req for kw in node.keywords), \
                         f"{rel}:{node.lineno} verify_answer(...) without {req}="
     assert found, f"{rel}: no verify_answer call"
