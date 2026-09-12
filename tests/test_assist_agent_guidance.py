@@ -248,7 +248,8 @@ def test_environment_from_metadata_variants():
                    "banned_values": [], "missing_tools": [], "system_state": {},  # §17.893 — ruled-out values
                    "facts": ["Existing PVE 9.2.6"],
                    "playbook": {},  # §17.881b — playbook round-trips
-                   "file_writes": {}}  # §17.981 — the file ledger must too
+                   "file_writes": {},  # §17.981 — the file ledger must too
+                   "sourced_values": []}  # §17.1030 — the sourced-values ledger too
     # tolerates a JSON string body
     got2 = assist_agent._environment_from_metadata('{"environment": {"profile": "X"}}')
     assert got2["profile"] == "X"
@@ -343,7 +344,7 @@ async def test_get_environment_returns_shape():
                    # erased by the next fact fold. This literal is the shape
                    # that let it hide; tests/test_assist_environment_roundtrip.py
                    # is the guard that enumerates instead of listing.
-                   "file_writes": {},
+                   "file_writes": {}, "sourced_values": [],
                    "verbosity": "normal"}  # §17.881b/892/893
 
 

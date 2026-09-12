@@ -187,7 +187,8 @@ def test_the_verified_sites_regenerate_through_the_verifier(rel):
                 # §17.1028 — and must say what may CREDIT a value (trusted=) and
                 # what earlier replies already flagged (flagged=), or the
                 # engine's own prior guess becomes provenance a turn later.
-                for req in ("trusted", "flagged"):
+                # §17.1030 — and the session's source-confirmed ledger (sourced=).
+                for req in ("trusted", "flagged", "sourced"):
                     assert any(kw.arg == req for kw in node.keywords), \
                         f"{rel}:{node.lineno} verify_answer(...) without {req}="
     assert found, f"{rel}: no verify_answer call"

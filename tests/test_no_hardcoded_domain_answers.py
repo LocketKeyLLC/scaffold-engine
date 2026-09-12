@@ -39,7 +39,7 @@ QUERY_MODULES = [
 # registry is the point of the gate: the alternative — predicting which words a
 # future answer key will contain — is the mistake it exists to prevent.
 EXEMPT_PHRASE_LISTS = {
-    ("assist_guide.py", 4193): (
+    ("assist_guide.py", 4198): (
         "destructive-command patterns (`| sh`, `dpkg -i`). A security scanner is "
         "inherently a list of known-dangerous shapes; it encodes no operator's "
         "problem, and deriving it from operator text would be strictly worse."
@@ -192,7 +192,7 @@ def test_the_structural_gate_is_not_vacuous():
     """It must find the one registered collection; a detector that finds
     nothing would pass every module for the wrong reason."""
     found = _phrase_collections(ROOT / "app/modules/assist_guide.py")
-    assert any(ln == 4193 for ln, _ in found), "the detector has gone blind"
+    assert any(ln == 4198 for ln, _ in found), "the detector has gone blind"
 
 
 def test_every_exemption_states_a_reason():

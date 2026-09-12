@@ -157,6 +157,10 @@ def _environment_from_metadata(metadata: Any) -> dict:
         # run.
         "file_writes": (env.get("file_writes")
                         if isinstance(env.get("file_writes"), dict) else {}),
+        # §17.1030 — values a retrieved SOURCE confirmed on an earlier turn
+        # ({value, kind, node_key}). Must round-trip for the §17.881b reason.
+        "sourced_values": (env.get("sourced_values")
+                           if isinstance(env.get("sourced_values"), list) else []),
     }
 
 
@@ -217,9 +221,16 @@ async def set_environment(
     retract_facts: list[str] | None = None,
     playbook_proven: list[str] | None = None,
     playbook_ruled_out: list[str] | None = None,
+    sourced_values: list[dict] | None = None,  # §17.1030
     db,
 ) -> dict:
     """Merge environment facts into `assist_sessions.metadata`.
+
+    `sourced_values` (§17.1030) are APPENDED to the ledger of concrete values a
+    retrieved source confirmed ({value, kind, node_key}), de-duplicated on the
+    value (case-insensitive, newest wins), oldest-dropped-first to the
+    `assist_sourced_values_max` cap. A value a source confirmed on one turn is
+    credited on later turns whose own research did not refetch that source.
 
     `profile` replaces the free-text profile when provided. `substitutions`
     are merged key-by-key (so `/assist env KEY=value` adds one without
@@ -390,6 +401,14 @@ async def set_environment(
             pb[key] = cur[-int(_pb_cap):]
         current["playbook"] = pb
     # Single jsonb merge patch — environment always, verbosity when given.
+    if sourced_values:
+        from app.config import settings as _s2
+        cur_sv = [v for v in (current.get("sourced_values") or []) if isinstance(v, dict)]
+        incoming = {str(v.get("value")).lower(): v for v in sourced_values
+                    if isinstance(v, dict) and str(v.get("value") or "").strip()}
+        cur_sv = [v for v in cur_sv if str(v.get("value")).lower() not in incoming]
+        cur_sv.extend(incoming.values())
+        current["sourced_values"] = cur_sv[-int(_s2.assist_sourced_values_max):]
     patch: dict[str, Any] = {"environment": current}
     if verbosity is not None:
         patch["verbosity"] = verbosity

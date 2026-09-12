@@ -945,6 +945,9 @@ async def generate_step_guidance(
                                     if isinstance(m, dict) and m.get("role") == "assistant"]),
         db=db,
     )
+    await _record_sourced_values(  # §17.1030
+        session_id=session_id, node_key=nk,
+        values=(res.get("guidance_meta") or {}).get("sourced_values"), db=db)
     # §17.726/§17.812 — record what the engine told the operator. Cached
     # re-presents are captured too (gap 2): a walkthrough generated before the
     # capture valve was on, or re-shown after intervening turns, was otherwise
@@ -1063,6 +1066,10 @@ async def generate_step_guidance_stream(
     ):
         if ev.get("type") == "delta":
             _buf.append(ev.get("text") or "")
+        elif ev.get("type") == "done":  # §17.1030
+            await _record_sourced_values(
+                session_id=session_id, node_key=nk,
+                values=(ev.get("guidance_meta") or {}).get("sourced_values"), db=db)
         yield ev
     # §17.812 (gap 2) — cached streams are captured too; the in-capture dedupe
     # keeps back-to-back replays out of the transcript.
@@ -1071,6 +1078,23 @@ async def generate_step_guidance_stream(
             session_id=session_id, node_key=nk, kind="guide",
             content="".join(_buf), db=db,
         )
+
+
+async def _record_sourced_values(*, session_id: str, node_key: str | None,
+                                 values: list | None, db) -> None:
+    """§17.1030 — fold the values THIS turn's sources confirmed into the session
+    ledger, so later turns credit them without refetching. Fail-soft."""
+    items = [{"value": v.get("value"), "kind": v.get("kind"), "node_key": node_key}
+             for v in (values or []) if isinstance(v, dict) and v.get("value")]
+    if not items:
+        return
+    try:
+        from app.modules.assist_environment import set_environment
+        await set_environment(session_id=session_id, sourced_values=items, db=db)
+        logger.info("assist_sourced_values_recorded session_id=%s node_key=%s values=%r",
+                    session_id, node_key, [i["value"] for i in items][:6])
+    except Exception as exc:  # noqa: BLE001 — a ledger write never breaks a turn
+        logger.warning("assist_sourced_values_record_failed: %s", exc)
 
 
 async def run_step_research(
@@ -1147,6 +1171,7 @@ async def run_step_research(
     # prompt (the model needs it to resolve "that one"); it just cannot vouch
     # for a value the engine itself put there a turn ago.
     from app.modules.assist_evidence import flagged_values, operator_text
+    from app.modules.assist_evidence import sourced_values_from_environment as _ev_sourced
     provenance_parts = list(context_parts)
     _op_text = operator_text(mem.history)
     if _op_text:
@@ -1190,7 +1215,12 @@ async def run_step_research(
         operator_notes=mem.operator_notes,
         goal_terms=_recap_goal_terms(_recap),  # §17.1023 — aim the search at the GOAL
         provenance=provenance, flagged=flagged,  # §17.1028
+        sourced=_ev_sourced(mem.environment),  # §17.1030
     )
+    # §17.1030 — the verifier's report is for the ledger, not the payload.
+    _grounding = res.pop("grounding", None) or {}
+    await _record_sourced_values(session_id=session_id, node_key=nk,
+                                 values=_grounding.get("sourced_now"), db=db)
     # §17.851b — research how-to answers carry commands too: same
     # code-enforced placeholder resolution as walkthroughs and fixes.
     from app.config import settings as _settings
@@ -1994,6 +2024,9 @@ async def run_step_fix(
         step_recap=mem.recap,  # §17.1027 — the OPEN item is the research fallback
         operator_conversation=_operator_text(mem.history),  # §17.1028
     )
+    await _record_sourced_values(  # §17.1030
+        session_id=session_id, node_key=nk,
+        values=(res.get("guidance_meta") or {}).get("sourced_values"), db=db)
     # §17.851b — fix commands get the same code-enforced placeholder
     # resolution as walkthroughs (carry-through: every operator-facing
     # command surface, not just /guide).
