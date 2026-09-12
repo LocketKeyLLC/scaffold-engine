@@ -4643,6 +4643,7 @@ async def generate_fix(
     recent_replies: Optional[list[str]] = None,  # §17.925
     hypotheses: Optional[dict] = None,  # §17.973
     step_recap: Optional[str] = None,  # §17.1027 — the OPEN item is the fallback subject
+    operator_conversation: Optional[str] = None,  # §17.1028 — operator-authored dialogue only
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -4756,6 +4757,11 @@ async def generate_fix(
         )
 
     parts = [ctx.assembled_prompt]
+    # §17.1028 — blocks the ENGINE authored (its earlier replies, its own
+    # prescriptions, its hypothesis ledger) go to the model but may not vouch
+    # for a value in the next answer. Tracked here; the provenance corpus is
+    # `parts` minus these, plus the operator-authored half of the dialogue.
+    _engine_authored: list[str] = []
     if job_digest and job_digest.strip():   # §17.653 — project-wide context
         parts.append(job_digest.strip())
     # §17.745 — same unified session memory (facts + provided values + operator
@@ -4765,6 +4771,7 @@ async def generate_fix(
     parts.extend(_render_memory_or_legacy(environment, operator_notes))
     if conversation and conversation.strip():  # §17.687 — recent back-and-forth
         parts.append(conversation.strip())
+        _engine_authored.append(conversation.strip())
     # §17.914 — SALIENCE. The confirmed state is already in the session-memory
     # block, but that block runs ~12k chars and the model argued around it
     # ("Even if the configuration says `scsi0` is first…") while re-asking for
@@ -4859,6 +4866,7 @@ async def generate_fix(
             "facts, it was never created, started, or configured.\n\n```\n"
             + prescribed_commands.strip()[:3000] + "\n```"
         )
+        _engine_authored.append(parts[-1])
     if failure_streak >= 1 and (failed_commands or "").strip():
         # §17.881/882 — from the FIRST repeat (the operator returning with an
         # error IS the proof the prior fix failed), the commands already tried
@@ -4878,6 +4886,7 @@ async def generate_fix(
             "playbook, or the operator's own output.\n\n```\n"
             + failed_commands.strip()[:3000] + "\n```"
         )
+        _engine_authored.append(parts[-1])
     # §17.973 — what this step has already eliminated, and the demand to name
     # what is left. Placed last in the user prompt so it is the final constraint
     # read before the model writes its Diagnosis.
@@ -4887,14 +4896,26 @@ async def generate_fix(
     _hyp_block = render_tested_hypotheses(hypotheses)
     if _hyp_block:
         parts.append(_hyp_block)
+        _engine_authored.append(_hyp_block)
     # §17.977 — what the rest of the project disproved. Informational, and
     # AFTER the same-step ledger, which is the part that binds.
     _cross_block = render_cross_step_eliminated(
         (hypotheses or {}).get("cross_step"))
     if _cross_block:
         parts.append(_cross_block)
+        _engine_authored.append(_cross_block)
     parts.append(_FIX_USER_TRAILER)
     user = "\n\n".join(parts)
+    # §17.1028 — provenance: everything the model saw EXCEPT what the engine
+    # itself wrote earlier, plus the operator's half of the dialogue and the
+    # step recap. The engine's earlier replies are what carried the value it
+    # is about to be checked for.
+    _provenance = "\n\n".join(
+        [p_ for p_ in parts if p_ not in _engine_authored]
+        + [operator_conversation or "", render_step_recap_block(step_recap) or ""])
+    _trusted = (error_text or "") + "\n" + research_block
+    from app.modules.assist_evidence import flagged_values
+    _flagged = flagged_values(recent_replies)
 
     # §17.903 — the fix path also carries the answer-and-lean rule: the blocked
     # flow routes through here, and a blocked operator asking "should we start
@@ -5276,8 +5297,9 @@ async def generate_fix(
             return cand
 
         text_out, _ = await verify_answer(
-            text_out, sources=sources, corpus=user, need=need,
+            text_out, sources=sources, corpus=_provenance, need=need,
             node_key=node_key, label="assist_fix", regenerate=_regen_grounded,
+            trusted=_trusted, flagged=_flagged,  # §17.1028
         )
     # §17.897 — every command the operator is handed must be copy-pasteable,
     # whichever path produced it. The fenced-block mandate is a prompt rule and
