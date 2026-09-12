@@ -530,6 +530,12 @@ async def lifespan(app: FastAPI):
         logger.info('event="startup_cleanup_skipped" CLEANUP_ON_STARTUP=%s', _cleanup_startup)
 
     _cleanup_task = start_cleanup_task()
+    # §17.1036 — resume approval chains stranded in `planning` (no plan, no
+    # live chain): a short loop, so a closed tab costs minutes, not a cancel.
+    _advance_resume_task = None
+    if settings.advance_chain_enabled:
+        from app.modules.advance_chain import start_advance_resume_task
+        _advance_resume_task = start_advance_resume_task()
     # Start APScheduler (rehydrates scheduled_jobs from DB; X.26 also
     # registers the threshold-eval + calibration-watchdog interval jobs).
     try:
@@ -597,6 +603,12 @@ async def lifespan(app: FastAPI):
         await shutdown_all()
     except Exception as exc:
         logger.warning('event="run_broker_shutdown_failed" error=%s', exc)
+    if _advance_resume_task is not None:  # §17.1036
+        _advance_resume_task.cancel()
+        try:
+            await _advance_resume_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
     _cleanup_task.cancel()
     try:
         await _cleanup_task

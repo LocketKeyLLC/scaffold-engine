@@ -301,6 +301,51 @@ def finalize_query(need: Need, generated: Optional[str] = None,
 _DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 
 
+# §17.1036 — how authoritative a source is for a PRODUCT question. The
+# research extractor already scores well-known hosts; on top of that, a URL
+# whose host or path is documentation-shaped (docs., wiki., help., support.,
+# /docs/, /documentation/, /manual/, /wiki/, /admin-guide/) counts as
+# documentation. Language-level shapes, no product names.
+_DOC_HOST_RE = re.compile(r"^(?:docs?|wiki|help|support|manual|kb)\.", re.IGNORECASE)
+_DOC_PATH_RE = re.compile(r"/(?:docs?|documentation|manual|wiki|guide|admin-guide|reference)(?:/|$)",
+                          re.IGNORECASE)
+_DOC_AUTHORITY = 0.85
+
+
+def source_authority(url: str) -> float:
+    if not url:
+        return 0.0
+    try:
+        from app.modules.research_extractors import _score_source
+        base = float(_score_source(url))
+    except Exception:  # noqa: BLE001
+        base = 0.5
+    m = re.match(r"https?://([^/?#]+)([^?#]*)", url.lower())
+    if m and (_DOC_HOST_RE.match(m.group(1)) or _DOC_PATH_RE.search(m.group(2) or "")):
+        base = max(base, _DOC_AUTHORITY)
+    return base
+
+
+def max_source_authority(sources: list) -> float:
+    best = 0.0
+    for s in sources or []:
+        if isinstance(s, dict) and s.get("kind") in ("web", "searxng") and s.get("url"):
+            best = max(best, source_authority(s["url"]))
+    return best
+
+
+# The shapes of an interface instruction: language-level words about screens
+# and controls, not any product's names.
+_INTERFACE_RE = re.compile(
+    r"\b(?:click|tap|tab|menu|button|checkbox|dialog|toggle|dropdown|sidebar|"
+    r"screen|panel|wizard|setting|settings|option|options|field|enable|disable)\b",
+    re.IGNORECASE)
+
+
+def interface_specifics_present(answer: str) -> bool:
+    return len(_INTERFACE_RE.findall(answer or "")) >= 3
+
+
 def source_date_key(source: dict) -> int:
     """``YYYYMMDD`` as an int for sorting; 0 when the source carries no date."""
     m = _DATE_RE.search(str(source.get("date") or ""))
@@ -355,7 +400,11 @@ def rank_evidence(sources: list[dict], need: Optional[Need] = None,
         kept.append(dict(s, relevance=round(rel, 2)))
         if url:
             seen_urls.add(url)
-    kept.sort(key=lambda s: (-round(s["relevance"], 1), -source_date_key(s)))
+    # §17.1036 — at equal relevance, official documentation outranks a forum
+    # thread, and only then does recency decide.
+    for s in kept:
+        s["authority"] = round(source_authority(s.get("url") or ""), 2) if s.get("url") else 0.0
+    kept.sort(key=lambda s: (-round(s["relevance"], 1), -s["authority"], -source_date_key(s)))
     if dropped:
         logger.info("assist_evidence_dropped_offtopic node_key=%s dropped=%d kept=%d",
                     node_key, dropped, len(kept))
@@ -768,9 +817,18 @@ def grounding_notice(unsupported: list[dict], cite: Optional[dict],
 def grounding_footer(unsupported: list[dict], cite: Optional[dict],
                      *, off_question: Optional[str] = None,
                      shape: Optional[list] = None,
-                     plan_only: Optional[list] = None) -> str:
+                     plan_only: Optional[list] = None,
+                     unsourced_interface: bool = False) -> str:
     """What the operator sees when the answer still fails after regeneration."""
     lines = ["\n\n---"]
+    if unsourced_interface:
+        # §17.1036 — F3/F4 in the §17.1035 run: screen labels and setting
+        # levels stated with no documentation retrieved, reading as sourced.
+        lines.append(
+            "ℹ️ **No official documentation was retrieved for this** — the "
+            "screen labels, menu paths and setting levels above come from "
+            "general knowledge, not from a page fetched for this question. "
+            "Verify them against the screen in front of you.")
     if plan_only:
         # §17.1034 — softer than the warning: the value is not from memory, it
         # is from the plan — but nothing the operator has reported confirms it.
@@ -831,7 +889,8 @@ async def verify_answer(
     """
     report: dict = {"checked": False, "unsupported": [], "citation": None,
                     "regenerated": False, "annotated": False, "sourced_now": [],
-                    "off_question": False, "command_shape": [], "plan_only": []}
+                    "off_question": False, "command_shape": [], "plan_only": [],
+                    "unsourced_interface": False}
     if not settings.assist_answer_verification_enabled or not (answer or "").strip():
         return answer, report
     report["checked"] = True
@@ -897,11 +956,20 @@ async def verify_answer(
                                          flagged=flagged, sourced=sourced, owned=owned_hosts)
     _uns_vals = {u["value"].lower() for u in unsupported}
     plan_only = [u for u in _unconfirmed if u["value"].lower() not in _uns_vals]
-    if _fails(unsupported, cite, off, shape) or plan_only:
+    # §17.1036 — interface specifics with no documentation behind them.
+    unsourced_iface = bool(
+        need is not None and need.kind == "question"
+        and interface_specifics_present(answer)
+        and max_source_authority(sources) < _DOC_AUTHORITY)
+    if unsourced_iface:
+        logger.info("assist_answer_unsourced_interface node_key=%s label=%s max_authority=%.2f",
+                    node_key, label, max_source_authority(sources))
+    if _fails(unsupported, cite, off, shape) or plan_only or unsourced_iface:
         answer = answer.rstrip() + grounding_footer(
             unsupported, cite, off_question=_q if off else None, shape=shape,
-            plan_only=plan_only)
+            plan_only=plan_only, unsourced_interface=unsourced_iface)
         report["annotated"] = bool(_fails(unsupported, cite, off, shape))
+    report["unsourced_interface"] = unsourced_iface
     report["off_question"] = off
     report["command_shape"] = shape
     report["plan_only"] = plan_only

@@ -66,6 +66,7 @@ from app.modules.profiles import (  # §17.809 — per-job --quick
 from app.modules.prompt_optimizer import optimize_prompt
 from app.schemas import (
     AdvanceInput,
+    ApproveInput,
     ConfirmInput,
     DagInput,
     ExecRetryInput,
@@ -476,6 +477,54 @@ async def advance_job_endpoint(
         _stream(), media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/jobs/{job_id}/approve", tags=["Workflow"])
+async def approve_job_endpoint(
+    job_id: str,
+    body: ApproveInput,
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1036 — approve the gate and let the SERVER run the chain, detached.
+
+    The SPA used to run `await /ideate/confirm` then `await /dag` from the
+    browser; closing the tab between the two stranded the job in `planning`
+    with no plan and nothing to restart it. This starts research → plan →
+    (assist | execute) as a background task that survives the client, records
+    its phase in `jobs.metadata.advance_chain`, and is idempotent: a live chain
+    is reported, a phase whose outcome exists is skipped. Poll
+    GET /jobs/{id}/approve (or /jobs/{id}) for progress.
+    """
+    try:
+        UUID(job_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+    async with async_session() as _s:
+        await assert_visible(_s, principal, job_id, detail=f"job not found: {job_id}")
+    overrides = await resolve_job_overrides(job_id, body.model_overrides)
+    await _require_valid_models(overrides)
+    from app.modules.advance_chain import start_advance_chain
+    return await start_advance_chain(
+        job_id, feedback=(body.feedback or "").strip() or None,
+        model_overrides=overrides, assist=body.assist, execute=body.execute,
+        push_to_github=body.push_to_github, source="api",
+    )
+
+
+@router.get("/jobs/{job_id}/approve", tags=["Workflow"])
+async def approve_job_state_endpoint(
+    job_id: str,
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1036 — the detached approval chain's state for a job."""
+    try:
+        UUID(job_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+    async with async_session() as _s:
+        await assert_visible(_s, principal, job_id, detail=f"job not found: {job_id}")
+    from app.modules.advance_chain import chain_state
+    return await chain_state(job_id)
 
 
 @router.get("/exec/status/{job_id}")

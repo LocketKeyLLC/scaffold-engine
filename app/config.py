@@ -1207,6 +1207,13 @@ class Settings(BaseSettings):
     assist_answer_min_citation_score: float = Field(default=0.6, ge=0.0, le=1.0)
     # §17.1030 — cap on the session ledger of source-confirmed values.
     assist_sourced_values_max: int = Field(default=200, ge=1, le=2000)
+    # §17.1036 — the server-owned approval chain. A job that is `planning`
+    # with no plan, no live chain and a marker older than `after_minutes` is
+    # resumed by the loop every `interval_seconds` — before the reaper's
+    # planning_stale_minutes cancel can reach it.
+    advance_chain_enabled: bool = True
+    advance_resume_after_minutes: int = Field(default=3, ge=1, le=120)
+    advance_resume_interval_seconds: int = Field(default=60, ge=10, le=3600)
     # §17.687 — recent-conversation recall. The §17.650 digest recovers only
     # COMMITTED node output; notes recover only what the OPERATOR captured. So a
     # program the engine SUGGESTED a turn ago (a decision node's "## My

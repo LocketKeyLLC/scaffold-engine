@@ -621,6 +621,22 @@ async def research_one(
         question, node_key=node_key, domain=domain, deep=True,
         kb_query_extra=context_hint, web_query=web_q,
     )
+    # §17.1036 — a QUESTION about a program deserves its documentation, not
+    # only whatever forum thread ranked first. When no fetched page is
+    # documentation-shaped, run one more web query aimed at documentation and
+    # merge; ranking then puts the authoritative page first.
+    try:
+        from app.modules.assist_evidence import max_source_authority, _DOC_AUTHORITY
+        if (need.kind == "question" and settings.assist_research_fetch_top_n > 0
+                and max_source_authority(sources) < _DOC_AUTHORITY):
+            _doc_q = _cap_query((web_q or question) + " official documentation")
+            _doc_sources = await _deep_web_sources(_doc_q, top_n=2)
+            if _doc_sources:
+                logger.info("assist_research_docs_query node_key=%s q=%r pages=%d",
+                            node_key, _doc_q[:120], len(_doc_sources))
+                sources.extend(_doc_sources)
+    except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
+        logger.warning("assist_research_docs_query_failed: %s", exc)
     sources = rank_evidence(sources, need, node_key=node_key)  # §17.1027
     answer: Optional[str] = None
     grounding: Optional[dict] = None  # §17.1030 — the verifier's report, for the caller's ledger

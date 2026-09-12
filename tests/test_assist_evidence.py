@@ -569,6 +569,50 @@ async def test_plan_only_never_regenerates_and_unsupported_still_wins(no_judge, 
     assert [u["value"] for u in rep2["unsupported"]] == ["10.9.9.9"] and rep2["plan_only"] == []
 
 
+# ── §17.1036: documentation outranks forums; interface labels need a source ──
+
+def test_documentation_shaped_urls_carry_authority():
+    assert ev.source_authority("https://pve.example.com/wiki/Firewall") >= ev._DOC_AUTHORITY
+    assert ev.source_authority("https://docs.example.com/x") >= ev._DOC_AUTHORITY
+    assert ev.source_authority("https://example.com/admin-guide/net") >= ev._DOC_AUTHORITY
+    assert ev.source_authority("https://forum.example.com/thread/1") < ev._DOC_AUTHORITY
+    assert ev.source_authority("https://reddit.com/r/x/y") < ev._DOC_AUTHORITY
+    assert ev.source_authority("") == 0.0
+
+
+def test_rank_prefers_documentation_at_equal_relevance_then_recency():
+    need = Need(kind="question", subject="firewall levels", query="firewall levels enable",
+                goal_terms=["firewall", "levels"])
+    forum = _src("firewall levels thread on the forum", url="https://forum.example.com/t/9", date="2025-09-01")
+    docs = _src("firewall levels in the admin guide", url="https://pve.example.com/wiki/Firewall", date="2022-01-01")
+    out = rank_evidence([forum, docs], need)
+    assert out[0]["url"].endswith("/wiki/Firewall") and out[0]["authority"] >= ev._DOC_AUTHORITY
+
+
+@pytest.mark.asyncio
+async def test_interface_specifics_with_no_documentation_get_the_honesty_note(no_judge, valves):
+    need = derive_need("where is the firewall option in the admin panel and which tab?", assume_question=True)
+    ans = ("Open the Firewall tab, click the Options button, tick the Enable checkbox, then in the "
+           "Rules panel click Add and pick the direction from the dropdown menu.")
+    out, rep = await verify_answer(ans, sources=[{"kind": "web", "url": "https://forum.example.com/t/1",
+                                                  "text": "forum chatter"}], corpus="", need=need)
+    assert rep["unsourced_interface"] and "No official documentation was retrieved" in out
+    out2, rep2 = await verify_answer(ans, sources=[{"kind": "web", "url": "https://docs.example.com/firewall",
+                                                    "text": "the firewall tab and options"}], corpus="", need=need)
+    assert not rep2["unsourced_interface"] and "No official documentation" not in out2
+    # a non-interface answer, or a non-question need, never gets the note
+    out3, rep3 = await verify_answer("Run the command and paste what it prints.", sources=[], corpus="", need=need)
+    assert not rep3["unsourced_interface"]
+
+
+def test_the_ask_path_runs_a_documentation_query_when_none_was_fetched():
+    import inspect
+    from app.modules import assist_research_lib as lib
+    src = inspect.getsource(lib.research_one)
+    assert "official documentation" in src and "max_source_authority(sources) < _DOC_AUTHORITY" in src
+    assert src.index("official documentation") < src.index("sources = rank_evidence(")
+
+
 # ── verify_answer: regenerate once, then annotate ─────────────────────────
 
 @pytest.fixture

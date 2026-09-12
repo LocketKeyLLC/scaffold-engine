@@ -552,6 +552,28 @@ export function renderApprovalDetail(container, jobId) {
     }
   }
 
+  // §17.1036 — poll the server-owned chain until it is done (or errors).
+  // Reloading this page mid-chain is fine: the chain keeps running and the
+  // job page's own flow guide picks it up from status.
+  async function waitForChain() {
+    const t0 = Date.now();
+    while (!disposed && Date.now() - t0 < 60 * 60 * 1000) {
+      try {
+        const st = await api.get(`/jobs/${jobId}/approve`);
+        const phaseText = { research: "Researching & compiling…", planning: "Generating plan (DAG)…",
+          assist: "Starting the guided walkthrough…", execute: "Starting execution…" }[st.phase];
+        const line = progress.querySelector(".progress-msg");
+        if (line && phaseText) line.textContent = phaseText;
+        if (st.chain === "done" || st.chain === "error") return st;
+        if (st.chain === "idle" && st.node_count > 0) return { chain: "done" };
+      } catch {
+        /* transient */
+      }
+      await new Promise((r) => setTimeout(r, 2500));
+    }
+    return null;
+  }
+
   async function approve() {
     if (busy) return;
     setBusy(true);
@@ -565,33 +587,28 @@ export function renderApprovalDetail(container, jobId) {
     );
     pollTimer = setInterval(pollStatus, 2500);
     try {
-      // Phase 2: research → ingest → compile → planning. Synchronous, minutes.
+      // §17.1036 — the chain is the SERVER's: research → plan → (assist |
+      // execute) runs detached and survives this page closing. Before this,
+      // `await /ideate/confirm` then `await /dag` ran HERE, and a tab closed
+      // between the two left the job stranded in `planning` with no plan.
       // Q/A pairs + free-form note from the questions card travel as feedback
       // and are folded into the brief before research.
-      await api.post("/ideate/confirm", { job_id: jobId, feedback: fb });
+      await api.post(`/jobs/${jobId}/approve`, {
+        feedback: fb, assist, execute: !assist && autoRun.checked,
+      });
       if (disposed) return;
-      const line = progress.querySelector(".progress-msg");
-      if (line) line.textContent = "Generating plan (DAG)…";
-      // Generate the DAG but DO NOT execute — the operator edits it next.
-      await api.post("/dag", { job_id: jobId });
+      const state = await waitForChain();
       if (disposed) return;
+      if (state && state.chain === "error") {
+        toast(`The engine could not finish approving: ${state.error || "unknown error"}`, "err");
+        router.navigate(`/job/${jobId}`);
+        return;
+      }
       if (assist) {
-        // §17.895 — Assist mode carries STRAIGHT THROUGH into the walkthrough:
-        // confirm → DAG → assist/start → Run tab, with step 1's guidance
-        // already generating. This is the "idea → approve → assist"
-        // progression; without it the job stayed at `executing` (never
-        // `assisted_*`), so the Run tab rendered the autonomous theater and
-        // the operator had to know to press "✦ Start assist" themselves.
-        const line = progress.querySelector(".progress-msg");
-        if (line) line.textContent = "Starting the guided walkthrough…";
-        const ok = await startAssistFor(api, jobId, toast, {
-          navigate: (hash) => router.navigate(hash.replace(/^#/, "")),
-        });
-        if (disposed) return;
-        // assist_unavailable (umbrella / 0-node) or a failed start must not
-        // strand the operator on a spinner — the plan editor is the honest
-        // fallback, and startAssistFor has already explained why.
-        if (!ok) router.navigate(`/job/${jobId}/plan`);
+        // §17.895 — Assist mode carries STRAIGHT THROUGH into the walkthrough;
+        // the server started the session as the chain's last phase.
+        toast("Assist mode — the engine guides, you drive.", "ok");
+        router.navigate(`/job/${jobId}/run`);
       } else if (autoRun.checked) {
         // §17.818 — hand off to the hub's Run tab (same /execute/all SSE
         // the manual Run uses; sessionStorage carries the one-shot intent).

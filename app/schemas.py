@@ -622,6 +622,20 @@ class AdvanceInput(BaseModel):
     model_overrides: dict | None = None
 
 
+class ApproveInput(BaseModel):
+    """§17.1036 — body for POST /jobs/{id}/approve (job_id is the path param).
+    The operator's approval at the gate, owned by the SERVER as a detached,
+    idempotent chain: research → plan → (assist session | execute). A client
+    that disconnects mid-way changes nothing; the chain finishes and the
+    client polls GET /jobs/{id}/approve."""
+    model_config = ConfigDict(protected_namespaces=())
+    feedback: str | None = Field(default=None, max_length=MAX_LLM_TEXT_LEN)
+    assist: bool = False
+    execute: bool = False
+    push_to_github: bool = False
+    model_overrides: dict | None = None
+
+
 class DagInput(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     job_id: str

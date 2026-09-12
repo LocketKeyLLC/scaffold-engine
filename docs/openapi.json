@@ -59,6 +59,52 @@
         "title": "AdvanceInput",
         "type": "object"
       },
+      "ApproveInput": {
+        "description": "§17.1036 — body for POST /jobs/{id}/approve (job_id is the path param).\nThe operator's approval at the gate, owned by the SERVER as a detached,\nidempotent chain: research → plan → (assist session | execute). A client\nthat disconnects mid-way changes nothing; the chain finishes and the\nclient polls GET /jobs/{id}/approve.",
+        "properties": {
+          "assist": {
+            "default": false,
+            "title": "Assist",
+            "type": "boolean"
+          },
+          "execute": {
+            "default": false,
+            "title": "Execute",
+            "type": "boolean"
+          },
+          "feedback": {
+            "anyOf": [
+              {
+                "maxLength": 50000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback"
+          },
+          "model_overrides": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Overrides"
+          },
+          "push_to_github": {
+            "default": false,
+            "title": "Push To Github",
+            "type": "boolean"
+          }
+        },
+        "title": "ApproveInput",
+        "type": "object"
+      },
       "ArtifactListResponse": {
         "properties": {
           "artifacts": {
@@ -8618,6 +8664,106 @@
           }
         ],
         "summary": "Advance Job Endpoint",
+        "tags": [
+          "Workflow"
+        ]
+      }
+    },
+    "/jobs/{job_id}/approve": {
+      "get": {
+        "description": "§17.1036 — the detached approval chain's state for a job.",
+        "operationId": "approve_job_state_endpoint_jobs__job_id__approve_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Approve Job State Endpoint",
+        "tags": [
+          "Workflow"
+        ]
+      },
+      "post": {
+        "description": "§17.1036 — approve the gate and let the SERVER run the chain, detached.\n\nThe SPA used to run `await /ideate/confirm` then `await /dag` from the\nbrowser; closing the tab between the two stranded the job in `planning`\nwith no plan and nothing to restart it. This starts research → plan →\n(assist | execute) as a background task that survives the client, records\nits phase in `jobs.metadata.advance_chain`, and is idempotent: a live chain\nis reported, a phase whose outcome exists is skipped. Poll\nGET /jobs/{id}/approve (or /jobs/{id}) for progress.",
+        "operationId": "approve_job_endpoint_jobs__job_id__approve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Approve Job Endpoint",
         "tags": [
           "Workflow"
         ]
