@@ -325,23 +325,77 @@ def _format_grounding_banner(verdict: dict, *, corrected: bool = False) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-async def _record_grounding_metadata(job_id: str, record: dict) -> None:
-    """Best-effort write of jobs.metadata.grounding (own session — never
-    touches the caller's transaction; never breaks compile)."""
+async def _record_job_metadata(job_id: str, key: str, record: dict) -> None:
+    """Best-effort write of jobs.metadata[key] (own session — never touches
+    the caller's transaction; never breaks compile)."""
     try:
         from app.database import async_session
         async with async_session() as mdb:
             await mdb.execute(
                 text(
                     "UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) "
-                    "|| jsonb_build_object('grounding', CAST(:v AS jsonb)) "
+                    "|| jsonb_build_object(CAST(:k AS text), CAST(:v AS jsonb)) "
                     "WHERE id = :jid"
                 ),
-                {"v": json.dumps(record), "jid": job_id},
+                {"k": key, "v": json.dumps(record), "jid": job_id},
             )
             await mdb.commit()
     except Exception as exc:  # best-effort metric — never break compile
-        logger.warning("grounding_metadata_write_failed: job=%s err=%s", job_id, exc)
+        logger.warning("%s_metadata_write_failed: job=%s err=%s", key, job_id, exc)
+
+
+async def _record_grounding_metadata(job_id: str, record: dict) -> None:
+    await _record_job_metadata(job_id, "grounding", record)
+
+
+async def _job_given(job_id: str) -> tuple[dict, str]:
+    """§17.1041 — what the operator gave: the refined brief and the request.
+    Own session, fail-soft to empty."""
+    try:
+        from app.database import async_session
+        async with async_session() as mdb:
+            row = (await mdb.execute(
+                text("SELECT refined_brief, input_text FROM jobs WHERE id = :jid"),
+                {"jid": job_id})).mappings().first()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("compile_value_check_job_read_failed: job=%s err=%s", job_id, exc)
+        return {}, ""
+    brief = (row or {}).get("refined_brief") if row else None
+    if isinstance(brief, str):
+        try:
+            brief = json.loads(brief)
+        except (ValueError, TypeError):
+            brief = {}
+    inp = (row or {}).get("input_text") if row else None
+    return (brief if isinstance(brief, dict) else {}), (inp if isinstance(inp, str) else "")
+
+
+async def _maybe_compile_value_check(job_id: str, text_value: str | None, nodes: list) -> str | None:
+    """§17.1041 — name the deliverable's values that no step output or
+    operator text supports (introduced by synthesis) and those carried from
+    steps whose own check (§17.1039) left them unverified. Banner at the top
+    (operational metadata, applied after synthesis), record on the job.
+    Fail-soft, never blocks, no rewrite."""
+    if not text_value or not settings.compile_value_check_enabled:
+        return text_value
+    try:
+        from app.modules.execution_evidence import compile_value_banner, compile_value_check
+        brief, input_text = await _job_given(job_id)
+        introduced, carried = compile_value_check(
+            text_value, nodes=list(nodes or []), brief=brief, input_text=input_text)
+        record = {
+            "checked": True,
+            "introduced": [u["value"] for u in introduced],
+            "carried": [u["value"] for u in carried],
+        }
+        await _record_job_metadata(job_id, "compile_evidence", record)
+        logger.info("compile_value_check: job=%s introduced=%r carried=%r",
+                    job_id, record["introduced"][:6], record["carried"][:6])
+        if introduced or carried:
+            return compile_value_banner(introduced, carried) + text_value
+    except Exception as exc:  # noqa: BLE001 — never break compile
+        logger.warning("compile_value_check_failed: job=%s err=%s", job_id, exc)
+    return text_value
 
 
 async def _maybe_grounding_gate(
@@ -722,7 +776,7 @@ async def _compile_output(
     """
     rows = await db.execute(
         text(
-            "SELECT node_key, title, tool, status, output_text, depends_on, "
+            "SELECT node_key, title, tool, status, output_text, depends_on, evidence, "
             "       COALESCE(is_output_node, FALSE) AS is_output_node, "
             "       COALESCE(is_deliverable, FALSE) AS is_deliverable "
             "FROM dag_nodes WHERE job_id = :jid ORDER BY execution_order"
@@ -757,6 +811,9 @@ async def _compile_output(
         banner + return. The top banner is applied last so it lands first —
         either the plan-only warning (autonomous, unexecuted) or the positive
         assist-completed header (operator executed it), never both."""
+        # §17.1041 — value check on the deliverable itself, before the
+        # operational banners so they land above it.
+        text_value = await _maybe_compile_value_check(job_id, text_value, nodes)
         banner_text = _prepend_skipped_banner(text_value, skipped_count, total_count)
         if assist_completed:
             banner_text = _prepend_assist_completed_banner(banner_text, done_count)
