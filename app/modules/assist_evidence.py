@@ -307,8 +307,12 @@ _DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 # /docs/, /documentation/, /manual/, /wiki/, /admin-guide/) counts as
 # documentation. Language-level shapes, no product names.
 _DOC_HOST_RE = re.compile(r"^(?:docs?|wiki|help|support|manual|kb)\.", re.IGNORECASE)
-_DOC_PATH_RE = re.compile(r"/(?:docs?|documentation|manual|wiki|guide|admin-guide|reference)(?:/|$)",
-                          re.IGNORECASE)
+# §17.1037f — vendor SUPPORT articles are documentation too: live, the ISP's
+# own `/support/internet/advanced-wifi-advanced-settings` page was fetched and
+# the "no documentation retrieved" note still fired.
+_DOC_PATH_RE = re.compile(
+    r"/(?:docs?|documentation|manual|manuals|wiki|guide|admin-guide|reference|support|help|faq|kb|"
+    r"knowledge-?base|user-guide)(?:/|$)", re.IGNORECASE)
 _DOC_AUTHORITY = 0.85
 
 

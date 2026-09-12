@@ -660,6 +660,15 @@ async def test_the_docs_fetch_never_spends_a_fetch_on_an_encyclopedia_page(monke
     assert [o["url"] for o in out] == ["https://docs.example.com/x"]
 
 
+def test_vendor_support_paths_are_documentation():
+    """§17.1037f — live: the ISP's own support article was fetched and the note
+    still said no documentation was retrieved."""
+    assert ev.source_authority("https://www.spectrum.net/support/internet/advanced-wifi-advanced-settings") >= ev._DOC_AUTHORITY
+    assert ev.source_authority("https://vendor.example/help/articles/1") >= ev._DOC_AUTHORITY
+    assert ev.source_authority("https://vendor.example/faq/ports") >= ev._DOC_AUTHORITY
+    assert ev.source_authority("https://vendor.example/page/spectrum-equipment-manuals") < ev._DOC_AUTHORITY
+
+
 def test_documentation_shaped_urls_carry_authority():
     assert ev.source_authority("https://pve.example.com/wiki/Firewall") >= ev._DOC_AUTHORITY
     assert ev.source_authority("https://docs.example.com/x") >= ev._DOC_AUTHORITY
