@@ -779,6 +779,23 @@ class GenerationMemory:
     project_recap: str  # §17.753 — the cross-step "living project recap" (raw)
 
 
+def _brief_text(brief: dict | None) -> str:
+    """§17.1037 — the operator-facing text of a refined brief, flattened."""
+    if not isinstance(brief, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("title", "description", "goals", "constraints", "expected_outputs",
+                "inputs", "available_hardware"):
+        v = brief.get(key)
+        if isinstance(v, str):
+            parts.append(v)
+        elif isinstance(v, (list, tuple)):
+            parts.extend(str(x) for x in v)
+        elif isinstance(v, dict):
+            parts.extend(f"{k}: {x}" for k, x in v.items())
+    return "\n".join(p for p in parts if p)
+
+
 async def assemble_generation_memory(
     *, session_id: str, nk: str, sess: dict, db,
     ctx: "StepContext | None" = None,
@@ -837,9 +854,16 @@ async def assemble_generation_memory(
     brief_block = ""
     if getattr(_settings, "assist_job_context_enabled", True):
         try:
-            brief_block = _brief_essentials_block(
-                await _post_confirm_brief(db=db, job_id=str(sess["job_id"]))
-            )
+            _brief = await _post_confirm_brief(db=db, job_id=str(sess["job_id"]))
+            brief_block = _brief_essentials_block(_brief)
+            # §17.1037 — the brief is the operator's own statement of the
+            # project (their domain, their hosts). Hostnames in it are theirs,
+            # so a URL on one is not a product claim from memory. Carried on
+            # the environment under a leading-underscore key: read by
+            # `owned_hosts`, never written back (the reader drops it).
+            _bt = _brief_text(_brief)
+            if _bt:
+                environment = {**environment, "_brief_text": _bt}
         except Exception:  # noqa: BLE001 — funnel sources are fail-soft (§17.751)
             logger.warning("assist_brief_block_failed job_id=%s", sess.get("job_id"))
             brief_block = ""

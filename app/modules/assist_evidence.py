@@ -563,6 +563,8 @@ def owned_hosts(environment: Optional[dict], operator_notes: Optional[list] = No
         parts.extend(str(v) for v in subs.values())
     for n in (operator_notes or []):
         parts.append(str((n.get("text") if isinstance(n, dict) else n) or ""))
+    # §17.1037 — the brief is the operator's own statement of the project.
+    parts.append(str(env.get("_brief_text") or ""))
     text = "\n".join(parts).lower()
     return {h for h in _HOST_RE.findall(text) if not re.fullmatch(r"[\d.]+", h)}
 

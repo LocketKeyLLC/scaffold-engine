@@ -629,11 +629,32 @@ async def research_one(
         from app.modules.assist_evidence import max_source_authority, _DOC_AUTHORITY
         if (need.kind == "question" and settings.assist_research_fetch_top_n > 0
                 and max_source_authority(sources) < _DOC_AUTHORITY):
-            _doc_q = _cap_query((web_q or question) + " official documentation")
+            # §17.1037 — the documentation words go FIRST. Appended after the
+            # 12-word cap they were the words the cap removed, so on any long
+            # question the "documentation" query was the original query again
+            # (live: 'docker compose restart unless-stopped host reboot stop
+            # exit code 1 deployment approach' — twelve words, no
+            # "documentation" in it). The base is held to nine words.
+            _doc_q = _cap_query("official documentation "
+                                + " ".join((web_q or question).split()[:9]))
             _doc_sources = await _deep_web_sources(_doc_q, top_n=2)
+            if not _doc_sources:
+                # §17.1037 — vendor help centres are often script-rendered and
+                # extract to nothing; the search SNIPPET still names the page.
+                # Keep documentation-grade snippets only.
+                from app.modules.assist_evidence import source_authority
+                for r in await _searxng_structured(_doc_q, max_results=5):
+                    if r.get("url") and source_authority(r["url"]) >= _DOC_AUTHORITY:
+                        _doc_sources.append({
+                            "query": _doc_q, "kind": "searxng", "url": r["url"],
+                            "title": r.get("title", ""), "date": (r.get("date") or "")[:10],
+                            "text": f"{r.get('title', '')}\n{r.get('content', '')}".strip(),
+                        })
+                        if len(_doc_sources) >= 2:
+                            break
+            logger.info("assist_research_docs_query node_key=%s q=%r pages=%d",
+                        node_key, _doc_q[:120], len(_doc_sources))
             if _doc_sources:
-                logger.info("assist_research_docs_query node_key=%s q=%r pages=%d",
-                            node_key, _doc_q[:120], len(_doc_sources))
                 sources.extend(_doc_sources)
     except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
         logger.warning("assist_research_docs_query_failed: %s", exc)
