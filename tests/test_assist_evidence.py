@@ -608,6 +608,29 @@ async def test_documentation_sources_fall_back_to_snippets_when_the_fetched_doc_
     assert extra[0]["kind"] == "searxng" and ev.max_source_authority(extra) >= ev._DOC_AUTHORITY
 
 
+def test_the_verifier_owns_the_footer_namespace():
+    """Live: a fresh answer echoed an earlier reply's "No official documentation"
+    footer while its own retrieval HAD documentation; the verifier had not
+    flagged it. Footer-shaped lines in a draft are stripped before checking."""
+    draft = ("Open Settings → Firewall.\n\n---\nℹ️ **No official documentation was retrieved for this** — "
+             "verify on screen.\n\n---\n⚠️ **Unverified specifics** — `9.9.9` (version)")
+    out = ev.strip_verifier_footers(draft)
+    assert out == "Open Settings → Firewall."
+    assert ev.strip_verifier_footers("plain answer") == "plain answer"
+
+
+@pytest.mark.asyncio
+async def test_an_echoed_footer_is_removed_and_only_the_true_one_reappears(no_judge, valves):
+    need = derive_need("where is the firewall setting and which tab?", assume_question=True)
+    draft = ("Open the Firewall tab, click the Options button, tick the Enable checkbox, set the "
+             "dropdown to In, then click Add in the Rules panel and pick a menu entry.\n\n---\n"
+             "ℹ️ **No official documentation was retrieved for this** — the labels above come from general knowledge.")
+    docs = [{"kind": "searxng", "url": "https://docs.example.com/firewall", "text": "firewall tab options rules"}]
+    out, rep = await verify_answer(draft, sources=docs, corpus="", need=need)
+    assert not rep["unsourced_interface"]
+    assert "No official documentation" not in out and out.count("---") == 0
+
+
 def test_documentation_shaped_urls_carry_authority():
     assert ev.source_authority("https://pve.example.com/wiki/Firewall") >= ev._DOC_AUTHORITY
     assert ev.source_authority("https://docs.example.com/x") >= ev._DOC_AUTHORITY

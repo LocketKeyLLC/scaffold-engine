@@ -872,6 +872,31 @@ def grounding_footer(unsupported: list[dict], cite: Optional[dict],
     return "\n".join(lines)
 
 
+# §17.1037d — the verifier OWNS the footer namespace. Earlier replies carry
+# these footers; they sit in the conversation block, and live the model copied
+# "ℹ️ No official documentation was retrieved…" into a fresh answer whose
+# retrieval HAD found documentation — the verifier's own log showed no such
+# flag. A footer line in a draft is therefore never the model's to write:
+# strip every footer-shaped line first, re-add only what is true now.
+_FOOTER_LINE_RE = re.compile(
+    r"^\s*(?:ℹ️|⚠️)\s*\*\*(?:No official documentation was retrieved|Unverified specifics|"
+    r"Weak sourcing|From the plan, not yet confirmed|Command mismatch|This may not answer what you asked)\b.*$",
+    re.MULTILINE)
+
+
+def strip_verifier_footers(answer: str) -> str:
+    """Remove footer lines the verifier itself writes (and a separator left
+    dangling right above one), so a draft that echoed an earlier reply's footer
+    is judged on its own content."""
+    if not answer or not _FOOTER_LINE_RE.search(answer):
+        return answer
+    out = _FOOTER_LINE_RE.sub("", answer)
+    # a `---` that now has nothing but whitespace after it, or is duplicated
+    out = re.sub(r"(?:\n\s*---\s*)+(?=\n\s*---\s*$|\s*$)", "", out.rstrip())
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.rstrip()
+
+
 async def verify_answer(
     answer: str,
     *,
@@ -907,6 +932,7 @@ async def verify_answer(
     if not settings.assist_answer_verification_enabled or not (answer or "").strip():
         return answer, report
     report["checked"] = True
+    answer = strip_verifier_footers(answer)  # §17.1037d
     # §17.1030 — the sources this call is handed are trusted text by
     # definition; a caller cannot forget to render them into the corpus.
     trusted = (trusted or "") + "\n" + "\n".join(
@@ -948,6 +974,7 @@ async def verify_answer(
             logger.warning("assist_answer_grounding_regen_failed: %s", exc)
             candidate = ""
         if candidate:
+            candidate = strip_verifier_footers(candidate)  # §17.1037d
             c_uns = unsupported_specifics(candidate, corpus, trusted=trusted, flagged=flagged,
                                           sourced=sourced, owned=owned_hosts)
             c_cite = await citation_report(candidate, sources)
