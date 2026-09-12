@@ -259,6 +259,14 @@ def test_well_known_ports_local_urls_and_placeholders_are_never_flagged():
     assert found == [], found
 
 
+def test_templated_urls_and_example_addresses_are_not_claims():
+    """§17.1029 — measured on stored walkthroughs: a URL with a shell variable
+    is a template, and RFC 5737 / wildcard / loopback addresses are examples."""
+    ans = ("curl -k https://${PVE_HOST}:8006/api2/json and https://{host}/x; "
+           "bind to 0.0.0.0 or 127.0.0.1; the doc example uses 203.0.113.42 and 192.0.2.7")
+    assert unsupported_specifics(ans, "") == []
+
+
 def test_a_value_that_is_a_substring_of_another_is_not_credited():
     # 3001 must not pass because 13001 appears in the corpus
     found = unsupported_specifics("listen on port 3001", "the id is 13001")

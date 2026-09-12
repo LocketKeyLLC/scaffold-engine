@@ -37,19 +37,22 @@ EXEMPT = {
         "writes the project recap board; same internal-ledger status as the "
         "step recap, no external product facts are asserted to the operator."
     ),
-    ("assist_guide.py", "generate_guidance"): (
-        "the cached per-step walkthrough. Deliberately outside §17.1027's first "
-        "cut: a 40-command walkthrough carries many example values, and applying "
-        "the value-level check there without measuring its false-positive rate "
-        "first is the blind change the sprint log warns against. Follow-up."
-    ),
-    ("assist_guide.py", "generate_guidance_stream"): (
-        "the streamed twin of generate_guidance (the SPA path); same deferral, "
-        "same reason, to be lifted together so the two paths cannot diverge."
-    ),
     ("assist_research_lib.py", "_focus_web_query"): (
         "produces a search QUERY, not an answer; it has nothing to verify "
         "against and its output never reaches the operator."
+    ),
+}
+
+
+# §17.1029 — sites that verify but may NOT regenerate (`regenerate=None`),
+# with the reason. A streamed walkthrough has already reached the operator;
+# replacing it after the fact would contradict what they read, so the stream
+# site annotates only. Everything else must offer a regeneration.
+ANNOTATE_ONLY = {
+    ("assist_guide.py", "generate_guidance_stream"): (
+        "the text has already streamed to the operator delta by delta; a "
+        "regenerated replacement would contradict what they have read, so this "
+        "site appends the Unverified-specifics footer and persists the annotated copy."
     ),
 }
 
@@ -127,9 +130,19 @@ def test_the_two_live_paths_are_verified_not_exempt():
 
 def test_every_exemption_names_a_real_site_and_argues_for_itself():
     names = {(f, n) for f, n, _ in _answer_sites()}
-    for key, reason in EXEMPT.items():
+    for key, reason in list(EXEMPT.items()) + list(ANNOTATE_ONLY.items()):
         assert key in names, f"{key} is exempted but no such answer site exists"
         assert len(reason.split()) >= 12, f"{key} is exempted without an argument"
+
+
+def test_the_guide_paths_are_verified_not_exempt():
+    """§17.1029 lifted the walkthrough exemption; it may not quietly return."""
+    for key in (("assist_guide.py", "generate_guidance"),
+                ("assist_guide.py", "generate_guidance_stream")):
+        assert key not in EXEMPT, f"{key} must be verified, not exempt"
+    verified = {(f, n) for f, n, node in _answer_sites() if VERIFIER in _calls(node)}
+    assert ("assist_guide.py", "generate_guidance") in verified
+    assert ("assist_guide.py", "generate_guidance_stream") in verified
 
 
 def test_the_verifier_exists_and_is_wired_to_the_evidence_module():
@@ -139,10 +152,21 @@ def test_the_verifier_exists_and_is_wired_to_the_evidence_module():
     assert {VERIFIER, "derive_need", "rank_evidence", "unsupported_specifics"} <= fns
 
 
+def _enclosing_function(tree: ast.AST, call: ast.Call) -> str:
+    best = ""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.lineno <= call.lineno <= (node.end_lineno or node.lineno):
+                best = node.name if not best else best  # outermost wins
+    return best
+
+
 @pytest.mark.parametrize("rel", ["assist_guide.py", "assist_research_lib.py"])
 def test_the_verified_sites_regenerate_through_the_verifier(rel):
     """A site that calls verify_answer but hands it no `regenerate` callable
-    has silently downgraded to annotate-only. Both live paths must offer one."""
+    has silently downgraded to annotate-only. Every path must offer one,
+    except the registered ANNOTATE_ONLY stream site — and that one must say
+    so with an explicit `regenerate=None`, never by omission."""
     tree = ast.parse((APP_MODULES / rel).read_text(encoding="utf-8"))
     found = False
     for node in ast.walk(tree):
@@ -150,8 +174,16 @@ def test_the_verified_sites_regenerate_through_the_verifier(rel):
             n = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
             if n == VERIFIER:
                 found = True
-                assert any(kw.arg == "regenerate" for kw in node.keywords), \
+                regen = next((kw for kw in node.keywords if kw.arg == "regenerate"), None)
+                assert regen is not None, \
                     f"{rel}:{node.lineno} verify_answer(...) without regenerate="
+                is_none = isinstance(regen.value, ast.Constant) and regen.value.value is None
+                site = (rel, _enclosing_function(tree, node))
+                if site in ANNOTATE_ONLY:
+                    assert is_none, f"{site} is registered annotate-only but passes a regenerator"
+                else:
+                    assert not is_none, \
+                        f"{rel}:{node.lineno} {site[1]}() passes regenerate=None without being registered in ANNOTATE_ONLY"
                 # §17.1028 — and must say what may CREDIT a value (trusted=) and
                 # what earlier replies already flagged (flagged=), or the
                 # engine's own prior guess becomes provenance a turn later.

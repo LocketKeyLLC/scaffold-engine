@@ -924,6 +924,7 @@ async def generate_step_guidance(
         exclude_tail=refine, history=history,
     )
 
+    from app.modules import assist_evidence as _ev  # §17.1029
     res = await assist_guide.ensure_guidance(
         session_id=session_id,
         node_key=nk,
@@ -939,6 +940,9 @@ async def generate_step_guidance(
         operator_notes=mem.operator_notes,
         is_decision=is_decision,
         conversation=mem.conversation,
+        operator_conversation=_ev.operator_text(mem.history),  # §17.1029
+        flagged=_ev.flagged_values([m for m in (mem.history or [])
+                                    if isinstance(m, dict) and m.get("role") == "assistant"]),
         db=db,
     )
     # §17.726/§17.812 — record what the engine told the operator. Cached
@@ -1035,6 +1039,7 @@ async def generate_step_guidance_stream(
 
     # §17.726 — tee the streamed walkthrough so the assembled reply lands in the
     # transcript once the stream completes.
+    from app.modules import assist_evidence as _ev  # §17.1029
     _buf: list[str] = []
     async for ev in assist_guide.generate_guidance_stream(
         session_id=session_id,
@@ -1051,6 +1056,9 @@ async def generate_step_guidance_stream(
         operator_notes=mem.operator_notes,
         is_decision=is_decision,
         conversation=mem.conversation,
+        operator_conversation=_ev.operator_text(mem.history),  # §17.1029
+        flagged=_ev.flagged_values([m for m in (mem.history or [])
+                                    if isinstance(m, dict) and m.get("role") == "assistant"]),
         db=db,
     ):
         if ev.get("type") == "delta":

@@ -2160,6 +2160,8 @@ async def generate_guidance(
     operator_notes: Optional[list[dict]] = None,
     is_decision: bool = False,
     conversation: Optional[str] = None,
+    operator_conversation: Optional[str] = None,  # §17.1029 — operator-authored dialogue only
+    flagged: Optional[set] = None,  # §17.1029 — values earlier replies flagged
 ) -> dict:
     """Generate (do not persist) the human walkthrough for one step.
 
@@ -2328,6 +2330,40 @@ async def generate_guidance(
             text_out = f"{text_out}\n\n{block}"
             suggestion_enforced = True
             logger.info("assist_decision_suggestion_enforced node_key=%s", node_key)
+    # §17.1029 — VERIFY the walkthrough against its grounding. This lifts the
+    # §17.1027 exemption, after measuring: on 43 stored walkthroughs the check
+    # flags LAN addresses absent from the facts, unsourced install URLs and a
+    # stale release number — values an operator should confirm — and its two
+    # false-positive classes (templated URLs, documentation-range addresses)
+    # are now excluded. Provenance is the prompt minus the engine's own
+    # earlier replies, plus the operator's half of the dialogue (§17.1028).
+    if text_out:
+        _conv = (conversation or "").strip()
+        _provenance = "\n\n".join([
+            user.replace(_conv, "") if _conv else user, operator_conversation or ""])
+        _trusted = "\n".join([ctx.base_prompt or "", node_description or "",
+                              _render_research_block(sources)])
+
+        async def _regen_guide(notice: str) -> str:
+            r = await chat_until_nonempty(
+                model_router.chat,
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": user + notice}],
+                {"role": role}, temperature=0.3,
+                max_tokens=settings.assist_guide_max_tokens, draws=2,
+                label="assist_guide_grounding_regen", think_off_rescue=True,
+            )
+            cand = (r.text or "").strip() if (r and r.success) else ""
+            if cand and find_presupposed_completion(cand, ctx.title):
+                return ""  # a candidate that trips the §17.887 gate is not better
+            return cand
+
+        from app.modules.assist_evidence import verify_answer
+        text_out, _ = await verify_answer(
+            text_out, sources=sources, corpus=_provenance, need=None,
+            node_key=node_key, label="assist_guide", regenerate=_regen_guide,
+            trusted=_trusted, flagged=flagged,
+        )
     # §17.897 — every command the operator is handed must be copy-pasteable,
     # whichever path produced it. The fenced-block mandate is a prompt rule and
     # prompt rules get ignored; only a fenced block gets a ⧉ copy button.
@@ -5878,6 +5914,8 @@ async def ensure_guidance(
     operator_notes: Optional[list[dict]] = None,
     is_decision: bool = False,
     conversation: Optional[str] = None,
+    operator_conversation: Optional[str] = None,  # §17.1029
+    flagged: Optional[set] = None,  # §17.1029
     db,
 ) -> dict:
     """Return guidance, generating + persisting only when needed.
@@ -5926,6 +5964,7 @@ async def ensure_guidance(
         operator_notes=operator_notes,
         is_decision=is_decision,
         conversation=conversation,
+        operator_conversation=operator_conversation, flagged=flagged,  # §17.1029
     )
     # §17.851 — code-enforced placeholder resolution (see resolve_placeholders).
     from app.config import settings as _settings
@@ -5980,6 +6019,8 @@ async def generate_guidance_stream(
     operator_notes: Optional[list[dict]] = None,
     is_decision: bool = False,
     conversation: Optional[str] = None,
+    operator_conversation: Optional[str] = None,  # §17.1029
+    flagged: Optional[set] = None,  # §17.1029
     db,
 ):
     """Stream a walkthrough as it generates. Yields event dicts:
@@ -6228,6 +6269,26 @@ async def generate_guidance_stream(
             title=ctx.title or node_key, db=db, banner_position="append",
         )
         meta.update(_guard_meta)
+        if len(text_out) > len(_before):
+            yield {"type": "delta", "text": text_out[len(_before):]}
+
+    # §17.1029 — VERIFY, annotate-only. The draft has already streamed to the
+    # operator, so a regeneration would contradict what they have read; the
+    # footer names what to confirm and the annotated copy is what gets saved.
+    if status != "failed" and text_out:
+        _conv = (conversation or "").strip()
+        _provenance = "\n\n".join([
+            user.replace(_conv, "") if _conv else user, operator_conversation or ""])
+        _trusted = "\n".join([ctx.base_prompt or "", node_description or "",
+                              _render_research_block(sources)])
+        from app.modules.assist_evidence import verify_answer
+        _before = text_out
+        text_out, _ = await verify_answer(
+            text_out, sources=sources, corpus=_provenance, need=None,
+            node_key=node_key, label="assist_guide_stream",
+            regenerate=None,  # annotate-only: the text is already on screen
+            trusted=_trusted, flagged=flagged,
+        )
         if len(text_out) > len(_before):
             yield {"type": "delta", "text": text_out[len(_before):]}
 

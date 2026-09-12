@@ -1364,6 +1364,59 @@ async def test_generate_guidance_stream_streams_then_done_and_persists():
 
 
 @pytest.mark.asyncio
+async def test_generate_guidance_stream_annotates_unverified_values_and_persists_them():
+    """§17.1029 — the stream path verifies annotate-only: the footer arrives as
+    a trailing delta and the persisted copy carries it."""
+    db = AsyncMock()
+    draft = "## Run\n1. Install release 22.04.3 on 192.168.77.5"
+    with patch("app.modules.assist_guide.read_cached_guidance", new=AsyncMock(return_value=None)), \
+         patch.object(assist_guide.model_router, "stream_chat", new=_astream([draft])), \
+         patch.object(assist_guide, "apply_post_generation_guards",
+                      new=AsyncMock(side_effect=lambda t, **k: (t, {}))), \
+         patch.object(assist_guide, "persist_guidance", new=AsyncMock()) as persist:
+        events = [ev async for ev in assist_guide.generate_guidance_stream(
+            session_id="s", node_key="T3", ctx=_ctx("shell"), research=False, force=True, db=db)]
+    deltas = [e["text"] for e in events if e["type"] == "delta"]
+    assert deltas[0] == draft                       # the draft streamed untouched
+    assert "Unverified specifics" in deltas[-1]     # the footer came last
+    assert "`22.04.3`" in deltas[-1] and "`192.168.77.5`" in deltas[-1]
+    saved = persist.await_args.kwargs["guidance"]
+    assert "Unverified specifics" in saved
+
+
+@pytest.mark.asyncio
+async def test_generate_guidance_stream_values_in_the_task_are_not_flagged():
+    db = AsyncMock()
+    import dataclasses
+    ctx = dataclasses.replace(_ctx("shell"),
+                              base_prompt="Install release 22.04.3 on the host at 192.168.77.5")
+    draft = "## Run\n1. Install release 22.04.3 on 192.168.77.5"
+    with patch("app.modules.assist_guide.read_cached_guidance", new=AsyncMock(return_value=None)), \
+         patch.object(assist_guide.model_router, "stream_chat", new=_astream([draft])), \
+         patch.object(assist_guide, "apply_post_generation_guards",
+                      new=AsyncMock(side_effect=lambda t, **k: (t, {}))), \
+         patch.object(assist_guide, "persist_guidance", new=AsyncMock()):
+        events = [ev async for ev in assist_guide.generate_guidance_stream(
+            session_id="s", node_key="T3", ctx=ctx, research=False, force=True, db=db)]
+    assert not any("Unverified specifics" in (e.get("text") or "") for e in events)
+
+
+@pytest.mark.asyncio
+async def test_generate_guidance_regenerates_then_annotates_unverified_values():
+    """§17.1029 — the non-stream path regenerates once with the values named;
+    a candidate still carrying them is annotated."""
+    draws = [_resp("## Run\n1. Install release 22.04.3"), _resp("## Run\n1. Install release 22.04.3 anyway")]
+    with patch.object(assist_guide.model_router, "chat", new=AsyncMock(side_effect=draws)) as chat:
+        res = await assist_guide.generate_guidance(ctx=_ctx("shell"), research=False, node_key="T3")
+    assert chat.await_count == 2
+    _call = chat.await_args_list[1]
+    _msgs = _call.args[0] if _call.args else _call.kwargs["messages"]
+    notice = _msgs[-1]["content"]
+    assert "GROUNDING NOTICE" in notice and "`22.04.3`" in notice
+    assert "Unverified specifics" in res["guidance"] and "`22.04.3`" in res["guidance"]
+
+
+@pytest.mark.asyncio
 async def test_generate_guidance_stream_cache_hit_no_model_call():
     db = AsyncMock()
     with patch("app.modules.assist_guide.read_cached_guidance",
