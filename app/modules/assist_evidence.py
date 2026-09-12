@@ -608,6 +608,69 @@ def addresses_question(answer: str, need: Optional["Need"]) -> bool:
     return any(re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", hay) for t in terms)
 
 
+# §17.1033 — command SHAPE: an interpreter invoked on a file of another
+# language. Live (operator-session replay, fix path): the draft proposed
+# `nohup python3 /opt/control-panel-backend/server.js` — hedged, after a
+# discovery step, but a command that cannot work as written. No value check
+# can see it (no version, address, URL or port), and the shell gates check
+# syntax, not meaning. This is language-level knowledge (which interpreter runs
+# which file kind), not one operator's problem.
+_INTERPRETER_EXTS = {
+    "python": {"py", "pyw"}, "python3": {"py", "pyw"}, "python2": {"py", "pyw"},
+    "pypy": {"py"}, "pypy3": {"py"},
+    "node": {"js", "mjs", "cjs"}, "nodejs": {"js", "mjs", "cjs"},
+    "bash": {"sh", "bash"}, "sh": {"sh"}, "zsh": {"sh", "zsh"}, "dash": {"sh"},
+    "perl": {"pl", "pm"}, "ruby": {"rb"}, "php": {"php"},
+}
+_ALL_SCRIPT_EXTS = frozenset(e for exts in _INTERPRETER_EXTS.values() for e in exts)
+_FENCE_RE = re.compile(r"```[a-zA-Z0-9_-]*\n(.*?)```", re.S)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_INTERP_TOKEN_RE = re.compile(r"^(?:[\w./-]*/)?(python(?:[23](?:\.\d+)?)?|pypy3?|node(?:js)?|bash|sh|zsh|dash|perl|ruby|php)$")
+
+
+def _interp_family(tok: str) -> Optional[str]:
+    m = _INTERP_TOKEN_RE.match(tok)
+    if not m:
+        return None
+    name = m.group(1)
+    if name.startswith("python"):
+        return "python3" if name != "python2" else "python2"
+    return name
+
+
+def command_shape_issues(answer: str) -> list[dict]:
+    """Commands in the answer's code (fenced blocks and inline spans) that
+    invoke an interpreter on a file whose extension belongs to a different
+    interpreter family. ``python3 -m mod``, ``python3 -c '…'`` and files with
+    no known script extension are never flagged."""
+    issues: list[dict] = []
+    snippets = _FENCE_RE.findall(answer or "") + _INLINE_CODE_RE.findall(answer or "")
+    seen: set[str] = set()
+    for snippet in snippets:
+        for line in snippet.splitlines():
+            toks = line.strip().split()
+            for i, tok in enumerate(toks[:-1]):
+                fam = _interp_family(tok)
+                if not fam:
+                    continue
+                nxt = toks[i + 1]
+                if nxt.startswith("-"):
+                    continue  # -m module, -c code, -e expr, flags
+                name = nxt.strip("'\"`;&|()").rsplit("/", 1)[-1]
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                if not ext or ext not in _ALL_SCRIPT_EXTS:
+                    continue
+                if ext in _INTERPRETER_EXTS.get(fam, set()):
+                    continue
+                cmd = " ".join(toks[i:i + 2])
+                if cmd in seen:
+                    continue
+                seen.add(cmd)
+                issues.append({"command": cmd, "interpreter": tok, "file": nxt,
+                               "expects": sorted(_INTERPRETER_EXTS.get(fam, set()))})
+    return issues
+
+
 async def citation_report(answer: str, sources: list) -> Optional[dict]:
     """§17.798's per-citation judge, fail-soft. ``None`` when the answer cites
     nothing (attribution undefined) or the judge could not run."""
@@ -630,9 +693,23 @@ def _citation_weak(cite: Optional[dict]) -> bool:
 
 
 def grounding_notice(unsupported: list[dict], cite: Optional[dict],
-                     *, off_question: Optional[str] = None) -> str:
+                     *, off_question: Optional[str] = None,
+                     shape: Optional[list] = None) -> str:
     """The regeneration directive: the exact values, named."""
     parts = ["\n\n---\nGROUNDING NOTICE:"]
+    if shape:
+        parts.append(
+            "Your previous answer contained command(s) that CANNOT work as "
+            "written — an interpreter run on a file of a different language:\n"
+            + "\n".join(
+                f"- `{s['command']}` — `{s['interpreter']}` runs "
+                + "/".join("." + e for e in s["expects"]) + " files, not `"
+                + s["file"].rsplit("/", 1)[-1] + "`"
+                for s in shape[:5])
+            + "\nEither the interpreter or the file is wrong. If you do not know "
+              "which file is the entry point, give a DISCOVERY command that "
+              "prints it and stop there; never pair an interpreter with a file "
+              "it cannot run.")
     if off_question:
         parts.append(
             "Your previous answer did NOT address the question the operator just "
@@ -664,9 +741,15 @@ def grounding_notice(unsupported: list[dict], cite: Optional[dict],
 
 
 def grounding_footer(unsupported: list[dict], cite: Optional[dict],
-                     *, off_question: Optional[str] = None) -> str:
+                     *, off_question: Optional[str] = None,
+                     shape: Optional[list] = None) -> str:
     """What the operator sees when the answer still fails after regeneration."""
     lines = ["\n\n---"]
+    if shape:
+        lines.append(
+            "⚠️ **Command mismatch** — these pair an interpreter with a file it "
+            "cannot run; fix the interpreter or the filename before running: "
+            + ", ".join(f"`{s['command']}`" for s in shape[:5]))
     if off_question:
         lines.append(
             "⚠️ **This may not answer what you asked** — the reply above does not "
@@ -714,7 +797,7 @@ async def verify_answer(
     """
     report: dict = {"checked": False, "unsupported": [], "citation": None,
                     "regenerated": False, "annotated": False, "sourced_now": [],
-                    "off_question": False}
+                    "off_question": False, "command_shape": []}
     if not settings.assist_answer_verification_enabled or not (answer or "").strip():
         return answer, report
     report["checked"] = True
@@ -730,25 +813,31 @@ async def verify_answer(
     if off:
         logger.warning("assist_answer_offtopic node_key=%s label=%s question_terms=%r",
                        node_key, label, sorted(question_terms(need))[:8])
+    shape = command_shape_issues(answer)  # §17.1033
+    if shape:
+        logger.warning("assist_answer_command_shape node_key=%s label=%s commands=%r",
+                       node_key, label, [s["command"] for s in shape][:4])
     _carried = [u["value"] for u in unsupported if u["value"].lower() in {v.lower() for v in (flagged or ())}]
     if _carried:
         logger.info("assist_answer_grounding_flag_carried node_key=%s label=%s values=%r",
                     node_key, label, _carried[:6])
 
-    def _fails(uns: list, ct: Optional[dict], off_: bool = False) -> bool:
-        return bool(uns) or _citation_weak(ct) or off_
+    def _fails(uns: list, ct: Optional[dict], off_: bool = False,
+               shape_: Optional[list] = None) -> bool:
+        return bool(uns) or _citation_weak(ct) or off_ or bool(shape_)
 
     _q = (need.subject if (need is not None and need.kind == "question") else "") or ""
-    if _fails(unsupported, cite, off) and regenerate is not None \
+    if _fails(unsupported, cite, off, shape) and regenerate is not None \
             and settings.assist_answer_verification_regenerate:
         logger.info(
             "assist_answer_grounding_regen node_key=%s label=%s unsupported=%r "
-            "cite_score=%s off_question=%s", node_key, label,
+            "cite_score=%s off_question=%s command_shape=%d", node_key, label,
             [u["value"] for u in unsupported][:6],
-            (cite or {}).get("score"), off)
+            (cite or {}).get("score"), off, len(shape))
         try:
             candidate = (await regenerate(grounding_notice(
-                unsupported, cite, off_question=_q if off else None)) or "").strip()
+                unsupported, cite, off_question=_q if off else None,
+                shape=shape)) or "").strip()
         except Exception as exc:  # noqa: BLE001 — verification never breaks a turn
             logger.warning("assist_answer_grounding_regen_failed: %s", exc)
             candidate = ""
@@ -757,19 +846,22 @@ async def verify_answer(
                                           sourced=sourced, owned=owned_hosts)
             c_cite = await citation_report(candidate, sources)
             c_off = not addresses_question(candidate, need)
-            better = (not _fails(c_uns, c_cite, c_off)) or (
-                not c_off and off) or (
-                not c_off and len(c_uns) < len(unsupported) and not (
+            c_shape = command_shape_issues(candidate)
+            better = (not _fails(c_uns, c_cite, c_off, c_shape)) or (
+                not c_off and off and not c_shape) or (
+                not c_shape and shape and not c_off) or (
+                not c_off and not c_shape and len(c_uns) < len(unsupported) and not (
                     _citation_weak(c_cite) and not _citation_weak(cite)))
             if better:
-                answer, unsupported, cite, off = candidate, c_uns, c_cite, c_off
+                answer, unsupported, cite, off, shape = candidate, c_uns, c_cite, c_off, c_shape
                 report["regenerated"] = True
 
-    if _fails(unsupported, cite, off):
+    if _fails(unsupported, cite, off, shape):
         answer = answer.rstrip() + grounding_footer(
-            unsupported, cite, off_question=_q if off else None)
+            unsupported, cite, off_question=_q if off else None, shape=shape)
         report["annotated"] = True
     report["off_question"] = off
+    report["command_shape"] = shape
     report["unsupported"] = unsupported
     report["citation"] = cite
     # §17.1030 — what THIS turn's sources confirmed, for the session ledger.
@@ -779,9 +871,11 @@ async def verify_answer(
                              if it["value"].lower() not in _still]
     logger.info(
         "assist_answer_grounding node_key=%s label=%s kind=%s unsupported=%d "
-        "cite_score=%s regenerated=%s annotated=%s values=%r sourced_now=%r off_question=%s",
+        "cite_score=%s regenerated=%s annotated=%s values=%r sourced_now=%r off_question=%s "
+        "command_shape=%r",
         node_key, label, getattr(need, "kind", "?"), len(unsupported),
         (cite or {}).get("score"), report["regenerated"], report["annotated"],
         [u["value"] for u in unsupported][:6],
-        [it["value"] for it in report["sourced_now"]][:6], report["off_question"])
+        [it["value"] for it in report["sourced_now"]][:6], report["off_question"],
+        [s["command"] for s in shape][:4])
     return answer, report
