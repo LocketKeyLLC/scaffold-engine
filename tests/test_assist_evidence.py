@@ -571,6 +571,43 @@ async def test_plan_only_never_regenerates_and_unsupported_still_wins(no_judge, 
 
 # ── §17.1036: documentation outranks forums; interface labels need a source ──
 
+def test_an_encyclopedia_wiki_path_is_not_product_documentation():
+    assert ev.source_authority("https://en.wikipedia.org/wiki/Documentation") < ev._DOC_AUTHORITY
+    assert ev.source_authority("https://help.ui.com/hc/en-us/articles/1-Port-Forwarding") >= ev._DOC_AUTHORITY
+
+
+def test_a_long_questions_own_nouns_are_relevance_terms():
+    q = ("In the UniFi Network application on a Dream Machine Pro (the current interface), give me "
+         "the exact click path and field names to forward TCP 443 from the WAN to 192.168.1.40, and "
+         "tell me whether the rule needs a matching firewall rule created separately.")
+    terms = ev.content_terms(derive_need(q, assume_question=True))
+    assert {"forward", "firewall", "unifi"} <= terms
+
+
+@pytest.mark.asyncio
+async def test_documentation_sources_fall_back_to_snippets_when_the_fetched_doc_page_is_offtopic(monkeypatch):
+    """The live chain: help centre 403s, an off-topic encyclopedia page is
+    fetched, and the on-topic documentation snippet must still be returned."""
+    from app.modules import assist_research_lib as lib
+    need = derive_need("In the UniFi Network application, exact click path to forward TCP 443 "
+                       "and whether a firewall rule is created", assume_question=True)
+
+    async def deep(q, top_n):
+        return [{"query": q, "kind": "web", "url": "https://en.wikipedia.org/wiki/Documentation",
+                 "text": "Documentation is any communicable material used to describe a system", "date": ""}]
+
+    async def structured(q, max_results=5):
+        return [{"title": "UniFi Gateway Port Forwarding", "url": "https://help.ui.com/hc/en-us/articles/1",
+                 "content": "Create a port forwarding rule: Settings, Firewall & Security, Port Forwarding", "date": ""},
+                {"title": "Forum thread", "url": "https://forums.example.net/t/1", "content": "port forward help", "date": ""}]
+    monkeypatch.setattr(lib, "_deep_web_sources", deep)
+    monkeypatch.setattr(lib, "_searxng_structured", structured)
+    monkeypatch.setattr(lib.settings, "assist_research_fetch_top_n", 4)
+    extra = await lib._documentation_sources(need, "unifi port forward tcp 443", [])
+    assert [e["url"] for e in extra] == ["https://help.ui.com/hc/en-us/articles/1"]
+    assert extra[0]["kind"] == "searxng" and ev.max_source_authority(extra) >= ev._DOC_AUTHORITY
+
+
 def test_documentation_shaped_urls_carry_authority():
     assert ev.source_authority("https://pve.example.com/wiki/Firewall") >= ev._DOC_AUTHORITY
     assert ev.source_authority("https://docs.example.com/x") >= ev._DOC_AUTHORITY
@@ -609,16 +646,17 @@ def test_the_ask_path_runs_a_documentation_query_when_none_was_fetched():
     import inspect
     from app.modules import assist_research_lib as lib
     src = inspect.getsource(lib.research_one)
-    assert '"documentation "' in src and "max_source_authority(sources) < _DOC_AUTHORITY" in src
-    assert src.index('"documentation "') < src.index("sources = rank_evidence(")
-    # §17.1037 — the documentation words must survive the 12-word cap: they
-    # lead, and the base is held to nine words.
-    assert '_cap_query("documentation "' in src and ".split()[:10]" in src
-    # the snippet fallback runs whenever no FETCHED documentation page reached
-    # documentation authority — not only when nothing was fetched at all
-    assert "if max_source_authority(_doc_sources) < _DOC_AUTHORITY:" in src
+    assert "_documentation_sources(" in src
+    assert src.index("_documentation_sources(") < src.index("sources = rank_evidence(")
+    hsrc = inspect.getsource(lib._documentation_sources)
+    # §17.1037 — the documentation words must survive the 12-word cap: they lead.
+    assert '_cap_query("documentation "' in hsrc and ".split()[:10]" in hsrc
+    # §17.1037c — authority is judged on the RANKED (on-topic) set, both sides
+    assert "max_source_authority(rank_evidence(list(sources), need))" in hsrc
+    assert "fetched = rank_evidence(await _deep_web_sources(doc_q, top_n=2), need)" in hsrc
+    assert "max_source_authority(fetched) < _DOC_AUTHORITY" in hsrc
     # and a documentation-grade snippet fallback exists for pages that extract to nothing
-    assert "_searxng_structured(_doc_q" in src and "source_authority(r[\"url\"]) >= _DOC_AUTHORITY" in src
+    assert "_searxng_structured(doc_q" in hsrc and "source_authority(r[\"url\"]) >= _DOC_AUTHORITY" in hsrc
 
 
 def test_documentation_query_keeps_its_keywords_on_a_long_question():

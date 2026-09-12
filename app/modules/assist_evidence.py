@@ -322,7 +322,11 @@ def source_authority(url: str) -> float:
         base = 0.5
     m = re.match(r"https?://([^/?#]+)([^?#]*)", url.lower())
     if m and (_DOC_HOST_RE.match(m.group(1)) or _DOC_PATH_RE.search(m.group(2) or "")):
-        base = max(base, _DOC_AUTHORITY)
+        # §17.1037c — an encyclopedia's `/wiki/` path is not a product's
+        # documentation; live it satisfied the authority test with a page
+        # about the word "documentation" itself.
+        if not m.group(1).endswith("wikipedia.org"):
+            base = max(base, _DOC_AUTHORITY)
     return base
 
 
@@ -362,9 +366,16 @@ def content_terms(need: Optional[Need]) -> set[str]:
     into their words; hardware models count; stopwords do not."""
     if need is None:
         return set()
-    from app.modules.assist_research_lib import _GOAL_STOPWORDS
+    from app.modules.assist_research_lib import _GOAL_STOPWORDS, _goal_keywords
     out: set[str] = set()
-    for chunk in list(need.goal_terms) + [need.query]:
+    chunks = list(need.goal_terms) + [need.query]
+    if need.kind == "question":
+        # §17.1037c — a long question's own nouns are the relevance terms;
+        # the query keeps six of them and the live UniFi question judged
+        # relevance on "exact click current" while "port forward firewall"
+        # were in the question and not in the set.
+        chunks += _goal_keywords(need.subject, limit=12)
+    for chunk in chunks:
         for tok in re.findall(r"[a-z0-9][a-z0-9-]{2,}", (chunk or "").lower()):
             if len(tok) >= 4 and tok not in _GOAL_STOPWORDS:
                 out.add(tok)
