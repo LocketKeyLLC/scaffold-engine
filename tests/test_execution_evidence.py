@@ -201,3 +201,20 @@ def test_the_executor_verifies_before_persisting_and_searches_by_need():
     assert "web_sources(" in searx and "_searxng_search(title)" not in searx
     assert "fetch_upstream_flagged(db, job_id, depends_on)" in body
     assert '{"evidence": _evidence_summary}' in body and '"evidence": _evidence_summary,' in body
+    # §17.1040 — durable on the node row and carried on both node_done emitters.
+    assert "UPDATE dag_nodes SET evidence = CAST(:ev AS jsonb)" in body
+    assert src.count('"evidence": res.get("evidence")') + src.count('"evidence": result.get("evidence")') == 2
+
+
+def test_the_status_payload_and_both_operator_surfaces_carry_the_report():
+    """§17.1040 — /exec/status projects dag_nodes.evidence, the SPA Run tab
+    renders it (evidenceLines) and the CLI prints it."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    handler = (root / "app/modules/execution_handler.py").read_text()
+    assert "completed_at, evidence" in handler and '"evidence": r.evidence' in handler
+    spa = (root / "app/ui/static/views/theater.js").read_text()
+    assert "function evidenceLines" in spa and "Evidence check" in spa and "evidence: data.evidence" in spa
+    cli = (root / "cli/scaffold_cli/main.py").read_text()
+    assert 'n.get("evidence")' in cli and "unverified:" in cli
+    mig = (root / "db/migrations/075_dag_nodes_evidence.sql").read_text()
+    assert mig.count(";") == 0 and "ADD COLUMN IF NOT EXISTS evidence JSONB" in mig

@@ -12,6 +12,7 @@ def _row(**kw):
     # §17.450 — execution_status now SELECTs last_verification_reason; default
     # it so node-row SimpleNamespaces don't AttributeError on the new column.
     kw.setdefault("last_verification_reason", None)
+    kw.setdefault("evidence", None)  # §17.1040 — execution_status SELECTs dag_nodes.evidence
     # §17.480 — execution_status now also SELECTs is_deliverable/confidence/tool.
     kw.setdefault("is_deliverable", False)
     kw.setdefault("confidence", None)

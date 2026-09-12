@@ -462,6 +462,9 @@ class ExecutionResult(BaseModel):
     message: str | None = None
     tool: str | None = None
     error: str | None = None
+    # §17.1040 — the §17.1039 per-node evidence report (unsupported values,
+    # plan-only values, command shape, citation score, regenerated).
+    evidence: dict | None = None
 
 # ---------------------------------------------------------------------------
 # Research Agent

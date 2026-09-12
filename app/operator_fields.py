@@ -79,6 +79,10 @@ EXEC_STATUS_NODE_OPERATOR_FIELDS: dict[str, frozenset[str]] = {
     # wire since §17.450, rendered by the CLI, dropped by the SPA for three
     # months. Requiring SPA here is the assertion that would have caught it.
     "failure_reason":  frozenset({SPA, CLI}),
+    # §17.1040 — the executor's evidence report (§17.1039). A value the node
+    # stated that nothing it was given supports is exactly the kind of thing
+    # that must reach the operator, not sit on the wire.
+    "evidence":        frozenset({SPA, CLI}),
     "is_deliverable":  frozenset({SPA}),
     "confidence":      frozenset({SPA, CLI}),
     "tool":            frozenset({SPA, CLI}),

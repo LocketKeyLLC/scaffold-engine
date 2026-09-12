@@ -97,17 +97,15 @@ def render_node_sources(sources: list[dict]) -> str:
 
 
 async def fetch_upstream_flagged(db, job_id: str, depends_on: list[str]) -> set[str]:
-    """Values the upstream nodes' evidence reports left unsupported. Fail-soft."""
+    """Values the upstream nodes' evidence reports left unsupported (§17.1040:
+    read from ``dag_nodes.evidence``, the latest report per node). Fail-soft."""
     if not depends_on:
         return set()
     out: set[str] = set()
     try:
         rows = await db.execute(text("""
-            SELECT l.details->'evidence'
-              FROM execution_logs l
-              JOIN dag_nodes n ON n.id = l.node_id
-             WHERE l.job_id = :jid AND n.node_key = ANY(:keys)
-               AND jsonb_exists(l.details, 'evidence')
+            SELECT evidence FROM dag_nodes
+             WHERE job_id = :jid AND node_key = ANY(:keys) AND evidence IS NOT NULL
         """), {"jid": job_id, "keys": list(depends_on)})
         for (ev,) in rows.fetchall():
             if isinstance(ev, str):

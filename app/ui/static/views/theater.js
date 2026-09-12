@@ -173,9 +173,17 @@ export function renderTheater(container, jobId, ctx = {}) {
             el("div", { class: "node-reason-label", text: "Why it failed" }),
             el("div", { class: "node-reason-text", text: n.reason }))
         : null;
+    // §17.1040 — the executor's evidence report (§17.1039). What the node
+    // stated that nothing it was given supports leads; the output is below.
+    const evidencePanel = evidenceLines(n.evidence).length
+      ? el("div", { class: "node-reason node-evidence" },
+          el("div", { class: "node-reason-label", text: "Evidence check" }),
+          ...evidenceLines(n.evidence).map((t) => el("div", { class: "node-reason-text", text: t })))
+      : null;
     mount(
       stageBody,
       reasonPanel,
+      evidencePanel,
       n.output
         ? el("div", { class: "md", html: mdToHtml(n.output) })
         : el("div", { class: "dim", text: n.status === "running" ? "Running…" : "No output yet." })
@@ -238,6 +246,7 @@ export function renderTheater(container, jobId, ctx = {}) {
         nodeState.set(n.node_key, {
           status: n.status, title: n.title, tool: n.tool,
           order: n.execution_order, output: "", reason: n.failure_reason || "",
+          evidence: n.evidence || null,  // §17.1040
         });
       renderNodes();
       setProgress(data.progress);
@@ -375,6 +384,23 @@ export function renderTheater(container, jobId, ctx = {}) {
     }).catch(() => {});
   }
 
+  // §17.1040 — one line per finding in the evidence report; empty when clean.
+  function evidenceLines(ev) {
+    if (!ev || !ev.checked) return [];
+    const out = [];
+    if (ev.unsupported && ev.unsupported.length)
+      out.push("⚠️ Unverified specifics — appear in no source, fact or note for this step; confirm before relying on them: " + ev.unsupported.join(", "));
+    if (ev.plan_only && ev.plan_only.length)
+      out.push("ℹ️ From the plan, not confirmed on your system: " + ev.plan_only.join(", "));
+    if (ev.command_shape && ev.command_shape.length)
+      out.push("⚠️ Command mismatch — an interpreter paired with a file it cannot run: " + ev.command_shape.join(", "));
+    if (ev.citation_score != null && ev.citation_score < 0.6)
+      out.push(`⚠️ Weak sourcing — only ${Math.round(ev.citation_score * 100)}% of cited statements are backed by the source they cite.`);
+    if (ev.regenerated && !out.length)
+      out.push("✓ First draft stated values from memory; regenerated against the sources.");
+    return out;
+  }
+
   function ensureNode(key, patch) {
     const cur = nodeState.get(key) || { status: "pending", title: "", output: "", order: nodeState.size };
     nodeState.set(key, { ...cur, ...patch });
@@ -408,6 +434,7 @@ export function renderTheater(container, jobId, ctx = {}) {
           title: data.title,
           tool: data.tool,
           output: data.output || nodeState.get(data.node_key)?.output || "",
+          evidence: data.evidence || nodeState.get(data.node_key)?.evidence || null,  // §17.1040
         });
         log("node_done", `${data.node_key} done${data.verified === false ? " (unverified)" : ""}${data.confidence != null ? ` · conf ${Number(data.confidence).toFixed(2)}` : ""}`, "ok");
         if (data.node_key === currentKey) showNode(data.node_key);

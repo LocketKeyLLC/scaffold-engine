@@ -115,7 +115,7 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
             SELECT node_key, title, status, execution_order, depends_on,
                    assigned_model, last_verification_reason,
                    COALESCE(is_deliverable, FALSE) AS is_deliverable,
-                   confidence, tool, started_at, completed_at
+                   confidence, tool, started_at, completed_at, evidence
             FROM dag_nodes
             WHERE job_id = :job_id
             ORDER BY execution_order
@@ -151,6 +151,10 @@ async def execution_status(job_id: UUID, db: AsyncSession) -> dict:
             # §17.450 (Phase B / B3) — surface WHY a node failed to the web +
             # CLI exec-status consumers (dag_nodes.last_verification_reason).
             "failure_reason": r.last_verification_reason,
+            # §17.1040 — the §17.1039 evidence report (unsupported / plan-only
+            # values, command shape, citation score, regenerated). Rendered
+            # by the SPA Run tab and the CLI; NULL before the node ran.
+            "evidence": r.evidence,
             # §17.480 — surface the node-overhaul signals to the web detail
             # page: the §17.475 deliverable marker, §17.477 verifier
             # confidence, and the tool so the UI can badge each node.
