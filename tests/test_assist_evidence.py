@@ -592,7 +592,7 @@ async def test_documentation_sources_fall_back_to_snippets_when_the_fetched_doc_
     need = derive_need("In the UniFi Network application, exact click path to forward TCP 443 "
                        "and whether a firewall rule is created", assume_question=True)
 
-    async def deep(q, top_n):
+    async def deep(q, top_n, skip=None):
         return [{"query": q, "kind": "web", "url": "https://en.wikipedia.org/wiki/Documentation",
                  "text": "Documentation is any communicable material used to describe a system", "date": ""}]
 
@@ -629,6 +629,35 @@ async def test_an_echoed_footer_is_removed_and_only_the_true_one_reappears(no_ju
     out, rep = await verify_answer(draft, sources=docs, corpus="", need=need)
     assert not rep["unsourced_interface"]
     assert "No official documentation" not in out and out.count("---") == 0
+
+
+def test_pages_about_the_word_documentation_are_skipped_before_any_fetch():
+    from app.modules.assist_research_lib import _about_the_word
+    assert _about_the_word({"url": "https://en.wikipedia.org/wiki/Documentation", "title": "Documentation"})
+    assert _about_the_word({"url": "https://www.merriam-webster.com/dictionary/documentation", "title": "Documentation Definition"})
+    assert _about_the_word({"url": "https://scribe.com/library/what-is-documentation", "title": "Documentation"})
+    assert not _about_the_word({"url": "https://help.ui.com/hc/en-us/articles/1-Port-Forwarding", "title": "UniFi Gateway - Port Forwarding"})
+    assert not _about_the_word({"url": "https://docs.example.com/documentation/firewall", "title": "Firewall documentation"})
+
+
+@pytest.mark.asyncio
+async def test_the_docs_fetch_never_spends_a_fetch_on_an_encyclopedia_page(monkeypatch):
+    from app.modules import assist_research_lib as lib
+    fetched_urls = []
+
+    async def structured(q, max_results=5):
+        return [{"title": "Documentation", "url": "https://en.wikipedia.org/wiki/Documentation", "content": "x"},
+                {"title": "Vendor docs", "url": "https://docs.example.com/x", "content": "port forward"}]
+
+    async def fake_fetch(results):
+        fetched_urls.extend(r["url"] for r in results)
+        return [{"url": r["url"], "content": "port forward documentation " * 10, "date": ""} for r in results]
+    monkeypatch.setattr(lib, "_searxng_structured", structured)
+    import app.modules.research_agent as ra
+    monkeypatch.setattr(ra, "_fetch_and_extract", fake_fetch)
+    out = await lib._deep_web_sources("documentation port forward", top_n=2, skip=lib._about_the_word)
+    assert fetched_urls == ["https://docs.example.com/x"]
+    assert [o["url"] for o in out] == ["https://docs.example.com/x"]
 
 
 def test_documentation_shaped_urls_carry_authority():
@@ -676,7 +705,7 @@ def test_the_ask_path_runs_a_documentation_query_when_none_was_fetched():
     assert '_cap_query("documentation "' in hsrc and ".split()[:10]" in hsrc
     # §17.1037c — authority is judged on the RANKED (on-topic) set, both sides
     assert "max_source_authority(rank_evidence(list(sources), need))" in hsrc
-    assert "fetched = rank_evidence(await _deep_web_sources(doc_q, top_n=2), need)" in hsrc
+    assert "fetched = rank_evidence(await _deep_web_sources(doc_q, top_n=2, skip=_about_the_word), need)" in hsrc
     assert "max_source_authority(fetched) < _DOC_AUTHORITY" in hsrc
     # and a documentation-grade snippet fallback exists for pages that extract to nothing
     assert "_searxng_structured(doc_q" in hsrc and "source_authority(r[\"url\"]) >= _DOC_AUTHORITY" in hsrc
