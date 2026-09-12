@@ -233,10 +233,15 @@ async def _searxng_structured(query: str, max_results: int = 5) -> list[dict]:
         return []
 
 
-async def _deep_web_sources(query: str, *, top_n: int) -> list[dict]:
+async def _deep_web_sources(query: str, *, top_n: int, skip=None) -> list[dict]:
     """§17.500 — fetch + trafilatura-extract the top-N SearXNG pages for real
-    doc content. Reuses the research-agent fetcher. Fail-soft → []."""
+    doc content. Reuses the research-agent fetcher. Fail-soft → [].
+
+    ``skip`` (§17.1037e) — a predicate over a search result; matching results
+    are dropped BEFORE the top-N slice so they cost no fetch."""
     results = await _searxng_structured(query)
+    if skip is not None:
+        results = [r for r in results if not skip(r)]
     if not results or top_n <= 0:
         return []
     try:
@@ -577,6 +582,23 @@ def _cap_query(q: str, max_words: int = 12) -> str:
     return " ".join(parts[:max_words])
 
 
+# §17.1037e — the documentation query's own keyword draws pages ABOUT the word
+# ("Documentation" on an encyclopedia, "documentation" in a dictionary). They
+# are never a product's documentation; skip them before any fetch. Shape-based:
+# an encyclopedia/dictionary host, or a page whose title IS the keyword.
+_ABOUT_THE_WORD_HOST_RE = re.compile(r"(?:^|\.)(?:wikipedia|wiktionary)\.org$|(?:^|\.)dictionary\.|/dictionary/")
+
+
+def _about_the_word(result: dict, keyword: str = "documentation") -> bool:
+    url = (result.get("url") or "").lower()
+    title = re.sub(r"[^a-z ]", " ", (result.get("title") or "").lower()).strip()
+    m = re.match(r"https?://([^/?#]+)([^?#]*)", url)
+    host, path = (m.group(1), m.group(2) or "") if m else ("", "")
+    if _ABOUT_THE_WORD_HOST_RE.search(host) or _ABOUT_THE_WORD_HOST_RE.search(path):
+        return True
+    return title == keyword or title.startswith(keyword + " ") and len(title.split()) <= 3
+
+
 async def _documentation_sources(need, base_query: str, sources: list, *, node_key: str = "?") -> list[dict]:
     """§17.1036/1037 — when a QUESTION's fetched pages include no ON-TOPIC
     documentation, run one more web query aimed at documentation and return
@@ -598,7 +620,7 @@ async def _documentation_sources(need, base_query: str, sources: list, *, node_k
     # "documentation" alone: "official" drew dictionary pages for the word
     # itself. The keywords LEAD, so the 12-word cap cannot remove them.
     doc_q = _cap_query("documentation " + " ".join((base_query or "").split()[:10]))
-    fetched = rank_evidence(await _deep_web_sources(doc_q, top_n=2), need)
+    fetched = rank_evidence(await _deep_web_sources(doc_q, top_n=2, skip=_about_the_word), need)
     extra: list[dict] = list(fetched)
     if max_source_authority(fetched) < _DOC_AUTHORITY:
         # Vendor help centres are often script-rendered or bot-blocked (403)
@@ -606,6 +628,8 @@ async def _documentation_sources(need, base_query: str, sources: list, *, node_k
         # documentation-grade snippets, relevance-filtered like everything else.
         snippets = []
         for r in await _searxng_structured(doc_q, max_results=5):
+            if _about_the_word(r):
+                continue
             if r.get("url") and source_authority(r["url"]) >= _DOC_AUTHORITY:
                 snippets.append({
                     "query": doc_q, "kind": "searxng", "url": r["url"],
