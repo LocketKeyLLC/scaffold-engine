@@ -1232,6 +1232,12 @@ class Settings(BaseSettings):
     # output (a footer in output_text would be parroted downstream).
     execution_evidence_retrieval_enabled: bool = True
     execution_answer_verification_enabled: bool = True
+    # §17.1041 — the COMPILE step: values the deliverable states that no step
+    # output or operator text contains (introduced by synthesis), and values
+    # carried from steps whose own check left them unverified, are named in a
+    # banner at the top of the deliverable and recorded in
+    # jobs.metadata.compile_evidence. Deterministic; no rewrite.
+    compile_value_check_enabled: bool = True
     # §17.687 — recent-conversation recall. The §17.650 digest recovers only
     # COMMITTED node output; notes recover only what the OPERATOR captured. So a
     # program the engine SUGGESTED a turn ago (a decision node's "## My

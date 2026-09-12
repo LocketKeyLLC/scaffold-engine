@@ -66,6 +66,8 @@ REGISTERED_SITES = {
     ("dag_generator.py", "generate_dag"): "mark_assumed_values",
     ("execution_agent.py", "execute_next_node"): "verify_node_output",   # §17.1039
     ("execution_evidence.py", "verify_node_output"): "verify_answer",    # §17.1039
+    ("execution_compile.py", "_compile_output"): "_maybe_compile_value_check",  # §17.1041
+    ("execution_compile.py", "_maybe_compile_value_check"): "compile_value_check",  # §17.1041
 }
 
 

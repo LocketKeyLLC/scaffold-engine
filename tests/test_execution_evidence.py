@@ -224,3 +224,71 @@ def test_the_status_payload_and_both_operator_surfaces_carry_the_report():
     assert "status, domain, evidence," in logs
     mig = (root / "db/migrations/075_dag_nodes_evidence.sql").read_text()
     assert mig.count(";") == 0 and "ADD COLUMN IF NOT EXISTS evidence JSONB" in mig
+
+
+# ---- §17.1041 — the compile step ------------------------------------------
+
+def _nodes(*items):
+    return [dict(node_key=f"T{i+1}", output_text=t, evidence=ev) for i, (t, ev) in enumerate(items)]
+
+
+def test_a_value_the_synthesizer_introduced_is_named():
+    nodes = _nodes(("Bind Grafana to 127.0.0.1 behind Nginx.", {"checked": True, "unsupported": []}))
+    intro, carried = xe.compile_value_check(
+        "Grafana listens on 10.77.0.9 behind Nginx at https://grafana.hamlet-labs.net.",
+        nodes=nodes, brief=BRIEF, input_text="reachable at https://grafana.hamlet-labs.net")
+    assert [u["value"] for u in intro] == ["10.77.0.9"] and carried == []
+    banner = xe.compile_value_banner(intro, carried)
+    assert banner.startswith("> ⚠️ **Value check:**") and "`10.77.0.9` (ip)" in banner and banner.endswith("\n\n")
+
+
+def test_a_value_a_step_flagged_is_carried_not_introduced():
+    nodes = _nodes(("Install Docker 24.0.7 from the repo.", {"checked": True, "unsupported": ["24.0.7"]}))
+    intro, carried = xe.compile_value_check("Install Docker 24.0.7, then start the stack.",
+                                            nodes=nodes, brief=BRIEF, input_text="")
+    assert intro == [] and [u["value"] for u in carried] == ["24.0.7"]
+    assert "Carried unverified" in xe.compile_value_banner(intro, carried)
+
+
+def test_values_from_steps_or_the_operator_are_clean():
+    nodes = _nodes(("Publish port 3001; image 1.23.16.", {"checked": True, "unsupported": []}),
+                   ("Server 10.20.0.5 ok.", '{"checked": true, "unsupported": []}'))
+    intro, carried = xe.compile_value_check(
+        "Server 10.20.0.5 runs image 1.23.16 on port 3001 at https://status.hamlet-labs.net/x",
+        nodes=nodes, brief=BRIEF, input_text="my server is 10.20.0.5")
+    assert intro == [] and carried == [] and xe.compile_value_banner(intro, carried) == ""
+
+
+def test_a_flagged_value_the_operator_later_confirmed_is_not_carried():
+    nodes = _nodes(("Install Docker 24.0.7.", {"checked": True, "unsupported": ["24.0.7"]}))
+    intro, carried = xe.compile_value_check("Install Docker 24.0.7.", nodes=nodes, brief=BRIEF,
+                                            input_text="we run Docker 24.0.7 already")
+    assert intro == [] and carried == []
+
+
+async def test_the_compile_step_banners_and_records(monkeypatch):
+    from app.modules import execution_compile as ec
+    monkeypatch.setattr(ec.settings, "compile_value_check_enabled", True)
+    recorded = {}
+
+    async def given(job_id):
+        return BRIEF, ""
+
+    async def record(job_id, key, rec):
+        recorded[key] = rec
+    monkeypatch.setattr(ec, "_job_given", given)
+    monkeypatch.setattr(ec, "_record_job_metadata", record)
+    nodes = _nodes(("Bind to 127.0.0.1.", {"checked": True, "unsupported": []}))
+    out = await ec._maybe_compile_value_check("j", "Bind Grafana to 10.77.0.9.", nodes)
+    assert out.startswith("> ⚠️ **Value check:**") and out.endswith("Bind Grafana to 10.77.0.9.")
+    assert recorded["compile_evidence"] == {"checked": True, "introduced": ["10.77.0.9"], "carried": []}
+    monkeypatch.setattr(ec.settings, "compile_value_check_enabled", False)
+    assert await ec._maybe_compile_value_check("j", "Bind Grafana to 10.77.0.9.", nodes) == "Bind Grafana to 10.77.0.9."
+
+
+def test_compile_runs_the_check_on_every_exit_and_selects_evidence():
+    src = (pathlib.Path(__file__).resolve().parents[1] / "app/modules/execution_compile.py").read_text()
+    body = src[src.index("async def _compile_output("):]
+    finish = body[body.index("async def _finish("):body.index("deliverable = [")]
+    assert "_maybe_compile_value_check(job_id, text_value, nodes)" in finish
+    assert "output_text, depends_on, evidence," in body

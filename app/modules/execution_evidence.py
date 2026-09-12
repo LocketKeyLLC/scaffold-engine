@@ -40,7 +40,8 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.modules.assist_evidence import (
-    Need, derive_need, finalize_query, owned_hosts, rank_evidence, verify_answer,
+    Need, derive_need, finalize_query, owned_hosts, rank_evidence, unsupported_specifics,
+    verify_answer,
 )
 
 logger = logging.getLogger("scaffold")
@@ -185,3 +186,56 @@ async def verify_node_output(
                        node_key, tool_l, [u["value"] for u in report["unsupported"]][:6],
                        report.get("regenerated"))
     return out, report
+
+
+# ---------------------------------------------------------------------------
+# §17.1041 — the COMPILE step. The deliverable is a rewrite of verified node
+# outputs; two things can still go wrong with its values: the synthesizer
+# INTRODUCES one that no step output and no operator text states (§17.360's
+# class — `tskey-abc123…`, hardcoded addresses in place of placeholders), or
+# it CARRIES one that a step's own check left unverified. Both are named at
+# the top of the deliverable — the surface the operator reads — and recorded
+# on the job. No model call, no rewrite: the node layer already regenerated.
+# ---------------------------------------------------------------------------
+
+def compile_value_check(text_value: str, *, nodes: list, brief: Optional[dict],
+                        input_text: Optional[str]) -> tuple[list[dict], list[dict]]:
+    """Returns ``(introduced, carried)`` — values in the deliverable that
+    appear in no step output and nothing the operator gave; and values a
+    step's evidence report flagged that nothing the operator gave confirms."""
+    given = given_text(brief, input_text)
+    node_text = "\n".join(str(n.get("output_text") or "") for n in (nodes or [])
+                          if isinstance(n, dict) or hasattr(n, "get"))
+    flagged: set[str] = set()
+    for n in nodes or []:
+        ev = n.get("evidence") if hasattr(n, "get") else None
+        if isinstance(ev, str):
+            try:
+                ev = json.loads(ev)
+            except (ValueError, TypeError):
+                ev = None
+        if isinstance(ev, dict):
+            flagged.update(str(v) for v in (ev.get("unsupported") or []) if v)
+    owned = owned_hosts({"_brief_text": given})
+    introduced = unsupported_specifics(text_value, given + "\n" + node_text, owned=owned)
+    not_given = unsupported_specifics(text_value, given, owned=owned)
+    intro_vals = {u["value"] for u in introduced}
+    carried = [u for u in not_given if u["value"] in flagged and u["value"] not in intro_vals]
+    return introduced, carried
+
+
+def compile_value_banner(introduced: list[dict], carried: list[dict]) -> str:
+    """Operational metadata prepended AFTER synthesis, like the other compile
+    banners — it names values, it does not rewrite them."""
+    lines: list[str] = []
+    if introduced:
+        lines.append(
+            "> ⚠️ **Value check:** these values appear in none of the step outputs "
+            "or the brief — the compile step introduced them; confirm each before "
+            "relying on it: " + ", ".join(f"`{u['value']}` ({u['kind']})" for u in introduced[:8]))
+    if carried:
+        lines.append(
+            "> ℹ️ **Carried unverified:** a step stated these and its own check could "
+            "not trace them to a source or the brief: "
+            + ", ".join(f"`{u['value']}` ({u['kind']})" for u in carried[:8]))
+    return ("\n".join(lines) + "\n\n") if lines else ""
