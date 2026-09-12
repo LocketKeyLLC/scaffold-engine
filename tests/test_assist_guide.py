@@ -1463,7 +1463,10 @@ async def test_deep_web_sources_fetches_and_extracts(monkeypatch):
          patch("app.modules.research_agent._fetch_and_extract",
                new=AsyncMock(return_value=[{"url": "https://a", "content": "FULL PAGE BODY"}])):
         out = await assist_guide._deep_web_sources("q", top_n=2)
-    assert out == [{"query": "q", "kind": "web", "text": "FULL PAGE BODY", "url": "https://a"}]
+    # §17.1027 — the source now carries the hit's title and a date ("" when
+    # neither the page nor the engine declared one).
+    assert out == [{"query": "q", "kind": "web", "text": "FULL PAGE BODY",
+                    "url": "https://a", "title": "t", "date": ""}]
 
 
 @pytest.mark.asyncio
@@ -1607,7 +1610,10 @@ async def test_research_one_searches_focused_query_not_raw_question():
     async def _fake_confirm(q, **kw):
         captured["kb_q"] = q                    # positional = raw question (KB)
         captured["web_q"] = kw.get("web_query")  # §17.729 focused web query
-        return [{"query": q, "kind": "web", "text": "docs", "url": "https://d"}]
+        # §17.1027 — a source that shares no term with the question is dropped
+        # before synthesis, so the fake must be ABOUT the question.
+        return [{"query": q, "kind": "web", "url": "https://d",
+                 "text": "docs on the newest ubuntu server iso"}]
 
     with patch.object(assist_research_lib, "_focus_web_query",
                       new=AsyncMock(return_value="ubuntu server latest lts iso")), \

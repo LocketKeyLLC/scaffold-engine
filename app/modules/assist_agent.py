@@ -1968,6 +1968,7 @@ async def run_step_fix(
         job_digest=mem.job_digest,
         operator_notes=mem.operator_notes,  # §17.745 — notes + reset supersession
         conversation=mem.conversation,  # §17.687 + §17.738 recap
+        step_recap=mem.recap,  # §17.1027 — the OPEN item is the research fallback
     )
     # §17.851b — fix commands get the same code-enforced placeholder
     # resolution as walkthroughs (carry-through: every operator-facing

@@ -135,6 +135,21 @@ def _check_contradictions(entries: list[dict]) -> list[dict]:
 # Web fetch + extract
 # =============================================================================
 
+def _extract_text_and_date(html: str) -> tuple[str, str]:
+    """Body text plus the page's declared publication date (§17.1027), in ONE
+    worker thread — trafilatura parses the tree once per call, so the metadata
+    pass is a second parse; bounded by the same byte cap as the fetch."""
+    text_out = trafilatura.extract(html, output_format="txt", with_metadata=False)
+    date = ""
+    if text_out:
+        try:
+            md = trafilatura.extract_metadata(html)
+            date = str(getattr(md, "date", "") or "") if md else ""
+        except Exception:  # noqa: BLE001 — a date is a bonus, never a failure
+            date = ""
+    return text_out or "", date
+
+
 async def _fetch_and_extract(
     results: list[dict], progress: dict | None = None,
 ) -> list[dict]:
@@ -189,17 +204,15 @@ async def _fetch_and_extract(
                 if not html:
                     _tick(url, ok=False, reason=fail.get("reason", "fetch_error"))
                     return None
-                text_out = await asyncio.to_thread(
-                    trafilatura.extract,
-                    html,
-                    output_format="txt",
-                    with_metadata=False,
-                )
+                text_out, page_date = await asyncio.to_thread(_extract_text_and_date, html)
                 if not text_out or len(text_out) < 100:
                     _tick(url, ok=False, reason="no_content")
                     return None
                 _tick(url, ok=True)
-                return {"url": url, "content": text_out}
+                # §17.1027 — the page's own publication date rides along so a
+                # consumer can rank fresh material first and SAY how old a
+                # source is. "" when the page declares none.
+                return {"url": url, "content": text_out, "date": page_date}
             except Exception as e:
                 logger.debug("trafilatura_fetch_failed: url=%s error=%s", url, e)
                 _tick(url, ok=False, reason="fetch_error")

@@ -1188,6 +1188,18 @@ class Settings(BaseSettings):
     # reaching for the open web. max_chars caps the digest (0 = disabled too).
     assist_job_context_enabled: bool = True
     assist_job_context_max_chars: int = Field(default=6000, ge=0, le=20000)
+    # §17.1027 — answer VERIFICATION on the ask and fix paths. After the model
+    # answers, every version number / IP / external URL / non-standard port it
+    # states is checked against the grounding it was given (sources, facts,
+    # notes, the operator's own words), and each `[n]` citation is judged
+    # against the source it cites (§17.798's scorer). A failing answer is
+    # regenerated ONCE with the unsupported values named; if it still fails,
+    # they are listed under a visible warning. `min_citation_score` is the
+    # fraction of cited statements that must be supported before the answer is
+    # accepted without regeneration.
+    assist_answer_verification_enabled: bool = True
+    assist_answer_verification_regenerate: bool = True
+    assist_answer_min_citation_score: float = Field(default=0.6, ge=0.0, le=1.0)
     # §17.687 — recent-conversation recall. The §17.650 digest recovers only
     # COMMITTED node output; notes recover only what the OPERATOR captured. So a
     # program the engine SUGGESTED a turn ago (a decision node's "## My

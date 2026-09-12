@@ -101,15 +101,21 @@ def test_the_cap_keeps_the_front_where_hardware_and_goal_go():
 
 # ── wiring: a hint is a request, these are enforced ──────────────────────
 def test_the_web_query_enforces_both():
+    """§17.1027 — the enforcement moved into `assist_evidence` so the fix path
+    shares it. research_one must still route the generator's output THROUGH
+    it, and the shared builder must still carry all three rules."""
     import inspect
     from app.modules import assist_research_lib as lib
+    from app.modules import assist_evidence as ev
     src = inspect.getsource(lib.research_one)
-    assert "hardware_for_text(" in src, "hardware is only a hint again"
-    assert "_goal_keywords(" in src, "the goal is only a hint again"
-    assert "_cap_query(" in src, "the query is unbounded again"
+    assert "derive_need(" in src and "finalize_query(" in src, "the need is not enforced"
     # Enforcement must run AFTER the generator, or it is just another hint.
-    assert src.index("_focus_web_query(") < src.index("hardware_for_text(")
-    assert src.index("_focus_web_query(") < src.index("_goal_keywords(")
+    assert src.index("_focus_web_query(") < src.index("finalize_query(")
+    need_src = inspect.getsource(ev.derive_need)
+    assert "hardware_for_text(" in need_src, "hardware is only a hint again"
+    fin_src = inspect.getsource(ev.finalize_query)
+    assert "need.hardware" in fin_src and "need.goal_terms" in fin_src
+    assert "_cap(" in fin_src, "the query is unbounded again"
 
 
 def test_the_ask_path_supplies_the_goal():

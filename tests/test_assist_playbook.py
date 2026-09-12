@@ -217,8 +217,17 @@ def _fix_ctx():
         grounding_kind=None, assembled_prompt="## Task\ninstall radarr",
     )
 
+@pytest.fixture
+def verification_off(monkeypatch):
+    """§17.1027 — these tests count model draws to prove the INTEGRITY gate
+    regenerates exactly once; the answer-verification stage (its own draw,
+    its own tests in test_assist_evidence.py) is switched off here."""
+    from app.modules import assist_evidence
+    monkeypatch.setattr(assist_evidence.settings, "assist_answer_verification_enabled", False)
+
+
 @pytest.mark.asyncio
-async def test_generate_fix_regen_gate_blocks_repeat():
+async def test_generate_fix_regen_gate_blocks_repeat(verification_off):
     """First draw repeats the failed command → ONE regeneration; the clean
     regen is returned with no warning banner."""
     from app.modules import assist_guide
@@ -358,7 +367,7 @@ def test_find_novel_urls_flags_ungrounded_and_passes_grounded():
 
 
 @pytest.mark.asyncio
-async def test_generate_fix_novel_url_gate_regenerates():
+async def test_generate_fix_novel_url_gate_regenerates(verification_off):
     """A draft with an invented URL at escalation triggers ONE regen; the
     discovery-command regen (no external URLs) is returned clean."""
     from app.modules import assist_guide

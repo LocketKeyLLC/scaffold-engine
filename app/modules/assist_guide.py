@@ -4213,10 +4213,15 @@ def find_novel_urls(text_out: str, grounding_corpus: str) -> list[str]:
 # "hung"/"stuck"/"frozen" were absent from the §17.882 line detector, so a HANG —
 # the most common non-error blocker — never even registered as the error line.
 _SYMPTOM_LINE_RE = (
+    # §17.1027 — a symptom word must START a word: unanchored, "hang" matched
+    # inside "changes", so the two-word status "no changes" read as a failure
+    # and was researched as one. Suffixes stay free ("fail" → "failed").
+    r"(?<![A-Za-z])(?:"
     r"error|fail|not found|not in |unable|denied|refus|timeout|timed out|"
     r"invalid|cannot|can't|no such|returned status|unexpected|corrupt|E:|"
     r"curl: \(|hang|hung|hangs|stuck|frozen|freeze|unresponsive|crash|panic|"
     r"no progress|never finish|won't boot|wont boot|loop"
+    r")"
 )
 
 # §17.1018 — tokens that are unique to ONE occurrence of an event. A timestamp,
@@ -4637,6 +4642,7 @@ async def generate_fix(
     prescribed_commands: Optional[str] = None,  # §17.898
     recent_replies: Optional[list[str]] = None,  # §17.925
     hypotheses: Optional[dict] = None,  # §17.973
+    step_recap: Optional[str] = None,  # §17.1027 — the OPEN item is the fallback subject
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -4659,6 +4665,15 @@ async def generate_fix(
     # (a single generic query re-fed the same weak grounding three fixes in a
     # row live) and demand a materially different approach below.
     escalated = failure_streak >= settings.assist_fix_streak_threshold
+    # §17.1027 — what this turn actually needs to know, decided BEFORE any
+    # query is built. Live, the deterministic fallback below searched the open
+    # web for `qm config 106`, `pct exec 111 -- ls -la /opt` and `no changes`:
+    # the operator's typed command, or a two-word status, was the whole query.
+    # A paste with no failure line and no question is researched by the step's
+    # recorded OPEN item — the live blocker — or not at all.
+    from app.modules.assist_evidence import derive_need, rank_evidence, verify_answer
+    need = derive_need(error_text, title=ctx.title, step_recap=step_recap,
+                       operator_notes=operator_notes)
     sources: list[dict] = []
     if research:
         max_q = settings.assist_guide_max_research_queries
@@ -4709,15 +4724,25 @@ async def generate_fix(
         # §17.882 — one DETERMINISTIC error-derived query, always. The
         # LLM query generator emitted the same generic query five fixes in a
         # row live; grounding on the ACTUAL error must not depend on it.
+        # §17.1027 — the query is the NEED's query: the symptom query for an
+        # error (unchanged, via `_error_focus_query`), the OPEN item for a
+        # paste that carries no error, and NOTHING for a paste that carries
+        # neither — logged, so "no research ran" is visible instead of silent.
         try:
             from app.modules.assist_research_lib import _confirm_query
-            eq = _error_focus_query(ctx.title, error_text, operator_notes)
-            if eq and eq not in {s.get("query") for s in sources}:
+            eq = need.query if need.researchable else ""
+            if not need.researchable:
+                logger.info("assist_research_no_need node_key=%s kind=%s reason=%s",
+                            node_key, need.kind, need.reason)
+            elif eq and eq not in {s.get("query") for s in sources}:
+                logger.info("assist_fix_need_query node_key=%s kind=%s q=%r",
+                            node_key, need.kind, eq[:120])
                 sources.extend(await _confirm_query(
                     eq, node_key=node_key, domain=domain, deep=True,
                 ))
         except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
             logger.debug("assist_fix_error_query_failed: %s", exc)
+        sources = rank_evidence(sources, need, node_key=node_key)  # §17.1027
         # §17.974b — a durable record of what this fix actually researched.
         # `guidance_meta.research_sources` is returned by this function and then
         # dropped: the fix caller never persists it, and `assist_steps.
@@ -5230,6 +5255,30 @@ async def generate_fix(
                     + "the integrity gate flagged. Treat with suspicion; reply "
                     "\"different approach\" to force a method change.\n\n" + text_out
                 )
+    # §17.1027 — VERIFY the fix against its own grounding. Every version / IP /
+    # external URL / non-standard port it states must trace to the prompt it
+    # was given (research, facts, notes, the operator's paste); every `[n]`
+    # must be backed by source n. One regeneration with the values named; a
+    # candidate that trips the integrity gate above is rejected so the two
+    # gates cannot undo each other. What still fails is listed under a visible
+    # warning rather than handed over as fact.
+    if text_out:
+        async def _regen_grounded(notice: str) -> str:
+            r = await _draw_fix([
+                {"role": "system", "content": fix_system},
+                {"role": "user", "content": user + notice},
+            ])
+            cand = (r.text or "").strip() if (r and r.success) else ""
+            if cand and any(_gate(cand)):
+                logger.info("assist_answer_grounding_regen_rejected node_key=%s "
+                            "(integrity gate)", node_key)
+                return ""
+            return cand
+
+        text_out, _ = await verify_answer(
+            text_out, sources=sources, corpus=user, need=need,
+            node_key=node_key, label="assist_fix", regenerate=_regen_grounded,
+        )
     # §17.897 — every command the operator is handed must be copy-pasteable,
     # whichever path produced it. The fenced-block mandate is a prompt rule and
     # prompt rules get ignored; only a fenced block gets a ⧉ copy button.

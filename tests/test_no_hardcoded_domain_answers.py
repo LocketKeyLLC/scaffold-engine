@@ -31,6 +31,7 @@ QUERY_MODULES = [
     "app/modules/assist_guide.py",
     "app/modules/assist_agent.py",
     "app/modules/assist_policy.py",
+    "app/modules/assist_evidence.py",  # §17.1027 — need / evidence / verification
 ]
 
 # §17.1026 — literal phrase collections that are NOT answer keys, each with its
@@ -111,6 +112,7 @@ DOMAIN_VOCAB_BASELINE = {
     "assist_guide.py": 17,
     "assist_agent.py": 0,
     "assist_policy.py": 1,
+    "assist_evidence.py": 0,
 }
 
 

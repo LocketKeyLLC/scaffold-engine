@@ -32,6 +32,7 @@ GROUNDING_BUILDERS = {
     "hardware_for_text",           # §17.1020 — subject-matched models, deterministic queries
     "blocker_research_query",      # §17.918 — grounds via facts/notes, hardware since §17.1020
     "_error_focus_query",          # §17.882 — grounds via the symptom, hardware since §17.1020
+    "derive_need",                 # §17.1027 — the evidence layer's need: hardware + the step's OPEN item
 }
 
 # Sites that legitimately carry no grounding, with the reason. Adding to this
