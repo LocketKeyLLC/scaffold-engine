@@ -354,7 +354,7 @@ async def drain_cleanup_tasks(timeout: float = 5.0) -> None:
 
 async def _get_job(db: AsyncSession, job_id: str) -> dict | None:
     row = await db.execute(
-        text("SELECT id, status, refined_brief FROM jobs WHERE id = :id"),
+        text("SELECT id, status, refined_brief, input_text FROM jobs WHERE id = :id"),
         {"id": job_id},
     )
     r = row.mappings().first()
@@ -924,6 +924,11 @@ def _build_prompt(node: dict, brief: dict) -> str:
 # name reachable from this module (tests + the `_build_prompt` caller above
 # both reference it on `execution_agent`).
 from app.modules.execution_retry import _format_reviewer_feedback  # noqa: E402
+# §17.1039 — the evidence layer on the executor (need → dated sources → verified output).
+from app.modules.execution_evidence import (  # noqa: E402
+    evidence_summary, fetch_upstream_flagged, node_need, render_node_sources,
+    verify_node_output, web_sources, node_task_text as node_task_text_for,
+)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -1387,6 +1392,9 @@ async def execute_next_node(
                 await _fetch_upstream_outputs(db, job_id, depends_on)
                 if depends_on else {}
             )
+            # §17.1039 — values the upstream reports left unsupported; they are
+            # not credited by the upstream text they sit in (§17.1028).
+            _upstream_flagged = await fetch_upstream_flagged(db, job_id, depends_on)
         except Exception as fetch_exc:
             err_msg = f"upstream fetch error: {fetch_exc}"
             logger.exception(
@@ -1492,20 +1500,31 @@ async def execute_next_node(
         # job's domain is still found. The cosine floor + reranker filter noise.
         grounding_domain = None if settings.execution_grounding_cross_domain else job_domain
 
+        # §17.1039 — the task as an information need; the sources this node
+        # is given are collected so its output can be verified against them.
+        _node_need = node_need(node_snapshot, brief)
+        _node_sources: list[dict] = []
         if tool_lower == "milvus":
             rag_block = await _milvus_search(title, node_key=node_key, domain=node_snapshot.get("domain"))
             if rag_block:
                 raw_prompt = f"{raw_prompt}\n\n## Knowledge Base Results\n{rag_block}"
                 logger.info("milvus_context_injected: chars=%d node='%s'", len(rag_block), title)
+                _node_sources.append({"kind": "milvus", "query": title, "text": rag_block})
         elif tool_lower == "searxng":
-            search_results = await _searxng_search(title)
+            # §17.1039 — page content for the need-derived query, ranked and
+            # dated (was: snippets for the bare title).
+            _node_sources = await web_sources(
+                _node_need, node_key=node_key, domain=node_snapshot.get("domain"))
+            search_results = render_node_sources(_node_sources) or "No search results found."
             raw_prompt = f"{raw_prompt}\n\n## Web Search Results\n{search_results}"
-            logger.info("searxng_context_injected: chars=%d node='%s'", len(search_results), title)
+            logger.info("searxng_context_injected: chars=%d sources=%d node='%s'",
+                        len(search_results), len(_node_sources), title)
         else:
             rag_context = await _fetch_rag_context(rag_query, top_k=settings.verifier_top_k, domain=grounding_domain)
             if rag_context:
                 raw_prompt = f"{raw_prompt}\n\nGROUND TRUTH (use this as authoritative reference):\n{rag_context}"
                 logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
+                _node_sources.append({"kind": "milvus", "query": rag_query, "text": rag_context})
 
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).
         _upstream_block = _format_upstream_block(upstream_outputs, node_key)
@@ -1751,6 +1770,41 @@ async def execute_next_node(
         }
 
     # Verify (LLM call — still outside DB session).
+    # §17.1039 — verify the output against what this node was given BEFORE
+    # the verifier scores it, so the persisted text and its confidence agree.
+    # Unsupported values are reported (execution log + result), never written
+    # into output_text.
+    _evidence_summary: dict = {"checked": False}
+    try:
+        async def _regen_node(notice: str) -> str:
+            _messages = [
+                {"role": "system", "content": _system_for_tool(tool)},
+                {"role": "user", "content": exec_prompt + notice},
+            ]
+            _resp = await asyncio.wait_for(
+                chat_until_nonempty(
+                    model_router.chat, _messages,
+                    {"role": exec_role, "overrides": exec_overrides},
+                    temperature=0.7, max_tokens=settings.node_generation_max_tokens,
+                    draws=settings.node_generation_max_draws,
+                    label=f"node-exec-regen {node_key}",
+                ),
+                timeout=settings.node_timeout_seconds,
+            )
+            return _resp.text.strip() if _resp.success else ""
+
+        output, _evidence_report = await verify_node_output(
+            output, need=_node_need, sources=_node_sources, brief=brief,
+            input_text=job.get("input_text"), task_text=node_task_text_for(node_snapshot),
+            upstream_text="\n".join(
+                (v[0] if isinstance(v, tuple) else str(v)) for v in upstream_outputs.values()),
+            upstream_flagged=_upstream_flagged, tool=tool, node_key=node_key,
+            regenerate=_regen_node,
+        )
+        _evidence_summary = evidence_summary(_evidence_report)
+    except Exception as exc:  # noqa: BLE001 — verification never fails a node
+        logger.warning("node_output_verification_failed node=%s err=%r", node_key, exc)
+
     verify_status: Literal["pass", "fail", "skipped"]
     if skip_verify:
         verify_status = "skipped"
@@ -1970,6 +2024,17 @@ async def execute_next_node(
             f"Node '{title}' -> {final_status}",
             {"model": exec_model, "confidence": confidence, "reason": reason},
         )
+        if _evidence_summary.get("checked"):
+            # §17.1039 — the evidence report is durable here; downstream nodes
+            # read `unsupported` from it so a flagged value is not credited by
+            # the upstream text it sits in.
+            await _log_execution(
+                db, job_id, node_id, "warning" if _evidence_summary.get("unsupported") else "info",
+                f"Node '{title}' evidence: unsupported={len(_evidence_summary.get('unsupported') or [])} "
+                f"plan_only={len(_evidence_summary.get('plan_only') or [])} "
+                f"regenerated={_evidence_summary.get('regenerated')}",
+                {"evidence": _evidence_summary},
+            )
         logger.info(
             "verification_complete",
             extra=dict(
@@ -2032,6 +2097,7 @@ async def execute_next_node(
         "model_used": exec_model,
         "prompt_used": exec_prompt,
         "verify_status": verify_status,
+        "evidence": _evidence_summary,
         "awaiting_approval": True,
         "job_complete": job_complete,
     }

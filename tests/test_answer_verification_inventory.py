@@ -64,6 +64,8 @@ ANNOTATE_ONLY = {
 # fails naming the function if the call goes missing.
 REGISTERED_SITES = {
     ("dag_generator.py", "generate_dag"): "mark_assumed_values",
+    ("execution_agent.py", "execute_next_node"): "verify_node_output",   # §17.1039
+    ("execution_evidence.py", "verify_node_output"): "verify_answer",    # §17.1039
 }
 
 
@@ -171,7 +173,7 @@ def _enclosing_function(tree: ast.AST, call: ast.Call) -> str:
     return best
 
 
-@pytest.mark.parametrize("rel", ["assist_guide.py", "assist_research_lib.py"])
+@pytest.mark.parametrize("rel", ["assist_guide.py", "assist_research_lib.py", "execution_evidence.py"])
 def test_the_verified_sites_regenerate_through_the_verifier(rel):
     """A site that calls verify_answer but hands it no `regenerate` callable
     has silently downgraded to annotate-only. Every path must offer one,

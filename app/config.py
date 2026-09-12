@@ -1221,6 +1221,17 @@ class Settings(BaseSettings):
     # `assumed_values`, so the plan can no longer launder a model's guess into
     # downstream provenance (the §17.1034 plan-only tier, closed at its source).
     dag_value_provenance_enabled: bool = True
+    # §17.1039 — the evidence layer on the EXECUTOR. `retrieval`: a SearXNG
+    # node fetches page content for a need-derived query (task terms + named
+    # hardware), ranked by relevance → authority → date and rendered with
+    # dates, instead of snippets for its bare title. `verification`: every
+    # node output's addresses / ports / versions / URLs are traced to the
+    # brief + request, the task text, upstream outputs and the sources; one
+    # regeneration with the values named (never for CodeGen); what remains is
+    # REPORTED in execution_logs and the node result, not appended to the
+    # output (a footer in output_text would be parroted downstream).
+    execution_evidence_retrieval_enabled: bool = True
+    execution_answer_verification_enabled: bool = True
     # §17.687 — recent-conversation recall. The §17.650 digest recovers only
     # COMMITTED node output; notes recover only what the OPERATOR captured. So a
     # program the engine SUGGESTED a turn ago (a decision node's "## My
