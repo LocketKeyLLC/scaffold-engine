@@ -292,3 +292,7 @@ def test_compile_runs_the_check_on_every_exit_and_selects_evidence():
     finish = body[body.index("async def _finish("):body.index("deliverable = [")]
     assert "_maybe_compile_value_check(job_id, text_value, nodes)" in finish
     assert "output_text, depends_on, evidence," in body
+    # Live (2e74196b): asyncpg could not type a bare `:k` inside
+    # jsonb_build_object → "could not determine data type of parameter $1"
+    # and the record silently never landed. The key must be CAST.
+    assert "jsonb_build_object(CAST(:k AS text), CAST(:v AS jsonb))" in src

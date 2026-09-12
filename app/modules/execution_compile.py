@@ -334,7 +334,7 @@ async def _record_job_metadata(job_id: str, key: str, record: dict) -> None:
             await mdb.execute(
                 text(
                     "UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) "
-                    "|| jsonb_build_object(:k, CAST(:v AS jsonb)) "
+                    "|| jsonb_build_object(CAST(:k AS text), CAST(:v AS jsonb)) "
                     "WHERE id = :jid"
                 ),
                 {"k": key, "v": json.dumps(record), "jid": job_id},
