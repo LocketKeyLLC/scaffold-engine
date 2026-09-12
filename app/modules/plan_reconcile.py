@@ -13,8 +13,10 @@ step that carried it. The model is then told the truth in one prompt block
 and shown the stale plan in another; the §17.1034 plan-only tier is how that
 contradiction has been papered over.
 
-This module owns ONE trigger for now — *fix confirmed*: a step is committed
-after one or more fix replies on it. It derives correction records
+Triggers so far — *fix confirmed* (§17.1043): a step is committed after one
+or more fix replies on it; *decision committed* (§17.1044): a ``decision``
+node is committed, and the chosen option is applied to every pending step
+that depends on it or was written for a rejected option. It derives correction records
 deterministically (old value → new value, by kind), applies them to every
 PENDING step's task text, invalidates any cached walkthrough that mentions the
 old value so it regenerates through the verified path, records the correction
@@ -169,6 +171,8 @@ def plan_changes(nodes: list[dict], steps: list[dict], corrections: list[dict],
 
 def render_note(result: dict) -> str:
     """The operator-facing line. Empty when nothing changed."""
+    if result and result.get("trigger") == "decision":
+        return render_decision_note(result)
     if not result or not (result.get("node_updates") or result.get("guidance_resets")):
         return ""
     src = result.get("source_node_key", "?")
@@ -184,6 +188,242 @@ def render_note(result: dict) -> str:
         lines.append(f"- the walkthrough{'s' if len(resets) > 1 else ''} for {', '.join(resets)} "
                      f"will be rewritten from the corrected plan when you reach {'them' if len(resets) > 1 else 'it'}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# §17.1044 — the decision trigger.
+#
+# A decision node's notes carry its options ("(1) label — trade-off; (2) …",
+# the §17.663 planner rule) and the committed evidence is the deliberation's
+# decision record (or the operator's plain answer). The chosen option is read
+# from the record deterministically — an option number, or the one option
+# whose distinctive terms the record names. What changes: every PENDING step
+# downstream of the decision (and any pending step that names a rejected
+# option) gets a directive line naming the chosen and rejected options; cached
+# walkthroughs that name a rejected option regenerate; the ledger gets a fact;
+# and STRUCTURAL impact (a step written only for a rejected option) is routed
+# through the existing surface-and-ask re-plan (§17.677) — a model may propose
+# a drop/revise, the operator confirms, nothing structural is applied silently.
+# ---------------------------------------------------------------------------
+
+DECISION_PREFIX = "🔁 Decision at step"
+_OPTION_PAREN_RE = re.compile(r"\((\d{1,2})\)\s*(.+?)(?=\s*(?:;\s*)?\(\d{1,2}\)\s|\s*$)", re.S)
+_OPTION_LINE_RE = re.compile(r"(?m)^\s*(\d{1,2})[.)]\s+(.+?)\s*$")
+_CHOICE_NUM_RE = re.compile(r"(?i)\b(?:option|choice|go with|pick|choose|chose|selected?)\s*\(?#?(\d{1,2})\)?|^\s*\(?(\d{1,2})\)?[.)]?\s*(?:—|-|:)")
+_TERM_RE = re.compile(r"(?<![a-z0-9-])(?:--?)?[a-z0-9][a-z0-9_.+-]{2,}")  # keeps `--nginx` distinct from `nginx`
+_TERM_STOP = frozenset({
+    "the", "and", "for", "with", "that", "this", "from", "into", "than", "then",
+    "your", "will", "each", "only", "also", "when", "while", "does", "not", "but",
+    "use", "uses", "using", "via", "its", "can", "may", "fit", "tradeoff",
+    "trade-off", "option", "options", "suggested", "default", "existing", "keep",
+})
+
+
+def parse_options(notes: str) -> list[dict]:
+    """``[{n, label, text}]`` from a decision node's notes. ``label`` is the
+    text up to the first em-dash / colon / period; ``text`` the whole option."""
+    body = notes or ""
+    m = re.search(r"(?i)options?\s*:\s*", body)
+    if m:
+        body = body[m.end():]
+    # The planner's trailing "Suggested: …" / "Record the operator's choice…"
+    # sentences are not part of the last option (live: they made the first
+    # option's own terms look shared with the second).
+    body = re.split(r"(?i)\b(?:suggested(?:\s+default)?|recommended)\s*:", body)[0]
+    found = [(int(n), t.strip()) for n, t in _OPTION_PAREN_RE.findall(body)]
+    if len(found) < 2:
+        found = [(int(n), t.strip()) for n, t in _OPTION_LINE_RE.findall(body)]
+    out: list[dict] = []
+    seen: set[int] = set()
+    for n, t in found:
+        if n in seen or not t:
+            continue
+        seen.add(n)
+        label = re.split(r"\s+(?:—|–|-{2,})\s+|:\s|\.\s", t, maxsplit=1)[0].strip(" .;")
+        out.append({"n": n, "label": label[:120], "text": t[:400]})
+    return out if len(out) >= 2 else []
+
+
+def option_terms(opt: dict, others: list[dict]) -> set[str]:
+    """The option's distinctive terms: its LABEL's tokens minus the ones any
+    other option uses — what a later step names when it means THIS option. The
+    trade-off text is too broad ("rewrites the server block" would flag any
+    step that says "server block"); it is used only when the label has none."""
+    def _toks(txt: str) -> set[str]:
+        return {t for t in _TERM_RE.findall((txt or "").lower()) if t not in _TERM_STOP and not t.isdigit()}
+    shared: set[str] = set()
+    for o in others:
+        shared |= _toks(o.get("label", "") + " " + o.get("text", ""))
+    mine = {t for t in _toks(opt.get("label", "")) if t not in shared}
+    if not mine:
+        mine = {t for t in _toks(opt.get("text", "")) if t not in shared}
+    return mine
+
+
+def choose(options: list[dict], record: str) -> Optional[dict]:
+    """The option the committed record names. A number wins; else the single
+    option whose distinctive terms the record's opening names; else None."""
+    rec = (record or "").strip()
+    if not options or not rec:
+        return None
+    head = rec[:400]
+    m = _CHOICE_NUM_RE.search(head)
+    if m:
+        n = int(m.group(1) or m.group(2))
+        for o in options:
+            if o["n"] == n:
+                return o
+    scores = []
+    low = head.lower()
+    for o in options:
+        terms = option_terms(o, [x for x in options if x is not o])
+        hits = sum(1 for t in terms if re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", low))
+        scores.append((hits, o))
+    scores.sort(key=lambda x: -x[0])
+    if scores and scores[0][0] >= 2 and (len(scores) == 1 or scores[0][0] > scores[1][0]):
+        return scores[0][1]
+    return None
+
+
+def _names_option(text_value: str, terms: set[str]) -> bool:
+    low = (text_value or "").lower()
+    hits = sum(1 for t in terms if re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", low))
+    return hits >= 2 or any(("-" in t and len(t) >= 5) and re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", low) for t in terms)
+
+
+def decision_directive(source_node_key: str, chosen: dict, rejected: list[dict]) -> str:
+    rej = "; ".join(f"({o['n']}) {o['label']}" for o in rejected) or "none"
+    return (f"{DECISION_PREFIX} {source_node_key}: chosen ({chosen['n']}) {chosen['label']}; "
+            f"not {rej}. Follow the chosen option — steps written for a rejected option do not apply as written.")
+
+
+def decision_changes(nodes: list[dict], steps: list[dict], *, source_node_key: str,
+                     downstream: set[str], chosen: dict, rejected: list[dict]) -> dict:
+    """Pure: pending steps that get the directive (downstream of the decision,
+    or naming a rejected option) and cached walkthroughs to regenerate."""
+    rej_terms: set[str] = set()
+    for o in rejected:
+        rej_terms |= option_terms(o, [chosen] + [x for x in rejected if x is not o])
+    directive = decision_directive(source_node_key, chosen, rejected)
+    node_updates: list[dict] = []
+    for n in nodes or []:
+        nk = n.get("node_key")
+        if nk == source_node_key or (n.get("status") or "") not in ("pending", "blocked"):
+            continue
+        txt = n.get("prompt_template") or ""
+        if f"{DECISION_PREFIX} {source_node_key}:" in txt:
+            continue  # idempotent
+        body = "\n".join(ln for ln in txt.splitlines() if not ln.lstrip().startswith(DECISION_PREFIX))
+        names_rejected = bool(rej_terms) and _names_option(body, rej_terms)
+        if nk in downstream or names_rejected:
+            node_updates.append({"node_key": nk, "prompt_template": txt.rstrip() + "\n\n" + directive,
+                                 "reason": "names a rejected option" if names_rejected else "depends on the decision"})
+    guidance_resets: list[str] = []
+    for s in steps or []:
+        nk = s.get("node_key")
+        if nk == source_node_key or (s.get("status") or "") in ("committed", "skipped", "handed_off", "escalated"):
+            continue
+        g = s.get("guidance") or ""
+        if g and rej_terms and _names_option(g, rej_terms):
+            guidance_resets.append(nk)
+    return {"node_updates": node_updates, "guidance_resets": guidance_resets}
+
+
+def render_decision_note(result: dict) -> str:
+    if not result or not (result.get("node_updates") or result.get("guidance_resets") or result.get("replan_proposal")):
+        return ""
+    src = result.get("source_node_key", "?")
+    chosen = result.get("chosen") or {}
+    lines = [f"🔁 **Decision at step {src} applied to the plan** — chosen ({chosen.get('n', '?')}) {chosen.get('label', '')}."]
+    ups = result.get("node_updates") or []
+    if ups:
+        lines.append(f"- the steps ahead now carry it: {', '.join(u['node_key'] for u in ups)}")
+    named = [u["node_key"] for u in ups if u.get("reason") == "names a rejected option"]
+    if named:
+        lines.append(f"- {', '.join(named)} were written for an option you did not choose — flagged")
+    resets = result.get("guidance_resets") or []
+    if resets:
+        lines.append(f"- the walkthrough{'s' if len(resets) > 1 else ''} for {', '.join(resets)} will be rewritten when you reach {'them' if len(resets) > 1 else 'it'}")
+    if result.get("replan_proposal"):
+        lines.append("- some steps may need revising or dropping for this choice — see the plan-change proposal below and confirm or dismiss it")
+    return "\n".join(lines)
+
+
+async def _decision_trigger(*, db, session_id: str, job_id: str, node_key: str,
+                            evidence: str, nodes: list[dict], steps: list[dict]) -> Optional[dict]:
+    src = next((n for n in nodes if n.get("node_key") == node_key), None)
+    options = parse_options((src or {}).get("prompt_template") or "")
+    if not options:
+        logger.info("plan_reconcile_decision_no_options session_id=%s node_key=%s", session_id, node_key)
+        return None
+    chosen = choose(options, evidence)
+    if chosen is None:
+        logger.info("plan_reconcile_decision_unresolved session_id=%s node_key=%s options=%d",
+                    session_id, node_key, len(options))
+        return None
+    rejected = [o for o in options if o is not chosen]
+    from app.modules.assist_replan import downstream_node_keys
+    try:
+        downstream = set(await downstream_node_keys(db=db, job_id=job_id, root_node_key=node_key))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("plan_reconcile_downstream_failed session_id=%s err=%r", session_id, exc)
+        downstream = set()
+    changes = decision_changes(nodes, steps, source_node_key=node_key, downstream=downstream,
+                               chosen=chosen, rejected=rejected)
+    changes.update({"trigger": "decision", "source_node_key": node_key, "chosen": chosen,
+                    "rejected": rejected, "replan_proposal": None})
+    for u in changes["node_updates"]:
+        await db.execute(text("""
+            UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+             WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+        """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
+    for nk in changes["guidance_resets"]:
+        await db.execute(text("""
+            UPDATE assist_steps
+               SET guidance = NULL, guidance_status = 'none', guidance_generated_at = NULL, updated_at = NOW()
+             WHERE session_id = :sid AND node_key = :nk
+               AND status NOT IN ('committed', 'skipped', 'handed_off', 'escalated')
+        """), {"sid": session_id, "nk": nk})
+    entry = {
+        "at": datetime.now(timezone.utc).isoformat(), "trigger": "decision",
+        "source_node_key": node_key, "chosen": chosen, "rejected": rejected,
+        "nodes": [u["node_key"] for u in changes["node_updates"]],
+        "guidance_resets": changes["guidance_resets"],
+    }
+    await db.execute(text("""
+        UPDATE jobs
+           SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{reconciliation}',
+                                    COALESCE(metadata->'reconciliation', '[]'::jsonb) || CAST(:e AS jsonb))
+         WHERE id = :jid
+    """), {"e": json.dumps(entry), "jid": job_id})
+    await db.commit()
+    try:
+        from app.modules.assist_environment import set_environment
+        await set_environment(session_id=session_id, db=db, facts=[
+            f"Decided at {node_key}: ({chosen['n']}) {chosen['label']}; not "
+            + ("; ".join(f"({o['n']}) {o['label']}" for o in rejected) or "none")])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("plan_reconcile_fact_failed session_id=%s err=%r", session_id, exc)
+    # Structural impact → the existing surface-and-ask re-plan (model proposes,
+    # operator confirms). Only when a pending step names a rejected option.
+    named = [u["node_key"] for u in changes["node_updates"] if u.get("reason") == "names a rejected option"]
+    if named:
+        try:
+            from app.modules.assist_notes import assess_note_impact
+            note = (f"Decision at {node_key} ({(src or {}).get('title') or node_key}): the operator chose "
+                    f"({chosen['n']}) {chosen['label']}. Rejected: "
+                    + ("; ".join(f"({o['n']}) {o['label']}" for o in rejected) or "none")
+                    + f". Steps {', '.join(named)} were written for a rejected option and must be revised or dropped.")
+            changes["replan_proposal"] = await assess_note_impact(
+                session_id=session_id, note_kind="decision", note_text=note, db=db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("plan_reconcile_decision_impact_failed session_id=%s err=%r", session_id, exc)
+    logger.warning(
+        "plan_reconcile_decision_applied session_id=%s node_key=%s chosen=%r rejected=%r nodes=%r "
+        "guidance_resets=%r proposal=%s", session_id, node_key, chosen["label"],
+        [o["label"] for o in rejected], entry["nodes"], entry["guidance_resets"],
+        bool(changes.get("replan_proposal")))
+    return changes
 
 
 async def _fix_context(*, db, session_id: str, node_key: str) -> Optional[dict]:
@@ -216,17 +456,21 @@ async def reconcile_after_commit(*, db, session_id: str, job_id: str, node_key: 
     if not settings.plan_reconcile_enabled:
         return None
     try:
-        ctx = await _fix_context(db=db, session_id=session_id, node_key=node_key)
-        if not ctx:
-            return None
-        closing = (evidence or "") + "\n" + (ctx["closing"] or "")
         nodes = [dict(r) for r in (await db.execute(text("""
-            SELECT node_key, status, prompt_template FROM dag_nodes
+            SELECT node_key, status, node_type, title, prompt_template FROM dag_nodes
              WHERE job_id = :jid ORDER BY execution_order
         """), {"jid": job_id})).mappings().all()]
         steps = [dict(r) for r in (await db.execute(text("""
             SELECT node_key, status, guidance FROM assist_steps WHERE session_id = :sid
         """), {"sid": session_id})).mappings().all()]
+        src = next((n for n in nodes if n.get("node_key") == node_key), None)
+        if src and (src.get("node_type") or "").strip().lower() == "decision":
+            return await _decision_trigger(db=db, session_id=session_id, job_id=job_id,
+                                           node_key=node_key, evidence=evidence, nodes=nodes, steps=steps)
+        ctx = await _fix_context(db=db, session_id=session_id, node_key=node_key)
+        if not ctx:
+            return None
+        closing = (evidence or "") + "\n" + (ctx["closing"] or "")
         plan_text = "\n".join((n.get("prompt_template") or "") for n in nodes
                               if (n.get("status") or "") in ("pending", "blocked"))
         from app.modules.assist_environment import _environment_from_metadata
