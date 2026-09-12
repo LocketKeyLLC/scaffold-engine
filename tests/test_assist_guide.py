@@ -462,7 +462,10 @@ async def test_research_one_synthesizes_from_job_context_without_web_sources():
             job_context="## Project context — done work\nHOST_A=10.0.0.1, HOST_B=10.0.0.2 via crossover",
         )
     assert res["sources"] == []           # web/KB were dry
-    assert res["answer"] == "Use HOST_A=10.0.0.1"  # but the project context carried it
+    # but the project context carried it — and §17.1034 notes that the value
+    # traces only to the project's own digest, not to anything confirmed.
+    assert res["answer"].startswith("Use HOST_A=10.0.0.1")
+    assert "From the plan, not yet confirmed" in res["answer"]
     chat.assert_called_once()
     # chat_until_nonempty forwards messages= as a kwarg to model_router.chat.
     messages = chat.call_args.kwargs["messages"]

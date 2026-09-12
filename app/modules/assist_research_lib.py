@@ -585,6 +585,7 @@ async def research_one(
     provenance: Optional[str] = None, flagged: Optional[set] = None,
     sourced: Optional[set] = None,  # §17.1030 — the session's source-confirmed ledger
     owned_hosts: Optional[set] = None,  # §17.1032 — hosts the operator's ledger names
+    confirmed: Optional[str] = None,  # §17.1034 — the operator's ledger text (confirmed tier)
 ) -> dict:
     """Confirm a single operator-supplied question and optionally synthesize
     a short cited answer. Does not persist — this is a side query.
@@ -805,6 +806,7 @@ async def research_one(
                     trusted=_trusted, flagged=flagged,  # §17.1028
                     sourced=sourced,  # §17.1030
                     owned_hosts=owned_hosts,  # §17.1032
+                    confirmed=confirmed or "",  # §17.1034
                 )
                 grounding = _vreport
             if answer:  # §17.897 — code-enforced copy-paste format

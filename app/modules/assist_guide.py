@@ -2360,13 +2360,15 @@ async def generate_guidance(
             return cand
 
         from app.modules.assist_evidence import (
-            owned_hosts as _owned_hosts, sourced_values_from_environment, verify_answer)
+            ledger_text as _ledger_text, owned_hosts as _owned_hosts,
+            sourced_values_from_environment, verify_answer)
         text_out, _vreport_guide = await verify_answer(
             text_out, sources=sources, corpus=_provenance, need=None,
             node_key=node_key, label="assist_guide", regenerate=_regen_guide,
             trusted=_trusted, flagged=flagged,
             sourced=sourced_values_from_environment(environment),  # §17.1030
             owned_hosts=_owned_hosts(environment, operator_notes),  # §17.1032
+            confirmed=_ledger_text(environment, operator_notes),  # §17.1034
         )
         _sourced_meta_guide = list(_vreport_guide.get("sourced_now") or [])
     # §17.897 — every command the operator is handed must be copy-pasteable,
@@ -5340,13 +5342,15 @@ async def generate_fix(
             return cand
 
         from app.modules.assist_evidence import (
-            owned_hosts as _owned_hosts, sourced_values_from_environment)
+            ledger_text as _ledger_text, owned_hosts as _owned_hosts,
+            sourced_values_from_environment)
         text_out, _vreport_fix = await verify_answer(
             text_out, sources=sources, corpus=_provenance, need=need,
             node_key=node_key, label="assist_fix", regenerate=_regen_grounded,
             trusted=_trusted, flagged=_flagged,  # §17.1028
             sourced=sourced_values_from_environment(environment),  # §17.1030
             owned_hosts=_owned_hosts(environment, operator_notes),  # §17.1032
+            confirmed=_ledger_text(environment, operator_notes),  # §17.1034
         )
         _sourced_meta_fix = list(_vreport_fix.get("sourced_now") or [])
     # §17.897 — every command the operator is handed must be copy-pasteable,
@@ -6295,7 +6299,8 @@ async def generate_guidance_stream(
         _trusted = "\n".join([ctx.base_prompt or "", node_description or "",
                               _render_research_block(sources)])
         from app.modules.assist_evidence import (
-            owned_hosts as _owned_hosts, sourced_values_from_environment, verify_answer)
+            ledger_text as _ledger_text, owned_hosts as _owned_hosts,
+            sourced_values_from_environment, verify_answer)
         _before = text_out
         text_out, _vreport_stream = await verify_answer(
             text_out, sources=sources, corpus=_provenance, need=None,
@@ -6304,6 +6309,7 @@ async def generate_guidance_stream(
             trusted=_trusted, flagged=flagged,
             sourced=sourced_values_from_environment(environment),  # §17.1030
             owned_hosts=_owned_hosts(environment, operator_notes),  # §17.1032
+            confirmed=_ledger_text(environment, operator_notes),  # §17.1034
         )
         meta["sourced_values"] = list(_vreport_stream.get("sourced_now") or [])
         if len(text_out) > len(_before):
