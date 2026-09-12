@@ -915,8 +915,13 @@ async def verify_answer(
     sourced: Optional[set] = None,
     owned_hosts: Optional[set] = None,
     confirmed: str = "",
+    annotate: bool = True,
 ) -> tuple[str, dict]:
     """Check an answer against its grounding; regenerate once; else annotate.
+
+    ``annotate=False`` (§17.1039, the executor): the footer is returned in
+    ``report["footer"]`` and the text is left as written — a footer inside a
+    node's output would be parroted downstream and compiled into the deliverable.
 
     ``trusted`` / ``flagged`` — §17.1028: values a previous reply already
     flagged are credited only by the sources and the operator's current
@@ -932,7 +937,7 @@ async def verify_answer(
     report: dict = {"checked": False, "unsupported": [], "citation": None,
                     "regenerated": False, "annotated": False, "sourced_now": [],
                     "off_question": False, "command_shape": [], "plan_only": [],
-                    "unsourced_interface": False}
+                    "unsourced_interface": False, "footer": ""}
     if not settings.assist_answer_verification_enabled or not (answer or "").strip():
         return answer, report
     report["checked"] = True
@@ -1009,9 +1014,12 @@ async def verify_answer(
         logger.info("assist_answer_unsourced_interface node_key=%s label=%s max_authority=%.2f",
                     node_key, label, max_source_authority(sources))
     if _fails(unsupported, cite, off, shape) or plan_only or unsourced_iface:
-        answer = answer.rstrip() + grounding_footer(
+        footer = grounding_footer(
             unsupported, cite, off_question=_q if off else None, shape=shape,
             plan_only=plan_only, unsourced_interface=unsourced_iface)
+        report["footer"] = footer
+        if annotate:
+            answer = answer.rstrip() + footer
         report["annotated"] = bool(_fails(unsupported, cite, off, shape))
     report["unsourced_interface"] = unsourced_iface
     report["off_question"] = off

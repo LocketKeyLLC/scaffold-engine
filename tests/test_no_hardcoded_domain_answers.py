@@ -33,6 +33,7 @@ QUERY_MODULES = [
     "app/modules/assist_policy.py",
     "app/modules/assist_evidence.py",  # §17.1027 — need / evidence / verification
     "app/modules/plan_evidence.py",  # §17.1038 — plan-level value provenance
+    "app/modules/execution_evidence.py",  # §17.1039 — the executor's evidence layer
 ]
 
 # §17.1026 — literal phrase collections that are NOT answer keys, each with its
@@ -115,6 +116,7 @@ DOMAIN_VOCAB_BASELINE = {
     "assist_policy.py": 1,
     "assist_evidence.py": 0,
     "plan_evidence.py": 0,
+    "execution_evidence.py": 0,
 }
 
 
