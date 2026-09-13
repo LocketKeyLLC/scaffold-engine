@@ -222,7 +222,7 @@ class TestApplyNoteReplan:
             proposals=[{"node_key": "T5", "action": "drop"}],
         )
         assert out == {"revised": [], "dropped": ["T5"],
-                       "reopened": [], "reopened_prior": {}}
+                       "reopened": [], "reopened_prior": {}, "rewritten": []}  # §17.1048
         db.commit.assert_awaited_once()
 
     async def test_revise_appends_description_and_busts_guidance(self):
@@ -238,7 +238,7 @@ class TestApplyNoteReplan:
                         "proposed_change": "switch to passphrase LUKS"}],
         )
         assert out == {"revised": ["T1"], "dropped": [],
-                       "reopened": [], "reopened_prior": {}}
+                       "reopened": [], "reopened_prior": {}, "rewritten": []}  # §17.1048
         # the description UPDATE carried the concrete change
         sqls = [str(c.args[0]) for c in db.execute.await_args_list]
         params = [c.args[1] for c in db.execute.await_args_list]
@@ -256,7 +256,7 @@ class TestApplyNoteReplan:
             proposals=[{"node_key": "T1", "action": "revise", "proposed_change": "x"}],
         )
         assert out == {"revised": [], "dropped": [],
-                       "reopened": [], "reopened_prior": {}}
+                       "reopened": [], "reopened_prior": {}, "rewritten": []}  # §17.1048
 
     async def test_reopen_resets_done_node_and_preserves_prior(self):
         # §17.747 — reopen captures the prior output, resets the done node +
