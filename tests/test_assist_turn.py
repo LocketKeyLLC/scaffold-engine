@@ -507,3 +507,26 @@ async def test_fallback_path_actually_invokes_tracker():
     body = track.await_args.args[1]
     assert body.message.startswith("ok that box")
     assert "assist_guide_delta" in _names(ev)
+
+
+async def test_add_step_with_reshape_tag_dispatches_add_step_not_note():
+    """§17.1053b — live: the model routed "add a step for this" to add_step
+    AND tagged plan_impact=reshape; the reshape branch ran first and filed a
+    note. add_step IS the plan change — it must dispatch."""
+    p1, p2 = _guide_patches(node_key="ADD1")
+    added = {"node_key": "ADD1", "title": "Repair the Caddyfile in LXC 120",
+             "steps": [{"node_key": "ADD1", "title": "Repair the Caddyfile in LXC 120"}], "count": 1}
+    with p1, p2, \
+         patch("app.modules.assist_agent.ingest_turn", new=AsyncMock()), \
+         patch("app.modules.assist_decide.decide_turn",
+               new=AsyncMock(return_value={"action": "add_step", "confidence": "high",
+                                           "plan_impact": "reshape", "node_key": "T37"})), \
+         patch("app.routers.assist.assist_add_step", new=AsyncMock(return_value=added)) as add, \
+         patch("app.routers.assist.assist_note", new=AsyncMock()) as note:
+        ev = await _collect(message="add a step for this")
+    names = _names(ev)
+    add.assert_awaited_once()
+    note.assert_not_awaited()
+    assert "assist_note_recorded" not in names
+    assert ev[-1][1]["handled"] == "add_step"
+    assert any("Added a step" in (d.get("text") or "") for n, d in ev if n == "assist_turn_status")

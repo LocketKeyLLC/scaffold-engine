@@ -476,7 +476,10 @@ async def _run_turn_inner(
         nk = (str(d.get("node_key") or "").strip() or node_key)
 
         # 4. Dispatch — mirrors the pipeline's `_dispatch_decision` semantics.
-        if confident and (action == "note" or impact == "reshape"):
+        # §17.1053b — add_step IS the plan change; a reshape tag on it must
+        # not divert the turn to the note path (live: "add a step for this"
+        # routed add_step + reshape → filed as a note, nothing added).
+        if confident and (action == "note" or (impact == "reshape" and action != "add_step")):
             async for e in _note(session_id, d, text_, nk, db):
                 yield e
             # §17.903 — recording is not answering. A pivot framed as a QUESTION

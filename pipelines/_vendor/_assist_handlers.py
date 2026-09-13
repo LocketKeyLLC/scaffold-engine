@@ -2347,7 +2347,8 @@ def _dispatch_decision(
         yield from assist_checklist_cmd(pipe, session_id); return
 
     # Plan-affecting → surface-and-ask re-plan (server assess_note_impact).
-    if action == "note" or impact == "reshape":
+    # §17.1053b — add_step IS the plan change; a reshape tag must not divert it.
+    if action == "note" or (impact == "reshape" and action != "add_step"):
         kind = decision.get("note_kind") or ("decision" if impact == "reshape" else "note")
         yield from assist_note_cmd(
             pipe, session_id, (decision.get("note_text") or msg).strip(),

@@ -389,3 +389,21 @@ def test_think_opts_only_reach_ollama():
     assert model_router._think_opts(ol, False) == {"think": False}
     assert model_router._think_opts(oa, False) == {}
     assert model_router._think_opts(ol, None) == {}
+
+
+# ── §17.1053b: a reshape tag must not hijack add_step ────────────────────────
+
+def test_override_normalizes_reshape_on_add_step():
+    d = {"action": "add_step", "confidence": "high", "plan_impact": "reshape",
+         "rationale": "", "signals": {}}
+    out = P.apply_deterministic_overrides(d, "add a step for this")
+    assert out["action"] == "add_step" and out["plan_impact"] == "none"
+    assert out["impact_normalized"] == "add_step_is_the_plan_change"
+    # a phrase-forced add_step over a reshape-tagged question is normalised too
+    q = {"action": "question", "confidence": "high", "plan_impact": "reshape",
+         "rationale": "", "signals": {}}
+    out = P.apply_deterministic_overrides(q, "add a step for this")
+    assert out["action"] == "add_step" and out["plan_impact"] == "none"
+    # untouched otherwise
+    n = {"action": "note", "confidence": "high", "plan_impact": "reshape", "rationale": "", "signals": {}}
+    assert P.apply_deterministic_overrides(n, "use zfs instead of lvm")["plan_impact"] == "reshape"
