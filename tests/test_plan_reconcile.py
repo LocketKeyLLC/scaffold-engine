@@ -377,3 +377,36 @@ def test_a_bare_port_pin_is_a_port_so_the_mapping_rule_applies():
     assert "-p 127.0.0.1:3002:3001 x; curl http://127.0.0.1:3002" in body
     corr2, _ = pr.substitution_corrections({"GATEWAY": "8080"}, {"GATEWAY": "8081"})
     assert corr2[0]["kind"] == "port"
+
+
+# ---- §17.1047 — the plan-view diff + revert ---------------------------------
+
+def test_every_entry_records_before_and_after_per_node():
+    nodes = [{"node_key": "T4", "status": "pending", "prompt_template": "curl 127.0.0.1:3001"}]
+    ups = pr.plan_changes(nodes, [], [{"kind": "port", "old": "3001", "new": "3002"}], source_node_key="T2")["node_updates"]
+    d = pr.node_diffs(nodes, ups)
+    assert d[0]["node_key"] == "T4" and d[0]["before"] == "curl 127.0.0.1:3001" and d[0]["after"].startswith("curl 127.0.0.1:3002")
+    src = pathlib.Path(__file__).resolve().parents[1] / "app/modules/plan_reconcile.py"
+    assert src.read_text().count('"changes": node_diffs(nodes, changes["node_updates"])') == 4  # all four triggers
+
+
+def test_revertable_needs_pending_and_unchanged_text_and_not_already_reverted():
+    entry = {"changes": [{"node_key": "T4", "before": "a", "after": "b"}, {"node_key": "T5", "before": "c", "after": "d"},
+                         {"node_key": "T6", "before": "e", "after": "f"}]}
+    nodes = [{"node_key": "T4", "status": "pending", "prompt_template": "b"},
+             {"node_key": "T5", "status": "done", "prompt_template": "d"},
+             {"node_key": "T6", "status": "pending", "prompt_template": "f-edited"}]
+    assert [c["node_key"] for c in pr.revertable(entry, nodes)] == ["T4"]
+    assert pr.revertable({**entry, "reverted_at": "2026-09-13T00:00:00Z"}, nodes) == []
+
+
+def test_the_ledger_has_an_endpoint_a_plan_panel_and_a_cli_view():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    router = (root / "app/routers/jobs.py").read_text()
+    assert '@router.get("/jobs/{job_id}/reconciliation"' in router
+    assert '@router.post("/jobs/{job_id}/reconciliation/{index}/revert"' in router
+    assert "_visible_job_or_404(job_id, db, principal)" in router  # owner-scoped like /jobs/{id}
+    spa = (root / "app/ui/static/views/plan.js").read_text()
+    assert "/reconciliation`" in spa and "Plan changes" in spa and "/revert`" in spa and "plan-change-before" in spa
+    cli = (root / "cli/scaffold_cli/main.py").read_text()
+    assert '@jobs.command("changes"' in cli and "/reconciliation" in cli and "revert" in cli

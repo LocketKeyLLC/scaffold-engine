@@ -681,3 +681,55 @@ async def set_job_budget(
         cost_budget_usd=(float(row["cost_budget_usd"]) if row and row["cost_budget_usd"] is not None else None),
         status=status,
     )
+
+
+# ---------------------------------------------------------------------------
+# §17.1047 — the plan change ledger (plan reconciliation) as a diff, with revert.
+# ---------------------------------------------------------------------------
+
+async def _visible_job_or_404(job_id: str, db: AsyncSession, principal: Principal) -> None:
+    try:
+        UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=422, detail="job_id must be a valid UUID")
+    owner_clause, owner_params = owner_filter(principal, column="j.owner")
+    row = (await db.execute(
+        text(f"SELECT j.id FROM jobs j WHERE j.id = :id{owner_clause}"),
+        {"id": job_id, **owner_params},
+    )).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+
+
+@router.get("/jobs/{job_id}/reconciliation", tags=["Management"])
+async def get_job_reconciliation(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1047 — every change the reconciliation triggers (§17.1043–1046)
+    applied to this job's plan: trigger, source step, corrections, and per
+    node the task text before and after — with which nodes can still be
+    reverted (pending, text unchanged since)."""
+    await _visible_job_or_404(job_id, db, principal)
+    from app.modules.plan_reconcile import list_reconciliation
+    entries = await list_reconciliation(db=db, job_id=job_id)
+    return {"job_id": job_id, "entries": entries, "count": len(entries)}
+
+
+@router.post("/jobs/{job_id}/reconciliation/{index}/revert", tags=["Management"])
+async def revert_job_reconciliation(
+    job_id: str,
+    index: int,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1047 — put back the task text of the nodes an entry rewrote, where
+    they are still pending and unchanged since; stamps the entry reverted."""
+    await _visible_job_or_404(job_id, db, principal)
+    from app.modules.plan_reconcile import revert_reconciliation
+    res = await revert_reconciliation(db=db, job_id=job_id, index=index)
+    if res.get("error"):
+        raise HTTPException(status_code=404, detail=res["error"])
+    return {"job_id": job_id, **res}
+

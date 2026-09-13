@@ -411,6 +411,7 @@ async def _decision_trigger(*, db, session_id: str, job_id: str, node_key: str,
         "at": datetime.now(timezone.utc).isoformat(), "trigger": "decision",
         "source_node_key": node_key, "chosen": chosen, "rejected": rejected,
         "nodes": [u["node_key"] for u in changes["node_updates"]],
+        "changes": node_diffs(nodes, changes["node_updates"]),  # §17.1047
         "guidance_resets": changes["guidance_resets"],
     }
     await db.execute(text("""
@@ -556,6 +557,7 @@ async def reconcile_after_note(*, db, session_id: str, job_id: str, note_text: s
             "at": datetime.now(timezone.utc).isoformat(), "trigger": "note",
             "source_node_key": src, "note_kind": note_kind, "corrections": corrections,
             "nodes": [u["node_key"] for u in changes["node_updates"]],
+            "changes": node_diffs(nodes, changes["node_updates"]),  # §17.1047
             "guidance_resets": changes["guidance_resets"],
         }
         await db.execute(text("""
@@ -668,6 +670,7 @@ async def reconcile_after_substitution(*, db, session_id: str, job_id: str,
             "at": datetime.now(timezone.utc).isoformat(), "trigger": "substitution",
             "source_node_key": src, "corrections": corrections, "new_keys": new_keys,
             "nodes": [u["node_key"] for u in changes["node_updates"]],
+            "changes": node_diffs(nodes, changes["node_updates"]),  # §17.1047
             "guidance_resets": changes["guidance_resets"],
         }
         await db.execute(text("""
@@ -684,6 +687,112 @@ async def reconcile_after_substitution(*, db, session_id: str, job_id: str,
     except Exception as exc:  # noqa: BLE001 — never break an environment update
         logger.warning("plan_reconcile_substitution_failed session_id=%s err=%r", session_id, exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# §17.1047 — the change ledger as a plan-view diff, with revert.
+#
+# Every entry records, per rewritten node, the task text BEFORE and AFTER, so
+# the operator can see exactly what a trigger changed and put it back. A
+# revert restores `before` on nodes that are still pending and still carry
+# exactly the `after` text (a later trigger or edit wins), resets their cached
+# walkthroughs, and stamps the entry `reverted_at` — the ledger keeps both the
+# change and its reversal.
+# ---------------------------------------------------------------------------
+
+def node_diffs(nodes: list[dict], node_updates: list[dict]) -> list[dict]:
+    before = {n.get("node_key"): (n.get("prompt_template") or "") for n in nodes or []}
+    return [{"node_key": u["node_key"], "before": before.get(u["node_key"], ""),
+             "after": u["prompt_template"]} for u in node_updates or []]
+
+
+def revertable(entry: dict, nodes: list[dict]) -> list[dict]:
+    """The entry's node changes that can still be put back: node pending or
+    blocked, and its current text still exactly the entry's `after`."""
+    if not entry or entry.get("reverted_at"):
+        return []
+    cur = {n.get("node_key"): n for n in nodes or []}
+    out: list[dict] = []
+    for ch in entry.get("changes") or []:
+        n = cur.get(ch.get("node_key"))
+        if not n or (n.get("status") or "") not in ("pending", "blocked"):
+            continue
+        if (n.get("prompt_template") or "") != (ch.get("after") or ""):
+            continue
+        out.append(ch)
+    return out
+
+
+async def list_reconciliation(*, db, job_id: str) -> list[dict]:
+    """The job's change ledger, oldest first, each entry with its index and
+    which of its changes are still revertable."""
+    raw = (await db.execute(text("SELECT metadata->'reconciliation' FROM jobs WHERE id = :jid"),
+                            {"jid": job_id})).scalar()
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            raw = []
+    entries = list(raw or []) if isinstance(raw, list) else []
+    nodes = [dict(r) for r in (await db.execute(text("""
+        SELECT node_key, status, prompt_template FROM dag_nodes WHERE job_id = :jid
+    """), {"jid": job_id})).mappings().all()]
+    out = []
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict):
+            continue
+        rv = revertable(e, nodes)
+        out.append({**e, "index": i, "revertable": [c["node_key"] for c in rv]})
+    return out
+
+
+async def revert_reconciliation(*, db, job_id: str, index: int) -> dict:
+    """Put back the entry's node texts where still possible; stamp the entry."""
+    raw = (await db.execute(text("SELECT metadata->'reconciliation' FROM jobs WHERE id = :jid"),
+                            {"jid": job_id})).scalar()
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            raw = []
+    entries = list(raw or []) if isinstance(raw, list) else []
+    if index < 0 or index >= len(entries) or not isinstance(entries[index], dict):
+        return {"error": "no such change", "index": index}
+    entry = entries[index]
+    if entry.get("reverted_at"):
+        return {"index": index, "reverted": [], "already_reverted_at": entry["reverted_at"]}
+    nodes = [dict(r) for r in (await db.execute(text("""
+        SELECT node_key, status, prompt_template FROM dag_nodes WHERE job_id = :jid
+    """), {"jid": job_id})).mappings().all()]
+    rv = revertable(entry, nodes)
+    reverted: list[str] = []
+    for ch in rv:
+        res = await db.execute(text("""
+            UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+             WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+               AND prompt_template = :after
+        """), {"pt": ch["before"], "jid": job_id, "nk": ch["node_key"], "after": ch["after"]})
+        if res.rowcount:
+            reverted.append(ch["node_key"])
+    if reverted:
+        await db.execute(text("""
+            UPDATE assist_steps s SET guidance = NULL, guidance_status = 'none',
+                   guidance_generated_at = NULL, updated_at = NOW()
+              FROM assist_sessions ss
+             WHERE s.session_id = ss.id AND ss.job_id = :jid AND s.node_key = ANY(CAST(:keys AS text[]))
+               AND s.status NOT IN ('committed', 'skipped', 'handed_off', 'escalated')
+        """), {"jid": job_id, "keys": reverted})
+    stamp = {"reverted_at": datetime.now(timezone.utc).isoformat(), "reverted": reverted}
+    await db.execute(text("""
+        UPDATE jobs
+           SET metadata = jsonb_set(metadata, CAST(:path AS text[]),
+                                    (metadata->'reconciliation'->CAST(:i AS int)) || CAST(:st AS jsonb))
+         WHERE id = :jid
+    """), {"path": ["reconciliation", str(index)], "i": index, "st": json.dumps(stamp), "jid": job_id})
+    await db.commit()
+    logger.warning("plan_reconcile_reverted job=%s index=%d reverted=%r skipped=%r",
+                   job_id, index, reverted, [c["node_key"] for c in (entry.get("changes") or []) if c["node_key"] not in reverted])
+    return {"index": index, "reverted": reverted, "reverted_at": stamp["reverted_at"]}
 
 
 async def _fix_context(*, db, session_id: str, node_key: str) -> Optional[dict]:
@@ -770,6 +879,7 @@ async def reconcile_after_commit(*, db, session_id: str, job_id: str, node_key: 
             "source_node_key": node_key,
             "corrections": corrections,
             "nodes": [u["node_key"] for u in changes["node_updates"]],
+            "changes": node_diffs(nodes, changes["node_updates"]),  # §17.1047
             "guidance_resets": changes["guidance_resets"],
         }
         await db.execute(text("""
