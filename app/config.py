@@ -1246,6 +1246,11 @@ class Settings(BaseSettings):
     # change is recorded in jobs.metadata.reconciliation. Done steps are never
     # touched. Deterministic; ambiguous candidate sets are logged, not applied.
     plan_reconcile_enabled: bool = True
+    # §17.1048 — after a confirmed fix, a model may PROPOSE exact phrase rewrites
+    # of pending steps (method changes value pairing cannot see); each must be
+    # grounded in the fix reply / closing paste, and is only STAGED for the
+    # operator to confirm — one model call per fix-confirmed commit.
+    plan_reconcile_model_proposals_enabled: bool = True
     # §17.687 — recent-conversation recall. The §17.650 digest recovers only
     # COMMITTED node output; notes recover only what the OPERATOR captured. So a
     # program the engine SUGGESTED a turn ago (a decision node's "## My

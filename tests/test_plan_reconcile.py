@@ -187,6 +187,20 @@ def test_the_trailing_suggestion_is_not_part_of_the_last_option():
     assert {"certbot", "--nginx"} <= pr.option_terms(opts[0], [opts[1]])
 
 
+def test_a_value_that_was_part_of_the_failure_is_never_a_new_value():
+    """Live (session e7fcafb0): the fix reply named the MISSING directory and a
+    ledger fact repeated it, so `/etc/nginx/sites-available` became a second
+    'new' path candidate and the real pair was declined."""
+    failing = ["ls: cannot access '/etc/nginx/sites-available/': No such file or directory"]
+    fix = ["There is no /etc/nginx/sites-available here; create /etc/nginx/conf.d/status.hamlet-labs.net.conf instead."]
+    corr, declined = pr.derive_corrections(
+        failing_pastes=failing, fix_replies=fix,
+        closing_paste="root@u:~# ls /etc/nginx/conf.d/status.hamlet-labs.net.conf\n/etc/nginx/conf.d/status.hamlet-labs.net.conf",
+        plan_text="Create /etc/nginx/sites-available/x", confirmed_facts="this host has no /etc/nginx/sites-available directory")
+    assert declined == [] and corr == [{"kind": "path", "old": "/etc/nginx/sites-available",
+                                        "new": "/etc/nginx/conf.d/status.hamlet-labs.net.conf"}]
+
+
 def test_numbered_lines_are_parsed_too():
     opts = pr.parse_options("Choose:\n1. Caddy — automatic HTTPS\n2. Nginx — manual certbot\n")
     assert [(o["n"], o["label"]) for o in opts] == [(1, "Caddy"), (2, "Nginx")]
@@ -410,3 +424,93 @@ def test_the_ledger_has_an_endpoint_a_plan_panel_and_a_cli_view():
     assert "/reconciliation`" in spa and "Plan changes" in spa and "/revert`" in spa and "plan-change-before" in spa
     cli = (root / "cli/scaffold_cli/main.py").read_text()
     assert '@jobs.command("changes"' in cli and "/reconciliation" in cli and "revert" in cli
+
+
+# ---- §17.1048 — model-proposed corrections ----------------------------------
+
+NODES_MP = [
+    {"node_key": "T6", "status": "pending", "prompt_template": "ln -s the site file into sites-enabled and nginx -t to validate syntax."},
+    {"node_key": "T9", "status": "pending", "prompt_template": "Add a 443 server block to the existing site file."},
+    {"node_key": "T3", "status": "done", "prompt_template": "ln -s the site file into sites-enabled"},
+]
+EVIDENCE = ("This host's server uses a conf.d include, so the file is enabled by its presence — no symlink is needed. "
+            "root@u:~# nginx -t && echo OK\nOK")
+
+
+def test_grounded_proposals_keep_only_verbatim_grounded_rewrites_on_pending_steps():
+    raw = [
+        {"node_key": "T6", "old_text": "ln -s the site file into sites-enabled", "new_text": "no symlink is needed — the conf.d include enables the file", "reason": "conf.d"},
+        {"node_key": "T6", "old_text": "restart the whole box", "new_text": "reboot", "reason": "not in the step"},
+        {"node_key": "T9", "old_text": "existing site file", "new_text": "use a brand-new dashboard product instead", "reason": "invented"},
+        {"node_key": "T3", "old_text": "ln -s the site file into sites-enabled", "new_text": "no symlink is needed", "reason": "done step"},
+        {"node_key": "T6", "old_text": "nginx -t to validate syntax", "new_text": "nginx -t to validate syntax", "reason": "no-op"},
+    ]
+    kept, dropped = pr.grounded_proposals(raw, NODES_MP, evidence_text=EVIDENCE)
+    assert [k["node_key"] for k in kept] == ["T6"] and kept[0]["action"] == "rewrite"
+    assert kept[0]["current_assumption"] == "ln -s the site file into sites-enabled"
+    assert sorted(d["why"] for d in dropped) == sorted([
+        "old_text not verbatim in the step", "new_text not grounded in the fix or the operator's output",
+        "node not pending", "no replacement"])
+
+
+def test_a_provenance_line_is_never_a_rewrite_target():
+    nodes = [{"node_key": "T6", "status": "pending", "prompt_template": "do x\n\n🔁 Updated after step T5: `a` → `b` (path)."}]
+    raw = [{"node_key": "T6", "old_text": "🔁 Updated after step T5: `a` → `b` (path).", "new_text": "gone"}]
+    kept, dropped = pr.grounded_proposals(raw, nodes, evidence_text="gone")
+    assert kept == [] and dropped[0]["why"] == "old_text is a provenance line"
+
+
+def test_render_note_mentions_a_proposal_with_or_without_value_changes():
+    only = pr.render_note({"trigger": "fix_confirmed", "source_node_key": "T5", "node_updates": [],
+                           "guidance_resets": [], "replan_proposal": {"proposals": [{}]}})
+    assert only.startswith("🔁 The fix at step T5 may change how later steps are worded")
+    both = pr.render_note({"trigger": "fix_confirmed", "source_node_key": "T5",
+                           "node_updates": [{"node_key": "T6", "corrections": [{"kind": "path", "old": "/a", "new": "/b"}]}],
+                           "guidance_resets": [], "replan_proposal": {"proposals": [{}]}})
+    assert "`/a` → `/b` (path) in T6" in both and "plan-change proposal" in both
+
+
+def test_the_prompt_names_no_technology():
+    """The domain-vocabulary gate scans this module; the opening must stay generic."""
+    for word in ("nginx", "docker", "certbot", "proxmox", "ubuntu", "apt"):
+        assert word not in pr._PROPOSE_OPENING.lower()
+
+
+def test_proposals_are_staged_not_applied_and_confirm_goes_through_the_rewrite_path():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    src = (root / "app/modules/plan_reconcile.py").read_text()
+    stage = src[src.index("async def _stage_model_proposals("):src.index("async def _fix_context(")]
+    assert "_stage_replan_proposal(" in stage and "UPDATE dag_nodes" not in stage
+    replan = (root / "app/modules/assist_replan.py").read_text()
+    assert 'p.get("action") == "rewrite"' in replan and "apply_rewrite_proposals(" in replan
+    turn = (root / "app/modules/assist_turn.py").read_text()
+    fn = turn[turn.index("async def _reconciliation_note("):turn.index("async def _claim_and_guide(")]
+    assert fn.index('rec.get("replan_proposal")') < fn.index("if not note:")  # proposal even without a note
+    spa = (root / "app/ui/static/views/assist.js").read_text()
+    assert "rewrite: { icon:" in spa and "reworded" in spa
+
+
+async def test_model_proposals_are_valve_gated(monkeypatch):
+    monkeypatch.setattr(pr.settings, "plan_reconcile_model_proposals_enabled", False)
+    assert await pr._stage_model_proposals(db=None, session_id="s", node_key="T1", nodes=[], ctx={"failing": [], "fixes": ["x"]},
+                                           closing="y", confirmed_facts="") is None
+
+
+def test_a_quoted_phrase_matches_the_step_modulo_whitespace_quotes_and_case():
+    """Live (session e23e60d1): the model quoted the step's own command with
+    different spacing/backticks and the proposal was dropped as 'not verbatim'."""
+    step = "Starts from T5. Run ln -s /etc/nginx/sites-available/status.hamlet-labs.net /etc/nginx/sites-enabled/. Does NOT test or reload."
+    assert pr.locate_phrase("run `ln -s /etc/nginx/sites-available/status.hamlet-labs.net  /etc/nginx/sites-enabled/`", step) \
+        == "Run ln -s /etc/nginx/sites-available/status.hamlet-labs.net /etc/nginx/sites-enabled/"
+    assert pr.locate_phrase("symlink the file into sites-enabled", step) is None
+    raw = [{"node_key": "T6", "old_text": "run `ln -s /etc/nginx/sites-available/status.hamlet-labs.net /etc/nginx/sites-enabled/`",
+            "new_text": "No symlink is needed: the conf.d include enables the file", "reason": "conf.d"}]
+    kept, _ = pr.grounded_proposals(raw, [{"node_key": "T6", "status": "pending", "prompt_template": step}],
+                                    evidence_text="this server uses conf.d; no symlink is needed")
+    assert kept and kept[0]["current_assumption"].startswith("Run ln -s /etc/nginx/sites-available")
+
+
+def test_fix_context_keeps_only_failure_shaped_pastes_when_any_exist():
+    src = (pathlib.Path(__file__).resolve().parents[1] / "app/modules/plan_reconcile.py").read_text()
+    body = src[src.index("async def _fix_context("):src.index("async def reconcile_after_commit(")]
+    assert 'derive_need(t).kind == "error"' in body and "or before_fix" in body

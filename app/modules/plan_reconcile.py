@@ -51,6 +51,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.modules.assist_evidence import extract_specifics
+from app.providers.base import Tool
 
 logger = logging.getLogger("scaffold")
 
@@ -121,11 +122,14 @@ def derive_corrections(*, failing_pastes: list[str], fix_replies: list[str],
         if kind == "path":
             by_kind_fix[kind] = _prune_prefix_paths(by_kind_fix[kind])
             by_kind_old[kind] = _prune_prefix_paths(by_kind_old[kind])
-        # NEW: proposed by a fix AND stated by the operator's system afterwards.
-        new = [v for v in by_kind_fix[kind] if _mentions(v, confirmed)]
-        # OLD: seen while failing, absent from the closing paste and the
-        # confirmed facts, and not itself a proposed value.
-        old = [v for v in by_kind_old[kind] if v not in new and not _mentions(v, confirmed)]
+        # NEW: proposed by a fix AND stated by the operator's system afterwards —
+        # and not part of the FAILURE (live: the missing directory itself sat in
+        # the fix reply and in a ledger fact, and counted as a second "new" path).
+        new = [v for v in by_kind_fix[kind] if _mentions(v, confirmed) and not _mentions(v, failing)]
+        # OLD: seen while failing, absent from the CLOSING paste (the facts
+        # ledger may name it — "no such directory", "Corrected at Tn: old → …"),
+        # and not itself a proposed value.
+        old = [v for v in by_kind_old[kind] if v not in new and not _mentions(v, closing)]
         if not new or not old:
             continue
         if len(new) == 1 and len(old) == 1 and new[0] != old[0]:
@@ -190,6 +194,9 @@ def render_note(result: dict) -> str:
     """The operator-facing line. Empty when nothing changed."""
     if result and result.get("trigger") == "decision":
         return render_decision_note(result)
+    if result and not (result.get("node_updates") or result.get("guidance_resets")) and result.get("replan_proposal"):
+        return (f"🔁 The fix at step {result.get('source_node_key', '?')} may change how later steps are "
+                "worded — see the plan-change proposal below and confirm or dismiss it.")
     if not result or not (result.get("node_updates") or result.get("guidance_resets")):
         return ""
     src = result.get("source_node_key", "?")
@@ -210,6 +217,8 @@ def render_note(result: dict) -> str:
     if resets:
         lines.append(f"- the walkthrough{'s' if len(resets) > 1 else ''} for {', '.join(resets)} "
                      f"will be rewritten from the corrected plan when you reach {'them' if len(resets) > 1 else 'it'}")
+    if result.get("replan_proposal"):
+        lines.append("- some later steps may also need rewording — see the plan-change proposal below and confirm or dismiss it")
     return "\n".join(lines)
 
 
@@ -795,6 +804,255 @@ async def revert_reconciliation(*, db, job_id: str, index: int) -> dict:
     return {"index": index, "reverted": reverted, "reverted_at": stamp["reverted_at"]}
 
 
+# ---------------------------------------------------------------------------
+# §17.1048 — model-PROPOSED corrections for what value pairing cannot see.
+#
+# A confirmed fix often changes a METHOD, not a value: "no symlink is needed
+# here", "run it with the other interpreter", "this host has no such
+# directory". The deterministic triggers cannot name those. A model reads the
+# failing paste, the fix that worked and the operator's closing paste, and
+# proposes exact phrase rewrites for pending steps — and every proposal must
+# pass the same grounding the evidence layer applies to answers: the OLD phrase
+# must be in that step's text verbatim, the NEW phrase's distinctive terms must
+# come from the fix reply, the closing paste or the confirmed facts. What
+# survives is STAGED as a plan-change proposal (the §17.677 surface) — the
+# operator confirms, then the same deterministic rewrite applies it with a
+# provenance line and a ledger entry (revertable like every other change).
+# ---------------------------------------------------------------------------
+
+PROPOSE_CORRECTIONS_TOOL = Tool(
+    name="propose_plan_corrections",
+    description=(
+        "Report which still-pending plan steps carry an instruction the confirmed "
+        "fix showed to be wrong for this operator's system, and the exact rewrite."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "corrections": {
+                "type": "array",
+                "description": "Empty when no pending step needs a wording change.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "node_key": {"type": "string", "description": "A pending step's node_key."},
+                        "old_text": {"type": "string",
+                                     "description": "A phrase copied VERBATIM from that step's text that is now wrong."},
+                        "new_text": {"type": "string",
+                                     "description": "The replacement, using only what the fix and the operator's output established."},
+                        "reason": {"type": "string", "description": "One sentence: what the confirmed fix showed."},
+                    },
+                    "required": ["node_key", "old_text", "new_text"],
+                },
+            }
+        },
+        "required": ["corrections"],
+    },
+)
+
+_PROPOSE_OPENING = (
+    "A step of the operator's plan just failed, was fixed, and the operator's own output "
+    "confirmed the fix. Some LATER steps may still carry the instruction that failed, or an "
+    "assumption the fix disproved (a directory that does not exist on this system, a tool that is "
+    "not the one in use, a sub-step that is unnecessary here). Propose the smallest exact "
+    "rewrites to those pending steps. Rules: copy `old_text` VERBATIM from the step's text; write "
+    "`new_text` only from what the fix reply or the operator's output established — never from "
+    "general knowledge; leave steps alone when nothing in them is contradicted; never propose a "
+    "change to a step that only sets a value (addresses, ports, versions are handled elsewhere)."
+)
+
+
+def _distinctive(text_value: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9][a-z0-9_.+/-]{3,}", (text_value or "").lower())
+            if t not in _TERM_STOP}
+
+
+def locate_phrase(phrase: str, text_value: str) -> Optional[str]:
+    """The step's own text for a phrase the model quoted — verbatim, or
+    verbatim modulo whitespace, surrounding quotes/backticks and case (models
+    normalise those); None when the phrase is not in the step at all."""
+    if not phrase or not text_value:
+        return None
+    if phrase in text_value:
+        return phrase
+    toks = [t.strip("`'\"") for t in re.split(r"\s+", phrase.strip()) if t.strip("`'\"")]
+    if not toks:
+        return None
+    pat = r"[`'\"]?" + r"[`'\"]?\s+[`'\"]?".join(re.escape(t) for t in toks) + r"[`'\"]?"
+    m = re.search(pat, text_value, flags=re.IGNORECASE)
+    return m.group(0) if m else None
+
+
+def grounded_proposals(raw: list, nodes: list[dict], *, evidence_text: str) -> tuple[list[dict], list[dict]]:
+    """Keep a proposal only when: the node is pending; `old_text` is in that
+    node's text verbatim (and is not a provenance line); `new_text` differs and
+    at least one of its distinctive terms appears in the evidence (fix reply,
+    closing paste, confirmed facts). Returns ``(kept, dropped)``."""
+    by_key = {n.get("node_key"): n for n in nodes or []}
+    ev = (evidence_text or "").lower()
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        nk = str(item.get("node_key") or "").strip()
+        old = str(item.get("old_text") or "").strip()
+        new = str(item.get("new_text") or "").strip()
+        reason = str(item.get("reason") or "").strip()[:300]
+        why = None
+        n = by_key.get(nk)
+        if not n or (n.get("status") or "") not in ("pending", "blocked"):
+            why = "node not pending"
+        elif len(old) < 4 or locate_phrase(old, n.get("prompt_template") or "") is None:
+            why = "old_text not verbatim in the step"
+        elif locate_phrase(old, n.get("prompt_template") or "").lstrip().startswith(("🔁", PROVENANCE_PREFIX, DECISION_PREFIX)):
+            why = "old_text is a provenance line"
+        elif not new or new == old:
+            why = "no replacement"
+        else:
+            terms = _distinctive(new) - _distinctive(old)
+            if terms and not any(re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", ev) for t in terms):
+                why = "new_text not grounded in the fix or the operator's output"
+        if why:
+            dropped.append({"node_key": nk, "old_text": old[:120], "new_text": new[:120], "why": why})
+            continue
+        kept.append({"node_key": nk, "action": "rewrite",
+                     "current_assumption": locate_phrase(old, n.get("prompt_template") or "")[:300],
+                     "proposed_change": new[:400], "reason": reason})
+        if len(kept) >= 8:
+            break
+    return kept, dropped
+
+
+async def propose_corrections(*, nodes: list[dict], failing_pastes: list[str], fix_replies: list[str],
+                              closing_paste: str, confirmed_facts: str = "",
+                              model_overrides: Optional[dict] = None) -> tuple[list[dict], list[dict]]:
+    """One model call → grounded proposals. Fail-soft → ``([], [])``."""
+    pending = [n for n in nodes or [] if (n.get("status") or "") in ("pending", "blocked")]
+    if not pending or not fix_replies:
+        return [], []
+    steps_block = "\n".join(
+        f"- {n.get('node_key')}: {(n.get('title') or '')[:80]} — {(n.get('prompt_template') or '')[:400]}"
+        for n in pending)
+    msg = (
+        _PROPOSE_OPENING + "\n\nPENDING STEPS:\n" + steps_block
+        + "\n\nWHAT FAILED (the operator's paste):\n" + ("\n".join(failing_pastes)[-1500:] or "(none)")
+        + "\n\nTHE FIX THAT WORKED (the engine's reply):\n" + ("\n".join(fix_replies)[-2500:])
+        + "\n\nTHE OPERATOR'S CLOSING OUTPUT (confirms the fix):\n" + (closing_paste or "")[-800:]
+        + ("\n\nCONFIRMED FACTS ABOUT THIS SYSTEM:\n" + confirmed_facts[-1200:] if confirmed_facts else "")
+    )
+    from app import model_router
+    from app.utils.tool_call_args import read_tool_args
+    try:
+        resp = await model_router.tool_call(
+            messages=[{"role": "user", "content": msg}],
+            tools=[PROPOSE_CORRECTIONS_TOOL], role="model_general", overrides=model_overrides,
+            temperature=0.0, tool_choice="auto", max_tokens=2048,
+        )
+    except Exception as exc:  # noqa: BLE001 — a proposal must never block a commit
+        logger.warning("plan_reconcile_propose_failed: %r", exc)
+        return [], []
+    args = read_tool_args(resp)
+    raw = (args or {}).get("corrections")
+    if not isinstance(raw, list):
+        logger.info("plan_reconcile_propose_unparsed text_head=%r", (getattr(resp, "text", "") or "")[:160])
+        return [], []
+    evidence = "\n".join(fix_replies) + "\n" + (closing_paste or "") + "\n" + (confirmed_facts or "")
+    kept, dropped = grounded_proposals(raw, nodes, evidence_text=evidence)
+    logger.info("plan_reconcile_model_proposals raw=%d kept=%d dropped=%r",
+                len(raw), len(kept), [(d["node_key"], d["why"], d["old_text"][:60]) for d in dropped][:6])
+    return kept, dropped
+
+
+async def apply_rewrite_proposals(*, db, session_id: str, job_id: str, proposals: list[dict],
+                                  source_node_key: str) -> list[str]:
+    """Apply CONFIRMED rewrite proposals with the same deterministic machinery
+    as every other trigger (provenance line, walkthrough reset, ledger entry
+    with before/after so it is revertable). Returns the node keys rewritten."""
+    rewrites = [p for p in proposals or [] if p.get("action") == "rewrite"
+                and (p.get("current_assumption") or "").strip() and (p.get("proposed_change") or "").strip()]
+    if not rewrites:
+        return []
+    nodes = [dict(r) for r in (await db.execute(text("""
+        SELECT node_key, status, prompt_template FROM dag_nodes WHERE job_id = :jid ORDER BY execution_order
+    """), {"jid": job_id})).mappings().all()]
+    steps = [dict(r) for r in (await db.execute(text("""
+        SELECT node_key, status, guidance FROM assist_steps WHERE session_id = :sid
+    """), {"sid": session_id})).mappings().all()]
+    original = {n.get("node_key"): (n.get("prompt_template") or "") for n in nodes}
+    all_updates: list[dict] = []
+    resets: list[str] = []
+    corrections_done: list[dict] = []
+    for p in rewrites:
+        corr = [{"kind": "text", "old": p["current_assumption"].strip(), "new": p["proposed_change"].strip()}]
+        target = [n for n in nodes if n.get("node_key") == p.get("node_key")]
+        ch = plan_changes(target, steps, corr, source_node_key=source_node_key,
+                          source_label=f"the confirmed fix at {source_node_key} (change you approved)")
+        for u in ch["node_updates"]:
+            await db.execute(text("""
+                UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+                 WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+            """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
+            all_updates.append(u)
+            corrections_done.append({**corr[0], "node_key": u["node_key"], "reason": p.get("reason", "")})
+            for n in nodes:  # keep the in-memory copy current for the diff and later proposals
+                if n.get("node_key") == u["node_key"]:
+                    n["prompt_template"] = u["prompt_template"]
+        for nk in ch["guidance_resets"]:
+            if nk not in resets:
+                resets.append(nk)
+    if not all_updates:
+        return []
+    for nk in resets:
+        await db.execute(text("""
+            UPDATE assist_steps SET guidance = NULL, guidance_status = 'none', guidance_generated_at = NULL, updated_at = NOW()
+             WHERE session_id = :sid AND node_key = :nk AND status NOT IN ('committed', 'skipped', 'handed_off', 'escalated')
+        """), {"sid": session_id, "nk": nk})
+    entry = {
+        "at": datetime.now(timezone.utc).isoformat(), "trigger": "model_proposed",
+        "source_node_key": source_node_key, "corrections": corrections_done,
+        "nodes": sorted({u["node_key"] for u in all_updates}),
+        "changes": [{"node_key": nk, "before": original.get(nk, ""),
+                     "after": next(n for n in nodes if n.get("node_key") == nk)["prompt_template"]}
+                    for nk in sorted({u["node_key"] for u in all_updates})],
+        "guidance_resets": resets,
+    }
+    await db.execute(text("""
+        UPDATE jobs
+           SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{reconciliation}',
+                                    COALESCE(metadata->'reconciliation', '[]'::jsonb) || CAST(:e AS jsonb))
+         WHERE id = :jid
+    """), {"e": json.dumps(entry), "jid": job_id})
+    await db.commit()
+    logger.warning("plan_reconcile_model_proposed_applied session_id=%s source=%s nodes=%r",
+                   session_id, source_node_key, entry["nodes"])
+    return entry["nodes"]
+
+
+async def _stage_model_proposals(*, db, session_id: str, node_key: str, nodes: list[dict],
+                                 ctx: dict, closing: str, confirmed_facts: str) -> Optional[dict]:
+    """§17.1048 — model proposes, grounding filters, the §17.677 surface stages;
+    nothing is applied here. Fail-soft → None."""
+    if not settings.plan_reconcile_model_proposals_enabled:
+        return None
+    try:
+        kept, _dropped = await propose_corrections(
+            nodes=nodes, failing_pastes=ctx["failing"], fix_replies=ctx["fixes"],
+            closing_paste=closing, confirmed_facts=confirmed_facts)
+        if not kept:
+            return None
+        for k in kept:
+            k["source_node_key"] = node_key
+        from app.modules.assist_notes import _stage_replan_proposal
+        note_text = (f"The fix at {node_key} worked: "
+                     + " ".join((closing or "").split())[:160])
+        return await _stage_replan_proposal(
+            session_id=session_id, note_text=note_text, note_kind="fix", affected=kept, db=db)
+    except Exception as exc:  # noqa: BLE001 — a proposal must never break a commit
+        logger.warning("plan_reconcile_stage_proposals_failed session_id=%s err=%r", session_id, exc)
+        return None
+
+
 async def _fix_context(*, db, session_id: str, node_key: str) -> Optional[dict]:
     step = (await db.execute(text("""
         SELECT presented_at, evidence FROM assist_steps
@@ -812,8 +1070,14 @@ async def _fix_context(*, db, session_id: str, node_key: str) -> Optional[dict]:
     if not fixes:
         return None
     last_fix_at = max(r["created_at"] for r in rows if r["role"] == "assistant" and r["kind"] == "fix")
-    failing = [r["content"] or "" for r in rows
-               if r["role"] == "operator" and r["kind"] in ("message", "submit") and r["created_at"] <= last_fix_at]
+    before_fix = [r["content"] or "" for r in rows
+                  if r["role"] == "operator" and r["kind"] in ("message", "submit") and r["created_at"] <= last_fix_at]
+    # The FAILING pastes are the ones that read as a failure (§17.1027's
+    # symptom detector). A success-shaped paste the verifier refused before
+    # the fix (live: a closing paste judged incomplete, then a fix, then the
+    # real close) must not make the fix's new value look "part of the failure".
+    from app.modules.assist_evidence import derive_need
+    failing = [t for t in before_fix if derive_need(t).kind == "error"] or before_fix
     return {"fixes": fixes, "failing": failing, "closing": step["evidence"] or ""}
 
 
@@ -856,10 +1120,19 @@ async def reconcile_after_commit(*, db, session_id: str, job_id: str, node_key: 
         if not corrections:
             logger.info("plan_reconcile_no_corrections session_id=%s node_key=%s fixes=%d",
                         session_id, node_key, len(ctx["fixes"]))
+            # §17.1048 — no value pair, but the fix may still change how later
+            # steps are worded: ask the model, stage what survives grounding.
+            proposal = await _stage_model_proposals(
+                db=db, session_id=session_id, node_key=node_key, nodes=nodes, ctx=ctx,
+                closing=closing, confirmed_facts=ledger_text(env))
+            if proposal:
+                return {"trigger": "fix_confirmed", "source_node_key": node_key, "node_updates": [],
+                        "guidance_resets": [], "corrections": [], "replan_proposal": proposal}
             return None
         changes = plan_changes(nodes, steps, corrections, source_node_key=node_key)
         changes["source_node_key"] = node_key
         changes["corrections"] = corrections
+        changes["trigger"] = "fix_confirmed"
         for u in changes["node_updates"]:
             await db.execute(text("""
                 UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
@@ -902,6 +1175,15 @@ async def reconcile_after_commit(*, db, session_id: str, job_id: str, node_key: 
             "plan_reconcile_applied session_id=%s node_key=%s corrections=%r nodes=%r guidance_resets=%r",
             session_id, node_key, [(c["old"], c["new"]) for c in corrections],
             entry["nodes"], entry["guidance_resets"])
+        # §17.1048 — and the wording changes value pairing cannot see, on the
+        # rewritten texts, staged for the operator to confirm.
+        for u in changes["node_updates"]:
+            for n in nodes:
+                if n.get("node_key") == u["node_key"]:
+                    n["prompt_template"] = u["prompt_template"]
+        changes["replan_proposal"] = await _stage_model_proposals(
+            db=db, session_id=session_id, node_key=node_key, nodes=nodes, ctx=ctx,
+            closing=closing, confirmed_facts=ledger_text(env))
         return changes
     except Exception as exc:  # noqa: BLE001 — never break a commit
         logger.warning("plan_reconcile_failed session_id=%s node_key=%s err=%r", session_id, node_key, exc)

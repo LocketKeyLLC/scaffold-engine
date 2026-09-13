@@ -71,6 +71,8 @@ REGISTERED_SITES = {
     ("assist_agent.py", "submit_step"): "reconcile_after_commit",  # §17.1043 — fix confirmed → plan
     ("plan_reconcile.py", "reconcile_after_note"): "note_corrections",  # §17.1045 — note → plan
     ("plan_reconcile.py", "reconcile_after_substitution"): "substitution_corrections",  # §17.1046 — re-pin → plan
+    ("plan_reconcile.py", "propose_corrections"): "grounded_proposals",  # §17.1048 — model proposes, grounding filters
+    ("plan_reconcile.py", "_stage_model_proposals"): "_stage_replan_proposal",  # §17.1048 — staged, never applied silently
 }
 
 
