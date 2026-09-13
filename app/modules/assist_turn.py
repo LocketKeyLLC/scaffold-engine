@@ -1014,8 +1014,22 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
     """§17.1050 — probe phase: one read-only script, staged as pending."""
     from app.modules import assist_agent, assist_state_check as _sc
     yield _ev(ASSIST_TURN_STATUS, {"text": "🩺 Working out what the plan believes about your system and how to check each part (this can take a minute)…"})
+    # §17.1051 — a long session has dozens of claims → several model calls;
+    # the browser must not sit on one status line for two minutes.
+    progress_q: asyncio.Queue = asyncio.Queue()
+
+    async def _progress(batch_i: int, batches: int, so_far: int) -> None:
+        await progress_q.put(f"🩺 Building the checks… batch {batch_i} of {batches} ({so_far} so far)")
+
+    task = asyncio.create_task(_sc.start_state_check(db=db, session_id=session_id, node_key=nk, on_progress=_progress))
     try:
-        res = await _sc.start_state_check(db=db, session_id=session_id, node_key=nk)
+        while not task.done():
+            try:
+                msg = await asyncio.wait_for(progress_q.get(), timeout=1.0)
+                yield _ev(ASSIST_TURN_STATUS, {"text": msg})
+            except asyncio.TimeoutError:
+                continue
+        res = task.result()
     except Exception as exc:  # noqa: BLE001
         yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": f"I couldn't start the state check ({exc}). Tell me in your own words what is and is not working."})
         return
