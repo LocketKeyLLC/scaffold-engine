@@ -673,6 +673,20 @@ async def _run_turn_inner(
                     session_id, AssistAddStepInput(request=text_, before_node_key=nk), db=db,
                 )
                 new_nk = (res or {}).get("node_key")
+                # §17.1053 — name what was inserted (one step or a chain), so a
+                # proposal of several fixes reads as several steps, not as the
+                # first one silently swallowing the rest.
+                _steps = (res or {}).get("steps") or []
+                if len(_steps) > 1:
+                    _lines = "\n".join(
+                        f"- **{st.get('node_key')}**: {st.get('title')}" for st in _steps)
+                    yield _ev(ASSIST_TURN_STATUS, {
+                        "text": (f"➕ Added {len(_steps)} steps before **{nk}**, in order:\n"
+                                 f"{_lines}\nStarting with the first.")})
+                elif _steps:
+                    yield _ev(ASSIST_TURN_STATUS, {
+                        "text": (f"➕ Added a step: **{_steps[0].get('title')}** — we'll do "
+                                 f"this first, then return to **{nk}**.")})
                 async for e in _claim_and_guide(session_id, new_nk, history, db, orient=False):
                     yield e
             except Exception as exc:  # noqa: BLE001

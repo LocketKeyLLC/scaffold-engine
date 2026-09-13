@@ -1500,13 +1500,237 @@ _DRAFT_STEP_SYSTEM = (
 )
 
 
+_DRAFT_STEPS_TOOL = model_router.Tool(
+    name="draft_steps",
+    description=(
+        "Draft the new plan step(s) the operator asked to add: one step per "
+        "distinct task, in the order they should be done. Usually ONE step; "
+        "several only when the proposal names several distinct fixes."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 4,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": _DRAFT_STEP_TOOL.input_schema["properties"]["title"],
+                        "description": _DRAFT_STEP_TOOL.input_schema["properties"]["description"],
+                    },
+                    "required": ["title", "description"],
+                },
+            },
+        },
+        "required": ["steps"],
+    },
+)
+
+_DRAFT_STEPS_SYSTEM = (
+    "You turn an operator's request into concrete plan step(s) for a "
+    "human-in-the-loop build. Use the project context (its hosts, addresses, "
+    "decisions) so each step is specific to THIS system, not generic. Each step "
+    "is the smallest coherent unit that resolves one need, with a clear "
+    "done-condition (e.g. 'Configure the VM's network for internet access' — "
+    "done when the VM can ping an external host).\n\n"
+    "When an ENGINE PROPOSAL is supplied, it is the engine's own previous "
+    "answer, whose '## Needs its own step' section proposed the work. If the "
+    "operator's request is a bare reference ('add a step for this', 'add "
+    "them'), draft EXACTLY the proposed work: one step per distinct item the "
+    "proposal names (its diagnosis / summary supplies the specifics — hosts, "
+    "container IDs, file paths, the failing thing), in the order they should "
+    "be done, and nothing else. If the operator names a specific task, draft "
+    "that task (the proposal is context only). A title must name the work "
+    "itself — never echo the request phrase. Call draft_steps exactly once."
+)
+
+_NEEDS_OWN_STEP_HEADING_RE = re.compile(r"(?im)^\s*#{2,4}\s*needs\s+its\s+own\s+step\b[^\n]*$")
+_NEXT_HEADING_RE = re.compile(r"(?m)^\s*#{1,4}\s+\S")
+_PROPOSAL_ITEM_RE = re.compile(r"(?m)^\s*(?:[-*•]|\d+[.)])\s+(.+?)\s*$")
+
+
+def extract_needs_own_step(content: str) -> str | None:
+    """§17.1053 — the body of an answer's `## Needs its own step` section (the
+    §17.736 proposal the engine makes in a fix), or None when there is none."""
+    if not content:
+        return None
+    m = _NEEDS_OWN_STEP_HEADING_RE.search(content)
+    if not m:
+        return None
+    rest = content[m.end():]
+    n = _NEXT_HEADING_RE.search(rest)
+    body = (rest[: n.start()] if n else rest).strip()
+    return body or None
+
+
+def proposal_excerpt(content: str, *, limit: int = 3500) -> str:
+    """§17.1053 — the engine's previous answer, bounded for the drafter, always
+    keeping its `## Needs its own step` section whole: that section often
+    refers back to items enumerated earlier in the answer ("each of these
+    three failures"), so the drafter needs both."""
+    c = (content or "").strip()
+    if len(c) <= limit:
+        return c
+    section = extract_needs_own_step(c) or ""
+    head = c[: max(400, limit - len(section) - 40)]
+    return f"{head}\n\n[…]\n\n## Needs its own step\n{section}".strip()
+
+
+# A title that is ABOUT adding a step rather than naming work — the proposal's
+# own instruction sentence ("…needs a dedicated fix step. Reply 'add a step for
+# this'…") must never become a node title any more than the phrase itself.
+_META_TITLE_RE = re.compile(
+    r"\breply\b|\bthe engine will\b|\bneeds?\s+(?:its\s+own|a\s+dedicated|a\s+separate|a\s+proper)\s+(?:fix\s+)?step",
+    re.I,
+)
+
+
+def _items(text_: str, *, bold_only: bool = False) -> list[dict]:
+    out: list[dict] = []
+    for m in _PROPOSAL_ITEM_RE.finditer(text_ or ""):
+        raw = m.group(1).strip()
+        if bold_only and not raw.startswith("**"):
+            continue
+        line = re.sub(r"[*`_]+", "", raw).strip()
+        if not line:
+            continue
+        title = re.split(r"\s+[—–-]\s+|:\s+", line, maxsplit=1)[0].strip()
+        if len(title) < 4 or _META_TITLE_RE.search(title):
+            continue
+        out.append({"title": title[:120], "description": line[:600]})
+        if len(out) >= 4:
+            break
+    return out
+
+
+def _steps_from_proposal_text(section: str, whole: str | None = None) -> list[dict]:
+    """Deterministic fallback when the drafter is unavailable: one step per
+    bullet / numbered item of the proposal section; else the bold-led items
+    the answer enumerated elsewhere ("1. **GPU driver mismatch** in VM 110 —
+    …", which the section refers back to); else the section's first sentence
+    when it names work rather than instructing the operator."""
+    out = _items(section)
+    if out:
+        return out
+    if whole:
+        out = _items(whole, bold_only=True)
+        if out:
+            return out
+    flat = re.sub(r"[*`_]+", "", (section or "")).strip()
+    first = re.split(r"(?<=[.!?])\s+", flat, maxsplit=1)[0].strip() if flat else ""
+    if len(first) >= 4 and not _META_TITLE_RE.search(first):
+        return [{"title": first[:120], "description": flat[:600]}]
+    return []
+
+
+def _clean_drafted(raw, *, request: str) -> list[dict]:
+    """Normalise a draft_steps / draft_step tool payload to a list, dropping
+    any step whose title is itself an add-step phrase (the ADD6 shape) or
+    empty — the output-side gate of §17.1053."""
+    from app.modules import assist_policy
+    items: list = []
+    if isinstance(raw, dict):
+        if isinstance(raw.get("steps"), list):
+            items = raw["steps"]
+        elif raw.get("title"):
+            items = [raw]
+    out: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        title = str(it.get("title") or "").strip()[:120]
+        desc = str(it.get("description") or "").strip()[:600]
+        if len(title) < 4 or assist_policy.is_bare_add_step_request(title) \
+                or _META_TITLE_RE.search(title):
+            logger.warning("assist_draft_step_dropped_bare_title title=%r request=%r",
+                           title, (request or "")[:80])
+            continue
+        out.append({"title": title, "description": desc or title})
+        if len(out) >= 4:
+            break
+    return out
+
+
+async def draft_steps(
+    *, request: str, job_context: str | None = None, proposal: str | None = None,
+    role: str = "model_general",
+) -> list[dict]:
+    """§17.736/§17.1053 — draft ``[{title, description}, …]`` for the step(s)
+    the operator asked to add.
+
+    ``proposal`` is the engine's previous answer when the operator is accepting
+    a step it proposed (`## Needs its own step`). The live defect this closes:
+    ``draft_step`` saw only the operator's words, so "add a step for this" —
+    the exact phrase the engine tells operators to reply — drafted a step
+    titled "add a step for this" (ADD6, 2026-09-11), and a proposal naming
+    three fixes (T37, 2026-09-13) told the operator to repeat the phrase three
+    times. Fail-soft on the model: falls back to the proposal's own items, then
+    to the request text; a BARE request with no proposal yields [] — the
+    caller refuses to insert a placeholder.
+    """
+    from app.modules import assist_policy
+    req = (request or "").strip()
+    prop = (proposal or "").strip()
+    bare = assist_policy.is_bare_add_step_request(req)
+    if not req and not prop:
+        return []
+    if bare and not prop:
+        return []
+
+    def _fallback() -> list[dict]:
+        if prop:
+            section = extract_needs_own_step(prop) or prop
+            got = _steps_from_proposal_text(section, prop)
+            if got:
+                return _clean_drafted({"steps": got}, request=req)
+        if req and not bare:
+            return [{"title": req[:80], "description": req[:400]}]
+        return []
+
+    user_parts: list[str] = []
+    if (job_context or "").strip():
+        user_parts.append(job_context.strip())
+    if prop:
+        user_parts.append(
+            "ENGINE PROPOSAL (the engine's previous answer; its '## Needs its own "
+            "step' section names the work to add):\n" + proposal_excerpt(prop)
+        )
+    user_parts.append(
+        "Operator's request for the new step(s):\n"
+        + (req[:1000] if req else "(accepted the proposal)")
+        + ("\n(This is a bare reference — draft exactly the proposed step(s).)"
+           if bare else "")
+        + "\n\nCall draft_steps."
+    )
+    try:
+        resp = await model_router.tool_call(
+            messages=[
+                {"role": "system", "content": _DRAFT_STEPS_SYSTEM},
+                {"role": "user", "content": "\n\n".join(user_parts)},
+            ],
+            tools=[_DRAFT_STEPS_TOOL],
+            role=role,
+            temperature=0.1,
+            tool_choice="auto",
+            max_tokens=1536,
+            require_nonempty="steps",
+        )
+    except Exception as exc:  # noqa: BLE001 — never block the insert on the draft
+        logger.warning("assist_draft_step_failed: %s", exc)
+        return _fallback()
+    steps = _clean_drafted(read_tool_args(resp) or {}, request=req)
+    return steps or _fallback()
+
+
 async def draft_step(
     *, request: str, job_context: str | None = None, role: str = "model_general",
 ) -> dict:
-    """§17.736 — draft ``{title, description}`` for a step the operator asked to
-    add (a foundational task the plan doesn't cover). Fail-soft: on any error
-    returns a title/description derived from the raw request so the insert still
-    succeeds."""
+    """§17.736 — draft ``{title, description}`` for ONE step from an explicit
+    request. Thin wrapper over ``draft_steps`` kept for callers that want a
+    single step; fail-soft to a title/description derived from the raw request
+    so the insert still succeeds."""
     req = (request or "").strip()
     fallback = {
         "title": (req[:80] or "Additional setup step"),
@@ -1514,31 +1738,8 @@ async def draft_step(
     }
     if not req:
         return fallback
-    try:
-        resp = await model_router.tool_call(
-            messages=[
-                {"role": "system", "content": _DRAFT_STEP_SYSTEM},
-                {"role": "user", "content": (
-                    (f"{job_context.strip()}\n\n" if (job_context or "").strip() else "")
-                    + f"Operator's request for a new step:\n{req[:1000]}\n\n"
-                    "Call draft_step."
-                )},
-            ],
-            tools=[_DRAFT_STEP_TOOL],
-            role=role,
-            temperature=0.1,
-            tool_choice="auto",
-            max_tokens=1024,
-        )
-    except Exception as exc:  # noqa: BLE001 — never block the insert on the draft
-        logger.warning("assist_draft_step_failed: %s", exc)
-        return fallback
-    args = read_tool_args(resp) or {}
-    title = str(args.get("title") or "").strip()[:120]
-    desc = str(args.get("description") or "").strip()[:600]
-    if not title:
-        return fallback
-    return {"title": title, "description": desc or fallback["description"]}
+    steps = await draft_steps(request=req, job_context=job_context, role=role)
+    return steps[0] if steps else fallback
 
 
 # ── Ledger consolidation (§17.727 — merge redundant same-truth facts) ───────

@@ -132,25 +132,35 @@ async def record_note(
 
 
 async def add_step(
-    *, session_id: str, request: str, before_node_key: str | None = None, db,
+    *, session_id: str, request: str, before_node_key: str | None = None,
+    proposal: str | None = None, db,
 ) -> dict:
-    """§17.736 — insert a new guided step the plan doesn't cover, to run BEFORE
-    the current blocked step, and point the session at it.
+    """§17.736 — insert new guided step(s) the plan doesn't cover, to run BEFORE
+    the current blocked step, and point the session at the first of them.
 
     The reported gap: the operator hit a foundational task the plan never had a
     step for (get the VM connected to the internet), so it was handled as
     scattered one-off `fix`es with no throughline. Re-plan could drop/revise but
-    not ADD. This drafts a concrete step (model_general, project-grounded),
-    inserts a `dag_nodes` + `assist_steps` row, makes the blocked step DEPEND on
-    it (so it's sequenced first via the normal dep gate), resets the blocked
-    step from presented→pending, and sets ``current_node_key`` to the new node.
-    The new step is then guided by the ordinary walkthrough machinery — the
-    gather→paste→verify (§17.731) loop the operator asked for. Fail-soft only on
-    the draft; the insert itself raises ValueError on a bad session so the
-    router maps it to a 4xx.
+    not ADD. This drafts concrete step(s) (model_general, project-grounded),
+    inserts `dag_nodes` + `assist_steps` rows, makes the blocked step DEPEND on
+    them (so they're sequenced first via the normal dep gate), resets the
+    blocked step from presented→pending, and sets ``current_node_key`` to the
+    first new node. The new steps are then guided by the ordinary walkthrough
+    machinery — the gather→paste→verify (§17.731) loop the operator asked for.
+
+    §17.1053 — the request is usually the engine's OWN phrase. A fix answer
+    proposes work under `## Needs its own step` and tells the operator to reply
+    "add a step for this"; that reply names nothing, so drafting from it
+    produced a step titled "add a step for this" (ADD6, live 2026-09-11). A
+    BARE request now resolves the proposal from the transcript (the most recent
+    assistant turn carrying that section) and drafts one step per proposed
+    item; with no proposal on record it raises instead of inserting a
+    placeholder. ``proposal`` lets a caller supply the text directly.
+    Fail-soft only on the draft; the insert itself raises ValueError on a bad
+    session / an empty draft so the router maps it to a 4xx.
     """
     from app.modules.assist_agent import _environment_from_metadata  # §17.856 re-exports (patch-safe deferred)
-    from app.modules import assist_guide
+    from app.modules import assist_guide, assist_policy
 
     sess = (await db.execute(
         text("""
@@ -189,11 +199,41 @@ async def add_step(
     if isinstance(goal, str) and goal.strip():
         ctx_parts.append(f"## Project goal\n{goal.strip()}")
     ctx_parts.extend(assist_guide._render_memory_or_legacy(environment, None))
-    drafted = await assist_guide.draft_step(
-        request=request, job_context="\n\n".join(ctx_parts) or None,
-    )
 
-    # Unique node_key: ADD1, ADD2, … (distinct from the T-series; sorts before
+    # §17.1053 — a bare "add a step for this" refers to the engine's previous
+    # proposal. Resolve it from the durable transcript (the SPA/OWUI history is
+    # optional and truncated; `assist_turns` is authoritative).
+    bare = assist_policy.is_bare_add_step_request(request)
+    if bare and not (proposal or "").strip():
+        rows = (await db.execute(
+            text("""
+                SELECT content FROM assist_turns
+                 WHERE session_id = :sid AND role = 'assistant'
+                 ORDER BY created_at DESC, id DESC LIMIT 4
+            """),
+            {"sid": session_id},
+        )).mappings().all()
+        for r in rows:
+            if assist_guide.extract_needs_own_step(r.get("content") or ""):
+                proposal = r.get("content") or ""
+                break
+        if not (proposal or "").strip():
+            raise ValueError(
+                "nothing concrete to add — the last answer didn't propose a step. "
+                "Say what the step should accomplish, e.g. 'add a step to set up "
+                "the VM's networking'"
+            )
+    drafted = await assist_guide.draft_steps(
+        request=request, job_context="\n\n".join(ctx_parts) or None,
+        proposal=proposal,
+    )
+    if not drafted:
+        raise ValueError(
+            "couldn't draft a concrete step from that — say what it should "
+            "accomplish, e.g. 'add a step to set up the VM's networking'"
+        )
+
+    # Unique node_keys: ADD1, ADD2, … (distinct from the T-series; sorts before
     # T* so a same-order tie still serves it first, though the dep gate is what
     # actually sequences it).
     existing = {
@@ -202,47 +242,61 @@ async def add_step(
         )).mappings().all()
     }
     n = 1
-    while f"ADD{n}" in existing:
+    new_keys: list[str] = []
+    while len(new_keys) < len(drafted):
+        if f"ADD{n}" not in existing:
+            new_keys.append(f"ADD{n}")
+            existing.add(f"ADD{n}")
         n += 1
-    new_key = f"ADD{n}"
 
-    new_deps = list((anchor or {}).get("depends_on") or [])
+    anchor_deps = list((anchor or {}).get("depends_on") or [])
     order = (anchor or {}).get("execution_order")
     tool = (anchor or {}).get("tool") or "shell"
     domain = (anchor or {}).get("domain")
 
-    await db.execute(
-        text("""
-            INSERT INTO dag_nodes
-                (job_id, node_key, title, description, node_type, status,
-                 depends_on, prompt_template, tool, domain, execution_order)
-            VALUES (:jid, :nk, :title, :desc, 'task', 'pending',
-                    :deps, :prompt, :tool, :domain, :order)
-        """),
-        {"jid": job_id, "nk": new_key, "title": drafted["title"],
-         "desc": drafted["description"], "deps": new_deps,
-         "prompt": drafted["description"], "tool": tool, "domain": domain,
-         "order": order},
-    )
-    await db.execute(
-        text("""
-            INSERT INTO assist_steps (session_id, job_id, node_key, status)
-            VALUES (:sid, :jid, :nk, 'pending')
-        """),
-        {"sid": session_id, "jid": job_id, "nk": new_key},
-    )
-    # Sequence: the anchor now depends on the new node, and is reset to pending
-    # so get_next_step serves the new node first (not the re-presented anchor).
-    if anchor:
+    # Several steps chain in proposal order: each depends on the anchor's
+    # original deps PLUS the previous new step, so the dep gate serves them
+    # first-to-last before the reopened anchor.
+    inserted: list[dict] = []
+    prev_key: str | None = None
+    for new_key, step in zip(new_keys, drafted):
+        deps = anchor_deps + ([prev_key] if prev_key else [])
         await db.execute(
             text("""
-                UPDATE dag_nodes
-                   SET depends_on = array_append(coalesce(depends_on,'{}'), :nk),
-                       updated_at = NOW()
-                 WHERE job_id = :jid AND node_key = :anchor
+                INSERT INTO dag_nodes
+                    (job_id, node_key, title, description, node_type, status,
+                     depends_on, prompt_template, tool, domain, execution_order)
+                VALUES (:jid, :nk, :title, :desc, 'task', 'pending',
+                        :deps, :prompt, :tool, :domain, :order)
             """),
-            {"jid": job_id, "nk": new_key, "anchor": before},
+            {"jid": job_id, "nk": new_key, "title": step["title"],
+             "desc": step["description"], "deps": deps,
+             "prompt": step["description"], "tool": tool, "domain": domain,
+             "order": order},
         )
+        await db.execute(
+            text("""
+                INSERT INTO assist_steps (session_id, job_id, node_key, status)
+                VALUES (:sid, :jid, :nk, 'pending')
+            """),
+            {"sid": session_id, "jid": job_id, "nk": new_key},
+        )
+        inserted.append({"node_key": new_key, "title": step["title"],
+                         "description": step["description"]})
+        prev_key = new_key
+    # Sequence: the anchor now depends on the new nodes, and is reset to pending
+    # so get_next_step serves the new nodes first (not the re-presented anchor).
+    if anchor:
+        for new_key in new_keys:
+            await db.execute(
+                text("""
+                    UPDATE dag_nodes
+                       SET depends_on = array_append(coalesce(depends_on,'{}'), :nk),
+                           updated_at = NOW()
+                     WHERE job_id = :jid AND node_key = :anchor
+                """),
+                {"jid": job_id, "nk": new_key, "anchor": before},
+            )
         # §17.911 — REOPEN the anchor, on BOTH tables (mirror invariant §17.286).
         #
         # The first cut reset `assist_steps` only, and only from 'presented'.
@@ -282,22 +336,26 @@ async def add_step(
             """),
             {"sid": session_id, "anchor": before},
         )
+    first_key = new_keys[0]
     await db.execute(
         text("""
             UPDATE assist_sessions SET current_node_key = :nk, updated_at = NOW()
              WHERE id = :sid
         """),
-        {"sid": session_id, "nk": new_key},
+        {"sid": session_id, "nk": first_key},
     )
     await db.commit()
     logger.info(
-        "assist_added_step session_id=%s job_id=%s new=%s before=%s title=%r",
-        session_id, job_id, new_key, before, drafted["title"],
+        "assist_added_step session_id=%s job_id=%s new=%s before=%s bare=%s "
+        "from_proposal=%s titles=%r",
+        session_id, job_id, new_keys, before, bare, bool((proposal or "").strip()),
+        [i["title"] for i in inserted],
     )
     return {
-        "session_id": session_id, "node_key": new_key,
-        "title": drafted["title"], "description": drafted["description"],
+        "session_id": session_id, "node_key": first_key,
+        "title": inserted[0]["title"], "description": inserted[0]["description"],
         "before_node_key": before,
+        "steps": inserted, "count": len(inserted),
     }
 
 

@@ -966,13 +966,14 @@ async def test_add_step_inserts_node_and_points_session():
         _result(None),  # UPDATE session current_node_key
     ])
     db.commit = AsyncMock()
-    with patch("app.modules.assist_guide.draft_step",
-               new=AsyncMock(return_value={
+    with patch("app.modules.assist_guide.draft_steps",  # §17.1053 — list shape
+               new=AsyncMock(return_value=[{
                    "title": "Configure the VM's network for internet access",
-                   "description": "Give VM 100 internet; done when it can ping an external host."})):
+                   "description": "Give VM 100 internet; done when it can ping an external host."}])):
         out = await assist_agent.add_step(
             session_id="s1", request="set up the VM networking properly", db=db)
     assert out["node_key"] == "ADD1"                       # first ADD key
+    assert out["count"] == 1 and out["steps"][0]["node_key"] == "ADD1"
     assert out["before_node_key"] == "T14"
     assert "network" in out["title"].lower()
     # the anchor was made to depend on the new node, and reset to pending

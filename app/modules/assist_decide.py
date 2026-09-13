@@ -78,18 +78,30 @@ def _compute_signals(message: str, history: list[dict] | None) -> dict:
     msg = message or ""
     is_shell_paste = bool(_SHELL_PROMPT_LINE_RE.search(msg))
     last_was_fix = False
+    proposed_step = False
+    seen_assistant = 0
     for m in reversed(history or []):
         if not isinstance(m, dict) or (m.get("role") or "") != "assistant":
             continue
         c = m.get("content") or ""
-        last_was_fix = ("🔧 Troubleshooting" in c) or (
-            "something went wrong — let me help" in c
-        )
-        break
+        if seen_assistant == 0:
+            last_was_fix = ("🔧 Troubleshooting" in c) or (
+                "something went wrong — let me help" in c
+            )
+        # §17.1053 — did the engine JUST propose a step ("## Needs its own
+        # step")? A short "add them" / "insert it" is then an add-step reply,
+        # not chat. The nudge frames that can follow a fix (↩︎ "reply confirm")
+        # are separate assistant messages, so look back a few, not just one.
+        if "needs its own step" in c.lower():
+            proposed_step = True
+        seen_assistant += 1
+        if seen_assistant >= 3:
+            break
     return {
         "shell_paste": is_shell_paste,
         "shell_error": bool(_SHELL_ERROR_RE.search(msg)),
         "last_assistant_was_fix": last_was_fix,
+        "last_assistant_proposed_step": proposed_step,
     }
 
 
@@ -301,7 +313,8 @@ async def decide_turn(
         "\nSignals: "
         f"shell_paste={signals['shell_paste']}, "
         f"shell_error={signals['shell_error']}, "
-        f"last_assistant_was_fix={signals['last_assistant_was_fix']}"
+        f"last_assistant_was_fix={signals['last_assistant_was_fix']}, "
+        f"last_assistant_proposed_step={signals['last_assistant_proposed_step']}"
     )
     parts.append(f"\nOperator's message:\n{(message or '')[:2000]}")
     user = "\n".join(parts)

@@ -858,12 +858,13 @@ async def tool_call(
     """
     resp = None
     attempts = max(1, draws)
+    think: bool | None = None
     for d in range(attempts):
         resp = await _tool_call_once(
             messages, tools, model,
             role=role, overrides=overrides,
             temperature=temperature, max_tokens=max_tokens,
-            tool_choice=tool_choice, fallback=fallback,
+            tool_choice=tool_choice, fallback=fallback, think=think,
         )
         # Only re-draw the "success but no usable tool args" variance. Hard
         # failures and the empty-tools short-circuit are returned as-is.
@@ -897,7 +898,39 @@ async def tool_call(
             and _args is not None else "no tool args",
             _empty_draw_diag(resp),
         )
+        # §17.1053 — a STARVED draw (done_reason='length', no content, no tool
+        # call) is a thinking model that spent the whole num_predict budget on
+        # reasoning; re-drawing identically just starves again. Live 2026-09-13
+        # 20:24: /decide (deepseek-v4-pro:cloud, 768 tokens) — three draws,
+        # each 768 completion tokens and '' content, then the fallback
+        # decision. `generate` has had this rescue since §17.876
+        # (`llm_think_off_rescue`); tool_call did not. Remaining draws run with
+        # think=False so the budget goes to the answer.
+        if think is None and _draw_starved(resp):
+            think = False
+            logger.warning(
+                "tool_call_think_off_rescue: model/role=%s draw=%d/%d starved "
+                "(done_reason='length', empty) — remaining draws with think=False "
+                "(§17.1053)",
+                role or model or settings.model_general, d + 1, attempts,
+            )
     return resp
+
+
+def _draw_starved(resp) -> bool:
+    """§17.1053 — the draw hit the token limit with nothing usable: no tool
+    call and empty content. Defensive on every field."""
+    try:
+        raw = getattr(resp, "raw", None) or {}
+        if not isinstance(raw, dict) or raw.get("done_reason") != "length":
+            return False
+        msg = raw.get("message") or {}
+        if msg.get("tool_calls"):
+            return False
+        return not (msg.get("content") or "").strip() and not (
+            getattr(resp, "text", "") or "").strip()
+    except Exception:  # noqa: BLE001 — a diagnostic must never raise
+        return False
 
 
 async def _tool_call_once(
@@ -911,9 +944,11 @@ async def _tool_call_once(
     max_tokens: int = 4096,
     tool_choice: str = "auto",
     fallback: str | None = None,
+    think: bool | None = None,
 ) -> ModelResponse:
     """One tool-call draw (native-first-then-coax + telemetry). See ``tool_call``
-    for the retry wrapper (§17.583)."""
+    for the retry wrapper (§17.583). ``think`` (§17.1053) is forwarded only to
+    providers that understand it (Ollama's reasoning toggle)."""
     _reject_role_model_collision(role, model)
     _begin_trace(
         "tool_call", messages=messages,
@@ -930,12 +965,13 @@ async def _tool_call_once(
                 provider, resolved_model, messages, tools,
                 temperature=temperature, max_tokens=max_tokens,
                 tool_choice=tool_choice, role=role, fallback=fallback,
+                think=think,
             )
             return await _record_call(resp)
         coaxed = await _tool_call_via_coaxing(
             provider, resolved_model, messages, tools,
             temperature=temperature, max_tokens=max_tokens,
-            role=role, fallback=fallback,
+            role=role, fallback=fallback, think=think,
         )
         return await _record_call(coaxed)
 
@@ -951,14 +987,24 @@ async def _tool_call_once(
             provider, model, messages, tools,
             temperature=temperature, max_tokens=max_tokens,
             tool_choice=tool_choice, role=None, fallback=fallback,
+            think=think,
         )
         return await _record_call(resp)
     coaxed = await _tool_call_via_coaxing(
         provider, model, messages, tools,
         temperature=temperature, max_tokens=max_tokens,
-        role=None, fallback=fallback,
+        role=None, fallback=fallback, think=think,
     )
     return await _record_call(coaxed)
+
+
+def _think_opts(provider, think: bool | None) -> dict:
+    """§17.1053 — the reasoning toggle is an Ollama request field; every other
+    provider either strips it (§17.854) or would reject it, so only Ollama
+    receives it."""
+    if think is None or getattr(provider, "name", "") != "ollama":
+        return {}
+    return {"think": think}
 
 
 async def _native_first_then_coax(
@@ -972,6 +1018,7 @@ async def _native_first_then_coax(
     tool_choice: str,
     role: str | None,
     fallback: str | None,
+    think: bool | None = None,
 ) -> ModelResponse:
     """§17.548 — native-first tool call with a coaxing fallback.
 
@@ -986,6 +1033,7 @@ async def _native_first_then_coax(
         lambda: provider.tool_call(
             model, messages, tools,
             temperature=temperature, max_tokens=max_tokens, tool_choice=tool_choice,
+            **_think_opts(provider, think),
         ),
         model=model,
     )
@@ -1002,7 +1050,7 @@ async def _native_first_then_coax(
         return await _tool_call_via_coaxing(
             provider, model, messages, tools,
             temperature=temperature, max_tokens=max_tokens,
-            role=role, fallback=fallback,
+            role=role, fallback=fallback, think=think,
         )
     if not resp.success and role:
         resp.error = _format_provider_error(resp, role)
@@ -1019,6 +1067,7 @@ async def _tool_call_via_coaxing(
     max_tokens: int,
     role: str | None,
     fallback: str | None,
+    think: bool | None = None,
 ) -> ModelResponse:
     """Coaxing fallback for providers without native tool support.
 
@@ -1065,6 +1114,7 @@ async def _tool_call_via_coaxing(
         lambda: provider.chat_completion(
             model, augmented, temperature=temperature,
             max_tokens=effective_max, fallback=fallback,
+            **_think_opts(provider, think),
         ),
         model=model,
     )
