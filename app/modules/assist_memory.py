@@ -122,6 +122,51 @@ async def _sibling_facts(*, job_id: str, db) -> list[str]:
     return out
 
 
+_PROMPT_CMD_RE = re.compile(r"^\s*(?:\[?[\w.-]+@[\w.-]+[^\n$#>]*\]?\s*[$#>]|\$)\s+(.+?)\s*$")
+_SUCCESS_LINE_RE = re.compile(
+    r"(?i)^(?:.*\b(?:running|listening|started|active|enabled|up \d|is up|ok|success(?:ful(?:ly)?)?|done|"
+    r"created|reachable|connected|healthy|ready|200 OK|HTTP/[\d.]+ (?:200|30[12])|LISTEN)\b.*)$")
+_FAILURE_LINE_RE = re.compile(
+    r"(?i)(?:error|fail(?:ed|ure)?|cannot|could not|not found|no such|refused|denied|inactive|stopped|dead|"
+    r"exited|traceback|unknown|invalid|timed? ?out|unreachable)")
+
+
+def worked_command_facts(paste: str, *, node_key: str | None = None) -> list[str]:
+    """Facts for commands whose next output line reads as success and carries
+    no failure word: ``Worked at Tn: `cmd` → first output line``. A command
+    whose only output is a new prompt is not counted (silence is not
+    success); a command followed by an error is not counted."""
+    lines = (paste or "").splitlines()
+    out: list[str] = []
+    seen: set[str] = set()
+    for i, ln in enumerate(lines):
+        m = _PROMPT_CMD_RE.match(ln)
+        if not m:
+            continue
+        cmd = m.group(1).strip()
+        if len(cmd) < 6 or cmd.startswith(("echo ", "cat ", "ls", "cd ", "grep ", "history", "clear")):
+            continue
+        nxt = ""
+        for j in range(i + 1, min(i + 4, len(lines))):
+            cand = lines[j].strip()
+            if not cand:
+                continue
+            if _PROMPT_CMD_RE.match(cand):
+                break
+            nxt = cand
+            break
+        if not nxt or _FAILURE_LINE_RE.search(nxt) or not _SUCCESS_LINE_RE.match(nxt):
+            continue
+        key = cmd.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f"Worked{' at ' + node_key if node_key else ''}: `{cmd[:160]}` → {nxt[:120]}")
+        if len(out) >= 4:
+            break
+    return out
+
+
 async def learn_from_submit(
     *, session_id: str, node_key: str, evidence: str, db,
 ) -> dict:
@@ -224,7 +269,11 @@ async def capture_session_facts(
             task_prompt=(row or {}).get("prompt_template") or "",
             known_facts=known_facts or None,
         )
-        facts = res.get("facts") or []
+        facts = list(res.get("facts") or [])
+        # §17.1052 — the deterministic "this worked" facts ride the submit path too.
+        for wf in worked_command_facts(evidence, node_key=node_key):
+            if wf not in facts and wf not in known_facts:
+                facts.append(wf)
         superseded = (res.get("superseded") or []) if known_facts else []
         if not facts and not superseded:
             return []
@@ -477,6 +526,14 @@ async def derive_turn_memory(
         # §17.725 — retract the known facts this message directly contradicted
         # (verbatim ledger matches only), valve-gated.
         new_facts = [f for f in (derived.get("facts") or [])]
+        # §17.1052 — a command the operator ran that visibly WORKED is the most
+        # durable fact a paste can carry, and the model-derived memory kept
+        # recording the failures around it (live: `node server.js` printed
+        # "Backend API running on port 3001" at 12:24 and six hours later the
+        # fix loop was chasing `index.js` from the package file). Deterministic.
+        for wf in worked_command_facts(msg, node_key=node_key):
+            if wf not in new_facts and wf not in known_facts:
+                new_facts.append(wf)
         superseded = (
             list(derived.get("superseded") or [])
             if settings.assist_umem_supersede else []

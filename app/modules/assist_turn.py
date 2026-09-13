@@ -1252,9 +1252,10 @@ async def _claim_and_guide(
                 # `ephemeralTail` only. On any reload the transcript ended on the
                 # last fix, so the one message confirming the project was
                 # finished simply was not there.
-                _done_text = ("🎉 **Every step in this plan is done — the project "
-                              "is complete.** Open the session's Done view for the "
-                              "compiled summary of what you built.")
+                _done_text = ("🎉 **Every step in this plan is done — the project is complete.** "
+                              "The deliverable has been compiled: open the job's **Output** tab to read it, "
+                              "or the **Plan** tab to review what changed along the way. Nothing further "
+                              "is waiting on you here.")
                 yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _done_text})
                 try:
                     await assist_agent.capture_assistant_reply(

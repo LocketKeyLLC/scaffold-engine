@@ -253,6 +253,26 @@ export function renderChat(container, sessionId) {
     verbBtns[label] = b;
     return b;
   }
+  // §17.1052 — completion hand-off (the ✓ path and a reload of a finished
+  // session both land here; the turn-loop path says the same in its own words).
+  function completionText() {
+    return "🎉 **Every step in this plan is done — the project is complete.** The deliverable has been compiled: open the Output tab to read it, or the Plan tab to review what changed along the way.";
+  }
+  function renderCompletionCard() {
+    if (!stepHero || stepHero.querySelector(".assist-complete")) return;
+    const jid = session?.job_id;
+    const card = el("div", { class: "assist-complete row row-wrap" },
+      el("strong", { text: "🎉 Job complete" }),
+      el("span", { class: "dim", text: " — every step is done and the deliverable is compiled." }),
+      el("span", { class: "spacer" }),
+      jid ? el("a", { class: "btn btn-primary btn-sm", href: `#/job/${jid}/output`, text: "View output →" }) : null,
+      jid ? el("a", { class: "btn btn-ghost btn-sm", href: `#/job/${jid}/plan`, text: "Review the plan" }) : null);
+    stepHero.append(card);
+    stepHero.classList.remove("hidden");
+    // the hub's status pill was rendered once from the job row — tell it.
+    if (jid) window.dispatchEvent(new CustomEvent("scaffold:job-status", { detail: { jobId: jid, status: "completed" } }));
+  }
+
   // §17.848 — advance to the next claimable step and stream its walkthrough.
   async function claimAndGuideNext() {
     // §17.868 — claim + premise check + guidance are ONE server-side stream
@@ -269,9 +289,25 @@ export function renderChat(container, sessionId) {
     // §17.890 — quiet: the operator's message is already in the transcript
     // (typed-claim fall-through from doneNext); don't echo it twice.
     if (!opts.quiet) appendBubble("operator", "submit", output);
-    const res = await api.post(`/assist/${sessionId}/submit`, {
-      node_key: nk, output, action: "submit", history: historyForGuide(),
-    });
+    let res;
+    try {
+      res = await api.post(`/assist/${sessionId}/submit`, {
+        node_key: nk, output, action: "submit", history: historyForGuide(),
+      });
+    } catch (e) {
+      // §17.1052 — this path had no catch: a 409 (unclaimed step, finished
+      // session) vanished and the ✓ press did nothing at all. Say what
+      // happened, and for an unclaimed step claim it and try once more.
+      const code = e?.detail?.error_code || e?.error_code || "";
+      const msg = e?.detail?.message || e?.detail || e?.message || String(e);
+      if (code === "must_claim_first" && !opts.retried) {
+        await claimAndGuideNext();
+        return submitEvidence(nk, output, { ...opts, quiet: true, retried: true });
+      }
+      appendBubble("assistant", "error", `⚠️ Couldn't submit that for ${nk}: ${msg}`);
+      toast(`Submit failed: ${msg}`, "err");
+      return false;
+    }
     const st = res?.status;
     if (st === "committed") {
       // §17.1007 — name what was ACCOMPLISHED, not just that a counter moved.
@@ -291,7 +327,11 @@ export function renderChat(container, sessionId) {
       // changed and where (the turn-loop path renders the same note server-side).
       if (res.reconciliation_note) appendBubble("assistant", "note", res.reconciliation_note);
       await load();
-      if (session?.status !== "completed") await claimAndGuideNext();
+      if (session?.status !== "completed") { await claimAndGuideNext(); return true; }
+      // §17.1052 — the last step just closed: say so, and hand the operator to
+      // the deliverable instead of leaving a changed hero label to be noticed.
+      appendBubble("assistant", "ask", completionText());
+      renderCompletionCard();
       return true;
     }
     if (st === "verification_failed" || st === "step_incomplete" || st === "step_unverified") {
@@ -596,7 +636,7 @@ export function renderChat(container, sessionId) {
         nk
           ? el("span", { class: "step-hero-title" }, el("strong", { text: `Step ${nk}` }),
               (cur?.title || session.current_node_title) ? ` — ${cur?.title || session.current_node_title}` : "")
-          : el("span", { class: "step-hero-title dim", text: session.status === "completed" ? "Session complete 🎉" : "No step claimed — press Next step to begin" }),
+          : el("span", { class: "step-hero-title dim", text: session.status === "completed" ? "Session complete 🎉 — the deliverable is in the Output tab" : "No step claimed — press Next step to begin" }),
         el("span", { class: "spacer" }),
         phaseTag,
         totalN ? el("span", { class: phaseTag ? "tag faint" : "tag", text: `${doneN}/${totalN} overall` }) : null,
@@ -876,6 +916,7 @@ export function renderChat(container, sessionId) {
   function renderBelow() {
     if (!session) return;
     if (verbBtns["⏸"]) verbBtns["⏸"].textContent = session.status === "paused" ? "▶" : "⏸";
+    if (session.status === "completed") renderCompletionCard();  // §17.1052 — a reload of a finished session lands on the hand-off too
     const sc = session.step_counts || {};
     const notes = (session.notes || []).slice(-6).reverse();
     const facts = (session.memory_facts || []).slice(-8).reverse();

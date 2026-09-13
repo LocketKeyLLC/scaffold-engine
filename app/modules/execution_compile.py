@@ -325,38 +325,51 @@ def _format_grounding_banner(verdict: dict, *, corrected: bool = False) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-async def _record_job_metadata(job_id: str, key: str, record: dict) -> None:
-    """Best-effort write of jobs.metadata[key] (own session — never touches
-    the caller's transaction; never breaks compile)."""
+_METADATA_UPDATE = text(
+    "UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) "
+    "|| jsonb_build_object(CAST(:k AS text), CAST(:v AS jsonb)) "
+    "WHERE id = :jid"
+)
+
+
+async def _record_job_metadata(job_id: str, key: str, record: dict, db=None) -> None:
+    """Best-effort write of jobs.metadata[key]; never breaks compile.
+
+    §17.1052 — writes on the CALLER'S session when one is given. The compile
+    runs inside the caller's transaction, and on the assist completion path
+    that transaction already holds the jobs row (status → completed): a
+    second session's UPDATE on the same row waited on the caller forever,
+    the caller waited on it, and every later /assist/start for the job
+    queued behind the pair. Own session only when no caller session exists.
+    """
+    params = {"k": key, "v": json.dumps(record), "jid": job_id}
     try:
+        if db is not None:
+            await db.execute(_METADATA_UPDATE, params)
+            return
         from app.database import async_session
         async with async_session() as mdb:
-            await mdb.execute(
-                text(
-                    "UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) "
-                    "|| jsonb_build_object(CAST(:k AS text), CAST(:v AS jsonb)) "
-                    "WHERE id = :jid"
-                ),
-                {"k": key, "v": json.dumps(record), "jid": job_id},
-            )
+            await mdb.execute(_METADATA_UPDATE, params)
             await mdb.commit()
     except Exception as exc:  # best-effort metric — never break compile
         logger.warning("%s_metadata_write_failed: job=%s err=%s", key, job_id, exc)
 
 
-async def _record_grounding_metadata(job_id: str, record: dict) -> None:
-    await _record_job_metadata(job_id, "grounding", record)
+async def _record_grounding_metadata(job_id: str, record: dict, db=None) -> None:
+    await _record_job_metadata(job_id, "grounding", record, db=db)
 
 
-async def _job_given(job_id: str) -> tuple[dict, str]:
+async def _job_given(job_id: str, db=None) -> tuple[dict, str]:
     """§17.1041 — what the operator gave: the refined brief and the request.
-    Own session, fail-soft to empty."""
+    The caller's session when given (own session otherwise), fail-soft to empty."""
+    q = text("SELECT refined_brief, input_text FROM jobs WHERE id = :jid")
     try:
-        from app.database import async_session
-        async with async_session() as mdb:
-            row = (await mdb.execute(
-                text("SELECT refined_brief, input_text FROM jobs WHERE id = :jid"),
-                {"jid": job_id})).mappings().first()
+        if db is not None:
+            row = (await db.execute(q, {"jid": job_id})).mappings().first()
+        else:
+            from app.database import async_session
+            async with async_session() as mdb:
+                row = (await mdb.execute(q, {"jid": job_id})).mappings().first()
     except Exception as exc:  # noqa: BLE001
         logger.warning("compile_value_check_job_read_failed: job=%s err=%s", job_id, exc)
         return {}, ""
@@ -370,7 +383,9 @@ async def _job_given(job_id: str) -> tuple[dict, str]:
     return (brief if isinstance(brief, dict) else {}), (inp if isinstance(inp, str) else "")
 
 
-async def _maybe_compile_value_check(job_id: str, text_value: str | None, nodes: list) -> str | None:
+async def _maybe_compile_value_check(
+    job_id: str, text_value: str | None, nodes: list, db=None,
+) -> str | None:
     """§17.1041 — name the deliverable's values that no step output or
     operator text supports (introduced by synthesis) and those carried from
     steps whose own check (§17.1039) left them unverified. Banner at the top
@@ -380,7 +395,7 @@ async def _maybe_compile_value_check(job_id: str, text_value: str | None, nodes:
         return text_value
     try:
         from app.modules.execution_evidence import compile_value_banner, compile_value_check
-        brief, input_text = await _job_given(job_id)
+        brief, input_text = await _job_given(job_id, db=db)
         introduced, carried = compile_value_check(
             text_value, nodes=list(nodes or []), brief=brief, input_text=input_text)
         record = {
@@ -388,7 +403,7 @@ async def _maybe_compile_value_check(job_id: str, text_value: str | None, nodes:
             "introduced": [u["value"] for u in introduced],
             "carried": [u["value"] for u in carried],
         }
-        await _record_job_metadata(job_id, "compile_evidence", record)
+        await _record_job_metadata(job_id, "compile_evidence", record, db=db)
         logger.info("compile_value_check: job=%s introduced=%r carried=%r",
                     job_id, record["introduced"][:6], record["carried"][:6])
         if introduced or carried:
@@ -399,7 +414,7 @@ async def _maybe_compile_value_check(job_id: str, text_value: str | None, nodes:
 
 
 async def _maybe_grounding_gate(
-    job_id: str, text_value: str, evidence: str,
+    job_id: str, text_value: str, evidence: str, db=None,
 ) -> str:
     """§17.569/§17.570 — grounding LOOP on a synthesized deliverable: detect
     (faithfulness) → correct (CoVe) → re-verify → flag-if-still-low. Default
@@ -443,7 +458,7 @@ async def _maybe_grounding_gate(
     if corrected:
         record["score_before"] = score_before
         record["score_after"] = score_after
-    await _record_grounding_metadata(job_id, record)
+    await _record_grounding_metadata(job_id, record, db=db)
     logger.info(
         "grounding_scored: job=%s score=%.2f supported=%d/%d corrected=%s",
         job_id, score_after, verdict.get("supported", 0),
@@ -483,7 +498,7 @@ async def _maybe_synthesize(
     if synthesized:
         # §17.569 — grounding gate: the synthesis can introduce claims absent
         # from the source work; flag (never block) when unsupported.
-        annotated = await _maybe_grounding_gate(job_id, synthesized, heuristic)
+        annotated = await _maybe_grounding_gate(job_id, synthesized, heuristic, db=db)
         return annotated, True
     return heuristic, False
 
@@ -813,7 +828,7 @@ async def _compile_output(
         assist-completed header (operator executed it), never both."""
         # §17.1041 — value check on the deliverable itself, before the
         # operational banners so they land above it.
-        text_value = await _maybe_compile_value_check(job_id, text_value, nodes)
+        text_value = await _maybe_compile_value_check(job_id, text_value, nodes, db=db)
         banner_text = _prepend_skipped_banner(text_value, skipped_count, total_count)
         if assist_completed:
             banner_text = _prepend_assist_completed_banner(banner_text, done_count)

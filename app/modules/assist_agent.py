@@ -337,6 +337,24 @@ async def start_assist_session(
         {"sid": session_id},
     )).scalar()
 
+    # §17.1052 — a session whose every step is terminal but which never got
+    # finalized (the completion transaction was lost — a compile-time
+    # self-deadlock did exactly that) is stranded: 'active' with nothing to
+    # hand out. Finish it here so reopening the tab completes the job instead
+    # of showing the last step forever. _maybe_finalize_session is idempotent
+    # and no-ops on any non-terminal step, on 'completed', and on a reopen.
+    if total and not pending and not reopening:
+        await _maybe_finalize_session(session_id=session_id, db=db)
+        fin = (await db.execute(
+            text("SELECT status FROM assist_sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).scalar()
+        if fin == "completed":
+            logger.info(
+                "assist_session_finalize_resumed session_id=%s job_id=%s",
+                session_id, job_id,
+            )
+
     await db.commit()
     logger.info(
         "assist_session_started session_id=%s job_id=%s total_steps=%d "
@@ -3049,7 +3067,8 @@ async def submit_step(
     # Validate session active + step claim-ready.
     step = (await db.execute(
         text("""
-            SELECT s.id AS step_id, s.status, s.session_id, s.job_id, s.node_key
+            SELECT s.id AS step_id, s.status, s.session_id, s.job_id, s.node_key,
+                   ss.current_node_key
               FROM assist_steps s
               JOIN assist_sessions ss ON ss.id = s.session_id
              WHERE s.session_id = :sid AND s.node_key = :nk
@@ -3060,6 +3079,23 @@ async def submit_step(
     )).mappings().first()
     if not step:
         raise ValueError(f"step not found or session not active: {session_id}/{node_key}")
+    if step["status"] == "pending" and step.get("current_node_key") == node_key:
+        # §17.1052 — the session already POINTS at this step (the previous
+        # commit advanced the pointer; a goto moved it; the claim-and-guide
+        # stream that would have presented it was cut off by a closed tab).
+        # The operator sees it as the current step, pastes, presses ✓ — and
+        # got a 409 the evidence box swallowed: nothing happened, nothing said
+        # ("it became stuck"). The pointer IS the claim; present it and go on.
+        await db.execute(
+            text("""
+                UPDATE assist_steps
+                   SET status = 'presented', presented_at = NOW(), updated_at = NOW()
+                 WHERE id = :step_id AND status = 'pending'
+            """),
+            {"step_id": step["step_id"]},
+        )
+        step = dict(step, status="presented")
+        logger.info("assist_submit_autoclaimed session_id=%s node_key=%s", session_id, node_key)
     if step["status"] not in ("presented",):
         # Idempotent: already-committed submits return current state, not error.
         if step["status"] in ("committed", "skipped"):
