@@ -836,8 +836,10 @@ export function renderChat(container, sessionId) {
     const subs = environment?.substitutions || {};
     const putSub = async (k, v) => {
       try {
-        await api.req(`/assist/${sessionId}/env`, { method: "PUT", body: { substitutions: { [k]: v } } });
+        const res = await api.req(`/assist/${sessionId}/env`, { method: "PUT", body: { substitutions: { [k]: v } } });
         toast(v ? `Pinned ${k} — walkthroughs will use it verbatim.` : `Cleared ${k}.`, "ok");
+        // §17.1046 — a re-pin was applied to the steps ahead: say what changed.
+        if (res?.reconciliation_note) appendBubble("assistant", "note", res.reconciliation_note);
         load();
       } catch (e) { toast(`Could not save: ${e.detail || e.message}`, "err"); }
     };

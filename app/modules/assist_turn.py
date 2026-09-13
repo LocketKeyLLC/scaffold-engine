@@ -674,12 +674,14 @@ async def _run_turn_inner(
                 verb = ("terse" if "terse" in text_.lower() else
                         "detailed" if "detail" in text_.lower() else
                         "normal" if action == "set_verbosity" else None)
-                await assist_set_env(
+                _env_res = await assist_set_env(
                     session_id,
                     AssistEnvInput(substitutions=subs or None, verbosity=verb),
                     db=db,
                 )
                 yield _ev(ASSIST_TURN_STATUS, {"text": "Noted — environment updated."})
+                async for e in _reconciliation_note(session_id, nk, _env_res, db):  # §17.1046
+                    yield e
             except Exception as exc:  # noqa: BLE001
                 yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't update the environment ({exc})."})
             handled["v"] = "set_env"

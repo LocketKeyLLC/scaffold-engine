@@ -19,7 +19,10 @@ node is committed, and the chosen option is applied to every pending step
 that depends on it or was written for a rejected option; *note recorded*
 (§17.1045): an operator note that states a correction in its own words
 ("3002 instead of 3001", "10.20.0.4 → 10.20.0.40", "changed from X to Y")
-is applied to every pending step that still carries the old value. It derives correction records
+is applied to every pending step that still carries the old value;
+*substitution changed* (§17.1046): the operator re-pins an environment
+value (``/assist env KEY=value``, the SPA editor) — the previous pin is the
+old value, the new pin the new one, both the operator's own words. It derives correction records
 deterministically (old value → new value, by kind), applies them to every
 PENDING step's task text, invalidates any cached walkthrough that mentions the
 old value so it regenerates through the verified path, records the correction
@@ -192,6 +195,8 @@ def render_note(result: dict) -> str:
     src = result.get("source_node_key", "?")
     if result.get("trigger") == "note":
         head = "🔁 **Plan updated from your note** — the correction has been applied to the steps ahead:"
+    elif result.get("trigger") == "substitution":
+        head = "🔁 **Plan updated from your environment pin** — the new value has been applied to the steps ahead:"
     else:
         head = f"🔁 **Plan updated after step {src}** — the fix that worked has been applied to the steps ahead:"
     pairs: dict[tuple, list[str]] = {}
@@ -566,6 +571,118 @@ async def reconcile_after_note(*, db, session_id: str, job_id: str, note_text: s
         return changes
     except Exception as exc:  # noqa: BLE001 — never break note-taking
         logger.warning("plan_reconcile_note_failed session_id=%s err=%r", session_id, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# §17.1046 — the substitution trigger. A re-pinned KEY is the cleanest
+# correction record there is: old value = the previous pin, new value = the
+# new pin, both typed by the operator. A NEW key rewrites nothing (its
+# `<KEY>` placeholders resolve at render time) but a cached walkthrough that
+# still shows the bare placeholder is stale and regenerates.
+# ---------------------------------------------------------------------------
+
+def substitution_corrections(old_subs: dict, new_subs: dict) -> tuple[list[dict], list[str]]:
+    """``(corrections, new_keys)``: a correction per key whose value changed
+    (kind inferred from the value's shape, else ``value``), and the keys that
+    were pinned for the first time."""
+    corrections: list[dict] = []
+    new_keys: list[str] = []
+    for k, new in (new_subs or {}).items():
+        new_s = str(new or "").strip()
+        if not new_s:
+            continue
+        old_s = str((old_subs or {}).get(k) or "").strip()
+        if not old_s:
+            new_keys.append(k)
+            continue
+        if old_s == new_s:
+            continue
+        kinds = {it["kind"] for it in values_in(new_s) if it["value"] == new_s}
+        kind = next(iter(kinds)) if len(kinds) == 1 else "value"
+        # A bare number in the port range, or a key that says so, is a port —
+        # the `host:container` mapping rule must apply to it (live: a "value"
+        # kind rewrote `-p 127.0.0.1:3001:3001` to `3002:3002`).
+        if kind == "value" and (("PORT" in k.upper()) or (new_s.isdigit() and old_s.isdigit()
+                                                          and 1024 <= int(new_s) <= 65535 and 1024 <= int(old_s) <= 65535)):
+            kind = "port"
+        corrections.append({"kind": kind, "old": old_s, "new": new_s, "key": k})
+    return corrections, new_keys
+
+
+def placeholder_resets(steps: list[dict], new_keys: list[str]) -> list[str]:
+    """Pending steps whose cached walkthrough still shows a bare `<KEY>` that
+    now has a pin."""
+    out: list[str] = []
+    for s in steps or []:
+        if (s.get("status") or "") in ("committed", "skipped", "handed_off", "escalated"):
+            continue
+        g = s.get("guidance") or ""
+        if g and any(f"<{k}>" in g for k in new_keys):
+            out.append(s.get("node_key"))
+    return out
+
+
+async def reconcile_after_substitution(*, db, session_id: str, job_id: str,
+                                       old_subs: dict, new_subs: dict,
+                                       node_key: Optional[str] = None) -> Optional[dict]:
+    """The substitution trigger. Fail-soft; None when nothing changed."""
+    if not settings.plan_reconcile_enabled:
+        return None
+    try:
+        corrections, new_keys = substitution_corrections(old_subs, new_subs)
+        if not corrections and not new_keys:
+            return None
+        nodes = [dict(r) for r in (await db.execute(text("""
+            SELECT node_key, status, prompt_template FROM dag_nodes
+             WHERE job_id = :jid ORDER BY execution_order
+        """), {"jid": job_id})).mappings().all()]
+        steps = [dict(r) for r in (await db.execute(text("""
+            SELECT node_key, status, guidance FROM assist_steps WHERE session_id = :sid
+        """), {"sid": session_id})).mappings().all()]
+        src = node_key or "env"
+        changes = plan_changes(nodes, steps, corrections, source_node_key=src,
+                               source_label="your environment pin") if corrections else {"node_updates": [], "guidance_resets": []}
+        for nk in placeholder_resets(steps, new_keys):
+            if nk not in changes["guidance_resets"]:
+                changes["guidance_resets"].append(nk)
+        changes.update({"trigger": "substitution", "source_node_key": src,
+                        "corrections": corrections, "new_keys": new_keys})
+        if not (changes["node_updates"] or changes["guidance_resets"]):
+            logger.info("plan_reconcile_substitution_nothing_to_apply session_id=%s keys=%r",
+                        session_id, [c["key"] for c in corrections] + new_keys)
+            return None
+        for u in changes["node_updates"]:
+            await db.execute(text("""
+                UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+                 WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+            """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
+        for nk in changes["guidance_resets"]:
+            await db.execute(text("""
+                UPDATE assist_steps
+                   SET guidance = NULL, guidance_status = 'none', guidance_generated_at = NULL, updated_at = NOW()
+                 WHERE session_id = :sid AND node_key = :nk
+                   AND status NOT IN ('committed', 'skipped', 'handed_off', 'escalated')
+            """), {"sid": session_id, "nk": nk})
+        entry = {
+            "at": datetime.now(timezone.utc).isoformat(), "trigger": "substitution",
+            "source_node_key": src, "corrections": corrections, "new_keys": new_keys,
+            "nodes": [u["node_key"] for u in changes["node_updates"]],
+            "guidance_resets": changes["guidance_resets"],
+        }
+        await db.execute(text("""
+            UPDATE jobs
+               SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{reconciliation}',
+                                        COALESCE(metadata->'reconciliation', '[]'::jsonb) || CAST(:e AS jsonb))
+             WHERE id = :jid
+        """), {"e": json.dumps(entry), "jid": job_id})
+        await db.commit()
+        logger.warning("plan_reconcile_substitution_applied session_id=%s corrections=%r new_keys=%r nodes=%r guidance_resets=%r",
+                       session_id, [(c["key"], c["old"], c["new"]) for c in corrections], new_keys,
+                       entry["nodes"], entry["guidance_resets"])
+        return changes
+    except Exception as exc:  # noqa: BLE001 — never break an environment update
+        logger.warning("plan_reconcile_substitution_failed session_id=%s err=%r", session_id, exc)
         return None
 
 

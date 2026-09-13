@@ -310,3 +310,70 @@ def test_a_port_correction_keeps_the_container_side_of_a_docker_mapping():
     body = out["node_updates"][0]["prompt_template"].split("\n\n🔁")[0]
     assert "-p 127.0.0.1:3002:3001" in body
     assert "curl http://127.0.0.1:3002" in body and "proxy_pass to 127.0.0.1:3002" in body
+
+
+# ---- §17.1046 — the substitution trigger ------------------------------------
+
+def test_a_re_pinned_key_is_a_correction_and_a_new_key_is_not():
+    corr, new_keys = pr.substitution_corrections(
+        {"SERVER_IP": "10.20.0.5", "DOMAIN": "status.hamlet-labs.net", "PORT": "3001"},
+        {"SERVER_IP": "10.20.0.50", "DOMAIN": "status.hamlet-labs.net", "PORT": "3001", "NAS_HOST": "nas01", "EMPTY": ""})
+    assert corr == [{"kind": "ip", "old": "10.20.0.5", "new": "10.20.0.50", "key": "SERVER_IP"}]
+    assert new_keys == ["NAS_HOST"]
+
+
+def test_a_non_value_shaped_pin_gets_the_generic_kind_and_rewrites_word_bounded():
+    corr, _ = pr.substitution_corrections({"HOSTNAME": "pve-old"}, {"HOSTNAME": "pve-new"})
+    assert corr == [{"kind": "value", "old": "pve-old", "new": "pve-new", "key": "HOSTNAME"}]
+    nodes = [{"node_key": "T4", "status": "pending", "prompt_template": "ssh root@pve-old; not pve-older"}]
+    out = pr.plan_changes(nodes, [], corr, source_node_key="env", source_label="your environment pin")
+    body = out["node_updates"][0]["prompt_template"]
+    assert body.startswith("ssh root@pve-new; not pve-older") and "🔁 Updated after your environment pin:" in body
+
+
+def test_a_new_pin_resets_walkthroughs_that_still_show_the_bare_placeholder():
+    steps = [{"node_key": "T4", "status": "pending", "guidance": "ssh root@<SERVER_IP>"},
+             {"node_key": "T5", "status": "pending", "guidance": "already 10.20.0.5"},
+             {"node_key": "T3", "status": "committed", "guidance": "ssh root@<SERVER_IP>"}]
+    assert pr.placeholder_resets(steps, ["SERVER_IP"]) == ["T4"]
+
+
+def test_render_note_for_a_substitution():
+    note = pr.render_note({"trigger": "substitution", "source_node_key": "env",
+                           "node_updates": [{"node_key": "T4", "corrections": [
+                               {"kind": "ip", "old": "10.20.0.5", "new": "10.20.0.50", "key": "SERVER_IP"}]}],
+                           "guidance_resets": ["T4"]})
+    assert note.startswith("🔁 **Plan updated from your environment pin**") and "`10.20.0.5` → `10.20.0.50` (ip) in T4" in note
+
+
+async def test_the_substitution_trigger_is_valve_gated_and_silent_on_no_change(monkeypatch):
+    monkeypatch.setattr(pr.settings, "plan_reconcile_enabled", False)
+    assert await pr.reconcile_after_substitution(db=None, session_id="s", job_id="j",
+                                                 old_subs={"A": "1"}, new_subs={"A": "2"}) is None
+    monkeypatch.setattr(pr.settings, "plan_reconcile_enabled", True)
+    assert await pr.reconcile_after_substitution(db=None, session_id="s", job_id="j",
+                                                 old_subs={"A": "1"}, new_subs={"A": "1"}) is None
+
+
+def test_the_env_endpoint_turn_loop_and_spa_are_wired():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    router = (root / "app/routers/assist.py").read_text()
+    body = router[router.index("async def assist_set_env("):router.index("async def assist_get_env(")]
+    assert "reconcile_after_substitution(" in body and 'out["reconciliation_note"] = render_note(rec)' in body
+    assert body.index("get_environment(") < body.index("set_environment(")  # old pins read BEFORE the update
+    turn = (root / "app/modules/assist_turn.py").read_text()
+    assert "_reconciliation_note(session_id, nk, _env_res, db)" in turn
+    spa = (root / "app/ui/static/views/assist.js").read_text()
+    assert "res?.reconciliation_note" in spa
+
+
+def test_a_bare_port_pin_is_a_port_so_the_mapping_rule_applies():
+    """Live (scratch session 33356054): KUMA_HOST_PORT 3001→3002 came out as kind
+    `value` and rewrote `-p 127.0.0.1:3001:3001` to `3002:3002`."""
+    corr, _ = pr.substitution_corrections({"KUMA_HOST_PORT": "3001"}, {"KUMA_HOST_PORT": "3002"})
+    assert corr[0]["kind"] == "port"
+    nodes = [{"node_key": "T6", "status": "pending", "prompt_template": "docker run -p 127.0.0.1:3001:3001 x; curl http://127.0.0.1:3001"}]
+    body = pr.plan_changes(nodes, [], corr, source_node_key="env")["node_updates"][0]["prompt_template"]
+    assert "-p 127.0.0.1:3002:3001 x; curl http://127.0.0.1:3002" in body
+    corr2, _ = pr.substitution_corrections({"GATEWAY": "8080"}, {"GATEWAY": "8081"})
+    assert corr2[0]["kind"] == "port"
