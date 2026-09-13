@@ -97,7 +97,7 @@ def test_plan_changes_touch_pending_nodes_only_and_flag_stale_walkthroughs():
     out = pr.plan_changes(nodes, steps, corr, source_node_key="T37")
     assert [u["node_key"] for u in out["node_updates"]] == ["T38"]
     t38 = out["node_updates"][0]["prompt_template"]
-    assert t38.startswith("Restart from /opt/control-panel-backend") and pr.PROVENANCE_PREFIX + " T37" in t38
+    assert t38.startswith("Restart from /opt/control-panel-backend") and pr.PROVENANCE_PREFIX + " step T37" in t38
     assert out["guidance_resets"] == ["T38"]
 
 
@@ -245,3 +245,68 @@ def test_a_decision_commit_is_dispatched_by_node_type_and_the_turn_loop_forwards
     assert "assess_note_impact(" in src  # structural impact goes through surface-and-ask, never applied silently
     turn = (root / "app/modules/assist_turn.py").read_text()
     assert 'rec.get("replan_proposal")' in turn and "ASSIST_REPLAN_PROPOSAL, {\"proposal\": rec[\"replan_proposal\"]}" in turn
+
+
+# ---- §17.1045 — the note trigger --------------------------------------------
+
+PLAN = "T7: docker run -p 127.0.0.1:3001:3001 … T9: proxy_pass http://127.0.0.1:3001 … T14: mount /srv/old-data"
+
+
+@pytest.mark.parametrize("note,expected", [
+    ("Uptime Kuma will listen on port 3002 instead of 3001", ("port", "3001", "3002")),
+    ("port 3001 → 3002 on this box", ("port", "3001", "3002")),
+    ("I changed the data dir from /srv/old-data to /srv/kuma-data", ("path", "/srv/old-data", "/srv/kuma-data")),
+    ("use port 3002, not 3001", ("port", "3001", "3002")),
+    ("port 3001 is now 3002", ("port", "3001", "3002")),
+])
+def test_a_note_states_its_own_correction(note, expected):
+    corr, declined = pr.note_corrections(note, PLAN)
+    assert declined == [] and corr == [{"kind": expected[0], "old": expected[1], "new": expected[2]}]
+
+
+def test_a_lone_value_or_an_old_value_the_plan_never_had_is_not_a_correction():
+    assert pr.note_corrections("my NAS is 10.20.0.40", PLAN) == ([], [])
+    assert pr.note_corrections("port 8080 instead of 8081", PLAN) == ([], [])  # 8081 not in the plan
+    assert pr.note_corrections("open port 3001 to 3010 in the firewall", PLAN) == ([], [])  # "X to Y" without "from"
+
+
+def test_two_pairs_of_one_kind_in_a_note_are_declined():
+    corr, declined = pr.note_corrections("port 3002 instead of 3001, and 9001 instead of 3001", PLAN)
+    assert corr == [] and declined and declined[0]["kind"] == "port"
+
+
+def test_plan_changes_carry_the_note_label_and_render_note_says_from_your_note():
+    corr = [{"kind": "port", "old": "3001", "new": "3002"}]
+    nodes = [{"node_key": "T9", "status": "pending", "prompt_template": "proxy_pass http://127.0.0.1:3001"}]
+    out = pr.plan_changes(nodes, [], corr, source_node_key="T7", source_label="your note (T7)")
+    assert "🔁 Updated after your note (T7): `3001` → `3002` (port)." in out["node_updates"][0]["prompt_template"]
+    out.update({"trigger": "note", "source_node_key": "T7"})
+    note = pr.render_note(out)
+    assert note.startswith("🔁 **Plan updated from your note**") and "`3001` → `3002` (port) in T9" in note
+
+
+async def test_the_note_trigger_is_valve_gated(monkeypatch):
+    monkeypatch.setattr(pr.settings, "plan_reconcile_enabled", False)
+    assert await pr.reconcile_after_note(db=None, session_id="s", job_id="j", note_text="3002 instead of 3001",
+                                         note_kind="note", node_key="T7") is None
+
+
+def test_the_note_endpoint_and_turn_loop_are_wired():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    router = (root / "app/routers/assist.py").read_text()
+    body = router[router.index("async def assist_note("):router.index("async def assist_add_step(")]
+    assert "reconcile_after_note(" in body and 'out["reconciliation_note"] = render_note(rec)' in body
+    assert body.index("assess_note_impact(") < body.index("reconcile_after_note(")
+    turn = (root / "app/modules/assist_turn.py").read_text()
+    note_fn = turn[turn.index("async def _note("):turn.index("async def _surface(")]
+    assert "_reconciliation_note(session_id, nk, res, db)" in note_fn
+
+
+def test_a_port_correction_keeps_the_container_side_of_a_docker_mapping():
+    corr = [{"kind": "port", "old": "3001", "new": "3002"}]
+    nodes = [{"node_key": "T3", "status": "pending",
+              "prompt_template": "docker run -p 127.0.0.1:3001:3001 … then curl http://127.0.0.1:3001 and proxy_pass to 127.0.0.1:3001"}]
+    out = pr.plan_changes(nodes, [], corr, source_node_key="T2")
+    body = out["node_updates"][0]["prompt_template"].split("\n\n🔁")[0]
+    assert "-p 127.0.0.1:3002:3001" in body
+    assert "curl http://127.0.0.1:3002" in body and "proxy_pass to 127.0.0.1:3002" in body

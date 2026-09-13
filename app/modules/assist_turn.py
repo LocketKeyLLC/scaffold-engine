@@ -785,6 +785,8 @@ async def _note(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterator[_
         "retracted": len(res.get("retracted_facts") or []),
         "has_proposal": bool(res.get("replan_proposal")),
     })
+    async for e in _reconciliation_note(session_id, nk, res, db):  # §17.1045
+        yield e
     if res.get("replan_proposal"):
         yield _ev(ASSIST_REPLAN_PROPOSAL, {"proposal": res["replan_proposal"]})
 

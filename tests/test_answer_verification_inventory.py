@@ -69,6 +69,7 @@ REGISTERED_SITES = {
     ("execution_compile.py", "_compile_output"): "_maybe_compile_value_check",  # §17.1041
     ("execution_compile.py", "_maybe_compile_value_check"): "compile_value_check",  # §17.1041
     ("assist_agent.py", "submit_step"): "reconcile_after_commit",  # §17.1043 — fix confirmed → plan
+    ("plan_reconcile.py", "reconcile_after_note"): "note_corrections",  # §17.1045 — note → plan
 }
 
 
