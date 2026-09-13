@@ -194,7 +194,8 @@ def test_note_branch_answers_before_returning():
     import inspect
     from app.modules import assist_turn
     src = inspect.getsource(assist_turn)
-    note_branch = src[src.index('action == "note" or impact == "reshape"'):]
+    # §17.1053b — the branch now exempts add_step from the reshape hijack.
+    note_branch = src[src.index('action == "note" or (impact == "reshape" and action != "add_step")'):]
     note_branch = note_branch[:note_branch.index('handled["v"] = "note"')]
     assert "answer_query" in note_branch
     assert "_answer(" in note_branch

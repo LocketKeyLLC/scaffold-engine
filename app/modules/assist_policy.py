@@ -813,7 +813,7 @@ def apply_deterministic_overrides(decision: dict, message: str) -> dict:
     action = decision.get("action")
     new_action, reason, patch = _override(action, message or "", signals)
     if reason is None:
-        return decision
+        return _normalize_add_step_impact(decision)
     out = dict(decision)
     for k, v in patch.items():
         if k in _TEXT_FILL_FIELDS:
@@ -825,7 +825,23 @@ def apply_deterministic_overrides(decision: dict, message: str) -> dict:
     out["confidence"] = "high"
     out["override"] = reason
     out["rationale"] = f"[deterministic:{reason}] " + (out.get("rationale") or "")
-    return out
+    return _normalize_add_step_impact(out)
+
+
+def _normalize_add_step_impact(decision: dict) -> dict:
+    """§17.1053b — an `add_step` IS the plan change. Live (2026-09-13 21:59,
+    the first reply after §17.1053 shipped): the model routed "add a step for
+    this" to add_step correctly AND tagged it plan_impact=reshape; both
+    dispatchers send any reshape to the note path before looking at the
+    action, so the phrase was filed as a note and nothing was added. The
+    dispatchers now also exempt add_step, but the decision itself must not
+    carry a contradiction: reshape on add_step becomes none."""
+    if decision.get("action") == "add_step" and (decision.get("plan_impact") or "none") == "reshape":
+        out = dict(decision)
+        out["plan_impact"] = "none"
+        out["impact_normalized"] = "add_step_is_the_plan_change"
+        return out
+    return decision
 
 
 # ── Completion confirmation (§17.951) ────────────────────────────────────────

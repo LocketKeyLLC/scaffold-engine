@@ -305,3 +305,15 @@ def test_checklist_request_reaches_checklist(pipe):
             node_key="T3", chat_id="c1", history=[]))
     assert chk.called and not chat.called
     assert "<checklist>" in out
+
+
+def test_dispatch_add_step_with_reshape_tag_still_adds(pipe):
+    """§17.1053b — add_step IS the plan change; reshape must not divert it to the note path."""
+    decision = {"action": "add_step", "confidence": "high", "plan_impact": "reshape"}
+    with patch.object(_vendor, "_recall_node_key", return_value="T37"), \
+         patch.object(_vendor, "assist_note_cmd", return_value=["<note>"]) as note, \
+         patch.object(_vendor, "assist_add_step_cmd", return_value=["<add>"]) as add:
+        out = "".join(_vendor._dispatch_decision(
+            pipe, _SID, decision, msg="add a step for this", node_key="T37",
+            chat_id="c1", history=[]))
+    assert add.called and not note.called and "<add>" in out
