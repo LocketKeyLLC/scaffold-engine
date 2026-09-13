@@ -683,6 +683,17 @@ async def assist_decide_turn(session_id: str, body: AssistInterpretInput, db=Dep
 @router.put("/assist/{session_id}/env")
 async def assist_set_env(session_id: str, body: AssistEnvInput, db=Depends(get_db)):
     """Set the operator's environment so walkthroughs use concrete commands."""
+    # §17.1046 — the pins BEFORE this update are the old values a re-pin corrects.
+    old_subs: dict = {}
+    job_id: str | None = None
+    if body.substitutions:
+        try:
+            sess = await assist_agent.get_session(session_id=session_id, db=db)
+            job_id = str((sess or {}).get("job_id") or "") or None
+            prev = await assist_agent.get_environment(session_id=session_id, db=db)
+            old_subs = dict((prev or {}).get("substitutions") or {})
+        except Exception:  # noqa: BLE001 — the diff is a courtesy, the update is not
+            old_subs, job_id = {}, None
     try:
         env = await assist_agent.set_environment(
             session_id=session_id,
@@ -697,7 +708,17 @@ async def assist_set_env(session_id: str, body: AssistEnvInput, db=Depends(get_d
         if "not found" in str(exc):
             raise HTTPException(status_code=404, detail=str(exc))
         raise HTTPException(status_code=409, detail=str(exc))
-    return {"session_id": session_id, "environment": env}
+    out = {"session_id": session_id, "environment": env}
+    if body.substitutions and job_id:
+        from app.modules.plan_reconcile import reconcile_after_substitution, render_note
+        rec = await reconcile_after_substitution(
+            db=db, session_id=session_id, job_id=job_id, old_subs=old_subs,
+            new_subs=dict(body.substitutions), node_key=None,
+        )
+        if rec:
+            out["reconciliation"] = rec
+            out["reconciliation_note"] = render_note(rec)
+    return out
 
 
 @router.get("/assist/{session_id}/env")
