@@ -185,6 +185,7 @@ def test_regex_parity_with_pipeline_copy():
     assert P._QUESTION_PIVOT_RE.pattern == h._QUESTION_PIVOT_RE.pattern
     assert P._HOWTO_QUESTION_RE.pattern == h._HOWTO_QUESTION_RE.pattern
     assert P._HELP_REQUEST_RE.pattern == h._HELP_REQUEST_RE.pattern
+    assert P._ADD_STEP_RE.pattern == h._ADD_STEP_RE.pattern  # §17.1053
 
 
 # ── §17.867 — whats-next orientation gate ─────────────────────────────────────

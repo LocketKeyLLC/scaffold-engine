@@ -19,7 +19,8 @@ from app.modules.prompt_assembly import StepContext
 
 def test_signals_clean_shell_paste():
     s = assist_decide._compute_signals("root@pve:~# ls -la\ntotal 4", [])
-    assert s == {"shell_paste": True, "shell_error": False, "last_assistant_was_fix": False}
+    assert s == {"shell_paste": True, "shell_error": False, "last_assistant_was_fix": False,
+                 "last_assistant_proposed_step": False}  # §17.1053
 
 
 def test_signals_shell_error():

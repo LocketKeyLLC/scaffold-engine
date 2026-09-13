@@ -631,6 +631,79 @@ def looks_like_whats_next(message: str) -> bool:
     return bool(_WHATS_NEXT_RE.match(message or ""))
 
 
+# ── §17.1053 — "add a step for this" (the §17.736 route) ─────────────────────
+# Verbatim from `_assist_handlers._ADD_STEP_RE` (parity-pinned). The pipeline
+# intercepts this phrase BEFORE its classifier; the server had no equivalent, so
+# whenever /decide fell back — live 2026-09-13 20:24, three 768-token draws of
+# the decide model all spent on reasoning, `tool_call_empty_redraw` ×3 — the
+# operator's reply to the engine's OWN instruction ("reply 'add a step for
+# this'") was routed as a question and answered as chat. The phrase is the
+# engine's contract with the operator; it must route deterministically.
+_ADD_STEP_RE = re.compile(
+    r"\b(?:"
+    r"add\s+(?:a\s+|another\s+)?step|make\s+(?:it|this|that)\s+(?:its\s+own|a\s+separate)\s+step|"
+    r"(?:its|it)\s+own\s+step|(?:a\s+)?separate\s+step|create\s+(?:a\s+)?step|"
+    r"needs?\s+(?:its\s+own\s+|a\s+)?step|we\s+need\s+a\s+step|(?:a\s+)?step\s+for\s+(?:this|that|it)"
+    r")\b",
+    re.I,
+)
+# A short affirmative reply to a step the engine JUST proposed ("add them",
+# "yes, add the steps", "add both", "insert it"). Server-only, and consulted
+# only when the previous assistant turn carried a `## Needs its own step`
+# section — that scoping is what makes "add it" safe to read this way.
+_ADD_STEP_REPLY_RE = re.compile(
+    r"^\s*(?:(?:yes|yeah|yep|ok(?:ay)?|sure|please|go\s+ahead)[,!.\s]+)*"
+    r"(?:add|insert|create|make)\s+"
+    r"(?:it|them|both|all(?:\s+\w+)?|the\s+steps?|those|these|that|this|each(?:\s+one)?)\b"
+    r"[\s\w,]{0,24}$",
+    re.I,
+)
+# What the operator's add-step reply is ABOUT, once the request framing is
+# stripped. A reply that names nothing ("add a step for this", "add them",
+# "yes add a step for each one") is BARE: the step it refers to lives in the
+# engine's previous answer, and `add_step` must resolve it from the transcript
+# — never draft from the phrase itself. Live: ADD6 (2026-09-11) was inserted
+# with title AND description "add a step for this"; the operator then had to
+# spend a plan update asking for the placeholder to be removed.
+_ADD_STEP_STRIP_RE = re.compile(
+    r"\b(?:please|yes|yeah|yep|ok(?:ay)?|sure|go\s+ahead|do\s+(?:it|that)|"
+    r"add|make|create|insert|another|a|an|the|it|this|that|these|those|them|"
+    r"each|all|both|three|two|of|as|its|own|separate|new|proper|steps?|for|one|"
+    r"at\s+a\s+time|and|too|also|now|thanks?|thank\s+you)\b",
+    re.I,
+)
+
+
+def looks_like_add_step_request(message: str) -> bool:
+    """§17.736/§17.1053 — the operator explicitly asks to turn something into a
+    proper plan step (insert + guide it, not band-aid it as a one-off)."""
+    if not message:
+        return False
+    return bool(_ADD_STEP_RE.search(normalize_punct(message)))
+
+
+def looks_like_add_step_reply(message: str) -> bool:
+    """§17.1053 — a short affirmative reply accepting a step the engine just
+    proposed. Only meaningful while the previous answer proposed one."""
+    if not message:
+        return False
+    return bool(_ADD_STEP_REPLY_RE.match(normalize_punct(message).strip()))
+
+
+def is_bare_add_step_request(message: str) -> bool:
+    """§17.1053 — True when an add-step message names NO task of its own, so
+    the step must be resolved from the engine's previous `## Needs its own
+    step` proposal (and must never be drafted from the phrase itself)."""
+    m = normalize_punct(message or "").strip()
+    if not m:
+        return False
+    if not (_ADD_STEP_RE.search(m) or _ADD_STEP_REPLY_RE.match(m)):
+        return False
+    rest = _ADD_STEP_STRIP_RE.sub(" ", m)
+    rest = re.sub(r"[^A-Za-z0-9]+", "", rest)
+    return len(rest) < 4
+
+
 def _override(action: str, message: str, signals: dict) -> tuple[str, str | None, dict]:
     """Return (new_action, reason|None, patch). Precedence mirrors the pipeline
     cascade: shell-result (fix > submit) → pivot → help/how-to. A `None` reason
@@ -647,6 +720,18 @@ def _override(action: str, message: str, signals: dict) -> tuple[str, str | None
         if action not in ("submit", "fix"):
             return "submit", "shell_result", {"evidence": msg.strip()}
         return action, None, {}
+    # 1b. §17.1053 — an explicit add-step request routes to add_step no matter
+    #     what the model said (it is the engine's own instruction to the
+    #     operator, so it must survive a starved /decide draw). Terminal routes
+    #     the operator chose with a verb (submit/skip/pause/finalize) and an
+    #     already-right add_step are left alone. A short affirmative ("add
+    #     them", "insert it") counts only while the previous assistant turn
+    #     proposed a step — that scoping is what makes the reply unambiguous.
+    if action in ("question", "ask", "note", "status", "advance", "fix") and (
+        looks_like_add_step_request(msg)
+        or (signals.get("last_assistant_proposed_step") and looks_like_add_step_reply(msg))
+    ):
+        return "add_step", "add_step_request", {}
     # 2. §17.867 — a pure orientation ask maps to `status` no matter what the
     #    model said (live: "whats next??" was confidently routed to NOTE and
     #    recorded as ledger junk). Never `advance` — orientation must not close
