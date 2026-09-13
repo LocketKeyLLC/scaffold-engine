@@ -592,7 +592,7 @@ async def test_documentation_sources_fall_back_to_snippets_when_the_fetched_doc_
     need = derive_need("In the UniFi Network application, exact click path to forward TCP 443 "
                        "and whether a firewall rule is created", assume_question=True)
 
-    async def deep(q, top_n, skip=None):
+    async def deep(q, top_n, skip=None, operator_text=None):
         return [{"query": q, "kind": "web", "url": "https://en.wikipedia.org/wiki/Documentation",
                  "text": "Documentation is any communicable material used to describe a system", "date": ""}]
 
@@ -714,7 +714,7 @@ def test_the_ask_path_runs_a_documentation_query_when_none_was_fetched():
     assert '_cap_query("documentation "' in hsrc and ".split()[:10]" in hsrc
     # §17.1037c — authority is judged on the RANKED (on-topic) set, both sides
     assert "max_source_authority(rank_evidence(list(sources), need))" in hsrc
-    assert "fetched = rank_evidence(await _deep_web_sources(doc_q, top_n=2, skip=_about_the_word), need)" in hsrc
+    assert "fetched = rank_evidence(await _deep_web_sources(doc_q, top_n=2, skip=_about_the_word, operator_text=operator_text), need)" in hsrc
     assert "max_source_authority(fetched) < _DOC_AUTHORITY" in hsrc
     # and a documentation-grade snippet fallback exists for pages that extract to nothing
     assert "_searxng_structured(doc_q" in hsrc and "source_authority(r[\"url\"]) >= _DOC_AUTHORITY" in hsrc
