@@ -994,6 +994,7 @@ export function renderChat(container, sessionId) {
   let lastReplanSig = null;
 
   const REPLAN_ACTION_COPY = {
+    rewrite: { icon: "✎", label: "Reword", blurb: "the confirmed fix showed this instruction is wrong here; exact phrase replaced" },
     revise: { icon: "✏️", label: "revise", blurb: "rewrite this step's instructions" },
     drop: { icon: "🗑️", label: "drop", blurb: "remove this step from the plan" },
     reopen: { icon: "↩️", label: "reopen", blurb: "put this finished step back in play" },
@@ -1039,7 +1040,7 @@ export function renderChat(container, sessionId) {
     lastReplanSig = sig;
 
     const counts = changes.reduce((a, c) => { a[c.action] = (a[c.action] || 0) + 1; return a; }, {});
-    const countText = ["revise", "drop", "reopen"]
+    const countText = ["revise", "drop", "reopen", "rewrite"]
       .filter((k) => counts[k])
       .map((k) => `${counts[k]} to ${k}`).join(" · ");
 
@@ -1060,9 +1061,10 @@ export function renderChat(container, sessionId) {
         if (decision === "apply") {
           const rev = (res.revised || []).length;
           const drop = (res.dropped || []).length;
+          const rw = (res.rewritten || []).length;
           ackPopup("✅", "Plan updated",
-            `${rev} step(s) revised, ${drop} dropped. Continuing on the revised plan…`);
-          toast(`Plan updated — ${rev} revised, ${drop} dropped.`, "ok");
+            `${rev} step(s) revised, ${drop} dropped${rw ? `, ${rw} reworded` : ""}. Continuing on the revised plan…`);
+          toast(`Plan updated — ${rev} revised, ${drop} dropped${rw ? `, ${rw} reworded` : ""}.`, "ok");
           await load();
           await claimAndGuideNext();
           return;

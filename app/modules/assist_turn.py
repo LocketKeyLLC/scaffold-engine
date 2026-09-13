@@ -1090,11 +1090,12 @@ async def _reconciliation_note(session_id: str, nk, res, db) -> AsyncIterator[_E
     from app.modules.plan_reconcile import render_note
     rec = (res or {}).get("reconciliation") or {}
     note = render_note(rec)
+    if note:
+        yield _ev(ASSIST_ANSWER, {"kind": "note", "text": note})
+    if rec.get("replan_proposal"):  # §17.1044/1048 — proposals the operator confirms
+        yield _ev(ASSIST_REPLAN_PROPOSAL, {"proposal": rec["replan_proposal"]})
     if not note:
         return
-    yield _ev(ASSIST_ANSWER, {"kind": "note", "text": note})
-    if rec.get("replan_proposal"):  # §17.1044 — structural impact of a decision, operator confirms
-        yield _ev(ASSIST_REPLAN_PROPOSAL, {"proposal": rec["replan_proposal"]})
     try:
         from app.modules import assist_agent as _aa
         await _aa.capture_assistant_reply(

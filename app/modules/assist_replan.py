@@ -663,13 +663,23 @@ async def apply_note_replan(
             )
 
     await db.commit()
+    # §17.1048 — confirmed model-proposed REWRITES go through the reconciliation
+    # machinery (exact phrase, provenance line, ledger entry, revertable).
+    rewritten: list[str] = []
+    _rw = [p for p in proposals if p.get("action") == "rewrite"]
+    if _rw:
+        from app.modules.plan_reconcile import apply_rewrite_proposals
+        rewritten = await apply_rewrite_proposals(
+            db=db, session_id=session_id, job_id=job_id, proposals=_rw,
+            source_node_key=str(_rw[0].get("source_node_key") or "?"))
     logger.info(
-        "assist_note_replan session_id=%s job_id=%s revised=%d dropped=%d reopened=%d",
-        session_id, job_id, len(revised), len(dropped), len(reopened),
+        "assist_note_replan session_id=%s job_id=%s revised=%d dropped=%d reopened=%d rewritten=%d",
+        session_id, job_id, len(revised), len(dropped), len(reopened), len(rewritten),
     )
     return {
         "revised": revised, "dropped": dropped,
         "reopened": reopened, "reopened_prior": reopened_prior,
+        "rewritten": rewritten,
     }
 
 

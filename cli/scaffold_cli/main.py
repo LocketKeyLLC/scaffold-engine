@@ -1305,7 +1305,8 @@ def jobs_changes(ctx: click.Context, job_id: str, as_json: bool, revert_index: i
     if not entries:
         click.echo("no plan changes recorded")
         return
-    labels = {"fix_confirmed": "fix confirmed", "decision": "decision", "note": "note", "substitution": "env pin"}
+    labels = {"fix_confirmed": "fix confirmed", "decision": "decision", "note": "note", "substitution": "env pin",
+              "model_proposed": "proposed after a fix (approved)"}
     for e in entries:
         head = f"[{e.get('index')}] {labels.get(e.get('trigger'), e.get('trigger'))} @ {e.get('source_node_key') or '-'}  {str(e.get('at') or '')[:19]}"
         if e.get("reverted_at"):
