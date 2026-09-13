@@ -271,10 +271,10 @@ async def test_the_compile_step_banners_and_records(monkeypatch):
     monkeypatch.setattr(ec.settings, "compile_value_check_enabled", True)
     recorded = {}
 
-    async def given(job_id):
+    async def given(job_id, db=None):
         return BRIEF, ""
 
-    async def record(job_id, key, rec):
+    async def record(job_id, key, rec, db=None):
         recorded[key] = rec
     monkeypatch.setattr(ec, "_job_given", given)
     monkeypatch.setattr(ec, "_record_job_metadata", record)
@@ -290,7 +290,7 @@ def test_compile_runs_the_check_on_every_exit_and_selects_evidence():
     src = (pathlib.Path(__file__).resolve().parents[1] / "app/modules/execution_compile.py").read_text()
     body = src[src.index("async def _compile_output("):]
     finish = body[body.index("async def _finish("):body.index("deliverable = [")]
-    assert "_maybe_compile_value_check(job_id, text_value, nodes)" in finish
+    assert "_maybe_compile_value_check(job_id, text_value, nodes, db=db)" in finish  # §17.1052: caller's session
     assert "output_text, depends_on, evidence," in body
     # Live (2e74196b): asyncpg could not type a bare `:k` inside
     # jsonb_build_object → "could not determine data type of parameter $1"
