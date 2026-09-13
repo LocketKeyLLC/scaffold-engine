@@ -212,3 +212,64 @@ async def test_probes_are_requested_in_batches_pins_are_context_and_progress_is_
 def test_an_empty_probe_result_is_explained_as_a_miss_not_as_nothing_to_check():
     assert "returned no usable command for any of the 86 claims" in sc.render_probe_message([], checked=0, unchecked=86)
     assert "recorded nothing I can verify" in sc.render_probe_message([], checked=0, unchecked=0)
+
+
+# ---- §17.1052 — safety: history is not a claim, repairs never destroy ---------
+
+@pytest.mark.parametrize("fact", [
+    "VM 100 AI-VM destroyed with purge; logical volumes vm-100-disk-0 removed",
+    "The /etc/caddy/Caddyfile in LXC 120 was truncated with 'truncate -s 0'",
+    "The operator's attempt to start the backend used the path /opt/control-panel (with a typo)",
+    "'systemctl start control-panel.service' fails with 'Unit not found'",
+    "Backup of /etc/network/interfaces created (interfaces.bak)",
+])
+def test_history_and_failure_facts_are_not_probed(fact):
+    assert not sc.probe_worthy(fact), fact
+
+
+@pytest.mark.parametrize("fact", [
+    "VM 106 (palworld-server) is running with 4 cores and 8192 MB",
+    "Inside LXC 111 the control-panel backend listens on *:3001 as the transient unit control-panel",
+    "cluster.fw has policy_in DROP with five security groups",
+])
+def test_desired_state_facts_are_probed(fact):
+    assert sc.probe_worthy(fact), fact
+
+
+@pytest.mark.parametrize("repair", [
+    "Stop the node process (pid 430) listening on *:3001 inside LXC 111",
+    "Stop LXC container 120 and truncate its /etc/caddy/Caddyfile to 0 bytes",
+    "Remove every remaining VM (106, 110) and container from the Proxmox host",
+    "rm -rf /opt/control-panel and reinstall",
+])
+def test_destructive_repairs_are_refused(repair):
+    assert sc.destructive_repair(repair), repair
+
+
+def test_a_destructive_repair_from_the_judge_becomes_needs_decision_and_never_a_proposal():
+    verdicts = [{"id": "F:1", "kind": "fact", "node_key": None, "verdict": "contradicted", "claim": "backend listening on 3001",
+                 "reason": "something IS listening", "repair": "Stop the node process listening on 3001"},
+                {"id": "S:T6", "kind": "step", "node_key": "T6", "verdict": "contradicted", "claim": "firewall groups carry -source",
+                 "reason": "no -source", "repair": "Add -source 192.168.1.0/24 to the game and dmz group rules"}]
+    out = sc.proposals_from_verdicts(verdicts, anchor_node_key="T37")
+    assert [(p["action"], p["node_key"]) for p in out] == [("repair", "T6")]
+    text = sc.render_verdicts([dict(verdicts[0], needs_decision=True, repair="")])
+    assert "I am not proposing one; you decide" in text
+
+
+async def test_judge_strips_destructive_repairs_at_the_source(monkeypatch):
+    from app import model_router
+    probes = [{"id": "F:1", "kind": "fact", "node_key": None, "claim": "backend on 3001", "command": "ss -tlnp", "expect": "nothing"}]
+    class _Resp:
+        text = ""
+        tool_calls = [{"name": "record_state_verdicts", "arguments": {"verdicts": [
+            {"id": "F:1", "verdict": "contradicted", "reason": "LISTEN", "repair": "Kill the process on 3001"}]}}]
+    monkeypatch.setattr(model_router, "tool_call", AsyncMock(return_value=_Resp()))
+    import app.utils.tool_call_args as tca
+    monkeypatch.setattr(tca, "read_tool_args", lambda resp: resp.tool_calls[0]["arguments"])
+    v = (await sc.judge_outputs(probes, "== F:1 ==\nLISTEN 0 511 *:3001\n"))[0]
+    assert v["verdict"] == "contradicted" and v["repair"] == "" and v.get("needs_decision") is True
+
+
+def test_the_judge_prompt_forbids_destructive_repairs():
+    assert "never propose" in sc._JUDGE_OPENING and "destructive" in sc._JUDGE_OPENING

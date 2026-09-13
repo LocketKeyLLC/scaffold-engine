@@ -158,6 +158,7 @@ export default function jobHub(container, params) {
   const tab = resolveTab(params && params.tab);
   let disposed = false;
   let childDispose = null;
+  let statusListener = null;
 
   // §17.1007 — the §17.854 G2 nav guard is gone with the reason for it. It
   // asked "leaving STOPS the run — leave anyway?" on every tab and back click,
@@ -218,6 +219,16 @@ export default function jobHub(container, params) {
     if (disposed) return;
     titleEl.textContent = job.title || "(untitled)";
     mount(pillSlot, statusBadge(job.status));
+    // §17.1052 — the Run tab finishes the job in place (last step ✓, or a
+    // stranded session finalized on reopen); the pill was rendered once from
+    // the job row and read "assisted running" next to a "completed" hero.
+    const onStatus = (ev) => {
+      if (disposed || !ev.detail || ev.detail.jobId !== jobId) return;
+      job.status = ev.detail.status;
+      mount(pillSlot, statusBadge(job.status));
+    };
+    window.addEventListener("scaffold:job-status", onStatus);
+    statusListener = onStatus;
     setCurrentJob(job); // §17.896 — pin it in the sidebar (⬡ DAG · ▶ Run · ▤ Output)
 
     switch (tab) {
@@ -243,6 +254,7 @@ export default function jobHub(container, params) {
 
   return () => {
     disposed = true;
+    if (statusListener) window.removeEventListener("scaffold:job-status", statusListener);
     if (childDispose) childDispose();
   };
 }

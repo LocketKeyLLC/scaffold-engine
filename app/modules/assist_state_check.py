@@ -76,6 +76,37 @@ _MUTATION_RE = re.compile(
 )
 
 
+# §17.1052 — a claim worth probing describes a DESIRED state. A fact that
+# records a failure, an attempt, or a one-off past action ("VM 100 destroyed",
+# "the Caddyfile was truncated", "the attempt used the wrong path") is history:
+# probing it invites the judge to "make it true again" — live, that produced
+# repairs that stopped a working backend, emptied a config and proposed
+# deleting every VM. Such facts are left out of the claims.
+_HISTORY_FACT_RE = re.compile(
+    r"(?i)\b(?:fail(?:s|ed|ure)?|error|attempt(?:s|ed)?|cannot|could not|couldn't|not found|no such|wrong|typo|"
+    r"refused|denied|missing|broken|crash(?:ed|es)?|"
+    r"destroy(?:ed)?|remov(?:ed|al)|delet(?:ed|ion)|purg(?:ed)?|wip(?:ed)?|truncat(?:ed|ion)|clear(?:ed)?|"
+    r"backed up|backup (?:of|created)|downloaded|snapshot(?:ted)?|was (?:re)?(?:written|placed|moved|stopped|started)|"
+    r"were (?:re)?(?:written|placed|moved|stopped|started))\b")
+
+# A repair may only ADD or START what the claim says should exist. Anything that
+# removes, stops or overwrites is never proposed by the engine — the operator
+# is told the claim no longer holds and decides.
+_DESTRUCTIVE_REPAIR_RE = re.compile(
+    r"(?i)\b(?:stop|kill|remove|delete|destroy|purge|wipe|truncate|clear|empty|reset|uninstall|disable|"
+    r"tear down|shut ?down|power off|drop|overwrite|revert|roll ?back|rm|format|reinstall|recreate from scratch)\b")
+
+
+def probe_worthy(fact: str) -> bool:
+    """False for facts that record history (failures, attempts, one-off past
+    actions) rather than a state the system should still be in."""
+    return not _HISTORY_FACT_RE.search(fact or "")
+
+
+def destructive_repair(text_value: str) -> bool:
+    return bool(_DESTRUCTIVE_REPAIR_RE.search(text_value or ""))
+
+
 def read_only_command(cmd: str) -> bool:
     """True when the command can only read. Conservative: any mutation verb,
     any redirect that is not to /dev/null, any pipe into a shell → False."""
@@ -125,6 +156,7 @@ async def build_claims(*, db, session_id: str, max_facts: int = 24) -> dict:
         claims.append({"id": f"S:{r['node_key']}", "kind": "step", "node_key": r["node_key"],
                        "title": r.get("title") or "", "text": summary[:300]})
     facts = [str(f).strip() for f in (env.get("facts") or []) if str(f).strip()]
+    facts = [f for f in facts if probe_worthy(f)]  # §17.1052 — desired state only
     for i, f in enumerate(facts[-max_facts:]):
         claims.append({"id": f"F:{i + 1}", "kind": "fact", "text": f[:300]})
     for k, v in (env.get("substitutions") or {}).items():
@@ -323,7 +355,10 @@ _JUDGE_OPENING = (
     "the operator must do to make it true again, using only what the output and the claim state. When "
     "several contradicted claims share ONE cause (a container that no longer exists makes its port, its "
     "mounts and its HTTP response all fail), name the root claim's id in `caused_by` on the others, so "
-    "there is one repair, not three."
+    "there is one repair, not three. A repair only ADDS or STARTS what should exist; never propose "
+    "stopping, removing, emptying or deleting anything — if the only way to satisfy a claim is destructive, "
+    "leave `repair` empty. A claim about a one-off past action (something destroyed, backed up, "
+    "downloaded, rewritten) is CONFIRMED when its effect is present and is never repaired by repeating it."
 )
 
 
@@ -378,8 +413,13 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
             v = str(item.get("verdict") or "").strip()
             if cid not in to_judge or v not in ("confirmed", "contradicted", "unknown"):
                 continue
+            repair = str(item.get("repair") or "")[:300]
+            if repair and destructive_repair(repair):  # §17.1052 — never proposed by the engine
+                logger.info("state_check_repair_refused id=%s repair=%r", cid, repair[:80])
+                verdicts[cid]["needs_decision"] = True
+                repair = ""
             verdicts[cid].update({"verdict": v, "reason": str(item.get("reason") or "")[:300],
-                                  "repair": str(item.get("repair") or "")[:300],
+                                  "repair": repair,
                                   "caused_by": str(item.get("caused_by") or "").strip()})
     return list(verdicts.values())
 
@@ -394,7 +434,8 @@ def render_verdicts(verdicts: list[dict]) -> str:
     lines = [f"🩺 **State check result — {n['confirmed']} confirmed, {n['contradicted']} contradicted, {n['unknown']} unknown.**"]
     icon = {"confirmed": "✅", "contradicted": "❌", "unknown": "❔"}
     for v in sorted(verdicts, key=lambda x: ("contradicted", "unknown", "confirmed").index(x["verdict"])):
-        lines.append(f"- {icon[v['verdict']]} `{v['id']}` {v['claim'][:90]}" + (f" — {v['reason'][:140]}" if v.get("reason") and v["verdict"] != "confirmed" else ""))
+        lines.append(f"- {icon[v['verdict']]} `{v['id']}` {v['claim'][:90]}" + (f" — {v['reason'][:140]}" if v.get("reason") and v["verdict"] != "confirmed" else "")
+                     + (" — *the only repair would remove or stop something, so I am not proposing one; you decide*" if v.get("needs_decision") else ""))
     bad = [v for v in verdicts if v["verdict"] == "contradicted"]
     if bad:
         lines.append("\nContradicted facts have been retracted from what I believe. The step results that no longer hold "
@@ -546,6 +587,8 @@ def proposals_from_verdicts(verdicts: list[dict], *, anchor_node_key: Optional[s
             out.append({"node_key": anchor_node_key, "action": "repair",
                         "current_assumption": (v.get("claim") or "")[:300],
                         "proposed_change": repair[:400], "reason": (v.get("reason") or "")[:300]})
+    # §17.1052 — belt and braces: nothing destructive leaves this function.
+    out = [p for p in out if not (p["action"] == "repair" and destructive_repair(p["proposed_change"]))]
     # one repair per cause: fold repairs whose distinctive terms mostly overlap
     uniq: list[dict] = []
     for p in out:
