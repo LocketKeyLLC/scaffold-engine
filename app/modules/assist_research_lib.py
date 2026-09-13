@@ -186,6 +186,32 @@ async def _detect_unknowns(
     return queries[:max_queries]
 
 
+def _excluded_url(url: str) -> bool:
+    """§17.1049 — a URL the deployment never cites (its own repository)."""
+    u = (url or "").lower()
+    return any(p and p.lower() in u for p in (settings.research_excluded_url_patterns or []))
+
+
+_SHINGLE_WORDS = 8
+
+
+def _echoes_operator(text_value: str, operator_text: Optional[str]) -> bool:
+    """§17.1049 — a page that contains an 8-word run of the operator's OWN
+    words verbatim is a mirror of this conversation (a bug tracker, a pasted
+    log, the engine's own project pages), not evidence about the world."""
+    if not operator_text or not text_value:
+        return False
+    norm = lambda t: re.sub(r"[^a-z0-9 ]+", " ", (t or "").lower())
+    words = norm(operator_text).split()
+    if len(words) < _SHINGLE_WORDS:
+        return False
+    hay = " ".join(norm(text_value).split())
+    for i in range(0, len(words) - _SHINGLE_WORDS + 1):
+        if " ".join(words[i:i + _SHINGLE_WORDS]) in hay:
+            return True
+    return False
+
+
 async def _searxng_structured(query: str, max_results: int = 5) -> list[dict]:
     """§17.500 — structured SearXNG results ([{title, content, url}]) so we can
     fetch the result pages. Fail-soft → [].
@@ -220,6 +246,12 @@ async def _searxng_structured(query: str, max_results: int = 5) -> list[dict]:
             if fb.status_code == 200:
                 results = fb.json().get("results") or []
         results = relevant_search_results(query, results)
+        # §17.1049 — the deployment's own pages are never sources; dropped
+        # BEFORE the top-N slice so they cost no fetch.
+        _excl = [r for r in results if _excluded_url(r.get("url", ""))]
+        if _excl:
+            logger.info("assist_source_excluded urls=%r", [r.get("url", "")[:100] for r in _excl][:3])
+            results = [r for r in results if not _excluded_url(r.get("url", ""))]
         return [
             {"title": r.get("title", ""), "content": r.get("content", ""),
              "url": r.get("url", ""),
@@ -233,7 +265,8 @@ async def _searxng_structured(query: str, max_results: int = 5) -> list[dict]:
         return []
 
 
-async def _deep_web_sources(query: str, *, top_n: int, skip=None) -> list[dict]:
+async def _deep_web_sources(query: str, *, top_n: int, skip=None,
+                            operator_text: Optional[str] = None) -> list[dict]:
     """§17.500 — fetch + trafilatura-extract the top-N SearXNG pages for real
     doc content. Reuses the research-agent fetcher. Fail-soft → [].
 
@@ -262,6 +295,9 @@ async def _deep_web_sources(query: str, *, top_n: int, skip=None) -> list[dict]:
     for p in pages:
         if not (p.get("content") or "").strip():
             continue
+        if _echoes_operator(p.get("content") or "", operator_text):  # §17.1049
+            logger.info("assist_source_echo_dropped url=%s", (p.get("url") or "")[:120])
+            continue
         hit = by_url.get(p.get("url")) or {}
         out.append({
             "query": query, "kind": "web", "text": p["content"][:2000],
@@ -275,6 +311,7 @@ async def _deep_web_sources(query: str, *, top_n: int, skip=None) -> list[dict]:
 async def _confirm_query(
     query: str, *, node_key: str, domain: Optional[str], deep: bool = False,
     kb_query_extra: Optional[str] = None, web_query: Optional[str] = None,
+    operator_text: Optional[str] = None,
 ) -> list[dict]:
     """Confirm one query via Milvus (local KB) + web.
 
@@ -300,7 +337,8 @@ async def _confirm_query(
         sources.append({"query": query, "kind": "milvus", "text": milvus.strip()})
 
     if deep and settings.assist_research_fetch_top_n > 0:
-        web = await _deep_web_sources(web_q, top_n=settings.assist_research_fetch_top_n)
+        web = await _deep_web_sources(web_q, top_n=settings.assist_research_fetch_top_n,
+                                      operator_text=operator_text)  # §17.1049
         if web:
             sources.extend(web)
             return sources
@@ -599,7 +637,8 @@ def _about_the_word(result: dict, keyword: str = "documentation") -> bool:
     return title == keyword or title.startswith(keyword + " ") and len(title.split()) <= 3
 
 
-async def _documentation_sources(need, base_query: str, sources: list, *, node_key: str = "?") -> list[dict]:
+async def _documentation_sources(need, base_query: str, sources: list, *, node_key: str = "?",
+                                 operator_text: Optional[str] = None) -> list[dict]:
     """§17.1036/1037 — when a QUESTION's fetched pages include no ON-TOPIC
     documentation, run one more web query aimed at documentation and return
     the extra sources (fetched pages, else documentation-grade search snippets).
@@ -620,7 +659,7 @@ async def _documentation_sources(need, base_query: str, sources: list, *, node_k
     # "documentation" alone: "official" drew dictionary pages for the word
     # itself. The keywords LEAD, so the 12-word cap cannot remove them.
     doc_q = _cap_query("documentation " + " ".join((base_query or "").split()[:10]))
-    fetched = rank_evidence(await _deep_web_sources(doc_q, top_n=2, skip=_about_the_word), need)
+    fetched = rank_evidence(await _deep_web_sources(doc_q, top_n=2, skip=_about_the_word, operator_text=operator_text), need)
     extra: list[dict] = list(fetched)
     if max_source_authority(fetched) < _DOC_AUTHORITY:
         # Vendor help centres are often script-rendered or bot-blocked (403)
@@ -685,10 +724,12 @@ async def research_one(
     sources = await _confirm_query(
         question, node_key=node_key, domain=domain, deep=True,
         kb_query_extra=context_hint, web_query=web_q,
+        operator_text=question,  # §17.1049 — a page quoting the question is an echo
     )
     # §17.1036/1037 — a QUESTION about a program deserves its documentation.
     try:
-        sources.extend(await _documentation_sources(need, web_q or question, sources, node_key=node_key))
+        sources.extend(await _documentation_sources(need, web_q or question, sources, node_key=node_key,
+                                                    operator_text=question))
     except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
         logger.warning("assist_research_docs_query_failed: %s", exc)
     sources = rank_evidence(sources, need, node_key=node_key)  # §17.1027

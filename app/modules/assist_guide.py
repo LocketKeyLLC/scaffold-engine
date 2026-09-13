@@ -4784,6 +4784,7 @@ async def generate_fix(
                             node_key, need.kind, eq[:120])
                 sources.extend(await _confirm_query(
                     eq, node_key=node_key, domain=domain, deep=True,
+                    operator_text=error_text,  # §17.1049 — a page quoting the paste is an echo
                 ))
         except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
             logger.debug("assist_fix_error_query_failed: %s", exc)

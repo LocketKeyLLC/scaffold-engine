@@ -1182,6 +1182,15 @@ class Settings(BaseSettings):
     # Peak memory is bounded by research_fetch_concurrency (§17.801), not by
     # this; each kept page is capped at 2,000 chars in the prompt.
     assist_research_fetch_top_n: int = Field(default=4, ge=0, le=5)
+    # §17.1049 — URL substrings never used as a web source. Live: the search
+    # engine returned THIS project's own pull-request page, which quoted the
+    # operator's question and the engine's earlier wrong answer, and the
+    # answer regressed to that wrong shape. A deployment lists its own
+    # repository here (JSON list in the env, e.g.
+    # RESEARCH_EXCLUDED_URL_PATTERNS='["github.com/org/repo"]'). Independent of
+    # this list, a page that quotes the operator's own words verbatim is
+    # dropped as an echo of the conversation (`_echoes_operator`).
+    research_excluded_url_patterns: list[str] = Field(default_factory=list)
     # §17.650 — project-aware assist Q&A. Both the /assist research ("ask")
     # path and the step-guidance turn were job-BLIND: they answered an operator
     # question with a raw KB/web lookup that carried none of the project's own
