@@ -16,7 +16,10 @@ contradiction has been papered over.
 Triggers so far — *fix confirmed* (§17.1043): a step is committed after one
 or more fix replies on it; *decision committed* (§17.1044): a ``decision``
 node is committed, and the chosen option is applied to every pending step
-that depends on it or was written for a rejected option. It derives correction records
+that depends on it or was written for a rejected option; *note recorded*
+(§17.1045): an operator note that states a correction in its own words
+("3002 instead of 3001", "10.20.0.4 → 10.20.0.40", "changed from X to Y")
+is applied to every pending step that still carries the old value. It derives correction records
 deterministically (old value → new value, by kind), applies them to every
 PENDING step's task text, invalidates any cached walkthrough that mentions the
 old value so it regenerates through the verified path, records the correction
@@ -53,7 +56,7 @@ logger = logging.getLogger("scaffold")
 _PATH_RE = re.compile(r"(?<![\w.:/])(/[A-Za-z0-9_.+-]+(?:/+[A-Za-z0-9_.+-]+)+/?)")
 _PATH_SKIP_PREFIXES = ("/dev/", "/proc/", "/sys/")
 KINDS = ("ip", "port", "version", "url", "path")
-PROVENANCE_PREFIX = "🔁 Updated after step"
+PROVENANCE_PREFIX = "🔁 Updated after"
 
 
 def values_in(text_value: str) -> list[dict]:
@@ -130,10 +133,13 @@ def derive_corrections(*, failing_pastes: list[str], fix_replies: list[str],
 
 
 def plan_changes(nodes: list[dict], steps: list[dict], corrections: list[dict],
-                 *, source_node_key: str) -> dict:
+                 *, source_node_key: str, source_label: Optional[str] = None) -> dict:
     """Pure: which pending nodes' task text change and how, and which cached
     walkthroughs must be regenerated. ``nodes``: ``{node_key, status,
-    prompt_template}``; ``steps``: ``{node_key, status, guidance}``."""
+    prompt_template}``; ``steps``: ``{node_key, status, guidance}``.
+    ``source_label`` names the origin in the provenance line (default
+    ``step <source_node_key>``); a note trigger passes ``your note (Tn)``."""
+    label = source_label or f"step {source_node_key}"
     node_updates: list[dict] = []
     for n in nodes or []:
         nk = n.get("node_key")
@@ -149,11 +155,19 @@ def plan_changes(nodes: list[dict], steps: list[dict], corrections: list[dict],
         applied: list[dict] = []
         for c in corrections:
             if _mentions(c["old"], new_body):
-                new_body = re.sub(r"(?<![\w.])" + re.escape(c["old"]) + r"(?![\w])", c["new"], new_body)
+                if c["kind"] == "port":
+                    # `host:container` mappings (docker -p 127.0.0.1:3001:3001): the
+                    # correction names the HOST side; the container side stays.
+                    new_body = re.sub(r"(?<![\w.])" + re.escape(c["old"]) + ":" + re.escape(c["old"]) + r"(?![\w])",
+                                      c["new"] + ":" + c["old"], new_body)
+                    new_body = re.sub(r"(?<!" + re.escape(c["new"]) + r":)(?<![\w.])" + re.escape(c["old"]) + r"(?![\w])",
+                                      c["new"], new_body)
+                else:
+                    new_body = re.sub(r"(?<![\w.])" + re.escape(c["old"]) + r"(?![\w])", c["new"], new_body)
                 applied.append(c)
         if applied:
             prov_lines.extend(
-                f"{PROVENANCE_PREFIX} {source_node_key}: `{c['old']}` → `{c['new']}` ({c['kind']})."
+                f"{PROVENANCE_PREFIX} {label}: `{c['old']}` → `{c['new']}` ({c['kind']})."
                 for c in applied)
             new_txt = new_body + "\n\n" + "\n".join(prov_lines)
             node_updates.append({"node_key": nk, "prompt_template": new_txt,
@@ -176,11 +190,15 @@ def render_note(result: dict) -> str:
     if not result or not (result.get("node_updates") or result.get("guidance_resets")):
         return ""
     src = result.get("source_node_key", "?")
+    if result.get("trigger") == "note":
+        head = "🔁 **Plan updated from your note** — the correction has been applied to the steps ahead:"
+    else:
+        head = f"🔁 **Plan updated after step {src}** — the fix that worked has been applied to the steps ahead:"
     pairs: dict[tuple, list[str]] = {}
     for u in result.get("node_updates") or []:
         for c in u["corrections"]:
             pairs.setdefault((c["old"], c["new"], c["kind"]), []).append(u["node_key"])
-    lines = [f"🔁 **Plan updated after step {src}** — the fix that worked has been applied to the steps ahead:"]
+    lines = [head]
     for (old, new, kind), nks in pairs.items():
         lines.append(f"- `{old}` → `{new}` ({kind}) in {', '.join(nks)}")
     resets = result.get("guidance_resets") or []
@@ -424,6 +442,131 @@ async def _decision_trigger(*, db, session_id: str, job_id: str, node_key: str,
         [o["label"] for o in rejected], entry["nodes"], entry["guidance_resets"],
         bool(changes.get("replan_proposal")))
     return changes
+
+
+# ---------------------------------------------------------------------------
+# §17.1045 — the note trigger. Only what the note SAYS is a correction: two
+# values of one kind joined by the operator's own connective. No inference
+# from a lone value — "the NAS is 10.20.0.40" beside a plan that says
+# 10.20.0.5 for the server is not a correction, it is a second machine.
+# ---------------------------------------------------------------------------
+
+_NEW_THEN_OLD_RE = re.compile(r"(?i)^\W*(?:not|instead\s+of|rather\s+than|replaces|replacing|was|previously|no\s+longer|and\s+not)\W*$")
+_OLD_THEN_NEW_RE = re.compile(r"(?i)^\W*(?:->|→|=>|is\s+now|becomes|became|changed\s+to|moved\s+to|should\s+be|must\s+be|to|now)\W*$")
+_FROM_RE = re.compile(r"(?i)\bfrom\W*$")
+
+
+def note_corrections(note_text: str, plan_text: str) -> tuple[list[dict], list[dict]]:
+    """``(corrections, declined)`` from a note's own wording: two values of the
+    same kind with a connective between them. The OLD value must appear in the
+    pending plan text (else there is nothing to apply). One pair per kind."""
+    txt = note_text or ""
+    found = values_in(txt)
+    # In a note, a bare number beside a port ("port 3002 instead of 3001") is
+    # the other port — the evidence layer's extractor only takes "port N" / ":N".
+    if any(it["kind"] == "port" for it in found):
+        known = {it["value"] for it in found}
+        for m in re.finditer(r"(?<![\w.:])(\d{4,5})(?![\w.])", txt):
+            n = m.group(1)
+            if n not in known and 1024 <= int(n) <= 65535:
+                found.append({"kind": "port", "value": n})
+                known.add(n)
+    items = []
+    for it in found:
+        for m in re.finditer(r"(?<![\w.])" + re.escape(it["value"]) + r"(?![\w])", txt):
+            items.append((m.start(), m.end(), it["kind"], it["value"]))
+    items.sort()
+    by_kind: dict[str, list[tuple[str, str]]] = {}
+    for i in range(len(items) - 1):
+        a, b = items[i], items[i + 1]
+        if a[2] != b[2] or a[3] == b[3]:
+            continue
+        between = txt[a[1]:b[0]]
+        if len(between) > 40:
+            continue
+        pair = None
+        if _NEW_THEN_OLD_RE.match(between):
+            pair = (b[3], a[3])  # old=b, new=a
+        elif _OLD_THEN_NEW_RE.match(between):
+            if re.search(r"(?i)^\W*to\W*$", between) and not _FROM_RE.search(txt[max(0, a[0] - 12):a[0]]):
+                continue  # "X to Y" only counts as "from X to Y"
+            pair = (a[3], b[3])
+        if pair:
+            by_kind.setdefault(a[2], [])
+            if pair not in by_kind[a[2]]:
+                by_kind[a[2]].append(pair)
+    corrections: list[dict] = []
+    declined: list[dict] = []
+    for kind, pairs in by_kind.items():
+        pairs = [(o, n) for o, n in pairs if _mentions(o, plan_text)]
+        if not pairs:
+            continue
+        if len(pairs) == 1:
+            corrections.append({"kind": kind, "old": pairs[0][0], "new": pairs[0][1]})
+        else:
+            declined.append({"kind": kind, "pairs": pairs[:4]})
+    return corrections, declined
+
+
+async def reconcile_after_note(*, db, session_id: str, job_id: str, note_text: str,
+                               note_kind: str, node_key: Optional[str]) -> Optional[dict]:
+    """The note trigger: apply a correction the note states in its own words to
+    every pending step that still carries the old value. Fail-soft; None when
+    the note states no correction the plan carries."""
+    if not settings.plan_reconcile_enabled:
+        return None
+    try:
+        nodes = [dict(r) for r in (await db.execute(text("""
+            SELECT node_key, status, prompt_template FROM dag_nodes
+             WHERE job_id = :jid ORDER BY execution_order
+        """), {"jid": job_id})).mappings().all()]
+        steps = [dict(r) for r in (await db.execute(text("""
+            SELECT node_key, status, guidance FROM assist_steps WHERE session_id = :sid
+        """), {"sid": session_id})).mappings().all()]
+        plan_text = "\n".join((n.get("prompt_template") or "") for n in nodes
+                              if (n.get("status") or "") in ("pending", "blocked"))
+        corrections, declined = note_corrections(note_text, plan_text)
+        if declined:
+            logger.info("plan_reconcile_note_declined session_id=%s pairs=%r", session_id, declined[:4])
+        if not corrections:
+            logger.info("plan_reconcile_note_no_corrections session_id=%s kind=%s", session_id, note_kind)
+            return None
+        src = node_key or "?"
+        changes = plan_changes(nodes, steps, corrections, source_node_key=src,
+                               source_label=f"your note ({src})")
+        changes.update({"trigger": "note", "source_node_key": src, "corrections": corrections})
+        for u in changes["node_updates"]:
+            await db.execute(text("""
+                UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
+                 WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+            """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
+        for nk in changes["guidance_resets"]:
+            await db.execute(text("""
+                UPDATE assist_steps
+                   SET guidance = NULL, guidance_status = 'none', guidance_generated_at = NULL, updated_at = NOW()
+                 WHERE session_id = :sid AND node_key = :nk
+                   AND status NOT IN ('committed', 'skipped', 'handed_off', 'escalated')
+            """), {"sid": session_id, "nk": nk})
+        entry = {
+            "at": datetime.now(timezone.utc).isoformat(), "trigger": "note",
+            "source_node_key": src, "note_kind": note_kind, "corrections": corrections,
+            "nodes": [u["node_key"] for u in changes["node_updates"]],
+            "guidance_resets": changes["guidance_resets"],
+        }
+        await db.execute(text("""
+            UPDATE jobs
+               SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{reconciliation}',
+                                        COALESCE(metadata->'reconciliation', '[]'::jsonb) || CAST(:e AS jsonb))
+             WHERE id = :jid
+        """), {"e": json.dumps(entry), "jid": job_id})
+        await db.commit()
+        logger.warning("plan_reconcile_note_applied session_id=%s node_key=%s corrections=%r nodes=%r guidance_resets=%r",
+                       session_id, src, [(c["old"], c["new"]) for c in corrections], entry["nodes"],
+                       entry["guidance_resets"])
+        return changes
+    except Exception as exc:  # noqa: BLE001 — never break note-taking
+        logger.warning("plan_reconcile_note_failed session_id=%s err=%r", session_id, exc)
+        return None
 
 
 async def _fix_context(*, db, session_id: str, node_key: str) -> Optional[dict]:
