@@ -1267,6 +1267,65 @@ Examples:
 """
 
 
+JOBS_CHANGES_EPILOG = """
+\b
+Examples:
+  scaffold jobs changes <job_id>
+  scaffold jobs changes <job_id> --json
+  scaffold jobs changes <job_id> --revert 2
+"""
+
+
+@jobs.command("changes", help="§17.1047 — the plan change ledger: what confirmed fixes, decisions, notes and pins changed in the steps ahead.",
+              epilog=JOBS_CHANGES_EPILOG)
+@click.argument("job_id")
+@click.option("--json", "as_json", is_flag=True, help="Print the raw JSON response.")
+@click.option("--revert", "revert_index", type=int, default=None,
+              help="Revert the entry with this index (pending steps, unchanged since).")
+@click.pass_context
+def jobs_changes(ctx: click.Context, job_id: str, as_json: bool, revert_index: int | None) -> None:
+    cfg = ctx.obj["cfg"]
+    try:
+        with Client(cfg.api_url, cfg.api_key) as c:
+            if revert_index is not None:
+                res = c.post(f"/jobs/{job_id}/reconciliation/{revert_index}/revert", json={})
+                click.secho(f"reverted: {', '.join(res.get('reverted') or []) or 'nothing (already reverted, committed, or edited since)'}",
+                            fg="green" if res.get("reverted") else "yellow")
+            data = c.get_or_none(f"/jobs/{job_id}/reconciliation")
+    except CLIError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(1)
+    if data is None:
+        click.secho(f"job {job_id} not found", fg="yellow", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+        return
+    entries = data.get("entries") or []
+    if not entries:
+        click.echo("no plan changes recorded")
+        return
+    labels = {"fix_confirmed": "fix confirmed", "decision": "decision", "note": "note", "substitution": "env pin"}
+    for e in entries:
+        head = f"[{e.get('index')}] {labels.get(e.get('trigger'), e.get('trigger'))} @ {e.get('source_node_key') or '-'}  {str(e.get('at') or '')[:19]}"
+        if e.get("reverted_at"):
+            head += "  (reverted)"
+        click.secho(head, fg="cyan", bold=True)
+        if e.get("trigger") == "decision":
+            ch = e.get("chosen") or {}
+            click.echo(f"    chosen ({ch.get('n')}) {ch.get('label')}; not "
+                       + ("; ".join(f"({o.get('n')}) {o.get('label')}" for o in e.get("rejected") or []) or "none"))
+        for c in e.get("corrections") or []:
+            click.echo(f"    {c.get('old')} -> {c.get('new')} ({c.get('kind')})")
+        for chg in e.get("changes") or []:
+            mark = " (revertable)" if chg.get("node_key") in (e.get("revertable") or []) else ""
+            click.echo(f"    {chg.get('node_key')}{mark}")
+            click.secho(f"      - {str(chg.get('before') or '')[:160]}", fg="red")
+            click.secho(f"      + {str(chg.get('after') or '')[:160]}", fg="green")
+        if e.get("guidance_resets"):
+            click.echo(f"    walkthroughs rewritten: {', '.join(e['guidance_resets'])}")
+
+
 @jobs.command("find", help="Search jobs by title substring.", epilog=JOBS_FIND_EPILOG)
 @click.argument("query", nargs=-1, required=True)
 @click.option("--limit", default=25, type=int, show_default=True)

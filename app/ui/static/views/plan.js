@@ -103,7 +103,50 @@ export function renderPlan(container, jobId) {
     const fg = flowGuide(job, { here: `#/job/${jobId}/plan` });
     if (fg) mount(flowSlot, fg);
   }).catch(() => {});
-  mount(container, header, flowSlot, mobileNote, guidance, briefPanel(jobId), warning, reorderPanel, stage);
+  // §17.1047 — the plan change ledger: what the reconciliation triggers
+  // (a confirmed fix, a decision, a note, a re-pinned value) changed in the
+  // steps ahead, per step before → after, with revert where still possible.
+  const changesPanel = el("div", { class: "plan-changes" });
+  async function loadChanges() {
+    try {
+      const res = await api.get(`/jobs/${jobId}/reconciliation`);
+      const entries = (res && res.entries) || [];
+      if (!entries.length) { mount(changesPanel); return; }
+      const label = (e) => ({ fix_confirmed: "Fix confirmed", decision: "Decision", note: "Your note", substitution: "Environment pin" })[e.trigger] || e.trigger;
+      const rows = entries.slice().reverse().map((e) => {
+        const head = el("div", { class: "plan-change-head" },
+          el("span", { class: "tag", text: label(e) }),
+          el("span", { class: "mono", text: e.source_node_key ? ` ${e.source_node_key}` : "" }),
+          el("span", { class: "faint", text: ` · ${e.at ? new Date(e.at).toLocaleString() : ""}` }),
+          e.reverted_at ? el("span", { class: "tag", text: "reverted" }) : null);
+        const what = e.trigger === "decision"
+          ? el("div", { class: "plan-change-what", text: `chosen (${e.chosen?.n}) ${e.chosen?.label}; not ${(e.rejected || []).map((o) => `(${o.n}) ${o.label}`).join("; ") || "none"}` })
+          : el("div", { class: "plan-change-what" }, ...(e.corrections || []).map((c) => el("div", {}, el("code", { text: c.old }), " → ", el("code", { text: c.new }), el("span", { class: "faint", text: ` (${c.kind})` }))));
+        const diffs = (e.changes || []).map((ch) => el("details", { class: "plan-change-node" },
+          el("summary", {}, el("span", { class: "mono", text: ch.node_key }), el("span", { class: "faint", text: (e.revertable || []).includes(ch.node_key) ? " · revertable" : "" })),
+          el("div", { class: "plan-change-diff" },
+            el("pre", { class: "md-pre plan-change-before", text: ch.before || "" }),
+            el("pre", { class: "md-pre plan-change-after", text: ch.after || "" }))));
+        const resets = (e.guidance_resets || []).length
+          ? el("div", { class: "faint", text: `walkthroughs rewritten: ${e.guidance_resets.join(", ")}` }) : null;
+        const revertBtn = (!e.reverted_at && (e.revertable || []).length)
+          ? el("button", { class: "btn btn-sm", text: `↩ Revert in ${e.revertable.join(", ")}`, onclick: async () => {
+              try {
+                const r = await api.post(`/jobs/${jobId}/reconciliation/${e.index}/revert`, {});
+                toast(r.reverted?.length ? `Reverted ${r.reverted.join(", ")}.` : "Nothing left to revert.", "ok");
+                await loadChanges(); load();
+              } catch (err) { toast(`Could not revert: ${err.detail || err.message}`, "err"); }
+            } })
+          : null;
+        return el("div", { class: "plan-change" }, head, what, ...diffs, resets, revertBtn);
+      });
+      mount(changesPanel, el("details", { class: "brief-details", open: true },
+        el("summary", {}, `🔁 Plan changes (${entries.length}) — what the confirmed fixes, decisions, notes and pins changed in the steps ahead`),
+        ...rows));
+    } catch (e) { mount(changesPanel); }
+  }
+  loadChanges();
+  mount(container, header, flowSlot, mobileNote, guidance, briefPanel(jobId), warning, changesPanel, reorderPanel, stage);
   mount(canvas, loading("Loading plan…"));
 
   const graph = createGraphCanvas(canvas);

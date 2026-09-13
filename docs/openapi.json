@@ -9050,6 +9050,107 @@
         ]
       }
     },
+    "/jobs/{job_id}/reconciliation": {
+      "get": {
+        "description": "§17.1047 — every change the reconciliation triggers (§17.1043–1046)\napplied to this job's plan: trigger, source step, corrections, and per\nnode the task text before and after — with which nodes can still be\nreverted (pending, text unchanged since).",
+        "operationId": "get_job_reconciliation_jobs__job_id__reconciliation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Get Job Reconciliation",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
+    "/jobs/{job_id}/reconciliation/{index}/revert": {
+      "post": {
+        "description": "§17.1047 — put back the task text of the nodes an entry rewrote, where\nthey are still pending and unchanged since; stamps the entry reverted.",
+        "operationId": "revert_job_reconciliation_jobs__job_id__reconciliation__index__revert_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "title": "Index",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Revert Job Reconciliation",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
     "/jobs/{job_id}/resume": {
       "post": {
         "description": "Resume a cancelled job and stream its execution.\n\nAtomically flips the job from ``cancelled`` back to ``executing`` and\nre-fires ``/execute/all``-equivalent execution. Replaces the manual\nSQL-then-curl recipe in debugging.md. ``execute_all_nodes`` is\nidempotent over completed nodes — execution picks up from the last\npending node, with done-node outputs serving as upstream context.\n\nStatus codes:\n  - 200 + SSE stream on successful resume\n  - 404 if no job with that ID exists\n  - 409 if the job exists but isn't in ``cancelled`` (current status\n    returned in detail for client-side dispatch)\n  - 400 on malformed UUID",
