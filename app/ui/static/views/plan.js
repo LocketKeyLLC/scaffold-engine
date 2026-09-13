@@ -112,7 +112,7 @@ export function renderPlan(container, jobId) {
       const res = await api.get(`/jobs/${jobId}/reconciliation`);
       const entries = (res && res.entries) || [];
       if (!entries.length) { mount(changesPanel); return; }
-      const label = (e) => ({ fix_confirmed: "Fix confirmed", decision: "Decision", note: "Your note", substitution: "Environment pin" })[e.trigger] || e.trigger;
+      const label = (e) => ({ fix_confirmed: "Fix confirmed", decision: "Decision", note: "Your note", substitution: "Environment pin", model_proposed: "Proposed after a fix (you approved)" })[e.trigger] || e.trigger;
       const rows = entries.slice().reverse().map((e) => {
         const head = el("div", { class: "plan-change-head" },
           el("span", { class: "tag", text: label(e) }),
