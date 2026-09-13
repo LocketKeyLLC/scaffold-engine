@@ -21,6 +21,8 @@ call, so behavior cannot drift from the documented per-verb surfaces.
 from __future__ import annotations
 
 import logging
+
+from app.config import settings
 from typing import AsyncIterator
 
 from app.modules import assist_policy
@@ -257,6 +259,11 @@ async def _run_turn_inner(
     from app.modules import assist_agent
 
     if True:  # single indent block — keeps the dispatch ladder's early returns flat
+        if command == "verify_state":  # §17.1050 — the 🩺 button
+            async for e in _start_state_check(session_id, node_key, db):
+                yield e
+            handled["v"] = "verify_state"
+            return
         if command == "guide":
             # §17.950 — "Guide me" used to go STRAIGHT to claim-and-guide, with
             # no notion of whether the step was already finished. So an operator
@@ -296,6 +303,27 @@ async def _run_turn_inner(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("turn_loop_capture_failed sid=%s err=%r", session_id, exc)
+
+        # 1a′. §17.1050 — a pending state check: the operator pasted the probe
+        # script's output (the `== id ==` markers attribute it), or asked for
+        # one by phrase. Anything else clears the pending check and continues.
+        try:
+            from app.modules import assist_state_check as _sc
+            if _sc.STATE_CHECK_PHRASE_RE.search(text_) and settings.assist_state_check_enabled:
+                async for e in _start_state_check(session_id, node_key, db):
+                    yield e
+                handled["v"] = "verify_state"
+                return
+            _pending_sc = await _sc.get_pending_state_check(db=db, session_id=session_id)
+            if _pending_sc and _sc.looks_like_probe_output(text_):
+                async for e in _resolve_state_check(session_id, node_key, text_, history, db):
+                    yield e
+                handled["v"] = "state_check_resolved"
+                return
+            if _pending_sc:
+                await _sc.clear_pending_state_check(db=db, session_id=session_id)
+        except Exception as exc:  # noqa: BLE001 — a state check never strands a turn
+            logger.warning("state_check_route_failed sid=%s err=%r", session_id, exc)
 
         # 1b. §17.951 — resolve a pending completion confirmation.
         #
@@ -982,11 +1010,57 @@ async def _blocked_flow(session_id: str, text_: str, node_key, history, db
         logger.warning("turn_loop_blocked_note_failed sid=%s err=%r", session_id, exc)
 
 
+async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
+    """§17.1050 — probe phase: one read-only script, staged as pending."""
+    from app.modules import assist_agent, assist_state_check as _sc
+    yield _ev(ASSIST_TURN_STATUS, {"text": "🩺 Working out what the plan believes about your system and how to check each part (this can take a minute)…"})
+    try:
+        res = await _sc.start_state_check(db=db, session_id=session_id, node_key=nk)
+    except Exception as exc:  # noqa: BLE001
+        yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": f"I couldn't start the state check ({exc}). Tell me in your own words what is and is not working."})
+        return
+    yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": res["message"]})
+    try:
+        await assist_agent.capture_assistant_reply(
+            session_id=session_id, node_key=nk, kind="ask", content=res["message"], db=db)
+    except Exception:  # noqa: BLE001
+        logger.warning("state_check_capture_failed sid=%s", session_id)
+
+
+async def _resolve_state_check(session_id: str, nk, pasted: str, history, db) -> AsyncIterator[_Event]:
+    """§17.1050 — judge phase: verdicts, retractions, staged repairs."""
+    from app.modules import assist_agent, assist_state_check as _sc
+    yield _ev(ASSIST_TURN_STATUS, {"text": "🩺 Reading the checks against what the plan believes…"})
+    res = await _sc.resolve_state_check(db=db, session_id=session_id, pasted=pasted)
+    if res.get("message"):
+        yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": res["message"]})
+        try:
+            await assist_agent.capture_assistant_reply(
+                session_id=session_id, node_key=nk, kind="ask", content=res["message"], db=db)
+        except Exception:  # noqa: BLE001
+            logger.warning("state_check_result_capture_failed sid=%s", session_id)
+    if res.get("proposal"):
+        yield _ev(ASSIST_REPLAN_PROPOSAL, {"proposal": res["proposal"]})
+
+
 async def _fix_flow(session_id: str, nk, error_text: str, history, db,
                     *, status_text: str) -> AsyncIterator[_Event]:
     """§17.874/884 — the research-backed fix sequence, shared by the fix
     dispatch branch and the incomplete-submit continuation."""
     from app.modules import assist_agent
+    # §17.1050 — after several fixes on one step, offer the state check BEFORE
+    # yet another fix (never forced: the fix still follows).
+    try:
+        if settings.assist_state_check_enabled and nk:
+            from app.modules import assist_state_check as _sc
+            _streak, _ = await assist_agent._fix_failure_streak(session_id=session_id, node_key=nk, db=db)
+            if _streak >= settings.assist_state_check_after_fixes and \
+                    not await _sc.state_check_done_on_step(db=db, session_id=session_id, node_key=nk):
+                _offer = _sc.offer_text(_streak)
+                yield _ev(ASSIST_ANSWER, {"kind": "note", "text": _offer})
+                logger.info("state_check_offered sid=%s node_key=%s streak=%d", session_id, nk, _streak)
+    except Exception as exc:  # noqa: BLE001 — the offer never blocks the fix
+        logger.warning("state_check_offer_failed sid=%s err=%r", session_id, exc)
     yield _ev(ASSIST_TURN_STATUS, {"text": status_text})
     fix = await assist_agent.run_step_fix(
         session_id=session_id, node_key=nk, error=error_text,

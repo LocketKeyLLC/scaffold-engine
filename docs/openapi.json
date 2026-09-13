@@ -509,10 +509,11 @@
         "properties": {
           "command": {
             "default": "message",
-            "description": "'message' runs the full loop; 'guide' goes straight to claim-and-guide.",
+            "description": "'message' runs the full loop; 'guide' goes straight to claim-and-guide; 'verify_state' (§17.1050) starts a state check of everything the plan believes.",
             "enum": [
               "message",
-              "guide"
+              "guide",
+              "verify_state"
             ],
             "title": "Command",
             "type": "string"

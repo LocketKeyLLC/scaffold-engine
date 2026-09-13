@@ -421,6 +421,12 @@ export function renderChat(container, sessionId) {
       // §17.868 — one server-side stream (claim-if-needed + premise + guide).
       await runTurnStream({ command: "guide" });
     }),
+    // §17.1050 — stop and verify: everything the plan believes, one read-only
+    // script, then repairs the operator confirms. The answer to "it keeps
+    // fixing one thing at a time and never converges".
+    verb("🩺 Verify state", "Check what is actually running against what the plan believes, then walk through the repairs", async () => {
+      await runTurnStream({ command: "verify_state" });
+    }),
     verb("🔧 Fix error", "Paste the error in the box first — get a diagnosis for YOUR environment", async () => {
       const err = composerText.value.trim();
       if (!err) { toast("Paste the error into the box first.", "err"); return; }
@@ -995,6 +1001,7 @@ export function renderChat(container, sessionId) {
 
   const REPLAN_ACTION_COPY = {
     rewrite: { icon: "✎", label: "Reword", blurb: "the confirmed fix showed this instruction is wrong here; exact phrase replaced" },
+    repair: { icon: "🩺", label: "Repair", blurb: "the state check found this result no longer holds; a step to put it right is inserted before the current one" },
     revise: { icon: "✏️", label: "revise", blurb: "rewrite this step's instructions" },
     drop: { icon: "🗑️", label: "drop", blurb: "remove this step from the plan" },
     reopen: { icon: "↩️", label: "reopen", blurb: "put this finished step back in play" },
@@ -1040,7 +1047,7 @@ export function renderChat(container, sessionId) {
     lastReplanSig = sig;
 
     const counts = changes.reduce((a, c) => { a[c.action] = (a[c.action] || 0) + 1; return a; }, {});
-    const countText = ["revise", "drop", "reopen", "rewrite"]
+    const countText = ["revise", "drop", "reopen", "rewrite", "repair"]
       .filter((k) => counts[k])
       .map((k) => `${counts[k]} to ${k}`).join(" · ");
 
@@ -1062,9 +1069,10 @@ export function renderChat(container, sessionId) {
           const rev = (res.revised || []).length;
           const drop = (res.dropped || []).length;
           const rw = (res.rewritten || []).length;
+          const rp = (res.repaired || []).length;
           ackPopup("✅", "Plan updated",
-            `${rev} step(s) revised, ${drop} dropped${rw ? `, ${rw} reworded` : ""}. Continuing on the revised plan…`);
-          toast(`Plan updated — ${rev} revised, ${drop} dropped${rw ? `, ${rw} reworded` : ""}.`, "ok");
+            `${rev} step(s) revised, ${drop} dropped${rw ? `, ${rw} reworded` : ""}${rp ? `, ${rp} repair step(s) added` : ""}. Continuing on the revised plan…`);
+          toast(`Plan updated — ${rev} revised, ${drop} dropped${rw ? `, ${rw} reworded` : ""}${rp ? `, ${rp} repairs` : ""}.`, "ok");
           await load();
           await claimAndGuideNext();
           return;

@@ -665,6 +665,21 @@ async def apply_note_replan(
     await db.commit()
     # §17.1048 — confirmed model-proposed REWRITES go through the reconciliation
     # machinery (exact phrase, provenance line, ledger entry, revertable).
+    # §17.1050 — confirmed REPAIR proposals from a state check: insert a
+    # guided step (§17.736 add_step) that puts the contradicted result right,
+    # before the current step; the walkthrough then runs it first.
+    repaired: list[str] = []
+    for p in [p for p in proposals if p.get("action") == "repair"]:
+        req = (p.get("proposed_change") or "").strip()
+        if not req:
+            continue
+        try:
+            from app.modules.assist_notes import add_step
+            added = await add_step(session_id=session_id, request=req, db=db)
+            if added and added.get("node_key"):
+                repaired.append(added["node_key"])
+        except Exception as exc:  # noqa: BLE001 — one failed repair must not lose the rest
+            logger.warning("state_check_repair_add_failed sid=%s err=%r", session_id, exc)
     rewritten: list[str] = []
     _rw = [p for p in proposals if p.get("action") == "rewrite"]
     if _rw:
@@ -679,7 +694,7 @@ async def apply_note_replan(
     return {
         "revised": revised, "dropped": dropped,
         "reopened": reopened, "reopened_prior": reopened_prior,
-        "rewritten": rewritten,
+        "rewritten": rewritten, "repaired": repaired,
     }
 
 

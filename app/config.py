@@ -1260,6 +1260,13 @@ class Settings(BaseSettings):
     # grounded in the fix reply / closing paste, and is only STAGED for the
     # operator to confirm — one model call per fix-confirmed commit.
     plan_reconcile_model_proposals_enabled: bool = True
+    # §17.1050 — the state check: stop the walkthrough, verify the ledger's
+    # claims (done steps, facts, pins) with one read-only script, retract what
+    # is contradicted, stage repairs/reopens for the operator to confirm.
+    # Offered automatically once `after_fixes` fixes on one step have not
+    # resolved it (never forced); also the 🩺 button / "verify state".
+    assist_state_check_enabled: bool = True
+    assist_state_check_after_fixes: int = Field(default=3, ge=1, le=20)
     # §17.687 — recent-conversation recall. The §17.650 digest recovers only
     # COMMITTED node output; notes recover only what the OPERATOR captured. So a
     # program the engine SUGGESTED a turn ago (a decision node's "## My

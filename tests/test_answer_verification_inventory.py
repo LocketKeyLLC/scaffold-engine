@@ -73,6 +73,8 @@ REGISTERED_SITES = {
     ("plan_reconcile.py", "reconcile_after_substitution"): "substitution_corrections",  # §17.1046 — re-pin → plan
     ("plan_reconcile.py", "propose_corrections"): "grounded_proposals",  # §17.1048 — model proposes, grounding filters
     ("plan_reconcile.py", "_stage_model_proposals"): "_stage_replan_proposal",  # §17.1048 — staged, never applied silently
+    ("assist_state_check.py", "plan_probes"): "read_only_command",  # §17.1050 — every probe passes the read-only gate
+    ("assist_state_check.py", "resolve_state_check"): "_stage_replan_proposal",  # §17.1050 — repairs/reopens are confirmed, never applied silently
 }
 
 
