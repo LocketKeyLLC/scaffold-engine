@@ -183,3 +183,32 @@ async def test_expected_text_present_confirms_without_the_judge_and_batches_are_
     assert out["F:1"]["verdict"] == "confirmed" and out["F:2"]["verdict"] == "confirmed"
     assert out["F:3"]["verdict"] == "unknown" and out["F:3"]["reason"] == "the judge returned no verdict for this check"
     assert len(calls) == 1 and "EACH of the 5 claims" in calls[0]  # 5 unjudged → one batch of 5
+
+
+async def test_probes_are_requested_in_batches_pins_are_context_and_progress_is_reported(monkeypatch):
+    """Live (operator session, 86 claims): one call over all claims returned no
+    probes and the operator saw an empty check."""
+    from app import model_router
+    claims = [{"id": f"S:T{i}", "kind": "step", "node_key": f"T{i}", "text": f"step {i} done"} for i in range(1, 24)]
+    claims += [{"id": "K:HOST", "kind": "pin", "text": "HOST = pve"}]
+    calls = []
+    class _Resp:
+        def __init__(self, ids): self.tool_calls = [{"name": "plan_state_probes", "arguments": {"probes": [{"id": i, "command": "pct list", "expect": "running"} for i in ids]}}]; self.text = ""
+    async def tc(**kw):
+        msg = kw["messages"][0]["content"]; calls.append(msg)
+        ids = [ln.split(":")[0].strip("- ") + ":" + ln.split(":")[1].split()[0] for ln in msg.split("CLAIMS")[1].splitlines() if ln.startswith("- S:")]
+        return _Resp(ids)
+    monkeypatch.setattr(model_router, "tool_call", tc)
+    import app.utils.tool_call_args as tca
+    monkeypatch.setattr(tca, "read_tool_args", lambda resp: resp.tool_calls[0]["arguments"])
+    progress = []
+    async def prog(i, n, so_far): progress.append((i, n))
+    probes, refused = await sc.plan_probes(claims, {"profile": "root@pve"}, on_progress=prog)
+    assert len(calls) == 3 and progress == [(1, 3), (2, 3), (3, 3)]  # 23 step claims → 10+10+3; the pin is context
+    assert len(probes) == 23 and all("KNOWN VALUES" in c and "HOST = pve" in c for c in calls)
+    assert "K:HOST" not in {p["id"] for p in probes}
+
+
+def test_an_empty_probe_result_is_explained_as_a_miss_not_as_nothing_to_check():
+    assert "returned no usable command for any of the 86 claims" in sc.render_probe_message([], checked=0, unchecked=86)
+    assert "recorded nothing I can verify" in sc.render_probe_message([], checked=0, unchecked=0)

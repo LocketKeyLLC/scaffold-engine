@@ -172,47 +172,71 @@ _PROBE_OPENING = (
 )
 
 
+_PROBE_BATCH = 10
+_MAX_PROBES = 48
+
+
 async def plan_probes(claims: list[dict], environment: Optional[dict], *,
-                      model_overrides: Optional[dict] = None) -> tuple[list[dict], list[dict]]:
+                      model_overrides: Optional[dict] = None, on_progress=None) -> tuple[list[dict], list[dict]]:
     """``(probes, refused)`` — probes the read-only gate accepted, and the
-    ones it refused (logged, never shown). Fail-soft → ``([], [])``."""
-    if not claims:
+    ones it refused (logged, never shown). Claims go to the model in batches
+    of ``_PROBE_BATCH`` (live: 86 claims in one call returned NOTHING) up to
+    ``_MAX_PROBES`` probes; pins are context, not probe targets. Fail-soft
+    per batch → the other batches still count."""
+    targets = [c for c in claims if c.get("kind") != "pin"]
+    if not targets:
         return [], []
     from app import model_router
     from app.utils.tool_call_args import read_tool_args
     profile = str((environment or {}).get("profile") or "")
-    claims_block = "\n".join(f"- {c['id']}: {c['text']}" for c in claims)
-    msg = (_PROBE_OPENING + ("\n\nOPERATOR CONTEXT:\n" + profile[:600] if profile else "")
-           + "\n\nCLAIMS:\n" + claims_block)
-    try:
-        resp = await model_router.tool_call(
-            messages=[{"role": "user", "content": msg}], tools=[PLAN_PROBES_TOOL],
-            role="model_general", overrides=model_overrides, temperature=0.0,
-            tool_choice="auto", max_tokens=3000)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("state_check_probe_model_failed: %r", exc)
-        return [], []
-    raw = ((read_tool_args(resp) or {}).get("probes")) or []
-    by_id = {c["id"]: c for c in claims}
+    pins = [c["text"] for c in claims if c.get("kind") == "pin"][:20]
+    context = ("\n\nOPERATOR CONTEXT:\n" + profile[:600] if profile else "") + \
+              ("\n\nKNOWN VALUES (the operator's pins):\n" + "\n".join(f"- {p}" for p in pins) if pins else "")
+    by_id = {c["id"]: c for c in targets}
     probes: list[dict] = []
     refused: list[dict] = []
     seen: set[str] = set()
-    for item in raw if isinstance(raw, list) else []:
-        if not isinstance(item, dict):
-            continue
-        cid = str(item.get("id") or "").strip()
-        cmd = " ".join(str(item.get("command") or "").split())
-        if cid not in by_id or cid in seen or not cmd:
-            continue
-        seen.add(cid)
-        if not read_only_command(cmd):
-            refused.append({"id": cid, "command": cmd[:120]})
-            continue
-        probes.append({"id": cid, "command": cmd[:300], "expect": str(item.get("expect") or "")[:200],
-                       "claim": by_id[cid]["text"], "kind": by_id[cid]["kind"],
-                       "node_key": by_id[cid].get("node_key")})
-    logger.info("state_check_probes claims=%d probes=%d refused=%r", len(claims), len(probes),
-                [(r["id"], r["command"][:50]) for r in refused][:4])
+    batches = [targets[i:i + _PROBE_BATCH] for i in range(0, len(targets), _PROBE_BATCH)]
+    for bi, batch in enumerate(batches, 1):
+        if len(probes) >= _MAX_PROBES:
+            break
+        if on_progress is not None:
+            try:
+                await on_progress(bi, len(batches), len(probes))
+            except Exception:  # noqa: BLE001 — progress is a courtesy
+                pass
+        claims_block = "\n".join(f"- {c['id']}: {c['text']}" for c in batch)
+        msg = _PROBE_OPENING + context + f"\n\nCLAIMS (give a probe for each of the {len(batch)}, or an empty command):\n" + claims_block
+        try:
+            resp = await model_router.tool_call(
+                messages=[{"role": "user", "content": msg}], tools=[PLAN_PROBES_TOOL],
+                role="model_general", overrides=model_overrides, temperature=0.0,
+                tool_choice="auto", max_tokens=2500)
+            raw = ((read_tool_args(resp) or {}).get("probes")) or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("state_check_probe_model_failed batch=%d/%d: %r", bi, len(batches), exc)
+            raw = []
+        got = 0
+        for item in raw if isinstance(raw, list) else []:
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("id") or "").strip()
+            cmd = " ".join(str(item.get("command") or "").split())
+            if cid not in by_id or cid in seen or not cmd:
+                continue
+            seen.add(cid)
+            if not read_only_command(cmd):
+                refused.append({"id": cid, "command": cmd[:120]})
+                continue
+            probes.append({"id": cid, "command": cmd[:300], "expect": str(item.get("expect") or "")[:200],
+                           "claim": by_id[cid]["text"], "kind": by_id[cid]["kind"],
+                           "node_key": by_id[cid].get("node_key")})
+            got += 1
+            if len(probes) >= _MAX_PROBES:
+                break
+        logger.info("state_check_probe_batch %d/%d claims=%d probes=%d", bi, len(batches), len(batch), got)
+    logger.info("state_check_probes claims=%d targets=%d probes=%d refused=%r", len(claims), len(targets),
+                len(probes), [(r["id"], r["command"][:50]) for r in refused][:4])
     return probes, refused
 
 
@@ -226,8 +250,12 @@ def render_probe_script(probes: list[dict]) -> str:
 
 def render_probe_message(probes: list[dict], *, checked: int, unchecked: int) -> str:
     if not probes:
-        return ("🩺 **State check** — I found nothing here I can verify from a shell. Tell me in your own "
-                "words what is and is not working and I will take it from there.")
+        if unchecked:
+            return (f"🩺 **State check** — I could not build the checks this time: the model returned no usable "
+                    f"command for any of the {unchecked} claims (a generation miss, not a verdict on your system). "
+                    "Press 🩺 Verify state again to retry, or tell me in your own words what is and is not working.")
+        return ("🩺 **State check** — the plan has recorded nothing I can verify from a shell yet. Tell me in your "
+                "own words what is and is not working and I will take it from there.")
     what = "\n".join(f"- `{p['id']}` {p['claim'][:110]}" for p in probes[:20])
     return (
         f"🩺 **State check — {len(probes)} thing{'s' if len(probes) != 1 else ''} the plan believes about your system.**\n"
@@ -382,12 +410,12 @@ def render_verdicts(verdicts: list[dict]) -> str:
 # surface.
 # ---------------------------------------------------------------------------
 
-async def start_state_check(*, db, session_id: str, node_key: Optional[str]) -> dict:
+async def start_state_check(*, db, session_id: str, node_key: Optional[str], on_progress=None) -> dict:
     """Build claims → probes → stash ``pending_state_check`` → return the
     message for the operator. Raises ValueError on a bad session."""
     built = await build_claims(db=db, session_id=session_id)
     claims = built["claims"]
-    probes, refused = await plan_probes(claims, built["environment"])
+    probes, refused = await plan_probes(claims, built["environment"], on_progress=on_progress)
     pending = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "node_key": node_key or built.get("current_node_key"),
@@ -402,7 +430,8 @@ async def start_state_check(*, db, session_id: str, node_key: Optional[str]) -> 
     await db.commit()
     logger.warning("state_check_started session_id=%s node_key=%s claims=%d probes=%d refused=%d",
                    session_id, pending["node_key"], len(claims), len(probes), len(refused))
-    return {"message": render_probe_message(probes, checked=len(probes), unchecked=len(claims) - len(probes)),
+    targets = sum(1 for c in claims if c.get("kind") != "pin")
+    return {"message": render_probe_message(probes, checked=len(probes), unchecked=max(0, targets - len(probes))),
             "probes": probes, "claims_total": len(claims), "refused": refused}
 
 
