@@ -446,9 +446,10 @@ async def assist_next(session_id: str, db=Depends(get_db)):
 class AssistMessageInput(BaseModel):
     """§17.868 — one operator turn for the server-side turn loop."""
     message: Optional[str] = Field(default=None, description="The operator's message (command='message').")
-    command: Literal["message", "guide"] = Field(
+    command: Literal["message", "guide", "verify_state"] = Field(
         default="message",
-        description="'message' runs the full loop; 'guide' goes straight to claim-and-guide.",
+        description="'message' runs the full loop; 'guide' goes straight to claim-and-guide; "
+                    "'verify_state' (§17.1050) starts a state check of everything the plan believes.",
     )
     node_key: Optional[str] = Field(default=None, description="Defaults to the session's current step.")
     history: list[dict] = Field(default_factory=list)
