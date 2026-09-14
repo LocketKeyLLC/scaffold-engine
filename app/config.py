@@ -987,6 +987,11 @@ class Settings(BaseSettings):
     # write sites that have re-broken the mirror invariant: log-only by
     # default, raise when strict (tests run strict).
     assist_step_fsm_strict: bool = False
+    # §17.1076 — procrastinate trial. When on, the compose `queue` worker runs
+    # the cleanup sweep as a periodic task and the in-process asyncio loop is
+    # NOT started; when off (default) nothing changes.
+    queue_enabled: bool = False
+    queue_cleanup_cron: str = "*/15 * * * *"
     # §17.855 (audit "policy migration") — fold the deterministic phrase gates
     # (pivot / help / how-to / shell-result) into the SERVER `/decide` path as a
     # post-filter (`assist_policy.apply_deterministic_overrides`), so the CONFIDENT
