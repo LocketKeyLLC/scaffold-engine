@@ -660,3 +660,15 @@ diff: ## §17.1057 — structural diff of the working tree (difftastic): make di
 
 audit-tools: ## §17.1058 — one read-only audit with every developer tool (ruff/pyright/ast-grep/import-linter/vulture/hadolint/oasdiff/mutmut-on-record/semgrep/trivy/dive) → .profiles/audit-<date>.md. QUICK=1 skips the network/image scans.
 	@python3 scripts/audit_tools.py $(if $(QUICK),--quick,) $(ARGS)
+
+load-llm: ## §17.1061 — locust through /v1/chat/completions against a THROWAWAY orchestrator on :8765 whose roles are pinned to the stub provider (no tokens spent; migrations, scheduler and resume-on-startup off). USERS=10 DURATION=20s
+	@docker rm -f scaffold-loadllm >/dev/null 2>&1 || true
+	@docker run -d --name scaffold-loadllm --network ai-network --env-file .env -p 127.0.0.1:8765:8000 \
+		-e DATABASE_URL="$$(docker exec $(CONTAINER) printenv DATABASE_URL)" \
+		-e SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false -e SCHEDULER_ENABLED=false -e EXECUTION_RESUME_ON_STARTUP_ENABLED=false \
+		$$(grep -oE '^MODEL_[A-Z_]+_PROVIDER' .env.example | grep -v EMBEDDER | grep -v RERANKER | sort -u | sed 's/$$/=stub/;s/^/-e /' | tr '\n' ' ') \
+		scaffold-engine:$${SCAFFOLD_IMAGE_TAG:-local} >/dev/null
+	@for i in $$(seq 1 60); do curl -sf http://127.0.0.1:8765/health >/dev/null 2>&1 && break; sleep 2; done; curl -sf http://127.0.0.1:8765/health >/dev/null || { docker logs scaffold-loadllm | tail -20; docker rm -f scaffold-loadllm >/dev/null; exit 1; }
+	@SCAFFOLD_API_KEY=$$(grep -E '^(SCAFFOLD_)?API_KEY=' .env | head -1 | cut -d= -f2-) \
+	locust -f scripts/locustfile_llm.py --headless -u $(or $(USERS),10) -r 5 -t $(or $(DURATION),20s) -H http://127.0.0.1:8765 --only-summary $(ARGS); \
+	docker rm -f scaffold-loadllm >/dev/null
