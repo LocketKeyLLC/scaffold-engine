@@ -49,3 +49,4 @@ locust-*.csv
 locust-*.html
 .semgrep/
 .profiles/
+.schemathesis/

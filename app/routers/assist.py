@@ -14,7 +14,7 @@ import logging
 from typing import Literal, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from starlette.responses import StreamingResponse
@@ -44,16 +44,19 @@ async def _require_assist_session_visible(
     db=Depends(get_db),
     principal: Principal = Depends(get_principal),
 ) -> None:
+    sid = request.path_params.get("session_id")
+    if sid:
+        # §17.1068 — a malformed session id is a 404 HERE, for everyone. The
+        # earlier "leave it to the handler" left every handler to cast it in
+        # SQL, and asyncpg's invalid-uuid error surfaced as a 500 on eleven
+        # GET routes (schemathesis, 2026-09-14: `GET /assist/0/...`).
+        try:
+            UUID(str(sid))
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(status_code=404, detail=f"assist session not found: {sid}")
     if principal.is_admin:
         return
-    sid = request.path_params.get("session_id")
     if not sid:
-        return
-    # A malformed session id can't own anything; leave it to the handler's own
-    # not-found path rather than 500 on an invalid-UUID comparison.
-    try:
-        UUID(str(sid))
-    except (ValueError, AttributeError, TypeError):
         return
     await assert_visible_by_query(
         db, principal,
@@ -759,7 +762,7 @@ async def assist_record_turn(session_id: str, body: AssistTurnInput, db=Depends(
 
 
 @router.get("/assist/{session_id}/turns")
-async def assist_list_turns(session_id: str, limit: int = 200, db=Depends(get_db)):
+async def assist_list_turns(session_id: str, limit: int = Query(200, ge=1, le=2000), db=Depends(get_db)):  # §17.1068 — a 24-digit limit reached SQL (schemathesis: 500)
     """§17.710a — the session's raw transcript, oldest-first."""
     turns = await assist_agent.list_turns(session_id=session_id, limit=limit, db=db)
     return {"session_id": session_id, "turns": turns}

@@ -25,3 +25,5 @@ import-linter==2.15
 vulture==2.16
 # structural rules gate (make check-ast-grep / tests/test_ast_grep_rules.py)
 ast-grep-cli==0.45.3
+# §17.1068 — property tests over the phrase gates (tests/test_assist_policy_properties.py)
+hypothesis==6.168.0

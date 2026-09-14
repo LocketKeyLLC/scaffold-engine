@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.authz import Principal, assert_visible_by_query, get_principal
@@ -155,7 +155,7 @@ async def post_unconfirm(
 @router.get("/pending", response_model=SpecPendingListResponse)
 async def get_pending(
     job_id: uuid.UUID | None = None,
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=500),  # §17.1068 — a negative limit reached SQL as-is (schemathesis: 500)
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ) -> SpecPendingListResponse:
