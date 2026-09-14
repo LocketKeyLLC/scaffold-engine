@@ -44,3 +44,5 @@ jsonschema==4.26.0
 # needed so test_openapi_ssrf_guard.py collects in the ci-smoke fast gate.
 openapi-spec-validator==0.9.0
 prance==26.7.19.0
+# §17.1057 — hardened XML parsing for forum/RSS ingest (semgrep use-defused-xml)
+defusedxml==0.7.1

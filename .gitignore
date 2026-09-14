@@ -39,3 +39,5 @@ pipelines/*/valves.json
 .claude/settings.local.json
 .claude/settings.local.json.tmp.*
 .claude/*.tmp.*
+\n# §17.1057 — devtool outputs\nmutants/\n.mutmut-cache\nmemray-*.bin\nmemray-*.html\npyinstrument-*.html\nlocust-*.csv\nlocust-*.html\n.semgrep/\n
+.profiles/

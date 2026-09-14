@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# §17.1057 — commit-time hooks via pre-commit (.pre-commit-config.yaml). The
+# repo pins core.hooksPath=.githooks for the pre-push ci-tier-0 gate, so
+# `pre-commit install` cannot write its own hook; this shim runs it instead.
+# Missing pre-commit = no-op (the pre-push gate still bites).
+command -v pre-commit >/dev/null 2>&1 || exit 0
+exec pre-commit run --hook-stage pre-commit

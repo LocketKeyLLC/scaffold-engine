@@ -9,6 +9,8 @@ on the box at the time of writing).
 """
 from __future__ import annotations
 
+import random  # §17.1057 — the string annotations below name it at module scope
+
 from collections import Counter, defaultdict
 
 import pytest

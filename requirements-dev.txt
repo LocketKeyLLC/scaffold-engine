@@ -12,3 +12,14 @@ psutil==7.2.2
 # Pulls PyPA's Advisory DB at scan time; no daemon, no network access
 # at install time. Local-only dev tool — NOT in requirements.txt.
 pip-audit==2.10.1
+# §17.1057 — dev-image tooling (pruned from prod by scripts/_prune_dev_deps.py).
+# mutation testing over the gate modules (make mutate)
+mutmut==3.8.0
+# memory profiler for the OOM lane (make profile-mem)
+memray==1.20.0
+# CPU profiler for a test or a script (make profile-cpu)
+pyinstrument==5.1.3
+# module-boundary contracts, parses source via grimp (make lint-imports)
+import-linter==2.15
+# dead-code report with whitelist (make dead-code)
+vulture==2.16

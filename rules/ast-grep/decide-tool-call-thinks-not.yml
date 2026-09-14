@@ -1,0 +1,15 @@
+# §17.1056 — the routing decision must not spend its budget on reasoning
+# (three starved 768-token draws, twice, 2026-09-13).
+id: decide-tool-call-thinks-not
+language: python
+severity: error
+message: decide_turn's tool_call() must pass think=False
+files:
+  - app/modules/assist_decide.py
+rule:
+  pattern: $M.tool_call($$$ARGS)
+  not:
+    has:
+      kind: keyword_argument
+      regex: '^think\s*=\s*False$'
+      stopBy: end

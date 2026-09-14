@@ -9,6 +9,8 @@ contained apart from model_router; every name re-exported from assist_guide.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import json
 import logging
 import re

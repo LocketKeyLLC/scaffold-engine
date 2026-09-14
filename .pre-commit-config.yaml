@@ -1,0 +1,20 @@
+# §17.1057 — commit-time hooks (the pre-push hook still runs `make ci-tier-0`).
+# Install once: `pre-commit install` (devtools venv: ~/.local/share/scaffold-devtools).
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.3
+    hooks:
+      - id: ruff
+        args: [--fix]
+  - repo: local
+    hooks:
+      - id: ast-grep
+        name: ast-grep rules (rules/ast-grep)
+        entry: python3 scripts/ast_grep_gate.py
+        language: system
+        pass_filenames: false
+      - id: import-linter
+        name: import-linter contracts (.importlinter)
+        entry: lint-imports
+        language: system
+        pass_filenames: false

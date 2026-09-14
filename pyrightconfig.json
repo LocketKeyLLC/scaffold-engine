@@ -1,0 +1,24 @@
+{
+  "include": [
+    "app/modules/assist_policy.py",
+    "app/modules/assist_state_check.py",
+    "app/modules/assist_replan.py",
+    "app/modules/assist_notes.py",
+    "app/modules/assist_decide.py",
+    "app/modules/assist_turn.py",
+    "app/modules/assist_turns.py"
+  ],
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.12",
+  "reportMissingImports": false,
+  "reportMissingModuleSource": false,
+  "reportAttributeAccessIssue": false,
+  "reportOptionalMemberAccess": false,
+  "reportOptionalSubscript": false,
+  "reportArgumentType": false,
+  "reportCallIssue": false,
+  "reportIndexIssue": false,
+  "reportOptionalIterable": false,
+  "reportUndefinedVariable": true,
+  "reportUnusedExpression": true
+}

@@ -37,7 +37,6 @@ async def _durable_facts_for_session(*, session_id: str, metadata, db) -> list[s
     to a clean shared baseline with NO classifier call at generation time (cache
     hit). On a classifier FAILURE, falls back to ALL facts (the §17.757 behavior) so
     sharing degrades gracefully rather than going empty."""
-    from app.modules import assist_guide
     # Parse the RAW environment (not _environment_from_metadata, which strips the
     # durable_facts cache keys) so the cache read works.
     md = metadata
@@ -184,7 +183,6 @@ async def learn_from_submit(
     substitutions.
     """
     from app.modules.assist_agent import capture_execution_context, get_environment, set_environment  # §17.856 re-exports (patch-safe deferred)
-    from app.modules import assist_guide
 
     # §17.701/703 — keep the operator's execution context (single interactive
     # shell, `user@host`) in sync. Delegated to the standalone monitor, which is
@@ -243,7 +241,6 @@ async def capture_session_facts(
     """
     from app.modules.assist_agent import get_environment, set_environment  # §17.856 re-exports (patch-safe deferred)
     from app.config import settings
-    from app.modules import assist_guide
 
     if not settings.assist_capture_facts_enabled or not (evidence or "").strip():
         return []
@@ -314,7 +311,6 @@ async def check_submit_grounding(
     result can't be judged consistent with its own claims."""
     from app.modules.assist_agent import get_environment, _coerce_notes  # §17.856 re-exports (patch-safe deferred)
     from app.config import settings
-    from app.modules import assist_guide
 
     if not (settings.assist_unified_memory_enabled and settings.assist_umem_grounding):
         return None
@@ -466,7 +462,6 @@ async def derive_turn_memory(
     steps. Now every message is reviewed."""
     from app.modules.assist_agent import _apply_shell_context, _detect_shell_context, _environment_from_metadata, get_environment, set_environment, record_note, _coerce_notes  # §17.856 re-exports (patch-safe deferred)
     from app.config import settings
-    from app.modules import assist_guide
 
     result = {"notes_added": 0, "facts_added": 0}
     if not (settings.assist_unified_memory_enabled and settings.assist_umem_derive):
@@ -759,7 +754,6 @@ async def consolidate_session_facts(*, session_id: str, db) -> dict:
     Fail-soft — returns a summary dict, never raises."""
     from app.modules.assist_agent import _environment_from_metadata  # §17.856 re-exports (patch-safe deferred)
     from app.config import settings
-    from app.modules import assist_guide
 
     result = {"before": 0, "after": 0, "merges": 0}
     if not (settings.assist_unified_memory_enabled and settings.assist_umem_consolidate):
@@ -888,7 +882,6 @@ async def sweep_superseded_facts(*, session_id: str, note_text: str, db) -> dict
     wipe most of the ledger. Returns the retracted facts for surfacing/logging."""
     from app.modules.assist_agent import _environment_from_metadata, set_environment  # §17.856 re-exports (patch-safe deferred)
     from app.config import settings
-    from app.modules import assist_guide
 
     if not settings.assist_reset_facts_sweep_enabled:
         return {"retracted": []}

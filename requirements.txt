@@ -82,3 +82,5 @@ opentelemetry-instrumentation-asyncpg==0.65b0
 # explicitly because it is now a DIRECT dependency of app/utils/secrets.py and
 # the "pinned everything" invariant applies to direct deps.
 cryptography==50.0.1
+# §17.1057 — hardened XML parsing for forum/RSS ingest (semgrep use-defused-xml)
+defusedxml==0.7.1
