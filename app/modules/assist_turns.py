@@ -75,6 +75,17 @@ async def ingest_turn(
     if not (settings.assist_unified_memory_enabled and settings.assist_umem_capture):
         return False
     # A skip carries no content but is still a real turn worth recording.
+    # §17.1064 — the ONE place every operator paste passes through: mask
+    # credential values before they become durable transcript or facts.
+    if settings.assist_redact_secrets_enabled and (role or "").strip().lower() == "operator" and content:
+        try:
+            from app.modules.redaction import redact_secrets
+            content, _kinds = redact_secrets(content)
+            if _kinds:
+                logger.warning("assist_secret_redacted session_id=%s node_key=%s kinds=%s",
+                               session_id, node_key, sorted(set(_kinds)))
+        except Exception as _e:  # noqa: BLE001 — redaction must never lose the turn
+            logger.warning("assist_secret_redaction_failed session_id=%s err=%r", session_id, _e)
     if not (content or "").strip() and kind != "skip":
         return False
     try:

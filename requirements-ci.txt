@@ -46,3 +46,5 @@ openapi-spec-validator==0.9.0
 prance==26.7.19.0
 # §17.1057 — hardened XML parsing for forum/RSS ingest (semgrep use-defused-xml)
 defusedxml==0.7.1
+# §17.1064 — credential redaction at the assist capture funnel
+detect-secrets==1.5.0
