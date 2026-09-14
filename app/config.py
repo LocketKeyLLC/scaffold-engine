@@ -750,6 +750,12 @@ class Settings(BaseSettings):
     # Ubuntu, Super User, Medium and Quora all 403'd the plain client — the
     # pages most likely to hold the fix for a shell error silently dropped out
     # of the citation set. Same SSRF check, same byte cap, same timeout.
+    # §17.1069 — per-host pacing: minimum seconds between request STARTS to one
+    # host (bursts against one host queue; other hosts proceed), and the base
+    # cooldown after a 403/429 (doubles per repeat, capped at 120 s) during
+    # which that host is refused up front. 0 disables pacing.
+    research_fetch_host_min_interval_s: float = Field(default=0.75, ge=0.0, le=30.0)
+    research_fetch_host_cooldown_s: float = Field(default=2.0, ge=0.0, le=600.0)
     research_fetch_impersonate_enabled: bool = True
     research_fetch_impersonate_profile: str = "chrome"
     research_fetch_timeout: int = Field(default=15, ge=1, le=300)

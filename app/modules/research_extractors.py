@@ -571,6 +571,17 @@ async def _fetch_url_bounded(
         _fail("ssrf_rejected")
         return None
     cap = max_bytes or settings.research_max_url_bytes
+    # §17.1069 — per-host pacing + cooldown (the Stack Exchange throttle was
+    # earned by volume, not by fingerprint).
+    pacer = None
+    if settings.research_fetch_host_min_interval_s > 0 or settings.research_fetch_host_cooldown_s > 0:
+        from app.modules.fetch_pacing import get_pacer, host_of
+        pacer = get_pacer()
+        waited = await pacer.acquire(url)
+        if waited is None:
+            logger.info("url_fetch_skipped_cooldown: url=%s cooldown_s=%.0f", url, pacer.cooldown_remaining(host_of(url)))
+            _fail("host_cooldown")
+            return None
     try:
         # Item 12 — shared persistent client; per-call timeout override.
         client = _ra().get_generic_http_client()
@@ -595,6 +606,8 @@ async def _fetch_url_bounded(
                     )
                     _fail("ssrf_redirect_rejected")
                     return None
+            if pacer is not None:
+                pacer.record(url, resp.status_code)
             if resp.status_code != 200:
                 logger.warning("url_fetch_status: url=%s status=%d", url, resp.status_code)
                 _fail(f"http_{resp.status_code}")
@@ -606,6 +619,8 @@ async def _fetch_url_bounded(
                     if recovered is not None:
                         logger.info("url_fetch_recovered: url=%s via=impersonate status_was=%d",
                                     url, resp.status_code)
+                        if pacer is not None:
+                            pacer.record(url, 200)
                         if failure is not None:
                             failure.pop("reason", None)
                         return recovered
