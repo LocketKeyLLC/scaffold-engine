@@ -12,7 +12,14 @@ import * as notify from "./notify.js";
 // Visible build stamp (sidebar foot). Bump per UI change round — it exists so
 // "is my tab running the latest UI?" is answerable at a glance instead of by
 // diffing pixels (the §17.840/§17.842 stale-module debugging sink).
-const UI_BUILD = "r8";
+const UI_BUILD = "r9";
+// §17.1055 — the sidebar retracts on wide screens (the operator asked for
+// the room: a walkthrough plus a terminal side by side). Per-browser, like
+// theme and density; the ≤820px drawer is unaffected.
+const SIDEBAR_COLLAPSED_KEY = "scaffold_sidebar_collapsed";
+function sidebarCollapsed() {
+  try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch { return false; }
+}
 
 // ── Global error surface ──────────────────────────────────────────────
 // A backstop so anything that escapes a view's own try/catch becomes a
@@ -80,6 +87,7 @@ let cleanup = () => {}; // teardown hook returned by the active view
 let healthTimer = null;
 let attentionTimer = null; // §17.1007 — replaced, not stacked, per chrome rebuild
 let escHandler = null;
+let sidebarKeyHandler = null;  // §17.1055
 let jobPinHandler = null; // §17.896 — replaced, not stacked, per chrome rebuild
 
 // §17.896 — the sidebar's Current-job pin. Three verbs, named the way the
@@ -360,6 +368,13 @@ function buildChrome() {
   jobPinHandler = () => renderJobPin(jobPin);
   window.addEventListener("scaffold:currentjob", jobPinHandler);
 
+  const collapseBtn = el("button", {
+    class: "btn btn-ghost btn-sm sidebar-collapse",
+    title: "Hide the sidebar (⌃\\ toggles)",
+    "aria-label": "Hide the sidebar",
+    text: "⟨",
+    onClick: () => setSidebarCollapsed(true),
+  });
   const sidebar = el(
     "aside",
     { class: "sidebar" },
@@ -367,7 +382,9 @@ function buildChrome() {
       "div",
       { class: "brand" },
       el("img", { class: "brand-logo", src: "/ui/static/logo.svg", alt: "" }),
-      el("span", { class: "brand-name", text: "Scaffold" })
+      el("span", { class: "brand-name", text: "Scaffold" }),
+      el("span", { class: "spacer" }),
+      collapseBtn
     ),
     jobPin,
     el("nav", { class: "nav" }, ...navGroups),
@@ -444,7 +461,26 @@ function buildChrome() {
   escHandler = (e) => { if (e.key === "Escape") closeNav(); };
   document.addEventListener("keydown", escHandler);
 
-  mount(root, el("div", { class: "shell" }, topbar, sidebar, scrim, outlet));
+  // §17.1055 — the rail: the one control that survives a collapsed sidebar.
+  const rail = el("button", {
+    class: "sidebar-rail",
+    title: "Show the sidebar (⌃\\ toggles)",
+    "aria-label": "Show the sidebar",
+    text: "☰",
+    onClick: () => setSidebarCollapsed(false),
+  });
+  const shell = el("div", { class: "shell" + (sidebarCollapsed() ? " sidebar-collapsed" : "") }, topbar, sidebar, scrim, rail, outlet);
+  function setSidebarCollapsed(on) {
+    shell.classList.toggle("sidebar-collapsed", !!on);
+    try { on ? localStorage.setItem(SIDEBAR_COLLAPSED_KEY, "1") : localStorage.removeItem(SIDEBAR_COLLAPSED_KEY); } catch { /* private mode */ }
+    window.dispatchEvent(new CustomEvent("scaffold:sidebar", { detail: { collapsed: !!on } }));
+  }
+  if (sidebarKeyHandler) document.removeEventListener("keydown", sidebarKeyHandler);
+  sidebarKeyHandler = (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "\\") { e.preventDefault(); setSidebarCollapsed(!shell.classList.contains("sidebar-collapsed")); }
+  };
+  document.addEventListener("keydown", sidebarKeyHandler);
+  mount(root, shell);
   mountCommandPalette(); // idempotent; overlay lives on document.body
   startHealthPolling(healthDot, healthText);
   startAttentionPolling(); // §17.1007

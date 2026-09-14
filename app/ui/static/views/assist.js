@@ -209,7 +209,37 @@ export function ephemeralIsDurable(turns, entry, maxIdAtTurnStart) {
   });
 }
 
-export function renderChat(container, sessionId) {
+// §17.1055 — where the operator is in the plan, from the ordered /steps list:
+// 1-based position of the current step, the nearest finished step before it
+// and the nearest unfinished step after it. Pure, so the strip can be tested
+// without a DOM. `total` is the list length (the plan as ordered), not the
+// step_counts sum — the two agree except mid-mutation.
+const TERMINAL_STEP = new Set(["committed", "done", "skipped", "handed_off"]);
+export function planPosition(steps, currentKey) {
+  const list = Array.isArray(steps) ? steps : [];
+  const idx = list.findIndex((x) => x && x.node_key === currentKey);
+  let prev = null, next = null;
+  if (idx >= 0) {
+    for (let i = idx - 1; i >= 0; i--) {
+      if (TERMINAL_STEP.has(list[i].step_status)) { prev = list[i]; break; }
+    }
+    for (let i = idx + 1; i < list.length; i++) {
+      if (!TERMINAL_STEP.has(list[i].step_status)) { next = list[i]; break; }
+    }
+  }
+  const done = list.filter((x) => TERMINAL_STEP.has(x && x.step_status)).length;
+  return { index: idx >= 0 ? idx + 1 : 0, total: list.length, done, prev, next };
+}
+
+const SIDEBAR_COLLAPSED_KEY = "scaffold_sidebar_collapsed";
+const ASSIST_MORE_KEY = "scaffold_assist_more_open";
+
+export function renderChat(container, sessionId, opts = {}) {
+  // §17.1055 — inside the job hub the hub header already names the job and
+  // owns the tabs, so the view's own "Assistant / <id> / ← Sessions / Refresh"
+  // header was a second, redundant header above the step. Embedded mode drops
+  // it; the refresh lives in the plan strip instead.
+  const embedded = !!(opts && opts.embedded);
   let disposed = false;
   let guiding = false;
   let abort = null;
@@ -471,6 +501,10 @@ export function renderChat(container, sessionId) {
 
   // Verbs ordered as the loop runs (research: labeled contextual actions over
   // icon mysteries; primary path visually distinct from escape hatches).
+  // §17.1055 — three tiers, not one row of nine: the primary verb, the four
+  // the loop uses every few turns, and the escape hatches behind "⋯ More".
+  const moreMenu = el("details", { class: "verbs-more" },
+    el("summary", { class: "btn btn-sm btn-ghost", title: "More step actions", text: "⋯" }));
   const verbsBar = el(
     "div",
     { class: "row row-wrap assist-verbs" },
@@ -504,7 +538,9 @@ export function renderChat(container, sessionId) {
       appendBubble("assistant", "fix", res.fix || "I couldn't produce a fix this time — the model returned no usable answer after several attempts. Press the button again to retry, or paste just the last ~50 lines of the error output.");
       load();
     }),
-    el("span", { class: "spacer" }),
+    moreMenu
+  );
+  const moreBody = el("div", { class: "verbs-more-body" },
     verb("⏩ Skip", "Skip the current step (recorded, revisitable)", async () => {
       const nk = session?.current_node_key;
       if (!nk) { toast("No step in flight.", "err"); return; }
@@ -526,6 +562,11 @@ export function renderChat(container, sessionId) {
       load();
     })
   );
+  moreMenu.append(moreBody);
+  // Close the overflow after a pick, and on a click anywhere else.
+  moreBody.addEventListener("click", (e) => { if (e.target.closest("button")) moreMenu.open = false; });
+  const onDocClick = (e) => { if (moreMenu.open && !moreMenu.contains(e.target)) moreMenu.open = false; };
+  document.addEventListener("click", onDocClick);
   const composer = el(
     "div",
     { class: "chat-composer" },
@@ -547,11 +588,19 @@ export function renderChat(container, sessionId) {
     el("div", { class: "header-actions" }, el("a", { class: "btn btn-sm btn-ghost", href: "#/assist", text: "← Sessions" }), el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => load() }))
   );
 
-  const main = el("div", { class: "chat-main assist-main" }, transcript, composer);
+  const main = el("div", { class: "chat-main assist-main" + (embedded ? " embedded" : "") }, transcript, composer);
   // §17.845 — the editable living brief rides with the session (mounted once
   // the session tells us its job).
   const briefSlot = el("div", { class: "assist-brief-slot" });
-  mount(container, header, contractCard(null, session), stepHero, main, briefSlot, belowGrid);
+  // §17.1055 — session / steps / environment / notes / facts and the brief
+  // used to be five cards permanently under the chat. They are reference,
+  // not the work: one folded row holds them, remembered per browser.
+  const moreOpen = (() => { try { return localStorage.getItem(ASSIST_MORE_KEY) === "1"; } catch { return false; } })();
+  const moreRow = el("details", { class: "assist-more" + (moreOpen ? "" : ""), open: moreOpen || null },
+    el("summary", { text: "Session details — environment, pinned values, notes, brief" }),
+    belowGrid, briefSlot);
+  moreRow.addEventListener("toggle", () => { try { localStorage.setItem(ASSIST_MORE_KEY, moreRow.open ? "1" : "0"); } catch { /* private mode */ } });
+  mount(container, embedded ? null : header, contractCard(null, session), stepHero, main, moreRow);
   let briefMounted = false;
 
   // 📍 Current-step hero — where am I, what's the loop position (§17.738/741
@@ -615,22 +664,18 @@ export function renderChat(container, sessionId) {
     const sc = session.step_counts || {};
     // §17.938 — `step_counts` is keyed by ASSIST-step status, where the
     // terminal state is `committed`; `done` is the dag_nodes vocabulary and
-    // never appears here. Counting `sc.done` read 1/41 on a session with 26
-    // committed steps — the progress badge had been understating the operator's
-    // own progress by an order of magnitude. Count every terminal state, and
-    // keep `done` in the sum so the badge stays right if the shape ever changes.
+    // never appears here. Count every terminal state (§17.938).
     const doneN = (sc.committed || 0) + (sc.done || 0)
       + (sc.skipped || 0) + (sc.handed_off || 0);
     const totalN = Object.values(sc).reduce((a, b) => a + b, 0);
     const cur = steps.find((x) => x.node_key === nk);
-    // §17.1007 — the phase badge. `doneN/totalN` across a 41-step session is a
-    // gradient nobody can feel: 12→13 of 41 is perceptually the same as 13→14,
-    // so the effect that drives effort as a goal nears never engages. The
-    // server chunks the plan by its dependency structure (dag_phases.py,
-    // compute-on-read) and this renders the near summit — six times a session
-    // instead of once. Absent on short plans, where the plain total is already
-    // legible and phases would be ceremony.
-    const isTerminal = (st) => !["pending", "presented", "awaiting_input"].includes(st);
+    const pos = planPosition(steps, nk);
+    const total = pos.total || totalN;
+    const done = pos.total ? pos.done : doneN;
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    // §17.1007 — the phase badge: the near summit, six times a session instead
+    // of once. Absent on short plans.
+    const isTerminal = (st) => TERMINAL_STEP.has(st);
     let phaseTag = null;
     let stopHint = null;
     if (cur && cur.phase && cur.phase_total > 1) {
@@ -639,56 +684,71 @@ export function renderChat(container, sessionId) {
       phaseTag = el("span", {
         class: "tag phase-tag",
         title: `Phases follow the plan's dependencies — a boundary means the next group could not start until this one finished.`,
-        text: `Phase ${cur.phase} of ${cur.phase_total} · step ${cur.phase_pos} of ${cur.phase_size}`,
+        text: `Phase ${cur.phase} of ${cur.phase_total} · ${cur.phase_pos} of ${cur.phase_size}`,
       });
-      // §17.1007 — a sanctioned place to stop. A session runs until the
-      // operator quits mid-step, and an unfinished step stays mentally open:
-      // quitting between phases feels like a pause, quitting mid-step feels
-      // like failing, and nothing in the console told them which was which.
-      // Only offered where it is TRUE — the last step of a phase with the rest
-      // of that phase already behind them.
+      // §17.1007 — a sanctioned place to stop, offered only where it is true.
       if (cur.phase_pos === cur.phase_size && donePhase >= inPhase.length - 1
           && cur.phase < cur.phase_total) {
         stopHint = el("div", { class: "step-hero-stop" },
           `⏸ Finish this one and Phase ${cur.phase} is done — a clean place to stop. Your progress is saved; ✦ pick it up here whenever.`);
       }
     }
+    const title = cur?.title || session.current_node_title || "";
+    const short = (t, n = 64) => (t || "").length > n ? (t || "").slice(0, n - 1) + "…" : (t || "");
+    // §17.1055 — the strip. Top: where in the plan (count + phase + bar),
+    // the session state, the loop "?" and refresh. Middle: the step you are
+    // on, framed by the step just finished and the one coming — the
+    // three-item timeline is what makes "where am I" legible without reading
+    // the whole picker. Bottom: the jump-to picker, compact and right-sized.
     stepHero.classList.remove("hidden");
     mount(
       stepHero,
-      el("div", { class: "row row-wrap" },
-        el("span", { class: "step-hero-pin", text: "📍" }),
-        nk
-          ? el("span", { class: "step-hero-title" }, el("strong", { text: `Step ${nk}` }),
-              (cur?.title || session.current_node_title) ? ` — ${cur?.title || session.current_node_title}` : "")
-          : el("span", { class: "step-hero-title dim", text: session.status === "completed" ? "Session complete 🎉 — the deliverable is in the Output tab" : "No step claimed — press Next step to begin" }),
-        el("span", { class: "spacer" }),
+      el("div", { class: "row plan-strip-top" },
+        nk && pos.index
+          ? el("span", { class: "plan-strip-count", text: `Step ${pos.index} of ${total}` })
+          : el("span", { class: "plan-strip-count", text: total ? `${done} of ${total} done` : "Plan" }),
         phaseTag,
-        totalN ? el("span", { class: phaseTag ? "tag faint" : "tag", text: `${doneN}/${totalN} overall` }) : null,
-        statusBadge(session.status)),
-      stopHint,
-      steps.length
-        ? el("div", { class: "row row-wrap step-hero-nav" },
-            el("span", { class: "dim small", text: "Jump to:" }),
-            renderStepPicker(nk))
-        : null,
-      nk
-        // §17.1011 — the one-line loop stays (it is compact and it is the
-        // reminder that earns its place next to the work), and it is now the
-        // way BACK to the full explainer the card used to hold. Clicking it
-        // clears the retire flag and re-renders, so the four-step contract is
-        // always one click away instead of permanently on screen.
-        ? el("button", {
-            class: "step-hero-loop dim linklike",
-            title: "How assist mode works",
-            text: "The loop: ✦ Guide me → do it on your machine → paste what happened → ✓ Submit results  ?",
+        el("span", { class: "spacer" }),
+        el("span", { class: "plan-strip-done dim small", text: total ? `${done}/${total} done · ${pct}%` : "" }),
+        statusBadge(session.status),
+        nk ? el("button", {
+            class: "btn btn-ghost btn-sm plan-strip-help",
+            title: "How assist mode works: ✦ Guide me → do it on your machine → paste what happened → ✓ Done",
+            text: "?",
             onClick: () => {
               const host = stepHero.parentNode;
               if (!host || host.querySelector(".assist-contract")) return;
               const card = contractCard(null, session, true);
               if (card) host.insertBefore(card, stepHero);
             },
-          })
+          }) : null,
+        embedded ? el("button", { class: "btn btn-ghost btn-sm", title: "Reload the conversation and step state", text: "↻", onClick: () => load() }) : null),
+      el("div", { class: "plan-bar", title: `${done} of ${total} steps finished` },
+        el("div", { class: "plan-bar-fill", style: `width:${pct}%` })),
+      el("div", { class: "plan-strip-now" },
+        pos.prev
+          ? el("div", { class: "plan-step plan-prev", title: pos.prev.title || "" },
+              el("span", { class: "plan-step-icon", text: STEP_ICON[pos.prev.step_status] || "✅" }),
+              el("span", { class: "plan-step-key mono", text: pos.prev.node_key }),
+              el("span", { class: "plan-step-title", text: short(pos.prev.title) }))
+          : el("div", { class: "plan-step plan-prev faint", text: nk ? "start of plan" : "" }),
+        nk
+          ? el("div", { class: "plan-step plan-cur" },
+              el("span", { class: "plan-step-icon", text: "📍" }),
+              el("span", { class: "plan-step-key mono", text: nk }),
+              el("span", { class: "plan-step-title", text: title }))
+          : el("div", { class: "plan-step plan-cur dim", text: session.status === "completed" ? "Session complete 🎉 — the deliverable is in the Output tab" : "No step claimed — press ✦ Guide me to begin" }),
+        pos.next
+          ? el("div", { class: "plan-step plan-next", title: pos.next.title || "" },
+              el("span", { class: "plan-step-icon", text: "○" }),
+              el("span", { class: "plan-step-key mono", text: pos.next.node_key }),
+              el("span", { class: "plan-step-title", text: short(pos.next.title) }))
+          : el("div", { class: "plan-step plan-next faint", text: nk ? "last step of the plan" : "" })),
+      stopHint,
+      steps.length
+        ? el("div", { class: "row row-wrap step-hero-nav" },
+            el("span", { class: "dim small", text: "All steps:" }),
+            renderStepPicker(nk))
         : null
     );
   }
@@ -882,9 +942,22 @@ export function renderChat(container, sessionId) {
       return;
     }
     checklistPanel.classList.remove("hidden");
+    const openN = checklist?.open_count ?? checkItems.filter((i) => !i.done).length;
+    // §17.1055 — with nothing open this panel is a receipt, not a request:
+    // one muted line, the list behind a click.
+    if (!openN) {
+      const doneList = el("details", { class: "checklist-done" },
+        el("summary", { class: "side-title", text: `Nothing needed from you right now · ${checkItems.length} provided` }),
+        ...checkItems.map((it) => el("div", { class: "side-check" },
+          el("span", { class: "check-dot done", text: "✓" }),
+          el("span", { class: "check-text dim" }, `${it.title || it.node_key}`,
+            provided[it.node_key] ? el("span", { class: "faint", text: ` — ${provided[it.node_key]}` }) : null))));
+      mount(checklistPanel, doneList);
+      return;
+    }
     mount(
       checklistPanel,
-      el("div", { class: "side-title", text: `The engine needs from you (${checklist?.open_count ?? checkItems.filter((i) => !i.done).length} open)` }),
+      el("div", { class: "side-title", text: `The engine needs from you (${openN} open)` }),
       ...checkItems.map((it) => {
         const done = it.done === true;
         const value = provided[it.node_key];
@@ -1009,7 +1082,7 @@ export function renderChat(container, sessionId) {
       if (cl !== null) checklist = cl;
       if (env !== null) environment = env?.environment ?? null;
       if (st !== null) steps = st?.steps || [];
-      header.querySelector(".sub").textContent = s.job_title || shortId(sessionId);
+      if (!embedded) header.querySelector(".sub").textContent = s.job_title || shortId(sessionId);
       if (!briefMounted && s.job_id) {
         briefMounted = true;
         mount(briefSlot, briefPanel(String(s.job_id)));
@@ -1393,6 +1466,7 @@ export function renderChat(container, sessionId) {
   return () => {
     disposed = true;
     document.removeEventListener("selectionchange", onSelChange);  // §17.890
+    document.removeEventListener("click", onDocClick);  // §17.1055
     if (abort) abort.abort();
   };
 }
