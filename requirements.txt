@@ -86,3 +86,6 @@ cryptography==50.0.1
 defusedxml==0.7.1
 # §17.1064 — credential redaction at the assist capture funnel
 detect-secrets==1.5.0
+# §17.1067 — shell commands judged on their AST (state-check probe gate)
+tree-sitter==0.26.0
+tree-sitter-bash==0.25.1

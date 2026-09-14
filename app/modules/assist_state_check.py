@@ -159,14 +159,49 @@ def reopen_refused(verdict: dict) -> bool:
     return destructive_repair(title) or not probe_worthy(claim) or not probe_worthy(title)
 
 
+_SUBCOMMAND_HEADS = frozenset({
+    "systemctl", "service", "pct", "qm", "docker", "podman", "virsh", "ufw", "firewall-cmd", "ip", "wg", "wg-quick",
+    "nmcli", "zfs", "zpool", "git", "sed", "perl", "crontab", "apt", "apt-get", "curl", "wget", "snap", "pip", "pip3",
+    "npm", "yarn", "cargo", "make", "kill", "pkill", "nft", "iptables", "update-alternatives", "update-grub", "update-initramfs",
+})
+
+
 def read_only_command(cmd: str) -> bool:
-    """True when the command can only read. Conservative: any mutation verb,
-    any redirect that is not to /dev/null, any pipe into a shell → False."""
+    """True when the command can only read. Conservative: any mutation verb at
+    the HEAD of any command (nested scripts and substitutions included), any
+    redirect that is not to /dev/null, any pipe into an interpreter → False.
+
+    §17.1067 — judged on the tree-sitter-bash AST (`shell_ast.analyze`), not
+    on the raw text: the regex over the whole line refused read-only probes
+    whose ARGUMENTS carried a verb (`getent passwd prowlarr`, `ls /etc/apt`,
+    `grep 'rm -rf' /var/log/syslog`; live, 6 of 48 probes) and could not see
+    `$(…)` or `bash -c "…"`. The mutation regex still decides which HEADS are
+    mutations (first four tokens of each command) — one verb table, applied
+    to structure. A parse error fails closed."""
     c = (cmd or "").strip()
     if not c or c.startswith("#"):
         return False
-    if _MUTATION_RE.search(" " + c + " "):
+    from app.modules.shell_ast import analyze
+    facts = analyze(c)
+    if facts.parse_error:
         return False
+    if facts.redirect_targets or facts.piped_to_interpreter:
+        return False
+    if not facts.commands:
+        return False
+    for argv, head in zip(facts.commands, facts.heads, strict=True):
+        # argv[0] alone decides for most commands; the joined unquoted head
+        # (`systemctl start`, `pct destroy`, `ip link add`, `sed -i`) only
+        # for the families whose verb is a subcommand or a flag.
+        probe = head if argv[0] in _SUBCOMMAND_HEADS else argv[0]
+        if _MUTATION_RE.search(" " + probe + " "):
+            return False
+        if argv[0] in ("curl", "wget") and any(a in ("-X", "--request", "-d", "--data", "--data-raw", "--upload-file", "-T", "-o", "-O") for a in argv[1:]):
+            # curl/wget that WRITE (a method override, a body, or a download to disk)
+            # — `-o /dev/null` is the one read-only shape
+            outs = [argv[i + 1] for i, a in enumerate(argv) if a in ("-o", "-O") and i + 1 < len(argv)]
+            if not (outs and all(o == "/dev/null" for o in outs) and not any(a in ("-X", "--request", "-d", "--data", "--data-raw", "--upload-file", "-T") for a in argv[1:])):
+                return False
     try:
         from app.modules.assist_guide import find_shell_unsafe_commands
         if find_shell_unsafe_commands("```bash\n" + c + "\n```"):
