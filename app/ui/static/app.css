@@ -846,7 +846,7 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 /* Wrap so the verbs drop to a second line on narrow windows instead of
    crushing the checklist to zero width (it has content priority). */
 .composer-top { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
-.composer-checklist { display: flex; flex-direction: column; gap: 2px; max-height: 96px; overflow-y: auto; flex: 1 1 240px; min-width: 220px; }
+.composer-checklist { display: flex; flex-direction: column; gap: 2px; max-height: 96px; overflow-y: auto; flex: 1 1 300px; min-width: 220px; }
 .composer-checklist .side-title { font-size: 10.5px; margin-bottom: 1px; }
 .composer-checklist .side-check { padding: 1px 0; }
 .composer-checklist .check-text { font-size: 12px; }
@@ -862,7 +862,7 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 }
 .assist-verbs .btn:hover { background: var(--bg-elev-2); color: var(--text); border-color: var(--border); }
 /* §17.848 — the advance verb is the loop's primary action: always visible. */
-.assist-verbs .btn:first-child {
+.assist-verbs > .btn:first-child {
   background: var(--accent-btn); color: #fff; border-color: transparent;
   font-weight: var(--fw-semi);
 }
@@ -1535,3 +1535,76 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
 
 /* §17.1008 — the decomposition breadcrumb on a component job. */
 .umbrella-link { border-left: 3px solid var(--purple); font-size: var(--fs-sm); color: var(--text-dim); }
+
+
+/* ── §17.1055 — retractable sidebar (wide screens) ─────────────────────── */
+.sidebar-collapse { padding: 0 6px; font-size: 14px; line-height: 1; color: var(--text-faint); }
+.sidebar-collapse:hover { color: var(--text); }
+.sidebar-rail {
+  display: none;
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 40;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+}
+.sidebar-rail:hover { color: var(--text); }
+@media (min-width: 821px) {
+  .shell { transition: grid-template-columns var(--dur-med) var(--ease); }
+  /* One column, not "0 1fr": with the sidebar display:none the outlet becomes
+     the first grid item and would auto-place into the zero-width column. */
+  .shell.sidebar-collapsed { grid-template-columns: 1fr; }
+  .shell.sidebar-collapsed .sidebar { display: none; }
+  .shell.sidebar-collapsed .sidebar-rail { display: inline-flex; }
+  .shell.sidebar-collapsed .content { padding-left: 56px; }
+}
+
+/* ── §17.1055 — Run tab: the plan strip ────────────────────────────────── */
+.step-hero { padding: 10px 14px 12px; }
+.plan-strip-top { align-items: center; gap: 10px; flex-wrap: wrap; }
+.plan-strip-count { font-size: 12.5px; font-weight: var(--fw-semi); color: var(--text); }
+.plan-strip-help { padding: 0 7px; border-radius: 999px; font-weight: var(--fw-semi); }
+.plan-bar { height: 4px; margin: 8px 0 10px; background: var(--bg-inset); border-radius: 999px; overflow: hidden; }
+.plan-bar-fill { height: 100%; background: var(--accent); border-radius: 999px; transition: width var(--dur-med) var(--ease); }
+.plan-strip-now { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.plan-step { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 12.5px; color: var(--text-dim); }
+.plan-step-icon { flex: none; width: 18px; text-align: center; }
+.plan-step-key { flex: none; font-size: 11.5px; color: var(--text-faint); }
+.plan-step-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-cur { font-size: 15px; color: var(--text); padding: 2px 0; }
+.plan-cur .plan-step-key { font-size: 12.5px; color: var(--accent); font-weight: var(--fw-semi); }
+.plan-cur .plan-step-title { white-space: normal; font-weight: var(--fw-semi); }
+.plan-prev .plan-step-icon, .plan-prev .plan-step-key { opacity: 0.8; }
+.step-hero-nav { margin-top: 10px; }
+.step-picker { max-width: 480px; font-size: 12.5px; padding: 4px 8px; }
+.assist-main { height: calc(100vh - 230px); }
+.assist-main.embedded { height: calc(100vh - 300px); }
+
+/* verbs: primary, the everyday four, the rest behind ⋯ */
+.verbs-more { position: relative; }
+.verbs-more > summary { list-style: none; cursor: pointer; padding: 4px 10px; border-radius: 999px; }
+.verbs-more > summary::-webkit-details-marker { display: none; }
+.verbs-more-body {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
+  display: flex; flex-direction: column; gap: 2px; min-width: 190px; padding: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow);
+}
+.verbs-more-body .btn { justify-content: flex-start; text-align: left; border-radius: var(--radius-sm); }
+
+/* the folded reference row under the chat */
+.assist-more { margin-top: 12px; }
+.assist-more > summary { cursor: pointer; font-size: 12px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; font-weight: var(--fw-semi); padding: 6px 2px; }
+.assist-more[open] > summary { margin-bottom: 8px; }
+.checklist-done > summary { cursor: pointer; list-style: none; }
+.checklist-done > summary::-webkit-details-marker { display: none; }

@@ -134,7 +134,7 @@ function renderRun(container, jobId, job, ctx) {
         mount(container, errorPanel({ message: "No assist session for this job." }));
         return;
       }
-      childDispose = renderChat(container, String(sid));
+      childDispose = renderChat(container, String(sid), { embedded: true });  // §17.1055
     } catch (e) {
       if (!disposed) mount(container, errorPanel(e));
     }
