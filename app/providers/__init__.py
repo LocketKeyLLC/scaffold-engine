@@ -139,6 +139,7 @@ def _autoload() -> None:
         "app.providers.anthropic",
         # §17.900 — imported AFTER openai: HuggingFaceProvider subclasses it.
         "app.providers.huggingface",
+        "app.providers.stub",  # §17.1061 — canned provider for load / offline lanes
     ):
         try:
             __import__(mod)
