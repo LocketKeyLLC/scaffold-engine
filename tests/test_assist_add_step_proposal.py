@@ -407,3 +407,65 @@ def test_override_normalizes_reshape_on_add_step():
     # untouched otherwise
     n = {"action": "note", "confidence": "high", "plan_impact": "reshape", "rationale": "", "signals": {}}
     assert P.apply_deterministic_overrides(n, "use zfs instead of lvm")["plan_impact"] == "reshape"
+
+
+# ── §17.1062 — mutation survivors in `_override` (make mutate baseline):
+# each gate is asserted over EVERY action it names, and the actions it
+# leaves alone are asserted untouched.
+
+@pytest.mark.parametrize("action", ["question", "ask", "note", "status", "advance", "fix"])
+def test_add_step_phrase_overrides_every_listed_action(action):
+    d = {"action": action, "confidence": "high", "rationale": "", "signals": {}}
+    out = P.apply_deterministic_overrides(d, "add a step for this")
+    assert out["action"] == "add_step" and out["override"] == "add_step_request", action
+
+
+@pytest.mark.parametrize("action", ["submit", "skip", "pause", "finalize", "add_step"])
+def test_add_step_phrase_leaves_operator_verbs_alone(action):
+    d = {"action": action, "confidence": "high", "rationale": "", "signals": {}}
+    assert P.apply_deterministic_overrides(d, "add a step for this").get("override") is None, action
+
+
+def test_clean_shell_paste_leaves_fix_alone_and_error_paste_forces_fix_from_submit():
+    clean = {"action": "fix", "confidence": "high", "rationale": "",
+             "signals": {"shell_paste": True, "shell_error": False, "last_assistant_was_fix": False}}
+    assert P.apply_deterministic_overrides(clean, "root@pve:~# ls\nok").get("override") is None
+    err = {"action": "submit", "confidence": "high", "rationale": "",
+           "signals": {"shell_paste": True, "shell_error": True}}
+    out = P.apply_deterministic_overrides(err, "root@pve:~# x\nNo such file or directory")
+    assert out["action"] == "fix" and out["override"] == "shell_error" and out["error_text"].startswith("root@pve")
+
+
+def test_override_with_no_message_is_a_no_op():
+    d = {"action": "question", "confidence": "low", "rationale": "", "signals": {}}
+    assert P.apply_deterministic_overrides(d, "") is d
+    assert P.apply_deterministic_overrides(d, None) is d
+
+
+# ── §17.1062 — `_compute_signals` survivors: the second fix marker, the
+# three-turn lookback bound, and the early exit still returning the dict.
+
+def test_second_fix_marker_and_exact_case():
+    hist = [{"role": "assistant", "content": "something went wrong — let me help with that paste"}]
+    assert assist_decide._compute_signals("x", hist)["last_assistant_was_fix"] is True
+    hist_upper = [{"role": "assistant", "content": "SOMETHING WENT WRONG — LET ME HELP"}]
+    assert assist_decide._compute_signals("x", hist_upper)["last_assistant_was_fix"] is False
+    hist_tool = [{"role": "assistant", "content": "🔧 Troubleshooting\n## Fix"}]
+    assert assist_decide._compute_signals("x", hist_tool)["last_assistant_was_fix"] is True
+
+
+def test_proposal_lookback_is_exactly_three_assistant_turns():
+    proposal = {"role": "assistant", "content": "## Needs its own step\nx"}
+    filler = {"role": "assistant", "content": "ok"}
+    user = {"role": "user", "content": "paste"}
+    third_back = [proposal, user, filler, user, filler]           # proposal is the 3rd assistant turn back
+    assert assist_decide._compute_signals("add them", third_back)["last_assistant_proposed_step"] is True
+    fourth_back = [proposal, filler, user, filler, user, filler]  # 4th back → outside the window
+    assert assist_decide._compute_signals("add them", fourth_back)["last_assistant_proposed_step"] is False
+
+
+def test_signals_after_the_lookback_exit_still_return_the_full_dict():
+    hist = [{"role": "assistant", "content": f"turn {i}"} for i in range(6)]
+    out = assist_decide._compute_signals("root@pve:~# ls\nok", hist)
+    assert set(out) == {"shell_paste", "shell_error", "last_assistant_was_fix", "last_assistant_proposed_step"}
+    assert out["shell_paste"] is True and out["last_assistant_was_fix"] is False
