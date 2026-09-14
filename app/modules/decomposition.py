@@ -564,7 +564,7 @@ async def create_and_run_decomposition(
     )
     await db.commit()
 
-    for child, comp in zip(children, components):
+    for child, comp in zip(children, components, strict=True):
         _spawn_component(
             child["job_id"], comp["description"],
             domain=comp.get("domain"),

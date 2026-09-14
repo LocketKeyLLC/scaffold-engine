@@ -259,7 +259,7 @@ async def add_step(
     # first-to-last before the reopened anchor.
     inserted: list[dict] = []
     prev_key: str | None = None
-    for new_key, step in zip(new_keys, drafted):
+    for new_key, step in zip(new_keys, drafted, strict=True):
         deps = anchor_deps + ([prev_key] if prev_key else [])
         await db.execute(
             text("""

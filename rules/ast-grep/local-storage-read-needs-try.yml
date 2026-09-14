@@ -1,10 +1,10 @@
 # §17.1055 — localStorage can throw (private mode, blocked site data); every
 # read the SPA depends on must be guarded. Advisory: the pre-existing reads in
-# app.js/util.js are listed as warnings until they are wrapped.
+# §17.1059 — every site now goes through storage.js; raw access is an error.
 id: local-storage-read-needs-try
 language: javascript
-severity: warning
-message: localStorage access should sit inside a try block (it throws in private mode)
+severity: error
+message: use storage.get/set/remove from storage.js — raw localStorage throws when site data is blocked
 files:
   - app/ui/static/**/*.js
 rule:

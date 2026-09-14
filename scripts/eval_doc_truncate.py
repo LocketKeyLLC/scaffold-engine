@@ -464,7 +464,7 @@ def main() -> int:
 
     # Cartesian product over the axes.
     from itertools import product
-    points = [list(zip([k for k, _ in axes], combo))
+    points = [list(zip([k for k, _ in axes], combo, strict=True))
               for combo in product(*[vs for _, vs in axes])]
 
     rows = []

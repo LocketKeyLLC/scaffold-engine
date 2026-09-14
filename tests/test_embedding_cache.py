@@ -33,7 +33,7 @@ def test_encode_decode_roundtrip_preserves_values():
     emb = [0.1, -0.5, 1e-4, 0.0] * 128  # 512 dims
     back = _decode_embedding(_encode_embedding(emb))
     assert len(back) == 512
-    for orig, round_tripped in zip(emb, back):
+    for orig, round_tripped in zip(emb, back, strict=True):
         assert abs(orig - round_tripped) < 1e-6
 
 

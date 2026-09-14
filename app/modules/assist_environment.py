@@ -356,8 +356,8 @@ async def set_environment(
         cap = int(_s.assist_facts_max)
         if len(existing) > cap:
             keep_flags = [bool(_CORRECTION_FACT_RE.search(str(f))) for f in existing]
-            corrections = [f for f, k in zip(existing, keep_flags) if k]
-            routine = [f for f, k in zip(existing, keep_flags) if not k]
+            corrections = [f for f, k in zip(existing, keep_flags, strict=True) if k]
+            routine = [f for f, k in zip(existing, keep_flags, strict=True) if not k]
             # corrections are capped too — half the budget at most, newest kept
             corr_keep = corrections[-max(1, cap // 2):]
             room = cap - len(corr_keep)

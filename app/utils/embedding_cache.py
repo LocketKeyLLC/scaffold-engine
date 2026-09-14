@@ -267,7 +267,7 @@ class EmbeddingCache:
 
         loaded = 0
         stale: list[bytes] = []
-        for key, blob in zip(keys, values):
+        for key, blob in zip(keys, values, strict=True):
             if not blob:
                 # Key expired between SCAN and MGET. Not an error; not loaded.
                 continue

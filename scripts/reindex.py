@@ -170,7 +170,7 @@ async def reindex_partition(
             stats["errors"] += len(texts)
             continue
 
-        for row, vec in zip(rows_to_embed, vectors):
+        for row, vec in zip(rows_to_embed, vectors, strict=True):
             if not vec:
                 stats["errors"] += 1
                 continue

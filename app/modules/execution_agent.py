@@ -45,7 +45,6 @@ from app.modules.execution_verify import (
     extract_brief_goal,
     collect_upstream_code,
     _is_validation_llm_node,
-    check_validation_citations,
     check_validation_citation_coverage,
 )
 from app.modules.execution_codegen_gate import (
@@ -858,7 +857,7 @@ async def _best_of_n_inference(gen_fn, evidence: str, node_key: str) -> str:
         return_exceptions=True,
     )
     scored = []
-    for c, v in zip(cands, verdicts):
+    for c, v in zip(cands, verdicts, strict=True):
         s = v.get("score", 0.0) if isinstance(v, dict) else 0.0
         scored.append((s, c))
     scored.sort(key=lambda x: x[0], reverse=True)

@@ -171,3 +171,15 @@ async def test_blocked_submit_yields_offer_and_one_fix_with_the_nudge_inside():
     src = open("app/modules/assist_turn.py", encoding="utf-8").read()
     blocked = src[src.index("elif blocked_reason is not None:"):src.index('handled["v"] = "submit"')]
     assert "trailer=_nudge" in blocked and blocked.count("yield _ev(ASSIST_ANSWER") == 1  # offer only; no third bubble
+
+
+# ── §17.1059 — research convergence: a null coverage_pct must not crash ──────
+
+def test_coverage_pct_never_none():
+    from app.modules.research_agent import _coverage_pct
+    assert _coverage_pct({"coverage_pct": None}) == 0.0
+    assert _coverage_pct({}) == 0.0
+    assert _coverage_pct(None) == 0.0
+    assert _coverage_pct({"coverage_pct": "87"}) == 87.0
+    assert _coverage_pct({"coverage_pct": "n/a"}) == 0.0
+    assert _coverage_pct({"coverage_pct": 91}) == 91.0

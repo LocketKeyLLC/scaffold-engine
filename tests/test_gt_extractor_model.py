@@ -27,7 +27,7 @@ def test_gt_distill_uses_model_router_role_as_default():
     role_strings_used: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
-            for k, v in zip(node.keys, node.values):
+            for k, v in zip(node.keys, node.values, strict=True):
                 if (
                     isinstance(k, ast.Constant)
                     and k.value == "role"

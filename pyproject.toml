@@ -22,7 +22,10 @@ extend-exclude = ["internal", ".backups", ".venv-ci", "docs/toon"]
 # sequences. Stylistic rules (import sorting, PEP 604 unions, blind-except)
 # are intentionally deferred to keep this baseline green; enable them
 # incrementally rather than in one churny sweep.
-select = ["F", "E9", "W605"]
+select = ["F", "E9", "W605", "B905"]
+# §17.1059 — B905 (zip without strict=): a length mismatch must fail loudly
+# where the sequences are built together. RUF100 (unused noqa) is NOT enabled:
+# its autofix stripped the "— why" text on 351 documented suppressions.
 # F401 (unused-import) is deferred, NOT auto-fixed: this codebase deliberately
 # re-exports names through modules (e.g. `app.modules.research_agent` re-exports
 # extractor/state helpers "for test patches and existing call sites"), and

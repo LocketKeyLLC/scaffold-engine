@@ -24,7 +24,7 @@ import logging
 import re
 import time
 import uuid as _uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Optional
 
 from sqlalchemy import text
