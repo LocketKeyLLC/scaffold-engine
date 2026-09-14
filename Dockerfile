@@ -124,6 +124,9 @@ COPY --from=builder --chown=scaffold:scaffold /code/.cache /code/.cache
 COPY --chown=root:root app/                       /code/app/
 COPY --chown=root:root scripts/                   /code/scripts/
 COPY --chown=root:root db/                        /code/db/
+# §17.1075 — Alembic revisions + config (run at startup after the SQL runner)
+COPY --chown=root:root alembic/                   /code/alembic/
+COPY --chown=root:root alembic.ini                /code/alembic.ini
 # sdk/scaffold_client is imported at runtime by cli/scaffold_cli (the
 # host-side make targets shell into the container and drive the API with it).
 COPY --chown=root:root sdk/scaffold_client/       /code/sdk/scaffold_client/
@@ -182,6 +185,8 @@ COPY --chown=root:root app/           /code/app/
 COPY --chown=root:root tests/         /code/tests/
 COPY --chown=root:root scripts/       /code/scripts/
 COPY --chown=root:root db/            /code/db/
+COPY --chown=root:root alembic/       /code/alembic/
+COPY --chown=root:root alembic.ini    /code/alembic.ini
 COPY --chown=root:root sdk/           /code/sdk/
 COPY --chown=root:root cli/           /code/cli/
 # §17.400/§17.401 — pipelines/ into the DEV/test stage only (the prod

@@ -63,6 +63,8 @@ services:
       - ./sgconfig.yml:/code/sgconfig.yml:ro
       - ./.env.example:/code/.env.example:ro
       - ./db:/code/db:ro
+      - ./alembic:/code/alembic:ro
+      - ./alembic.ini:/code/alembic.ini:ro
       # Pipeline + repo-shape inputs probed by tests.
       - ./pipelines:/code/pipelines:ro
       - ./Dockerfile:/code/Dockerfile:ro

@@ -700,3 +700,12 @@ goldens: ## §17.1073 — run the routing + verifier goldens on the pinned model
 			-v $(CURDIR)/app:/code/app:ro -v $(CURDIR)/scripts:/code/scripts:ro -v $(CURDIR)/tests:/code/tests:ro -v $(CURDIR)/.profiles:/code/.profiles -w /code \
 			scaffold-engine:dev sh -c "python scripts/model_ab.py --task $$task --models $$model --repeat $(or $(REPEAT),1) --outfile /code/.profiles/ab_$$task.jsonl 2>&1 | grep -vE '^\{\"event\"' | tail -4" || exit 1; \
 	done
+migration: ## §17.1075 — new Alembic revision: make migration m="add foo column" (hand-written op.* calls; multi-statement OK)
+	@[ -n "$(m)" ] || { echo 'usage: make migration m="message"'; exit 1; }
+	docker run --rm --network ai-network --env-file .env --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(CURDIR):/work -w /work scaffold-engine:dev alembic revision -m "$(m)"
+
+migrate: ## §17.1075 — alembic upgrade head against the composed DB (the orchestrator also does this at startup)
+	docker run --rm --network ai-network --env-file .env -e DATABASE_URL="$$(docker exec $(CONTAINER) printenv DATABASE_URL)" --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(CURDIR):/work -w /work scaffold-engine:dev alembic upgrade head
+
+migrate-status: ## §17.1075 — alembic current + heads
+	docker run --rm --network ai-network --env-file .env -e DATABASE_URL="$$(docker exec $(CONTAINER) printenv DATABASE_URL)" --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(CURDIR):/work -w /work scaffold-engine:dev sh -c 'alembic current; alembic heads'

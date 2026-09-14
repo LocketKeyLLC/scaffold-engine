@@ -95,3 +95,5 @@ curl_cffi==0.16.3
 instructor==1.17.0
 # §17.1074 — the assist step state machine (declaration + oracle)
 transitions==0.9.3
+# §17.1075 — Alembic for schema changes after db/migrations/075
+alembic==1.20.0

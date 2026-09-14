@@ -324,6 +324,18 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.error("migrations_hook_crashed: error=%s", exc)
             _mig_failure = f"migration hook crashed: {exc}"
+        # §17.1075 — Alembic takes over AFTER the SQL runner (revisions since 075),
+        # and only when that succeeded: a broken SQL migration must not be
+        # papered over by a later Alembic head.
+        if _mig_failure is None:
+            try:
+                from app.alembic_runner import run_alembic_upgrade
+                _al = await run_alembic_upgrade()
+                if _al.get("status") == "error":
+                    _mig_failure = f"alembic: {_al.get('error')}"
+            except Exception as al_exc:  # noqa: BLE001
+                logger.error("alembic_hook_crashed: error=%s", al_exc)
+                _mig_failure = f"alembic hook crashed: {al_exc}"
 
         # §17.812 (audit M3) — a startup migration failure used to be a single
         # log line: the app booted and served traffic against a PARTIAL schema
