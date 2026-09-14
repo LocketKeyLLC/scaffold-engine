@@ -185,6 +185,30 @@ function contractCard(onDismiss, session, force) {
 
 // §17.859 — exported: the job hub's Run tab embeds the walkthrough for
 // assisted_* jobs (it resolves the session via the idempotent /assist/start).
+// §17.1054 — the newest durable turn id (0 when none / optimistic-only).
+export function maxTurnId(turns) {
+  let m = 0;
+  for (const t of turns || []) {
+    const id = Number(t && t.id);
+    if (Number.isFinite(id) && id > m) m = id;
+  }
+  return m;
+}
+
+// §17.1054 — an ephemeral (streamed this turn) assistant entry is already in
+// the durable transcript when a turn captured AFTER the turn-start watermark
+// carries the same text. Clock-free: ids only ever grow, and the server
+// assigns them, so a browser clock that runs fast or slow cannot break it.
+export function ephemeralIsDurable(turns, entry, maxIdAtTurnStart) {
+  const want = ((entry && entry.content) || "").trim();
+  if (!want) return true;
+  return (turns || []).some((t) => {
+    const id = Number(t && t.id);
+    return Number.isFinite(id) && id > (maxIdAtTurnStart || 0)
+      && ((t.content || "").trim() === want);
+  });
+}
+
 export function renderChat(container, sessionId) {
   let disposed = false;
   let guiding = false;
@@ -197,6 +221,7 @@ export function renderChat(container, sessionId) {
   // replace an ephemeral entry (see renderTranscript).
   let ephemeralTail = [];
   let turnStartedAt = null;
+  let turnStartMaxId = 0;  // §17.1054 — durable-id watermark at turn start
   // §17.929 — the operator's OWN messages, held on screen until a durable turn
   // with the same text comes back from the server. `ephemeralTail` only ever
   // protected ASSISTANT output, so the operator's half of the conversation had
@@ -832,12 +857,10 @@ export function renderChat(container, sessionId) {
     for (const o of pendingOps) {
       transcript.append(bubble("operator", o.kind, o.content, o.created_at));
     }
-    const cutoff = turnStartedAt || "9999";
     for (const e of ephemeralTail) {
-      const dup = turns.some((t) =>
-        (t.created_at || "") >= cutoff &&
-        (t.content || "").trim() === e.content.trim());
-      if (!dup && e.content.trim()) transcript.append(bubble("assistant", e.kind, e.content, e.at));
+      if (!ephemeralIsDurable(turns, e, turnStartMaxId) && e.content.trim()) {
+        transcript.append(bubble("assistant", e.kind, e.content, e.at));
+      }
     }
     stick();
   }
@@ -1211,6 +1234,13 @@ export function renderChat(container, sessionId) {
     // §17.871 — small slack for client/server clock skew; a capture stamped
     // slightly "before" our local start must still count as ours.
     turnStartedAt = new Date(Date.now() - 15000).toISOString();
+    // §17.1054 — the dedupe key is the durable id watermark, not the clock:
+    // "captured during this turn" = id above the newest durable turn at turn
+    // start. The time cutoff compared the BROWSER's clock to the server's
+    // created_at; a browser more than 15 s ahead made every server capture
+    // look older than the turn, nothing retired, and every answer showed
+    // twice (live, 2026-09-13).
+    turnStartMaxId = maxTurnId(turns);
     let statusEl = null;
     const setStatusLine = (t) => {
       if (!statusEl) {

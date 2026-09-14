@@ -122,7 +122,7 @@ def test_the_state_check_is_wired_on_every_entry_and_applied_only_on_confirm():
     router = (root / "app/routers/assist.py").read_text()
     assert '"verify_state"' in router
     replan = (root / "app/modules/assist_replan.py").read_text()
-    assert 'p.get("action") == "repair"' in replan and "add_step(session_id=session_id, request=req, db=db)" in replan
+    assert 'p.get("action") == "repair"' in replan and "add_step(session_id=session_id, request=req, before_node_key=_anchor, db=db)" in replan
     mod = (root / "app/modules/assist_state_check.py").read_text()
     resolve = mod[mod.index("async def resolve_state_check("):mod.index("async def state_check_done_on_step(")]
     assert "_stage_replan_proposal(" in resolve and "add_step(" not in resolve and "UPDATE dag_nodes" not in resolve

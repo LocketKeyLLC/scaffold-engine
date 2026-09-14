@@ -669,17 +669,46 @@ async def apply_note_replan(
     # guided step (§17.736 add_step) that puts the contradicted result right,
     # before the current step; the walkthrough then runs it first.
     repaired: list[str] = []
-    for p in [p for p in proposals if p.get("action") == "repair"]:
+    _repairs = [p for p in proposals if p.get("action") == "repair"]
+    # §17.1054 — anchor EVERY repair on the step the operator was on, not on
+    # "the current step" (which add_step moves to each new node): anchoring on
+    # the moving pointer chained the live repairs in REVERSE (ADD17 waited on
+    # ADD18, ADD16 on ADD17 …) and left the session pointing at the LAST one.
+    _anchor = None
+    if _repairs:
+        _anchor = (await db.execute(
+            text("SELECT current_node_key FROM assist_sessions WHERE id = :sid"),
+            {"sid": session_id},
+        )).scalar()
+    for p in _repairs:
         req = (p.get("proposed_change") or "").strip()
         if not req:
             continue
         try:
             from app.modules.assist_notes import add_step
-            added = await add_step(session_id=session_id, request=req, db=db)
+            added = await add_step(session_id=session_id, request=req, before_node_key=_anchor, db=db)
             if added and added.get("node_key"):
                 repaired.append(added["node_key"])
         except Exception as exc:  # noqa: BLE001 — one failed repair must not lose the rest
             logger.warning("state_check_repair_add_failed sid=%s err=%r", session_id, exc)
+    # §17.1054 — one pointer, one truth. After repairs the session points at
+    # the FIRST of them (add_step left it on the last); after reopens with no
+    # repair the pointer is cleared so the next guide claims through the dep
+    # gate, the same way a commit does. Live: the pointer sat on ADD18 while
+    # get_next_step served the reopened T1 — the operator's paste for one step
+    # was judged against the other.
+    if repaired:
+        await db.execute(
+            text("UPDATE assist_sessions SET current_node_key = :nk, updated_at = NOW() WHERE id = :sid"),
+            {"sid": session_id, "nk": repaired[0]},
+        )
+        await db.commit()
+    elif reopened:
+        await db.execute(
+            text("UPDATE assist_sessions SET current_node_key = NULL, updated_at = NOW() WHERE id = :sid"),
+            {"sid": session_id},
+        )
+        await db.commit()
     rewritten: list[str] = []
     _rw = [p for p in proposals if p.get("action") == "rewrite"]
     if _rw:

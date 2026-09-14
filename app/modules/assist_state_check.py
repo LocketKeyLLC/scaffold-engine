@@ -87,7 +87,16 @@ _HISTORY_FACT_RE = re.compile(
     r"refused|denied|missing|broken|crash(?:ed|es)?|"
     r"destroy(?:ed)?|remov(?:ed|al)|delet(?:ed|ion)|purg(?:ed)?|wip(?:ed)?|truncat(?:ed|ion)|clear(?:ed)?|"
     r"backed up|backup (?:of|created)|downloaded|snapshot(?:ted)?|was (?:re)?(?:written|placed|moved|stopped|started)|"
-    r"were (?:re)?(?:written|placed|moved|stopped|started))\b")
+    r"were (?:re)?(?:written|placed|moved|stopped|started)|"
+    # §17.1054 — the same shapes on STEP claims (recap DONE lines): a stop, an
+    # audit snapshot, a precondition check. Live: "Ran `systemctl stop`" (ADD10,
+    # later started again by design), "Collected raw state into …" (T1, an
+    # inventory that is stale by construction), "VMID 102 confirmed free" (T13,
+    # false the moment the step succeeded) were judged contradicted and the
+    # steps reopened — the engine then walked the operator back through
+    # stopping and deleting what it had just helped build.
+    r"stopp?(?:ed)?\b|collected|gathered|audit(?:ed)?|inventor(?:y|ied)|"
+    r"confirmed (?:free|available|unused|absent)|verified (?:free|available|unused))\b")
 
 # A repair may only ADD or START what the claim says should exist. Anything that
 # removes, stops or overwrites is never proposed by the engine — the operator
@@ -95,6 +104,24 @@ _HISTORY_FACT_RE = re.compile(
 _DESTRUCTIVE_REPAIR_RE = re.compile(
     r"(?i)\b(?:stop|kill|remove|delete|destroy|purge|wipe|truncate|clear|empty|reset|uninstall|disable|"
     r"tear down|shut ?down|power off|drop|overwrite|revert|roll ?back|rm|format|reinstall|recreate from scratch)\b")
+
+
+_CLAIM_MAX = 300
+
+
+def _clip_claim(text_value: str, limit: int = _CLAIM_MAX) -> str:
+    """§17.1054 — clip on a word boundary and mark it. A hard ``[:300]`` cut
+    the live T17 claim to "… tags: me" (from "tags: media"); the judge then
+    read the real output "tags: media" as a contradiction and proposed a step
+    to retag the container."""
+    t = (text_value or "").strip()
+    if len(t) <= limit:
+        return t
+    cut = t[:limit]
+    ws = cut.rfind(" ")
+    if ws > limit // 2:
+        cut = cut[:ws]
+    return cut.rstrip(" ;,:-") + " …"
 
 
 def probe_worthy(fact: str) -> bool:
@@ -105,6 +132,15 @@ def probe_worthy(fact: str) -> bool:
 
 def destructive_repair(text_value: str) -> bool:
     return bool(_DESTRUCTIVE_REPAIR_RE.search(text_value or ""))
+
+
+def reopen_refused(verdict: dict) -> bool:
+    """§17.1054 — a `reopen` is refused when the step is itself a one-off or
+    destructive action (its title says stop/remove/clear/audit…, or its
+    recorded result is history): redoing it would undo later work."""
+    title = (verdict.get("title") or "")
+    claim = (verdict.get("claim") or "")
+    return destructive_repair(title) or not probe_worthy(claim) or not probe_worthy(title)
 
 
 def read_only_command(cmd: str) -> bool:
@@ -148,13 +184,26 @@ async def build_claims(*, db, session_id: str, max_facts: int = 24) -> dict:
          ORDER BY n.execution_order
     """), {"sid": session_id})).mappings().all()
     claims: list[dict] = []
+    skipped_history = 0
     for r in rows:
         done = parse_recap(r.get("progress_recap")).get("done") or []
-        summary = "; ".join(str(d) for d in done[:3]) if done else " ".join((r.get("evidence") or "").split())[:240]
+        # §17.1054 — the evidence head is clipped on a word too: the live T17
+        # claim was this exact ``[:240]`` cut landing on "tags: me".
+        summary = ("; ".join(str(d) for d in done[:3]) if done
+                   else _clip_claim(" ".join((r.get("evidence") or "").split()), 240))
         if not summary:
             summary = f"step completed: {r.get('title') or r['node_key']}"
+        # §17.1054 — a step whose recorded result is a one-off action or a
+        # snapshot is history, exactly like a history fact: not a state the
+        # system should still be in, so not a claim to probe. Its title tells
+        # the same story ("Stop …", "Remove …", "Audit …").
+        if not probe_worthy(summary) or destructive_repair(r.get("title") or ""):
+            skipped_history += 1
+            continue
         claims.append({"id": f"S:{r['node_key']}", "kind": "step", "node_key": r["node_key"],
-                       "title": r.get("title") or "", "text": summary[:300]})
+                       "title": r.get("title") or "", "text": _clip_claim(summary)})
+    if skipped_history:
+        logger.info("state_check_history_steps_skipped session_id=%s n=%d", session_id, skipped_history)
     facts = [str(f).strip() for f in (env.get("facts") or []) if str(f).strip()]
     facts = [f for f in facts if probe_worthy(f)]  # §17.1052 — desired state only
     for i, f in enumerate(facts[-max_facts:]):
@@ -358,7 +407,10 @@ _JUDGE_OPENING = (
     "there is one repair, not three. A repair only ADDS or STARTS what should exist; never propose "
     "stopping, removing, emptying or deleting anything — if the only way to satisfy a claim is destructive, "
     "leave `repair` empty. A claim about a one-off past action (something destroyed, backed up, "
-    "downloaded, rewritten) is CONFIRMED when its effect is present and is never repaired by repeating it."
+    "downloaded, rewritten) is CONFIRMED when its effect is present and is never repaired by repeating it. "
+    "Such a claim is contradicted ONLY if the specific object it names is back (the destroyed VM listed "
+    "again, the truncated file's old content restored); other things existing or running now do not "
+    "contradict it. A claim ending in an ellipsis (…) was clipped — judge only the part you can read."
 )
 
 
@@ -371,7 +423,8 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
     verdicts: dict[str, dict] = {}
     for cid, p in probed.items():
         verdicts[cid] = {"id": cid, "verdict": "unknown", "reason": "no output pasted for this check",
-                         "repair": "", "kind": p["kind"], "node_key": p.get("node_key"), "claim": p["claim"]}
+                         "repair": "", "kind": p["kind"], "node_key": p.get("node_key"), "claim": p["claim"],
+                         "title": p.get("title") or ""}
     # A marker that is PRESENT with nothing under it is evidence too ("docker
     # ps … returns no rows"); only an absent marker is "no output pasted".
     with_output = {cid: (sections[cid] or "(no output — the command printed nothing)")
@@ -435,7 +488,10 @@ def render_verdicts(verdicts: list[dict]) -> str:
     icon = {"confirmed": "✅", "contradicted": "❌", "unknown": "❔"}
     for v in sorted(verdicts, key=lambda x: ("contradicted", "unknown", "confirmed").index(x["verdict"])):
         lines.append(f"- {icon[v['verdict']]} `{v['id']}` {v['claim'][:90]}" + (f" — {v['reason'][:140]}" if v.get("reason") and v["verdict"] != "confirmed" else "")
-                     + (" — *the only repair would remove or stop something, so I am not proposing one; you decide*" if v.get("needs_decision") else ""))
+                     + (" — *this step recorded a one-off action, so I am not reopening it; you decide*"
+                        if v.get("needs_decision") == "reopen" else
+                        " — *the only repair would remove or stop something, so I am not proposing one; you decide*"
+                        if v.get("needs_decision") else ""))
     bad = [v for v in verdicts if v["verdict"] == "contradicted"]
     if bad:
         lines.append("\nContradicted facts have been retracted from what I believe. The step results that no longer hold "
@@ -579,6 +635,15 @@ def proposals_from_verdicts(verdicts: list[dict], *, anchor_node_key: Optional[s
                 out.append({"node_key": v.get("node_key"), "action": "repair",
                             "current_assumption": (v.get("claim") or "")[:300],
                             "proposed_change": repair[:400], "reason": (v.get("reason") or "")[:300]})
+            elif reopen_refused(v):
+                # §17.1054 — redoing a one-off / destructive step IS the
+                # destructive repair §17.1052 refuses, in different clothes.
+                # Live: reopening "Remove old containers and VMs", "Stop the
+                # control-panel backend", "Stop caddy-proxy and clear its
+                # Caddyfile" — the plan would have walked the operator through
+                # undoing what later steps built on purpose.
+                v["needs_decision"] = "reopen"
+                logger.info("state_check_reopen_refused id=%s title=%r", v.get("id"), (v.get("title") or "")[:80])
             else:
                 out.append({"node_key": v.get("node_key"), "action": "reopen",
                             "current_assumption": (v.get("claim") or "")[:300],
