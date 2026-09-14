@@ -1,0 +1,23 @@
+# §17.1073 — the golden runs (routing + verifier) on the pinned models.
+# The GitHub runners have no Ollama, so this job only runs on a self-hosted
+# runner when one is registered (same gate as Tier 2) or by hand via
+# workflow_dispatch; until then `make goldens` on the operator's box is the
+# golden run, and the JSONL under .profiles/ is the record.
+name: Goldens
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"   # nightly 04:17 UTC — no-op without a self-hosted runner
+jobs:
+  goldens:
+    if: ${{ vars.SCAFFOLD_SELF_HOSTED == '1' }}
+    runs-on: self-hosted
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: Routing + verifier goldens through the engine's own harness
+        run: make goldens
+      - uses: actions/upload-artifact@v4
+        with:
+          name: goldens-${{ github.run_id }}
+          path: .profiles/ab_*.jsonl

@@ -688,3 +688,15 @@ fuzz-api: ## §17.1068 — schemathesis over docs/openapi.json against a THROWAW
 		$$(for m in $(or $(METHODS),GET); do printf -- '--include-method %s ' $$m; done) \
 		--report junit --report-junit-path .profiles/fuzz-api-$$(date +%Y%m%d-%H%M).xml $(ARGS); rc=$$?; \
 	docker rm -f scaffold-fuzz >/dev/null; exit $$rc
+
+goldens: ## §17.1073 — run the routing + verifier goldens on the pinned models through the engine's OWN harness (scripts/model_ab.py, real tool-call path) in a throwaway dev container → .profiles/ab_<task>.jsonl. TASKS="routing verifier codegen" to widen.
+	@mkdir -p .profiles
+	@MG=$$(grep -E '^MODEL_GENERAL=' .env | cut -d= -f2-); MV=$$(grep -E '^MODEL_VERIFIER=' .env | cut -d= -f2-); \
+	for task in $(or $(TASKS),routing verifier); do \
+		model=$$MG; [ "$$task" = verifier ] && model=$${MV:-$$MG}; \
+		printf '\033[1m▶ goldens: %s on %s\033[0m\n' "$$task" "$$model"; \
+		docker run --rm --network ai-network --env-file .env -e DATABASE_URL="$$(docker exec $(CONTAINER) printenv DATABASE_URL)" \
+			-e SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false --user $$(id -u):$$(id -g) -e HOME=/tmp \
+			-v $(CURDIR)/app:/code/app:ro -v $(CURDIR)/scripts:/code/scripts:ro -v $(CURDIR)/tests:/code/tests:ro -v $(CURDIR)/.profiles:/code/.profiles -w /code \
+			scaffold-engine:dev sh -c "python scripts/model_ab.py --task $$task --models $$model --repeat $(or $(REPEAT),1) --outfile /code/.profiles/ab_$$task.jsonl 2>&1 | grep -vE '^\{\"event\"' | tail -4" || exit 1; \
+	done
