@@ -1142,6 +1142,10 @@ class Settings(BaseSettings):
     reranker_backend: str = "local"
     reranker_url: str = "http://scaffold-reranker:80"
     reranker_timeout_s: float = 60.0
+    # §17.1064 — redact credential VALUES in operator turns at the capture
+    # funnel (detect-secrets keyword/format plugins + two house regexes; the
+    # entropy plugins stay off). Kinds are logged, values never are.
+    assist_redact_secrets_enabled: bool = True
     assist_unified_memory_enabled: bool = False   # master gate for §17.710
     assist_umem_capture: bool = True              # Stage A — record raw turns
     assist_umem_inject: bool = False              # Stage B — consolidate + inject
