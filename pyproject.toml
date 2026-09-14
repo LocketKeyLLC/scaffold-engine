@@ -142,10 +142,19 @@ pytest_add_cli_args = ["-o", "addopts=", "-o", "pythonpath=.", "-q", "--timeout=
 # (and the sdk/pipelines/presets the suite probes) must ride along.
 also_copy = ["app", "sdk", "pipelines", "presets", "docs", "db", "scripts", ".env.example"]
 pytest_add_cli_args_test_selection = [
+    # §17.1062 — every assist-side test file: the six-file selection left 547
+    # mutants "no tests" (has_advancement_signal, looks_like_completion_denial,
+    # detect_truncated_paste …) that ARE tested elsewhere.
     "tests/test_assist_policy.py",
     "tests/test_assist_hedged_routing.py",
     "tests/test_assist_add_step_proposal.py",
     "tests/test_assist_state_check.py",
     "tests/test_state_check_reopen_gate.py",
     "tests/test_remaining_engine_items_1056.py",
+    "tests/test_assist_completion_claim.py",
+    "tests/test_assist_completion_confirm.py",
+    "tests/test_assist_directed_turn.py",
+    "tests/test_assist_decide.py",
+    "tests/test_assist_nl_turns.py",
+    "tests/test_assist_uncertainty.py",
 ]
