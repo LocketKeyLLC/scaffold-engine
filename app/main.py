@@ -665,6 +665,49 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+# §17.1070 — declare the path-id FORMATS the handlers actually enforce. Every
+# `{job_id}`, `{session_id}`, `{artifact_id}`, … is a uuid column and the
+# router dependencies 404 anything else, but the schema said plain `string`
+# (FastAPI's default for a `str` parameter), so a spec-driven client or
+# fuzzer generated arbitrary text and read the resulting 404s as "the API
+# rejects its own contract" (schemathesis: 25 operations, §17.1068). Stamping
+# `format: uuid` at schema-generation time
+# fixes the contract without retyping 39 handler signatures. (`schedule_id` and
+# `proposal_id` are already typed `int` in their handlers.) Ids that are
+# genuinely free text (`chat_id` from OWUI, `entry_id` for GT, `node_key`,
+# `name`, `role`, `provider`, `index`) are left alone.
+_UUID_PATH_IDS = frozenset({"job_id", "session_id", "artifact_id", "run_id", "sizing_id", "spec_id",
+                            "topology_selection_id", "error_id"})
+
+
+def _stamp_path_id_formats(schema: dict) -> dict:
+    for path_item in (schema.get("paths") or {}).values():
+        for op in path_item.values():
+            if not isinstance(op, dict):
+                continue
+            for prm in op.get("parameters") or []:
+                if prm.get("in") != "path":
+                    continue
+                sch = prm.get("schema") or {}
+                if prm.get("name") in _UUID_PATH_IDS and sch.get("type") == "string":
+                    sch["format"] = "uuid"
+                prm["schema"] = sch
+    return schema
+
+
+_fastapi_openapi = app.openapi
+
+
+def _openapi_with_path_id_formats() -> dict:
+    if app.openapi_schema:
+        return app.openapi_schema
+    app.openapi_schema = _stamp_path_id_formats(_fastapi_openapi())
+    return app.openapi_schema
+
+
+app.openapi = _openapi_with_path_id_formats  # type: ignore[method-assign]
+
 # Middleware executes in reverse registration order: incoming request
 # flows RequestId (outermost) -> Performance -> ErrorLogging (innermost) ->
 # endpoint. HTTPException is intercepted by Starlette's own ExceptionMiddleware

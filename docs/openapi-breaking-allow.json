@@ -1,0 +1,8 @@
+[
+  {
+    "id": "request-parameter-type-changed",
+    "text_contains": "the `format` was changed from `none` to `uuid`",
+    "reason": "\u00a717.1070 \u2014 path ids were always uuid columns and the routers 404 anything else; declaring format: uuid corrects the contract to what the handlers enforce. One-time.",
+    "expires": "2026-09-21"
+  }
+]
