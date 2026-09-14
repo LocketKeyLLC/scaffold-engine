@@ -265,8 +265,12 @@ class TestApplyNoteReplan:
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[
             _result(all_=[{"node_key": "T13", "output_text": "logged into VM"}]),  # prior SELECT
+            _result(all_=[{"node_key": "T13", "status": "committed", "evidence": "ssh ok",  # §17.1056 pre-image
+                           "evidence_kind": "text", "committed_at": None,
+                           "output_text": "logged into VM", "completed_at": None}]),
             _result(all_=[{"node_key": "T13"}]),   # dag_nodes UPDATE RETURNING
             _result(),                              # assist_steps UPDATE
+            _result(),                              # §17.1056 — pre-image appended to session metadata
             _result(),                              # §17.1054 — pointer cleared after a repair-less reopen
         ])
         db.commit = AsyncMock()
@@ -279,6 +283,11 @@ class TestApplyNoteReplan:
         assert out["reopened_prior"] == {"T13": "logged into VM"}
         sqls = [str(c.args[0]) for c in db.execute.await_args_list]
         assert any("current_node_key = NULL" in s for s in sqls)  # §17.1054 — one pointer, one truth
+        # §17.1056 — the pre-image is captured BEFORE the reset and returned
+        assert out["reopened_preimages"][0]["evidence"] == "ssh ok"
+        assert any("reopen_preimages" in s for s in sqls)
+        assert sqls.index(next(s for s in sqls if "s.evidence, s.evidence_kind" in s)) \
+            < sqls.index(next(s for s in sqls if "output_text = NULL" in s))
         # dag_nodes reset guarded on status='done'; step reset to pending
         assert any("status = 'pending'" in s and "output_text = NULL" in s for s in sqls)
         assert any("AND status = 'done'" in s for s in sqls)

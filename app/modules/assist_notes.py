@@ -359,6 +359,82 @@ async def add_step(
     }
 
 
+async def restore_reopened_step(*, session_id: str, node_key: str, db) -> dict:
+    """§17.1056 — undo a reopen from its pre-image (`metadata.reopen_preimages`,
+    written by `apply_note_replan`). Puts the node back to done and the step
+    back to committed with the evidence it had, then drops the pre-image.
+    Refused when the operator has since worked on the step (an operator turn
+    on the node after the reopen) — a restore must never discard new work —
+    or when the step is no longer pending/presented."""
+    sess = (await db.execute(
+        text("SELECT job_id, current_node_key, metadata FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    meta = sess.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:  # noqa: BLE001
+            meta = {}
+    pres = [p for p in (meta.get("reopen_preimages") or []) if isinstance(p, dict)]
+    mine = [p for p in pres if p.get("node_key") == node_key]
+    if not mine:
+        raise ValueError(f"no reopen pre-image for {node_key} — nothing to restore")
+    pre = sorted(mine, key=lambda p: p.get("ts") or "")[-1]
+    st = (await db.execute(
+        text("SELECT status FROM assist_steps WHERE session_id = :sid AND node_key = :nk"),
+        {"sid": session_id, "nk": node_key},
+    )).scalar()
+    if st not in ("pending", "presented"):
+        raise ValueError(f"{node_key} is {st!r} — only a reopened (pending/presented) step can be restored")
+    worked = (await db.execute(
+        text("""
+            SELECT COUNT(*) FROM assist_turns
+             WHERE session_id = :sid AND node_key = :nk AND role = 'operator'
+               AND created_at > CAST(:ts AS timestamptz)
+        """),
+        {"sid": session_id, "nk": node_key, "ts": pre.get("ts")},
+    )).scalar() or 0
+    if worked:
+        raise ValueError(f"{node_key} has {worked} operator turn(s) since the reopen — restore would discard them")
+    job_id = str(sess["job_id"])
+    await db.execute(
+        text("""
+            UPDATE dag_nodes SET status = 'done', output_text = :out,
+                   completed_at = COALESCE(CAST(:done AS timestamptz), NOW()), updated_at = NOW()
+             WHERE job_id = :jid AND node_key = :nk
+        """),
+        {"jid": job_id, "nk": node_key, "out": pre.get("output_text"), "done": pre.get("completed_at")},
+    )
+    await db.execute(
+        text("""
+            UPDATE assist_steps SET status = 'committed', evidence = :ev, evidence_kind = :ek,
+                   committed_at = COALESCE(CAST(:cat AS timestamptz), NOW()), submitted_at = NOW(),
+                   presented_at = NULL, replan_triggered = FALSE, updated_at = NOW()
+             WHERE session_id = :sid AND node_key = :nk
+        """),
+        {"sid": session_id, "nk": node_key, "ev": pre.get("evidence"),
+         "ek": pre.get("evidence_kind"), "cat": pre.get("committed_at")},
+    )
+    remaining = [p for p in pres if p is not pre]
+    await db.execute(
+        text("""
+            UPDATE assist_sessions
+               SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('reopen_preimages', CAST(:pre AS jsonb)),
+                   current_node_key = CASE WHEN current_node_key = :nk THEN NULL ELSE current_node_key END,
+                   updated_at = NOW()
+             WHERE id = :sid
+        """),
+        {"sid": session_id, "nk": node_key, "pre": json.dumps(remaining)},
+    )
+    await db.commit()
+    logger.info("assist_step_restored session_id=%s node_key=%s from=%s", session_id, node_key, pre.get("ts"))
+    return {"session_id": session_id, "node_key": node_key, "restored": True,
+            "evidence_chars": len(pre.get("evidence") or ""), "reopened_at": pre.get("ts")}
+
+
 async def assess_note_impact(
     *, session_id: str, note_kind: str, note_text: str, db,
 ) -> dict | None:

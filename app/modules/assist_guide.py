@@ -3019,11 +3019,26 @@ def find_missing_tools(operator_text: str) -> list[str]:
     return out
 
 
+# §17.1056 — a line that hands its command to ANOTHER machine. The
+# missing-tools ledger describes the operator's own shell; what runs after
+# `ssh host`, `pct exec N --`, `qm guest exec`, `docker exec` runs elsewhere.
+# Live: `ssh aedefruscio@192.168.1.127 nvidia-smi` (the VM) was footnoted
+# "nvidia-smi is not installed on this box — install it first" (the host).
+_REMOTE_TARGET_RE = re.compile(
+    r"^(?:sudo\s+)?(?:ssh|pct\s+(?:exec|enter)|qm\s+guest\s+exec|docker\s+(?:exec|run)|"
+    r"podman\s+(?:exec|run)|kubectl\s+exec|lxc\s+exec|incus\s+exec|vagrant\s+ssh)\b")
+
+
+def runs_on_another_host(line: str) -> bool:
+    return bool(_REMOTE_TARGET_RE.match((line or "").strip()))
+
+
 def find_unavailable_tools(text_out: str, missing: list | None) -> list[dict]:
     """Commands in the draft that invoke a tool this session has PROVEN absent.
 
     Returns ``[{tool, line}]``. Word-boundary matched inside fenced blocks only,
-    so prose discussing the tool is never flagged.
+    so prose discussing the tool is never flagged. Lines that run their
+    command on another host (§17.1056) are never flagged.
     """
     names = [str(m.get("tool") or "").strip() for m in (missing or [])
              if isinstance(m, dict) and str(m.get("tool") or "").strip()]
@@ -3034,7 +3049,7 @@ def find_unavailable_tools(text_out: str, missing: list | None) -> list[dict]:
     for block in re.findall(r"```[a-z]*\n(.*?)```", text_out, re.S):
         for raw in block.splitlines():
             line = " ".join(raw.split())
-            if not line or line.startswith("#"):
+            if not line or line.startswith("#") or runs_on_another_host(line):
                 continue
             for tool in names:
                 if re.search(rf"(?:^|[|&;]\s*|\s){re.escape(tool)}\s", line + " "):

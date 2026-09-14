@@ -555,6 +555,18 @@ export function renderChat(container, sessionId, opts = {}) {
       toast(`Step ${nk} handed to the engine.`, "ok");
       load();
     }),
+    // §17.1056 — undo a reopen from its pre-image (the engine keeps one for
+    // every step a confirmed re-plan or state check reopens).
+    verb("↶ Restore a reopened step", "Put a step that a re-plan or state check reopened back to done, with the evidence it had (refused once you've worked on it since)", async () => {
+      const nk = (window.prompt("Which reopened step should go back to done? (step key, e.g. T3)") || "").trim();
+      if (!nk) return;
+      try {
+        const res = await api.post(`/assist/${sessionId}/step/restore`, { node_key: nk });
+        toast(`↶ ${res.node_key} restored to done.`, "ok");
+        appendBubble("assistant", "note", `↶ Restored **${res.node_key}** to done from before its reopen (${res.evidence_chars} chars of evidence).`);
+        await load();
+      } catch (e) { toast(errText(e), "err"); }
+    }),
     verb("⏸", "Pause / resume the session", async () => {
       const paused = session?.status === "paused";
       await api.post(`/assist/${sessionId}/${paused ? "resume" : "pause"}`);

@@ -27,6 +27,8 @@ executor uses post-LLM, preserving the model-stack invariant.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import asyncio
 import json
 import logging
@@ -554,6 +556,7 @@ async def apply_note_replan(
     # (done-only), so its now-false result stops being injected as MANDATORY
     # upstream context — the structural fix the §17.746 recap-authority header
     # only mitigated at the prompt level.
+    preimages: list[dict] = []
     if reopen_keys:
         prior = (await db.execute(
             text("""
@@ -563,6 +566,34 @@ async def apply_note_replan(
             {"jid": job_id, "keys": reopen_keys},
         )).mappings().all()
         reopened_prior = {r["node_key"]: (r["output_text"] or "") for r in prior}
+        # §17.1056 — the PRE-IMAGE. A reopen nulls the step's evidence and the
+        # node's output with no copy kept, so a wrong reopen (live: T3's
+        # original "VM 100 destroyed" evidence, lost to a misjudged state
+        # check) could not be undone — [[a-ledger-needs-the-pre-image]].
+        # Captured here, before the reset, and stored on the session
+        # (`metadata.reopen_preimages`, capped) for `restore_reopened_step`.
+        pre_rows = (await db.execute(
+            text("""
+                SELECT s.node_key, s.status, s.evidence, s.evidence_kind, s.committed_at,
+                       n.output_text, n.completed_at
+                  FROM assist_steps s
+                  JOIN dag_nodes n ON n.job_id = s.job_id AND n.node_key = s.node_key
+                 WHERE s.session_id = :sid AND s.node_key = ANY(:keys)
+            """),
+            {"sid": session_id, "keys": reopen_keys},
+        )).mappings().all()
+        def _iso(v):
+            return v.isoformat() if hasattr(v, "isoformat") else (v or None)
+        preimages = []
+        for r in pre_rows:
+            d = dict(r)
+            preimages.append({
+                "node_key": d.get("node_key"), "step_status": d.get("status"),
+                "evidence": d.get("evidence"), "evidence_kind": d.get("evidence_kind"),
+                "committed_at": _iso(d.get("committed_at")),
+                "output_text": d.get("output_text"), "completed_at": _iso(d.get("completed_at")),
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            })
         res = (await db.execute(
             text("""
                 UPDATE dag_nodes
@@ -600,6 +631,22 @@ async def apply_note_replan(
                 """),
                 {"sid": session_id, "keys": reopened},
             )
+            if preimages:
+                kept = [pi for pi in preimages if pi["node_key"] in reopened]
+                await db.execute(
+                    text("""
+                        UPDATE assist_sessions
+                           SET metadata = COALESCE(metadata, '{}'::jsonb)
+                                 || jsonb_build_object('reopen_preimages',
+                                      (SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM (
+                                          SELECT e FROM jsonb_array_elements(
+                                              COALESCE(metadata->'reopen_preimages', '[]'::jsonb) || CAST(:pre AS jsonb)) e
+                                          ORDER BY (e->>'ts') DESC LIMIT 30) t)),
+                               updated_at = NOW()
+                         WHERE id = :sid
+                    """),
+                    {"sid": session_id, "pre": json.dumps(kept)},
+                )
 
     if drop_keys:
         res = (await db.execute(
@@ -720,11 +767,17 @@ async def apply_note_replan(
         "assist_note_replan session_id=%s job_id=%s revised=%d dropped=%d reopened=%d rewritten=%d",
         session_id, job_id, len(revised), len(dropped), len(reopened), len(rewritten),
     )
-    return {
+    out = {
         "revised": revised, "dropped": dropped,
         "reopened": reopened, "reopened_prior": reopened_prior,
         "rewritten": rewritten, "repaired": repaired,
     }
+    # §17.1056 — present only when a reopen happened (the result shape for
+    # drop/revise-only applies is unchanged).
+    kept_pre = [pi for pi in preimages if pi["node_key"] in reopened]
+    if kept_pre:
+        out["reopened_preimages"] = kept_pre
+    return out
 
 
 # ── Subgraph helpers ───────────────────────────────────────────────────────

@@ -335,6 +335,11 @@ async def decide_turn(
                 messages, [_RECORD_DECISION_TOOL],
                 role=settings.assist_decide_model_role,
                 temperature=0.0, max_tokens=768, tool_choice="auto",
+                # §17.1056 — a routing decision, not a reasoning task: with
+                # thinking on, deepseek spent the whole 768-token budget on
+                # chain-of-thought (three starved draws, twice, 2026-09-13)
+                # and the §17.1053 rescue still cost one wasted draw first.
+                think=False,
             )
         except Exception as exc:
             logger.warning(

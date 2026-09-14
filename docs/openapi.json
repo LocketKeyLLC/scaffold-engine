@@ -640,6 +640,20 @@
         "title": "AssistResearchInput",
         "type": "object"
       },
+      "AssistRestoreStepInput": {
+        "properties": {
+          "node_key": {
+            "description": "A step reopened by a confirmed re-plan or state check, to put back as it was.",
+            "title": "Node Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "node_key"
+        ],
+        "title": "AssistRestoreStepInput",
+        "type": "object"
+      },
       "AssistStartInput": {
         "properties": {
           "handoff_policy": {
@@ -6582,6 +6596,62 @@
           }
         ],
         "summary": "Assist Goto Step",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/step/restore": {
+      "post": {
+        "description": "§17.1056 — undo a reopen from its pre-image (evidence + output are\ncaptured before every reopen now). Refused once the operator has worked\non the step since, or when it is not in a reopened state.",
+        "operationId": "assist_restore_step_assist__session_id__step_restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistRestoreStepInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Restore Step",
         "tags": [
           "Assist"
         ]
