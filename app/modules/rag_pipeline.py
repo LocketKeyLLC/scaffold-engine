@@ -35,12 +35,12 @@ import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, cast
 
 from pymilvus import MilvusClient
 
 if TYPE_CHECKING:
-    from app.modules._rag_protocol import IngestStatsDict, RagResponseDict
+    from app.modules._rag_protocol import IngestStatsDict, RagMetadataDict, RagResponseDict
 from app.utils.milvus_utils import get_client
 from app.utils.rag_result_cache import get_rag_result_cache
 from app.rerankers import rerank as cross_encoder_rerank
@@ -915,9 +915,10 @@ async def query_rag(
         # passes the same dict through twice) can't leak cache_hit=True
         # into a sibling response. The metadata sub-dict is copied too —
         # we mutate one of its keys.
-        response = dict(cached)
-        response["metadata"] = dict(response.get("metadata") or {})
-        response["metadata"]["cache_hit"] = True
+        response = cast("RagResponseDict", dict(cached))
+        md = cast("RagMetadataDict", dict(response.get("metadata") or {}))
+        md["cache_hit"] = True
+        response["metadata"] = md
         return response
 
     loop = asyncio.get_running_loop()
@@ -1119,7 +1120,7 @@ async def query_rag(
             },
         })
 
-    response = {
+    response: RagResponseDict = {
         "status": "ok",
         "query": query,
         "result_count": len(result_dicts),
@@ -1305,7 +1306,7 @@ async def ingest_entries(
     exact-hash filter). Fail-soft: a raising callback is swallowed, never
     breaking ingest.
     """
-    stats = {"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0, "skipped_empty": 0}
+    stats: IngestStatsDict = {"new": 0, "versioned": 0, "rejected": 0, "skipped_hash": 0, "skipped_empty": 0}
     if not entries:
         return stats
     if domain == "":
@@ -1401,7 +1402,7 @@ async def ingest_entries(
                     consistency_level="Strong",
                 ),
             )
-            present_hashes = {r.get("content_hash") for r in (existing or [])}
+            present_hashes = {h for r in (existing or []) if (h := r.get("content_hash"))}
         except Exception as e:
             # §17.812 (audit M6) — was debug (silent). A failed pre-filter means
             # duplicates may slip to the semantic pass; surface it + count it.
@@ -1625,7 +1626,7 @@ async def ingest_entries(
     if stats.get("dedup_errors"):
         logger.warning(
             "ingest_dedup_degraded: dedup_errors=%d — some entries may have been "
-            "inserted as new without a dedup check (toon_v2)", stats["dedup_errors"],
+            "inserted as new without a dedup check (toon_v2)", stats.get("dedup_errors", 0),
         )
 
     if provenance_writes:

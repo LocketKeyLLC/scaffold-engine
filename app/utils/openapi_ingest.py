@@ -356,6 +356,8 @@ async def _resolve_refs(spec: dict, url: str) -> tuple[dict, bool]:
         # tries to use the parsed URL as a filesystem path). With spec_string
         # alone, internal $refs resolve but relative *external* refs cannot —
         # those are an unsupported edge case for inline ingestion.
+        if ResolvingParser is None:  # §17.1060 — the import above is guarded; fail with the reason, not NoneType
+            raise RuntimeError("prance is not installed — OpenAPI ingest needs it")
         parser = ResolvingParser(
             spec_string=spec_string,
             lazy=False,

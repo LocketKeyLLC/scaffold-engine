@@ -83,6 +83,12 @@ def _sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+def _conf_or_default(value, default: float = 0.5) -> float:
+    """§17.1060 — a node's recorded confidence, or the neutral default when
+    none was recorded (0.0 is a real value and stays 0.0)."""
+    return default if value is None else float(value)
+
+
 async def _await_keepalives_cancelled(*tasks: asyncio.Task) -> None:
     """§17.812 (audit M1) — await already-cancelled keepalive tasks during teardown.
 
@@ -756,7 +762,7 @@ def _format_upstream_block(upstream_outputs: dict, node_key: str = "") -> str:
     if total_chars > settings.max_upstream_chars:
         if settings.upstream_confidence_ranking_enabled:
             weights = {
-                nk: (confs[nk] if confs[nk] is not None else 0.5) * len(texts[nk])
+                nk: _conf_or_default(confs[nk]) * len(texts[nk])
                 for nk in texts
             }
             denom = sum(weights.values()) or 1.0

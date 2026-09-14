@@ -91,6 +91,15 @@ class RagMetadataDict(TypedDict, total=False):
     warnings: list[str]
     latency_ms: float
     cache_hit: bool
+    fell_back_to_top3: bool  # §17.1060 — written by query_rag; was undeclared
+    # §17.1060 — the rest of what query_rag actually writes (pyright, whole-app scope)
+    rerank_capped_at: int | None
+    rerank_max_candidates: int | None
+    rerank_doc_truncate: int | None
+    superseded_dropped: int
+    superseded_backfilled: int
+    partitions_failed: list[str]
+    degraded: bool
 
 
 class RagResponseDict(TypedDict):
@@ -132,6 +141,7 @@ class IngestStatsDict(TypedDict):
     rejected: int
     skipped_hash: int
     skipped_empty: int
+    dedup_errors: NotRequired[int]  # §17.1060 — counted when a dedup check itself fails (ingest_dedup_degraded)
 
 
 # ---------------------------------------------------------------------------

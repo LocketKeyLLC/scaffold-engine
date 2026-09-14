@@ -289,7 +289,7 @@ async def select_topologies(
             rag_domain=domain,
             errors=[f"RAG retrieval failed: {rag_resp.get('error', 'unknown')}"],
         )
-    chunks: list[dict[str, Any]] = rag_resp.get("results") or []
+    chunks: list[Any] = list(rag_resp.get("results") or [])  # RagResultDict rows or plain dicts
     if not chunks:
         return TopologySelectionResult(
             ok=False,

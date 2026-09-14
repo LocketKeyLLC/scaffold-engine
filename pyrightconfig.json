@@ -1,12 +1,6 @@
 {
   "include": [
-    "app/modules/assist_policy.py",
-    "app/modules/assist_state_check.py",
-    "app/modules/assist_replan.py",
-    "app/modules/assist_notes.py",
-    "app/modules/assist_decide.py",
-    "app/modules/assist_turn.py",
-    "app/modules/assist_turns.py"
+    "app"
   ],
   "typeCheckingMode": "basic",
   "pythonVersion": "3.12",
@@ -20,5 +14,8 @@
   "reportIndexIssue": false,
   "reportOptionalIterable": false,
   "reportUndefinedVariable": true,
-  "reportUnusedExpression": true
+  "reportUnusedExpression": true,
+  "exclude": [
+    "app/ui/static"
+  ]
 }

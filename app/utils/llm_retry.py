@@ -16,6 +16,11 @@ still applies. Callers parse the returned response as before.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.providers.base import ModelResponse
+
 import logging
 
 logger = logging.getLogger("scaffold.llm_retry")
@@ -41,7 +46,7 @@ def _thinking_squeezed(resp) -> bool:
 
 
 async def _redraw_until(call, is_usable, *, draws, label, detail,
-                        event="llm_empty_redraw", rescue=None):
+                        event="llm_empty_redraw", rescue=None) -> "ModelResponse":
     """§17.582 — core retry-on-empty loop shared by the three public guards.
 
     ``call`` is a zero-arg coroutine factory that performs one draw; ``is_usable``
@@ -80,6 +85,7 @@ async def _redraw_until(call, is_usable, *, draws, label, detail,
         rescued = await rescue()
         if rescued.success and is_usable(rescued):
             return rescued
+    assert resp is not None  # §17.1060 — draws >= 1 at every call site; the loop ran
     return resp
 
 

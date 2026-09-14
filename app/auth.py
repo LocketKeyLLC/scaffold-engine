@@ -94,7 +94,7 @@ async def require_api_key(
         is_admin = bool(_RAW_KEY) and key is not None and secrets.compare_digest(key, _RAW_KEY)
     except TypeError:
         is_admin = False
-    if is_admin:
+    if is_admin and key is not None:
         # §17.810 — the master key authenticates as the admin principal. Attach
         # it so downstream handlers (get_principal) see full-visibility identity.
         request.state.principal = ADMIN_PRINCIPAL
@@ -189,7 +189,7 @@ async def require_openai_key(
     except TypeError:
         # §17.596 — non-ASCII header bytes make compare_digest raise; treat as fail.
         ok = False
-    if not ok:
+    if not ok or candidate is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key",

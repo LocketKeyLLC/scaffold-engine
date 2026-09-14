@@ -921,6 +921,7 @@ async def tool_call(
                 "(§17.1053)",
                 role or model or settings.model_general, d + 1, attempts,
             )
+    assert resp is not None  # attempts >= 1, so the loop ran at least once
     return resp
 
 

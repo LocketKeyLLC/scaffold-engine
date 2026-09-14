@@ -274,9 +274,9 @@ async def build_health_response(app, migration_state) -> dict:
                 client = get_milvus_client()
                 if client is None:
                     return 0, 0
-                colls = client.list_collections()
+                colls = client.list_collections()  # pyright: ignore[reportOperatorIssue] — sync MilvusClient (run in an executor); pyright infers the async twin
                 entry_count = 0
-                if "toon_v2" in colls:
+                if "toon_v2" in colls:  # pyright: ignore[reportOperatorIssue]
                     stats = client.get_collection_stats("toon_v2")
                     entry_count = int(stats.get("row_count", 0))
                 return len(colls), entry_count

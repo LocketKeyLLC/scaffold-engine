@@ -203,7 +203,7 @@ async def rag_query(
     from app.modules.rag_pipeline import query_rag
 
     result = await query_rag(query, top_k=max(1, min(int(top_k), 50)), domain=domain)
-    return result if isinstance(result, dict) else {"result": result}
+    return dict(result) if isinstance(result, dict) else {"result": result}
 
 
 @mcp.tool()
