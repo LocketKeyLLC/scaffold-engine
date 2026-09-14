@@ -607,7 +607,7 @@ lint-imports: ## §17.1057 — module-boundary contracts (.importlinter); grimp 
 check-openapi-breaking: ## §17.1057 — breaking-change diff of docs/openapi.json against origin/main (oasdiff). Part of ci-tier-0; skips when origin/main is unavailable.
 	@command -v oasdiff >/dev/null 2>&1 || { printf '\033[1;31m✗ oasdiff not installed — release binary from github.com/oasdiff/oasdiff\033[0m\n'; exit 1; }
 	@if git show origin/main:docs/openapi.json >/tmp/openapi.main.json 2>/dev/null; then \
-		if oasdiff breaking /tmp/openapi.main.json docs/openapi.json --fail-on ERR >/tmp/oasdiff.out 2>&1; then \
+		if oasdiff breaking /tmp/openapi.main.json docs/openapi.json --fail-on ERR --severity-levels docs/openapi-severity.txt >/tmp/oasdiff.out 2>&1; then \
 			printf '\033[1;32m✓ openapi: no breaking changes vs origin/main\033[0m\n'; \
 		else cat /tmp/oasdiff.out; exit 1; fi; \
 	else printf '\033[2m  openapi breaking-change check skipped (no origin/main)\033[0m\n'; fi
@@ -672,3 +672,19 @@ load-llm: ## §17.1061 — locust through /v1/chat/completions against a THROWAW
 	@SCAFFOLD_API_KEY=$$(grep -E '^(SCAFFOLD_)?API_KEY=' .env | head -1 | cut -d= -f2-) \
 	locust -f scripts/locustfile_llm.py --headless -u $(or $(USERS),10) -r 5 -t $(or $(DURATION),20s) -H http://127.0.0.1:8765 --only-summary $(ARGS); \
 	docker rm -f scaffold-loadllm >/dev/null
+
+fuzz-api: ## §17.1068 — schemathesis over docs/openapi.json against a THROWAWAY stub-role orchestrator on :8765 (GET only by default; METHODS="GET POST" to widen; EXAMPLES=5). Reports 5xx and schema mismatches; never touches the live orchestrator.
+	@command -v schemathesis >/dev/null 2>&1 || { printf '\033[1;31m✗ schemathesis not installed — uv pip install --python ~/.local/share/scaffold-devtools/bin/python schemathesis\033[0m\n'; exit 1; }
+	@docker rm -f scaffold-fuzz >/dev/null 2>&1 || true
+	@docker run -d --name scaffold-fuzz --network ai-network --env-file .env -p 127.0.0.1:8765:8000 \
+		-e DATABASE_URL="$$(docker exec $(CONTAINER) printenv DATABASE_URL)" \
+		-e SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false -e SCHEDULER_ENABLED=false -e EXECUTION_RESUME_ON_STARTUP_ENABLED=false \
+		$$(grep -oE '^MODEL_[A-Z_]+_PROVIDER' .env.example | grep -v EMBEDDER | grep -v RERANKER | sort -u | sed 's/$$/=stub/;s/^/-e /' | tr '\n' ' ') \
+		scaffold-engine:$${SCAFFOLD_IMAGE_TAG:-local} >/dev/null
+	@for i in $$(seq 1 60); do curl -sf http://127.0.0.1:8765/health >/dev/null 2>&1 && break; sleep 2; done; curl -sf http://127.0.0.1:8765/health >/dev/null || { docker logs scaffold-fuzz | tail -20; docker rm -f scaffold-fuzz >/dev/null; exit 1; }
+	@mkdir -p .profiles; schemathesis run docs/openapi.json --url http://127.0.0.1:8765 \
+		-H "X-API-Key: $$(grep -E '^(SCAFFOLD_)?API_KEY=' .env | head -1 | cut -d= -f2-)" \
+		--max-examples $(or $(EXAMPLES),5) --checks not_a_server_error --workers 2 \
+		$$(for m in $(or $(METHODS),GET); do printf -- '--include-method %s ' $$m; done) \
+		--report junit --report-junit-path .profiles/fuzz-api-$$(date +%Y%m%d-%H%M).xml $(ARGS); rc=$$?; \
+	docker rm -f scaffold-fuzz >/dev/null; exit $$rc

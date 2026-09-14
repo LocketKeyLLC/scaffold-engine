@@ -6890,6 +6890,8 @@
             "required": false,
             "schema": {
               "default": 200,
+              "maximum": 2000,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -12363,6 +12365,8 @@
             "required": false,
             "schema": {
               "default": 100,
+              "maximum": 500,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
