@@ -610,6 +610,11 @@ async def apply_note_replan(
         )).mappings().all()
         reopened = [r["node_key"] for r in res]
         if reopened:
+            from app.modules.assist_step_fsm import check as _fsm_check  # §17.1074
+            for pi in preimages:
+                if pi["node_key"] in reopened:
+                    _fsm_check("apply_note_replan_reopen", src=pi.get("step_status"), dst="pending",
+                               node_status="pending", node_key=pi["node_key"], trigger="reopen")
             await db.execute(
                 text("""
                     UPDATE assist_steps

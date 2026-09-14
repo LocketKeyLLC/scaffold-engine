@@ -30,6 +30,12 @@ def _ctx():
     )
 
 
+def _scalar(v):
+    r = MagicMock()
+    r.scalar.return_value = v
+    return r
+
+
 def _result(row):
     r = MagicMock()
     r.mappings.return_value.first.return_value = row
@@ -961,6 +967,7 @@ async def test_add_step_inserts_node_and_points_session():
         _result(None),  # INSERT dag_nodes
         _result(None),  # INSERT assist_steps
         _result(None),  # UPDATE anchor depends_on
+        _scalar("presented"),  # §17.1074 SELECT anchor step status (FSM oracle)
         _result(None),  # §17.911 UPDATE anchor dag_nodes done->pending
         _result(None),  # UPDATE anchor assist_steps ->pending
         _result(None),  # UPDATE session current_node_key
