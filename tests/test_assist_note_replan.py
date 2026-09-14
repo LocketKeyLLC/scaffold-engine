@@ -267,6 +267,7 @@ class TestApplyNoteReplan:
             _result(all_=[{"node_key": "T13", "output_text": "logged into VM"}]),  # prior SELECT
             _result(all_=[{"node_key": "T13"}]),   # dag_nodes UPDATE RETURNING
             _result(),                              # assist_steps UPDATE
+            _result(),                              # §17.1054 — pointer cleared after a repair-less reopen
         ])
         db.commit = AsyncMock()
         out = await assist_replan.apply_note_replan(
@@ -277,6 +278,7 @@ class TestApplyNoteReplan:
         assert out["reopened"] == ["T13"]
         assert out["reopened_prior"] == {"T13": "logged into VM"}
         sqls = [str(c.args[0]) for c in db.execute.await_args_list]
+        assert any("current_node_key = NULL" in s for s in sqls)  # §17.1054 — one pointer, one truth
         # dag_nodes reset guarded on status='done'; step reset to pending
         assert any("status = 'pending'" in s and "output_text = NULL" in s for s in sqls)
         assert any("AND status = 'done'" in s for s in sqls)
