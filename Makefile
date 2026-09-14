@@ -657,3 +657,6 @@ load-smoke: ## §17.1057 — locust, headless, model-free endpoints only: 5 user
 
 diff: ## §17.1057 — structural diff of the working tree (difftastic): make diff ARGS="HEAD~1"
 	GIT_EXTERNAL_DIFF=difft git diff $(ARGS)
+
+audit-tools: ## §17.1058 — one read-only audit with every developer tool (ruff/pyright/ast-grep/import-linter/vulture/hadolint/oasdiff/mutmut-on-record/semgrep/trivy/dive) → .profiles/audit-<date>.md. QUICK=1 skips the network/image scans.
+	@python3 scripts/audit_tools.py $(if $(QUICK),--quick,) $(ARGS)
