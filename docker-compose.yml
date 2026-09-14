@@ -191,6 +191,24 @@ services:
       retries: 10
       start_period: 120s
 
+  # §17.1076 — procrastinate worker (trial): runs the cleanup sweep as a
+  # periodic queue task from the engine image. OFF unless `--profile queue`
+  # AND QUEUE_ENABLED=true in .env (then the orchestrator's in-process sweep
+  # loop stays off). Schema: `make queue-schema` once.
+  queue:
+    image: scaffold-engine:${SCAFFOLD_IMAGE_TAG:-local}
+    container_name: scaffold-queue
+    profiles: ["queue"]
+    logging: *default-logging
+    mem_limit: 512m
+    env_file: .env
+    command: ["python", "-m", "procrastinate", "--app", "app.queue.app", "worker", "--queues", "maintenance", "--concurrency", "1"]
+    networks:
+      - ai-network
+    depends_on:
+      scaffold-postgres:
+        condition: service_healthy
+
   searxng:
     image: searxng/searxng@sha256:3547509b419cd6a67333d6d68bd1ffad8d46d3669d82e7a7bd538f7b45827432
     container_name: searxng

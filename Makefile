@@ -707,3 +707,8 @@ migrate: ## Apply pending DB migrations the way the orchestrator does at startup
 
 migrate-status: ## §17.1075 — alembic current + heads
 	docker run --rm --network ai-network --env-file .env -e DATABASE_URL="$$(docker exec $(CONTAINER) printenv DATABASE_URL)" --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(CURDIR):/work -w /work scaffold-engine:dev sh -c 'alembic current; alembic heads'
+queue-schema: ## §17.1076 — apply procrastinate's own schema (idempotent) to the composed DB
+	docker run --rm --network ai-network --env-file .env -e DATABASE_URL="$$(docker exec $(CONTAINER) printenv DATABASE_URL)" scaffold-engine:$${SCAFFOLD_IMAGE_TAG:-local} python -c "import asyncio; from app.queue import apply_schema; asyncio.run(apply_schema()); print('procrastinate schema applied')"
+
+queue-once: ## §17.1076 — defer the cleanup sweep once and run a one-shot worker against the composed DB (proof the queue path works)
+	docker run --rm --network ai-network --env-file .env -e DATABASE_URL="$$(docker exec $(CONTAINER) printenv DATABASE_URL)" scaffold-engine:$${SCAFFOLD_IMAGE_TAG:-local} sh -c 'python -m procrastinate --app app.queue.app defer scaffold.cleanup_sweep "{\"timestamp\": 0}" && python -m procrastinate --app app.queue.app worker --queues maintenance --one-shot'

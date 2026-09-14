@@ -60,3 +60,6 @@ instructor==1.17.0
 transitions==0.9.3
 # §17.1075 — Alembic for schema changes after db/migrations/075
 alembic==1.20.0
+# §17.1076 — procrastinate trial (Postgres task queue; psycopg 3 is its connector)
+procrastinate==3.9.0
+psycopg[binary,pool]==3.3.5

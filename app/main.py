@@ -541,7 +541,12 @@ async def lifespan(app: FastAPI):
     else:
         logger.info('event="startup_cleanup_skipped" CLEANUP_ON_STARTUP=%s', _cleanup_startup)
 
-    _cleanup_task = start_cleanup_task()
+    # §17.1076 — when the queue worker owns the sweep, the in-process loop stays off.
+    if settings.queue_enabled:
+        logger.info("cleanup_loop_delegated_to_queue: worker runs scaffold.cleanup_sweep on %s", settings.queue_cleanup_cron)
+        _cleanup_task = None
+    else:
+        _cleanup_task = start_cleanup_task()
     # §17.1036 — resume approval chains stranded in `planning` (no plan, no
     # live chain): a short loop, so a closed tab costs minutes, not a cancel.
     _advance_resume_task = None
@@ -621,7 +626,8 @@ async def lifespan(app: FastAPI):
             await _advance_resume_task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
-    _cleanup_task.cancel()
+    if _cleanup_task is not None:
+        _cleanup_task.cancel()
     try:
         await _cleanup_task
     except asyncio.CancelledError:
