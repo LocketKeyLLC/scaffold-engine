@@ -1300,6 +1300,11 @@ class Settings(BaseSettings):
     # Offered automatically once `after_fixes` fixes on one step have not
     # resolved it (never forced); also the 🩺 button / "verify state".
     assist_state_check_enabled: bool = True
+    # §17.1077 — the opt-in local runner. Name of a registered `mcp_servers`
+    # entry the operator runs on THEIR machine (scripts/local_runner_mcp.py);
+    # when set, the state check executes its read-only probes through it
+    # instead of asking for a paste. Empty = off (the default, and the tenet).
+    assist_local_runner_server: str = ""
     assist_state_check_after_fixes: int = Field(default=3, ge=1, le=20)
     # §17.687 — recent-conversation recall. The §17.650 digest recovers only
     # COMMITTED node output; notes recover only what the OPERATOR captured. So a
