@@ -142,6 +142,8 @@ jobs:
           git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main || true
       # app.sse_events is dep-free, so the pytest guards need no app deps.
       - name: Static-parity gate — ci-tier-0 (§17.393/§17.395)
+        env:
+          SCAFFOLD_REQUIRE_AST_GREP: "1"   # §17.1057 — the ast-grep gate must bite here, never skip
         run: make ci-tier-0
 
       - name: Run ci-smoke tests

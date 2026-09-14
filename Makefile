@@ -193,7 +193,7 @@ check-env-example: ## §17.823 (M15) — every compose ${VAR} must be documented
 ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift check-version lint-migrations check-env-example check-ast-grep lint-imports check-openapi-breaking ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
 	@printf '\033[1m▶ static-scan inventory tests (host pytest, --noconftest)\033[0m\n'
 	@if command -v pytest >/dev/null 2>&1; then \
-		PYTHONPATH=$(CURDIR):$(CURDIR)/sdk pytest \
+		SCAFFOLD_REQUIRE_AST_GREP=1 PYTHONPATH=$(CURDIR):$(CURDIR)/sdk pytest \
 			tests/test_sse_event_inventory.py \
 			tests/test_sdk_schema_parity.py \
 			tests/test_settings_patch_scan.py \

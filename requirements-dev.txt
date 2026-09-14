@@ -23,3 +23,5 @@ pyinstrument==5.1.3
 import-linter==2.15
 # dead-code report with whitelist (make dead-code)
 vulture==2.16
+# structural rules gate (make check-ast-grep / tests/test_ast_grep_rules.py)
+ast-grep-cli==0.45.3
