@@ -1,0 +1,5 @@
+# §17.1057 — ast-grep (structural search) rule set. Run: `make check-ast-grep`
+# (part of ci-tier-0). Every rule has a known-hit fixture under
+# tests/fixtures/ast_grep/ so an inert pattern fails the gate, not the reader.
+ruleDirs:
+  - rules/ast-grep

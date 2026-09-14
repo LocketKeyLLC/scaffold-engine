@@ -1,0 +1,32 @@
+# §17.1057 — module-boundary contracts for the assist clusters (§17.856 split
+# a 4,500-line agent into clusters held apart by deferred imports; nothing
+# enforced the layering). grimp parses source, so this runs without app deps:
+# `make lint-imports` (host) and in the CI smoke job.
+[importlinter]
+root_package = app
+include_external_packages = False
+
+[importlinter:contract:assist-leaves]
+name = assist leaf modules import no assist orchestration
+type = forbidden
+source_modules =
+    app.modules.assist_policy
+    app.modules.assist_state_check
+    app.modules.assist_replan
+    app.modules.assist_decide
+    app.modules.assist_notes
+forbidden_modules =
+    app.modules.assist_turn
+    app.routers.assist
+
+[importlinter:contract:policy-is-pure]
+name = assist_policy is a pure gate module
+type = forbidden
+source_modules =
+    app.modules.assist_policy
+forbidden_modules =
+    app.modules.assist_agent
+    app.modules.assist_guide
+    app.modules.assist_decide
+    app.modules.assist_notes
+    app.model_router

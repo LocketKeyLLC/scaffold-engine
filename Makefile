@@ -190,10 +190,10 @@ test-ui: ## §17.814 — SPA JS unit tests (node --test; dev-only, zero runtime 
 check-env-example: ## §17.823 (M15) — every compose ${VAR} must be documented in .env.example. Static, no docker. Part of ci-tier-0.
 	@python3 scripts/check_env_example.py
 
-ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift check-version lint-migrations check-env-example ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
+ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift check-version lint-migrations check-env-example check-ast-grep lint-imports check-openapi-breaking ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
 	@printf '\033[1m▶ static-scan inventory tests (host pytest, --noconftest)\033[0m\n'
 	@if command -v pytest >/dev/null 2>&1; then \
-		PYTHONPATH=$(CURDIR):$(CURDIR)/sdk pytest \
+		SCAFFOLD_REQUIRE_AST_GREP=1 PYTHONPATH=$(CURDIR):$(CURDIR)/sdk pytest \
 			tests/test_sse_event_inventory.py \
 			tests/test_sdk_schema_parity.py \
 			tests/test_settings_patch_scan.py \
@@ -204,6 +204,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_retrieval_grounding_inventory.py \
 			tests/test_no_hardcoded_domain_answers.py \
 			tests/test_answer_verification_inventory.py \
+			tests/test_ast_grep_rules.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
 	else \
 		printf '\033[1;33m⚠ host pytest not found — skipped the inventory scans (byte-equal gates above still ran). Full coverage: make test\033[0m\n'; \
@@ -585,3 +586,74 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 .DEFAULT_GOAL := help
+
+
+# ── §17.1057 — developer tooling (host binaries in ~/.local/bin, Python tools in
+# ~/.local/share/scaffold-devtools; dev-image tools pinned in requirements-dev.txt).
+DEVTOOLS_VENV ?= $(HOME)/.local/share/scaffold-devtools
+THROWAWAY_DEV = docker run --rm --network ai-network --env-file .env --user $$(id -u):$$(id -g) \
+	-v $(CURDIR)/app:/code/app:ro -v $(CURDIR)/tests:/code/tests:ro -v $(CURDIR)/pipelines:/code/pipelines:ro \
+	-v $(CURDIR)/presets:/code/presets:ro -v $(CURDIR)/pyproject.toml:/code/pyproject.toml:ro -v $(CURDIR)/db:/code/db:ro \
+	-v $(CURDIR)/sdk:/code/sdk:ro -v $(CURDIR)/cli:/code/cli:ro -v $(CURDIR)/scripts:/code/scripts:ro -v $(CURDIR)/docs:/code/docs:ro \
+	-v $(CURDIR)/.env.example:/code/.env.example:ro -w /code
+
+check-ast-grep: ## §17.1057 — structural rules in rules/ast-grep (errors fail; warnings advisory). Part of ci-tier-0. Needs `ast-grep` (pip: ast-grep-cli) on PATH.
+	@python3 scripts/ast_grep_gate.py
+
+lint-imports: ## §17.1057 — module-boundary contracts (.importlinter); grimp parses source, no app deps. Part of ci-tier-0.
+	@command -v lint-imports >/dev/null 2>&1 || { printf '\033[1;31m✗ import-linter not installed — pip install import-linter==2.15\033[0m\n'; exit 1; }
+	@PYTHONPATH=$(CURDIR) lint-imports >/tmp/lint-imports.out 2>&1 && printf '\033[1;32m✓ import contracts kept\033[0m\n' || { cat /tmp/lint-imports.out; exit 1; }
+
+check-openapi-breaking: ## §17.1057 — breaking-change diff of docs/openapi.json against origin/main (oasdiff). Part of ci-tier-0; skips when origin/main is unavailable.
+	@command -v oasdiff >/dev/null 2>&1 || { printf '\033[1;31m✗ oasdiff not installed — release binary from github.com/oasdiff/oasdiff\033[0m\n'; exit 1; }
+	@if git show origin/main:docs/openapi.json >/tmp/openapi.main.json 2>/dev/null; then \
+		if oasdiff breaking /tmp/openapi.main.json docs/openapi.json --fail-on ERR >/tmp/oasdiff.out 2>&1; then \
+			printf '\033[1;32m✓ openapi: no breaking changes vs origin/main\033[0m\n'; \
+		else cat /tmp/oasdiff.out; exit 1; fi; \
+	else printf '\033[2m  openapi breaking-change check skipped (no origin/main)\033[0m\n'; fi
+
+typecheck: ## §17.1057 — pyright basic mode over the assist gate modules (pyrightconfig.json)
+	pyright
+
+mutate: ## §17.1057 — mutation testing over the gate modules (pyproject [tool.mutmut]) in the dev image. Slow; writes mutants/ (gitignored).
+	docker run --rm --network ai-network --env-file .env --user $$(id -u):$$(id -g) -e HOME=/tmp -e PYTHONPATH= -v $(CURDIR):/work -w /work scaffold-engine:dev \
+		sh -c 'mutmut run --max-children $(or $(MUTATE_WORKERS),1) $(ARGS) ; mutmut results'  # PYTHONPATH= : the image pins /code, which would shadow mutants/. One worker: parallel workers reported 100% survival (§17.1057b)
+
+dead-code: ## §17.1057 — vulture report (min confidence 80) with scripts/vulture_whitelist.py
+	vulture app scripts/vulture_whitelist.py --min-confidence 80 $(ARGS)
+
+profile-mem: ## §17.1057 — memray a test selection in the dev image: make profile-mem TEST=tests/test_x.py
+	$(THROWAWAY_DEV) -v $(CURDIR)/.profiles:/code/.profiles scaffold-engine:dev sh -c \
+		'python -m memray run -o /code/.profiles/memray-$$(date +%s).bin -m pytest -q --timeout=120 -o cache_dir=/tmp/pc $(TEST) && ls -la /code/.profiles | tail -2'
+
+profile-cpu: ## §17.1057 — pyinstrument a test selection in the dev image: make profile-cpu TEST=tests/test_x.py
+	$(THROWAWAY_DEV) -v $(CURDIR)/.profiles:/code/.profiles scaffold-engine:dev sh -c \
+		'pyinstrument -r html -o /code/.profiles/pyinstrument-$$(date +%s).html -m pytest -q --timeout=120 -o cache_dir=/tmp/pc $(TEST) >/dev/null; ls -la /code/.profiles | tail -1'
+
+spy: ## §17.1057 — py-spy dump of the live orchestrator's stacks (needs ptrace: run `docker exec` path if the host refuses)
+	@pid=$$(docker inspect $(CONTAINER) --format '{{.State.Pid}}'); py-spy dump --pid $$pid $(ARGS) || printf '\033[2m  host ptrace refused — try: docker exec $(CONTAINER) pip install py-spy && docker exec --cap-add SYS_PTRACE $(CONTAINER) py-spy dump --pid 1\033[0m\n'
+
+ci-local: ## §17.1057 — run the GitHub unit-test job locally with act (first run pulls the runner image): make ci-local JOB=unit-tests
+	act -j $(or $(JOB),unit-tests) -W .github/workflows/test.yml $(ARGS)
+
+ci-local-list: ## §17.1057 — list the workflow jobs act can run
+	act -l
+
+scan-image: ## §17.1057 — trivy CVE scan of the prod image (OS packages + Python), HIGH/CRITICAL only
+	trivy image --severity HIGH,CRITICAL --scanners vuln scaffold-engine:$${SCAFFOLD_IMAGE_TAG:-local} $(ARGS)
+
+lint-dockerfile: ## §17.1057 — hadolint over the Dockerfile
+	hadolint Dockerfile $(ARGS)
+
+image-layers: ## §17.1057 — dive efficiency report for the prod image (CI mode, no TUI)
+	CI=true dive scaffold-engine:$${SCAFFOLD_IMAGE_TAG:-local} $(ARGS)
+
+sast: ## §17.1057 — semgrep with the community Python + security rulesets over app/ (network: downloads the rules)
+	semgrep scan --config p/python --config p/security-audit --exclude-rule python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text --error --metrics=off app $(ARGS)
+
+load-smoke: ## §17.1057 — locust, headless, model-free endpoints only: 5 users for 15 s against localhost:8000
+	SCAFFOLD_API_KEY=$$(grep -E '^(SCAFFOLD_)?API_KEY=' .env | head -1 | cut -d= -f2-) \
+	locust -f scripts/locustfile.py --headless -u $(or $(USERS),5) -r 5 -t $(or $(DURATION),15s) -H http://localhost:8000 --only-summary $(ARGS)
+
+diff: ## §17.1057 — structural diff of the working tree (difftastic): make diff ARGS="HEAD~1"
+	GIT_EXTERNAL_DIFF=difft git diff $(ARGS)

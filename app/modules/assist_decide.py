@@ -60,49 +60,13 @@ _NOTE_KINDS = ("addition", "constraint", "preference", "decision", "note")
 # them instead of the pipeline pre-empting the model. Same shapes as
 # `_assist_handlers._SHELL_PROMPT_LINE_RE` / `_SHELL_ERROR_RE` and the §17.748
 # fix marker, kept here so the server can compute them from (message, history).
-_SHELL_PROMPT_LINE_RE = re.compile(r"(?m)^\s*[A-Za-z_][\w.-]*@[\w.-]+:[^\n#$]*[#$]")
-_SHELL_ERROR_RE = re.compile(
-    r"command not found|no such file or directory|permission denied"
-    r"|operation not permitted|traceback \(most recent call last\)"
-    r"|cannot (?:open|access|stat|create|remove|find|execute|connect|locate)"
-    r"|could not (?:open|find|resolve|connect|create|load)|unable to |failed to "
-    r"|\bnot recognized\b|unknown (?:option|command|argument|flag)"
-    r"|invalid (?:option|argument|parameter|value|name)"
-    r"|connection (?:refused|timed out|reset)|does(?:n't| not) exist|no space left",
-    re.I | re.M,
+# §17.1057 — the shell-signal regexes and `_compute_signals` live in
+# assist_policy (the pure gate module) and are re-exported here: policy used
+# to lazy-import THIS module for them, which is the wrong direction for a
+# leaf and is what the import-linter contract caught first.
+from app.modules.assist_policy import (  # noqa: E402,F401 — re-exports (patch targets)
+    _SHELL_ERROR_RE, _SHELL_PROMPT_LINE_RE, _compute_signals,
 )
-
-
-def _compute_signals(message: str, history: list[dict] | None) -> dict:
-    """The deterministic features the decision reasons with (§17.705/748/749)."""
-    msg = message or ""
-    is_shell_paste = bool(_SHELL_PROMPT_LINE_RE.search(msg))
-    last_was_fix = False
-    proposed_step = False
-    seen_assistant = 0
-    for m in reversed(history or []):
-        if not isinstance(m, dict) or (m.get("role") or "") != "assistant":
-            continue
-        c = m.get("content") or ""
-        if seen_assistant == 0:
-            last_was_fix = ("🔧 Troubleshooting" in c) or (
-                "something went wrong — let me help" in c
-            )
-        # §17.1053 — did the engine JUST propose a step ("## Needs its own
-        # step")? A short "add them" / "insert it" is then an add-step reply,
-        # not chat. The nudge frames that can follow a fix (↩︎ "reply confirm")
-        # are separate assistant messages, so look back a few, not just one.
-        if "needs its own step" in c.lower():
-            proposed_step = True
-        seen_assistant += 1
-        if seen_assistant >= 3:
-            break
-    return {
-        "shell_paste": is_shell_paste,
-        "shell_error": bool(_SHELL_ERROR_RE.search(msg)),
-        "last_assistant_was_fix": last_was_fix,
-        "last_assistant_proposed_step": proposed_step,
-    }
 
 
 # ── The decision prompt (built FROM the classifier prompt to avoid drift) ─────

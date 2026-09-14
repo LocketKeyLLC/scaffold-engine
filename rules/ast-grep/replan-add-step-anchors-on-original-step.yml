@@ -1,0 +1,18 @@
+# §17.1054 — repairs inserted by a confirmed re-plan must all anchor on the
+# step the operator was on; anchoring on the moving pointer chained them in
+# reverse (live: ADD17 waited on ADD18).
+id: replan-add-step-anchors-on-original-step
+language: python
+severity: error
+message: add_step() in the replan apply path must pass before_node_key= (the original current step)
+files:
+  - app/modules/assist_replan.py
+rule:
+  any:
+    - pattern: add_step($$$ARGS)
+    - pattern: $OBJ.add_step($$$ARGS)
+  not:
+    has:
+      kind: keyword_argument
+      regex: '^before_node_key\s*='
+      stopBy: end

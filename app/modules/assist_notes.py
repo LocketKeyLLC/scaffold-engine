@@ -160,7 +160,7 @@ async def add_step(
     session / an empty draft so the router maps it to a 4xx.
     """
     from app.modules.assist_agent import _environment_from_metadata  # §17.856 re-exports (patch-safe deferred)
-    from app.modules import assist_guide, assist_policy
+    from app.modules import assist_policy
 
     sess = (await db.execute(
         text("""
@@ -451,7 +451,6 @@ async def assess_note_impact(
     from app.modules.assist_agent import _note_impact_facts_block, _note_impact_project_block  # §17.856 re-exports (patch-safe deferred)
     from datetime import datetime, timezone
 
-    from app.config import settings
     from app.modules import assist_replan
 
     if not settings.assist_note_replan_enabled:
@@ -553,7 +552,6 @@ async def detect_reroute(
     the original intent. Fail-soft: any error → None (never trap the turn).
     """
     from app.modules.assist_agent import _note_impact_facts_block, _note_impact_project_block, sweep_superseded_facts  # §17.856 re-exports (patch-safe deferred)
-    from app.config import settings
     from app.modules import assist_replan
 
     if (not settings.assist_pivot_detect_enabled
@@ -671,7 +669,6 @@ async def apply_pending_replan(
     note as-is. Idempotent when nothing is pending. Returns a summary the
     pipeline renders back to the operator.
     """
-    from app.modules import assist_replan
 
     sess = (await db.execute(
         text("SELECT job_id, metadata FROM assist_sessions WHERE id = :sid"),

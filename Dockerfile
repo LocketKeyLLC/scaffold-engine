@@ -199,6 +199,9 @@ COPY --chown=scaffold:scaffold pipelines/ /code/pipelines/
 # test errors in CI while passing locally behind docker-compose.dev.yml's bind
 # mount — which is exactly what happened on the v1.6.0 PR.
 COPY --chown=root:root presets/       /code/presets/
+# §17.1057 — ast-grep rule set + config (tests/test_ast_grep_rules.py)
+COPY --chown=root:root rules/         /code/rules/
+COPY --chown=root:root sgconfig.yml   /code/sgconfig.yml
 COPY --chown=root:root .env.example   /code/.env.example
 COPY --chown=root:root Makefile       /code/Makefile
 COPY --chown=root:root pyproject.toml /code/pyproject.toml

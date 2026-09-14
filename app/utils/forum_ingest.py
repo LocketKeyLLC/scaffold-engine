@@ -29,7 +29,7 @@ import hashlib
 import json
 import logging
 import re
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET  # §17.1057 — semgrep use-defused-xml: feeds are untrusted XML (XXE / entity expansion)
 from typing import Any
 
 import httpx

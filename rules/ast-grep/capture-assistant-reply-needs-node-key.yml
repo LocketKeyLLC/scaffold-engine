@@ -1,0 +1,18 @@
+# §17.1057 — every durable assistant capture must say which step it belongs to.
+# Live class: the transcript recap, the state check and the ephemeral dedupe
+# all read turns by node_key; a capture without one is invisible to them.
+id: capture-assistant-reply-needs-node-key
+language: python
+severity: error
+message: capture_assistant_reply() must pass node_key= (the step this reply belongs to)
+files:
+  - app/**/*.py
+rule:
+  any:
+    - pattern: capture_assistant_reply($$$ARGS)
+    - pattern: $OBJ.capture_assistant_reply($$$ARGS)
+  not:
+    has:
+      kind: keyword_argument
+      regex: '^node_key\s*='
+      stopBy: end

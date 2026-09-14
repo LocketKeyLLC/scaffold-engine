@@ -11,6 +11,8 @@ is re-exported from assist_guide so assist_guide.<NAME> and the external callers
 
 from __future__ import annotations
 
+from typing import Optional
+
 import asyncio
 import json
 import logging

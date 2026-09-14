@@ -169,3 +169,15 @@ def test_collapse_double_records_merges_message_then_submit():
     assert [r["id"] for r in out] == [1, 2, 4, 5, 6]
     assert out[1]["kind"] == "submit" and out[1]["evidence_kind"] == "text"
     assert assist_turns.collapse_double_records([]) == []
+
+
+# ── §17.1057 — found by mutmut: `title = None` survived because every case
+# above also carried a history claim. The title branch must refuse ALONE.
+def test_reopen_refused_by_destructive_title_alone():
+    v = {"id": "S:T3", "kind": "step", "node_key": "T3", "title": "Remove old containers and VMs",
+         "verdict": "contradicted", "claim": "cluster.fw written with five security groups", "reason": "x", "repair": ""}
+    assert sc.reopen_refused(v)
+    v_clean = dict(v, title="Write the firewall policy")
+    assert not sc.reopen_refused(v_clean)
+    v_history_title = dict(v, title="Collected raw state into a file")   # history in the TITLE only
+    assert sc.reopen_refused(v_history_title)

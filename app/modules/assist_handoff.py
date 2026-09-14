@@ -9,6 +9,8 @@ with the body. Self-contained; every name re-exported from assist_agent.
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+
 import asyncio
 import json
 import logging

@@ -131,8 +131,19 @@ jobs:
       # On failure the make output names the failing sub-gate; the fix is the
       # matching `make sync-<x>` (schemas / sse-events / next-actions) then
       # commit the regenerated vendor file. `app/__init__.py` is empty and
+      # §17.1057 — ci-tier-0 now also runs the ast-grep rules, the import
+      # contracts and the OpenAPI breaking-change diff; those need three tools
+      # the runner does not have. Pinned to the versions on the operator's box.
+      - name: Install ci-tier-0 tools (ast-grep, import-linter, oasdiff)
+        run: |
+          pip install ast-grep-cli==0.45.3 import-linter==2.15
+          curl -sSL https://github.com/oasdiff/oasdiff/releases/download/v1.32.0/oasdiff_1.32.0_linux_amd64.tar.gz \
+            | tar xz -C /usr/local/bin oasdiff
+          git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main || true
       # app.sse_events is dep-free, so the pytest guards need no app deps.
       - name: Static-parity gate — ci-tier-0 (§17.393/§17.395)
+        env:
+          SCAFFOLD_REQUIRE_AST_GREP: "1"   # §17.1057 — the ast-grep gate must bite here, never skip
         run: make ci-tier-0
 
       - name: Run ci-smoke tests
