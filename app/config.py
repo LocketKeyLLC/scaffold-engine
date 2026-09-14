@@ -745,6 +745,13 @@ class Settings(BaseSettings):
     # false / SSE severed / session orphaned). 3 cuts the peak ~40% while keeping
     # useful parallelism; overridable via RESEARCH_FETCH_CONCURRENCY.
     research_fetch_concurrency: int = Field(default=3, ge=1, le=100)
+    # §17.1066 — on a 403/429 from the plain fetch, retry ONCE with a browser
+    # TLS/HTTP2 fingerprint (curl_cffi). Live 2026-09-13: Stack Overflow, Ask
+    # Ubuntu, Super User, Medium and Quora all 403'd the plain client — the
+    # pages most likely to hold the fix for a shell error silently dropped out
+    # of the citation set. Same SSRF check, same byte cap, same timeout.
+    research_fetch_impersonate_enabled: bool = True
+    research_fetch_impersonate_profile: str = "chrome"
     research_fetch_timeout: int = Field(default=15, ge=1, le=300)
     research_url_fetch_timeout: int = Field(default=30, ge=1, le=300)
     # §17.448 (Phase B / B1) — RAGAS-inspired faithfulness scoring of research

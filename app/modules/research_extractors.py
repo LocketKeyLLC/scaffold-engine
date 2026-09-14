@@ -504,6 +504,42 @@ async def _robots_allowed(url: str, user_agent: str = "ScaffoldEngine/1.0") -> b
 # file import so existing callers and mock patch targets keep working.
 
 
+async def _fetch_impersonated(url: str, *, cap: int, timeout: float) -> str | None:
+    """§17.1066 — the one retry with a browser fingerprint (curl_cffi).
+    Fingerprint-based bot blocks (Stack Exchange, Medium, Quora) answer a
+    plain client with 403; the same request with a Chrome TLS/HTTP2
+    fingerprint usually succeeds. Same SSRF re-check after redirects, same
+    byte cap. Returns None on any failure; never raises."""
+    try:
+        from curl_cffi.requests import AsyncSession
+    except Exception as exc:  # noqa: BLE001 — optional dependency at import time
+        logger.warning("url_fetch_impersonate_unavailable: %s", exc)
+        return None
+    try:
+        async with AsyncSession(impersonate=settings.research_fetch_impersonate_profile,
+                                timeout=timeout, max_redirects=5) as s:
+            r = await s.get(url, headers={"Accept-Language": "en-US,en;q=0.9"})
+        final_url = str(r.url)
+        if final_url != url:
+            ok2, reason2 = await asyncio.to_thread(_is_public_host, final_url)
+            if not ok2:
+                logger.warning("url_fetch_rejected_ssrf_after_redirect: initial=%s final=%s reason=%s (impersonate)",
+                               url, final_url, reason2)
+                return None
+        if r.status_code != 200:
+            logger.warning("url_fetch_impersonate_status: url=%s status=%d", url, r.status_code)
+            return None
+        body = r.content or b""
+        if len(body) > cap:
+            logger.warning("url_fetch_cap_exceeded: url=%s bytes=%d (impersonate)", url, len(body))
+            return None
+        enc = r.encoding or "utf-8"
+        return body.decode(enc, errors="replace")
+    except Exception as exc:  # noqa: BLE001 — a fallback must never raise
+        logger.warning("url_fetch_impersonate_failed: url=%s error=%s", url, exc)
+        return None
+
+
 async def _fetch_url_bounded(
     url: str, max_bytes: int | None = None, timeout: float | None = None,
     failure: dict | None = None,
@@ -562,6 +598,17 @@ async def _fetch_url_bounded(
             if resp.status_code != 200:
                 logger.warning("url_fetch_status: url=%s status=%d", url, resp.status_code)
                 _fail(f"http_{resp.status_code}")
+                if resp.status_code in (403, 429) and settings.research_fetch_impersonate_enabled:
+                    recovered = await _fetch_impersonated(
+                        url, cap=cap,
+                        timeout=timeout if timeout is not None else settings.research_url_fetch_timeout,
+                    )
+                    if recovered is not None:
+                        logger.info("url_fetch_recovered: url=%s via=impersonate status_was=%d",
+                                    url, resp.status_code)
+                        if failure is not None:
+                            failure.pop("reason", None)
+                        return recovered
                 return None
             cl = resp.headers.get("content-length")
             if cl and cl.isdigit() and int(cl) > cap:
