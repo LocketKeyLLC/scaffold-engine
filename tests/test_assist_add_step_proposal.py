@@ -262,6 +262,10 @@ def _result(row):
     return r
 
 
+def _scalar_res(v):
+    r = MagicMock(); r.scalar.return_value = v; return r
+
+
 def _result_all(rows):
     r = MagicMock()
     r.mappings.return_value.all.return_value = rows
@@ -282,6 +286,7 @@ async def test_add_step_bare_request_resolves_the_proposal_and_chains_three_step
         _result_all([{"node_key": "T36"}, {"node_key": "T37"}, {"node_key": "ADD1"}]),  # keys
         *[_result(None) for _ in range(6)],   # 3 × (INSERT node, INSERT step)
         *[_result(None) for _ in range(3)],   # 3 × UPDATE anchor depends_on
+        _scalar_res("presented"),             # §17.1074 SELECT anchor step status (FSM oracle)
         _result(None), _result(None),         # reopen anchor (dag_nodes, assist_steps)
         _result(None),                        # session → first new key
     ])

@@ -56,3 +56,5 @@ curl_cffi==0.16.3
 hypothesis==6.168.0  # §17.1068 — property tests in the smoke lane
 # §17.1072 — instructor-backed decide path (trial, default off)
 instructor==1.17.0
+# §17.1074 — the assist step state machine (declaration + oracle)
+transitions==0.9.3

@@ -983,6 +983,10 @@ class Settings(BaseSettings):
     # OpenAI-compatible endpoint; falls back to router on any failure). Trial.
     assist_decide_backend: str = "router"
     assist_decide_instructor_retries: int = Field(default=2, ge=0, le=5)
+    # §17.1074 — the assist step state machine (assist_step_fsm) guards the
+    # write sites that have re-broken the mirror invariant: log-only by
+    # default, raise when strict (tests run strict).
+    assist_step_fsm_strict: bool = False
     # §17.855 (audit "policy migration") — fold the deterministic phrase gates
     # (pivot / help / how-to / shell-result) into the SERVER `/decide` path as a
     # post-filter (`assist_policy.apply_deterministic_overrides`), so the CONFIDENT

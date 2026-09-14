@@ -297,6 +297,14 @@ async def add_step(
                 """),
                 {"jid": job_id, "nk": new_key, "anchor": before},
             )
+        # §17.1074 — the FSM oracle: a reopen is terminal → pending on both tables.
+        from app.modules.assist_step_fsm import check as _fsm_check
+        _anchor_st = (await db.execute(
+            text("SELECT status FROM assist_steps WHERE session_id = :sid AND node_key = :nk"),
+            {"sid": session_id, "nk": before})).scalar()
+        if _anchor_st and _anchor_st != "pending":
+            _fsm_check("add_step_reopen_anchor", src=_anchor_st, dst="pending", node_status="pending", node_key=before,
+                       trigger="reopen" if _anchor_st in ("committed", "skipped", "handed_off", "escalated") else "unclaim")
         # §17.911 — REOPEN the anchor, on BOTH tables (mirror invariant §17.286).
         #
         # The first cut reset `assist_steps` only, and only from 'presented'.
@@ -400,6 +408,8 @@ async def restore_reopened_step(*, session_id: str, node_key: str, db) -> dict:
     if worked:
         raise ValueError(f"{node_key} has {worked} operator turn(s) since the reopen — restore would discard them")
     job_id = str(sess["job_id"])
+    from app.modules.assist_step_fsm import check as _fsm_check  # §17.1074
+    _fsm_check("restore_reopened_step", src=st, dst="committed", node_status="done", node_key=node_key, trigger="restore")
     await db.execute(
         text("""
             UPDATE dag_nodes SET status = 'done', output_text = :out,
