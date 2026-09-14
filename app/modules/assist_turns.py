@@ -299,7 +299,37 @@ async def list_turns(*, session_id: str, limit: int = 200, db) -> list[dict]:
         """),
         {"sid": session_id, "lim": int(limit)},
     )).mappings().all()
-    return [dict(r) for r in rows]
+    return collapse_double_records([dict(r) for r in rows])
+
+
+def collapse_double_records(rows: list[dict]) -> list[dict]:
+    """§17.1054 — one bubble per operator paste. The capture funnel records a
+    paste TWICE on the submit path: the turn loop ingests a ``message`` row,
+    then ``/submit`` ingests the same text as a ``submit`` (or ``skip``) row
+    with its evidence kind. Both came back from GET /turns and the SPA rendered
+    both — every paste the operator sent showed twice (live, 2026-09-13:
+    2625/2626, 2621/2622, 2616/2617 …). The transcript is a view; the double
+    record stays in the table (the recap renderer already collapses it the
+    same way). Keep the FIRST row's id/time (it is what the SPA's optimistic
+    copy retires against) and the LATER row's kind/evidence_kind (the badge
+    says what the paste became)."""
+    out: list[dict] = []
+    for r in rows:
+        prev = out[-1] if out else None
+        if (
+            prev is not None
+            and (r.get("role") or "") == "operator" == (prev.get("role") or "")
+            and (r.get("kind") or "") in ("submit", "skip")
+            and (prev.get("kind") or "") == "message"
+            and (r.get("content") or "").strip() == (prev.get("content") or "").strip()
+        ):
+            merged = dict(prev)
+            merged["kind"] = r.get("kind")
+            merged["evidence_kind"] = r.get("evidence_kind") or prev.get("evidence_kind")
+            out[-1] = merged
+            continue
+        out.append(r)
+    return out
 
 
 def _render_node_transcript(turns: list[dict], *, max_chars: int = 12000) -> str:
