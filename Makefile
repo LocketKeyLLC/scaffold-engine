@@ -537,9 +537,6 @@ restart: ## Restart the orchestrator (no rebuild)
 dev-up: ## Bring up orchestrator with the dev image (mounts pipelines/, Dockerfile, .github/)
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml up -d $(CONTAINER)
 
-migrate: ## Apply pending DB migrations inside the orchestrator container
-	docker exec $(CONTAINER) python -m app.migrations
-
 clean-pyc: ## Drop stale .pyc / __pycache__ in repo and inside the dev container
 	find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 	find . -name '*.pyc' -delete 2>/dev/null || true
@@ -704,7 +701,8 @@ migration: ## §17.1075 — new Alembic revision: make migration m="add foo colu
 	@[ -n "$(m)" ] || { echo 'usage: make migration m="message"'; exit 1; }
 	docker run --rm --network ai-network --env-file .env --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(CURDIR):/work -w /work scaffold-engine:dev alembic revision -m "$(m)"
 
-migrate: ## §17.1075 — alembic upgrade head against the composed DB (the orchestrator also does this at startup)
+migrate: ## Apply pending DB migrations the way the orchestrator does at startup: SQL runner (≤075) inside the container, then §17.1075 alembic upgrade head
+	docker exec $(CONTAINER) python -m app.migrations
 	docker run --rm --network ai-network --env-file .env -e DATABASE_URL="$$(docker exec $(CONTAINER) printenv DATABASE_URL)" --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(CURDIR):/work -w /work scaffold-engine:dev alembic upgrade head
 
 migrate-status: ## §17.1075 — alembic current + heads
