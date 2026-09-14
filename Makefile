@@ -617,7 +617,7 @@ typecheck: ## §17.1057 — pyright basic mode over the assist gate modules (pyr
 
 mutate: ## §17.1057 — mutation testing over the gate modules (pyproject [tool.mutmut]) in the dev image. Slow; writes mutants/ (gitignored).
 	docker run --rm --network ai-network --env-file .env --user $$(id -u):$$(id -g) -e HOME=/tmp -e PYTHONPATH= -v $(CURDIR):/work -w /work scaffold-engine:dev \
-		sh -c 'mutmut run $(ARGS) ; mutmut results'  # PYTHONPATH= : the image pins /code, which would shadow mutants/
+		sh -c 'mutmut run --max-children $(or $(MUTATE_WORKERS),1) $(ARGS) ; mutmut results'  # PYTHONPATH= : the image pins /code, which would shadow mutants/. One worker: parallel workers reported 100% survival (§17.1057b)
 
 dead-code: ## §17.1057 — vulture report (min confidence 80) with scripts/vulture_whitelist.py
 	vulture app scripts/vulture_whitelist.py --min-confidence 80 $(ARGS)
