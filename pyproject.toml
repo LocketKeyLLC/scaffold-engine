@@ -157,4 +157,6 @@ pytest_add_cli_args_test_selection = [
     "tests/test_assist_decide.py",
     "tests/test_assist_nl_turns.py",
     "tests/test_assist_uncertainty.py",
+    "tests/test_state_check_assembly_fixtures.py",
+    "tests/test_shell_ast_gate.py",
 ]
