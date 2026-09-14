@@ -599,7 +599,7 @@ def _goal_keywords(goal_terms: str, limit: int = 4) -> list[str]:
     low = " ".join((goal_terms or "").lower().split())
     toks = _re.findall(r"[a-z][a-z0-9-]{2,}", low)
     phrases: list[str] = []
-    for a, b in zip(toks, toks[1:]):
+    for a, b in zip(toks, toks[1:], strict=False):
         if a in _GOAL_STOPWORDS or b in _GOAL_STOPWORDS:
             continue
         ph = f"{a} {b}"

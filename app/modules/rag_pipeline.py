@@ -269,7 +269,7 @@ async def _embed_contents_batch(texts: list[str]) -> list[list[float] | None]:
             logger.info("batch embed not supported or failed (%s); falling back to serial", e)
 
         if embs and len(embs) == len(chunk):
-            for (idx, txt), vec in zip(chunk, embs):
+            for (idx, txt), vec in zip(chunk, embs, strict=True):
                 if not vec:
                     continue
                 truncated = truncate_and_normalize(vec)
@@ -1442,7 +1442,7 @@ async def ingest_entries(
             except Exception:  # noqa: BLE001 — progress is best-effort
                 pass
 
-    for _idx, (p, vector) in enumerate(zip(prepared, vectors)):
+    for _idx, (p, vector) in enumerate(zip(prepared, vectors, strict=True)):
         _emit_ingest_progress(_idx)
         if vector is None:
             logger.warning("ingest_embed_failed for title=%s", p["title"])

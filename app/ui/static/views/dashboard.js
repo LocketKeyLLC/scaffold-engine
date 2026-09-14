@@ -1,6 +1,8 @@
 // Unified dashboard home — status overview, active work, recent jobs.
 import * as api from "../api.js";
 import { el, mount, timeAgo, fmtNum } from "../util.js";
+import { storage } from "../storage.js";
+
 import {
   statusBadge,
   statTile,
@@ -190,7 +192,7 @@ export default function dashboard(container) {
   function accountPrompt(account) {
     if (!account || account.claimed) return null;
     if (api.principal()?.is_admin === false) return null;
-    if (localStorage.getItem(ACCOUNT_PROMPT_KEY)) return null;
+    if (storage.get(ACCOUNT_PROMPT_KEY)) return null;
     return el(
       "div",
       { class: "card card-pad setup-checklist account-prompt" },
@@ -204,7 +206,7 @@ export default function dashboard(container) {
           class: "btn btn-ghost btn-sm",
           text: "Dismiss",
           onClick: (e) => {
-            localStorage.setItem(ACCOUNT_PROMPT_KEY, "1");
+            storage.set(ACCOUNT_PROMPT_KEY, "1");
             e.target.closest(".account-prompt")?.remove();
           },
         })
@@ -331,7 +333,7 @@ export default function dashboard(container) {
           class: "btn btn-ghost btn-sm",
           text: "Dismiss",
           onClick: () => {
-            localStorage.setItem(ONBOARD_KEY, "1");
+            storage.set(ONBOARD_KEY, "1");
             load();
           },
         })
@@ -341,7 +343,7 @@ export default function dashboard(container) {
 
   function render(status, work, health, roles, account) {
     // Empty install + not yet dismissed → orientation instead of zeroed tiles.
-    if ((status.total_jobs || 0) === 0 && !localStorage.getItem(ONBOARD_KEY)) {
+    if ((status.total_jobs || 0) === 0 && !storage.get(ONBOARD_KEY)) {
       mount(outlet, setupChecklist(health), welcomeCard());
       return;
     }

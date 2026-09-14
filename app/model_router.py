@@ -24,12 +24,16 @@ import logging
 import random
 import re
 import time
-from typing import Any, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
 from app.config import settings
 from app.providers.base import ModelResponse, Tool, ToolCall  # noqa: F401 — public re-export
+
+if TYPE_CHECKING:  # §17.1059 — annotation-only; the runtime import lives in the provider seam
+    from app.providers.base import LLMProvider
 from app.utils.llm_parsing import parse_json_array, parse_json_object
 from app.utils.tool_call_args import read_tool_args
 
@@ -391,7 +395,7 @@ async def _dispatch_with_retry(
 
 
 async def _retry_provider_call(
-    call: "Callable[[], Any]",  # () -> Awaitable[ModelResponse]  # noqa: F821
+    call: "Callable[[], Any]",  # () -> Awaitable[ModelResponse]
     *,
     model: str,
     max_retries: int | None = None,
@@ -435,7 +439,7 @@ async def _retry_provider_call(
 # Public API
 # ---------------------------------------------------------------------------
 
-def _resolve_role(role: str, overrides: dict | None) -> tuple[str, "LLMProvider"]:  # noqa: F821
+def _resolve_role(role: str, overrides: dict | None) -> tuple[str, "LLMProvider"]:
     """Resolve (model_tag, provider_singleton) for a role.
 
     Sprint E.7 seam: imported lazily so the model_router module stays

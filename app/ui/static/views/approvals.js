@@ -9,6 +9,8 @@ import { statusBadge, loading, errorPanel, toast, emptyState } from "../componen
 import { flowGuide } from "./flow_guide.js";
 import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
 
+import { storage } from "../storage.js";
+
 // Phase 1 in flight — feasibility not ready for approval yet (e.g. a job just
 // submitted from the composer). The detail view waits + polls through these
 // rather than dead-ending.
@@ -293,9 +295,9 @@ export function renderApprovalDetail(container, jobId) {
   // gesture. UI preference only (localStorage) — the server chain entries
   // (/ideate/confirm → /dag → /execute/all) are identical either way.
   const autoRun = el("input", { type: "checkbox" });
-  autoRun.checked = localStorage.getItem("scaffold_auto_run") === "1";
+  autoRun.checked = storage.get("scaffold_auto_run") === "1";
   autoRun.addEventListener("change", () =>
-    localStorage.setItem("scaffold_auto_run", autoRun.checked ? "1" : "0"));
+    storage.set("scaffold_auto_run", autoRun.checked ? "1" : "0"));
   const autoRunLabel = el("label", { class: "row faint autorun-toggle" },
     autoRun, " Auto-run after approve");
   // §17.895 — flipping the sidebar toggle while the gate is open must not

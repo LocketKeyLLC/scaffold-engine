@@ -1,3 +1,4 @@
+import { storage } from "./storage.js";
 // Orchestrator API client. Same-origin fetch; X-API-Key from localStorage.
 //
 // SSE note: every streaming endpoint (/execute/all, /research, /assist/*/stream)
@@ -8,11 +9,11 @@
 const KEY_STORAGE = "scaffold_api_key";
 
 export function getKey() {
-  return localStorage.getItem(KEY_STORAGE) || "";
+  return storage.get(KEY_STORAGE) || "";
 }
 export function setKey(k) {
-  if (k) localStorage.setItem(KEY_STORAGE, k);
-  else localStorage.removeItem(KEY_STORAGE);
+  if (k) storage.set(KEY_STORAGE, k);
+  else storage.remove(KEY_STORAGE);
 }
 export function hasKey() {
   return !!getKey();

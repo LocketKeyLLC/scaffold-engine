@@ -8,6 +8,8 @@ import { el, mount, shortId, timeAgo, fmtDate, mdToHtml, stickyScroll, selection
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
 import { briefPanel } from "./brief_panel.js";
 
+import { storage } from "../storage.js";
+
 // ── Picker ────────────────────────────────────────────────────────────
 function renderPicker(container) {
   let disposed = false;
@@ -152,7 +154,7 @@ export function sectionCount(body) {
 const ASSIST_RECENT_TURNS = 6;
 const ASSIST_ONBOARD_KEY = "scaffold_assist_onboarded";
 function contractCard(onDismiss, session, force) {
-  if (!force && localStorage.getItem(ASSIST_ONBOARD_KEY)) return null;
+  if (!force && storage.get(ASSIST_ONBOARD_KEY)) return null;
   // §17.1011 — retire it once the operator has DONE the loop. Measured on the
   // live homelab session: this four-step "how assist mode works" card was
   // still on screen at step 37 of 41, directly above a step header that
@@ -173,7 +175,7 @@ function contractCard(onDismiss, session, force) {
     el("div", { class: "row" },
       el("h3", { class: "brief-heading", text: "How assist mode works" }),
       el("span", { class: "spacer" }),
-      el("button", { class: "btn btn-ghost btn-sm", text: "Got it", onClick: (e) => { localStorage.setItem(ASSIST_ONBOARD_KEY, "1"); e.target.closest(".assist-contract")?.remove(); onDismiss?.(); } })),
+      el("button", { class: "btn btn-ghost btn-sm", text: "Got it", onClick: (e) => { storage.set(ASSIST_ONBOARD_KEY, "1"); e.target.closest(".assist-contract")?.remove(); onDismiss?.(); } })),
     el("p", { class: "assist-contract-lede", text: "The engine never touches your machine — it has no terminal access, by design. You are its hands: it guides, you act on your computer, it tracks and adapts." }),
     el("div", { class: "welcome-steps" },
       step(1, "Guide", "Press ✦ Guide me — the assistant walks you through the current step with exact commands or clicks for YOUR environment."),
@@ -607,11 +609,11 @@ export function renderChat(container, sessionId, opts = {}) {
   // §17.1055 — session / steps / environment / notes / facts and the brief
   // used to be five cards permanently under the chat. They are reference,
   // not the work: one folded row holds them, remembered per browser.
-  const moreOpen = (() => { try { return localStorage.getItem(ASSIST_MORE_KEY) === "1"; } catch { return false; } })();
+  const moreOpen = (() => { try { return storage.get(ASSIST_MORE_KEY) === "1"; } catch { return false; } })();
   const moreRow = el("details", { class: "assist-more" + (moreOpen ? "" : ""), open: moreOpen || null },
     el("summary", { text: "Session details — environment, pinned values, notes, brief" }),
     belowGrid, briefSlot);
-  moreRow.addEventListener("toggle", () => { try { localStorage.setItem(ASSIST_MORE_KEY, moreRow.open ? "1" : "0"); } catch { /* private mode */ } });
+  moreRow.addEventListener("toggle", () => { try { storage.set(ASSIST_MORE_KEY, moreRow.open ? "1" : "0"); } catch { /* private mode */ } });
   mount(container, embedded ? null : header, contractCard(null, session), stepHero, main, moreRow);
   let briefMounted = false;
 

@@ -45,7 +45,7 @@ def _entry_literals_missing_provenance(path: str) -> list[int]:
         if not isinstance(node, ast.Dict):
             continue
         kv = {
-            k.value: v for k, v in zip(node.keys, node.values)
+            k.value: v for k, v in zip(node.keys, node.values, strict=True)
             if isinstance(k, ast.Constant) and isinstance(k.value, str)
         }
         if not ({"content", "source"} <= set(kv)):

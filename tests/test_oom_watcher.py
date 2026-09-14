@@ -25,7 +25,7 @@ def _flags(argv: list[str]) -> dict[str, str]:
     """Return the --flag → value mapping from the alerts-CLI tail of argv."""
     i = argv.index("emit") + 1
     tail = argv[i:]
-    return dict(zip(tail[::2], tail[1::2]))
+    return dict(zip(tail[::2], tail[1::2], strict=True))
 
 
 def _make_event(

@@ -150,6 +150,16 @@ def _extract_text_and_date(html: str) -> tuple[str, str]:
     return text_out or "", date
 
 
+def _coverage_pct(gaps: dict | None) -> float:
+    """§17.1059 — the gap-analysis coverage as a number, never None (model
+    JSON may carry the key with a null or a non-numeric value)."""
+    try:
+        v = (gaps or {}).get("coverage_pct")
+        return float(v) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 async def _fetch_and_extract(
     results: list[dict], progress: dict | None = None,
 ) -> list[dict]:
@@ -1936,7 +1946,9 @@ async def _execute_iteration_loop(
         ):
             yield hb
         gaps = gap_task.result()
-        coverage = gaps.get("coverage_pct", 0)
+        # §17.1059 — gap analysis is model JSON; a present-but-null field made
+        # this `None >= 85` (a hard TypeError mid-iteration, found by pyright).
+        coverage = _coverage_pct(gaps)
         state.covered_facets.update(gaps.get("covered_facets", []))
 
         yield _sse("gap_analysis", {

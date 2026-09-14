@@ -9,6 +9,8 @@ import { NAV, NAV_GROUPS } from "./nav.js";
 import { execMode, setExecMode } from "./exec_mode.js";
 import * as notify from "./notify.js";
 
+import { storage } from "./storage.js";
+
 // Visible build stamp (sidebar foot). Bump per UI change round — it exists so
 // "is my tab running the latest UI?" is answerable at a glance instead of by
 // diffing pixels (the §17.840/§17.842 stale-module debugging sink).
@@ -18,7 +20,7 @@ const UI_BUILD = "r9";
 // theme and density; the ≤820px drawer is unaffected.
 const SIDEBAR_COLLAPSED_KEY = "scaffold_sidebar_collapsed";
 function sidebarCollapsed() {
-  try { return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1"; } catch { return false; }
+  try { return storage.get(SIDEBAR_COLLAPSED_KEY) === "1"; } catch { return false; }
 }
 
 // ── Global error surface ──────────────────────────────────────────────
@@ -472,7 +474,7 @@ function buildChrome() {
   const shell = el("div", { class: "shell" + (sidebarCollapsed() ? " sidebar-collapsed" : "") }, topbar, sidebar, scrim, rail, outlet);
   function setSidebarCollapsed(on) {
     shell.classList.toggle("sidebar-collapsed", !!on);
-    try { on ? localStorage.setItem(SIDEBAR_COLLAPSED_KEY, "1") : localStorage.removeItem(SIDEBAR_COLLAPSED_KEY); } catch { /* private mode */ }
+    try { on ? storage.set(SIDEBAR_COLLAPSED_KEY, "1") : storage.remove(SIDEBAR_COLLAPSED_KEY); } catch { /* private mode */ }
     window.dispatchEvent(new CustomEvent("scaffold:sidebar", { detail: { collapsed: !!on } }));
   }
   if (sidebarKeyHandler) document.removeEventListener("keydown", sidebarKeyHandler);
@@ -499,7 +501,7 @@ const ACCOUNT_PROMPT_KEY = "scaffold_account_prompt_dismissed";
 const THEME_LABELS = { auto: "◐ Auto", dark: "● Dark", light: "○ Light" };
 
 function themeToggle() {
-  const cur = () => localStorage.getItem(THEME_KEY) || "auto";
+  const cur = () => storage.get(THEME_KEY) || "auto";
   const btn = el("button", {
     class: "btn btn-ghost",
     title: "Theme (auto follows the OS)",
@@ -509,10 +511,10 @@ function themeToggle() {
     const order = ["auto", "dark", "light"];
     const next = order[(order.indexOf(cur()) + 1) % order.length];
     if (next === "auto") {
-      localStorage.removeItem(THEME_KEY);
+      storage.remove(THEME_KEY);
       delete document.documentElement.dataset.theme;
     } else {
-      localStorage.setItem(THEME_KEY, next);
+      storage.set(THEME_KEY, next);
       document.documentElement.dataset.theme = next;
     }
     btn.textContent = THEME_LABELS[next];
@@ -657,7 +659,7 @@ function startAttentionPolling() {
 }
 
 function densityToggle() {
-  const compact = () => localStorage.getItem(DENSITY_KEY) === "compact";
+  const compact = () => storage.get(DENSITY_KEY) === "compact";
   const label = () => (compact() ? "▦ Compact" : "▢ Cozy");
   const btn = el("button", {
     class: "btn btn-ghost",
@@ -666,10 +668,10 @@ function densityToggle() {
   });
   btn.addEventListener("click", () => {
     if (compact()) {
-      localStorage.removeItem(DENSITY_KEY);
+      storage.remove(DENSITY_KEY);
       delete document.documentElement.dataset.density;
     } else {
-      localStorage.setItem(DENSITY_KEY, "compact");
+      storage.set(DENSITY_KEY, "compact");
       document.documentElement.dataset.density = "compact";
     }
     btn.textContent = label();
@@ -687,22 +689,22 @@ function densityToggle() {
 // closed set) → everything open; the operator collapses what they don't want.
 const NAV_CLOSED_KEY = "scaffold_nav_closed";
 function navClosedGroups() {
-  try { return new Set(JSON.parse(localStorage.getItem(NAV_CLOSED_KEY)) || []); }
+  try { return new Set(JSON.parse(storage.get(NAV_CLOSED_KEY)) || []); }
   catch { return new Set(); }
 }
 function saveNavClosedGroups(set) {
-  localStorage.setItem(NAV_CLOSED_KEY, JSON.stringify([...set]));
+  storage.set(NAV_CLOSED_KEY, JSON.stringify([...set]));
 }
 
 // §17.896 — the mirror of the above for groups that default to COLLAPSED
 // (System): membership means "the operator deliberately opened this".
 const NAV_OPENED_KEY = "scaffold_nav_opened";
 function navOpenedGroups() {
-  try { return new Set(JSON.parse(localStorage.getItem(NAV_OPENED_KEY)) || []); }
+  try { return new Set(JSON.parse(storage.get(NAV_OPENED_KEY)) || []); }
   catch { return new Set(); }
 }
 function saveNavOpenedGroups(set) {
-  localStorage.setItem(NAV_OPENED_KEY, JSON.stringify([...set]));
+  storage.set(NAV_OPENED_KEY, JSON.stringify([...set]));
 }
 
 function highlightNav(path) {
@@ -867,7 +869,7 @@ async function maybeFirstRun() {
     /* pre-§17.817 server */
   }
   const acct = await api.accountStatus();
-  if (acct && !acct.claimed && !localStorage.getItem(ACCOUNT_PROMPT_KEY)) {
+  if (acct && !acct.claimed && !storage.get(ACCOUNT_PROMPT_KEY)) {
     location.hash = "#/setup";
   }
 }

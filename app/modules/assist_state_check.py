@@ -355,7 +355,8 @@ def render_probe_message(probes: list[dict], *, checked: int, unchecked: int) ->
                 "own words what is and is not working and I will take it from there.")
     what = "\n".join(f"- `{p['id']}` {p['claim'][:110]}" for p in probes[:20])
     return (
-        f"🩺 **State check — {len(probes)} thing{'s' if len(probes) != 1 else ''} the plan believes about your system.**\n"
+        f"🩺 **State check — {len(probes)} thing{'s' if len(probes) != 1 else ''} the plan believes about your system"
+        f"{f' ({checked} claims checked)' if checked and checked != len(probes) else ''}.**\n"
         "Nothing here changes anything: every command only reads. Paste the whole block into your usual "
         "shell, then paste ALL of the output back here (keep the `== … ==` lines).\n\n"
         "```bash\n" + render_probe_script(probes) + "\n```\n\n"

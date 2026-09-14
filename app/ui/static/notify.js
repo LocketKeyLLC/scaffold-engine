@@ -1,3 +1,4 @@
+import { storage } from "./storage.js";
 // §17.1007 — the console never called the operator back.
 //
 // Before this module there was not one `document.title` write or Notification
@@ -76,7 +77,7 @@ export function notifySupported() {
 export function notifyEnabled() {
   return (
     notifySupported() &&
-    localStorage.getItem(PERM_KEY) === "1" &&
+    storage.get(PERM_KEY) === "1" &&
     Notification.permission === "granted"
   );
 }
@@ -94,17 +95,17 @@ export async function enableNotifications() {
     }
   }
   if (perm === "granted") {
-    localStorage.setItem(PERM_KEY, "1");
+    storage.set(PERM_KEY, "1");
     return true;
   }
   // "denied" is sticky in every browser — storing the flag would leave the
   // toggle reading "on" while nothing ever fires.
-  localStorage.removeItem(PERM_KEY);
+  storage.remove(PERM_KEY);
   return false;
 }
 
 export function disableNotifications() {
-  localStorage.removeItem(PERM_KEY);
+  storage.remove(PERM_KEY);
 }
 
 /** Fire one notification. No-op unless opted in. `href` is a SPA hash route —

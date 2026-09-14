@@ -8,6 +8,8 @@ import * as api from "../api.js";
 import { el, mount } from "../util.js";
 import { errorPanel, loading, toast } from "../components.js";
 
+import { storage } from "../storage.js";
+
 // The operator-tuned cloud picks (§17.632 general A/B, §17.567 verifier A/B,
 // §17.498 coder, §17.631 research_extract). Applied only for tags actually
 // pulled on the target daemon; missing tags keep the current value.
@@ -78,7 +80,7 @@ export default function setup(container) {
     // Skipping is remembered (same key as the dashboard card's Dismiss) so
     // the boot-time route into setup stops nagging a deliberate decliner.
     const skip = () => {
-      localStorage.setItem("scaffold_account_prompt_dismissed", "1");
+      storage.set("scaffold_account_prompt_dismissed", "1");
       stepConnect();
     };
     mount(

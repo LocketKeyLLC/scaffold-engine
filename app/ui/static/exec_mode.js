@@ -1,3 +1,4 @@
+import { storage } from "./storage.js";
 // §17.853 — the global Auto / Assist execution mode.
 //
 // Operator finding: pressing Execute launched AUTONOMOUS execution when they
@@ -16,12 +17,12 @@
 const KEY = "scaffold_exec_mode";
 
 export function execMode() {
-  return localStorage.getItem(KEY) === "auto" ? "auto" : "assist";
+  return storage.get(KEY) === "auto" ? "auto" : "assist";
 }
 
 export function setExecMode(mode) {
   const m = mode === "auto" ? "auto" : "assist";
-  localStorage.setItem(KEY, m);
+  storage.set(KEY, m);
   // §17.854 (audit S4) — notify open views (theater/plan run buttons) so their
   // labels don't lie about what Execute will do after a sidebar toggle.
   window.dispatchEvent(new CustomEvent("scaffold:execmode", { detail: m }));

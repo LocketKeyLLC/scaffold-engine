@@ -633,8 +633,7 @@ async def _run_turn_inner(
             # §17.886(#2) — run the tracker reconcile, then honor EVERY result
             # action (the old code matched only 'advanced', so 'finalized' and
             # 'added_step' re-guided the stale node).
-            async for e in _track_then_continue(session_id, text_, nk, history, db,
-                                                finalize=(action == "finalize")):
+            async for e in _track_then_continue(session_id, text_, nk, history, db):
                 yield e
             handled["v"] = action
             return
@@ -881,9 +880,11 @@ async def _recent_advance_message(session_id: str, node_key, db) -> str | None:
     return None
 
 
-async def _track_then_continue(session_id: str, text_: str, nk, history, db,
-                               *, finalize: bool = False) -> AsyncIterator[_Event]:
-    """§17.886(#2) — tracker reconcile honoring EVERY result action."""
+async def _track_then_continue(session_id: str, text_: str, nk, history, db) -> AsyncIterator[_Event]:
+    """§17.886(#2) — tracker reconcile honoring EVERY result action. A
+    `finalize` decision reaches here too: the tracker's own verdict decides
+    whether the plan is complete (its `finalized` action), so there is no
+    separate flag to pass (§17.1059 — vulture found the one that was)."""
     from app.modules import assist_agent
     from app.routers.assist import AssistInterpretInput, assist_track
     tr = {}
