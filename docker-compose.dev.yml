@@ -58,6 +58,9 @@ services:
       - ./sdk:/code/sdk:ro
       - ./scripts:/code/scripts:ro
       - ./presets:/code/presets:ro
+      # §17.1057 — ast-grep rule set + config
+      - ./rules:/code/rules:ro
+      - ./sgconfig.yml:/code/sgconfig.yml:ro
       - ./.env.example:/code/.env.example:ro
       - ./db:/code/db:ro
       # Pipeline + repo-shape inputs probed by tests.

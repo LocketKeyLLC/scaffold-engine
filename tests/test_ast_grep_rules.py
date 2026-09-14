@@ -59,6 +59,11 @@ def _scan(cwd: pathlib.Path, config: pathlib.Path) -> list[dict]:
         if REQUIRED:
             raise AssertionError(msg + "; this gate must not be skipped in ci-tier-0")
         pytest.skip(msg + "; enforced in ci-tier-0")
+    if not (ROOT / "sgconfig.yml").exists() or not (ROOT / "rules" / "ast-grep").is_dir():
+        msg = f"rules/ast-grep + sgconfig.yml are not present under {ROOT} (an image without them)"
+        if REQUIRED:
+            raise AssertionError(msg + "; this gate must not be skipped in ci-tier-0")
+        pytest.skip(msg + "; enforced in ci-tier-0")
     out = subprocess.run([BIN, "scan", "-c", str(config), "--json"], cwd=cwd,
                          capture_output=True, text=True)
     assert out.returncode in (0, 1), out.stderr[-800:]
