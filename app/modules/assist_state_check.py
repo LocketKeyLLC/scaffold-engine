@@ -134,6 +134,22 @@ def destructive_repair(text_value: str) -> bool:
     return bool(_DESTRUCTIVE_REPAIR_RE.search(text_value or ""))
 
 
+# §17.1056 — a contradiction argued from ABSENCE in unrelated output ("grep
+# found no references to 'DeFruscio Media'; output only lists data files") is
+# not evidence the setup is missing — it is evidence the probe looked in the
+# wrong place. Live: S:T12 (Jellyfin first-time setup) → a "Complete Jellyfin
+# first-time setup" repair the operator was asked to confirm.
+_INDIRECT_REASON_RE = re.compile(
+    r"(?i)\b(?:grep (?:found|returned|shows?) no|no (?:references?|mention|match(?:es)?|line) (?:to|of|for)\b|"
+    r"does not (?:mention|list|show|contain|include)|only lists|not (?:present|found) in (?:the )?output|"
+    r"absent from (?:the )?(?:output|listing)|nothing (?:in the output )?(?:mentions|references))")
+
+
+def indirect_contradiction(verdict: dict) -> bool:
+    """True when the judge's reason is an argument from absence."""
+    return bool(_INDIRECT_REASON_RE.search(verdict.get("reason") or ""))
+
+
 def reopen_refused(verdict: dict) -> bool:
     """§17.1054 — a `reopen` is refused when the step is itself a one-off or
     destructive action (its title says stop/remove/clear/audit…, or its
@@ -410,7 +426,10 @@ _JUDGE_OPENING = (
     "downloaded, rewritten) is CONFIRMED when its effect is present and is never repaired by repeating it. "
     "Such a claim is contradicted ONLY if the specific object it names is back (the destroyed VM listed "
     "again, the truncated file's old content restored); other things existing or running now do not "
-    "contradict it. A claim ending in an ellipsis (…) was clipped — judge only the part you can read."
+    "contradict it. A claim ending in an ellipsis (…) was clipped — judge only the part you can read. "
+    "Judge only what the output DIRECTLY shows: a setting, an account, a completed wizard is UNKNOWN "
+    "unless the output states it — a string being absent from a listing of unrelated files is not a "
+    "contradiction."
 )
 
 
@@ -490,6 +509,8 @@ def render_verdicts(verdicts: list[dict]) -> str:
         lines.append(f"- {icon[v['verdict']]} `{v['id']}` {v['claim'][:90]}" + (f" — {v['reason'][:140]}" if v.get("reason") and v["verdict"] != "confirmed" else "")
                      + (" — *this step recorded a one-off action, so I am not reopening it; you decide*"
                         if v.get("needs_decision") == "reopen" else
+                        " — *the check only showed absence in unrelated output, so I am not proposing a fix; look for yourself*"
+                        if v.get("needs_decision") == "indirect" else
                         " — *the only repair would remove or stop something, so I am not proposing one; you decide*"
                         if v.get("needs_decision") else ""))
     bad = [v for v in verdicts if v["verdict"] == "contradicted"]
@@ -630,6 +651,12 @@ def proposals_from_verdicts(verdicts: list[dict], *, anchor_node_key: Optional[s
         if cb and cb != v.get("id") and cb in contradicted_ids:
             continue
         repair = (v.get("repair") or "").strip()
+        if indirect_contradiction(v):
+            # §17.1056 — no proposal from an argument-from-absence; the
+            # operator is told to look themselves.
+            v["needs_decision"] = "indirect"
+            logger.info("state_check_indirect_contradiction id=%s reason=%r", v.get("id"), (v.get("reason") or "")[:80])
+            continue
         if v.get("kind") == "step":
             if repair:
                 out.append({"node_key": v.get("node_key"), "action": "repair",

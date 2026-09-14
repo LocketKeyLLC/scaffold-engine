@@ -1489,6 +1489,26 @@ class AssistGotoStepInput(BaseModel):
     node_key: str = Field(description="Step to move to and present.")
 
 
+class AssistRestoreStepInput(BaseModel):
+    node_key: str = Field(description="A step reopened by a confirmed re-plan or state check, to put back as it was.")
+
+
+@router.post("/assist/{session_id}/step/restore")
+async def assist_restore_step(
+    session_id: str, body: AssistRestoreStepInput, db=Depends(get_db),
+):
+    """§17.1056 — undo a reopen from its pre-image (evidence + output are
+    captured before every reopen now). Refused once the operator has worked
+    on the step since, or when it is not in a reopened state."""
+    from app.modules import assist_notes
+    try:
+        return await assist_notes.restore_reopened_step(
+            session_id=session_id, node_key=body.node_key, db=db)
+    except ValueError as exc:
+        msg = str(exc)
+        raise HTTPException(status_code=404 if "not found" in msg else 409, detail=msg)
+
+
 @router.get("/assist/{session_id}/steps")
 async def assist_list_steps(session_id: str, db=Depends(get_db)):
     """§17.938 — the session's steps, for the step picker.

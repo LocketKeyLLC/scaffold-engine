@@ -592,6 +592,13 @@ async def _run_turn_inner(
                 # flow seeded with the evidence + the verifier's reason: the
                 # pasted values are now provenance-legal grounding, so the next
                 # command can use them directly.
+                # §17.953 — the offer leads (for anyone reading top-down) and a
+                # one-liner closes the reply, where the eye actually lands in a
+                # chat pinned to its bottom. §17.1056 — that closer is the fix's
+                # last line, not a third bubble.
+                _nudge = ("↩︎ Or — if this step is in fact already done on "
+                          "your machine, reply `confirm` and I'll mark it "
+                          "complete and move to the next one.") if _offer_made else None
                 async for e in _fix_flow(
                     session_id, nk,
                     (f"{text_}\n\n[Progress noted, but the step is not complete "
@@ -599,37 +606,9 @@ async def _run_turn_inner(
                      "output above: use the concrete values it contains."),
                     history, db,
                     status_text="Good progress — the step isn't finished yet, so I'm working out your next move from what you just pasted…",
+                    trailer=_nudge,
                 ):
                     yield e
-                if _offer_made:
-                    # §17.953 — §17.951 put the offer FIRST because "they read
-                    # the top of the reply". True of a static reply; false of a
-                    # chat pinned to its own bottom. What actually happens: the
-                    # offer renders, then `_fix_flow` spends a minute or two on
-                    # research and drops a long fix underneath it, and the
-                    # transcript scrolls to the end of THAT. The invitation is
-                    # off-screen by the time the operator has anything to read.
-                    # Live 2026-09-06: offered three times, answered none, then
-                    # forced the step with the Done button.
-                    #
-                    # So say it at both ends. The offer still leads (that
-                    # ordering is load-bearing for anyone reading top-down) and
-                    # a one-liner now closes the reply, which is where the eye
-                    # actually lands. Same staged offer either way — this adds
-                    # no new state and no second thing to answer.
-                    _nudge = ("↩︎ Or — if this step is in fact already done on "
-                              "your machine, reply `confirm` and I'll mark it "
-                              "complete and move to the next one.")
-                    yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _nudge})
-                    try:
-                        await assist_agent.capture_assistant_reply(
-                            session_id=session_id, node_key=nk, kind="ask",
-                            content=_nudge, db=db,
-                        )
-                    except Exception:  # noqa: BLE001 — capture never blocks
-                        logger.warning(
-                            "completion_confirm_nudge_capture_failed sid=%s",
-                            session_id)
             handled["v"] = "submit"
             return
         if confident and action == "skip":
@@ -1075,7 +1054,7 @@ async def _resolve_state_check(session_id: str, nk, pasted: str, history, db) ->
 
 
 async def _fix_flow(session_id: str, nk, error_text: str, history, db,
-                    *, status_text: str) -> AsyncIterator[_Event]:
+                    *, status_text: str, trailer: str | None = None) -> AsyncIterator[_Event]:
     """§17.874/884 — the research-backed fix sequence, shared by the fix
     dispatch branch and the incomplete-submit continuation."""
     from app.modules import assist_agent
@@ -1105,6 +1084,11 @@ async def _fix_flow(session_id: str, nk, error_text: str, history, db,
         "retry (research is re-run fresh), or paste just the last "
         "~50 lines of the error output to tighten the context."
     )
+    if (trailer or "").strip():
+        # §17.1056 — the §17.953 closing nudge rides INSIDE the fix (its last
+        # line) instead of a third bubble; same words, same place the eye
+        # lands, one less message per blocked paste.
+        fix_text = fix_text.rstrip() + "\n\n---\n" + trailer.strip()
     yield _ev(ASSIST_ANSWER, {"kind": "fix", "text": fix_text})
     try:  # §17.873 — answers must outlive the run row
         await assist_agent.capture_assistant_reply(

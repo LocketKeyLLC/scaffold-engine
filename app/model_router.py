@@ -815,6 +815,7 @@ async def tool_call(
     fallback: str | None = None,
     draws: int = 3,
     require_nonempty: str | None = None,
+    think: bool | None = None,
 ) -> ModelResponse:
     """Call an LLM with native tool-calling, falling back to JSON-coaxing
     for providers that don't support native tools.
@@ -858,7 +859,9 @@ async def tool_call(
     """
     resp = None
     attempts = max(1, draws)
-    think: bool | None = None
+    # §17.1056 — a caller may switch reasoning off from the FIRST draw (a
+    # classification needs none); the §17.1053 starved-draw rescue only
+    # engages when the caller left it open.
     for d in range(attempts):
         resp = await _tool_call_once(
             messages, tools, model,
