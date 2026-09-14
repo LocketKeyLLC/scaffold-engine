@@ -607,8 +607,8 @@ lint-imports: ## §17.1057 — module-boundary contracts (.importlinter); grimp 
 check-openapi-breaking: ## §17.1057 — breaking-change diff of docs/openapi.json against origin/main (oasdiff). Part of ci-tier-0; skips when origin/main is unavailable.
 	@command -v oasdiff >/dev/null 2>&1 || { printf '\033[1;31m✗ oasdiff not installed — release binary from github.com/oasdiff/oasdiff\033[0m\n'; exit 1; }
 	@if git show origin/main:docs/openapi.json >/tmp/openapi.main.json 2>/dev/null; then \
-		if oasdiff breaking /tmp/openapi.main.json docs/openapi.json --fail-on ERR --severity-levels docs/openapi-severity.txt >/tmp/oasdiff.out 2>&1; then \
-			printf '\033[1;32m✓ openapi: no breaking changes vs origin/main\033[0m\n'; \
+		if python3 scripts/openapi_breaking_gate.py /tmp/openapi.main.json docs/openapi.json >/tmp/oasdiff.out 2>&1; then \
+			cat /tmp/oasdiff.out; \
 		else cat /tmp/oasdiff.out; exit 1; fi; \
 	else printf '\033[2m  openapi breaking-change check skipped (no origin/main)\033[0m\n'; fi
 
