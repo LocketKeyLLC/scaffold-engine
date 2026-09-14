@@ -262,6 +262,8 @@ jobs:
             -v "$PWD/sdk:/code/sdk:ro" \
             -v "$PWD/scripts:/code/scripts:ro" \
             -v "$PWD/db:/code/db:ro" \
+            -v "$PWD/alembic:/code/alembic:ro" \
+            -v "$PWD/alembic.ini:/code/alembic.ini:ro" \
             -v "$PWD/pipelines:/code/pipelines" \
             -v "$PWD/docs:/code/docs:ro" \
             -v "$PWD/pyproject.toml:/code/pyproject.toml:ro" \

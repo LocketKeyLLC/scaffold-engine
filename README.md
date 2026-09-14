@@ -216,7 +216,7 @@ Once the stack is running, these are the commands you'll use most often:
 | Tail logs in real time | `make logs-follow` | `docker logs -f scaffold-orchestrator`, scroll-back included. |
 | List active jobs | `make status` | Hits `/status`, prints a counts table + recent jobs. |
 | Reap stale jobs | `make clean` | Triggers the cleanup endpoint; safe to run anytime. |
-| Apply DB migrations | `make migrate` | The lifespan auto-applies migrations on startup; this is for force-runs. |
+| Apply DB migrations | `make migrate` | SQL runner then Alembic, the same order the lifespan uses on startup; this is for force-runs. |
 | Re-run health audit | `make doctor` | Full pre-flight, with explanations. |
 | Show all targets | `make help` | Self-documenting Makefile; every target has a one-line description. |
 

@@ -58,3 +58,5 @@ hypothesis==6.168.0  # §17.1068 — property tests in the smoke lane
 instructor==1.17.0
 # §17.1074 — the assist step state machine (declaration + oracle)
 transitions==0.9.3
+# §17.1075 — Alembic for schema changes after db/migrations/075
+alembic==1.20.0

@@ -116,6 +116,14 @@ def main() -> int:
         return 1
 
     files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    # §17.1075 — Alembic owns schema changes after 075. A new SQL file above
+    # the hand-over point is the old convention creeping back in.
+    _ALEMBIC_HANDOVER = 75
+    late = [f.name for f in files if f.name[:3].isdigit() and int(f.name[:3]) > _ALEMBIC_HANDOVER]
+    if late:
+        print(f"✗ lint-migrations: {late} — schema changes after 075 are Alembic revisions "
+              f"(make migration m=\"…\"), not db/migrations/*.sql (§17.1075)")
+        return 1
     failures: list[tuple[str, int]] = []
     checked = 0
     for path in files:
