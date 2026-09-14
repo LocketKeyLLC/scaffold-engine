@@ -21,10 +21,10 @@ from starlette.responses import JSONResponse
 from sqlalchemy import text
 
 try:
-    from pymilvus.exceptions import MilvusException
+    from pymilvus.exceptions import MilvusException  # pyright: ignore[reportAssignmentType] — fallback class below
 except ImportError:  # pragma: no cover — pymilvus is required, but keep the
     # import defensive so a stripped install can still load the middleware.
-    class MilvusException(Exception):  # type: ignore[no-redef]
+    class MilvusException(Exception):  # type: ignore[no-redef]  # pyright: ignore[reportRedeclaration]
         pass
 
 from app.config import settings
