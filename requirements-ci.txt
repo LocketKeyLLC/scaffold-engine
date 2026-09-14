@@ -54,3 +54,5 @@ tree-sitter-bash==0.25.1
 # §17.1066 — browser-fingerprint retry on 403/429 for research fetches
 curl_cffi==0.16.3
 hypothesis==6.168.0  # §17.1068 — property tests in the smoke lane
+# §17.1072 — instructor-backed decide path (trial, default off)
+instructor==1.17.0
