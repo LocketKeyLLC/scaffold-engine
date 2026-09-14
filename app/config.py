@@ -978,6 +978,11 @@ class Settings(BaseSettings):
     # — is historical.) Default OFF so tests + fresh installs keep the legacy path.
     assist_unified_decision_enabled: bool = False
     assist_decide_model_role: str = "model_general"
+    # §17.1072 — "router" (the model_router tool-call loop with its four retry
+    # mechanisms) or "instructor" (schema-validated retries via Ollama's
+    # OpenAI-compatible endpoint; falls back to router on any failure). Trial.
+    assist_decide_backend: str = "router"
+    assist_decide_instructor_retries: int = Field(default=2, ge=0, le=5)
     # §17.855 (audit "policy migration") — fold the deterministic phrase gates
     # (pivot / help / how-to / shell-result) into the SERVER `/decide` path as a
     # post-filter (`assist_policy.apply_deterministic_overrides`), so the CONFIDENT

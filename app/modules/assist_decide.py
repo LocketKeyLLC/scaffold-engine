@@ -292,6 +292,43 @@ async def decide_turn(
     # on large-context turns (deepseek intermittently returns success but no tool
     # call); it emits one cleanly on a retry. One extra attempt keeps those turns
     # on the unified decision instead of dropping to the phrase-gate cascade.
+    # §17.873 — the deterministic overrides run on EVERY return path, most of
+    # all the model-failure fallbacks. Live incident: the /decide model
+    # returned no tool call on a clean shell paste; the fallback "question"
+    # decision skipped the override block, so the §17.855 shell→submit gate —
+    # which exists precisely to compensate for model failures — never fired,
+    # and the operator's completed-step evidence earned yet another
+    # walkthrough rerun. §17.812-C2's lesson, inverted: gates must not depend
+    # on the classifier they compensate for SUCCEEDING either.
+    def _finalize(decision: dict) -> dict:
+        if settings.assist_decide_deterministic_overrides:
+            before = decision["action"]
+            decision = assist_policy.apply_deterministic_overrides(decision, message)
+            if decision.get("override"):
+                logger.info(
+                    "decide_turn_override session=%s %s->%s reason=%s",
+                    session_id, before, decision["action"], decision["override"],
+                )
+        return decision
+
+    # §17.1072 — instructor path (trial): schema-validated retries in ONE
+    # mechanism. Any failure falls through to the router loop below.
+    if (settings.assist_decide_backend or "router").lower() == "instructor":
+        try:
+            import asyncio as _asyncio
+            from app.modules.assist_decide_instructor import decide_via_instructor
+            _model, _ = model_router._resolve_role(settings.assist_decide_model_role, None)
+            _d, _meta = await _asyncio.to_thread(
+                decide_via_instructor, messages, actions=DECIDE_ACTIONS, model=_model,
+                base_url=settings.ollama_base_url.rstrip("/") + "/v1",
+                max_retries=settings.assist_decide_instructor_retries)
+            logger.info("decide_turn_instructor session=%s action=%s latency_ms=%s",
+                        session_id, _d.get("action"), _meta.get("latency_ms"))
+            return _finalize({**_d, "node_key": nk, "title": ctx.title, "is_decision": is_decision,
+                              "signals": signals, "backend": "instructor"})
+        except Exception as exc:  # noqa: BLE001 — the trial must never lose a turn
+            logger.warning("decide_turn_instructor_failed session=%s err=%r (router fallback)", session_id, exc)
+
     resp = None
     for attempt in range(2):
         try:
@@ -321,24 +358,6 @@ async def decide_turn(
             session_id, attempt,
         )
 
-    # §17.873 — the deterministic overrides run on EVERY return path, most of
-    # all the model-failure fallbacks. Live incident: the /decide model
-    # returned no tool call on a clean shell paste; the fallback "question"
-    # decision skipped the override block, so the §17.855 shell→submit gate —
-    # which exists precisely to compensate for model failures — never fired,
-    # and the operator's completed-step evidence earned yet another
-    # walkthrough rerun. §17.812-C2's lesson, inverted: gates must not depend
-    # on the classifier they compensate for SUCCEEDING either.
-    def _finalize(decision: dict) -> dict:
-        if settings.assist_decide_deterministic_overrides:
-            before = decision["action"]
-            decision = assist_policy.apply_deterministic_overrides(decision, message)
-            if decision.get("override"):
-                logger.info(
-                    "decide_turn_override session=%s %s->%s reason=%s",
-                    session_id, before, decision["action"], decision["override"],
-                )
-        return decision
 
     if resp is None:
         return _finalize({**_fallback_decision("model_error"), "node_key": nk,
