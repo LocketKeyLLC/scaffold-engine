@@ -1030,6 +1030,42 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
     except Exception as exc:  # noqa: BLE001
         yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": f"I couldn't start the state check ({exc}). Tell me in your own words what is and is not working."})
         return
+    # §17.1077 — the opt-in local runner closes the loop: run the probes,
+    # record them as the operator turn a paste would have been, judge.
+    try:
+        from app.modules import assist_local_runner as _lr
+        _spec = await _lr.runner_spec(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("local_runner_lookup_failed sid=%s err=%r", session_id, exc)
+        _spec = None
+    if _spec is not None and res.get("probes"):
+        yield _ev(ASSIST_TURN_STATUS, {"text": f"🩺 Running {len(res['probes'])} read-only checks through your local runner ({_spec.name})…"})
+        _pq: asyncio.Queue = asyncio.Queue()
+        async def _lp(i: int, n: int) -> None:
+            await _pq.put(f"🩺 Local runner: {i} of {n} checks done…")
+        _t = asyncio.create_task(_lr.run_probes(_spec, res["probes"], on_progress=_lp))
+        while not _t.done():
+            try:
+                yield _ev(ASSIST_TURN_STATUS, {"text": await asyncio.wait_for(_pq.get(), timeout=1.0)})
+            except asyncio.TimeoutError:
+                continue
+        while not _pq.empty():          # frames the fast tail of the loop left behind
+            yield _ev(ASSIST_TURN_STATUS, {"text": _pq.get_nowait()})
+        pasted, executed = _t.result()
+        if executed:
+            record = _lr.transcript_record(executed, pasted)
+            _rnk = nk or res.get("node_key")
+            try:
+                await assist_agent.ingest_turn(session_id=session_id, role="operator", kind="message",
+                                               content=record, node_key=_rnk, db=db)
+            except Exception:  # noqa: BLE001
+                logger.warning("local_runner_record_failed sid=%s", session_id)
+            logger.warning("local_runner_executed sid=%s node_key=%s probes=%d ok=%d",
+                           session_id, _rnk, len(executed), sum(1 for e in executed if e["ok"]))
+            async for e in _resolve_state_check(session_id, nk, pasted, [], db):
+                yield e
+            return
+        yield _ev(ASSIST_TURN_STATUS, {"text": "🩺 The local runner executed nothing — falling back to the paste."})
     yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": res["message"]})
     try:
         await assist_agent.capture_assistant_reply(

@@ -586,7 +586,8 @@ async def start_state_check(*, db, session_id: str, node_key: Optional[str], on_
                    session_id, pending["node_key"], len(claims), len(probes), len(refused))
     targets = sum(1 for c in claims if c.get("kind") != "pin")
     return {"message": render_probe_message(probes, checked=len(probes), unchecked=max(0, targets - len(probes))),
-            "probes": probes, "claims_total": len(claims), "refused": refused}
+            "probes": probes, "claims_total": len(claims), "refused": refused,
+            "node_key": pending["node_key"]}
 
 
 async def get_pending_state_check(*, db, session_id: str) -> Optional[dict]:
