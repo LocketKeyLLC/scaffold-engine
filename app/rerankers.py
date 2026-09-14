@@ -291,6 +291,52 @@ def rerank_rrf(
 # ---------------------------------------------------------------------------
 # Public API — try CrossEncoder, fall back to RRF
 # ---------------------------------------------------------------------------
+def rerank_http(
+    query: str,
+    documents: list[str],
+    top_k: int = 5,
+    max_pairs: int = _MAX_PAIRS,
+) -> RerankResult | None:
+    """§17.1065 — score via a sidecar speaking the text-embeddings-inference
+    ``POST /rerank`` API (the bundled ``app.reranker_service`` or a real TEI
+    for a model it supports). Same pair formatting and the same [0, 1]
+    normalisation as the in-process path, so a backend swap does not move
+    the confidence threshold. Returns None on any failure (the caller falls
+    back)."""
+    import httpx
+    from app.config import settings
+    docs = documents[:max_pairs]
+    if not docs:
+        return RerankResult(items=[], backend="HTTP", latency_ms=0.0)
+    payload = {
+        "query": _format_query(query),
+        "texts": [_format_document(d) for d in docs],
+        "raw_scores": True,
+        "truncate": True,
+    }
+    try:
+        t0 = time.monotonic()
+        with httpx.Client(timeout=settings.reranker_timeout_s) as client:
+            r = client.post(f"{settings.reranker_url.rstrip('/')}/rerank", json=payload)
+        r.raise_for_status()
+        rows = r.json()
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        raw = [0.0] * len(docs)
+        for row in rows:
+            raw[int(row["index"])] = float(row["score"])
+        _, normalize = get_score_range_info(settings.model_reranker)
+        scores = normalize(raw)
+        items = [RerankedItem(index=i, score=float(s), text=docs[i]) for i, s in enumerate(scores)]
+        items.sort(key=lambda x: x.score, reverse=True)
+        items = items[:top_k]
+        logger.info("reranker_completed: backend=HTTP docs=%d elapsed_ms=%.0f top_score=%.4f",
+                    len(docs), elapsed_ms, items[0].score if items else 0)
+        return RerankResult(items=items, backend="HTTP", latency_ms=elapsed_ms)
+    except Exception as e:  # noqa: BLE001 — a sidecar hiccup must degrade, never raise
+        logger.warning("http_rerank_failed: url=%s error=%s (falling back)", settings.reranker_url, e)
+        return None
+
+
 def rerank(
     query: str,
     documents: list[str],
@@ -305,6 +351,11 @@ def rerank(
     shortlisted candidate scored instead of being silently truncated to
     the ``_MAX_PAIRS`` default. Bare callers keep the safe default.
     """
+    from app.config import settings
+    if (settings.reranker_backend or "local").lower() in ("http", "tei"):  # §17.1065
+        result = rerank_http(query, documents, top_k=top_k, max_pairs=max_pairs)
+        if result is not None:
+            return result
     result = rerank_cross_encoder(query, documents, top_k=top_k, max_pairs=max_pairs)
     if result is not None:
         return result

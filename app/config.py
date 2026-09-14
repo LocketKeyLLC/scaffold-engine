@@ -1130,6 +1130,18 @@ class Settings(BaseSettings):
     # recording — safe even alone once the master gate is on. Stage B (inject)
     # and C (grounding, warn-only) are toggled independently. `umem_max_chars`
     # bounds the single injected memory block (Stage B). See db/migrations/057.
+    # §17.1065 — reranker backend. "local" = the in-process CrossEncoder
+    # singleton (CPU-saturating: §17.704 measured ~6 s/query warm, 40 s for
+    # three concurrent); "http" = a sidecar speaking the text-embeddings-
+    # inference `/rerank` API, reached over HTTP so scoring leaves the event
+    # loop's process. The bundled sidecar (compose profile `reranker`, the
+    # engine's own image running app.reranker_service) serves the SAME
+    # CrossEncoder model — TEI itself cannot load MODEL_RERANKER's `classifier`
+    # architecture (verified 2026-09-14) — so the confidence threshold does
+    # not move. Falls back local → RRF on any failure.
+    reranker_backend: str = "local"
+    reranker_url: str = "http://scaffold-reranker:80"
+    reranker_timeout_s: float = 60.0
     assist_unified_memory_enabled: bool = False   # master gate for §17.710
     assist_umem_capture: bool = True              # Stage A — record raw turns
     assist_umem_inject: bool = False              # Stage B — consolidate + inject
