@@ -22,6 +22,7 @@ from app.config import settings
 from app.database import async_session
 
 ORCHESTRATOR_URL = "http://scaffold-orchestrator:8000"
+pytestmark = pytest.mark.needs_orchestrator   # §17.1080 — calls the running engine, not just its DB
 
 
 def _api_headers() -> dict[str, str]:

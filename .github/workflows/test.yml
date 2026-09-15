@@ -318,7 +318,8 @@ jobs:
       # Milvus/Ollama/SearXNG and stays gated; but tests/integration/*_db only
       # need Postgres, and that is where §17.1079's teardown deadlock hid for
       # a week (four errors on every run, visible to no workflow). Verified
-      # with every other service unreachable: 82 passed, 4 skip themselves.
+      # with every engine hostname dead: 59 passed, 27 skipped (the tests that
+      # call the RUNNING orchestrator carry `needs_orchestrator` and skip).
       # Excluded: *_live* (need the orchestrator), retrieval_eval + milvus
       # schema parity (need Milvus).
       - name: Integration lane (tests/integration/*_db, Postgres only)
