@@ -159,4 +159,5 @@ pytest_add_cli_args_test_selection = [
     "tests/test_assist_uncertainty.py",
     "tests/test_state_check_assembly_fixtures.py",
     "tests/test_shell_ast_gate.py",
+    "tests/test_state_check_mutation_targets.py",   # §17.1078 — written against the pass-2 survivors
 ]

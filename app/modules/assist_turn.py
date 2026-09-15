@@ -190,21 +190,32 @@ async def tail_turn_run(run_id: str) -> AsyncIterator[_Event]:
         await asyncio.sleep(0.6)
 
 
-async def sweep_zombie_runs() -> int:
+async def sweep_zombie_runs(*, older_than_minutes: int | None = None) -> int:
     """§17.875 — called at startup: any row still 'running' predates this boot
     (the drivers died with the old process) and can never finish. Mark it dead
-    with an honest terminal frame so tails end and resume skips it."""
+    with an honest terminal frame so tails end and resume skips it.
+
+    §17.1078 — with ``older_than_minutes`` (the queue's periodic sweep) only
+    runs older than that are closed, with wording that says what happened:
+    the turn stalled, the engine did not restart."""
     from app.database import async_session
 
+    detail = ("The engine restarted mid-turn — please resend your message." if older_than_minutes is None
+              else f"This turn stalled for more than {older_than_minutes} minutes and was closed — please resend your message.")
     dead_frames = _json.dumps([
-        {"e": "error", "d": {"detail": "The engine restarted mid-turn — please resend your message."}},
+        {"e": "error", "d": {"detail": detail}},
         {"e": ASSIST_TURN_DONE, "d": {"handled": "died"}},
     ])
+    where = "WHERE status = 'running'"
+    params: dict = {"f": dead_frames}
+    if older_than_minutes is not None:
+        where += " AND created_at < now() - make_interval(mins => :mins)"
+        params["mins"] = int(older_than_minutes)
     async with async_session() as db:
         res = await db.execute(
             _sqltext("UPDATE assist_turn_runs SET status = 'error', finished_at = now(), "
-                     "frames = frames || CAST(:f AS jsonb) WHERE status = 'running'"),
-            {"f": dead_frames},
+                     "frames = frames || CAST(:f AS jsonb) " + where),
+            params,
         )
         await db.commit()
     return res.rowcount or 0

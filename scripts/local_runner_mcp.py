@@ -14,6 +14,20 @@ state check stops asking you to paste.
 
 Every executed command is echoed to this process's log and recorded by the
 engine in the session transcript.
+
+sudo (§17.1078): the runner is unprivileged. A probe that starts with `sudo`
+is rewritten in one of two ways — if its command matches a prefix in
+``--sudo-allow`` (e.g. ``--sudo-allow "nginx -t" "pct config"``) it runs as
+``sudo -n …`` (non-interactive: it fails fast instead of waiting for a
+password); otherwise the ``sudo`` is dropped and the command runs as this
+user, with a note in the output so the judge knows what it is reading.
+For the allowed prefixes to work without a password, add a sudoers line
+for the user running this script — one per command, no wildcards:
+
+    runner ALL=(root) NOPASSWD: /usr/sbin/nginx -t, /usr/sbin/pct config *
+
+The allow-list is checked against the SAME read-only gate as everything
+else; sudo never widens what may run, only who runs it.
 """
 from __future__ import annotations
 
@@ -81,9 +95,29 @@ def read_only(cmd: str) -> tuple[bool, str]:
     return True, ""
 
 
-def build_server(token: str | None):
+_SUDO_RE = re.compile(r"^\s*sudo\s+(?:-[A-Za-z]+\s+)*")
+
+
+def apply_sudo_policy(cmd: str, allow: list[str]) -> tuple[str, str]:
+    """``(command to run, note)``. A leading ``sudo`` becomes ``sudo -n`` when
+    the rest matches an allowed prefix (whole-token match), and is dropped
+    otherwise. Only the FIRST segment is considered; a ``sudo`` later in a
+    pipeline is left alone and will fail non-interactively like any other."""
+    m = _SUDO_RE.match(cmd)
+    if not m:
+        return cmd, ""
+    rest = cmd[m.end():].strip()
+    for prefix in allow:
+        p = prefix.strip()
+        if p and (rest == p or rest.startswith(p + " ")):
+            return f"sudo -n {rest}", ""
+    return rest, "(ran WITHOUT sudo — not in the runner's --sudo-allow list; output may be partial)\n"
+
+
+def build_server(token: str | None, sudo_allow: list[str] | None = None):
     from mcp.server import MCPServer
     mcp = MCPServer("scaffold-local-runner")
+    allow = list(sudo_allow or [])
 
     @mcp.tool()
     async def run_readonly(command: str, timeout_s: int = 20) -> str:
@@ -92,6 +126,7 @@ def build_server(token: str | None):
         if not ok:
             log.warning("REFUSED (%s): %s", why, command)
             return f"(refused by the local runner: {why})"
+        command, note = apply_sudo_policy(command, allow)
         log.info("RUN: %s", command)
         proc = await asyncio.create_subprocess_shell(command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         try:
@@ -99,7 +134,7 @@ def build_server(token: str | None):
         except asyncio.TimeoutError:
             proc.kill()
             return f"(timed out after {timeout_s}s)"
-        return out.decode("utf-8", errors="replace")[:20000]
+        return note + out.decode("utf-8", errors="replace")[:20000]
 
     return mcp
 
@@ -109,8 +144,10 @@ def main() -> int:
     ap.add_argument("--host", default="127.0.0.1"); ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--token", default=None, help="shared secret the engine sends as X-Runner-Token")
     ap.add_argument("--stdio", action="store_true", help="speak MCP over stdio instead of HTTP")
+    ap.add_argument("--sudo-allow", nargs="*", default=[], metavar="PREFIX",
+                    help="command prefixes that may run as `sudo -n` (needs matching NOPASSWD sudoers lines); anything else drops its sudo")
     args = ap.parse_args()
-    mcp = build_server(args.token)
+    mcp = build_server(args.token, sudo_allow=args.sudo_allow)
     if args.stdio:
         asyncio.run(mcp.run_stdio_async()); return 0
     import contextlib
