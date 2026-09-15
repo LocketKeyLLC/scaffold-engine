@@ -30,3 +30,13 @@ def test_three_mount_lists_carry_alembic():
     assert "COPY --chown=root:root alembic/" in (ROOT / "Dockerfile").read_text()
     assert "./alembic:/code/alembic:ro" in (ROOT / "docker-compose.dev.yml").read_text()
     assert '"$PWD/alembic:/code/alembic:ro"' in (ROOT / ".github" / "workflows" / "test.yml").read_text()
+
+
+def test_env_never_reconfigures_an_already_configured_logging_stack():
+    """§17.1075b — fileConfig(alembic.ini) inside the orchestrator disabled every
+    `scaffold.*` logger and replaced the JSON root handler: the live service
+    logged nothing after startup. env.py must only apply the ini logging when
+    no root handler exists (the CLI case)."""
+    src = (ROOT / "alembic" / "env.py").read_text(encoding="utf-8")
+    assert "not logging.getLogger().handlers" in src
+    assert src.index("not logging.getLogger().handlers") < src.index("fileConfig(config.config_file_name)")

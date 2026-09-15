@@ -7,6 +7,7 @@ SQL to stdout for review.
 from __future__ import annotations
 
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from alembic import context
@@ -16,7 +17,12 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from app.config import settings
 
 config = context.config
-if config.config_file_name is not None:
+# The ini's [loggers] block is for the CLI only. Inside the orchestrator the
+# unified logging stack (app/logging_config.py) already owns the root handler;
+# fileConfig() would disable every existing logger and replace the JSON
+# formatter — the live orchestrator logged NOTHING after startup when this ran
+# unconditionally (§17.1075b). Apply it only when nothing is configured yet.
+if config.config_file_name is not None and not logging.getLogger().handlers:
     fileConfig(config.config_file_name)
 config.set_main_option("sqlalchemy.url", settings.database_url)
 target_metadata = None
