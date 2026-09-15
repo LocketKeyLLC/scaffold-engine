@@ -60,17 +60,32 @@ async def _reset_db_pool():
 
 
 @pytest_asyncio.fixture
-async def db_session() -> AsyncSession:
+async def db_session(tracked_jobs) -> AsyncSession:
     """A real AsyncSession backed by the app's engine. Test code commits as
     production code would; the ``track_job``/``insert_job`` fixtures handle
-    cleanup of any rows the test produced."""
+    cleanup of any rows the test produced.
+
+    §17.1079 — depends on ``tracked_jobs`` so that it is torn down FIRST:
+    whatever the test left open on this connection (a SELECT's autobegun
+    transaction, `_compile_output`'s uncommitted metadata UPDATE) is rolled
+    back before the cleanup DELETE on another connection needs the row."""
     async with async_session() as session:
         yield session
+        await session.rollback()
 
 
 @pytest_asyncio.fixture
 async def tracked_jobs():
-    """Collects job IDs produced during a test; teardown deletes them."""
+    """Collects job IDs produced during a test; teardown deletes them.
+
+    §17.1079 — the DELETE runs on its OWN connection (NullPool under pytest)
+    while the test's ``db_session`` may still hold an uncommitted write on the
+    same job row (`_compile_output` now records evidence in ``jobs.metadata``
+    and the test never commits after it): the DELETE then waits on that row
+    lock until pytest-timeout kills the teardown — four errors in
+    test_execution_db.py, invisible in CI because Tier 2 is skipped there.
+    Fixture ORDER is the fix: ``db_session`` depends on this fixture, so its
+    rollback runs first and the DELETE finds the row unlocked."""
     ids: list[str] = []
     yield ids
     if not ids:
