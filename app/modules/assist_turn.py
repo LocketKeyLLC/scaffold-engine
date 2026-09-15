@@ -28,6 +28,7 @@ from typing import AsyncIterator
 from app.modules import assist_policy
 from app.sse_events import (
     ASSIST_ANSWER,
+    ASSIST_TURN_PULSE,
     ASSIST_GUIDE_DELTA,
     ASSIST_GUIDE_DONE,
     ASSIST_NOTE_RECORDED,
@@ -111,6 +112,25 @@ async def _append_frames(run_id: str, frames: list[_Event], db) -> None:
         await db.commit()
 
 
+async def _append_note_detached(run_id: str, text_value: str) -> None:
+    """§17.1082 — a progress note from deep code (model retry) lands on the run
+    row through its OWN short session, with a lock timeout: the driver's
+    session never holds this row between its committed appends, but a bounded
+    wait is the guard against ever waiting on it (§17.1052's lesson)."""
+    from app.database import async_session
+    payload = _json.dumps([{"e": ASSIST_TURN_STATUS, "d": {"text": text_value}}])
+    try:
+        async with async_session() as db:
+            await db.execute(_sqltext("SET LOCAL lock_timeout = '2s'"))
+            await db.execute(
+                _sqltext("UPDATE assist_turn_runs SET frames = frames || CAST(:f AS jsonb) WHERE id = :rid"),
+                {"rid": run_id, "f": payload},
+            )
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001 — a note must never break the turn
+        logger.warning("turn_note_append_failed run_id=%s err=%r", run_id, exc)
+
+
 async def _drive_turn_run(
     *, run_id: str, session_id: str, message: str | None, command: str,
     node_key: str | None, history: list[dict],
@@ -119,8 +139,18 @@ async def _drive_turn_run(
     appending frames as they happen. Guide deltas are coalesced (~0.7s) so a
     long walkthrough doesn't hammer the row with per-token commits."""
     from app.database import async_session
+    from app.utils.progress import reset_turn_note_sink, set_turn_note_sink
 
     status = "done"
+    # §17.1082 — deep code (the model router's retry loop) can say one line to
+    # the operator's status line while this driver is blocked inside the loop.
+    _note_tasks: set[asyncio.Task] = set()
+
+    def _sink(text_value: str) -> None:
+        t = asyncio.create_task(_append_note_detached(run_id, text_value))
+        _note_tasks.add(t)
+        t.add_done_callback(_note_tasks.discard)
+    _sink_token = set_turn_note_sink(_sink)
     try:
         async with async_session() as db:
             buf: list[_Event] = []
@@ -145,6 +175,9 @@ async def _drive_turn_run(
         except Exception:  # noqa: BLE001
             pass
     finally:
+        reset_turn_note_sink(_sink_token)
+        if _note_tasks:
+            await asyncio.gather(*_note_tasks, return_exceptions=True)
         try:
             async with async_session() as db:
                 await db.execute(
@@ -164,7 +197,8 @@ async def tail_turn_run(run_id: str) -> AsyncIterator[_Event]:
 
     yield _ev("assist_turn_started", {"run_id": run_id})
     sent = 0
-    last_growth = asyncio.get_event_loop().time()
+    started = last_growth = asyncio.get_event_loop().time()
+    last_pulse = started
     while True:
         async with async_session() as db:
             row = (await db.execute(
@@ -182,6 +216,13 @@ async def tail_turn_run(run_id: str) -> AsyncIterator[_Event]:
         sent = len(frames)
         if row["status"] != "running":
             return
+        # §17.1082 — liveness pulse: the row is still 'running' and nothing
+        # new has landed for a while. Not persisted; a quiet 105 s research
+        # pass looked like a dead page (live, 2026-09-15).
+        _now = asyncio.get_event_loop().time()
+        if (_now - last_growth) >= _PULSE_AFTER_S and (_now - last_pulse) >= _PULSE_EVERY_S:
+            last_pulse = _now
+            yield _ev(ASSIST_TURN_PULSE, {"running_s": int(_now - started), "quiet_s": int(_now - last_growth)})
         # §17.875 — stall cap: never follow a wedged run forever.
         if (asyncio.get_event_loop().time() - last_growth) > _TAIL_STALL_SECONDS:
             yield _ev("error", {"detail": "This turn has gone quiet for over 6 minutes — it may still finish in the background (check the transcript later), but I'm releasing your screen. You can resend your message."})
@@ -227,6 +268,9 @@ async def sweep_zombie_runs(*, older_than_minutes: int | None = None) -> int:
 # than spin forever (the run may yet finish; its output lands in the
 # transcript via the §17.873 captures).
 _TAIL_STALL_SECONDS = 360
+# §17.1082 — pulse cadence: after 10 s of silence, one pulse every 10 s.
+_PULSE_AFTER_S = 10
+_PULSE_EVERY_S = 10
 
 
 async def get_active_run(session_id: str) -> str | None:

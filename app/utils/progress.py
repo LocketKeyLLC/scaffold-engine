@@ -28,8 +28,38 @@ Design notes
 
 from __future__ import annotations
 
+import contextvars
 import time
 from typing import Any, Callable, Iterable
+
+# §17.1082 — a per-task sink for one-line progress notes from DEEP code (the
+# model router's retry loop, a long fetch) to whatever is showing the operator
+# a status line. Set by the assist turn driver for the duration of a turn;
+# unset everywhere else, so `turn_note` is a no-op outside a turn.
+_TURN_NOTE_SINK: contextvars.ContextVar[Callable[[str], Any] | None] = contextvars.ContextVar(
+    "scaffold_turn_note_sink", default=None)
+
+
+def set_turn_note_sink(sink: Callable[[str], Any] | None):
+    """Install (or clear) the sink for the current task context; returns the
+    token to reset with."""
+    return _TURN_NOTE_SINK.set(sink)
+
+
+def reset_turn_note_sink(token) -> None:
+    _TURN_NOTE_SINK.reset(token)
+
+
+def turn_note(text: str) -> None:
+    """Say one line to the operator's status line, if anyone is listening.
+    Never raises — a progress note must not break the work it describes."""
+    sink = _TURN_NOTE_SINK.get()
+    if sink is None:
+        return
+    try:
+        sink(text)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def humanize_ms(ms: int | float | None) -> str:

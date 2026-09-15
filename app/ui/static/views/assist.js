@@ -118,6 +118,19 @@ export const FIX_OPEN_SECTION =
 
 // The open-section rule for a bubble kind. Anything not explicitly shaped like
 // a fix keeps the walkthrough rule.
+// §17.1082 — what the transcript paints for operator messages, as data so a
+// node test can pin it: durable turns once, and each un-persisted operator
+// message ONCE more only while no durable copy of it exists. The optimistic
+// copy sendMessage() pushes into `turns` is `_pending` and is NOT painted
+// from `turns` — painting it there and again from pendingOps showed every
+// operator message twice for the whole turn (live, 2026-09-15).
+export function transcriptPlan(turns, pendingOps) {
+  const durable = (turns || []).filter((t) => !t._pending);
+  const pending = (pendingOps || []).filter((o) => !durable.some(
+    (t) => t.role === "operator" && (t.content || "").trim() === (o.content || "").trim()));
+  return { durable, pending };
+}
+
 export function openSectionFor(kind) {
   return kind === "fix" ? FIX_OPEN_SECTION : GUIDE_OPEN_SECTION;
 }
@@ -872,8 +885,15 @@ export function renderChat(container, sessionId, opts = {}) {
     // exchange around it); everything older goes behind ONE row that says how
     // much is in there. Nothing is dropped — opening the row renders it all,
     // in order, and `stick()` still lands the view on the newest turn.
-    const recent = turns.slice(-ASSIST_RECENT_TURNS);
-    const older = turns.slice(0, turns.length - recent.length);
+    // §17.1082 — the optimistic copy sendMessage() pushes into `turns`
+    // (`_pending`) is painted by the pendingOps loop below, once. Drawing it
+    // here too showed every operator message TWICE for the whole turn (the
+    // reload at turn end replaced `turns` and hid it — so it read as "the
+    // doubling is back" without ever being durable). Live, 2026-09-15.
+    const { durable, pending } = transcriptPlan(turns, pendingOps);
+    pendingOps = pending;
+    const recent = durable.slice(-ASSIST_RECENT_TURNS);
+    const older = durable.slice(0, durable.length - recent.length);
     if (older.length) {
       // Build the backlog body LAZILY. A closed <details> still mounts all of
       // its children: folding alone took the measured Run tab from 518 visible
@@ -900,7 +920,7 @@ export function renderChat(container, sessionId, opts = {}) {
         ...recent.map((t) => bubble(t.role, t.kind, t.content, t.created_at))
       );
     } else {
-      mount(transcript, ...turns.map((t) => bubble(t.role, t.kind, t.content, t.created_at)));
+      mount(transcript, ...durable.map((t) => bubble(t.role, t.kind, t.content, t.created_at)));
     }
     // §17.870 — the ephemeral tail: output the CURRENT turn rendered live that
     // is not (yet, or ever) in the durable transcript. The live incident: a
@@ -925,9 +945,6 @@ export function renderChat(container, sessionId, opts = {}) {
     // against `turns` wholesale matched the optimistic copy pushed by
     // sendMessage() and cleared the entry on its very first render — which
     // left the guard doing nothing at all, the exact bug it exists to stop.
-    pendingOps = pendingOps.filter((o) => !turns.some(
-      (t) => t.role === "operator" && !t._pending
-        && (t.content || "").trim() === o.content.trim()));
     for (const o of pendingOps) {
       transcript.append(bubble("operator", o.kind, o.content, o.created_at));
     }
@@ -1316,6 +1333,7 @@ export function renderChat(container, sessionId, opts = {}) {
     guiding = true;
     guideBtn.textContent = "■ Stop";
     sendBtn.disabled = true;
+    let sawDone = false, stoppedByUser = false;   // §17.1082
     abort = new AbortController();
     ephemeralTail = [];  // §17.870 — fresh turn, fresh tail
     // §17.871 — small slack for client/server clock skew; a capture stamped
@@ -1328,16 +1346,39 @@ export function renderChat(container, sessionId, opts = {}) {
     // look older than the turn, nothing retired, and every answer showed
     // twice (live, 2026-09-13).
     turnStartMaxId = maxTurnId(turns);
-    let statusEl = null;
+    // §17.1082 — the status line is a LIVE indicator, not a caption: a
+    // spinner, the last thing the engine said it was doing, and a clock that
+    // ticks every second from the turn's start. Live, 2026-09-15: a 105 s
+    // research pass (two silent model retries inside) sat behind one static
+    // dim line and read as a dead page. The server's pulse frames prove the
+    // run is alive; the clock proves the page is.
+    let statusEl = null, statusText = "", statusTimer = null, lastSign = Date.now();
+    const turnT0 = Date.now();
+    const fmtElapsed = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`; };
+    const paintStatus = () => {
+      if (!statusEl) return;
+      const quiet = Date.now() - lastSign;
+      let tail = ` · working ${fmtElapsed(Date.now() - turnT0)}`;
+      if (quiet > 45000) tail += ` — no word from the engine for ${fmtElapsed(quiet)}; if this keeps up, press ■ Stop and resend`;
+      statusEl.querySelector(".status-text").textContent = statusText + tail;
+    };
     const setStatusLine = (t) => {
       if (!statusEl) {
-        statusEl = el("div", { class: "msg sys" }, el("div", { class: "msg-body dim" }));
+        statusEl = el("div", { class: "msg sys" },
+          el("div", { class: "msg-body dim" }, el("span", { class: "spin", style: "vertical-align:middle;margin-right:8px" }), el("span", { class: "status-text" })));
         transcript.append(statusEl);
+        statusTimer = setInterval(paintStatus, 1000);
       }
-      statusEl.firstChild.textContent = t;
+      statusText = t;
+      lastSign = Date.now();
+      paintStatus();
       stick();
     };
-    const clearStatusLine = () => { if (statusEl) { statusEl.remove(); statusEl = null; } };
+    const pulse = () => { lastSign = Date.now(); paintStatus(); };
+    const clearStatusLine = () => {
+      if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+      if (statusEl) { statusEl.remove(); statusEl = null; }
+    };
     let live = null, liveBody = null, acc = "";
     const ensureLive = () => {
       if (live) return;
@@ -1364,6 +1405,9 @@ export function renderChat(container, sessionId, opts = {}) {
             break;
           case "assist_turn_status":
             setStatusLine(data?.text || "…");
+            break;
+          case "assist_turn_pulse":
+            pulse();
             break;
           case "assist_note_recorded": {
             clearStatusLine();
@@ -1401,8 +1445,10 @@ export function renderChat(container, sessionId, opts = {}) {
             if (acc.trim()) ephemeralTail.push({ kind: "guide", content: acc, at: new Date().toISOString() });
             break;
           case "assist_turn_done":
+            sawDone = true;
             break;
           case "error":
+            sawDone = true;
             clearStatusLine();
             appendBubble("assistant", "note", `⚠ ${data?.detail || "turn error"}`);
             break;
@@ -1412,6 +1458,7 @@ export function renderChat(container, sessionId, opts = {}) {
       }
     } catch (e) {
       if (e.name !== "AbortError") toast(errText(e), "err");
+      else stoppedByUser = true;
     } finally {
       guiding = false;
       abort = null;
@@ -1419,6 +1466,14 @@ export function renderChat(container, sessionId, opts = {}) {
       guideBtn.textContent = "✦ Guide me";
       clearStatusLine();
       if (live) live.classList.remove("streaming");
+      // §17.1082 — the stream closed without a terminal frame and nobody
+      // pressed Stop: the turn is most likely still running server-side
+      // (the tail follows a detached run). Say so, and re-attach if it is.
+      if (!sawDone && !stoppedByUser && !disposed) {
+        appendBubble("assistant", "note", "⚠ The connection to the engine closed before this turn finished. Checking whether it is still running…");
+        resumeChecked = false;
+        setTimeout(() => { if (!disposed) maybeResumeActiveTurn(true); }, 1500);
+      }
       load();
     }
   }
@@ -1427,7 +1482,7 @@ export function renderChat(container, sessionId, opts = {}) {
   // replays what was missed; the operator never loses an in-flight turn to
   // navigation again.
   let resumeChecked = false;
-  async function maybeResumeActiveTurn() {
+  async function maybeResumeActiveTurn(afterDrop = false) {
     if (guiding || resumeChecked) return;
     resumeChecked = true;
     try {
@@ -1435,6 +1490,8 @@ export function renderChat(container, sessionId, opts = {}) {
       if (act?.run_id && !guiding) {
         toast("Re-attaching to the turn that was still running…", "");
         await runTurnStream(null, act.run_id);
+      } else if (afterDrop) {
+        appendBubble("assistant", "note", "The turn is not running any more. Its result, if any, is in the transcript above — otherwise send your message again.");
       }
     } catch { /* older server or none active — nothing to resume */ }
   }

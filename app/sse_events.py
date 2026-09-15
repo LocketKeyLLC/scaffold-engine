@@ -79,6 +79,10 @@ ASSIST_TURN_DONE = "assist_turn_done"          # {handled} — terminal frame
 # §17.869 — detached turn runs: the loop runs as a background task writing
 # frames to assist_turn_runs; clients tail the row and RESUME after reload.
 ASSIST_TURN_STARTED = "assist_turn_started"    # {run_id} — first frame of a tail
+# §17.1082 — liveness: emitted by the TAIL (not persisted) while the run row is
+# still 'running' and no frame has arrived for a while. Proves the turn is
+# alive server-side; the console shows it as "still working · Ns".
+ASSIST_TURN_PULSE = "assist_turn_pulse"        # {running_s, quiet_s}
 
 
 # ---------------------------------------------------------------------------
