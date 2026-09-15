@@ -66,6 +66,7 @@ export const NAV_GROUPS = [
       { id: "alerts", path: "/alerts", label: "Alerts", icon: "⚑", adminOnly: true },
       { id: "settings", path: "/settings", label: "Settings", icon: "☰", adminOnly: true },
       { id: "setup", path: "/setup", label: "Setup", icon: "✓", adminOnly: true },
+      { id: "capabilities", path: "/capabilities", label: "Capabilities", icon: "⚡", adminOnly: true },
     ],
   },
 ];

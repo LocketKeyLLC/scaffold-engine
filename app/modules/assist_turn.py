@@ -1077,10 +1077,16 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
                 yield e
             return
         yield _ev(ASSIST_TURN_STATUS, {"text": "🩺 The local runner executed nothing — falling back to the paste."})
-    yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": res["message"]})
+    # §17.1081 — the paste request is where the operator feels the cost; say
+    # once, here, that the engine can carry it (no line when a runner is set).
+    _msg = res["message"]
+    if res.get("probes"):
+        from app.modules.engine_setup import runner_nudge
+        _msg = _msg + runner_nudge()
+    yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _msg})
     try:
         await assist_agent.capture_assistant_reply(
-            session_id=session_id, node_key=nk, kind="ask", content=res["message"], db=db)
+            session_id=session_id, node_key=nk, kind="ask", content=_msg, db=db)
     except Exception:  # noqa: BLE001
         logger.warning("state_check_capture_failed sid=%s", session_id)
 

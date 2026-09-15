@@ -812,6 +812,7 @@ from app.routers.models import router as models_router  # noqa: E402 — §17.81
 from app.routers.auth_info import router as auth_info_router  # noqa: E402 — §17.815
 from app.routers.operator_account import router as operator_account_router  # noqa: E402 — §17.840
 from app.routers.meta import router as meta_router  # noqa: E402 — §17.817
+from app.routers.setup import router as setup_router  # noqa: E402 — §17.1081
 from app.routers.profiles import router as profiles_router  # noqa: E402 — §17.809
 app.include_router(workflow_router)
 app.include_router(research_router)
@@ -829,6 +830,7 @@ app.include_router(models_router)  # §17.813 — model-management JSON API (rol
 app.include_router(auth_info_router)  # §17.815 — GET /auth/whoami (SPA login identity)
 app.include_router(operator_account_router)  # §17.840 — admin account (password unlocks console)
 app.include_router(meta_router)  # §17.817 — first-run state (connect-models wizard)
+app.include_router(setup_router)  # §17.1081 — optional capabilities as self-setup walkthroughs
 app.include_router(profiles_router)  # §17.809 — runtime compute profiles (/config/profile)
 
 
