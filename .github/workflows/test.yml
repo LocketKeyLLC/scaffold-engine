@@ -313,6 +313,46 @@ jobs:
       # Makefile declares CORRECT: --noconftest. tests/conftest.py eager-loads
       # app/, which shadows the pipeline mocks (`_scaffold_router_setup.py`
       # stubs Pipeline._probe_embedder_dim etc.); before this step the 43
+      # §17.1080 — Tier 2's DATABASE half runs here, on the runner's own
+      # Postgres. The full-stack tier (ci.yml) needs a self-hosted runner with
+      # Milvus/Ollama/SearXNG and stays gated; but tests/integration/*_db only
+      # need Postgres, and that is where §17.1079's teardown deadlock hid for
+      # a week (four errors on every run, visible to no workflow). Verified
+      # with every other service unreachable: 82 passed, 4 skip themselves.
+      # Excluded: *_live* (need the orchestrator), retrieval_eval + milvus
+      # schema parity (need Milvus).
+      - name: Integration lane (tests/integration/*_db, Postgres only)
+        run: |
+          docker run --rm \
+            --network host \
+            -e DATABASE_URL=$DATABASE_URL \
+            -e OLLAMA_BASE_URL=$OLLAMA_BASE_URL \
+            -e MILVUS_URI=$MILVUS_URI \
+            -e SEARXNG_URL=$SEARXNG_URL \
+            -e SCAFFOLD_API_KEY=$SCAFFOLD_API_KEY \
+            -e PYTHONPATH=/code:/code/sdk \
+            -v "$PWD/app:/code/app:ro" \
+            -v "$PWD/tests:/code/tests:ro" \
+            -v "$PWD/sdk:/code/sdk:ro" \
+            -v "$PWD/scripts:/code/scripts:ro" \
+            -v "$PWD/db:/code/db:ro" \
+            -v "$PWD/alembic:/code/alembic:ro" \
+            -v "$PWD/alembic.ini:/code/alembic.ini:ro" \
+            -v "$PWD/pipelines:/code/pipelines" \
+            -v "$PWD/docs:/code/docs:ro" \
+            -v "$PWD/presets:/code/presets:ro" \
+            -v "$PWD/rules:/code/rules:ro" \
+            -v "$PWD/sgconfig.yml:/code/sgconfig.yml:ro" \
+            -v "$PWD/.env.example:/code/.env.example:ro" \
+            -v "$PWD/Makefile:/code/Makefile:ro" \
+            -v "$PWD/pyproject.toml:/code/pyproject.toml:ro" \
+            -w /code \
+            scaffold-orchestrator:ci \
+            pytest tests/integration/ -m integration --timeout=120 -q \
+              --ignore-glob='*_live*' \
+              --ignore=tests/integration/test_retrieval_eval.py \
+              --ignore=tests/integration/test_milvus_schema_parity.py
+
       # test_scaffold_router_* modules ran inside the main pytest run WITH
       # conftest — a configuration whose results the Makefile explicitly
       # distrusts (`make test` ignore-globs them; `make test-pipelines` is the
