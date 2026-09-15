@@ -47,6 +47,30 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.integration)
 
 
+_ORCH_REACHABLE: bool | None = None
+
+
+def _orchestrator_reachable() -> bool:
+    """§17.1080 — one probe per session: is the running orchestrator there?
+    The Postgres-only CI lane has the database but no engine; tests marked
+    `needs_orchestrator` skip instead of failing on name resolution."""
+    global _ORCH_REACHABLE
+    if _ORCH_REACHABLE is None:
+        import httpx
+        try:
+            httpx.get("http://scaffold-orchestrator:8000/health", timeout=3.0)
+            _ORCH_REACHABLE = True
+        except Exception:  # noqa: BLE001 — unreachable is the answer, whatever the reason
+            _ORCH_REACHABLE = False
+    return _ORCH_REACHABLE
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_orchestrator(request):
+    if request.node.get_closest_marker("needs_orchestrator") and not _orchestrator_reachable():
+        pytest.skip("orchestrator not reachable at scaffold-orchestrator:8000 (needs_orchestrator)")
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_db_pool():
     """Dispose the SQLAlchemy engine's connection pool before every test.

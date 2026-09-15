@@ -79,6 +79,10 @@ markers = [
     # `-m "not integration"`; before this marker test.yml used the fragile
     # `-k "not integration"` node-id substring match.
     "integration: Needs the live docker stack (Postgres at minimum, some Milvus/Ollama); deselected in cloud CI",
+    # §17.1080 — integration tests that call the RUNNING orchestrator over HTTP
+    # (not just its database). The conftest skips them when it is unreachable,
+    # so the Postgres-only CI lane runs the rest.
+    "needs_orchestrator: Calls the running orchestrator at ORCHESTRATOR_URL; skipped when unreachable",
 ]
 # Known noise: ~6-8 RuntimeWarnings per full-suite run with messages
 # `coroutine 'AsyncMockMixin._execute_mock_call' was never awaited` and

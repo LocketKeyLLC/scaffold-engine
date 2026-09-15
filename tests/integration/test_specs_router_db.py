@@ -24,6 +24,7 @@ from app.database import async_session
 from app.routers.specs import CONFIRMED_BY_API_KEY
 
 ORCHESTRATOR_URL = "http://scaffold-orchestrator:8000"
+pytestmark = pytest.mark.needs_orchestrator   # §17.1080 — calls the running engine, not just its DB
 
 # A minimal but valid spec — matches spec_schema.json. Re-validating
 # is the schema test's job; here we only need a row that exists.

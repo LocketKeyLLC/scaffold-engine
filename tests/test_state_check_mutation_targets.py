@@ -12,7 +12,7 @@ mutants (`wget` inside the curl tuple — `wget` is already a mutation head;
 from __future__ import annotations
 
 import logging
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -345,3 +345,112 @@ def test_proposals_reopen_dedupe_needs_same_node_and_same_text():
     out = sc.proposals_from_verdicts([a, b, c, d], anchor_node_key=None)
     assert [(p["node_key"], p["proposed_change"]) for p in out] == [
         ("T3", "Redo this step — gone"), ("T4", "Redo this step — gone"), ("T3", "Redo this step — different")]
+
+
+# ── §17.1080 — the last cluster: build_claims, get_pending_state_check, render_probe_message ──
+
+def _res_first(row):
+    r = MagicMock(); r.mappings.return_value.first.return_value = row; return r
+
+
+def _res_all(rows):
+    r = MagicMock(); r.mappings.return_value.all.return_value = rows; return r
+
+
+async def test_build_claims_queries_by_sid_reads_metadata_and_raises_on_missing_session():
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_res_first(None))
+    with pytest.raises(ValueError, match="assist session not found: sid-1"):
+        await sc.build_claims(db=db, session_id="sid-1")
+    assert db.execute.await_args.args[1] == {"sid": "sid-1"}
+    assert "FROM assist_sessions WHERE id = :sid" in str(db.execute.await_args.args[0])
+    # a JSON STRING metadata body (asyncpg edge) still yields the environment
+    db.execute = AsyncMock(side_effect=[
+        _res_first({"job_id": "j1", "metadata": '{"environment": {"facts": ["nginx listens on 8080"]}}', "current_node_key": "T2"}),
+        _res_all([])])
+    out = await sc.build_claims(db=db, session_id="sid-1")
+    assert out["claims"] == [{"id": "F:1", "kind": "fact", "text": "nginx listens on 8080"}]
+    assert out["job_id"] == "j1" and out["current_node_key"] == "T2"
+    assert db.execute.await_args_list[1].args[1] == {"sid": "sid-1"}
+    assert "s.status = 'committed'" in str(db.execute.await_args_list[1].args[0])
+
+
+async def test_build_claims_step_fields_title_fallback_and_history_count_logged(caplog):
+    caplog.set_level(logging.INFO, logger="scaffold")
+    rows = [
+        {"node_key": "T1", "title": None, "evidence": "", "progress_recap": None, "committed_at": None},        # no summary → title fallback → node_key
+        {"node_key": "T2", "title": "Configure caddy", "evidence": "caddy listening on 443", "progress_recap": None, "committed_at": None},
+        {"node_key": "T3", "title": "Stop the old proxy", "evidence": "stopped", "progress_recap": None, "committed_at": None},   # destructive title → skipped
+        {"node_key": "T4", "title": "Snapshot", "evidence": "Ran systemctl stop x", "progress_recap": None, "committed_at": None},  # history claim → skipped
+    ]
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[_res_first({"job_id": "j1", "metadata": {}, "current_node_key": None}), _res_all(rows)])
+    out = await sc.build_claims(db=db, session_id="sid-9")
+    assert out["claims"] == [
+        {"id": "S:T1", "kind": "step", "node_key": "T1", "title": "", "text": "step completed: T1"},
+        {"id": "S:T2", "kind": "step", "node_key": "T2", "title": "Configure caddy", "text": "caddy listening on 443"},
+    ]
+    assert "state_check_history_steps_skipped session_id=sid-9 n=2" in caplog.text
+
+
+async def test_build_claims_fact_clip_300_default_max_24_blank_facts_dropped():
+    facts = ["  ", ""] + [f"fact number {i} holds" for i in range(1, 31)] + ["z" * 310]
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[
+        _res_first({"job_id": "j1", "metadata": {"environment": {"facts": facts}}, "current_node_key": None}), _res_all([])])
+    out = await sc.build_claims(db=db, session_id="s")
+    fs = [c for c in out["claims"] if c["kind"] == "fact"]
+    assert len(fs) == 24 and fs[0]["id"] == "F:1" and fs[0]["text"] == "fact number 8 holds"   # newest 24 of 31
+    assert fs[-1]["text"] == "z" * 300 and len(fs[-1]["text"]) == 300
+    db.execute = AsyncMock(side_effect=[
+        _res_first({"job_id": "j1", "metadata": {"environment": {"facts": facts}}, "current_node_key": None}), _res_all([])])
+    out = await sc.build_claims(db=db, session_id="s", max_facts=3)
+    assert [c["text"][:6] for c in out["claims"]] == ["fact n", "fact n", "zzzzzz"]
+
+
+async def test_get_pending_state_check_shapes_and_failure_log(caplog):
+    caplog.set_level(logging.WARNING, logger="scaffold")
+    def _db(meta):
+        db = MagicMock(); r = MagicMock(); r.scalar.return_value = meta
+        db.execute = AsyncMock(return_value=r); return db
+    pending = {"probes": [{"id": "F:1", "command": "uptime"}], "ts": "t"}
+    db = _db({"pending_state_check": pending})
+    assert await sc.get_pending_state_check(db=db, session_id="s1") == pending
+    assert db.execute.await_args.args[1] == {"sid": "s1"}
+    assert "SELECT metadata FROM assist_sessions WHERE id = :sid" in str(db.execute.await_args.args[0])
+    assert await sc.get_pending_state_check(db=_db('{"pending_state_check": {"probes": [1]}}'), session_id="s") == {"probes": [1]}
+    assert await sc.get_pending_state_check(db=_db({"pending_state_check": {"probes": []}}), session_id="s") is None
+    assert await sc.get_pending_state_check(db=_db({"pending_state_check": "junk"}), session_id="s") is None
+    assert await sc.get_pending_state_check(db=_db(["not", "a", "dict"]), session_id="s") is None
+    assert await sc.get_pending_state_check(db=_db(None), session_id="s") is None
+    boom = MagicMock(); boom.execute = AsyncMock(side_effect=RuntimeError("db down"))
+    assert await sc.get_pending_state_check(db=boom, session_id="s7") is None
+    assert "state_check_pending_read_failed sid=s7 err=RuntimeError('db down')" in caplog.text
+
+
+def test_render_probe_message_exact_text_and_clips():
+    probes = [{"id": f"F:{i}", "command": f"echo {i}", "claim": f"claim {i} " + "c" * 120} for i in range(1, 23)]
+    msg = sc.render_probe_message(probes, checked=22, unchecked=0)
+    assert msg.startswith("🩺 **State check — 22 things the plan believes about your system.**\n")
+    assert ("Nothing here changes anything: every command only reads. Paste the whole block into your usual "
+            "shell, then paste ALL of the output back here (keep the `== … ==` lines).\n\n```bash\n"
+            'echo "== F:1 =="\necho 1\n') in msg
+    assert "\n```\n\nWhat each line checks:\n- `F:1` " + ("claim 1 " + "c" * 120)[:110] + "\n- `F:2` " in msg
+    assert "- `F:20` " in msg and "- `F:21` " not in msg                       # [:20]
+    assert "cannot be checked" not in msg and "claims checked" not in msg
+    one = sc.render_probe_message(probes[:1], checked=1, unchecked=1)
+    assert one.startswith("🩺 **State check — 1 thing the plan believes about your system.**\n")
+    assert one.endswith("\n\n(1 claim cannot be checked from a shell and are left as they are.)")
+    more = sc.render_probe_message(probes[:2], checked=5, unchecked=3)
+    assert more.startswith("🩺 **State check — 2 things the plan believes about your system (5 claims checked).**\n")
+    assert more.endswith("(3 claims cannot be checked from a shell and are left as they are.)")
+
+
+def test_render_probe_message_empty_branches_verbatim():
+    assert sc.render_probe_message([], checked=0, unchecked=4) == (
+        "🩺 **State check** — I could not build the checks this time: the model returned no usable "
+        "command for any of the 4 claims (a generation miss, not a verdict on your system). "
+        "Press 🩺 Verify state again to retry, or tell me in your own words what is and is not working.")
+    assert sc.render_probe_message([], checked=0, unchecked=0) == (
+        "🩺 **State check** — the plan has recorded nothing I can verify from a shell yet. Tell me in your "
+        "own words what is and is not working and I will take it from there.")
