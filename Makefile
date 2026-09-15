@@ -353,8 +353,11 @@ config: ## Show orchestrator config (use: make config; or make config FILTER=mod
 		docker exec $(CONTAINER) sh -c "cd /code/cli && python -m scaffold_cli.main config show --filter $(FILTER)"; \
 	fi
 
-openapi-snapshot: ## Regenerate docs/openapi.json from the live FastAPI app
-	@docker exec $(CONTAINER) python scripts/openapi_snapshot.py > docs/openapi.json.tmp && \
+openapi-snapshot: ## Regenerate docs/openapi.json from the WORKING TREE (a throwaway dev container — the live container may be the prod image and would snapshot the old routes, §17.1081)
+	@docker run --rm --network ai-network --env-file .env -e LOG_FILE= -e DATABASE_URL="$$(docker exec $(CONTAINER) printenv DATABASE_URL)" \
+		--user $$(id -u):$$(id -g) -e HOME=/tmp -v $(CURDIR):/code -w /code scaffold-engine:dev \
+		sh -c 'python scripts/openapi_snapshot.py' 2>/dev/null > docs/openapi.json.tmp && \
+		python3 -c "import json,sys; json.load(open('docs/openapi.json.tmp'))" && \
 		mv docs/openapi.json.tmp docs/openapi.json && \
 		echo "Wrote docs/openapi.json ($$(wc -c < docs/openapi.json) bytes)."
 

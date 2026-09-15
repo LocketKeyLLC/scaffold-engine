@@ -796,6 +796,7 @@ const VIEWS = {
   schedules: lazy("schedules", "Schedules"),
   settings: lazy("settings", "Settings"),
   setup: lazy("setup", "Connect your models"),
+  capabilities: lazy("capabilities", "Capabilities"),
   library: lazy("library", "Library"),
   costs: lazy("costs", "Costs"),
   traces: lazy("traces", "LLM Traces"),
@@ -840,6 +841,7 @@ function registerRoutes() {
   router.route("/schedules", (p) => loadAndRender("schedules", p, router.currentPath()));
   router.route("/settings", (p) => loadAndRender("settings", p, router.currentPath()));
   router.route("/setup", (p) => loadAndRender("setup", p, router.currentPath()));
+  router.route("/capabilities", (p) => loadAndRender("capabilities", p, router.currentPath()));
   router.route("/library", (p) => loadAndRender("library", p, router.currentPath()));
   router.route("/costs", (p) => loadAndRender("costs", p, router.currentPath()));
   router.route("/traces", (p) => loadAndRender("traces", p, router.currentPath()));

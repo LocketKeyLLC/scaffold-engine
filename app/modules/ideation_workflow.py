@@ -631,7 +631,12 @@ async def research_and_compile(
         # §17.662 machinery). Only-when-applicable: None for a straightforward
         # brief with no genuine branch. Fail-soft — never blocks Phase 2.
         research_options = None
-        if entries and settings.research_options_enabled:
+        # §17.1081b — a prescriptive brief has no branch to surface.
+        from app.modules.engine_setup import job_is_prescriptive as _presc
+        _is_prescriptive = await _presc(db, job_id)
+        if _is_prescriptive:
+            logger.info("phase2_options_skipped_prescriptive: job_id=%s", job_id)
+        if entries and settings.research_options_enabled and not _is_prescriptive:
             try:
                 from app.modules.research_agent import _generate_options
                 from app.modules.research_state import ResearchState

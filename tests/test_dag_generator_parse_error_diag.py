@@ -139,7 +139,8 @@ class TestGenerateDagParseErrorField:
         job_result = MagicMock()
         job_result.first.return_value = (
             # §17.1038 — input_text joined the SELECT (plan provenance corpus).
-            "planning", {"title": "test"}, None, None, None, 0,
+            # §17.1081b — prescriptive flag joined it too.
+            "planning", {"title": "test"}, None, None, None, 0, False,
         )
         db = AsyncMock()
         db.execute = AsyncMock(return_value=job_result)

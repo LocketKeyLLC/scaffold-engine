@@ -12361,6 +12361,85 @@
         "summary": "Delete Schedule"
       }
     },
+    "/setup/recipes": {
+      "get": {
+        "description": "Every optional capability with its live status (on / off / blocked /\nin_progress / manual), the plain-words reason it ships off, and the job\ncarrying its walkthrough when one is open.",
+        "operationId": "list_setup_recipes_setup_recipes_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Setup Recipes Setup Recipes Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Setup Recipes",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
+    "/setup/recipes/{recipe_id}/start": {
+      "post": {
+        "description": "Open the walkthrough: returns ``{job_id, status: \"refining\"}`` — the\nsame shape as ``POST /ideate/start`` so the console lands on the job hub.",
+        "operationId": "start_setup_recipe_setup_recipes__recipe_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recipe_id",
+            "required": true,
+            "schema": {
+              "title": "Recipe Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Setup Recipe Setup Recipes  Recipe Id  Start Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Start Setup Recipe",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
     "/skip": {
       "post": {
         "description": "Step 15: Skip a specific DAG node.",

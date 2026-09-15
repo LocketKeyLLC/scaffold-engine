@@ -1122,6 +1122,9 @@ async def _generate_dag_with_validator(
             prompt = _exemplar_block + prompt
         if _mcp_block:
             prompt = _mcp_block + prompt
+        if isinstance(brief_data, dict) and brief_data.get("prescribed"):
+            from app.modules.engine_setup import PRESCRIBED_BLOCK
+            prompt = PRESCRIBED_BLOCK + prompt
 
         # §17.463 — retry-on-empty around the generator call (thinking-model
         # empty-content guard). 8192-token headroom + up to 3 re-draws.
@@ -1345,7 +1348,8 @@ async def generate_dag(
         text("""
             SELECT j.status, j.refined_brief, j.dag_input_hash, j.research_data,
                    j.input_text,
-                   (SELECT COUNT(*) FROM dag_nodes WHERE job_id = j.id) AS node_count
+                   (SELECT COUNT(*) FROM dag_nodes WHERE job_id = j.id) AS node_count,
+                   COALESCE(j.metadata->>'prescriptive', '') = 'true' AS prescriptive
             FROM jobs j
             WHERE j.id = :id
             FOR UPDATE OF j
@@ -1357,7 +1361,7 @@ async def generate_dag(
         await db.rollback()
         return {"error": f"Job {job_id} not found"}
 
-    status, brief, stored_hash, research_data, input_text, node_count = row
+    status, brief, stored_hash, research_data, input_text, node_count, prescriptive = row
     # H6: accept 'planning' OR 'running' — execute_all_nodes flips to 'running'
     # before calling generate_dag on auto-gen path.
     if status not in ("planning", "running"):
@@ -1376,7 +1380,15 @@ async def generate_dag(
     # §17.663 — thread the research-surfaced operator decision (§17.662) into the
     # brief so the DAG builds an explicit `decision` node for it. Merged BEFORE
     # the input hash so a different surfaced decision correctly re-plans.
-    brief_data = _brief_with_operator_decision(brief_data, research_data)
+    # §17.1081b — a prescriptive brief (jobs.metadata.prescriptive) already
+    # made its decisions: no research-surfaced decision node, and the planner
+    # is told to follow the listed steps. The flag rides in brief_data so the
+    # input hash (and the prompt JSON) carry it.
+    if prescriptive:
+        brief_data = {**brief_data, "prescribed": True}
+        logger.info("dag_prescriptive_brief: job=%s (no decision node, steps as listed)", job_id)
+    else:
+        brief_data = _brief_with_operator_decision(brief_data, research_data)
     current_hash = _compute_dag_input_hash(brief_data, model, model_overrides)
 
     # §17.181: re-entry guard. Three cases when nodes already exist:
