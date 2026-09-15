@@ -88,6 +88,13 @@ def _register_observability_jobs() -> None:
         # already registered (re-init path) — ignore.
         pass
 
+    # §17.1078 — when the queue worker owns the interval jobs (procrastinate
+    # periodics in app/queue.py), the in-memory APScheduler copies stay off:
+    # two schedulers ticking the same coroutine would double every eval.
+    if settings.queue_enabled:
+        logger.info('event="observability_jobs_delegated_to_queue" jobs=threshold_eval,calibration_watchdog,model_role_learning')
+        return
+
     if settings.alert_eval_enabled:
         from app.observability import thresholds as _thresholds
         _scheduler.add_job(

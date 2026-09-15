@@ -992,6 +992,10 @@ class Settings(BaseSettings):
     # NOT started; when off (default) nothing changes.
     queue_enabled: bool = False
     queue_cleanup_cron: str = "*/15 * * * *"
+    # §17.1078 — age-based zombie turn-run sweep on the queue (the startup
+    # sweep is unconditional; this one only closes runs older than the cap).
+    queue_zombie_run_cron: str = "*/10 * * * *"
+    queue_zombie_run_max_age_minutes: int = Field(default=30, ge=5, le=1440)
     # §17.855 (audit "policy migration") — fold the deterministic phrase gates
     # (pivot / help / how-to / shell-result) into the SERVER `/decide` path as a
     # post-filter (`assist_policy.apply_deterministic_overrides`), so the CONFIDENT

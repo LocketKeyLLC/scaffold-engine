@@ -92,3 +92,31 @@ def test_runner_turn_is_attributed_to_the_pending_node():
     assert 'nk or res.get("node_key")' in block and "node_key=_rnk" in block
     sc = (ROOT / "app" / "modules" / "assist_state_check.py").read_text(encoding="utf-8")
     assert '"node_key": pending["node_key"]}' in sc
+
+
+# ── §17.1078 — sudo policy: allow-list → `sudo -n`, otherwise drop sudo and say so ──
+
+@pytest.mark.parametrize("cmd,allow,expect_cmd,noted", [
+    ("sudo nginx -t", ["nginx -t"], "sudo -n nginx -t", False),
+    ("sudo -E nginx -t", ["nginx -t"], "sudo -n nginx -t", False),          # sudo's own flags are dropped
+    ("sudo pct config 101", ["pct config"], "sudo -n pct config 101", False),
+    ("sudo nginx -T", ["nginx -t"], "nginx -T", True),                       # whole-token prefix: -t ≠ -T
+    ("sudo nginx -tq", ["nginx -t"], "nginx -tq", True),                     # no substring matches
+    ("sudo docker ps", [], "docker ps", True),
+    ("docker ps", ["docker ps"], "docker ps", False),                        # no sudo → untouched, no note
+])
+def test_runner_sudo_policy(cmd, allow, expect_cmd, noted):
+    mod = _load_runner_script()
+    out, note = mod.apply_sudo_policy(cmd, allow)
+    assert out == expect_cmd
+    assert ("WITHOUT sudo" in note) is noted
+
+
+def test_runner_sudo_never_widens_the_read_only_gate():
+    """The gate runs BEFORE the policy: an allowed prefix on a mutation is still refused."""
+    mod = _load_runner_script()
+    src = (ROOT / "scripts" / "local_runner_mcp.py").read_text(encoding="utf-8")
+    body = src[src.index("async def run_readonly"):src.index("return note + out")]
+    assert body.index("read_only(command)") < body.index("apply_sudo_policy(command, allow)")
+    assert mod.read_only("sudo systemctl restart nginx")[0] is False
+    assert "--sudo-allow" in src and 'nargs="*"' in src
