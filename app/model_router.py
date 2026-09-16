@@ -217,6 +217,15 @@ _BACKOFF_BASE_SEC = 0.5
 _BACKOFF_CAP_SEC = 8.0
 
 
+def _short_error(err: str | None) -> str:
+    """'HTTP 500' / 'timeout' / the first 60 chars — a status line, not a stack."""
+    e = (err or "").strip()
+    m = re.match(r"(HTTP \d{3})", e)
+    if m:
+        return m.group(1)
+    return (e[:60] + "…") if len(e) > 60 else (e or "no detail")
+
+
 def _classify_failure(resp: ModelResponse) -> str:
     """Return ``'retry'`` for transient failures, ``'fail_fast'`` for
     deterministic ones.
@@ -370,6 +379,12 @@ async def _dispatch_with_retry(
         )
         if classification == "fail_fast":
             break
+        # §17.1082 — the operator's screen went quiet for 105 s while two
+        # 500s from the cloud were retried in silence; say so where they look.
+        if attempt + 1 < retries:
+            from app.utils.progress import turn_note
+            turn_note(f"The model call to {model} failed ({_short_error(last_resp.error)}) — retrying, "
+                      f"attempt {attempt + 2} of {retries}…")
         # Sleep before the next primary attempt only; no point sleeping
         # after the last attempt or right before the fallback swap.
         if attempt + 1 < retries:

@@ -6,6 +6,7 @@ stage, the right dispatch, one terminal done frame".
 """
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -530,3 +531,88 @@ async def test_add_step_with_reshape_tag_dispatches_add_step_not_note():
     assert "assist_note_recorded" not in names
     assert ev[-1][1]["handled"] == "add_step"
     assert any("Added a step" in (d.get("text") or "") for n, d in ev if n == "assist_turn_status")
+
+
+# ── §17.1082 — liveness: tail pulse, deep-code progress notes, retry surfacing ──
+
+
+async def test_tail_pulses_while_quiet_and_running(monkeypatch):
+    """Rows that stay 'running' with no new frame: after _PULSE_AFTER_S the
+    tail emits assist_turn_pulse every _PULSE_EVERY_S (not persisted), then
+    ends normally when the run finishes. Live: a 105 s quiet research pass
+    looked like a dead page."""
+    quiet = {"status": "running", "frames": [{"e": "assist_turn_status", "d": {"text": "working"}}]}
+    done = {"status": "done", "frames": quiet["frames"] + [{"e": "assist_turn_done", "d": {"handled": "x"}}]}
+    rows = [quiet] * 6 + [done]
+    clock = {"t": 1000.0}
+    loop = asyncio.get_event_loop()
+    monkeypatch.setattr(type(loop), "time", lambda self: clock["t"])
+    async def tick(_):
+        clock["t"] += 5.0            # each poll = 5 s of wall clock
+    with patch("app.database.async_session", new=_fake_async_session(rows)), \
+         patch("asyncio.sleep", new=tick):
+        out = [ev async for ev in assist_turn.tail_turn_run("run-p")]
+    names = [n for n, _ in out]
+    pulses = [d for n, d in out if n == "assist_turn_pulse"]
+    assert names[0] == "assist_turn_started" and names[1] == "assist_turn_status" and names[-1] == "assist_turn_done"
+    assert len(pulses) >= 2                                  # 30 s quiet → pulses at 10 s and 20 s (and 30 s)
+    assert pulses[0]["quiet_s"] >= assist_turn._PULSE_AFTER_S and pulses[0]["running_s"] >= pulses[0]["quiet_s"]
+    assert pulses[1]["quiet_s"] - pulses[0]["quiet_s"] >= assist_turn._PULSE_EVERY_S
+
+
+def test_turn_note_sink_is_task_local_and_never_raises():
+    from app.utils import progress as pg
+    assert pg.turn_note("nobody listening") is None           # no sink → no-op
+    got = []
+    tok = pg.set_turn_note_sink(got.append)
+    try:
+        pg.turn_note("retrying")
+        assert got == ["retrying"]
+        pg.set_turn_note_sink(lambda t: 1 / 0)
+        pg.turn_note("boom")                                  # a broken sink is swallowed
+    finally:
+        pg.reset_turn_note_sink(tok)
+    assert pg.turn_note("after reset") is None
+
+
+async def test_driver_installs_the_sink_and_notes_land_on_the_run_row(monkeypatch):
+    """The driver wraps the loop with a sink that appends assist_turn_status
+    frames through a DETACHED session, and drains those tasks before
+    finalizing the row."""
+    appended = []
+    async def fake_note(run_id, text_value):
+        appended.append((run_id, text_value))
+    monkeypatch.setattr(assist_turn, "_append_note_detached", fake_note)
+    async def fake_run_turn(**kw):
+        from app.utils.progress import turn_note
+        turn_note("The model call to m failed (HTTP 500) — retrying, attempt 2 of 3…")
+        yield ("assist_turn_done", {"handled": "x"})
+    monkeypatch.setattr(assist_turn, "run_turn", fake_run_turn)
+    with patch("app.database.async_session", new=_fake_async_session([None] * 5)), \
+         patch.object(assist_turn, "_append_frames", new=AsyncMock()):
+        await assist_turn._drive_turn_run(run_id="r9", session_id="s", message=None, command="guide", node_key=None, history=[])
+    assert appended == [("r9", "The model call to m failed (HTTP 500) — retrying, attempt 2 of 3…")]
+    from app.utils import progress as pg
+    assert pg._TURN_NOTE_SINK.get() is None                   # reset after the turn
+
+
+def test_router_retry_says_so_in_the_status_line():
+    from app import model_router as mr
+    assert mr._short_error("HTTP 500: {\"StatusCode\":500}") == "HTTP 500"
+    assert mr._short_error("x" * 100).endswith("…") and len(mr._short_error("x" * 100)) == 61
+    assert mr._short_error(None) == "no detail"
+    src = open(mr.__file__, encoding="utf-8").read()
+    block = src[src.index("Attempt %d/%d failed for %s"):src.index("# Phase 2: fallback")]
+    assert "turn_note(" in block and "retrying, " in block and "attempt {attempt + 2} of {retries}" in block
+    assert block.index('if classification == "fail_fast":') < block.index("turn_note(")   # no note on a fail-fast
+
+
+def test_pulse_event_is_registered_and_vendored():
+    from app import sse_events
+    assert sse_events.ASSIST_TURN_PULSE == "assist_turn_pulse"
+    import pathlib
+    root = pathlib.Path(assist_turn.__file__).resolve().parents[2]
+    assert "ASSIST_TURN_PULSE" in (root / "pipelines" / "_vendor" / "_sse_events.py").read_text(encoding="utf-8")
+    js = (root / "app" / "ui" / "static" / "views" / "assist.js").read_text(encoding="utf-8")
+    for needle in ('case "assist_turn_pulse"', "working ${fmtElapsed", "no word from the engine", "closed before this turn finished", "maybeResumeActiveTurn(true)"):
+        assert needle in js, needle
