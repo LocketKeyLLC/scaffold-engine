@@ -52,6 +52,8 @@ _KV_RE = re.compile(r"^([a-z][a-z0-9_]{1,20}):\s*(.+?)\s*$", re.IGNORECASE)
 # read; the operator pastes them constantly and they were never kept.
 _QM_LIST_ROW_RE = re.compile(r"^[ \t]*(\d{2,5})[ \t]+(\S+)[ \t]+(running|stopped|paused|suspended)\b", re.IGNORECASE | re.MULTILINE)
 _PCT_LIST_ROW_RE = re.compile(r"^[ \t]*(\d{2,5})[ \t]+(running|stopped)[ \t]+(?:\S+[ \t]+)?(\S+)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_NET_SET_ECHO_RE = re.compile(
+    r"(?:^|\n)[^\n]*[$#]\s[^\n]*\b(pct|qm)\s+(?:create|set)\s+(\d{2,5})\b[^\n]*?--?net0[= ]+(\S+)", re.IGNORECASE)
 _EXEC_IPADDR_RE = re.compile(
     r"\bpct\s+exec\s+(\d{2,5})\s+--\s+ip\s+(?:-4\s+)?(?:addr|address|a)\b[^\n]*\n((?:[^\n]*\n?){1,6})", re.IGNORECASE)
 _HOST_IPADDR_RE = re.compile(
@@ -125,6 +127,15 @@ def parse_system_state(operator_text: str) -> dict[str, dict[str, Any]]:
         if ips:
             rec = out.setdefault(rid, {"kind": "ct", "attrs": {}, "devices": {}, "source": f"pct exec {rid} -- ip addr"})
             rec["attrs"]["ip"] = ips[0]
+    # §17.1086 — `pct create N … --net0 …ip=…` / `pct set N -net0 …` / `qm set N
+    # -net0 …` echoed on a prompt line: the addressing the operator gave the
+    # machine (static vs dhcp) is the fact behind "the router can't see it".
+    for verb, rid, spec in _NET_SET_ECHO_RE.findall(text_in):
+        spec = spec.strip().strip("'\"")
+        if "ip=" in spec or "hwaddr=" in spec or "bridge=" in spec:
+            rec = out.setdefault(rid, {"kind": "vm" if verb.lower() == "qm" else "ct", "attrs": {}, "devices": {},
+                                       "source": f"{verb.lower()} net0 echo"})
+            rec["devices"]["net0"] = spec
     # the host's own bridge address, from `ip -4 addr show vmbr0` or the
     # interfaces file
     host_ip = None
@@ -157,6 +168,22 @@ def parse_system_state(operator_text: str) -> dict[str, dict[str, Any]]:
     return clean
 
 
+def _merge_devices(cur: dict, new: dict) -> dict:
+    """§17.1086 — a net line is `k=v,k=v`; a partial read (a `pct set -net0
+    ip=dhcp` echo) updates the keys it carries and keeps the rest (the
+    hwaddr the config read established) instead of replacing the line."""
+    out = dict(cur)
+    for k, v in new.items():
+        if str(k).startswith("net") and k in out and "=" in str(v) and "=" in str(out[k]):
+            def _kv(spec: str) -> dict:
+                return dict(p.split("=", 1) for p in str(spec).split(",") if "=" in p)
+            m = {**_kv(out[k]), **_kv(v)}
+            out[k] = ",".join(f"{a}={b}" for a, b in m.items())
+        else:
+            out[k] = v
+    return out
+
+
 def merge_system_state(current: dict | None, observed: dict) -> dict:
     """Newer observation wins per resource; untouched resources survive."""
     merged = {k: v for k, v in (current or {}).items() if isinstance(v, dict)}
@@ -171,7 +198,7 @@ def merge_system_state(current: dict | None, observed: dict) -> dict:
             cur_is_config = " config " in f" {cur.get('source', '')} "
             merged[rid] = {**cur,
                            "attrs": {**(cur.get("attrs") or {}), **(rec.get("attrs") or {})},
-                           "devices": {**(cur.get("devices") or {}), **(rec.get("devices") or {})},
+                           "devices": _merge_devices(cur.get("devices") or {}, rec.get("devices") or {}),
                            "source": cur.get("source") if cur_is_config else rec.get("source", cur.get("source"))}
             continue
         if cur and not partial and " config " not in f" {cur.get('source', '')} ":

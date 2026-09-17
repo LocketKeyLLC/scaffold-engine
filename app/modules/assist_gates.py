@@ -63,6 +63,8 @@ GATES: tuple[Gate, ...] = (
          "commands are copy-pasteable and of the right shape"),
     Gate("ingress_target", "answer", "assist_inventory", "topology=", (GUIDE, FIX, RESEARCH, STREAM), "§17.1083b",
          "a port forward / reservation targets the map's entry point, never a management port"),
+    Gate("problem_class_query", "retrieval", "assist_evidence", "class_query", (RESEARCH,), "§17.1086",
+         "a second web query with the operator's specifics removed and the vendor kept — the threads by everyone who hit this before"),
     # ── fix-path integrity gates ──
     Gate("no_repeat_fix", "answer", "assist_guide", "_gate(", (FIX,), "§17.906", "a fix does not repeat a command already tried on the step"),
     Gate("banned_values", "answer", "assist_guide", "find_banned_values", (FIX,), "§17.893", "a ruled-out value never comes back"),
@@ -94,7 +96,7 @@ SURFACE_CODE: dict[str, tuple[str, str, str]] = {
     # surface: (module file, start marker, end marker) — the region that must contain every gate's symbol
     GUIDE: ("assist_guide.py", "_vreport_guide = await verify_answer(", "_sourced_meta_guide"),
     FIX: ("assist_guide.py", "def _gate(draft: str)", "_sourced_meta_fix = list("),
-    RESEARCH: ("assist_research_lib.py", "answer, _vreport = await verify_answer(", "grounding = _vreport"),
+    RESEARCH: ("assist_research_lib.py", "need = derive_need(question, operator_notes=operator_notes,", "grounding = _vreport"),
     # the research surface's post-answer gates live in assist_agent.run_step_research
     "research_post": ("assist_agent.py", "res = await assist_guide.research_one(", "return {"),
     STREAM: ("assist_guide.py", "_vreport_stream = await verify_answer(", "_vreport_stream.get"),

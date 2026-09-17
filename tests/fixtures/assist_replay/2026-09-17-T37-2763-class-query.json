@@ -1,0 +1,32 @@
+{
+ "id": "2026-09-17-T37-2763-class-query",
+ "surface": "query",
+ "question": "i was able to do the port forwarding for the proxmox. however the container doesn't appear to be able to reserve ip addrress which is needed to do port forwardingg. You should reseaarch how to fix this.",
+ "notes": [
+  {
+   "text": "[decision] Operator has decided to rebuild VM 106"
+  },
+  {
+   "text": "Router is a Spectrum SAX1V1K (ES2251) gateway; port forwarding is in the My Spectrum app"
+  }
+ ],
+ "expect": {
+  "class_query": {
+   "starts_with": "Spectrum",
+   "contains": [
+    "port forwarding",
+    "reserve"
+   ],
+   "excludes": [
+    "SAX1V1K",
+    "ES2251",
+    "Decision",
+    "VLAN",
+    "able",
+    "how",
+    "caddy-proxy"
+   ]
+  }
+ },
+ "note": "live: the specific query 'SAX1V1K ES2251 Proxmox LXC static IP port forwarding' fetched a manual behind a 403 and a dictionary page; the class query fetches '[SOLVED] Proxmox VM Port Forwarding with Spectrum Router'"
+}

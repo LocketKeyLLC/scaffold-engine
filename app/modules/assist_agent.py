@@ -1140,6 +1140,22 @@ async def _record_sourced_values(*, session_id: str, node_key: str | None,
         logger.warning("assist_sourced_values_record_failed: %s", exc)
 
 
+def _focus_text(question: str, mem) -> str:
+    """§17.1086 — what the turn is about: the operator's words plus the step
+    recap's OPEN and NEXT lines (the recap said 'Caddy container … 80/443'
+    while the draft said 'e.g., 101 (Jellyfin)')."""
+    parts = [question or ""]
+    try:
+        from app.modules.assist_render import parse_recap
+        p = parse_recap(getattr(mem, "recap", None) or "")
+        parts.extend(p.get("open") or [])
+        if p.get("next"):
+            parts.append(p["next"])
+    except Exception:  # noqa: BLE001 — focus is a hint
+        pass
+    return "\n".join(str(x) for x in parts if x)
+
+
 async def run_step_research(
     *,
     session_id: str,
@@ -1264,6 +1280,7 @@ async def run_step_research(
         owned_hosts=_ev_owned(mem.environment, mem.operator_notes),  # §17.1032
         confirmed=_ev_ledger(mem.environment, mem.operator_notes),  # §17.1034
         topology=_topology_of(mem.environment),  # §17.1083b (assist_inventory.topology_of)
+        focus=_focus_text(question, mem),  # §17.1086
     )
     # §17.1030 — the verifier's report is for the ledger, not the payload.
     _grounding = res.pop("grounding", None) or {}

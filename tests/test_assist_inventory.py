@@ -358,3 +358,50 @@ def test_a_pin_that_disagrees_with_observed_output_is_a_conflict_not_a_second_ad
     assert {(c["id"], c["pinned"], c["observed"]) for c in pc} == {("120", "192.168.1.30", "192.168.1.26"), ("host", "192.168.1.200", "192.168.1.156")}
     text = inv.render_system_map(env)
     assert "pinned value says caddy-proxy is 192.168.1.30 but its own `ip addr` output says 192.168.1.26" in text
+
+
+# ── §17.1086 — the problem-class query, addressing in the map, focus-aware ingress gate ──
+
+def test_class_query_strips_the_operators_specifics_and_keeps_the_vendor():
+    from app.modules.assist_evidence import class_query, derive_need, _vendor_words
+    notes = [{"text": "[decision] Operator has decided to rebuild VM 106"},
+             {"text": "Router is a Spectrum SAX1V1K (ES2251) gateway; port forwarding is in the My Spectrum app"},
+             {"text": "Media VLAN 20 uses 10.10.20.0/24 on the Netgear switch"}]
+    assert [_vendor_words(n["text"]) for n in notes] == [[], ["Spectrum"], ["Netgear"]]     # not "Decision", not "VLAN"
+    q = ("i was able to do the port forwarding for the proxmox. however the container doesn't appear to be able to "
+         "reserve ip addrress which is needed to do port forwardingg. You should reseaarch how to fix this.")
+    need = derive_need(q, operator_notes=notes, goal_terms="OPEN: control-panel HTTP returns 404 on container 111\nOPEN: caddy internal HTTPS check returns 000\nOPEN: Spectrum router cannot reserve an IP for the Caddy container, so port forwarding for it is blocked", assume_question=True)
+    assert need.goal_terms and all("control" not in t and "http" not in t for t in need.goal_terms), need.goal_terms   # only the sharing line's words
+    cq = class_query(need, q, operator_notes=notes)
+    assert cq.startswith("Spectrum ") and "SAX1V1K" not in cq and "ES2251" not in cq
+    assert "port forwarding" in cq and "reserve" in cq and "able" not in cq.split() and "how" not in cq.split()
+    # nothing local: no ids, ips, hostnames, macs
+    q2 = "in the spectrum app, under port forwarding i don't see 192.168.1.26 for CT 120 (caddy-proxy) MAC BC:24:11:AC:C9:06"
+    cq2 = class_query(derive_need(q2, operator_notes=notes, assume_question=True), q2, operator_notes=notes, local_names=["caddy-proxy", "jellyfin"])
+    assert "192.168" not in cq2 and "120" not in cq2 and "bc:24" not in cq2.lower() and "caddy-proxy" not in cq2
+    assert class_query(derive_need("pm2: command not found", operator_notes=notes, assume_question=True), "pm2: command not found", operator_notes=notes) == ""
+
+
+def test_addressing_mode_is_parsed_from_create_set_echoes_and_rendered():
+    create = ("root@pve:~# pct create 120 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst --hostname caddy-proxy "
+              "--net0 name=eth0,bridge=vmbr0,ip=192.168.1.26/24,gw=192.168.1.1 --ostype debian\n  Logical volume \"vm-120-disk-0\" created.\nroot@pve:~# ")
+    st = merge_system_state(parse_system_state(CONFIG_120), parse_system_state(create))
+    assert "hwaddr=BC:24:11:AC:C9:06" in st["120"]["devices"]["net0"] and "ip=192.168.1.26/24" in st["120"]["devices"]["net0"]
+    env = _env(); env["system_state"] = merge_system_state(env["system_state"], parse_system_state(create))
+    text = inv.render_system_map(env)
+    assert "addressing: static 192.168.1.26/24 (set in Proxmox — the router never leases to it)" in text
+    assert "ENTRY POINT ADDRESSING: static" in text and "must lease once (then reserve)" in text
+    dhcp = merge_system_state(st, parse_system_state("root@pve:~# pct set 120 -net0 name=eth0,bridge=vmbr0,ip=dhcp\nroot@pve:~# "))
+    assert "ip=dhcp" in dhcp["120"]["devices"]["net0"] and "hwaddr=" in dhcp["120"]["devices"]["net0"]
+    env["system_state"] = dhcp
+    assert "ENTRY POINT ADDRESSING" not in inv.render_system_map(env) and "addressing: dhcp" in inv.render_system_map(env)
+
+
+def test_ingress_gate_uses_the_turns_focus():
+    sm = inv.build_system_map(_env())
+    draft = ("In the Proxmox web UI, select the container you want to port forward (e.g., 101 (Jellyfin)). "
+             "Change Static to DHCP, reserve the IP in the Spectrum router, then point the port forward at the container.")
+    assert inv.ingress_issues(draft, sm) == []                                          # the draft alone never names the entry
+    focus = "the container can't reserve an IP\nNEXT: Give the Caddy container a fixed IP so the router can forward ports 80/443 to it"
+    assert inv.ingress_issues(draft, sm, focus=focus) == [{"kind": "wrong_machine", "id": "101", "name": "jellyfin"}]
+    assert inv.ingress_issues(GAME, sm, focus="At the Palworld step: open UDP 8211 for VM 106") == []

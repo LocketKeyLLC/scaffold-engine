@@ -180,6 +180,44 @@ def _cap(q: str) -> str:
     return " ".join((q or "").split()[:_QUERY_MAX_WORDS])
 
 
+def _lines_about(text: str, block: Optional[str]) -> list[str]:
+    """The lines of a multi-line block that are about ``text``: a line
+    qualifies through a shared content word that DISCRIMINATES among the
+    block's lines (appears in fewer than half of them). "container" in two of
+    three OPEN lines picks nothing out; "reserve" in one of three does."""
+    from app.modules.assist_research_lib import _GOAL_STOPWORDS
+    lines = [ln for ln in (block or "").splitlines() if ln.strip()]
+    if not lines:
+        return []
+
+    def _words(t: str) -> set[str]:
+        return {w for w in re.findall(r"[a-z][a-z0-9-]{3,}", t.lower()) if w not in _GOAL_STOPWORDS}
+    qwords = _words(text)
+    per_line = [_words(ln) for ln in lines]
+    freq: dict[str, int] = {}
+    for ws in per_line:
+        for w in ws:
+            freq[w] = freq.get(w, 0) + 1
+    half = max(1, len(lines) / 2)
+    out = []
+    for ln, ws in zip(lines, per_line, strict=True):
+        shared = qwords & ws
+        if any(freq[w] < half or len(lines) == 1 for w in shared):
+            out.append(ln)
+    return out
+
+
+def _shares_words(text: str, other: Optional[str], n: int) -> bool:
+    """True when two texts share at least ``n`` content words (≥5 chars, not stopwords)."""
+    if not (text or "").strip() or not (other or "").strip():
+        return False
+    from app.modules.assist_research_lib import _GOAL_STOPWORDS
+
+    def _words(t: str) -> set[str]:
+        return {w for w in re.findall(r"[a-z][a-z0-9-]{4,}", t.lower()) if w not in _GOAL_STOPWORDS}
+    return len(_words(text) & _words(other)) >= n
+
+
 def _shares_a_word(text: str, other: Optional[str]) -> bool:
     """True when two texts share a content word (≥4 chars, not a stopword)."""
     if not (text or "").strip() or not (other or "").strip():
@@ -240,8 +278,17 @@ def derive_need(
         # "control-panel backend attempted start" appended to its query. Same
         # rule as the hardware: a term earns its place by sharing a
         # distinctive word with the operator's text.
-        terms = _keywords(goal_terms or "", 4) if _shares_a_word(raw, goal_terms) else []
-        q = " ".join(hardware + _keywords(raw, 6) + [t for t in terms if t not in raw.lower()])
+        # §17.1086 — only the OPEN lines that share a word with the question
+        # supply terms. A multi-line OPEN block ("control-panel HTTP 404; caddy
+        # internal check 000; router cannot reserve the container's IP") shared
+        # ONE word with a router question and handed over all three services'
+        # words; now the router lines alone do.
+        _lines = _lines_about(raw, goal_terms)
+        terms = _keywords("\n".join(_lines), 4) if _lines else []
+        # §17.1086 — speaker framing is not a search term on this path either
+        _raw_q = " ".join(t for t in raw.replace("'", " ").split()
+                          if t.strip(".,;:!?\"").lower() not in _QUESTION_TERM_STOP | _FRAMING_STOP)
+        q = " ".join(hardware + _keywords(_raw_q, 6) + [t for t in terms if t not in raw.lower()])
         return Need(
             kind="question", subject=raw, query=_cap(q), hardware=hardware,
             goal_terms=terms,
@@ -271,6 +318,77 @@ def derive_need(
                 "records no open item" if commands or output
                 else "empty message"),
     )
+
+
+_CLASS_LOCAL_RE = re.compile(
+    r"https?://\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b|\b\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?\b|"
+    r"\b(?:CT|LXC|VM|container|vmid)\s*\d{2,5}\b|\b\d{2,5}\b|\b(?:[0-9a-f]{2}:){2,5}[0-9a-f]{2}\b",
+    re.IGNORECASE)
+
+
+def _vendor_words(note: str) -> list[str]:
+    """Capitalised words adjacent to a model token or a hardware noun."""
+    from app.modules.assist_render import _HARDWARE_NOUN_RE, _MODEL_TOKEN_RE
+    toks = [t.strip(".,;:()[]") for t in note.split()]
+    out: list[str] = []
+    for i, t in enumerate(toks):
+        if not (t[:1].isupper() and t[1:].islower() and t.isalpha() and len(t) > 3) or _MODEL_TOKEN_RE.fullmatch(t):
+            continue
+        neigh = [x for x in toks[max(0, i - 1): i + 2] if x != t]
+        if any(_MODEL_TOKEN_RE.fullmatch(x) or _HARDWARE_NOUN_RE.fullmatch(x.lower()) for x in neigh):
+            if t not in out:
+                out.append(t)
+    return out
+
+
+def class_query(need: Need, text: str, *, operator_notes: Optional[list] = None,
+                local_names: Optional[list] = None) -> str:
+    """§17.1086 — the PROBLEM-CLASS query: the same question with everything
+    that is only true of THIS operator removed — model numbers, ids, IPs,
+    hostnames, MACs — and the vendor word kept.
+
+    The specific query is right for a manual and wrong for a forum. Live:
+    "SAX1V1K ES2251 Proxmox LXC static IP port forwarding" fetched a manual
+    behind a 403 and a dictionary page, while hundreds of threads titled
+    "Spectrum app port forwarding device not listed" held the answer (the app
+    only lists DHCP clients; a static device must lease first). Both queries
+    run; the evidence ranker keeps what is relevant. Vocabulary-free: vendor
+    words are the capitalised tokens in the operator's own hardware notes,
+    model numbers the tokens `_MODEL_TOKEN_RE` matches — nothing here names a
+    product."""
+    from app.modules.assist_render import _HARDWARE_NOUN_RE, _MODEL_TOKEN_RE
+    base = " ".join((text or "").split())
+    if not base:
+        return ""
+    vendors: list[str] = []
+    for n in (operator_notes or []):
+        note = (n.get("text") if isinstance(n, dict) else str(n)) or ""
+        if not _HARDWARE_NOUN_RE.search(note):
+            continue
+        # a vendor is the capitalised word that stands NEXT TO a model number or
+        # a hardware noun in the note ("Spectrum SAX1V1K", "Spectrum router") —
+        # the first cut took any capitalised word and produced "Decision VLAN".
+        # The note earns its vendor when the question names it or shares a
+        # distinctive word with the note (same rule as the models, §17.1020).
+        if not (_shares_a_word(base, note) or any(v.lower() in base.lower() for v in _vendor_words(note))):
+            continue
+        for w2 in _vendor_words(note):
+            if w2.lower() in base.lower() or _shares_a_word(base, note):
+                if w2 not in vendors:
+                    vendors.append(w2)
+    cleaned = _CLASS_LOCAL_RE.sub(" ", base.replace("'", " "))
+    # the operator's own machine names (from the system map) are local too
+    for nm in sorted({str(n).lower() for n in (local_names or []) if str(n).strip()}, key=len, reverse=True):
+        cleaned = re.sub(rf"\b{re.escape(nm)}\b", " ", cleaned, flags=re.IGNORECASE)
+    # speaker framing ("you should research how to fix this", "I was able to")
+    # is not a symptom; drop the question-word/verb class before extraction
+    cleaned = " ".join(t for t in cleaned.split()
+                       if not _MODEL_TOKEN_RE.fullmatch(t)
+                       and t.strip(".,;:!?'\"").lower() not in _QUESTION_TERM_STOP | _FRAMING_STOP)
+    words = [w for w in _keywords(cleaned, 8)
+             if not any(v.lower() in w.split() for v in vendors)]
+    q = " ".join(dict.fromkeys(vendors[:2] + words))
+    return _cap(q) if len(q.split()) >= 3 else ""
 
 
 def finalize_query(need: Need, generated: Optional[str] = None,
@@ -658,6 +776,12 @@ def sourced_now(answer: str, sources: list) -> list[dict]:
 # `pm2 web` and discussed the pm2 web port — the PREVIOUS turn's question,
 # which sat last in the prompt inside the conversation block. Nothing checked
 # that the answer and the question shared a single word.
+# §17.1086 — speaker framing that is never a symptom (the class query drops it)
+_FRAMING_STOP = frozenset({
+    "able", "appear", "appears", "seem", "seems", "research", "researched", "fix", "fixed", "issue",
+    "problem", "under", "however", "though", "anyway", "actually", "really", "something", "anything",
+    "doesn", "don", "isn", "wasn", "didn", "won", "can", "cant", "needed", "needs", "tried",
+})
 _QUESTION_TERM_STOP = frozenset({
     "what", "which", "where", "when", "why", "how", "does", "did", "should",
     "could", "would", "please", "help", "there", "their", "this", "that",
@@ -917,6 +1041,7 @@ async def verify_answer(
     confirmed: str = "",
     annotate: bool = True,
     topology: Optional[dict] = None,
+    focus: str = "",
 ) -> tuple[str, dict]:
     """Check an answer against its grounding; regenerate once; else annotate.
 
@@ -970,7 +1095,7 @@ async def verify_answer(
         logger.warning("assist_answer_command_shape node_key=%s label=%s commands=%r",
                        node_key, label, [s["command"] for s in shape][:4])
     from app.modules.assist_inventory import ingress_footer, ingress_issues, ingress_notice
-    ingress = run_gate("ingress_target", ingress_issues, answer, topology, default=[])  # §17.1083b
+    ingress = run_gate("ingress_target", ingress_issues, answer, topology, focus=focus, default=[])  # §17.1083b
     if ingress:
         logger.warning("assist_answer_ingress_violation node_key=%s label=%s issues=%r",
                        node_key, label, ingress[:4])
@@ -1005,7 +1130,7 @@ async def verify_answer(
             c_cite = await run_gate_async("citation_backing", citation_report, candidate, sources, default=None)
             c_off = not run_gate("addresses_question", addresses_question, candidate, need, default=True)
             c_shape = run_gate("command_shape", command_shape_issues, candidate, default=[])
-            c_ingress = run_gate("ingress_target", ingress_issues, candidate, topology, default=[])
+            c_ingress = run_gate("ingress_target", ingress_issues, candidate, topology, focus=focus, default=[])
             better = (not _fails(c_uns, c_cite, c_off, c_shape, c_ingress)) or (
                 not c_ingress and ingress and not c_off and not c_shape) or (
                 not c_off and off and not c_shape and not c_ingress) or (
