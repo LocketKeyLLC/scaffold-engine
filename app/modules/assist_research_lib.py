@@ -597,6 +597,13 @@ def _goal_keywords(goal_terms: str, limit: int = 4) -> list[str]:
     """
     import re as _re
     low = " ".join((goal_terms or "").lower().split())
+    # §17.1083 — hostnames, IPs and URLs are the operator's own, never search
+    # terms; and a dotted name must not be split into tokens that then pair
+    # across the dot. Live: "defrusciohomelab.duckdns.org times out" became
+    # the phrase "org times", and the query
+    # "external https org times times out host fails cellular…" found a
+    # dictionary page for "external".
+    low = _re.sub(r"https?://\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+\b|\b\d{1,3}(?:\.\d{1,3}){3}\b", " ", low)
     toks = _re.findall(r"[a-z][a-z0-9-]{2,}", low)
     phrases: list[str] = []
     for a, b in zip(toks, toks[1:], strict=False):
@@ -692,6 +699,7 @@ async def research_one(
     sourced: Optional[set] = None,  # §17.1030 — the session's source-confirmed ledger
     owned_hosts: Optional[set] = None,  # §17.1032 — hosts the operator's ledger names
     confirmed: Optional[str] = None,  # §17.1034 — the operator's ledger text (confirmed tier)
+    topology: Optional[dict] = None,  # §17.1083b — the system map for the ingress gate
 ) -> dict:
     """Confirm a single operator-supplied question and optionally synthesize
     a short cited answer. Does not persist — this is a side query.
@@ -920,6 +928,7 @@ async def research_one(
                     sourced=sourced,  # §17.1030
                     owned_hosts=owned_hosts,  # §17.1032
                     confirmed=confirmed or "",  # §17.1034
+                    topology=topology,  # §17.1083b
                 )
                 grounding = _vreport
             if answer:  # §17.897 — code-enforced copy-paste format

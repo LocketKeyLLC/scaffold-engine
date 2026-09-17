@@ -30,6 +30,7 @@ from typing import Any, AsyncGenerator, Optional
 from sqlalchemy import text
 
 from app.database import async_session
+from app.modules.assist_inventory import topology_of as _topology_of  # §17.1083b
 from app.modules.prompt_assembly import (
     StepContext,
     assemble_job_digest,
@@ -1262,6 +1263,7 @@ async def run_step_research(
         sourced=_ev_sourced(mem.environment),  # §17.1030
         owned_hosts=_ev_owned(mem.environment, mem.operator_notes),  # §17.1032
         confirmed=_ev_ledger(mem.environment, mem.operator_notes),  # §17.1034
+        topology=_topology_of(mem.environment),  # §17.1083b (assist_inventory.topology_of)
     )
     # §17.1030 — the verifier's report is for the ledger, not the payload.
     _grounding = res.pop("grounding", None) or {}
