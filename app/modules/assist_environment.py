@@ -334,11 +334,29 @@ async def set_environment(
         from app.config import settings as _s
         existing = list(current.get("facts") or [])
         seen = {str(f).strip().lower() for f in existing}
+        # §17.1084 — every new fact is read against the records BEFORE it is
+        # stored: a MAC fragment that names a machine rewrites the fact and
+        # binds its address in the structured state. The operator's words stay;
+        # the engine's reading is appended so both are on the record.
+        from app.modules.assist_inventory import reconcile_fact
+        _fact_updates: dict = {}
         for f in facts:
             t = str(f).strip()
-            if t and t.lower() not in seen:
+            if not t:
+                continue
+            try:
+                t, upd = reconcile_fact(t, current)
+            except Exception:  # noqa: BLE001 — reconciliation never blocks a write
+                upd = None
+            if upd:
+                _fact_updates.update(upd)
+            if t.lower() not in seen:
                 existing.append(t)
                 seen.add(t.lower())
+        if _fact_updates:
+            from app.modules.assist_state import merge_system_state as _msm
+            current["system_state"] = _msm(current.get("system_state"), _fact_updates)
+            logger.info("assist_fact_reconciled session_id=%s updates=%s", session_id, sorted(_fact_updates))
         # Cap: keep the most recent (oldest drop first).
         # §17.920 — NEGATIVE KNOWLEDGE SURVIVES THE CAP. Plain FIFO discards
         # the most valuable facts first. Live (session 613dd1df): the operator

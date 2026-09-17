@@ -64,7 +64,7 @@ _PCT_LIST_HEAD_RE = re.compile(r"^\s*VMID\s+Status\s+Lock\s+Name", re.IGNORECASE
 # Values worth keeping: the ones the engine kept guessing at.
 _CONFIG_KEYS = frozenset({
     "boot", "name", "memory", "cores", "ostype", "scsihw", "onboot", "arch",
-    "hostname", "rootfs", "cpu", "machine", "bios", "agent", "status", "ip",
+    "hostname", "rootfs", "cpu", "machine", "bios", "agent", "status", "ip", "_listed_name",
 })
 _DEVICE_KEY_RE = re.compile(r"^(?:scsi|ide|sata|virtio|net|efidisk|tpmstate|mp|unused)\d+$",
                             re.IGNORECASE)
@@ -143,14 +143,17 @@ def parse_system_state(operator_text: str) -> dict[str, dict[str, Any]]:
     if _QM_LIST_HEAD_RE.search(text_in):
         for rid, name, status in _QM_LIST_ROW_RE.findall(text_in):
             rec = out.setdefault(rid, {"kind": "vm", "attrs": {}, "devices": {}, "source": "qm list"})
-            rec["attrs"].setdefault("name", name)
+            rec["attrs"]["name"] = name
+            rec["attrs"]["_listed_name"] = name
             rec["attrs"]["status"] = status.lower()
     if _PCT_LIST_HEAD_RE.search(text_in):
         for rid, status, name in _PCT_LIST_ROW_RE.findall(text_in):
             rec = out.setdefault(rid, {"kind": "ct", "attrs": {}, "devices": {}, "source": "pct list"})
-            rec["attrs"].setdefault("hostname", name)
+            rec["attrs"]["hostname"] = name
+            rec["attrs"]["_listed_name"] = name
             rec["attrs"]["status"] = status.lower()
-    return out
+    clean, _ = reconcile_system_state(out)
+    return clean
 
 
 def merge_system_state(current: dict | None, observed: dict) -> dict:
@@ -175,7 +178,8 @@ def merge_system_state(current: dict | None, observed: dict) -> dict:
             keep = {k: v for k, v in (cur.get("attrs") or {}).items() if k in ("ip", "status") and k not in (rec.get("attrs") or {})}
             rec = {**rec, "attrs": {**(rec.get("attrs") or {}), **keep}}
         merged[rid] = rec
-    return dict(list(merged.items())[-40:])
+    clean, _ = reconcile_system_state(merged)   # §17.1084 — invariants at every write
+    return dict(list(clean.items())[-40:])
 
 
 def render_system_state(state: dict | None) -> str:
@@ -221,7 +225,7 @@ def render_system_state(state: dict | None) -> str:
             head += f" ({attrs.get('name') or attrs.get('hostname')})"
         lines.append(head + f"  [via `{rec.get('source', '?')}`]")
         for k in sorted(attrs):
-            if k in ("name", "hostname"):
+            if k in ("name", "hostname") or k.startswith("_"):
                 continue
             lines.append(f"    - {k}: {attrs[k]}")
         for d in sorted(devices):
@@ -267,3 +271,103 @@ def find_redundant_discovery(text_out: str, state: dict | None) -> list[dict]:
                 "known": known,
             })
     return hits
+
+
+# ---------------------------------------------------------------------------
+# §17.1084 — INVARIANTS on the state table, enforced at every write.
+#
+# §17.1083 fixed the parse that contaminated CT 101; this refuses the RESULT
+# of any such parse, whatever its cause. Three things are physically true of
+# a Proxmox inventory and were never checked:
+#   1. a MAC address belongs to exactly one machine;
+#   2. a disk `vm-N-…` belongs to machine N;
+#   3. a `pct list` / `qm list` row names its machine (a config record whose
+#      hostname/name disagrees with the newest list row is the wrong record).
+# A record that breaks one is repaired where the offending field can be
+# dropped, refused where it cannot, and every repair is logged — nothing
+# impossible reaches a prompt.
+# ---------------------------------------------------------------------------
+
+_MAC_IN_DEV_RE = re.compile(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
+_VM_ONLY_KEYS = frozenset({"name", "bios", "machine", "agent", "scsihw"})
+_CT_ONLY_KEYS = frozenset({"hostname", "arch", "rootfs", "unprivileged"})
+_DISK_OWNER_RE = re.compile(r"\bvm-(\d{2,5})-")
+
+
+def reconcile_system_state(state: dict | None) -> tuple[dict, list[dict]]:
+    """``(clean_state, repairs)``. Deterministic; idempotent on a clean table."""
+    st = {k: dict(v) for k, v in (state or {}).items() if isinstance(v, dict)}
+    repairs: list[dict] = []
+    # 4. form ↔ kind: a container's net line is `name=eth0,…,hwaddr=…`, a
+    # VM's is `virtio=…|e1000=…|vmxnet3=…`; and the config KEYS differ (`name`,
+    # `bios`, `machine`, `agent`, `scsihw` are qm-only; `hostname`, `arch`,
+    # `rootfs`, `unprivileged` are pct-only). A field of the other kind's form
+    # on a record is another machine's output, whatever brought it here.
+    for rid, rec in st.items():
+        kind = rec.get("kind")
+        if kind not in ("ct", "vm"):
+            continue
+        attrs = dict(rec.get("attrs") or {})
+        for k in list(attrs):
+            if (kind == "ct" and k in _VM_ONLY_KEYS) or (kind == "vm" and k in _CT_ONLY_KEYS):
+                repairs.append({"kind": "wrong_kind_key", "id": rid, "field": k})
+                attrs.pop(k)
+        rec["attrs"] = attrs
+        devs = dict(rec.get("devices") or {})
+        for k, v in list(devs.items()):
+            if not str(k).startswith("net"):
+                continue
+            vm_form = bool(re.match(r"\s*(?:virtio|e1000|e1000e|vmxnet3|rtl8139)=", str(v), re.IGNORECASE))
+            ct_form = "hwaddr=" in str(v).lower()
+            if (kind == "ct" and vm_form) or (kind == "vm" and ct_form):
+                repairs.append({"kind": "wrong_kind_net", "id": rid, "field": k})
+                devs.pop(k)
+        rec["devices"] = devs
+    # 2. disks — the owner id is in the name
+    for rid, rec in list(st.items()):
+        if rec.get("kind") == "host":
+            continue
+        for bucket in ("devices", "attrs"):
+            vals = dict(rec.get(bucket) or {})
+            for k, v in list(vals.items()):
+                m = _DISK_OWNER_RE.search(str(v))
+                if m and m.group(1) != str(rid):
+                    repairs.append({"kind": "foreign_disk", "id": rid, "field": k, "owner": m.group(1)})
+                    vals.pop(k)
+            rec[bucket] = vals
+    # 1. MACs — one owner. The record whose `source` is a config read of THAT
+    # id keeps it; any other holder loses the device line.
+    holders: dict[str, list[str]] = {}
+    for rid, rec in st.items():
+        for k, v in (rec.get("devices") or {}).items():
+            for mac in _MAC_IN_DEV_RE.findall(str(v)):
+                holders.setdefault(mac.upper(), []).append(rid)
+    for mac, rids in holders.items():
+        if len(set(rids)) < 2:
+            continue
+        owners = [r for r in set(rids) if f" config {r}" in f" {st[r].get('source', '')}"]
+        keep = owners[0] if len(owners) == 1 else None
+        for rid in set(rids):
+            if rid == keep:
+                continue
+            devs = {k: v for k, v in (st[rid].get("devices") or {}).items() if mac not in str(v).upper()}
+            repairs.append({"kind": "shared_mac", "id": rid, "mac": mac, "kept_on": keep})
+            st[rid]["devices"] = devs
+    # 3. names — the newest list row is authoritative for name/hostname
+    for rid, rec in st.items():
+        attrs = rec.get("attrs") or {}
+        listed = attrs.get("_listed_name")
+        current_name = attrs.get("hostname") or attrs.get("name")
+        if listed and current_name != listed:
+            if current_name is not None:
+                repairs.append({"kind": "name_mismatch", "id": rid, "config": current_name, "list": listed})
+            attrs["hostname" if rec.get("kind") == "ct" else "name"] = listed
+    # a record the repairs emptied is refused outright (an empty record that
+    # arrived empty is left alone — it is a placeholder, not a lie)
+    touched = {r["id"] for r in repairs}
+    for rid in [r for r, rec in st.items() if r in touched and not (rec.get("attrs") or rec.get("devices"))]:
+        repairs.append({"kind": "empty_after_repair", "id": rid})
+        st.pop(rid)
+    if repairs:
+        logger.warning("system_state_reconciled repairs=%s", repairs[:8])
+    return st, repairs

@@ -8,6 +8,8 @@ the goal line whose hostname became the search phrase "org times".
 """
 from __future__ import annotations
 
+import re
+
 from app.modules import assist_inventory as inv
 from app.modules.assist_state import merge_system_state, parse_system_state, render_system_state
 
@@ -58,9 +60,9 @@ root@pve:~# """
 def test_probe_script_echo_is_refused_and_lists_are_harvested():
     st = parse_system_state(PROBE_PASTE)
     assert "101" in st and st["101"]["source"] == "pct list"          # not the contaminated config
-    assert st["101"]["attrs"] == {"hostname": "jellyfin", "status": "running"} and st["101"]["devices"] == {}
+    assert st["101"]["attrs"] == {"hostname": "jellyfin", "status": "running", "_listed_name": "jellyfin"} and st["101"]["devices"] == {}
     assert st["106"]["attrs"]["name"] == "palworld-server" and st["106"]["kind"] == "vm"
-    assert st["120"]["attrs"] == {"hostname": "caddy-proxy", "status": "running"}
+    assert st["120"]["attrs"] == {"hostname": "caddy-proxy", "status": "running", "_listed_name": "caddy-proxy"}
     assert set(st) == {"101", "106", "110", "111", "120"}
 
 
@@ -244,3 +246,102 @@ def test_every_verify_answer_call_site_passes_the_topology():
         src = (root / "app" / "modules" / f).read_text(encoding="utf-8")
         calls = len(re.findall(r"await (?:assist_guide\.)?(?:verify_answer|research_one)\(", src))
         assert calls == src.count("topology="), f
+
+
+# ── §17.1084 — invariants at every write; facts reconciled before they are stored ──
+
+from app.modules.assist_state import reconcile_system_state
+
+CORRUPT_101 = {"kind": "ct", "source": "pct config 101",
+               "attrs": {"hostname": "prowlarr", "name": "palworld-server", "bios": "seabios",
+                         "rootfs": "local-lvm:vm-105-disk-0,size=8G", "_listed_name": "jellyfin"},
+               "devices": {"net0": "virtio=BC:24:11:E8:9F:7A,bridge=vmbr0", "scsi0": "local-lvm:vm-106-disk-0,size=100G",
+                           "unused0": "oasis:vm-110-disk-1"}}
+VM_106 = {"kind": "vm", "source": "qm config 106", "attrs": {"name": "palworld-server"},
+          "devices": {"net0": "virtio=BC:24:11:E8:9F:7A,bridge=vmbr0", "scsi0": "local-lvm:vm-106-disk-0,size=100G"}}
+
+
+def test_the_live_corrupted_record_cannot_be_stored_whatever_produced_it():
+    clean, repairs = reconcile_system_state({"101": CORRUPT_101, "106": VM_106})
+    assert clean["101"] == {"kind": "ct", "source": "pct config 101", "attrs": {"hostname": "jellyfin", "_listed_name": "jellyfin"}, "devices": {}}
+    assert clean["106"]["devices"]["net0"] == "virtio=BC:24:11:E8:9F:7A,bridge=vmbr0"       # the real owner keeps its MAC
+    assert {r["kind"] for r in repairs} == {"foreign_disk", "name_mismatch", "wrong_kind_key", "wrong_kind_net"}
+    again, more = reconcile_system_state(clean)
+    assert again == clean and more == []                                               # idempotent
+    # merge and parse both pass through it
+    assert merge_system_state({"106": VM_106}, {"101": CORRUPT_101})["101"]["devices"] == {}
+    assert "scsi0" not in parse_system_state("root@pve:~# pct config 101\nhostname: jellyfin\nscsi0: local-lvm:vm-106-disk-0\nroot@pve:~# ").get("101", {}).get("devices", {})
+
+
+def test_a_shared_mac_between_two_config_reads_of_the_right_form_drops_both():
+    a = {"kind": "vm", "source": "qm config 106", "attrs": {"name": "a"}, "devices": {"net0": "virtio=AA:BB:CC:DD:EE:01,bridge=vmbr0"}}
+    b = {"kind": "vm", "source": "qm config 107", "attrs": {"name": "b"}, "devices": {"net0": "virtio=AA:BB:CC:DD:EE:01,bridge=vmbr0"}}
+    clean, repairs = reconcile_system_state({"106": a, "107": b})
+    assert clean["106"]["devices"] == {} and clean["107"]["devices"] == {}
+    assert all(r["kind"] == "shared_mac" and r["kept_on"] is None for r in repairs)
+
+
+def test_invariants_hold_for_any_table():
+    """Property: whatever records go in, the table that comes out has unique
+    MACs, disks that name their owner, no field of the other kind's form, and
+    a second pass changes nothing."""
+    import random
+    rnd = random.Random(1083)
+    kinds = ["ct", "vm"]
+    for _ in range(300):
+        ids = [str(rnd.randint(100, 130)) for _ in range(rnd.randint(1, 6))]
+        table = {}
+        for rid in ids:
+            kind = rnd.choice(kinds)
+            mac = f"BC:24:11:{rnd.randint(0,255):02X}:{rnd.randint(0,255):02X}:{rnd.choice(['01','02','03']):s}"
+            form = rnd.choice(["virtio=", "name=eth0,hwaddr="])
+            disk_owner = rnd.choice(ids + [rid, rid])
+            table[rid] = {"kind": kind, "source": rnd.choice([f"pct config {rid}", f"qm config {rid}", "pct list", "x"]),
+                          "attrs": {k: "v" for k in rnd.sample(["hostname", "name", "bios", "arch", "memory", "status", "ip"], rnd.randint(0, 4))}
+                                   | ({"_listed_name": "listed"} if rnd.random() < 0.3 else {}),
+                          "devices": {"net0": f"{form}{mac},bridge=vmbr0", "scsi0": f"local-lvm:vm-{disk_owner}-disk-0"}}
+        clean, _ = reconcile_system_state(table)
+        macs = [m for rec in clean.values() for v in rec["devices"].values() for m in inv._MAC_RE.findall(str(v))]
+        assert len(macs) == len(set(m.upper() for m in macs)), "a MAC on two machines"
+        for rid, rec in clean.items():
+            for v in list(rec["devices"].values()) + list(rec["attrs"].values()):
+                m = re.search(r"\bvm-(\d+)-", str(v))
+                assert m is None or m.group(1) == rid, "a foreign disk survived"
+            if rec["kind"] == "ct":
+                assert not ({"name", "bios"} & set(rec["attrs"])) and not any(str(v).startswith("virtio=") for v in rec["devices"].values())
+            if rec["kind"] == "vm":
+                assert not ({"hostname", "arch"} & set(rec["attrs"])) and not any("hwaddr=" in str(v) for v in rec["devices"].values())
+            if rec["attrs"].get("_listed_name"):
+                assert (rec["attrs"].get("hostname") or rec["attrs"].get("name")) == rec["attrs"]["_listed_name"]
+        again, more = reconcile_system_state(clean)
+        assert again == clean and more == []
+
+
+def test_a_fact_is_reconciled_against_the_records_before_it_is_stored():
+    env = _env()
+    fact = "The Proxmox host with MAC prefix b4:af:15 has IP address 192.168.1.129."
+    stored, update = inv.reconcile_fact(fact, env)
+    assert stored == ("The Proxmox host with MAC prefix b4:af:15 has IP address 192.168.1.129 "
+                      "[engine: MAC b4:af:15 is VM 110 (ai-vm) per its config, not the Proxmox host; so 192.168.1.129 is VM 110 (ai-vm)'s address].")
+    assert update == {"110": {"kind": "vm", "attrs": {"ip": "192.168.1.129"}, "devices": {}, "source": "fact reconciled (b4:af:15)"}}
+    # consistent facts pass untouched; an address they state still becomes structure
+    assert inv.reconcile_fact("VM 110 (ai-vm) net0 MAC BC:24:11:B4:AF:15 is at 192.168.1.129", env) == (
+        "VM 110 (ai-vm) net0 MAC BC:24:11:B4:AF:15 is at 192.168.1.129",
+        {"110": {"kind": "vm", "attrs": {"ip": "192.168.1.129"}, "devices": {}, "source": "fact reconciled (BC:24:11:B4:AF)"}})
+    assert inv.reconcile_fact("Operator completed port forwarding for the Proxmox host.", env) == ("Operator completed port forwarding for the Proxmox host.", None)
+    assert inv.reconcile_fact("anything", {}) == ("anything", None)
+
+
+def test_set_environment_routes_new_facts_through_reconcile():
+    import pathlib
+    src = (pathlib.Path(inv.__file__).resolve().parents[0] / "assist_environment.py").read_text(encoding="utf-8")
+    block = src[src.index("    if facts:"):src.index("        # Cap: keep the most recent")]
+    assert "reconcile_fact(t, current)" in block and "merge_system_state" in block and "assist_fact_reconciled" in block
+
+
+def test_a_reconciled_fact_no_longer_binds_the_host():
+    env = _env()
+    env["facts"] = [inv.reconcile_fact(f, env)[0] for f in env["facts"]]
+    sm = inv.build_system_map(env)
+    assert list(sm["host"]["ips"]) == ["192.168.1.156"]
+    assert not [c for c in sm["conflicts"] if c["kind"] in ("host_ip", "mac_owner")]

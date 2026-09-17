@@ -114,6 +114,8 @@ def build_system_map(environment: dict | None) -> dict[str, Any]:
         # the Proxmox host's own address — only when the sentence SAYS it is
         # the host's ("Proxmox host (192.168.1.156)", "vmbr0 … static X/24",
         # "the host with MAC … has IP address X")
+        if "not the Proxmox host" in f:      # §17.1084 — a fact the engine already re-read
+            continue
         for tup in _HOST_BOUND_IP_RE.findall(f):
             ip = next((x for x in tup if x), None)
             if ip:
@@ -401,3 +403,60 @@ def ingress_footer(issues: list[dict[str, Any]], topology: dict) -> str:
     return (f"\n\n---\n⚠️ **Wrong target** — this answer {what}. The plan's public entry point is "
             f"{kind} {ing['entry_id']} ({ent.get('name') or '?'}) at {ing.get('entry_ip') or '?'}"
             + (f" (MAC {ent['macs'][0]})" if ent.get("macs") else "") + ", ports 80/443 only. Treat the forwarding steps above with suspicion.")
+
+
+# ---------------------------------------------------------------------------
+# §17.1084 — reconcile a NEW fact against the records before it is written.
+#
+# "The Proxmox host with MAC prefix b4:af:15 has IP address 192.168.1.129"
+# went into the ledger verbatim while the state table said BC:24:11:B4:AF:15
+# is VM 110. §17.1083 flags that at read time; this corrects it at WRITE
+# time, deterministically: a MAC fragment that resolves to one machine names
+# that machine, an IP bound in the same clause becomes that machine's
+# structured IP, and the fact is rewritten to say so — the operator's words
+# are kept, the engine's reading is appended.
+# ---------------------------------------------------------------------------
+
+_FACT_IP_RE = re.compile(r"\b(?:has|is at|IP(?: address)?(?: is)?|address(?: is)?)\s*(\d{1,3}(?:\.\d{1,3}){3})\b", re.IGNORECASE)
+
+
+def reconcile_fact(fact: str, environment: dict | None) -> tuple[str, dict | None]:
+    """``(fact_to_store, structured_update | None)``. The update is a
+    ``system_state`` observation (``{id: {kind, attrs: {ip}, source}}``) when
+    the fact binds an address to a machine the records can name."""
+    text_value = (fact or "").strip()
+    if not text_value:
+        return text_value, None
+    sm = build_system_map(environment)
+    machines = sm.get("machines") or {}
+    if not machines:
+        return text_value, None
+    frags = list(dict.fromkeys(_MAC_FRAG_RE.findall(text_value)))
+    resolved = [(frag, _owner_of_mac_fragment(frag, machines)) for frag in frags]
+    resolved = [(f, o) for f, o in resolved if o is not None]
+    if not resolved:
+        return text_value, None
+    frag, owner = resolved[0]
+    named = {x for x, _ in _RES_RE.findall(text_value)}
+    if owner["id"] in named and len(named) == 1:
+        # the fact already names the machine the MAC belongs to — consistent;
+        # still bind an address it states, as structure
+        ip_m = _FACT_IP_RE.search(text_value)
+        if ip_m:
+            return text_value, {owner["id"]: {"kind": owner.get("kind") or "vm", "attrs": {"ip": ip_m.group(1)},
+                                              "devices": {}, "source": f"fact reconciled ({frag})"}}
+        return text_value, None
+    kind = "VM" if owner.get("kind") == "vm" else "CT"
+    label = f"{kind} {owner['id']}" + (f" ({owner['name']})" if owner.get("name") else "")
+    ip_m = _FACT_IP_RE.search(text_value)
+    claimed_host = bool(_HOST_RE.search(text_value)) and not _RES_RE.search(text_value)
+    note = f" [engine: MAC {frag} is {label} per its config"
+    if claimed_host:
+        note += ", not the Proxmox host"
+    update = None
+    if ip_m:
+        ip = ip_m.group(1)
+        note += f"; so {ip} is {label}'s address"
+        update = {owner["id"]: {"kind": owner.get("kind") or "vm", "attrs": {"ip": ip}, "devices": {},
+                                "source": f"fact reconciled ({frag})"}}
+    return text_value.rstrip(".") + note + "].", update
