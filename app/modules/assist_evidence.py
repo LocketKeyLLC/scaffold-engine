@@ -341,8 +341,56 @@ def _vendor_words(note: str) -> list[str]:
     return out
 
 
+_PROPER_RE = re.compile(r"\b([A-Z][a-zA-Z]{3,}(?:\s+[A-Z][a-zA-Z]{2,})?)\b")
+_SENTENCE_START_RE = re.compile(r"(?:^|[.!?]\s+)$")
+
+
+def dominant_products(environment: dict | None, *, limit: int = 2) -> list[str]:
+    """§17.1088 — the product / vendor names the SESSION is about, read from
+    its own facts and pins: proper nouns (capitalised, not sentence-initial)
+    that recur. A hardware job names its router in a note; a business job
+    names its SaaS in six facts and no note — the class query needs the name
+    either way, and nothing here lists products."""
+    from app.modules.assist_render import _MODEL_TOKEN_RE
+    env = environment or {}
+    texts = [str(f) for f in (env.get("facts") or [])]
+    texts += [f"{k} {v}" for k, v in (env.get("substitutions") or {}).items()]
+    counts: dict[str, int] = {}
+    mid: dict[str, int] = {}          # seen NOT at a sentence start at least once → a name, not a capitalised first word
+    for t in texts:
+        seen_here: set[str] = set()
+        for m in _PROPER_RE.finditer(t):
+            name = m.group(1)
+            if _MODEL_TOKEN_RE.fullmatch(name.replace(" ", "")) or name.lower() in _GENERIC_PROPER:
+                continue
+            if not _SENTENCE_START_RE.search(t[:m.start()]):
+                mid[name] = mid.get(name, 0) + 1
+            if name not in seen_here:
+                seen_here.add(name)
+                counts[name] = counts.get(name, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], -len(kv[0])))
+    out: list[str] = []
+    for name, n in ranked:
+        if n < 2:
+            break
+        if not mid.get(name):
+            continue
+        if any(name.lower() in o.lower() or o.lower() in name.lower() for o in out):
+            continue
+        out.append(name)
+        if len(out) >= limit:
+            break
+    return out
+
+
+# words that are capitalised in facts without naming a product (the class of
+# sentence-frame words; a product name never appears here)
+_GENERIC_PROPER = frozenset({"the", "operator", "internet", "connected", "status", "yes", "none",
+                             "true", "false", "not", "step", "next", "done", "open", "goal", "note", "notes"})
+
+
 def class_query(need: Need, text: str, *, operator_notes: Optional[list] = None,
-                local_names: Optional[list] = None) -> str:
+                local_names: Optional[list] = None, products: Optional[list] = None) -> str:
     """§17.1086 — the PROBLEM-CLASS query: the same question with everything
     that is only true of THIS operator removed — model numbers, ids, IPs,
     hostnames, MACs — and the vendor word kept.
@@ -385,9 +433,21 @@ def class_query(need: Need, text: str, *, operator_notes: Optional[list] = None,
     cleaned = " ".join(t for t in cleaned.split()
                        if not _MODEL_TOKEN_RE.fullmatch(t)
                        and t.strip(".,;:!?'\"").lower() not in _QUESTION_TERM_STOP | _FRAMING_STOP)
+    # the session's dominant products join the vendors when the question does
+    # not name one itself (a business job has no hardware note to supply it)
+    for prod in (products or []):
+        if prod.lower() not in base.lower() and not any(prod.lower() == v.lower() for v in vendors):
+            vendors.append(prod)
     words = [w for w in _keywords(cleaned, 8)
              if not any(v.lower() in w.split() for v in vendors)]
-    q = " ".join(dict.fromkeys(vendors[:2] + words))
+    # phrases overlap their neighbours ("recurring invoices", "invoices option")
+    # — a query is a bag of terms, so each word once
+    toks: list[str] = []
+    for w in vendors[:2] + words:
+        for t in w.split():
+            if t.lower() not in {x.lower() for x in toks}:
+                toks.append(t)
+    q = " ".join(toks)
     return _cap(q) if len(q.split()) >= 3 else ""
 
 

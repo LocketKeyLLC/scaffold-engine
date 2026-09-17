@@ -424,3 +424,23 @@ def test_screen_paste_detector_and_surface_fact_check():
     assert 'run_gate("surface_fact", looks_like_screen_paste' in block and "surface_pass=True" in block
     guide = (pathlib.Path(inv.__file__).resolve().parents[0] / "assist_guide.py").read_text(encoding="utf-8")
     assert "record as facts WHAT THAT SURFACE OFFERS" in guide and "_SURFACE_PASS_SUFFIX if surface_pass" in guide
+
+
+# ── §17.1088 — the class query on a NON-hardware job: products from the session's own facts ──
+
+def test_dominant_products_and_class_query_on_a_business_job():
+    from app.modules.assist_evidence import class_query, derive_need, dominant_products
+    env = {"facts": ["QuickBooks Online plan is Simple Start.", "Automated sales tax is on in QuickBooks Online.",
+                     "To add or edit tax agencies in QuickBooks Online, use the Taxes center.",
+                     "Recurring transactions are not available on the Simple Start plan; upgrading to Essentials is required.",
+                     "The operator is viewing the QuickBooks Online Account and settings page."]}
+    assert dominant_products(env) == ["QuickBooks Online", "Simple Start"]
+    q = "the recurring invoices option is greyed out on my plan. how do people handle three monthly client invoices without upgrading? is there a workaround or do I have to pay for Essentials?"
+    cq = class_query(derive_need(q, assume_question=True), q, products=dominant_products(env))
+    assert cq.startswith("QuickBooks Online") and "greyed out" in cq and "recurring invoices" in cq
+    assert len(cq.split()) == len({t.lower() for t in cq.split()})            # no duplicated tokens
+    # a hardware job still gets its vendor from the notes/facts, and nothing generic is a "product"
+    env2 = {"facts": ["Spectrum router (SAX1V1K) WAN IPv4 is 67.240.32.243.", "In the Spectrum app the operator does not see 192.168.1.26.",
+                      "VM 106 (palworld-server) status is stopped; VM 110 (ai-vm) status is running.", "The Proxmox host is at 192.168.1.156."]}
+    assert dominant_products(env2) == ["Spectrum"]
+    assert dominant_products({}) == [] and dominant_products({"facts": ["one mention of Netgear only"]}) == []
