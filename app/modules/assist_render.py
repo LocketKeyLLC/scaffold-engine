@@ -59,6 +59,20 @@ def render_environment_block(environment: dict | None) -> str:
         parts.append(profile)
     if subs:
         parts.append("\n".join(f"- {k} = {v}" for k, v in subs.items()))
+    # §17.1083 — the SYSTEM MAP first: one line per machine (id · name · IP ·
+    # MAC · ports · status), the public entry point and the path behind it,
+    # and every conflict the records contain. Joined deterministically from
+    # the structured state, the pins and the facts below — so the model is
+    # never asked to re-derive the topology from forty loose sentences (live:
+    # it forwarded the wrong machine's MAC, then the host's 8006/22, then
+    # agreed a VM's MAC suffix was the host).
+    try:
+        from app.modules.assist_inventory import render_system_map
+        _map = render_system_map(environment)
+    except Exception:  # noqa: BLE001 — the map is derived; its absence must not break the block
+        _map = ""
+    if _map:
+        parts.append(_map)
     # §17.709 — durable facts observed about the operator's ACTUAL system. Ground
     # on these; never assume a fresh/empty system when facts describe an existing
     # one (or say a check was inconclusive).
@@ -281,6 +295,18 @@ def render_session_memory(
     from app.modules.assist_state import render_system_state
     state_block = render_system_state(environment.get("system_state")
                                       if isinstance(environment.get("system_state"), dict) else {})
+    # §17.1083 — the SYSTEM MAP leads the state tier on BOTH injection paths
+    # (this one is the live one: ASSIST_UMEM_INJECT=true). The first cut put
+    # it only in render_environment_block — the legacy path — and the live
+    # replay of the operator's question still reached for VM 106's MAC.
+    # Same drift as §17.751/§17.914: two renderers, one edit.
+    try:
+        from app.modules.assist_inventory import render_system_map
+        _map_block = render_system_map(environment)
+    except Exception:  # noqa: BLE001 — derived; its absence must not break memory
+        _map_block = ""
+    if _map_block:
+        state_block = (_map_block + "\n\n" + state_block) if state_block else _map_block
     from app.modules.assist_files import render_file_writes   # §17.965
     _fws = (environment.get("file_writes")
             if isinstance(environment.get("file_writes"), dict) else {})

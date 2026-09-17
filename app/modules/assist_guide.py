@@ -258,6 +258,7 @@ from app.modules.assist_directives import (  # noqa: F401,E402
 
 # §17.856 — the block renderers moved to app/modules/assist_render.py;
 # re-exported so assist_guide.<NAME> and the external callers keep resolving.
+from app.modules.assist_inventory import topology_of as _topology_of  # noqa: E402 — §17.1083b
 from app.modules.assist_render import (  # noqa: F401,E402
     render_environment_block,
     render_research_grounding,  # §17.975
@@ -2570,6 +2571,7 @@ async def generate_guidance(
             sourced=sourced_values_from_environment(environment),  # §17.1030
             owned_hosts=_owned_hosts(environment, operator_notes),  # §17.1032
             confirmed=_ledger_text(environment, operator_notes),  # §17.1034
+            topology=_topology_of(environment),  # §17.1083b
         )
         _sourced_meta_guide = list(_vreport_guide.get("sourced_now") or [])
     # §17.897 — every command the operator is handed must be copy-pasteable,
@@ -5568,6 +5570,7 @@ async def generate_fix(
             sourced=sourced_values_from_environment(environment),  # §17.1030
             owned_hosts=_owned_hosts(environment, operator_notes),  # §17.1032
             confirmed=_ledger_text(environment, operator_notes),  # §17.1034
+            topology=_topology_of(environment),  # §17.1083b
         )
         _sourced_meta_fix = list(_vreport_fix.get("sourced_now") or [])
     # §17.897 — every command the operator is handed must be copy-pasteable,
@@ -6527,6 +6530,7 @@ async def generate_guidance_stream(
             sourced=sourced_values_from_environment(environment),  # §17.1030
             owned_hosts=_owned_hosts(environment, operator_notes),  # §17.1032
             confirmed=_ledger_text(environment, operator_notes),  # §17.1034
+            topology=_topology_of(environment),  # §17.1083b
         )
         meta["sourced_values"] = list(_vreport_stream.get("sourced_now") or [])
         if len(text_out) > len(_before):

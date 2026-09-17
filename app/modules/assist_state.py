@@ -33,15 +33,38 @@ logger = logging.getLogger("scaffold.assist_state")
 # kind, and the body is a flat `key: value` block. Anchored to the prompt echo
 # so we never parse a block the operator did not actually run.
 _CONFIG_ECHO_RE = re.compile(
-    r"(?:^|\n)[^\n]*?\b(qm|pct)\s+config\s+(\d{2,5})\b[^\n]*\n(.*?)(?=\n[^\n]*[$#]\s|\Z)",
+    r"(?:^|\n)([^\n]*?)\b(qm|pct)\s+config\s+(\d{2,5})\b([^\n]*)\n(.*?)(?=\n[^\n]*[$#]\s|\n\s*==\s|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
+# §17.1083 — a config echo is trusted only when the config command is the
+# LAST command on its line (a `| grep …` filter is fine); an echoed SCRIPT
+# (`pct config 101 | grep '^mp0'; pct exec 101 -- …` followed by twenty more
+# probes) is not an echo of one command, and the text after it is not that
+# resource's configuration. Live: the state-check probe script attributed
+# every probe's output to CT 101 — palworld-server's name, prowlarr's
+# hostname, VM 106's MAC and three other resources' disks — and that block
+# outranks the prose facts in every prompt.
+_TRAILING_COMMAND_RE = re.compile(r"[;&]|\|\s*(?!grep\b|egrep\b|head\b|tail\b|sort\b|cat\b)")
+# A line that is itself another command echo or a probe marker ends a body.
+_BODY_BREAK_RE = re.compile(r"^\s*(?:==\s|\S+@\S+[:~][^$#]*[$#]\s|(?:qm|pct|pvesm|zpool|zfs|lvs|ls|cat|ssh|curl)\s)")
 _KV_RE = re.compile(r"^([a-z][a-z0-9_]{1,20}):\s*(.+?)\s*$", re.IGNORECASE)
+# `qm list` / `pct list` tables — id, name, status for EVERY resource in one
+# read; the operator pastes them constantly and they were never kept.
+_QM_LIST_ROW_RE = re.compile(r"^[ \t]*(\d{2,5})[ \t]+(\S+)[ \t]+(running|stopped|paused|suspended)\b", re.IGNORECASE | re.MULTILINE)
+_PCT_LIST_ROW_RE = re.compile(r"^[ \t]*(\d{2,5})[ \t]+(running|stopped)[ \t]+(?:\S+[ \t]+)?(\S+)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+_EXEC_IPADDR_RE = re.compile(
+    r"\bpct\s+exec\s+(\d{2,5})\s+--\s+ip\s+(?:-4\s+)?(?:addr|address|a)\b[^\n]*\n((?:[^\n]*\n?){1,6})", re.IGNORECASE)
+_HOST_IPADDR_RE = re.compile(
+    r"(?:^|\n)[^\n]*\bip\s+(?:-4\s+)?(?:addr|address|a)\s+show\s+vmbr0[^\n]*\n(?:[^\n]*\n){0,3}?[^\n]*\binet\s+(\d{1,3}(?:\.\d{1,3}){3})/\d+", re.IGNORECASE)
+_IFACE_STATIC_RE = re.compile(
+    r"iface\s+vmbr0\s+inet\s+static\s*\n\s*address\s+(\d{1,3}(?:\.\d{1,3}){3})(?:/\d+)?", re.IGNORECASE)
+_QM_LIST_HEAD_RE = re.compile(r"^\s*VMID\s+NAME\s+STATUS", re.IGNORECASE | re.MULTILINE)
+_PCT_LIST_HEAD_RE = re.compile(r"^\s*VMID\s+Status\s+Lock\s+Name", re.IGNORECASE | re.MULTILINE)
 
 # Values worth keeping: the ones the engine kept guessing at.
 _CONFIG_KEYS = frozenset({
     "boot", "name", "memory", "cores", "ostype", "scsihw", "onboot", "arch",
-    "hostname", "rootfs", "cpu", "machine", "bios", "agent",
+    "hostname", "rootfs", "cpu", "machine", "bios", "agent", "status", "ip",
 })
 _DEVICE_KEY_RE = re.compile(r"^(?:scsi|ide|sata|virtio|net|efidisk|tpmstate|mp|unused)\d+$",
                             re.IGNORECASE)
@@ -54,19 +77,38 @@ def parse_system_state(operator_text: str) -> dict[str, dict[str, Any]]:
     text contains nothing recognisable — this never guesses.
     """
     out: dict[str, dict[str, Any]] = {}
-    for m in _CONFIG_ECHO_RE.finditer(operator_text or ""):
-        verb, rid, body = m.group(1).lower(), m.group(2), m.group(3)
+    text_in = operator_text or ""
+    for m in _CONFIG_ECHO_RE.finditer(text_in):
+        before, verb, rid, after, body = m.group(1), m.group(2).lower(), m.group(3), m.group(4), m.group(5)
+        # An echoed script, not a command: refuse the whole match.
+        if _TRAILING_COMMAND_RE.search(after) or "$(" in before or " for " in f" {before} " or "do " in before:
+            logger.info("system_state_echo_refused rid=%s reason=script_line", rid)
+            continue
         attrs: dict[str, str] = {}
         devices: dict[str, str] = {}
+        seen_keys: set[str] = set()
         for line in body.splitlines():
-            kv = _KV_RE.match(line.strip())
+            stripped = line.strip()
+            if _BODY_BREAK_RE.match(line) and not _KV_RE.match(stripped):
+                break
+            kv = _KV_RE.match(stripped)
             if not kv:
                 continue
             key, val = kv.group(1).lower(), kv.group(2).strip()
+            if key in seen_keys:
+                break          # a key repeating means a SECOND resource's output began
+            seen_keys.add(key)
             if _DEVICE_KEY_RE.match(key):
                 devices[key] = val
             elif key in _CONFIG_KEYS:
                 attrs[key] = val
+        # §17.1083 — contamination guard: a disk that belongs to another id
+        # cannot be this resource's; drop the record rather than store a lie.
+        foreign = [k for k, v in {**attrs, **devices}.items()
+                   if re.search(r"\bvm-(\d{2,5})-", str(v)) and re.search(r"\bvm-(\d{2,5})-", str(v)).group(1) != rid]
+        if foreign:
+            logger.warning("system_state_record_refused rid=%s foreign_disks=%s", rid, foreign)
+            continue
         if attrs or devices:
             out[rid] = {
                 "kind": "vm" if verb == "qm" else "ct",
@@ -74,6 +116,40 @@ def parse_system_state(operator_text: str) -> dict[str, dict[str, Any]]:
                 "devices": devices,
                 "source": f"{verb} config {rid}",
             }
+    # §17.1083 — `pct exec N -- ip -4 addr show eth0` → the container's IP, as
+    # STRUCTURE. The prose distiller dropped exactly this (the live ledger held
+    # "ip neigh | grep 192.168.1.26 returns nothing" and never "CT 120 is
+    # 192.168.1.26"), and the map cannot be built without it.
+    for rid, body in _EXEC_IPADDR_RE.findall(text_in):
+        ips = re.findall(r"\binet\s+(\d{1,3}(?:\.\d{1,3}){3})/\d+", body)
+        if ips:
+            rec = out.setdefault(rid, {"kind": "ct", "attrs": {}, "devices": {}, "source": f"pct exec {rid} -- ip addr"})
+            rec["attrs"]["ip"] = ips[0]
+    # the host's own bridge address, from `ip -4 addr show vmbr0` or the
+    # interfaces file
+    host_ip = None
+    mh = _HOST_IPADDR_RE.search(text_in)
+    if mh:
+        host_ip = mh.group(1)
+    else:
+        mi = _IFACE_STATIC_RE.search(text_in)
+        if mi:
+            host_ip = mi.group(1)
+    if host_ip:
+        rec = out.setdefault("host", {"kind": "host", "attrs": {}, "devices": {}, "source": "ip addr / interfaces"})
+        rec["attrs"]["ip"] = host_ip
+    # `qm list` / `pct list` — name + status per id. A list row never
+    # overrides a config record's attrs; it fills name/status where absent.
+    if _QM_LIST_HEAD_RE.search(text_in):
+        for rid, name, status in _QM_LIST_ROW_RE.findall(text_in):
+            rec = out.setdefault(rid, {"kind": "vm", "attrs": {}, "devices": {}, "source": "qm list"})
+            rec["attrs"].setdefault("name", name)
+            rec["attrs"]["status"] = status.lower()
+    if _PCT_LIST_HEAD_RE.search(text_in):
+        for rid, status, name in _PCT_LIST_ROW_RE.findall(text_in):
+            rec = out.setdefault(rid, {"kind": "ct", "attrs": {}, "devices": {}, "source": "pct list"})
+            rec["attrs"].setdefault("hostname", name)
+            rec["attrs"]["status"] = status.lower()
     return out
 
 
@@ -81,6 +157,23 @@ def merge_system_state(current: dict | None, observed: dict) -> dict:
     """Newer observation wins per resource; untouched resources survive."""
     merged = {k: v for k, v in (current or {}).items() if isinstance(v, dict)}
     for rid, rec in (observed or {}).items():
+        cur = merged.get(rid)
+        partial = " config " not in f" {rec.get('source', '')} "
+        if cur and partial:
+            # §17.1083 — a PARTIAL read (a `list` row, an `ip addr` line)
+            # refreshes what it observed on the existing record — newer wins
+            # for the keys it carries — and never deletes the devices/attrs a
+            # config read established.
+            cur_is_config = " config " in f" {cur.get('source', '')} "
+            merged[rid] = {**cur,
+                           "attrs": {**(cur.get("attrs") or {}), **(rec.get("attrs") or {})},
+                           "devices": {**(cur.get("devices") or {}), **(rec.get("devices") or {})},
+                           "source": cur.get("source") if cur_is_config else rec.get("source", cur.get("source"))}
+            continue
+        if cur and not partial and " config " not in f" {cur.get('source', '')} ":
+            # a config read arriving over a partial record keeps the partial's ip/status
+            keep = {k: v for k, v in (cur.get("attrs") or {}).items() if k in ("ip", "status") and k not in (rec.get("attrs") or {})}
+            rec = {**rec, "attrs": {**(rec.get("attrs") or {}), **keep}}
         merged[rid] = rec
     return dict(list(merged.items())[-40:])
 
@@ -118,6 +211,8 @@ def render_system_state(state: dict | None) -> str:
         "from configuration alone."
     ]
     for rid, rec in sorted(rows):
+        if rec.get("kind") == "host":
+            continue           # §17.1083 — rendered by the system map
         kind = "VM" if rec.get("kind") == "vm" else "container"
         attrs = rec.get("attrs") or {}
         devices = rec.get("devices") or {}

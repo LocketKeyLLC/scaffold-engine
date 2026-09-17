@@ -41,8 +41,11 @@ QUERY_MODULES = [
 # reason. Adding an entry is a deliberate act that belongs in review. This
 # registry is the point of the gate: the alternative — predicting which words a
 # future answer key will contain — is the mistake it exists to prevent.
+# §17.1083 — keyed by the NAME the literal is assigned to, not its line: a
+# one-line import above it moved the line and broke ci-tier-0 for an edit
+# that had nothing to do with the list.
 EXEMPT_PHRASE_LISTS = {
-    ("assist_guide.py", 4417): (
+    ("assist_guide.py", "_CONSUMING_MARKERS"): (
         "destructive-command patterns (`| sh`, `dpkg -i`). A security scanner is "
         "inherently a list of known-dangerous shapes; it encodes no operator's "
         "problem, and deriving it from operator text would be strictly worse."
@@ -163,6 +166,12 @@ def _phrase_collections(path: pathlib.Path):
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except SyntaxError:  # pragma: no cover
         return []
+    # the name a literal is assigned to (`NAME = (...)`), so exemptions can be
+    # keyed by name instead of by a line number that moves with every edit
+    names_by_line: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            names_by_line[node.value.lineno] = node.targets[0].id
     out = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Tuple, ast.List, ast.Set)):
@@ -173,7 +182,7 @@ def _phrase_collections(path: pathlib.Path):
             continue
         multi = [x for x in strs if " " in x.strip() and 2 <= len(x.split()) <= 4]
         if len(multi) >= 2 and len(multi) >= len(strs) * 0.6:
-            out.append((node.lineno, multi[:4]))
+            out.append((node.lineno, multi[:4], names_by_line.get(node.lineno)))
     return out
 
 
@@ -181,9 +190,9 @@ def _phrase_collections(path: pathlib.Path):
 def test_no_unregistered_phrase_lookup_tables(rel):
     path = ROOT / rel
     unregistered = [
-        f"{rel}:{ln} -> {sample}"
-        for ln, sample in _phrase_collections(path)
-        if (path.name, ln) not in EXEMPT_PHRASE_LISTS
+        f"{rel}:{ln} ({name or 'unnamed'}) -> {sample}"
+        for ln, sample, name in _phrase_collections(path)
+        if (path.name, name) not in EXEMPT_PHRASE_LISTS
     ]
     assert not unregistered, (
         "a literal table of multi-word phrases in query/routing logic is the "
@@ -198,7 +207,7 @@ def test_the_structural_gate_is_not_vacuous():
     """It must find the one registered collection; a detector that finds
     nothing would pass every module for the wrong reason."""
     found = _phrase_collections(ROOT / "app/modules/assist_guide.py")
-    assert any(ln == 4417 for ln, _ in found), "the detector has gone blind"
+    assert any(name == "_CONSUMING_MARKERS" for _, _, name in found), "the detector has gone blind"
 
 
 def test_every_exemption_states_a_reason():

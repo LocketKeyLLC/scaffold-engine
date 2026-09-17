@@ -916,8 +916,15 @@ async def verify_answer(
     owned_hosts: Optional[set] = None,
     confirmed: str = "",
     annotate: bool = True,
+    topology: Optional[dict] = None,
 ) -> tuple[str, dict]:
     """Check an answer against its grounding; regenerate once; else annotate.
+
+    ``topology`` — §17.1083b: the session's system map (`build_system_map`).
+    A draft whose forwarding/reservation steps target a machine that is not
+    the map's entry point, or a management port, fails the same way an
+    unsourced value does: one regeneration with the map's line spelled out,
+    then a visible "Wrong target" footer.
 
     ``annotate=False`` (§17.1039, the executor): the footer is returned in
     ``report["footer"]`` and the text is left as written — a footer inside a
@@ -958,27 +965,32 @@ async def verify_answer(
     if shape:
         logger.warning("assist_answer_command_shape node_key=%s label=%s commands=%r",
                        node_key, label, [s["command"] for s in shape][:4])
+    from app.modules.assist_inventory import ingress_footer, ingress_issues, ingress_notice
+    ingress = ingress_issues(answer, topology)  # §17.1083b
+    if ingress:
+        logger.warning("assist_answer_ingress_violation node_key=%s label=%s issues=%r",
+                       node_key, label, ingress[:4])
     _carried = [u["value"] for u in unsupported if u["value"].lower() in {v.lower() for v in (flagged or ())}]
     if _carried:
         logger.info("assist_answer_grounding_flag_carried node_key=%s label=%s values=%r",
                     node_key, label, _carried[:6])
 
     def _fails(uns: list, ct: Optional[dict], off_: bool = False,
-               shape_: Optional[list] = None) -> bool:
-        return bool(uns) or _citation_weak(ct) or off_ or bool(shape_)
+               shape_: Optional[list] = None, ingress_: Optional[list] = None) -> bool:
+        return bool(uns) or _citation_weak(ct) or off_ or bool(shape_) or bool(ingress_)
 
     _q = (need.subject if (need is not None and need.kind == "question") else "") or ""
-    if _fails(unsupported, cite, off, shape) and regenerate is not None \
+    if _fails(unsupported, cite, off, shape, ingress) and regenerate is not None \
             and settings.assist_answer_verification_regenerate:
         logger.info(
             "assist_answer_grounding_regen node_key=%s label=%s unsupported=%r "
-            "cite_score=%s off_question=%s command_shape=%d", node_key, label,
+            "cite_score=%s off_question=%s command_shape=%d ingress=%d", node_key, label,
             [u["value"] for u in unsupported][:6],
-            (cite or {}).get("score"), off, len(shape))
+            (cite or {}).get("score"), off, len(shape), len(ingress))
         try:
             candidate = (await regenerate(grounding_notice(
                 unsupported, cite, off_question=_q if off else None,
-                shape=shape)) or "").strip()
+                shape=shape) + ingress_notice(ingress, topology or {})) or "").strip()
         except Exception as exc:  # noqa: BLE001 — verification never breaks a turn
             logger.warning("assist_answer_grounding_regen_failed: %s", exc)
             candidate = ""
@@ -989,13 +1001,15 @@ async def verify_answer(
             c_cite = await citation_report(candidate, sources)
             c_off = not addresses_question(candidate, need)
             c_shape = command_shape_issues(candidate)
-            better = (not _fails(c_uns, c_cite, c_off, c_shape)) or (
-                not c_off and off and not c_shape) or (
-                not c_shape and shape and not c_off) or (
-                not c_off and not c_shape and len(c_uns) < len(unsupported) and not (
+            c_ingress = ingress_issues(candidate, topology)
+            better = (not _fails(c_uns, c_cite, c_off, c_shape, c_ingress)) or (
+                not c_ingress and ingress and not c_off and not c_shape) or (
+                not c_off and off and not c_shape and not c_ingress) or (
+                not c_shape and shape and not c_off and not c_ingress) or (
+                not c_off and not c_shape and not c_ingress and len(c_uns) < len(unsupported) and not (
                     _citation_weak(c_cite) and not _citation_weak(cite)))
             if better:
-                answer, unsupported, cite, off, shape = candidate, c_uns, c_cite, c_off, c_shape
+                answer, unsupported, cite, off, shape, ingress = candidate, c_uns, c_cite, c_off, c_shape, c_ingress
                 report["regenerated"] = True
 
     # §17.1034 — the plan-only tier: credited by the corpus (task text, digest,
@@ -1013,14 +1027,15 @@ async def verify_answer(
     if unsourced_iface:
         logger.info("assist_answer_unsourced_interface node_key=%s label=%s max_authority=%.2f",
                     node_key, label, max_source_authority(sources))
-    if _fails(unsupported, cite, off, shape) or plan_only or unsourced_iface:
+    if _fails(unsupported, cite, off, shape, ingress) or plan_only or unsourced_iface:
         footer = grounding_footer(
             unsupported, cite, off_question=_q if off else None, shape=shape,
-            plan_only=plan_only, unsourced_interface=unsourced_iface)
+            plan_only=plan_only, unsourced_interface=unsourced_iface) + ingress_footer(ingress, topology or {})
         report["footer"] = footer
         if annotate:
             answer = answer.rstrip() + footer
-        report["annotated"] = bool(_fails(unsupported, cite, off, shape))
+        report["annotated"] = bool(_fails(unsupported, cite, off, shape, ingress))
+    report["ingress"] = ingress
     report["unsourced_interface"] = unsourced_iface
     report["off_question"] = off
     report["command_shape"] = shape
