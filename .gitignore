@@ -50,3 +50,7 @@ locust-*.html
 .semgrep/
 .profiles/
 .schemathesis/
+
+# Docker bind-mount placeholders left by `docker run -v <file>:/code/<file>` probes (empty files at the repo root)
+/*.py
+!/conftest.py
