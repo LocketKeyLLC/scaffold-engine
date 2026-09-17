@@ -405,3 +405,22 @@ def test_ingress_gate_uses_the_turns_focus():
     focus = "the container can't reserve an IP\nNEXT: Give the Caddy container a fixed IP so the router can forward ports 80/443 to it"
     assert inv.ingress_issues(draft, sm, focus=focus) == [{"kind": "wrong_machine", "id": "101", "name": "jellyfin"}]
     assert inv.ingress_issues(GAME, sm, focus="At the Palworld step: open UDP 8211 for VM 106") == []
+
+
+# ── §17.1087 — a screen paste must yield a surface fact ──
+
+def test_screen_paste_detector_and_surface_fact_check():
+    from app.modules.assist_screens import looks_like_screen_paste, surface_fact_present
+    screen = "Spectrum Logo\nYour Spectrum Router Info\nDownload the My Spectrum app to manage your WiFi Network settings, such as:\n\n    Customize your network name and password.\n    Manage devices connected to your network.\n    Change advanced settings like DNS, port forwarding and more.\n\nInternet Status\nConnected\nIPv4\n67.240.32.243\nModel\nSAX1V1K\n"
+    assert looks_like_screen_paste(screen)
+    assert not looks_like_screen_paste("root@pve:~# pct exec 120 -- ip -4 addr show eth0 | grep inet\n    inet 192.168.1.26/24 brd 192.168.1.255 scope global eth0\nroot@pve:~# \n" * 3)
+    assert not looks_like_screen_paste("i was able to do the port forwarding. however the container cannot reserve an ip address.")
+    assert not looks_like_screen_paste("one\ntwo\nthree")                     # too short to be a screen
+    assert surface_fact_present("The router page at 192.168.1.1 shows status only; port forwarding is changed in the My Spectrum app.")
+    assert not surface_fact_present("Spectrum router (SAX1V1K) WAN IPv4 is 67.240.32.243.")
+    import pathlib
+    src = (pathlib.Path(inv.__file__).resolve().parents[0] / "assist_memory.py").read_text(encoding="utf-8")
+    block = src[src.index("§17.1087 — a SCREEN paste must yield"):src.index("assist_surface_fact_pass_failed")]
+    assert 'run_gate("surface_fact", looks_like_screen_paste' in block and "surface_pass=True" in block
+    guide = (pathlib.Path(inv.__file__).resolve().parents[0] / "assist_guide.py").read_text(encoding="utf-8")
+    assert "record as facts WHAT THAT SURFACE OFFERS" in guide and "_SURFACE_PASS_SUFFIX if surface_pass" in guide

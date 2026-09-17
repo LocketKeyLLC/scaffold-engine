@@ -1,0 +1,13 @@
+{
+ "id": "2026-09-17-T37-2737-router-status-page",
+ "surface": "screen_paste",
+ "paste": "Spectrum Logo\nYour Spectrum Router Info\nDownload the My Spectrum app to manage your WiFi Network settings, such as:\n\n    Customize your network name and password.\n    Manage devices connected to your network.\n    Change advanced settings like DNS, port forwarding and more.\n\nGet the My Spectrum app\nTo download My Spectrum, use your smartphone camera to scan this symbol.\nInternet Status\nConnected\nCloud Status\nConnected\nIPv4\n67.240.32.243\nIPv6\n2604:6000:ffc0:65:d990:3f2b:b38f:5e53/128\nMAC\n4C:AB:F8:D1:54:90\nSerial Number\n60KG22322491C92\nModel\nSAX1V1K\nFW Version\n5.4.0-14-792458-g202604101018-SAX1V1K-prod\nConnected Pods S/N\nN/A\nRIP Configuration Present\nfalse\n",
+ "expect": {
+  "surface_fact": {
+   "is_screen": true,
+   "first_pass_fact_counts_as_surface": "Spectrum router web page (SAX1V1K) shows status only and directs the operator to the My Spectrum app to change advanced settings such as DNS and port forwarding.",
+   "not_a_surface_fact": "Spectrum router (SAX1V1K) WAN IPv4 is 67.240.32.243."
+  }
+ },
+ "note": "live: the scribe kept the WAN IP and model and dropped 'download the app to change port forwarding' — the surface fact that decided the next four turns"
+}
