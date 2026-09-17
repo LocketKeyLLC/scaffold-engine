@@ -145,9 +145,12 @@ def test_replay_corpus(path):
     elif case["surface"] == "query":
         from app.modules.assist_evidence import class_query, derive_need
         need = derive_need(case["question"], operator_notes=case.get("notes"), assume_question=True)
+        from app.modules.assist_evidence import dominant_products
+        products = dominant_products({"facts": case.get("products_from_facts") or []}) if case.get("products_from_facts") else None
         cq = class_query(need, case["question"], operator_notes=case.get("notes"),
                          local_names=[m.get("name") for m in _ENV.get("system_state", {}).values() if isinstance(m, dict) and (m.get("attrs") or {}).get("hostname")]
-                         + ["caddy-proxy", "jellyfin"])
+                         + ["caddy-proxy", "jellyfin"], products=products)
+        assert len(cq.split()) == len({t.lower() for t in cq.split()}), (cq, "duplicated tokens")
         want = exp["class_query"]
         assert cq.startswith(want["starts_with"]), (cq, case["note"])
         assert all(w in cq for w in want["contains"]), (cq, case["note"])

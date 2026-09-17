@@ -701,6 +701,7 @@ async def research_one(
     confirmed: Optional[str] = None,  # §17.1034 — the operator's ledger text (confirmed tier)
     topology: Optional[dict] = None,  # §17.1083b — the system map for the ingress gate
     focus: str = "",  # §17.1086 — what the turn is about (question + recap OPEN/NEXT)
+    products: Optional[list] = None,  # §17.1088 — the session's dominant product names, for the class query
 ) -> dict:
     """Confirm a single operator-supplied question and optionally synthesize
     a short cited answer. Does not persist — this is a side query.
@@ -743,7 +744,7 @@ async def research_one(
     try:
         from app.modules.assist_evidence import class_query
         _local = [m.get("name") for m in ((topology or {}).get("machines") or {}).values() if m.get("name")]
-        cq = class_query(need, question, operator_notes=operator_notes, local_names=_local)
+        cq = class_query(need, question, operator_notes=operator_notes, local_names=_local, products=products)
         if cq and cq.lower() != (web_q or "").lower():
             logger.info("assist_research_class_query node_key=%s q=%r", node_key, cq)
             extra = await _deep_web_sources(cq, top_n=settings.assist_research_fetch_top_n,

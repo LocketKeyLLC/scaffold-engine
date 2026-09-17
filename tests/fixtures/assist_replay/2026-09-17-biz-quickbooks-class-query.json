@@ -1,0 +1,24 @@
+{
+ "id": "2026-09-17-biz-quickbooks-class-query",
+ "surface": "query",
+ "question": "the recurring invoices option is greyed out on my plan. how do people handle three monthly client invoices without upgrading? is there a workaround or do I have to pay for Essentials?",
+ "notes": [],
+ "products_from_facts": [
+  "QuickBooks Online plan is Simple Start.",
+  "Automated sales tax is on in QuickBooks Online.",
+  "To add or edit tax agencies in QuickBooks Online, use the Taxes center."
+ ],
+ "expect": {
+  "class_query": {
+   "starts_with": "QuickBooks Online",
+   "contains": [
+    "recurring invoices",
+    "greyed out"
+   ],
+   "excludes": [
+    "Essentials Essentials"
+   ]
+  }
+ },
+ "note": "a business job has no hardware note to supply a vendor; the product comes from the session's own facts. First live run produced 'recurring invoices invoices option greyed out people handle handle three three monthly' — no product, duplicated tokens"
+}

@@ -1231,6 +1231,7 @@ async def run_step_research(
     # for a value the engine itself put there a turn ago.
     from app.modules.assist_evidence import flagged_values, operator_text
     from app.modules.assist_evidence import sourced_values_from_environment as _ev_sourced
+    from app.modules.assist_evidence import dominant_products as _ev_products
     from app.modules.assist_evidence import owned_hosts as _ev_owned
     from app.modules.assist_evidence import ledger_text as _ev_ledger
     provenance_parts = list(context_parts)
@@ -1281,6 +1282,7 @@ async def run_step_research(
         confirmed=_ev_ledger(mem.environment, mem.operator_notes),  # §17.1034
         topology=_topology_of(mem.environment),  # §17.1083b (assist_inventory.topology_of)
         focus=_focus_text(question, mem),  # §17.1086
+        products=_ev_products(mem.environment),  # §17.1088
     )
     # §17.1030 — the verifier's report is for the ledger, not the payload.
     _grounding = res.pop("grounding", None) or {}
