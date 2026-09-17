@@ -516,3 +516,92 @@ def reconcile_fact(fact: str, environment: dict | None) -> tuple[str, dict | Non
         update = {owner["id"]: {"kind": owner.get("kind") or "vm", "attrs": {"ip": ip}, "devices": {},
                                 "source": f"fact reconciled ({frag})"}}
     return text_value.rstrip(".") + note + "].", update
+
+
+# ---------------------------------------------------------------------------
+# §17.1091 — the PREREQUISITE gate on the entry point.
+#
+# A certificate failure at the reverse proxy while the ledger records that
+# the router does not yet reach it is EXPECTED, not a config defect; the
+# proxy's config already validated. Live: three truncate-and-rewrite rounds
+# of a valid Caddyfile because the symptom (`tlsv1 alert internal error`)
+# was local and the write ledger had a stale size. This names the unmet
+# prerequisite from the records and refuses a draft that rewrites the entry
+# point's files instead of directing the operator to it.
+# ---------------------------------------------------------------------------
+
+_INGRESS_UNMET_RE = re.compile(
+    r"(?:\b(?:acme|certificate|cert|challenge|let'?s encrypt)\b[^\n]{0,160}?\b(?:fails?|failed|timeout|timed out|firewall|refused|unreachable|cannot|could not)\b"
+    r"|\b(?:port[- ]?forward\w*|reservation|reserve)\b[^\n]{0,120}?\b(?:blocked|would not allow|not allowed|cannot|can'?t|does not list|not listed|not see|doesn'?t see)\b"
+    r"|\b(?:blocked|cannot|can'?t|would not allow|does not list|not listed)\b[^\n]{0,80}?\b(?:port[- ]?forward\w*|reservation|reserve)\b"
+    r"|\bnever leases\b|\brouter (?:has never seen|does not see|cannot see)\b)", re.IGNORECASE)
+_INGRESS_MET_RE = re.compile(r"\b(?:certificate (?:issued|obtained|renewed)|https? (?:works|reachable) from outside|port[- ]?forward\w* (?:is )?(?:working|verified|confirmed|in place))\b", re.IGNORECASE)
+_TLS_SYMPTOM_RE = re.compile(r"\b(?:tls|ssl|https|certificate|cert|acme|handshake|alert internal error)\b", re.IGNORECASE)
+_CONFIG_VALID_RE = re.compile(r"\b(?:valid configuration|validates successfully|config(?:uration)? (?:is )?(?:ok|valid)|syntax is ok|test is successful)\b", re.IGNORECASE)
+_WRITE_CMD_RE = re.compile(r"\b(?:truncate\s+-s\s*0|tee\s+(?:-a\s+)?/|cat\s*>>?\s*/|sed\s+-i|>\s*/etc/|rm\s+(?:-f\s+)?/etc/|caddy fmt --overwrite)", re.IGNORECASE)
+
+
+def ingress_prerequisite(environment: dict | None) -> dict[str, Any] | None:
+    """``{entry_id, entry_name, entry_ip, evidence, config_validated}`` when the
+    records say the router does not yet reach the entry point (and nothing
+    says it does); else None. Deterministic; read from facts and the map."""
+    sm = build_system_map(environment)
+    ing = sm.get("ingress") or {}
+    if not ing.get("entry_id"):
+        return None
+    facts = [str(f) for f in ((environment or {}).get("facts") or [])]
+    unmet = [f for f in facts if _INGRESS_UNMET_RE.search(f)]
+    met = [f for f in facts if _INGRESS_MET_RE.search(f)]
+    if not unmet or met:
+        return None
+    ent = (sm.get("machines") or {}).get(ing["entry_id"]) or {}
+    addressing = ent.get("addressing") or ""
+    if addressing and not addressing.startswith("dhcp"):
+        unmet.append(f"entry point addressing: {addressing}")
+    return {"entry_id": ing["entry_id"], "entry_name": ent.get("name"), "entry_ip": ing.get("entry_ip"),
+            "entry_mac": (ent.get("macs") or [None])[0], "evidence": unmet[:4],
+            "config_validated": any(_CONFIG_VALID_RE.search(f) for f in facts)}
+
+
+def prerequisite_issues(draft: str, environment: dict | None, *, focus: str = "") -> list[dict[str, Any]]:
+    """A FIX draft that rewrites/edits files on the entry point while the
+    router prerequisite is unmet and the symptom in focus is TLS/HTTPS."""
+    if not draft:
+        return []
+    pre = ingress_prerequisite(environment)
+    if not pre:
+        return []
+    if not _TLS_SYMPTOM_RE.search(f"{focus}\n{draft[:400]}"):
+        return []
+    eid = pre["entry_id"]
+    on_entry = re.search(rf"\b(?:pct|qm)\s+exec\s+{re.escape(eid)}\b[^\n]*", draft) is not None
+    writes = [m.group(0) for m in _WRITE_CMD_RE.finditer(draft)]
+    if not (on_entry and writes):
+        return []
+    return [{"kind": "prerequisite_unmet", "entry_id": eid, "entry_name": pre["entry_name"], "writes": writes[:4],
+             "evidence": pre["evidence"], "config_validated": pre["config_validated"]}]
+
+
+def prerequisite_notice(issues: list[dict[str, Any]], environment: dict | None) -> str:
+    if not issues:
+        return ""
+    pre = ingress_prerequisite(environment) or {}
+    i = issues[0]
+    ev = "; ".join(str(e)[:110] for e in (i.get("evidence") or [])[:3])
+    valid = " Its configuration already validated — it is not the defect." if i.get("config_validated") else ""
+    return ("\n\n---\nPREREQUISITE NOTICE: the symptom is EXPECTED until the router forwards TCP 80/443 to "
+            f"CT {i['entry_id']} ({i.get('entry_name') or 'the entry point'}"
+            + (f", {pre.get('entry_ip')}" if pre.get("entry_ip") else "") + (f", MAC {pre.get('entry_mac')}" if pre.get("entry_mac") else "")
+            + f"). The records say that prerequisite is not met: {ev}.{valid} Do NOT rewrite, truncate or edit its files. "
+            "Rewrite the answer to say the certificate/HTTPS check cannot pass yet and direct the operator to completing the router "
+            "forward first (making the entry point visible to the router if it is not, reserving its address, adding TCP 80 and 443), "
+            "then re-running this check.")
+
+
+def prerequisite_footer(issues: list[dict[str, Any]]) -> str:
+    if not issues:
+        return ""
+    i = issues[0]
+    return (f"\n\n---\n⚠️ **Prerequisite not met** — this answer edits files on CT {i['entry_id']} ({i.get('entry_name') or '?'}) "
+            "while the records say the router does not yet forward 80/443 to it; the HTTPS failure is expected until that is done"
+            + (" and the configuration already validated" if i.get("config_validated") else "") + ". Treat the edits above with suspicion.")

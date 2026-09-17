@@ -65,6 +65,8 @@ GATES: tuple[Gate, ...] = (
          "a port forward / reservation targets the map's entry point, never a management port"),
     Gate("problem_class_query", "retrieval", "assist_evidence", "class_query", (RESEARCH,), "§17.1086",
          "a second web query with the operator's specifics removed and the vendor kept — the threads by everyone who hit this before"),
+    Gate("ingress_prerequisite", "answer", "assist_inventory", "prerequisite_issues", (GUIDE, FIX, RESEARCH, STREAM), "§17.1091",
+         "a TLS/HTTPS symptom at the entry point while the router does not reach it yet is expected — no config rewrites; direct to the router step"),
     # ── fix-path integrity gates ──
     Gate("no_repeat_fix", "answer", "assist_guide", "_gate(", (FIX,), "§17.906", "a fix does not repeat a command already tried on the step"),
     Gate("banned_values", "answer", "assist_guide", "find_banned_values", (FIX,), "§17.893", "a ruled-out value never comes back"),

@@ -1,0 +1,33 @@
+{
+ "id": "2026-09-17-T37-2779-config-rewrite-while-router-unmet",
+ "surface": "prerequisite",
+ "draft": "## Diagnosis\nThe Caddyfile on disk is the wrong size.\n```bash\npct exec 120 -- truncate -s 0 /etc/caddy/Caddyfile\n```\nthen add the lines with tee -a.",
+ "focus": "pct exec 120 -- curl -k https://localhost -> tlsv1 alert internal error",
+ "env": {
+  "system_state": {
+   "120": {
+    "kind": "ct",
+    "attrs": {
+     "hostname": "caddy-proxy"
+    },
+    "devices": {
+     "net0": "name=eth0,bridge=vmbr0,ip=192.168.1.26/24,hwaddr=BC:24:11:AC:C9:06"
+    },
+    "source": "pct config 120"
+   }
+  },
+  "facts": [
+   "Container listeners: CT 120 on *:443 and *:80.",
+   "The ACME challenge for defrusciohomelab.duckdns.org fails with 'Timeout during connect' against 67.240.32.243.",
+   "CT 120 cannot reserve an IP on the Spectrum router, required for port forwarding.",
+   "The Caddyfile in LXC 120 validates successfully ('Valid configuration')."
+  ]
+ },
+ "expect": {
+  "prerequisite": {
+   "issues": 1,
+   "entry_id": "120"
+  }
+ },
+ "note": "live: three truncate-and-rewrite rounds of a VALID Caddyfile because the TLS symptom was local and the real blocker was the unmade router forward"
+}

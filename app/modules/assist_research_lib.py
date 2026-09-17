@@ -702,6 +702,7 @@ async def research_one(
     topology: Optional[dict] = None,  # §17.1083b — the system map for the ingress gate
     focus: str = "",  # §17.1086 — what the turn is about (question + recap OPEN/NEXT)
     products: Optional[list] = None,  # §17.1088 — the session's dominant product names, for the class query
+    prerequisite_env: Optional[dict] = None,  # §17.1091 — the environment for the prerequisite gate
 ) -> dict:
     """Confirm a single operator-supplied question and optionally synthesize
     a short cited answer. Does not persist — this is a side query.
@@ -947,6 +948,7 @@ async def research_one(
                     confirmed=confirmed or "",  # §17.1034
                     topology=topology,  # §17.1083b
                     focus=focus or question,  # §17.1086
+                    prerequisite_env=prerequisite_env,  # §17.1091
                 )
                 grounding = _vreport
             if answer:  # §17.897 — code-enforced copy-paste format

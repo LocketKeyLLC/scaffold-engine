@@ -1283,6 +1283,7 @@ async def run_step_research(
         topology=_topology_of(mem.environment),  # §17.1083b (assist_inventory.topology_of)
         focus=_focus_text(question, mem),  # §17.1086
         products=_ev_products(mem.environment),  # §17.1088
+        prerequisite_env=mem.environment,  # §17.1091
     )
     # §17.1030 — the verifier's report is for the ledger, not the payload.
     _grounding = res.pop("grounding", None) or {}

@@ -56,6 +56,9 @@ def test_every_answer_surface_carries_every_gate_it_must(surface):
         if g.symbol == "verify_answer":
             if "verify_answer(" not in region and "verify_answer(" not in start:
                 missing.append(g.name)
+        elif g.name == "ingress_prerequisite":
+            if "prerequisite_env=" not in region:
+                missing.append(g.name)
         elif g.symbol not in region:
             missing.append(g.name)
     assert not missing, f"{surface} lacks gates {missing} in {fname} region {start!r}"
@@ -155,6 +158,13 @@ def test_replay_corpus(path):
         assert cq.startswith(want["starts_with"]), (cq, case["note"])
         assert all(w in cq for w in want["contains"]), (cq, case["note"])
         assert not any(x.lower() in cq.lower().split() or x in cq for x in want["excludes"]), (cq, case["note"])
+    elif case["surface"] == "prerequisite":
+        from app.modules.assist_inventory import prerequisite_issues
+        iss = prerequisite_issues(case["draft"], case["env"], focus=case.get("focus", ""))
+        want = exp["prerequisite"]
+        assert len(iss) == want["issues"], (iss, case["note"])
+        if want.get("entry_id"):
+            assert iss[0]["entry_id"] == want["entry_id"], case["note"]
     elif case["surface"] == "screen_paste":
         from app.modules.assist_screens import looks_like_screen_paste, surface_fact_present
         want = exp["surface_fact"]
@@ -188,11 +198,12 @@ def test_corpus_has_a_hit_and_a_non_hit_for_every_gate_it_covers():
     for p in _CASES:
         case = json.loads(p.read_text(encoding="utf-8"))
         for key, val in case["expect"].items():
-            gate = key.split("_kinds")[0].split("_ports")[0]
-            none = val in ([], {}, None) or (isinstance(val, dict) and (val.get("is_screen") is False or val.get("facts_flagged") == 0))
+            gate = {"prerequisite": "ingress_prerequisite"}.get(key, key.split("_kinds")[0].split("_ports")[0])
+            none = val in ([], {}, None) or (isinstance(val, dict) and (val.get("is_screen") is False or val.get("facts_flagged") == 0 or val.get("issues") == 0))
             seen.setdefault(gate, set()).add("none" if none else "hit")
     assert seen.get("ingress_target") == {"hit", "none"}
     assert "hit" in seen.get("state_invariants", set()) and "hit" in seen.get("fact_reconcile", set())
     assert "hit" in seen.get("class_query", set())
     assert seen.get("surface_fact") == {"hit", "none"}
     assert seen.get("fact_plan_trigger") == {"hit", "none"}
+    assert seen.get("ingress_prerequisite") == {"hit", "none"}

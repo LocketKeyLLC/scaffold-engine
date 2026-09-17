@@ -1,0 +1,31 @@
+{
+ "id": "2026-09-17-T37-router-step-no-prerequisite-issue",
+ "surface": "prerequisite",
+ "draft": "In the My Spectrum app, reserve 192.168.1.26 for MAC BC:24:11:AC:C9:06, then add TCP 80 and 443.",
+ "focus": "tls error",
+ "env": {
+  "system_state": {
+   "120": {
+    "kind": "ct",
+    "attrs": {
+     "hostname": "caddy-proxy"
+    },
+    "devices": {
+     "net0": "ip=192.168.1.26/24,hwaddr=BC:24:11:AC:C9:06"
+    },
+    "source": "pct config 120"
+   }
+  },
+  "facts": [
+   "Container listeners: CT 120 on *:443 and *:80.",
+   "The ACME challenge fails with timeout.",
+   "CT 120 cannot reserve an IP on the Spectrum router."
+  ]
+ },
+ "expect": {
+  "prerequisite": {
+   "issues": 0
+  }
+ },
+ "note": "directing to the router IS the fix — no writes on the entry point, no issue"
+}
