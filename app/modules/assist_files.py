@@ -38,6 +38,22 @@ _WRITE_OPEN_RE = re.compile(
     r"""[^\n]*?<<-?\s*(?P<q>['"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)""",
     re.VERBOSE,
 )
+# §17.1091 — the OTHER write form the engine prescribes: `tee [-a] PATH [>
+# /dev/null] <<'EOF'` (the §17.963 chunked rewrite is exactly this, seven
+# times per reply). It matched nothing above, so a rewrite was invisible to
+# the ledger: `expected` stayed at a 149-byte write from two days earlier,
+# the file measured 266, every turn read "clipped", and every fix prescribed
+# another invisible rewrite. Live: three truncate-and-rewrite rounds.
+_TEE_OPEN_RE = re.compile(
+    r"""\btee\s+(?P<append>(?:-a|--append)\s+)?(?P<path>(?:/|\./|~/)[^\s"'`;|&)]+)"""
+    r"""[^\n]*?<<-?\s*(?P<q>['"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)""",
+    re.VERBOSE,
+)
+# `truncate -s 0 PATH`, `: > PATH`, `> PATH` — the file is emptied: the write
+# series starts over at zero (a chunked rewrite begins with one of these).
+_TRUNCATE_RE = re.compile(
+    r"""(?:\btruncate\s+(?:-s\s*0|--size[= ]0)\s+|(?:^|[;&|]\s*|--\s+)(?::\s*)?>\s*)(?P<path>(?:/|\./|~/)[^\s"'`;|&)]+)""",
+    re.MULTILINE)
 # `wc -c` output: "2287 /opt/app/App.jsx". Also matches `wc -c <` forms.
 _WC_LINE_RE = re.compile(r"^\s*(?P<bytes>\d{1,12})\s+(?P<path>(?:/|\./|~/)\S+)\s*$")
 # `ls -l` output: "-rw-r--r-- 1 root root 2287 Sep  6 19:20 /opt/app/App.jsx"
@@ -67,8 +83,26 @@ def parse_file_writes(assistant_text: str) -> dict[str, dict[str, Any]]:
     """
     out: dict[str, dict[str, Any]] = {}
     text = assistant_text or ""
+    # §17.1091 — every write opener in reply order: redirect forms, tee forms,
+    # and truncations (which reset a path's series to zero).
+    openers: list[tuple[int, str, Any]] = []
     for m in _WRITE_OPEN_RE.finditer(text):
+        openers.append((m.start(), "write", m))
+    for m in _TEE_OPEN_RE.finditer(text):
+        if any(k == "write" and o.start() <= m.start() < o.end() for _, k, o in openers):
+            continue
+        openers.append((m.start(), "tee", m))
+    for m in _TRUNCATE_RE.finditer(text):
+        openers.append((m.start(), "truncate", m))
+    openers.sort(key=lambda t: t[0])
+    truncated: set[str] = set()
+    for _, kind, m in openers:
         path = m.group("path")
+        if kind == "truncate":
+            truncated.add(path)
+            out[path] = {"expected": 0, "lines": 0, "body": "", "sha": content_fingerprint("")}
+            continue
+        append = (m.group("append") == ">>") if kind == "write" else bool(m.group("append"))
         delim = m.group("delim")
         rest = text[m.end():]
         body_lines: list[str] = []
@@ -85,11 +119,15 @@ def parse_file_writes(assistant_text: str) -> dict[str, dict[str, Any]]:
         open_line = text[text.rfind("\n", 0, m.start()) + 1:m.end()]
         disk_body = _as_written_to_disk(open_line, "\n".join(body_lines))
         rec = out.get(path)
-        if rec and m.group("append") == ">>":
+        if rec and append:
             rec["expected"] += nbytes
             rec["lines"] += len(body_lines)
-            rec["body"] = rec.get("body", "") + "\n" + disk_body
+            rec["body"] = (rec.get("body", "") + "\n" + disk_body) if rec.get("body") else disk_body
             rec["sha"] = content_fingerprint(rec["body"])
+        elif rec and path in truncated and rec["expected"] == 0:
+            # the first chunk after a truncate in this reply starts the series
+            out[path] = {"expected": nbytes, "lines": len(body_lines), "body": disk_body,
+                         "sha": content_fingerprint(disk_body)}
         elif rec:
             # A SECOND `>` to the same path in one reply is the engine printing
             # the file twice, not writing it twice. Live (turn 1746): the same

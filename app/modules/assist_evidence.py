@@ -1102,6 +1102,7 @@ async def verify_answer(
     annotate: bool = True,
     topology: Optional[dict] = None,
     focus: str = "",
+    prerequisite_env: Optional[dict] = None,
 ) -> tuple[str, dict]:
     """Check an answer against its grounding; regenerate once; else annotate.
 
@@ -1156,6 +1157,11 @@ async def verify_answer(
                        node_key, label, [s["command"] for s in shape][:4])
     from app.modules.assist_inventory import ingress_footer, ingress_issues, ingress_notice
     ingress = run_gate("ingress_target", ingress_issues, answer, topology, focus=focus, default=[])  # §17.1083b
+    from app.modules.assist_inventory import prerequisite_footer, prerequisite_issues, prerequisite_notice
+    prereq = run_gate("ingress_prerequisite", prerequisite_issues, answer, prerequisite_env, focus=focus, default=[])  # §17.1091
+    if prereq:
+        logger.warning("assist_answer_prerequisite_violation node_key=%s label=%s entry=%s writes=%r",
+                       node_key, label, prereq[0].get("entry_id"), prereq[0].get("writes"))
     if ingress:
         logger.warning("assist_answer_ingress_violation node_key=%s label=%s issues=%r",
                        node_key, label, ingress[:4])
@@ -1165,11 +1171,11 @@ async def verify_answer(
                     node_key, label, _carried[:6])
 
     def _fails(uns: list, ct: Optional[dict], off_: bool = False,
-               shape_: Optional[list] = None, ingress_: Optional[list] = None) -> bool:
-        return bool(uns) or _citation_weak(ct) or off_ or bool(shape_) or bool(ingress_)
+               shape_: Optional[list] = None, ingress_: Optional[list] = None, prereq_: Optional[list] = None) -> bool:
+        return bool(uns) or _citation_weak(ct) or off_ or bool(shape_) or bool(ingress_) or bool(prereq_)
 
     _q = (need.subject if (need is not None and need.kind == "question") else "") or ""
-    if _fails(unsupported, cite, off, shape, ingress) and regenerate is not None \
+    if _fails(unsupported, cite, off, shape, ingress, prereq) and regenerate is not None \
             and settings.assist_answer_verification_regenerate:
         logger.info(
             "assist_answer_grounding_regen node_key=%s label=%s unsupported=%r "
@@ -1179,7 +1185,7 @@ async def verify_answer(
         try:
             candidate = (await regenerate(grounding_notice(
                 unsupported, cite, off_question=_q if off else None,
-                shape=shape) + ingress_notice(ingress, topology or {})) or "").strip()
+                shape=shape) + ingress_notice(ingress, topology or {}) + prerequisite_notice(prereq, prerequisite_env)) or "").strip()
         except Exception as exc:  # noqa: BLE001 — verification never breaks a turn
             logger.warning("assist_answer_grounding_regen_failed: %s", exc)
             candidate = ""
@@ -1191,14 +1197,16 @@ async def verify_answer(
             c_off = not run_gate("addresses_question", addresses_question, candidate, need, default=True)
             c_shape = run_gate("command_shape", command_shape_issues, candidate, default=[])
             c_ingress = run_gate("ingress_target", ingress_issues, candidate, topology, focus=focus, default=[])
-            better = (not _fails(c_uns, c_cite, c_off, c_shape, c_ingress)) or (
-                not c_ingress and ingress and not c_off and not c_shape) or (
-                not c_off and off and not c_shape and not c_ingress) or (
-                not c_shape and shape and not c_off and not c_ingress) or (
-                not c_off and not c_shape and not c_ingress and len(c_uns) < len(unsupported) and not (
+            c_prereq = run_gate("ingress_prerequisite", prerequisite_issues, candidate, prerequisite_env, focus=focus, default=[])
+            better = (not _fails(c_uns, c_cite, c_off, c_shape, c_ingress, c_prereq)) or (
+                not c_prereq and prereq and not c_off and not c_shape and not c_ingress) or (
+                not c_ingress and ingress and not c_off and not c_shape and not c_prereq) or (
+                not c_off and off and not c_shape and not c_ingress and not c_prereq) or (
+                not c_shape and shape and not c_off and not c_ingress and not c_prereq) or (
+                not c_off and not c_shape and not c_ingress and not c_prereq and len(c_uns) < len(unsupported) and not (
                     _citation_weak(c_cite) and not _citation_weak(cite)))
             if better:
-                answer, unsupported, cite, off, shape, ingress = candidate, c_uns, c_cite, c_off, c_shape, c_ingress
+                answer, unsupported, cite, off, shape, ingress, prereq = candidate, c_uns, c_cite, c_off, c_shape, c_ingress, c_prereq
                 report["regenerated"] = True
 
     # §17.1034 — the plan-only tier: credited by the corpus (task text, digest,
@@ -1216,15 +1224,16 @@ async def verify_answer(
     if unsourced_iface:
         logger.info("assist_answer_unsourced_interface node_key=%s label=%s max_authority=%.2f",
                     node_key, label, max_source_authority(sources))
-    if _fails(unsupported, cite, off, shape, ingress) or plan_only or unsourced_iface:
+    if _fails(unsupported, cite, off, shape, ingress, prereq) or plan_only or unsourced_iface:
         footer = grounding_footer(
             unsupported, cite, off_question=_q if off else None, shape=shape,
-            plan_only=plan_only, unsourced_interface=unsourced_iface) + ingress_footer(ingress, topology or {})
+            plan_only=plan_only, unsourced_interface=unsourced_iface) + ingress_footer(ingress, topology or {}) + prerequisite_footer(prereq)
         report["footer"] = footer
         if annotate:
             answer = answer.rstrip() + footer
-        report["annotated"] = bool(_fails(unsupported, cite, off, shape, ingress))
+        report["annotated"] = bool(_fails(unsupported, cite, off, shape, ingress, prereq))
     report["ingress"] = ingress
+    report["prerequisite"] = prereq
     report["unsourced_interface"] = unsourced_iface
     report["off_question"] = off
     report["command_shape"] = shape

@@ -464,3 +464,45 @@ def test_blocking_facts_pick_the_steps_they_invalidate_and_skip_status_facts():
     src = (pathlib.Path(inv.__file__).resolve().parents[0] / "assist_memory.py").read_text(encoding="utf-8")
     block = src[src.index("§17.1089"):src.index("assist_fact_plan_trigger_failed")]
     assert 'run_gate("fact_plan_trigger", blocking_candidates' in block and 'note_kind="fact"' in block and "assess_note_impact" in block
+
+
+# ── §17.1091 — the write ledger sees tee/truncate; the prerequisite gate ──
+
+def test_write_ledger_records_the_tee_chunked_rewrite_and_truncate():
+    from app.modules.assist_files import parse_file_writes
+    reply = ("pct exec 120 -- truncate -s 0 /etc/caddy/Caddyfile\n"
+             "pct exec 120 -- tee -a /etc/caddy/Caddyfile > /dev/null <<'EOF'\ndefrusciohomelab.duckdns.org {\nEOF\n"
+             "pct exec 120 -- tee -a /etc/caddy/Caddyfile > /dev/null <<'EOF'\n    reverse_proxy /jellyfin/* 192.168.1.20:8096\nEOF\n"
+             "pct exec 120 -- tee -a /etc/caddy/Caddyfile > /dev/null <<'EOF'\n}\nEOF\n")
+    w = parse_file_writes(reply)
+    r = w["/etc/caddy/Caddyfile"]
+    assert r["lines"] == 3 and r["expected"] == len("defrusciohomelab.duckdns.org {\n    reverse_proxy /jellyfin/* 192.168.1.20:8096\n}\n".encode())
+    assert parse_file_writes("pct exec 120 -- truncate -s 0 /etc/caddy/Caddyfile\n")["/etc/caddy/Caddyfile"]["expected"] == 0
+    assert parse_file_writes("cat > /tmp/x <<E\nab\nE\ncat >> /tmp/x <<E\ncd\nE\n")["/tmp/x"]["expected"] == 6   # redirect form unchanged
+
+
+def _ingress_unmet_env():
+    return {"system_state": {"120": {"kind": "ct", "attrs": {"hostname": "caddy-proxy"},
+                                     "devices": {"net0": "name=eth0,bridge=vmbr0,ip=192.168.1.26/24,hwaddr=BC:24:11:AC:C9:06"}, "source": "pct config 120"}},
+            "facts": ["Container listeners: CT 120 on *:443 and *:80.",
+                      "The ACME challenge for defrusciohomelab.duckdns.org fails with 'Timeout during connect (likely firewall problem)' against 67.240.32.243.",
+                      "The LXC container (caddy-proxy, CT 120) cannot reserve an IP address on the Spectrum router, which is required to set up port forwarding for it.",
+                      "The Caddyfile in LXC 120 validates successfully ('Valid configuration')."]}
+
+
+def test_prerequisite_gate_catches_config_rewrites_while_the_router_is_unmet():
+    env = _ingress_unmet_env()
+    pre = inv.ingress_prerequisite(env)
+    assert pre["entry_id"] == "120" and pre["config_validated"] is True and pre["evidence"]
+    draft = "## Diagnosis\nThe Caddyfile is the wrong size.\n```bash\npct exec 120 -- truncate -s 0 /etc/caddy/Caddyfile\n```\nthen rewrite it."
+    iss = inv.prerequisite_issues(draft, env, focus="pct exec 120 -- curl -k https://localhost → tlsv1 alert internal error")
+    assert iss and iss[0]["entry_id"] == "120" and iss[0]["config_validated"] is True
+    assert "router forwards TCP 80/443 to CT 120" in inv.prerequisite_notice(iss, env)
+    assert "Prerequisite not met" in inv.prerequisite_footer(iss)
+    # non-hits: directing to the router (no writes), a non-TLS symptom, a write on another machine, prerequisite already met
+    assert inv.prerequisite_issues("In the Spectrum app reserve 192.168.1.26 for MAC BC:24:11:AC:C9:06 and add TCP 80/443.", env, focus="tls error") == []
+    assert inv.prerequisite_issues(draft, env, focus="disk is full on the container") == []
+    assert inv.prerequisite_issues("pct exec 111 -- truncate -s 0 /etc/x", env, focus="https fails") == []
+    met = _ingress_unmet_env(); met["facts"].append("Port forwarding is working and HTTPS reachable from outside.")
+    assert inv.prerequisite_issues(draft, met, focus="tls error") == []
+    assert inv.ingress_prerequisite({"facts": ["all good"]}) is None

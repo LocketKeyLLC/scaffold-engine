@@ -2592,6 +2592,7 @@ async def generate_guidance(
             owned_hosts=_owned_hosts(environment, operator_notes),  # §17.1032
             confirmed=_ledger_text(environment, operator_notes),  # §17.1034
             topology=_topology_of(environment),  # §17.1083b
+            prerequisite_env=environment,  # §17.1091
         )
         _sourced_meta_guide = list(_vreport_guide.get("sourced_now") or [])
     # §17.897 — every command the operator is handed must be copy-pasteable,
@@ -5591,6 +5592,7 @@ async def generate_fix(
             owned_hosts=_owned_hosts(environment, operator_notes),  # §17.1032
             confirmed=_ledger_text(environment, operator_notes),  # §17.1034
             topology=_topology_of(environment),  # §17.1083b
+            prerequisite_env=environment,  # §17.1091
         )
         _sourced_meta_fix = list(_vreport_fix.get("sourced_now") or [])
     # §17.897 — every command the operator is handed must be copy-pasteable,
@@ -6551,6 +6553,7 @@ async def generate_guidance_stream(
             owned_hosts=_owned_hosts(environment, operator_notes),  # §17.1032
             confirmed=_ledger_text(environment, operator_notes),  # §17.1034
             topology=_topology_of(environment),  # §17.1083b
+            prerequisite_env=environment,  # §17.1091
         )
         meta["sourced_values"] = list(_vreport_stream.get("sourced_now") or [])
         if len(text_out) > len(_before):

@@ -56,7 +56,9 @@ def blocking_candidates(facts: list[str], pending: list[dict[str, Any]]) -> list
         scored: list[tuple[int, str]] = []
         shared_all: set[str] = set()
         for nk, ws in node_words:
-            shared = {w for w in (fw & ws) if freq.get(w, 0) < half or len(node_words) == 1}
+            # with one or two pending steps every shared word discriminates
+            # (the "fewer than half" bar would otherwise demand fewer than one)
+            shared = {w for w in (fw & ws) if freq.get(w, 0) < half or len(node_words) <= 2}
             if shared:
                 scored.append((len(shared), nk))
                 shared_all |= shared
