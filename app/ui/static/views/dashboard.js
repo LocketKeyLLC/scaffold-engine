@@ -255,7 +255,9 @@ export default function dashboard(container) {
             ...checks.map(([name, c]) =>
               el(
                 "span",
-                { class: "health-item" },
+                // §17.1090 — a degraded fail-safe names itself on hover
+                { class: "health-item", title: c.crashed && Object.keys(c.crashed).length
+                    ? "crashed gates: " + Object.entries(c.crashed).map(([g, v]) => `${g} ×${v.count}`).join(", ") : "" },
                 // Pass the real status through: "unknown" must render neutral
                 // (CSS default gray), not a false-alarm red. Only a hard
                 // "down"/"error" goes red.

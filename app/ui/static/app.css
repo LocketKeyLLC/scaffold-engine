@@ -1608,3 +1608,8 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
 .assist-more[open] > summary { margin-bottom: 8px; }
 .checklist-done > summary { cursor: pointer; list-style: none; }
 .checklist-done > summary::-webkit-details-marker { display: none; }
+
+/* §17.1090 — the system map inside the environment card */
+.side-map { margin-top: 8px; }
+.side-map summary { cursor: pointer; font-size: var(--fs-sm); color: var(--text-dim); }
+.side-map-pre { white-space: pre-wrap; font-family: var(--mono); font-size: var(--fs-2xs); line-height: 1.45; margin: 6px 0 0; max-height: 280px; overflow: auto; }

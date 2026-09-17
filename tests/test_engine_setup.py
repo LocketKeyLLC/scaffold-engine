@@ -203,3 +203,40 @@ def test_planner_and_research_honour_the_flag():
     assert "decision nodes" in es.PRESCRIBED_BLOCK and "already exist" in es.PRESCRIBED_BLOCK and "in the brief's order" in es.PRESCRIBED_BLOCK
     iw = (ROOT / "app" / "modules" / "ideation_workflow.py").read_text(encoding="utf-8")
     assert "and not _is_prescriptive:" in iw and "phase2_options_skipped_prescriptive" in iw
+
+
+# ── §17.1090 — the web UI carries this week's components ──
+
+def test_env_endpoint_carries_the_system_map_and_the_console_renders_it():
+    """§17.1007c's rule: a field the server emits for the operator must be read by
+    the surface that declares it. `system_map` on GET /assist/{sid}/env → the
+    environment card; `assist_gates.crashed` on /health → the dashboard dot's title;
+    a background-staged `pending_replan` → the idle poll."""
+    router = (ROOT / "app" / "routers" / "assist.py").read_text(encoding="utf-8")
+    assert '"system_map": system_map' in router and "render_system_map(env)" in router
+    js = (ROOT / "app" / "ui" / "static" / "views" / "assist.js").read_text(encoding="utf-8")
+    assert "r.system_map" in js and 'class: "side-map"' in js and "conflicts to settle" in js
+    assert "idlePoll = setInterval" in js and "renderReplanProposal(s.pending_replan, { open: true })" in js and "clearInterval(idlePoll)" in js
+    dash = (ROOT / "app" / "ui" / "static" / "views" / "dashboard.js").read_text(encoding="utf-8")
+    assert "crashed gates:" in dash and "c.crashed" in dash
+    css = (ROOT / "app" / "ui" / "static" / "app.css").read_text(encoding="utf-8")
+    assert ".side-map-pre" in css
+
+
+@pytest.mark.asyncio
+async def test_env_endpoint_returns_the_map_text():
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from app.routers import assist as assist_router
+    from app.database import get_db
+    from app.modules import assist_agent
+    env = {"system_state": {"120": {"kind": "ct", "attrs": {"hostname": "caddy-proxy", "ip": "192.168.1.26"}, "devices": {}, "source": "pct config 120"}},
+           "facts": ["Container listeners: CT 120 on *:443 and *:80."]}
+    app = FastAPI(); app.include_router(assist_router.router)
+    app.dependency_overrides[get_db] = lambda: MagicMock()
+    with patch.object(assist_agent, "get_environment", new=AsyncMock(return_value=env)):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get("/assist/9c9c9c9c-0000-0000-0000-000000000000/env")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["environment"] == env and "CT 120 (caddy-proxy) · IP 192.168.1.26" in body["system_map"]

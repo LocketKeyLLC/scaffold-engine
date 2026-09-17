@@ -960,6 +960,7 @@ export function renderChat(container, sessionId, opts = {}) {
   // cached per load cycle; failures degrade to absent cards, never errors.
   let checklist = null;
   let environment = null;
+  let systemMap = "";   // §17.1090 — the engine's joined view of the operator's machines
   // §17.938 — the plan's steps, for the step picker in the hero.
   let steps = [];
 
@@ -1071,6 +1072,13 @@ export function renderChat(container, sessionId, opts = {}) {
       el("div", { class: "card card-pad side-block" },
         el("div", { class: "side-title", text: "Your environment (as tracked)" }),
         ...envLines.map((l) => el("div", { class: "side-fact", text: l })),
+        // §17.1090 — the SYSTEM MAP: what every walkthrough is told about your
+        // machines (ids, names, addresses, MACs, the public entry point) and
+        // the CONFLICTS in the records that only you can settle.
+        systemMap ? el("details", { class: "side-map" },
+          el("summary", { text: systemMap.includes("CONFLICTS") ? "System map — ⚠ conflicts to settle" : "System map (what the engine believes about your machines)" }),
+          el("pre", { class: "side-map-pre", text: systemMap.replace(/^### [^\n]*\n/, "") })
+        ) : null,
         subsEditor()
       ),
       notes.length ? el("div", { class: "card card-pad side-block" },
@@ -1093,7 +1101,7 @@ export function renderChat(container, sessionId, opts = {}) {
         api.get(`/assist/${sessionId}`),
         api.get(`/assist/${sessionId}/turns`),
         api.get(`/assist/${sessionId}/checklist`).catch(() => null),
-        api.get(`/assist/${sessionId}/env`).catch(() => null),
+        api.get(`/assist/${sessionId}/env`).then((r) => { systemMap = (r && r.system_map) || ""; return r; }).catch(() => null),
         api.get(`/assist/${sessionId}/steps`).catch(() => null),
       ]);
       if (disposed) return;
@@ -1534,8 +1542,22 @@ export function renderChat(container, sessionId, opts = {}) {
 
   load().then(maybeResumeActiveTurn);
 
+  // §17.1090 — a re-plan proposal staged by a FACT (§17.1089) lands in the
+  // background after the turn's reload; poll the session while idle so it
+  // surfaces within half a minute instead of on the next turn. The proposal
+  // renderer dedupes by signature, so a repeat read draws nothing twice.
+  const idlePoll = setInterval(async () => {
+    if (disposed || guiding) return;
+    try {
+      const s = await api.get(`/assist/${sessionId}`);
+      if (disposed || guiding) return;
+      if (s && s.pending_replan) renderReplanProposal(s.pending_replan, { open: true });
+    } catch { /* transient — the next tick retries */ }
+  }, 25000);
+
   return () => {
     disposed = true;
+    clearInterval(idlePoll);
     document.removeEventListener("selectionchange", onSelChange);  // §17.890
     document.removeEventListener("click", onDocClick);  // §17.1055
     if (abort) abort.abort();
