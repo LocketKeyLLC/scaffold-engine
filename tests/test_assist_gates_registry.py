@@ -36,7 +36,7 @@ def test_registry_shape():
     assert len(names) == len(set(names)) and len(names) >= 18
     for g in ag.GATES:
         assert (MOD / f"{g.module}.py").exists(), g.module
-        assert g.kind in ("answer", "record", "prompt") and g.surfaces and g.since.startswith("§17.")
+        assert g.kind in ("answer", "record", "prompt", "retrieval") and g.surfaces and g.since.startswith("§17.")
         assert g.symbol.rstrip("(=") in (MOD / f"{g.module}.py").read_text(encoding="utf-8") or g.symbol in ("missing_tools", "guess_before_look"), g.name
 
 
@@ -50,7 +50,7 @@ def test_every_answer_surface_carries_every_gate_it_must(surface):
         fname, start, end = ag.SURFACE_CODE[part]
         region += _region(MOD / fname, start, end)
     fname, start, _ = ag.SURFACE_CODE[surface]
-    required = [g for g in ag.GATES if surface in g.surfaces and g.kind == "answer"]
+    required = [g for g in ag.GATES if surface in g.surfaces and g.kind in ("answer", "retrieval")]
     missing = []
     for g in required:
         if g.symbol == "verify_answer":
@@ -142,6 +142,16 @@ def test_replay_corpus(path):
                 continue
             for k, v in fields.items():
                 assert clean[rid][k] == v, f"{case['note']}: {rid}.{k}"
+    elif case["surface"] == "query":
+        from app.modules.assist_evidence import class_query, derive_need
+        need = derive_need(case["question"], operator_notes=case.get("notes"), assume_question=True)
+        cq = class_query(need, case["question"], operator_notes=case.get("notes"),
+                         local_names=[m.get("name") for m in _ENV.get("system_state", {}).values() if isinstance(m, dict) and (m.get("attrs") or {}).get("hostname")]
+                         + ["caddy-proxy", "jellyfin"])
+        want = exp["class_query"]
+        assert cq.startswith(want["starts_with"]), (cq, case["note"])
+        assert all(w in cq for w in want["contains"]), (cq, case["note"])
+        assert not any(x.lower() in cq.lower().split() or x in cq for x in want["excludes"]), (cq, case["note"])
     elif case["surface"] == "fact_write":
         from app.modules.assist_inventory import reconcile_fact
         stored, upd = reconcile_fact(case["fact"], _ENV)
@@ -164,3 +174,4 @@ def test_corpus_has_a_hit_and_a_non_hit_for_every_gate_it_covers():
             seen.setdefault(gate, set()).add("hit" if val not in ([], {}, None) else "none")
     assert seen.get("ingress_target") == {"hit", "none"}
     assert "hit" in seen.get("state_invariants", set()) and "hit" in seen.get("fact_reconcile", set())
+    assert "hit" in seen.get("class_query", set())

@@ -700,6 +700,7 @@ async def research_one(
     owned_hosts: Optional[set] = None,  # §17.1032 — hosts the operator's ledger names
     confirmed: Optional[str] = None,  # §17.1034 — the operator's ledger text (confirmed tier)
     topology: Optional[dict] = None,  # §17.1083b — the system map for the ingress gate
+    focus: str = "",  # §17.1086 — what the turn is about (question + recap OPEN/NEXT)
 ) -> dict:
     """Confirm a single operator-supplied question and optionally synthesize
     a short cited answer. Does not persist — this is a side query.
@@ -736,6 +737,21 @@ async def research_one(
         kb_query_extra=context_hint, web_query=web_q,
         operator_text=question,  # §17.1049 — a page quoting the question is an echo
     )
+    # §17.1086 — and the PROBLEM-CLASS query: the operator's specifics removed,
+    # the vendor kept, so the threads written by everyone who hit this before
+    # are in the corpus alongside the manual.
+    try:
+        from app.modules.assist_evidence import class_query
+        _local = [m.get("name") for m in ((topology or {}).get("machines") or {}).values() if m.get("name")]
+        cq = class_query(need, question, operator_notes=operator_notes, local_names=_local)
+        if cq and cq.lower() != (web_q or "").lower():
+            logger.info("assist_research_class_query node_key=%s q=%r", node_key, cq)
+            extra = await _deep_web_sources(cq, top_n=settings.assist_research_fetch_top_n,
+                                            operator_text=question)
+            have = {s.get("url") for s in sources if s.get("url")}
+            sources.extend(x for x in (extra or []) if not x.get("url") or x["url"] not in have)
+    except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
+        logger.warning("assist_research_class_query_failed: %s", exc)
     # §17.1036/1037 — a QUESTION about a program deserves its documentation.
     try:
         sources.extend(await _documentation_sources(need, web_q or question, sources, node_key=node_key,
@@ -929,6 +945,7 @@ async def research_one(
                     owned_hosts=owned_hosts,  # §17.1032
                     confirmed=confirmed or "",  # §17.1034
                     topology=topology,  # §17.1083b
+                    focus=focus or question,  # §17.1086
                 )
                 grounding = _vreport
             if answer:  # §17.897 — code-enforced copy-paste format

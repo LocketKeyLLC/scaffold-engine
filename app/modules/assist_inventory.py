@@ -57,7 +57,7 @@ def build_system_map(environment: dict | None) -> dict[str, Any]:
 
     def m(rid: str) -> dict[str, Any]:
         return machines.setdefault(rid, {"id": rid, "kind": None, "name": None, "ips": {}, "macs": set(),
-                                         "ports": set(), "status": None, "sources": set()})
+                                         "ports": set(), "status": None, "sources": set(), "addressing": None})
 
     # 1. the structured records — ids, names, MACs, status
     for rid, rec in state.items():
@@ -73,6 +73,16 @@ def build_system_map(environment: dict | None) -> dict[str, Any]:
             if str(dev).startswith("net"):
                 for mac in _MAC_RE.findall(str(val)):
                     r["macs"].add(_norm_mac(mac))
+                # §17.1086 — how the machine gets its address, from its own
+                # config line: `ip=dhcp` → leased by the router; `ip=A/24` →
+                # static, the router never hears from it; neither → set inside
+                # the guest (not leased unless the guest itself runs DHCP)
+                mip = re.search(r"\bip=([^,\s]+)", str(val))
+                if mip:
+                    v = mip.group(1).lower()
+                    r["addressing"] = "dhcp (leased by the router)" if v == "dhcp" else f"static {mip.group(1)} (set in Proxmox — the router never leases to it)"
+                elif r["addressing"] is None:
+                    r["addressing"] = "configured inside the guest (no ip= on net0; not router-leased unless the guest runs DHCP)"
         r["sources"].add(str(rec.get("source") or "config"))
 
     # 2. prose facts — resource mentions with IPs / MACs / ports / status
@@ -259,6 +269,8 @@ def render_system_map(environment: dict | None) -> str:
             bits.append("MAC " + ", ".join(f"{mac} (…:{':'.join(mac.split(':')[-3:])})" for mac in r["macs"]))
         if r["ports"]:
             bits.append("listens " + ",".join(r["ports"]))
+        if r.get("addressing"):
+            bits.append("addressing: " + r["addressing"])
         if r["status"]:
             bits.append(r["status"])
         lines.append("- " + " · ".join(bits))
@@ -273,8 +285,15 @@ def render_system_map(environment: dict | None) -> str:
         if ent:
             path.append(f"router port-forward TCP 80,443 → {ing['entry_ip'] or '?'} = CT {ent['id']} ({ent['name'] or 'reverse proxy'})"
                         + (f", MAC {ent['macs'][0]}" if ent["macs"] else ""))
+        if ent and ent.get("addressing") and not ent["addressing"].startswith("dhcp"):
+            lines_extra = (f"  ENTRY POINT ADDRESSING: {ent['addressing']} — a router that builds its device / reservation / "
+                           f"forwarding list from DHCP leases has never seen this machine; it must lease once (then reserve) before it can be chosen.")
+        else:
+            lines_extra = ""
         lines.append("")
         lines.append("INGRESS PATH: " + " → ".join(path))
+        if lines_extra:
+            lines.append(lines_extra)
         if ing["upstreams"]:
             lines.append("  behind it (the proxy routes to these; they are NOT forwarded from the router): "
                          + "; ".join(f"/{p} → {t}" if not p.count(":") else t for p, t in ing["upstreams"].items()))
@@ -337,14 +356,23 @@ _FWD_CTX_RE = re.compile(
     r"port[- ]?forward\w*|port assignment|reserve[d]?\s+ip|ip reservation|external port|internal port|"
     r"forward(?:ing)?\s+(?:tcp|udp|port|ports)\b", re.IGNORECASE)
 _GATE_RES_RE = re.compile(
-    r"\b(?:LXC container|LXC|CT|container|VM|vm)\s+(\d{2,5})\b|\b(?:qm|pct)\s+config\s+(\d{2,5})\b", re.IGNORECASE)
+    r"\b(?:LXC container|LXC|CT|container|VM|vm)\s+(\d{2,5})\b|\b(?:qm|pct)\s+(?:config|set|exec)\s+(\d{2,5})\b"
+    r"|\b(\d{2,5})\s*\((?:[A-Za-z][\w-]*)\)", re.IGNORECASE)
 _PORT_MENTION_RE = re.compile(r"\b(?:port|ports|external port|internal port|tcp|udp)\b[:\s`]*(\d{2,5})\b|\b(\d{2,5})\s*/\s*(?:tcp|udp)\b", re.IGNORECASE)
 
 
-def ingress_issues(answer: str, topology: dict | None) -> list[dict[str, Any]]:
+def ingress_issues(answer: str, topology: dict | None, *, focus: str = "") -> list[dict[str, Any]]:
     """Forwarding instructions in ``answer`` that contradict the map's entry
     point. Empty when the map has no entry point or the answer does not talk
-    about forwarding."""
+    about forwarding.
+
+    ``focus`` — §17.1086: what the TURN is about (the operator's question plus
+    the step recap's OPEN/NEXT lines). When the focus names the entry point
+    (its ip, name or domain, or ports 80/443), every forwarding window in the
+    draft is about the entry point — a draft that then names another machine
+    ("e.g., 101 (Jellyfin)") is wrong even though the draft itself never says
+    "caddy". The first cut judged each window from the draft alone and let
+    exactly that through."""
     if not answer or not topology:
         return []
     ing = topology.get("ingress") or {}
@@ -357,6 +385,10 @@ def ingress_issues(answer: str, topology: dict | None) -> list[dict[str, Any]]:
     known_ips = {ip for r in machines.values() for ip in r.get("ips", {})} | set((topology.get("host") or {}).get("ips", {}))
     issues: list[dict[str, Any]] = []
     seen: set[tuple] = set()
+    flow = (focus or "").lower()
+    focus_on_entry = bool(flow) and bool((entry_ip and entry_ip in flow) or (domain and domain.lower() in flow)
+                                         or any(n in flow for n in entry_names)
+                                         or re.search(r"\b(?:80|443)\b", " ".join(p for t in _PORT_MENTION_RE.findall(focus or "") for p in t if p)))
 
     def add(kind: str, **kw):
         key = (kind, tuple(sorted(kw.items())))
@@ -367,9 +399,9 @@ def ingress_issues(answer: str, topology: dict | None) -> list[dict[str, Any]]:
     for m in _FWD_CTX_RE.finditer(answer):
         window = answer[max(0, m.start() - 350): m.end() + 350]
         low = window.lower()
-        about_entry = bool((entry_ip and entry_ip in window) or (domain and domain.lower() in low)
-                           or any(n in low for n in entry_names)
-                           or re.search(r"\b(?:80|443)\b", " ".join(p for t in _PORT_MENTION_RE.findall(window) for p in t if p)))
+        about_entry = focus_on_entry or bool((entry_ip and entry_ip in window) or (domain and domain.lower() in low)
+                                             or any(n in low for n in entry_names)
+                                             or re.search(r"\b(?:80|443)\b", " ".join(p for t in _PORT_MENTION_RE.findall(window) for p in t if p)))
         # (a) a management port in a forwarding context — wrong regardless
         for t in _PORT_MENTION_RE.findall(window):
             port = next((p for p in t if p), "")
