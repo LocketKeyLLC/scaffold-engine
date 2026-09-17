@@ -1,0 +1,13 @@
+{
+ "id": "2026-09-17-fact-b4af15-host",
+ "surface": "fact_write",
+ "fact": "The Proxmox host with MAC prefix b4:af:15 has IP address 192.168.1.129.",
+ "expect": {
+  "fact_reconcile": {
+   "contains": "MAC b4:af:15 is VM 110 (ai-vm) per its config, not the Proxmox host",
+   "update_id": "110",
+   "update_ip": "192.168.1.129"
+  }
+ },
+ "note": "live: the operator's misidentification stored verbatim; must be re-read against the records"
+}

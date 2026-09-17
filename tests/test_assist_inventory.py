@@ -336,7 +336,7 @@ def test_set_environment_routes_new_facts_through_reconcile():
     import pathlib
     src = (pathlib.Path(inv.__file__).resolve().parents[0] / "assist_environment.py").read_text(encoding="utf-8")
     block = src[src.index("    if facts:"):src.index("        # Cap: keep the most recent")]
-    assert "reconcile_fact(t, current)" in block and "merge_system_state" in block and "assist_fact_reconciled" in block
+    assert 'run_gate("fact_reconcile", reconcile_fact, t, current' in block and "merge_system_state" in block and "assist_fact_reconciled" in block
 
 
 def test_a_reconciled_fact_no_longer_binds_the_host():
@@ -345,3 +345,16 @@ def test_a_reconciled_fact_no_longer_binds_the_host():
     sm = inv.build_system_map(env)
     assert list(sm["host"]["ips"]) == ["192.168.1.156"]
     assert not [c for c in sm["conflicts"] if c["kind"] in ("host_ip", "mac_owner")]
+
+
+def test_a_pin_that_disagrees_with_observed_output_is_a_conflict_not_a_second_address():
+    env = _env()
+    env["substitutions"]["CADDY_PROXY_IP"] = "192.168.1.30"      # typed pin vs the observed .26
+    env["substitutions"]["PVE_IP"] = "192.168.1.200"              # typed pin vs the observed .156 (interfaces)
+    env["system_state"]["host"] = {"kind": "host", "attrs": {"ip": "192.168.1.156"}, "devices": {}, "source": "ip addr / interfaces"}
+    sm = inv.build_system_map(env)
+    assert list(sm["machines"]["120"]["ips"]) == ["192.168.1.26"]
+    pc = [c for c in sm["conflicts"] if c["kind"] == "pin_vs_observed"]
+    assert {(c["id"], c["pinned"], c["observed"]) for c in pc} == {("120", "192.168.1.30", "192.168.1.26"), ("host", "192.168.1.200", "192.168.1.156")}
+    text = inv.render_system_map(env)
+    assert "pinned value says caddy-proxy is 192.168.1.30 but its own `ip addr` output says 192.168.1.26" in text

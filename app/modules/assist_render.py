@@ -66,11 +66,9 @@ def render_environment_block(environment: dict | None) -> str:
     # never asked to re-derive the topology from forty loose sentences (live:
     # it forwarded the wrong machine's MAC, then the host's 8006/22, then
     # agreed a VM's MAC suffix was the host).
-    try:
-        from app.modules.assist_inventory import render_system_map
-        _map = render_system_map(environment)
-    except Exception:  # noqa: BLE001 — the map is derived; its absence must not break the block
-        _map = ""
+    from app.modules.assist_gates import run_gate
+    from app.modules.assist_inventory import render_system_map
+    _map = run_gate("system_map", render_system_map, environment, default="")
     if _map:
         parts.append(_map)
     # §17.709 — durable facts observed about the operator's ACTUAL system. Ground
@@ -300,11 +298,9 @@ def render_session_memory(
     # it only in render_environment_block — the legacy path — and the live
     # replay of the operator's question still reached for VM 106's MAC.
     # Same drift as §17.751/§17.914: two renderers, one edit.
-    try:
-        from app.modules.assist_inventory import render_system_map
-        _map_block = render_system_map(environment)
-    except Exception:  # noqa: BLE001 — derived; its absence must not break memory
-        _map_block = ""
+    from app.modules.assist_gates import run_gate
+    from app.modules.assist_inventory import render_system_map
+    _map_block = run_gate("system_map", render_system_map, environment, default="")
     if _map_block:
         state_block = (_map_block + "\n\n" + state_block) if state_block else _map_block
     from app.modules.assist_files import render_file_writes   # §17.965

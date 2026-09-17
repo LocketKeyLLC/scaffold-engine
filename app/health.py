@@ -537,6 +537,13 @@ async def build_health_response(app, migration_state) -> dict:
                 "by_comm": {},
             }
 
+    def _gate_health_safe():
+        try:
+            from app.modules.assist_gates import gate_health
+            return gate_health()
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "unknown", "error": str(exc)[:120]}
+
     (pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys, calibration,
      oom_alerts, host_oom_alerts, searxng) = await asyncio.gather(
         _check_pg(), _check_ollama(), _check_milvus(), _check_redis(),
@@ -650,6 +657,11 @@ async def build_health_response(app, migration_state) -> dict:
         # action differs (host OOM = host-wide pressure, container OOM
         # = per-container mem_limit miss).
         "host_oom_alerts": host_oom_alerts,
+        # §17.1085 — the assist fail-safes: registered gates, runs, and any
+        # that CRASHED since start (a crashed gate used to vanish inside a
+        # fail-soft handler). Degraded when any crashed; does not affect the
+        # top-level status — the service is up, one of its guards is not.
+        "assist_gates": _gate_health_safe(),
     }
     pg_up = pg["status"] == "up"
     ollama_up = ollama["status"] == "up"

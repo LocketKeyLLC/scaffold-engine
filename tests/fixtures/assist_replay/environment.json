@@ -1,0 +1,66 @@
+{
+ "system_state": {
+  "101": {
+   "kind": "ct",
+   "attrs": {
+    "hostname": "jellyfin",
+    "status": "running",
+    "_listed_name": "jellyfin"
+   },
+   "devices": {},
+   "source": "pct list"
+  },
+  "106": {
+   "kind": "vm",
+   "attrs": {
+    "name": "palworld-server",
+    "status": "stopped",
+    "_listed_name": "palworld-server"
+   },
+   "devices": {
+    "net0": "virtio=BC:24:11:E8:9F:7A,bridge=vmbr0"
+   },
+   "source": "qm config 106"
+  },
+  "110": {
+   "kind": "vm",
+   "attrs": {
+    "name": "ai-vm",
+    "ip": "192.168.1.129",
+    "_listed_name": "ai-vm"
+   },
+   "devices": {
+    "net0": "virtio=BC:24:11:B4:AF:15,bridge=vmbr0"
+   },
+   "source": "qm config 110"
+  },
+  "120": {
+   "kind": "ct",
+   "attrs": {
+    "hostname": "caddy-proxy",
+    "ip": "192.168.1.26",
+    "_listed_name": "caddy-proxy"
+   },
+   "devices": {
+    "net0": "name=eth0,bridge=vmbr0,firewall=0,hwaddr=BC:24:11:AC:C9:06,type=veth"
+   },
+   "source": "pct config 120"
+  },
+  "host": {
+   "kind": "host",
+   "attrs": {
+    "ip": "192.168.1.156"
+   },
+   "devices": {},
+   "source": "interfaces"
+  }
+ },
+ "substitutions": {
+  "JELLYFIN_IP": "192.168.1.20"
+ },
+ "facts": [
+  "Container listeners: CT 101 on 0.0.0.0:8096, CT 120 on *:443 and *:80.",
+  "The ACME challenge for defrusciohomelab.duckdns.org fails with 'Timeout during connect' against 67.240.32.243.",
+  "Spectrum router (SAX1V1K) WAN IPv4 is 67.240.32.243."
+ ]
+}

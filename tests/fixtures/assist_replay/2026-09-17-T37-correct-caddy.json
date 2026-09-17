@@ -1,0 +1,9 @@
+{
+ "id": "2026-09-17-T37-correct-caddy",
+ "surface": "research",
+ "draft": "The device to forward to is CT 120 (caddy-proxy) at 192.168.1.26, MAC BC:24:11:AC:C9:06. In the Spectrum app find that MAC under Port Forwarding & IP Reservations, reserve 192.168.1.26 for it, then add TCP 80 and TCP 443.",
+ "expect": {
+  "ingress_target": []
+ },
+ "note": "the answer the gate regenerated into — must pass"
+}

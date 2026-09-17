@@ -1,0 +1,45 @@
+{
+ "id": "2026-09-17-CT101-contaminated-record",
+ "surface": "state_write",
+ "state": {
+  "101": {
+   "kind": "ct",
+   "source": "pct config 101",
+   "attrs": {
+    "hostname": "prowlarr",
+    "name": "palworld-server",
+    "bios": "seabios",
+    "rootfs": "local-lvm:vm-105-disk-0,size=8G",
+    "_listed_name": "jellyfin"
+   },
+   "devices": {
+    "net0": "virtio=BC:24:11:E8:9F:7A,bridge=vmbr0",
+    "scsi0": "local-lvm:vm-106-disk-0,size=100G",
+    "unused0": "oasis:vm-110-disk-1"
+   }
+  },
+  "106": {
+   "kind": "vm",
+   "source": "qm config 106",
+   "attrs": {
+    "name": "palworld-server"
+   },
+   "devices": {
+    "net0": "virtio=BC:24:11:E8:9F:7A,bridge=vmbr0"
+   }
+  }
+ },
+ "expect": {
+  "state_invariants": {
+   "101": {
+    "attrs": {
+     "hostname": "jellyfin",
+     "_listed_name": "jellyfin"
+    },
+    "devices": {}
+   },
+   "106_keeps_mac": true
+  }
+ },
+ "note": "live: the state-check probe script's output attributed to CT 101 \u2014 impossible record, must be repaired"
+}

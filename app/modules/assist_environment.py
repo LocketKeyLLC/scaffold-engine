@@ -344,10 +344,8 @@ async def set_environment(
             t = str(f).strip()
             if not t:
                 continue
-            try:
-                t, upd = reconcile_fact(t, current)
-            except Exception:  # noqa: BLE001 — reconciliation never blocks a write
-                upd = None
+            from app.modules.assist_gates import run_gate
+            t, upd = run_gate("fact_reconcile", reconcile_fact, t, current, default=(t, None))
             if upd:
                 _fact_updates.update(upd)
             if t.lower() not in seen:

@@ -1,0 +1,15 @@
+{
+ "id": "2026-09-17-T37-2762-host-8006-22",
+ "surface": "research",
+ "draft": "## 👉 Do this next\n**Open the My Spectrum app now and go here:**\n```\nMy Spectrum app → Services → Router → Advanced Settings → Port Forwarding & IP Reservations\n```\nThen tell me what you see on that screen.\n\n---\n\n📍 In: the My Spectrum app on your phone (or Spectrum.net in a browser)\n\nThe MAC address you found is only used to **reserve an IP** for the Proxmox host. Port forwarding itself needs an **IP address**, not a MAC. That's why the router wouldn't let you forward using the MAC directly.\n\nHere's the fix, step by step:\n\n1. **Reserve the Proxmox host's IP first**  \n   In the Port Forwarding & IP Reservations screen, find your Proxmox host in the device list (it should show MAC `b4:af:15` and IP `192.168.1.129`).  \n   Toggle **Reserved IP** to ON for that device. This locks `192.168.1.129` to the Proxmox host so the port forward always points to the right machine.\n\n2. **Add the port assignment**  \n   Tap **Add Port Assignment**.\n\n3. **Pick the device**  \n   Choose the Proxmox host (the one you just reserved) from the list.\n\n4. **Enter the port(s)**  \n   For the Proxmox web interface, use:\n   - External port: `8006`\n   - Internal port: `8006`\n   - Protocol: `TCP`\n\n   For SSH, add a second assignment:\n   - External port: `22`\n   - Internal port: `22`\n   - Protocol: `TCP`\n\n   If you're forwarding a game server (like Palworld), replace the ports with the game's port (e.g. `8211` for Palworld) and use `UDP` if the game requires it.\n\n5. **Save**  \n   Tap Save or Apply.\n\nAfter that, test from outside your network by opening `https://67.240.32.243:8006` in a browser (replace `67.240.32.243` with your actual public IP — you can find it by searching \"what is my IP\" on Google).\n\nIf you're using the router's web page instead of the app, the path is similar: log in at `192.168.1.1` with username `admin` and password `admin` (default), then go to **Advanced → Port Forwarding** [4]. The same rule applies: reserve the IP first, then add the port forward to that IP.\n\nTell me what you see on the Port Forwarding & IP Reservations screen, and I'll walk you through the exact taps from there.\n\n---\n⚠️ **Weak sourcing** — 1 of 1 cited statements are not backed by the source they cite.\n\n---\n**Values filled in:**\n- `YOUR_PUBLIC_IP` → `67.240.32.243` (from your environment)\n",
+ "expect": {
+  "ingress_target_kinds": [
+   "mgmt_port"
+  ],
+  "ingress_target_ports": [
+   "22",
+   "8006"
+  ]
+ },
+ "note": "live: told the operator to forward 8006 and 22 to 'the Proxmox host'"
+}

@@ -1,0 +1,9 @@
+{
+ "id": "2026-09-17-T22-palworld-own-step",
+ "surface": "fix",
+ "draft": "At the Palworld step: forward UDP 8211 to VM 106 (palworld-server). Add a port assignment for UDP 8211 in the Spectrum app.",
+ "expect": {
+  "ingress_target": []
+ },
+ "note": "a game-server forward at its own step is legitimate — the gate must not fire"
+}

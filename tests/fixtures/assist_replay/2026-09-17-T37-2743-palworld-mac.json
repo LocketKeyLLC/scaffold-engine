@@ -1,0 +1,15 @@
+{
+ "id": "2026-09-17-T37-2743-palworld-mac",
+ "surface": "research",
+ "draft": "📍 On: the Proxmox host shell (root@pve)\n\n## 👉 Do this next\n**Run this now:**\n```bash\nqm config 106 | grep -E 'net|hwaddr'\n```\nthen tell me what it shows.\n\n## Why you see MACs\nThe Spectrum app lists devices by their **MAC address** (the hardware address), not by IP. IP addresses can change, so the app uses MACs for port forwarding and reservations. You need to pick the device whose MAC matches your Palworld server.\n\n## Find your server's MAC\n1. On the Proxmox host, run the command above. Look for a line like `net0: virtio=XX:XX:XX:XX:XX:XX,bridge=vmbr0`. The `XX:XX:XX:XX:XX:XX` is the MAC address.\n2. If you don't see a MAC (or VM 106 isn't the right device), run this instead to see which MAC currently has 192.168.1.26:\n```bash\nip neigh | grep 192.168.1.26\n```\nThe first column is the IP, the second is the MAC.\n\n## Select it in the Spectrum app\n1. In the Spectrum app, under **Port Forwarding**, find the device whose MAC matches the one you found.\n2. Tap that device, then continue adding your port assignment (e.g., UDP 8211 for Palworld).\n3. If the device's IP is not fixed, set a **DHCP reservation** for that MAC so it always gets 192.168.1.26 — this keeps the port forward working even if the IP would otherwise change.\n",
+ "expect": {
+  "ingress_target": [
+   {
+    "kind": "wrong_machine",
+    "id": "106",
+    "name": "palworld-server"
+   }
+  ]
+ },
+ "note": "live: told the operator to find the Palworld VM's MAC and forward UDP 8211 for a Caddy 80/443 step"
+}
