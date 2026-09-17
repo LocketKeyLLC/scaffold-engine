@@ -444,3 +444,23 @@ def test_dominant_products_and_class_query_on_a_business_job():
                       "VM 106 (palworld-server) status is stopped; VM 110 (ai-vm) status is running.", "The Proxmox host is at 192.168.1.156."]}
     assert dominant_products(env2) == ["Spectrum"]
     assert dominant_products({}) == [] and dominant_products({"facts": ["one mention of Netgear only"]}) == []
+
+
+# ── §17.1089 — a fact that blocks a pending step triggers the re-plan judgment ──
+
+def test_blocking_facts_pick_the_steps_they_invalidate_and_skip_status_facts():
+    from app.modules.assist_plan_facts import blocking_candidates
+    pending = [{"node_key": "T1", "title": "Verify QuickBooks plan capabilities"}, {"node_key": "T6", "title": "Create invoice template"},
+               {"node_key": "T7", "title": "Set up recurring invoices", "prompt_template": "Schedule three recurring monthly client invoices in QuickBooks Online"},
+               {"node_key": "T8", "title": "Configure NY sales-tax settings"}]
+    c = blocking_candidates(["Recurring transactions are not available on the Simple Start plan; upgrading to Essentials is required to schedule recurring invoices.",
+                             "Automated sales tax is on in QuickBooks Online."], pending)
+    assert len(c) == 1 and c[0]["node_keys"][0] == "T7" and "recurring" in c[0]["shared"]
+    assert blocking_candidates(["QuickBooks Online plan is Simple Start."], pending) == []          # not blocking-shaped
+    assert blocking_candidates(["Recurring transactions are not available."], []) == []              # nothing pending
+    hl = [{"node_key": "T37", "title": "Validate secure outside access", "prompt_template": "Confirm the router forwards 80/443 to the Caddy container"}]
+    assert blocking_candidates(["CT 120 (caddy-proxy) has a static IP; the router never leases to it, so the app does not list it."], hl)[0]["node_keys"] == ["T37"]
+    import pathlib
+    src = (pathlib.Path(inv.__file__).resolve().parents[0] / "assist_memory.py").read_text(encoding="utf-8")
+    block = src[src.index("§17.1089"):src.index("assist_fact_plan_trigger_failed")]
+    assert 'run_gate("fact_plan_trigger", blocking_candidates' in block and 'note_kind="fact"' in block and "assess_note_impact" in block

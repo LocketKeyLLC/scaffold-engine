@@ -163,6 +163,13 @@ def test_replay_corpus(path):
             assert surface_fact_present(want["first_pass_fact_counts_as_surface"])
         if want.get("not_a_surface_fact"):
             assert not surface_fact_present(want["not_a_surface_fact"])
+    elif case["surface"] == "fact_plan":
+        from app.modules.assist_plan_facts import blocking_candidates
+        cands = blocking_candidates(case["facts"], case["pending"])
+        want = exp["fact_plan_trigger"]
+        assert len(cands) == want["facts_flagged"], (cands, case["note"])
+        if want.get("first_node"):
+            assert cands[0]["node_keys"][0] == want["first_node"], (cands, case["note"])
     elif case["surface"] == "fact_write":
         from app.modules.assist_inventory import reconcile_fact
         stored, upd = reconcile_fact(case["fact"], _ENV)
@@ -182,9 +189,10 @@ def test_corpus_has_a_hit_and_a_non_hit_for_every_gate_it_covers():
         case = json.loads(p.read_text(encoding="utf-8"))
         for key, val in case["expect"].items():
             gate = key.split("_kinds")[0].split("_ports")[0]
-            none = val in ([], {}, None) or (isinstance(val, dict) and val.get("is_screen") is False)
+            none = val in ([], {}, None) or (isinstance(val, dict) and (val.get("is_screen") is False or val.get("facts_flagged") == 0))
             seen.setdefault(gate, set()).add("none" if none else "hit")
     assert seen.get("ingress_target") == {"hit", "none"}
     assert "hit" in seen.get("state_invariants", set()) and "hit" in seen.get("fact_reconcile", set())
     assert "hit" in seen.get("class_query", set())
     assert seen.get("surface_fact") == {"hit", "none"}
+    assert seen.get("fact_plan_trigger") == {"hit", "none"}
