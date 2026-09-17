@@ -76,6 +76,8 @@ GATES: tuple[Gate, ...] = (
     # ── record invariants (what the answers are built FROM) ──
     Gate("state_invariants", "record", "assist_state", "reconcile_system_state", (STATE_WRITE,), "§17.1084",
          "a MAC belongs to one machine, a disk to its id, a record to its kind's form; list names authoritative"),
+    Gate("surface_fact", "record", "assist_screens", "looks_like_screen_paste", (FACT_WRITE,), "§17.1087",
+         "a pasted SCREEN must yield a fact about what that surface offers, does not, and where it sends the operator"),
     Gate("fact_reconcile", "record", "assist_inventory", "reconcile_fact", (FACT_WRITE,), "§17.1084",
          "a new fact is read against the records before it is stored; MAC fragments name their machine"),
     Gate("contract_conflicts", "record", "assist_contracts", "find_contract_conflicts", (PROMPT,), "§17.968",

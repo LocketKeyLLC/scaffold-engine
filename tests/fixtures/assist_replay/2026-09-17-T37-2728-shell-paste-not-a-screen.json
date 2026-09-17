@@ -1,0 +1,11 @@
+{
+ "id": "2026-09-17-T37-2728-shell-paste-not-a-screen",
+ "surface": "screen_paste",
+ "paste": "root@pve:~# pct exec 120 -- ip -4 addr show eth0 | grep inet\n    inet 192.168.1.26/24 brd 192.168.1.255 scope global eth0\nroot@pve:~# getent hosts defrusciohomelab.duckdns.org\n67.240.32.243   defrusciohomelab.duckdns.org\nroot@pve:~#\n",
+ "expect": {
+  "surface_fact": {
+   "is_screen": false
+  }
+ },
+ "note": "a shell paste must not trigger the surface pass"
+}

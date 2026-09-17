@@ -445,6 +445,9 @@ async def flag_steps_for_destroyed_resources(
     return flagged
 
 
+from app.modules.assist_screens import looks_like_screen_paste, surface_fact_present  # §17.1087
+
+
 async def derive_turn_memory(
     *, session_id: str, node_key: str | None, message: str, db,
 ) -> dict:
@@ -483,6 +486,28 @@ async def derive_turn_memory(
         derived = await assist_guide.distill_turn_memory(
             message=msg, known_notes=known_note_texts, known_facts=known_facts,
         )
+        # §17.1087 — a SCREEN paste must yield a fact about the surface (what it
+        # offers, what it does not, where it sends the operator). The prompt
+        # asks for it; this checks it and runs one focused pass when it is
+        # missing — the same shape as every other gate (prompt rule + code).
+        from app.modules.assist_gates import run_gate
+        if run_gate("surface_fact", looks_like_screen_paste, msg, default=False) and \
+                not any(surface_fact_present(f) for f in (derived.get("facts") or [])):
+            logger.info("assist_surface_fact_required session_id=%s node_key=%s (first pass recorded none)",
+                        session_id, node_key)
+            try:
+                second = await assist_guide.distill_turn_memory(
+                    message=msg, known_notes=known_note_texts,
+                    known_facts=known_facts + list(derived.get("facts") or []), surface_pass=True)
+                added = [f for f in (second.get("facts") or []) if surface_fact_present(f)]
+                if added:
+                    derived = {**derived, "facts": list(derived.get("facts") or []) + added}
+                    logger.info("assist_surface_fact_recorded session_id=%s n=%d", session_id, len(added))
+                else:
+                    logger.warning("assist_surface_fact_missing session_id=%s node_key=%s (second pass recorded none)",
+                                   session_id, node_key)
+            except Exception as exc:  # noqa: BLE001 — memory is fail-soft; the miss is logged
+                logger.warning("assist_surface_fact_pass_failed session_id=%s err=%r", session_id, exc)
         # §17.716 — keep the execution context (user@host) fresh from EVERY
         # message, not just submits. (a) deterministic: a prompt line pasted in a
         # non-submit message; (b) the operator saying in prose they've moved hosts

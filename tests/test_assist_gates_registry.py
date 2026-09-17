@@ -152,6 +152,14 @@ def test_replay_corpus(path):
         assert cq.startswith(want["starts_with"]), (cq, case["note"])
         assert all(w in cq for w in want["contains"]), (cq, case["note"])
         assert not any(x.lower() in cq.lower().split() or x in cq for x in want["excludes"]), (cq, case["note"])
+    elif case["surface"] == "screen_paste":
+        from app.modules.assist_screens import looks_like_screen_paste, surface_fact_present
+        want = exp["surface_fact"]
+        assert looks_like_screen_paste(case["paste"]) is want["is_screen"], case["note"]
+        if want.get("first_pass_fact_counts_as_surface"):
+            assert surface_fact_present(want["first_pass_fact_counts_as_surface"])
+        if want.get("not_a_surface_fact"):
+            assert not surface_fact_present(want["not_a_surface_fact"])
     elif case["surface"] == "fact_write":
         from app.modules.assist_inventory import reconcile_fact
         stored, upd = reconcile_fact(case["fact"], _ENV)
@@ -171,7 +179,9 @@ def test_corpus_has_a_hit_and_a_non_hit_for_every_gate_it_covers():
         case = json.loads(p.read_text(encoding="utf-8"))
         for key, val in case["expect"].items():
             gate = key.split("_kinds")[0].split("_ports")[0]
-            seen.setdefault(gate, set()).add("hit" if val not in ([], {}, None) else "none")
+            none = val in ([], {}, None) or (isinstance(val, dict) and val.get("is_screen") is False)
+            seen.setdefault(gate, set()).add("none" if none else "hit")
     assert seen.get("ingress_target") == {"hit", "none"}
     assert "hit" in seen.get("state_invariants", set()) and "hit" in seen.get("fact_reconcile", set())
     assert "hit" in seen.get("class_query", set())
+    assert seen.get("surface_fact") == {"hit", "none"}

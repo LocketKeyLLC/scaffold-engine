@@ -1983,14 +1983,34 @@ _TURN_MEMORY_SYSTEM = (
     "operator states the opposite or corrects the value), echo that known fact "
     "verbatim in superseded_facts so the ledger can retract it. Only a real "
     "conflict — never an addition or refinement.\n"
+    "- When the message is a SCREEN or PAGE the operator is looking at (a "
+    "router's web page, an app screen, an installer, a web console) rather "
+    "than command output, record as facts WHAT THAT SURFACE OFFERS and what "
+    "it DOES NOT — above all where it sends the operator for a setting "
+    "(\"the device's web page shows status only and says to use the vendor's "
+    "phone app to change its settings\"). Where a setting lives is durable; a "
+    "page that only reports status is a fact about the system.\n"
     "- Never guess or infer beyond what the message says.\n"
     "Call record_turn_memory exactly once."
+)
+
+# §17.1087 — the focused second pass for a screen paste whose first pass
+# yielded no surface fact (live: a router's status page was pasted; the scribe
+# kept the WAN address and the model number and dropped "download the app to
+# change settings" — the one line that decided the next four turns).
+_SURFACE_PASS_SUFFIX = (
+    "\n\nThis message is a SCREEN the operator is looking at, not command output. "
+    "Record, as facts: (1) which surface it is and where (URL, address or app "
+    "name); (2) the settings and actions it OFFERS; (3) the settings it does NOT "
+    "offer and where it sends the operator for them instead. Quote the surface's "
+    "own words for (3). Return at least one fact unless the screen truly says nothing."
 )
 
 
 async def distill_turn_memory(
     *, message: str, known_notes: list[str] | None = None,
     known_facts: list[str] | None = None, role: str = "model_general",
+    surface_pass: bool = False,
 ) -> dict:
     """§17.715 — extract durable, plan-relevant memory from ONE operator message:
     ``{"notes": [{"kind","text"}], "facts": [str]}``. This is the unconditional
@@ -2017,7 +2037,7 @@ async def distill_turn_memory(
     try:
         resp = await model_router.tool_call(
             messages=[
-                {"role": "system", "content": _TURN_MEMORY_SYSTEM},
+                {"role": "system", "content": _TURN_MEMORY_SYSTEM + (_SURFACE_PASS_SUFFIX if surface_pass else "")},
                 {"role": "user", "content": (
                     known_lines
                     + f"Operator message:\n{message[:4000]}\n\nCall record_turn_memory."
