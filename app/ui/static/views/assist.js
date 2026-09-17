@@ -131,6 +131,18 @@ export function transcriptPlan(turns, pendingOps) {
   return { durable, pending };
 }
 
+// §17.1093 — the one decision behind "the proposal keeps re-appearing": a
+// staged plan-change is SHOWN unless the operator already applied/discarded it,
+// and it force-OPENS the modal only for a fresh in-turn proposal — never from a
+// background poll or a reload, and never one closed with "Later". Pure so a
+// node test can pin it.
+export function replanRenderDecision(sig, { open = false, background = false, isNew = true, resolved, snoozed } = {}) {
+  const has = (set) => !!(set && (set.has ? set.has(sig) : set[sig]));
+  if (has(resolved)) return { show: false, openModal: false, isNew };
+  const openModal = open && !background && isNew && !has(snoozed);
+  return { show: true, openModal, isNew };
+}
+
 export function openSectionFor(kind) {
   return kind === "fix" ? FIX_OPEN_SECTION : GUIDE_OPEN_SECTION;
 }
@@ -1129,7 +1141,7 @@ export function renderChat(container, sessionId, opts = {}) {
       // §17.863 — a stashed-but-unresolved re-plan proposal re-renders after
       // any reload (the server now exposes it on the session read); resolving
       // it clears the slot.
-      if (s.pending_replan) renderReplanProposal(s.pending_replan);
+      if (s.pending_replan) renderReplanProposal(s.pending_replan, { background: true });
       else { lastReplanSig = null; mount(replanSlot); }
       renderStepHero();
       renderTranscript();
@@ -1174,6 +1186,12 @@ export function renderChat(container, sessionId, opts = {}) {
   // lost to navigation (the §17.863 invariant), but nothing squats at the top
   // either.
   let lastReplanSig = null;
+  // §17.1093 — signatures the operator has ACTED on (applied/discarded) never
+  // render again, and ones they closed with "Later" never RE-OPEN from a
+  // background poll. The idle poll (§17.1090) re-opened the modal every 25 s
+  // with {open:true} — "after accepting it just keeps appearing."
+  const resolvedReplanSigs = new Set();
+  const snoozedReplanSigs = new Set();
 
   const REPLAN_ACTION_COPY = {
     rewrite: { icon: "✎", label: "Reword", blurb: "the confirmed fix showed this instruction is wrong here; exact phrase replaced" },
@@ -1215,12 +1233,16 @@ export function renderChat(container, sessionId, opts = {}) {
     setTimeout(() => overlay.remove(), 2600);
   };
 
-  function renderReplanProposal(p, { open = false } = {}) {
+  function renderReplanProposal(p, { open = false, background = false } = {}) {
     const changes = p.proposals || [];
     if (!changes.length) { mount(replanSlot); return; }
     const sig = JSON.stringify(changes.map((c) => [c.node_key, c.action, c.proposed_change]));
-    const isNew = sig !== lastReplanSig;
+    const d = replanRenderDecision(sig, { open, background, isNew: sig !== lastReplanSig,
+                                          resolved: resolvedReplanSigs, snoozed: snoozedReplanSigs });
     lastReplanSig = sig;
+    if (!d.show) { mount(replanSlot); return; }
+    const isNew = d.isNew;
+    const shouldOpen = d.openModal;
 
     const counts = changes.reduce((a, c) => { a[c.action] = (a[c.action] || 0) + 1; return a; }, {});
     const countText = ["revise", "drop", "reopen", "rewrite", "repair"]
@@ -1232,6 +1254,7 @@ export function renderChat(container, sessionId, opts = {}) {
 
     const resolve = async (decision) => {
       const n = changes.length;
+      resolvedReplanSigs.add(sig);   // §17.1093 — never resurface this exact set
       closeModal();
       mount(replanSlot, el("div", { class: "replan-chip busy" },
         el("span", { class: "spin" }),
@@ -1273,7 +1296,7 @@ export function renderChat(container, sessionId, opts = {}) {
       const laterBtn = el("button", { class: "btn btn-ghost btn-sm", text: "Decide later" });
       applyBtn.addEventListener("click", () => resolve("apply"));
       keepBtn.addEventListener("click", () => resolve("discard"));
-      laterBtn.addEventListener("click", () => { closeModal(); renderChip(); });
+      laterBtn.addEventListener("click", () => { snoozedReplanSigs.add(sig); closeModal(); renderChip(); });
 
       overlay = el("div", { class: "modal-overlay" },
         el("div", { class: "card modal-card replan-modal" },
@@ -1312,9 +1335,7 @@ export function renderChat(container, sessionId, opts = {}) {
     };
 
     renderChip();
-    // Pop it the moment it is PRESENTED — a freshly proposed change, or one
-    // the operator has not seen in this view yet.
-    if (open || isNew) openModal();
+    if (shouldOpen) openModal();
   }
 
 
@@ -1551,7 +1572,7 @@ export function renderChat(container, sessionId, opts = {}) {
     try {
       const s = await api.get(`/assist/${sessionId}`);
       if (disposed || guiding) return;
-      if (s && s.pending_replan) renderReplanProposal(s.pending_replan, { open: true });
+      if (s && s.pending_replan) renderReplanProposal(s.pending_replan, { open: true, background: true });
     } catch { /* transient — the next tick retries */ }
   }, 25000);
 
