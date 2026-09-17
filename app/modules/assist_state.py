@@ -152,7 +152,8 @@ def parse_system_state(operator_text: str) -> dict[str, dict[str, Any]]:
             rec["attrs"]["hostname"] = name
             rec["attrs"]["_listed_name"] = name
             rec["attrs"]["status"] = status.lower()
-    clean, _ = reconcile_system_state(out)
+    from app.modules.assist_gates import run_gate
+    clean, _ = run_gate("state_invariants", reconcile_system_state, out, default=(out, []))
     return clean
 
 
@@ -178,7 +179,8 @@ def merge_system_state(current: dict | None, observed: dict) -> dict:
             keep = {k: v for k, v in (cur.get("attrs") or {}).items() if k in ("ip", "status") and k not in (rec.get("attrs") or {})}
             rec = {**rec, "attrs": {**(rec.get("attrs") or {}), **keep}}
         merged[rid] = rec
-    clean, _ = reconcile_system_state(merged)   # §17.1084 — invariants at every write
+    from app.modules.assist_gates import run_gate
+    clean, _ = run_gate("state_invariants", reconcile_system_state, merged, default=(merged, []))   # §17.1084
     return dict(list(clean.items())[-40:])
 
 

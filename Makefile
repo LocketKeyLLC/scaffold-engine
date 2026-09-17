@@ -204,6 +204,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_retrieval_grounding_inventory.py \
 			tests/test_no_hardcoded_domain_answers.py \
 			tests/test_answer_verification_inventory.py \
+			tests/test_assist_gates_registry.py \
 			tests/test_ast_grep_rules.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
 	else \

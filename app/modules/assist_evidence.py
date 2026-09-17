@@ -954,19 +954,23 @@ async def verify_answer(
     trusted = (trusted or "") + "\n" + "\n".join(
         str((s.get("text") or s.get("content") or "") if isinstance(s, dict) else s)
         for s in (sources or []))
-    unsupported = unsupported_specifics(answer, corpus, trusted=trusted, flagged=flagged,
-                                        sourced=sourced, owned=owned_hosts)
-    cite = await citation_report(answer, sources)
-    off = not addresses_question(answer, need)  # §17.1031
+    # §17.1085 — every gate runs through the registry's runner: a gate that
+    # crashes on a new shape is logged as assist_gate_crashed, counted and
+    # shown on /health instead of vanishing inside a fail-soft handler.
+    from app.modules.assist_gates import run_gate, run_gate_async
+    unsupported = run_gate("unsourced_values", unsupported_specifics, answer, corpus, trusted=trusted,
+                           flagged=flagged, sourced=sourced, owned=owned_hosts, default=[])
+    cite = await run_gate_async("citation_backing", citation_report, answer, sources, default=None)
+    off = not run_gate("addresses_question", addresses_question, answer, need, default=True)  # §17.1031
     if off:
         logger.warning("assist_answer_offtopic node_key=%s label=%s question_terms=%r",
                        node_key, label, sorted(question_terms(need))[:8])
-    shape = command_shape_issues(answer)  # §17.1033
+    shape = run_gate("command_shape", command_shape_issues, answer, default=[])  # §17.1033
     if shape:
         logger.warning("assist_answer_command_shape node_key=%s label=%s commands=%r",
                        node_key, label, [s["command"] for s in shape][:4])
     from app.modules.assist_inventory import ingress_footer, ingress_issues, ingress_notice
-    ingress = ingress_issues(answer, topology)  # §17.1083b
+    ingress = run_gate("ingress_target", ingress_issues, answer, topology, default=[])  # §17.1083b
     if ingress:
         logger.warning("assist_answer_ingress_violation node_key=%s label=%s issues=%r",
                        node_key, label, ingress[:4])
@@ -996,12 +1000,12 @@ async def verify_answer(
             candidate = ""
         if candidate:
             candidate = strip_verifier_footers(candidate)  # §17.1037d
-            c_uns = unsupported_specifics(candidate, corpus, trusted=trusted, flagged=flagged,
-                                          sourced=sourced, owned=owned_hosts)
-            c_cite = await citation_report(candidate, sources)
-            c_off = not addresses_question(candidate, need)
-            c_shape = command_shape_issues(candidate)
-            c_ingress = ingress_issues(candidate, topology)
+            c_uns = run_gate("unsourced_values", unsupported_specifics, candidate, corpus, trusted=trusted,
+                             flagged=flagged, sourced=sourced, owned=owned_hosts, default=[])
+            c_cite = await run_gate_async("citation_backing", citation_report, candidate, sources, default=None)
+            c_off = not run_gate("addresses_question", addresses_question, candidate, need, default=True)
+            c_shape = run_gate("command_shape", command_shape_issues, candidate, default=[])
+            c_ingress = run_gate("ingress_target", ingress_issues, candidate, topology, default=[])
             better = (not _fails(c_uns, c_cite, c_off, c_shape, c_ingress)) or (
                 not c_ingress and ingress and not c_off and not c_shape) or (
                 not c_off and off and not c_shape and not c_ingress) or (

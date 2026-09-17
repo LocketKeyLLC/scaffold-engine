@@ -126,20 +126,41 @@ def build_system_map(environment: dict | None) -> dict[str, Any]:
     # 2b. structured IPs (from `ip -4 addr` parses) outrank prose
     for rid, rec in state.items():
         if isinstance(rec, dict) and (rec.get("attrs") or {}).get("ip"):
+            # observed wins the SOURCE label for its address (a prose fact that
+            # names the same address is corroboration, not the record)
             if str(rid) == "host" or rec.get("kind") == "host":
-                host_ips = {rec["attrs"]["ip"]: f"observed via {rec.get('source', 'ip addr')}", **host_ips}
+                host_ips = {**host_ips, rec["attrs"]["ip"]: f"observed via {rec.get('source', 'ip addr')}"}
+                host_ips = {rec["attrs"]["ip"]: host_ips[rec["attrs"]["ip"]], **{k: v for k, v in host_ips.items() if k != rec["attrs"]["ip"]}}
             else:
                 r = m(str(rid))
-                r["ips"] = {rec["attrs"]["ip"]: f"observed via {rec.get('source', 'ip addr')}", **r["ips"]}
+                ip = rec["attrs"]["ip"]
+                r["ips"] = {ip: f"observed via {rec.get('source', 'ip addr')}", **{k: v for k, v in r["ips"].items() if k != ip}}
     # 3. pinned IPs by name (JELLYFIN_IP → jellyfin)
     pins_by_name: dict[str, str] = {}
     for k, v in subs.items():
         if str(k).upper().endswith("_IP") and _IPV4_RE.fullmatch(str(v).strip()):
             pins_by_name[str(k)[:-3].lower().replace("_", "-")] = str(v).strip()
+    pin_conflicts: list[dict[str, Any]] = []
     for r in machines.values():
         nm = (r["name"] or "").lower()
         if nm and nm in pins_by_name and pins_by_name[nm] not in r["ips"]:
-            r["ips"][pins_by_name[nm]] = f"pinned {nm.upper().replace('-', '_')}_IP"
+            observed = [ip for ip, src in r["ips"].items() if src.startswith("observed via")]
+            if observed:
+                # §17.1085 — a pin the operator typed disagrees with what their own
+                # machine printed: say so rather than list two addresses as equals
+                pin_conflicts.append({"kind": "pin_vs_observed", "id": r["id"], "name": r["name"],
+                                      "pinned": pins_by_name[nm], "observed": observed[0]})
+            else:
+                r["ips"][pins_by_name[nm]] = f"pinned {nm.upper().replace('-', '_')}_IP"
+    # the host too (PVE_IP / HOST_IP pins)
+    for key in ("PVE_IP", "HOST_IP", "PROXMOX_IP"):
+        v = str(subs.get(key) or "").strip()
+        if v and _IPV4_RE.fullmatch(v):
+            observed_host = [ip for ip, src in host_ips.items() if src.startswith("observed via")]
+            if observed_host and v not in host_ips:
+                pin_conflicts.append({"kind": "pin_vs_observed", "id": "host", "name": "Proxmox host", "pinned": v, "observed": observed_host[0]})
+            elif v not in host_ips:
+                host_ips[v] = f"pinned {key}"
 
     # 4. the ingress path: domain, WAN, entry point (who listens on 80/443), upstreams
     dom_counts: dict[str, int] = {}
@@ -172,7 +193,7 @@ def build_system_map(environment: dict | None) -> dict[str, Any]:
 
     # 5. conflicts — one machine with several IPs; the host recorded at two
     # addresses; a MAC fragment that names another machine
-    conflicts: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = list(pin_conflicts)
     for r in machines.values():
         if len(r["ips"]) > 1:
             conflicts.append({"kind": "ip", "id": r["id"], "name": r["name"], "values": dict(r["ips"]),
@@ -272,6 +293,9 @@ def render_system_map(environment: dict | None) -> str:
                 for res in c.get("resolutions", []):
                     lines.append(f"  · the MAC fragment {res['fragment']} in that fact belongs to {'VM' if machines[res['id']]['kind'] == 'vm' else 'CT'} "
                                  f"{res['id']} ({res['name'] or '?'}), not to the host — the address is probably that machine's")
+            elif c["kind"] == "pin_vs_observed":
+                lines.append(f"- pinned value says {c['name']} is {c['pinned']} but its own `ip addr` output says {c['observed']} — "
+                             "the observed address is what the machine has NOW; fix the pin or re-check the machine, do not use both")
             elif c["kind"] == "mac_owner":
                 lines.append(f"- MAC {c['fragment']} belongs to {'VM' if machines[c['id']]['kind'] == 'vm' else 'CT'} {c['id']} ({c['name'] or '?'}) "
                              f"per its config — a fact assigns it elsewhere: \"{c['fact']}\"")
