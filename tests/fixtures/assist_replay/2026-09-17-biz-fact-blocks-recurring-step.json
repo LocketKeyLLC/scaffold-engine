@@ -1,0 +1,39 @@
+{
+ "id": "2026-09-17-biz-fact-blocks-recurring-step",
+ "surface": "fact_plan",
+ "facts": [
+  "Recurring transactions are not available on the Simple Start plan; upgrading to Essentials is required to schedule recurring invoices.",
+  "Automated sales tax is on in QuickBooks Online.",
+  "Bank feeds in QuickBooks Online are connected to Chase Business Complete Checking ...4471."
+ ],
+ "pending": [
+  {
+   "node_key": "T1",
+   "title": "Verify QuickBooks plan capabilities"
+  },
+  {
+   "node_key": "T6",
+   "title": "Create invoice template"
+  },
+  {
+   "node_key": "T7",
+   "title": "Set up recurring invoices",
+   "prompt_template": "Schedule three recurring monthly client invoices in QuickBooks Online"
+  },
+  {
+   "node_key": "T8",
+   "title": "Configure NY sales-tax settings"
+  },
+  {
+   "node_key": "T10",
+   "title": "Validate QuickBooks setup"
+  }
+ ],
+ "expect": {
+  "fact_plan_trigger": {
+   "facts_flagged": 1,
+   "first_node": "T7"
+  }
+ },
+ "note": "live: the fact sat in the ledger while T7 stayed pending; a note would have triggered a re-plan, a fact never did"
+}

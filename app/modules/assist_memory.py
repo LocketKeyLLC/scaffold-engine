@@ -565,6 +565,33 @@ async def derive_turn_memory(
             )
             result["facts_added"] = len(new_facts)
             result["facts_retracted"] = len(superseded)
+            # §17.1089 — a fact that blocks a pending step is a plan trigger:
+            # the same surface-and-ask judgment a plan-affecting note gets.
+            try:
+                from app.modules.assist_gates import run_gate
+                from app.modules.assist_plan_facts import blocking_candidates
+                _jid = (await db.execute(text("SELECT job_id FROM assist_sessions WHERE id = :sid"),
+                                         {"sid": session_id})).scalar()
+                _pending = [dict(r) for r in (await db.execute(text("""
+                    SELECT node_key, title, prompt_template FROM dag_nodes
+                     WHERE job_id = :jid AND status IN ('pending', 'blocked') ORDER BY execution_order
+                """), {"jid": _jid})).mappings().all()] if _jid else []
+                _cands = run_gate("fact_plan_trigger", blocking_candidates, new_facts, _pending, default=[])
+                for c in _cands[:2]:
+                    logger.info("assist_fact_plan_trigger session_id=%s nodes=%r shared=%r fact=%r",
+                                session_id, c["node_keys"], c["shared"], c["fact"][:120])
+                    from app.modules import assist_notes as _notes
+                    _titles = {str(n["node_key"]): (n.get("title") or "") for n in _pending}
+                    _hint = "; ".join(f"{k} '{_titles.get(k, '')}'" for k in c["node_keys"])
+                    _prop = await _notes.assess_note_impact(
+                        session_id=session_id, note_kind="fact", db=db,
+                        note_text=f"{c['fact']}\n(Observed on the operator's system. Pending steps this may invalidate: {_hint})")
+                    if _prop:
+                        result["replan_proposal"] = _prop
+                        logger.warning("assist_fact_plan_proposal_staged session_id=%s nodes=%r", session_id,
+                                       [p.get("node_key") for p in (_prop.get("proposals") or [])])
+            except Exception as exc:  # noqa: BLE001 — memory is fail-soft; the miss is logged
+                logger.warning("assist_fact_plan_trigger_failed session_id=%s err=%r", session_id, exc)
             # §17.727 — background consolidation when the ledger has grown big.
             schedule_consolidate_facts(
                 session_id=session_id, fact_count=_fact_count_of(env_after),

@@ -1,0 +1,21 @@
+{
+ "id": "2026-09-17-homelab-fact-no-step-match",
+ "surface": "fact_plan",
+ "facts": [
+  "VM 106 (palworld-server) status is stopped; VM 110 (ai-vm) status is running.",
+  "Tailscale status shows node 'pve' at 100.84.253.90."
+ ],
+ "pending": [
+  {
+   "node_key": "T37",
+   "title": "Validate secure outside access",
+   "prompt_template": "Confirm the router forwards 80/443 to the Caddy container"
+  }
+ ],
+ "expect": {
+  "fact_plan_trigger": {
+   "facts_flagged": 0
+  }
+ },
+ "note": "status facts are not blocking-shaped — no judgment is spent on them"
+}
