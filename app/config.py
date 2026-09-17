@@ -994,6 +994,9 @@ class Settings(BaseSettings):
     queue_cleanup_cron: str = "*/15 * * * *"
     # §17.1078 — age-based zombie turn-run sweep on the queue (the startup
     # sweep is unconditional; this one only closes runs older than the cap).
+    # §17.1092 — split a lumped "validate everything" DAG node into one
+    # validation node per check (prompt asks; this enforces). Default on.
+    dag_split_validation_enabled: bool = True
     queue_zombie_run_cron: str = "*/10 * * * *"
     queue_zombie_run_max_age_minutes: int = Field(default=30, ge=5, le=1440)
     # §17.855 (audit "policy migration") — fold the deterministic phrase gates

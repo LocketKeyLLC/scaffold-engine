@@ -1344,3 +1344,43 @@ def test_dag_prompt_has_preserve_guidance():
     assert "preserve" in p
     assert "in place" in p or "in-place" in p
     assert "reinstall" in p and "wipe" in p
+
+
+# §17.1092 — one validation node per check
+def test_split_bundled_validation_makes_one_node_per_check():
+    from app.modules.dag_generator import split_bundled_validation
+    tasks = [{"id": "T36", "name": "Configure VPN", "type": "action", "depends_on": ["T35"]},
+             {"id": "T6", "name": "Firewall", "type": "action", "depends_on": []},
+             {"id": "T37", "name": "Validate entire build", "type": "validation", "depends_on": ["T36", "T6"], "is_deliverable": True,
+              "notes": "Check all services reachable, firewall rules correct, VPN works, GPU works, control panel functional. No installs."},
+             {"id": "T38", "name": "Document", "type": "output", "depends_on": ["T37"]}]
+    out = split_bundled_validation(tasks)
+    by = {t["id"]: t for t in out}
+    splits = [t for t in out if t["id"].startswith("T37")]
+    assert len(splits) == 5 and all(s["type"] == "validation" and s["depends_on"] == ["T36", "T6"] for s in splits)
+    assert not any(s.get("is_deliverable") for s in splits)
+    assert set(by["T38"]["depends_on"]) == {"T37", "T37v2", "T37v3", "T37v4", "T37v5"}   # waits for every check
+    assert [s["name"] for s in sorted(splits, key=lambda x: x["id"])] == [
+        "Verify all services reachable", "Verify firewall rules correct", "Verify VPN works", "Verify GPU works", "Verify control panel functional"]
+
+
+def test_split_leaves_single_check_and_action_nodes_alone():
+    from app.modules.dag_generator import split_bundled_validation
+    assert split_bundled_validation([{"id": "X", "name": "Verify HTTPS works", "type": "validation", "depends_on": []}]) == \
+        [{"id": "X", "name": "Verify HTTPS works", "type": "validation", "depends_on": []}]
+    a = [{"id": "Y", "name": "Install and verify Jellyfin", "type": "action", "depends_on": [], "notes": "install then check it runs"}]
+    assert split_bundled_validation(a) == a       # an action that mentions "verify" is not a validation node
+    assert split_bundled_validation([{"id": "Z", "name": "Validate build", "type": "validation", "depends_on": [], "notes": "confirm it works"}])[0]["id"] == "Z"  # one check → untouched
+
+
+def test_split_is_cycle_safe_and_edges_build():
+    from app.modules.dag_generator import split_bundled_validation, _build_edges
+    tasks = [{"id": "A", "name": "Build", "type": "action", "depends_on": []},
+             {"id": "V", "name": "Validate it", "type": "validation", "depends_on": ["A"], "notes": "check web reachable, api healthy, db connected"},
+             {"id": "D", "name": "Ship", "type": "output", "depends_on": ["V"]}]
+    out = split_bundled_validation(tasks)
+    edges = _build_edges(out)   # must not raise
+    ids = {t["id"] for t in out}
+    for t in out:
+        for d in t["depends_on"]:
+            assert d in ids     # no dangling refs

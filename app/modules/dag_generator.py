@@ -220,6 +220,20 @@ Each is one result with one checkpoint. Apply the same split to any
 otherwise create several sibling resources at once (e.g. "Create the 4 LXCs"
 → one create node per LXC). Prefer more small steps over few big ones.
 
+A VALIDATION / VERIFY step is the same rule: checking N independent things is
+N nodes, one per thing checked. "Validate the entire build — services
+reachable, firewall correct, VPN works, GPU works, control panel functional"
+is NOT one node; it is one validation node PER check, each depending on the
+step that produced the thing it checks:
+  V_a Verify each service is reachable
+  V_b Verify the firewall rules
+  V_c Verify VPN access
+  V_d Verify the GPU workload
+  V_e Verify the control panel
+so a single failing check (a certificate that cannot issue yet) does not hold
+the four that already pass. One node per check; never a "validate everything"
+catch-all.
+
 Concretely, "Create unprivileged LXC" is NOT one node either — a real DAG that
 made it one node produced a 900+-word walkthrough covering three phases at once.
 Split it:
@@ -626,6 +640,107 @@ def connect_isolated_nodes(tasks: list[dict]) -> list[str]:
         anchor_pool.append(iid)
         wired.append(iid)
     return wired
+
+
+# §17.1092 — split a lumped VALIDATION node into one node per check.
+# Live (T37): "Validate entire build — check all services reachable, firewall
+# rules correct, VPN works, GPU works, control panel functional" was ONE node.
+# When one check failed (Caddy HTTPS blocked on an unmade router forward) the
+# whole step stayed open and the engine ground on that one piece — no
+# throughline, because the plan never gave it one. The prompt now asks for one
+# node per check; this enforces it (prompt rules get ignored, §17.882), the
+# same deterministic post-pass shape as connect_isolated_nodes / converge.
+
+_VALIDATION_NAME_RE = re.compile(r"\b(validate|verify|verif|confirm|check|test)\b", re.IGNORECASE)
+_CHECK_VERB_RE = re.compile(r"\b(?:check|verify|confirm|test|ensure|validate)\b[:\s]+(?P<body>[^.;\n]+)", re.IGNORECASE)
+_CHECK_SPLIT_RE = re.compile(r"\s*(?:,|;|/|\band\b|\bplus\b|&)\s*", re.IGNORECASE)
+_CHECK_STOP = frozenset({"all", "the", "each", "every", "is", "are", "works", "working", "correct",
+                         "correctly", "functional", "reachable", "present", "valid", "ok", "good",
+                         "and", "that", "everything", "entire", "build", "setup", "system"})
+
+
+def _check_clauses(text_in: str) -> list[str]:
+    """The distinct checks enumerated in a validation node's own words.
+    ``"check services reachable, firewall correct, VPN works, GPU works"`` →
+    ``["services reachable", "firewall correct", "VPN works", "GPU works"]``.
+    Returns [] when it cannot find at least two."""
+    # the richest enumeration wins — a leading "Validate entire build" clause
+    # has no separators; the real check list ("services reachable, firewall …,
+    # VPN …, GPU …") is the body with the most parts.
+    bodies = [m.group("body") for m in _CHECK_VERB_RE.finditer(text_in or "")]
+    if not bodies:
+        return []
+    body = max(bodies, key=lambda b: len(_CHECK_SPLIT_RE.split(b)))
+    parts = [p.strip(" .-") for p in _CHECK_SPLIT_RE.split(body) if p.strip(" .-")]
+    out: list[str] = []
+    for p in parts:
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9-]+", p)]
+        content = [w for w in words if w.lower() not in _CHECK_STOP]
+        if not content:
+            continue
+        clause = " ".join(words)
+        if clause.lower() not in {o.lower() for o in out}:
+            out.append(clause)
+    return out if len(out) >= 2 else []
+
+
+def _validation_shaped(t: dict) -> bool:
+    if str(t.get("type", "")).lower() in ("validation", "checkpoint"):
+        return True
+    name = str(t.get("name") or "")
+    # a name that LEADS with a check verb ("Validate entire build") — not one
+    # that merely mentions it ("Install and verify Jellyfin", already an action)
+    return bool(_VALIDATION_NAME_RE.match(name.strip()))
+
+
+def split_bundled_validation(tasks: list[dict]) -> list[dict]:
+    """§17.1092 — replace a validation node that bundles ≥2 independent checks
+    with one validation node per check. Each split depends on the original's
+    dependencies; everything that depended on the original now depends on ALL
+    splits (so a downstream step still waits for every check). Cycle-safe: the
+    splits carry the original's upstream and nothing new points backward.
+    Returns the new task list; unchanged when nothing splits."""
+    real = [t for t in tasks if t.get("id")]
+    ids = {t["id"] for t in real}
+    plans: list[tuple[dict, list[str]]] = []
+    for t in real:
+        if not _validation_shaped(t):
+            continue
+        clauses = _check_clauses(f"{t.get('name') or ''}. {t.get('notes') or ''}")
+        if clauses:
+            plans.append((t, clauses[:8]))
+    if not plans:
+        return tasks
+    split_map: dict[str, list[str]] = {}
+    new_tasks: list[dict] = []
+    consumed: set[str] = set()
+    for orig, clauses in plans:
+        consumed.add(orig["id"])
+        deps = [d for d in (orig.get("depends_on") or []) if d in ids]
+        made: list[str] = []
+        for i, clause in enumerate(clauses):
+            nid = orig["id"] if i == 0 else f"{orig['id']}v{i + 1}"
+            name = ("Verify " + clause)[:60]
+            new_tasks.append({
+                **{k: v for k, v in orig.items() if k not in ("is_deliverable",)},
+                "id": nid, "name": name, "type": "validation",
+                "depends_on": list(deps), "notes": f"Verify: {clause}. (split from {orig['id']}: {orig.get('name') or ''})",
+                "is_deliverable": False,
+            })
+            made.append(nid)
+        split_map[orig["id"]] = made
+        logger.warning("dag_validation_split node=%s -> %d checks: %r", orig["id"], len(made), clauses)
+    # everything else: repoint a depends_on that named a split original to all its parts
+    rebuilt: list[dict] = []
+    for t in real:
+        if t["id"] in consumed:
+            continue
+        deps = t.get("depends_on") or []
+        new_deps: list[str] = []
+        for d in deps:
+            new_deps.extend(split_map[d]) if d in split_map else new_deps.append(d)
+        rebuilt.append({**t, "depends_on": list(dict.fromkeys(new_deps))})
+    return rebuilt + new_tasks
 
 
 # §17.910 — a bare VM that nothing installs an OS on. The live homelab plan
@@ -1528,6 +1643,18 @@ async def generate_dag(
         if errors:
             await _fail_job(db, uid, f"Task validation errors: {'; '.join(errors)}")
             return {"job_id": job_id, "status": "failed", "errors": errors}
+        # §17.1092 — split a lumped "validate everything" node into one node per
+        # check BEFORE edges/connectivity are computed, so the splits are edged
+        # and validated like any node. Off-by-flag; default on.
+        if settings.dag_split_validation_enabled:
+            _before = {t["id"] for t in normalized}
+            normalized = split_bundled_validation(normalized)
+            _added = [t["id"] for t in normalized if t["id"] not in _before]
+            if _added:
+                validator_warnings.append(
+                    f"validation_split: a bundled validation node was split into "
+                    f"one check per node ({len(_added)} added: {', '.join(_added[:6])})"
+                )
         # §17.668 — connectivity guarantee: wire any isolated node (zero edges)
         # into the graph. Catches the is_deliverable-marked orphans that
         # detect_dead_ends/auto_link_dead_ends miss (see connect_isolated_nodes).
