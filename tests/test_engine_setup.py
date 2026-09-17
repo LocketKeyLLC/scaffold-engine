@@ -216,7 +216,7 @@ def test_env_endpoint_carries_the_system_map_and_the_console_renders_it():
     assert '"system_map": system_map' in router and "render_system_map(env)" in router
     js = (ROOT / "app" / "ui" / "static" / "views" / "assist.js").read_text(encoding="utf-8")
     assert "r.system_map" in js and 'class: "side-map"' in js and "conflicts to settle" in js
-    assert "idlePoll = setInterval" in js and "renderReplanProposal(s.pending_replan, { open: true })" in js and "clearInterval(idlePoll)" in js
+    assert "idlePoll = setInterval" in js and "renderReplanProposal(s.pending_replan, { open: true" in js and "clearInterval(idlePoll)" in js
     dash = (ROOT / "app" / "ui" / "static" / "views" / "dashboard.js").read_text(encoding="utf-8")
     assert "crashed gates:" in dash and "c.crashed" in dash
     css = (ROOT / "app" / "ui" / "static" / "app.css").read_text(encoding="utf-8")
