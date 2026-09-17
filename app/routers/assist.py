@@ -728,9 +728,17 @@ async def assist_set_env(session_id: str, body: AssistEnvInput, db=Depends(get_d
 @router.get("/assist/{session_id}/env")
 async def assist_get_env(session_id: str, db=Depends(get_db)):
     env = await assist_agent.get_environment(session_id=session_id, db=db)
+    # §17.1090 — the SYSTEM MAP (§17.1083) is what every prompt sees about the
+    # operator's machines; the operator must see it too — it names the
+    # conflicts only they can settle. Rendered text, same as the prompt gets.
+    try:
+        from app.modules.assist_inventory import render_system_map
+        system_map = render_system_map(env)
+    except Exception:  # noqa: BLE001 — derived; never breaks the read
+        system_map = ""
     if env is None:
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
-    return {"session_id": session_id, "environment": env}
+    return {"session_id": session_id, "environment": env, "system_map": system_map}
 
 
 @router.get("/assist/{session_id}/checklist")
