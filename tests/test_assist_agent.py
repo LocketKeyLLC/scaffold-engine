@@ -706,19 +706,25 @@ async def test_handoff_single_restore_survives_cancellation(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_next_step_represents_inflight_before_claiming(monkeypatch):
     """When a step is already presented-but-unsubmitted, `next` re-presents THAT
-    instead of claiming a new (possibly far) node — no claim UPDATE runs."""
+    instead of claiming a new (possibly far) node — no CLAIM UPDATE runs. §17.1103
+    adds a cursor-repoint UPDATE (the invariant self-heal), so three execs run."""
     db = AsyncMock()
     db.execute.side_effect = [
         _result(mappings_first={"id": "s1", "job_id": "j1", "status": "active"}),
         # §17.699 — the divergence-notice metadata SELECT (no proposal staged).
         _result(mappings_first={"metadata": None}),
+        # §17.1103 — the cursor re-point UPDATE (presented step must be the cursor).
+        _result(),
     ]
     inflight = {"node_key": "T1", "re_presented": True}
     monkeypatch.setattr(assist_agent, "_load_presented_step",
                         AsyncMock(return_value=inflight))
     res = await assist_agent.get_next_step(session_id="s1", db=db)
     assert res is inflight
-    assert db.execute.await_count == 2  # session SELECT + notice SELECT; no claim
+    # session SELECT + notice SELECT + cursor re-point (NOT a claim of a new node)
+    assert db.execute.await_count == 3
+    sql = " ".join(str(c.args[0]) for c in db.execute.await_args_list).lower()
+    assert "set current_node_key" in sql and "status = 'presented'" not in sql  # re-point, not claim
 
 
 @pytest.mark.asyncio

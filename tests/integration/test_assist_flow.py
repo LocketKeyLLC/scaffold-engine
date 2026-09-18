@@ -504,6 +504,30 @@ async def test_evidence_matches_and_commits_a_different_pending_step(insert_job,
     async with async_session() as db:
         rows = dict((r["node_key"], r["status"]) for r in (await db.execute(text(
             "SELECT node_key, status FROM assist_steps WHERE session_id=:sid"), {"sid": sid})).mappings())
+        cursor = (await db.execute(text(
+            "SELECT current_node_key FROM assist_sessions WHERE id=:sid"), {"sid": sid})).scalar()
     assert rows["N2"] in ("committed", "done"), rows        # matched step committed
-    assert rows["N1"] == "presented", rows                  # cursor untouched
+    assert rows["N1"] == "presented", rows                  # cursor step untouched
     assert rows["N3"] == "pending", rows                    # unrelated step untouched
+    assert cursor == "N1", f"§17.1103 — a matched commit must NOT move the cursor (was {cursor})"
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
+async def test_get_next_step_repoints_cursor_when_presented_but_cursor_null(seeded_job):
+    """§17.1103 — a presented step with a NULL cursor (after a reopen/drop) must
+    self-heal: get_next_step re-points current_node_key at the presented step."""
+    async with async_session() as db:
+        out = await assist_agent.start_assist_session(job_id=seeded_job, replan_policy="disabled", db=db)
+        sid = out["session_id"]
+        step = await assist_agent.get_next_step(session_id=sid, db=db)   # presents T1, sets cursor
+        assert step["node_key"] == "T1"
+        # simulate the drift: null the cursor while T1 stays presented
+        await db.execute(text("UPDATE assist_sessions SET current_node_key=NULL WHERE id=:sid"), {"sid": sid})
+        await db.commit()
+    async with async_session() as db:
+        again = await assist_agent.get_next_step(session_id=sid, db=db)
+        cursor = (await db.execute(text(
+            "SELECT current_node_key FROM assist_sessions WHERE id=:sid"), {"sid": sid})).scalar()
+    assert again["node_key"] == "T1"
+    assert cursor == "T1", f"cursor not self-healed (was {cursor})"
