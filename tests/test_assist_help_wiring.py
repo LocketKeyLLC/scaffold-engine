@@ -67,6 +67,8 @@ def test_the_discoverable_help_path_exists():
     assert "function toggleHelp(" in SRC and "helpPanel" in SRC, "no toggleable help panel"
     assert "export function helpSections(" in SRC, "helpSections() (the panel's source) is not exported/testable"
     assert "export const ASSIST_HELP" in SRC
+    # the panel links out to the Capabilities page (read-only list is not admin-gated)
+    assert 'href: "#/capabilities"' in SRC, "help panel does not link to the Capabilities page"
 
 
 def test_help_covers_the_behaviours_built_this_session():

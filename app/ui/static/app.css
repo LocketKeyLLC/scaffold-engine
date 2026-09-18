@@ -887,6 +887,9 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 .assist-help-list { margin: 0; display: grid; grid-template-columns: minmax(150px, 220px) 1fr; gap: 6px 18px; align-items: baseline; }
 .assist-help-list dt { margin: 0; font-weight: var(--fw-semi); color: var(--text); }
 .assist-help-list dd { margin: 0; color: var(--text-dim); line-height: 1.5; }
+.assist-help-foot { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: var(--fs-sm); }
+.assist-help-caps { color: var(--accent); font-weight: var(--fw-semi); text-decoration: none; }
+.assist-help-caps:hover { text-decoration: underline; }
 @media (max-width: 640px) {
   .assist-help-list { grid-template-columns: 1fr; gap: 2px 0; }
   .assist-help-list dd { margin: 0 0 8px; }

@@ -702,12 +702,18 @@ export function renderChat(container, sessionId, opts = {}) {
             el("dt", { text: it.term }),
             el("dd", { text: it.plain }),
           ]))));
+    const footer = el("div", { class: "assist-help-foot" },
+      el("span", { text: "Turning on more of the engine? " }),
+      el("a", { href: "#/capabilities", class: "assist-help-caps",
+        text: "See what the engine can do →",
+        title: "Optional parts of the engine, each with a step-by-step walkthrough to switch it on" }));
     mount(helpPanel,
       el("div", { class: "assist-help-head" },
         el("h2", { text: "How the Assistant works" }),
         close),
       el("p", { class: "sub", text: "Every button, and everything the engine does on its own. Hover a button any time to see the same note." }),
-      ...secs);
+      ...secs,
+      footer);
   }
   function toggleHelp(force) {
     const show = typeof force === "boolean" ? force : helpPanel.hidden;
