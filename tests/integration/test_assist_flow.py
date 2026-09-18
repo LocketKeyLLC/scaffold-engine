@@ -531,3 +531,45 @@ async def test_get_next_step_repoints_cursor_when_presented_but_cursor_null(seed
             "SELECT current_node_key FROM assist_sessions WHERE id=:sid"), {"sid": sid})).scalar()
     assert again["node_key"] == "T1"
     assert cursor == "T1", f"cursor not self-healed (was {cursor})"
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
+async def test_reconcile_plan_against_facts(insert_job, monkeypatch):
+    """§17.1104 — a confirmed fact that a pending step is already done COMPLETES
+    it (verified); a fact that reversed a step's basis is PROPOSED for drop."""
+    from unittest.mock import AsyncMock
+    from app.modules import assist_guide, assist_agent
+
+    job_id = await insert_job(status="planning", title="reconcile",
+                              refined_brief={"description": "g", "goals": ["g"]})
+    nodes = [("N1", "Set VM 106 scsi0 disk to 40G", [], 1),
+             ("N2", "Expand VM 106 disk to 100GB", [], 2),
+             ("N3", "Install the NVIDIA driver on the host", [], 3)]
+    async with async_session() as db:
+        for nk, title, deps, o in nodes:
+            await db.execute(text("""INSERT INTO dag_nodes (job_id,node_key,title,depends_on,execution_order,prompt_template,tool,domain)
+                VALUES (:j,:n,:t,:d,:o,:p,'LLM','eng')"""), {"j": job_id, "n": nk, "t": title, "d": deps, "o": o, "p": "do "+title})
+        await db.commit()
+        out = await assist_agent.start_assist_session(job_id=job_id, replan_policy="disabled", db=db)
+        sid = out["session_id"]
+        # seed the confirmed facts on the session environment
+        await assist_agent.set_environment(session_id=sid, db=db, facts=[
+            "VM 106 scsi0 disk is now local-lvm:vm-106-disk-0,size=40G (confirmed by qm config 106)",
+            "VM 106 scsi0 disk was deleted and recreated as a 40G volume, replacing the previous 100G disk",
+        ])
+    # verifier: the 40G step is satisfied by the 40G fact; nothing else
+    async def fake_verify(*, title, task_prompt, tool, evidence, environment=None, is_decision=False, done_criteria=""):
+        return {"outcome": "succeeded" if ("40G" in title and "40G" in evidence) else "incomplete", "reason": "x"}
+    monkeypatch.setattr(assist_guide, "verify_step_success", fake_verify)
+    monkeypatch.setattr(assist_guide, "read_cached_guidance", AsyncMock(return_value=None))
+
+    async with async_session() as db:
+        res = await assist_agent.reconcile_plan_against_facts(session_id=sid, db=db)
+        statuses = {r["node_key"]: r["status"] for r in (await db.execute(text(
+            "SELECT node_key,status FROM assist_steps WHERE session_id=:s"), {"s": sid})).mappings()}
+    assert [c["node_key"] for c in res["completed"]] == ["N1"], res          # 40G step auto-completed
+    assert statuses["N1"] in ("committed", "done")
+    drops = [p["node_key"] for p in (res["proposals"] or {}).get("proposals", [])]
+    assert "N2" in drops                                                     # 100GB step proposed for drop (obsolete)
+    assert statuses["N2"] == "pending"                                       # proposal only — not auto-dropped

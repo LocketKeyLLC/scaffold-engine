@@ -32,11 +32,17 @@ _STOP = frozenset({"about", "after", "before", "their", "there", "these", "those
 
 
 def _words(t: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z][a-z0-9-]{4,}", (t or "").lower()) if w not in _STOP}
+    low = (t or "").lower()
+    out = {w for w in re.findall(r"[a-z][a-z0-9-]{4,}", low) if w not in _STOP}
+    # §17.1104 — ids and sizes are the strongest discriminators between steps
+    # (106, 40g, 100gb, 3001). Normalise size units so 100G == 100GB.
+    for m in re.findall(r"\b(\d{2,4}(?:gb|g|tb|t|mb|m)?)\b", low):
+        out.add(re.sub(r"gb$", "g", re.sub(r"tb$", "t", re.sub(r"mb$", "m", m))))
+    return out
 
 
-def blocking_candidates(facts: list[str], pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``[{fact, node_keys, shared}]`` — each blocking-shaped fact with the
+def _match(facts: list[str], pending: list[dict[str, Any]], shape: re.Pattern) -> list[dict[str, Any]]:
+    """``[{fact, node_keys, shared}]`` — each fact matching ``shape`` with the
     pending steps it shares a DISCRIMINATING word with (a word in fewer than
     half the pending steps; "invoice" in one step of eleven picks it out,
     "quickbooks" in all of them does not)."""
@@ -50,7 +56,7 @@ def blocking_candidates(facts: list[str], pending: list[dict[str, Any]]) -> list
     half = max(1, len(node_words) / 2)
     out: list[dict[str, Any]] = []
     for f in facts:
-        if not _BLOCKING_RE.search(f or ""):
+        if not shape.search(f or ""):
             continue
         fw = _words(f)
         scored: list[tuple[int, str]] = []
@@ -67,3 +73,39 @@ def blocking_candidates(facts: list[str], pending: list[dict[str, Any]]) -> list
             hits = [nk for _, nk in sorted(scored, key=lambda t: (-t[0], t[1]))]
             out.append({"fact": f, "node_keys": hits[:4], "shared": sorted(shared_all)[:6]})
     return out
+
+
+def blocking_candidates(facts: list[str], pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Facts shaped as a blocker (capability absent/gated/unsupported) matched to
+    the pending steps they may invalidate."""
+    return _match(facts, pending, _BLOCKING_RE)
+
+
+# §17.1104 — a fact can also SATISFY a pending step (its outcome is already
+# true) or OBSOLETE it (a later fact reversed the basis for it). The reconciler
+# then proposes complete / drop (surface-and-ask, same as a blocking fact).
+_SATISFIED_RE = re.compile(
+    r"\b(?:is\s+now|are\s+now|is\s+already|now\s+(?:shows?|reads?|listening|running|set|configured)|"
+    r"confirmed\s+(?:by|that)|has\s+been\s+(?:set|created|configured|installed|started|written|attached)|"
+    r"was\s+(?:created|configured|installed|started|written|attached|set)|"
+    r"successfully\s+(?:created|configured|installed|started)|is\s+(?:running|active|listening|reachable|installed|attached|set))\b",
+    re.IGNORECASE)
+_OBSOLETE_RE = re.compile(
+    r"\b(?:reverted|rolled\s+back|replaced\s+the\s+previous|no\s+longer|instead\s+of|"
+    r"deleted\s+(?:the\s+)?(?:old|previous)|recreated|superseded|changed\s+from\b.*\bto\b|"
+    r"undone|reversed|abandoned|switched\s+(?:from|to))\b",
+    re.IGNORECASE)
+
+
+def satisfied_candidates(facts: list[str], pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``[{fact, node_keys, shared}]`` — facts shaped as 'X is now/was/confirmed
+    done' matched to the pending steps they share a discriminating word with.
+    The model then judges whether the fact truly satisfies the step's outcome."""
+    return _match(facts, pending, _SATISFIED_RE)
+
+
+def obsolete_candidates(facts: list[str], pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``[{fact, node_keys, shared}]`` — facts shaped as 'reverted / replaced /
+    changed from X to Y / no longer' matched to the pending steps whose basis
+    they may have reversed. The model then judges obsolescence."""
+    return _match(facts, pending, _OBSOLETE_RE)
