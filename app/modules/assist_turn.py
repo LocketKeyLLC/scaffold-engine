@@ -315,6 +315,11 @@ async def _run_turn_inner(
 
     if True:  # single indent block — keeps the dispatch ladder's early returns flat
         if command == "verify_state":  # §17.1050 — the 🩺 button
+            # §17.1104 — reconcile the PENDING plan against confirmed facts +
+            # system map FIRST (complete already-done steps, propose dropping
+            # obsolete/duplicate ones), so the state check runs on a clean plan.
+            async for e in _reconcile_plan(session_id, node_key, db):
+                yield e
             async for e in _start_state_check(session_id, node_key, db):
                 yield e
             handled["v"] = "verify_state"
@@ -1157,6 +1162,33 @@ async def _resolve_state_check(session_id: str, nk, pasted: str, history, db) ->
             logger.warning("state_check_result_capture_failed sid=%s", session_id)
     if res.get("proposal"):
         yield _ev(ASSIST_REPLAN_PROPOSAL, {"proposal": res["proposal"]})
+
+
+async def _reconcile_plan(session_id: str, node_key, db) -> AsyncIterator[_Event]:
+    """§17.1104 — run the fact/system-map reconciliation and surface it: a note
+    for the steps auto-completed (already done per a confirmed fact), and a
+    plan-change proposal for the obsolete/duplicate steps to drop (confirmed)."""
+    from app.modules import assist_agent
+    try:
+        res = await assist_agent.reconcile_plan_against_facts(session_id=session_id, db=db)
+    except Exception as exc:  # noqa: BLE001 — reconciliation never strands the turn
+        logger.warning("plan_reconcile_failed sid=%s err=%r", session_id, exc)
+        return
+    comp = res.get("completed") or []
+    if comp:
+        lines = "\n".join(f"- ✅ **{c['node_key']}** — {c['title']}" for c in comp)
+        msg = ("Reconciled against your confirmed facts — "
+               f"{'this step was' if len(comp) == 1 else f'{len(comp)} steps were'} already done, "
+               f"marked complete:\n\n{lines}")
+        yield _ev(ASSIST_ANSWER, {"kind": "note", "text": msg})
+        try:
+            await assist_agent.capture_assistant_reply(
+                session_id=session_id, node_key=node_key, kind="note", content=msg, db=db)
+        except Exception:  # noqa: BLE001
+            logger.warning("plan_reconcile_note_capture_failed sid=%s", session_id)
+    prop = res.get("proposals")
+    if prop and prop.get("proposals"):
+        yield _ev(ASSIST_REPLAN_PROPOSAL, {"proposal": prop})
 
 
 async def _fix_flow(session_id: str, nk, error_text: str, history, db,

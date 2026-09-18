@@ -3857,3 +3857,113 @@ async def abandon_session(*, session_id: str, db) -> dict:
 
 
 
+
+
+async def reconcile_plan_against_facts(*, session_id: str, db) -> dict:
+    """§17.1104 — reconcile the PENDING plan against the engine's own confirmed
+    facts + system map, so stale/duplicate steps don't accumulate:
+
+    - SATISFIED: a fact shows a pending step's outcome is already achieved →
+      verify the step against that fact and, if it passes its own 'Done when',
+      COMPLETE it (auto, per-step verified — the safe §17.1101 machinery).
+    - OBSOLETE: a fact reversed a step's basis (reverted / replaced / changed
+      from X to Y) → PROPOSE dropping it (destructive → operator confirms).
+    - DUPLICATE: two pending steps are the same work once machine names are
+      resolved via the system map (LXC 111 ≡ control-panel CT 111) → PROPOSE
+      dropping the redundant twin.
+
+    Returns ``{"completed": [{node_key,title}], "proposals": {proposals,note_text}}``.
+    Auto-completes only what verifies; every removal is a proposal.
+    """
+    from app.config import settings
+    from app.modules import assist_guide
+    from app.modules.assist_plan_facts import satisfied_candidates, obsolete_candidates
+    from app.modules.assist_evidence_match import near_duplicate_clusters
+    from app.modules import assist_inventory
+
+    sess = (await db.execute(text(
+        "SELECT job_id, metadata FROM assist_sessions WHERE id=:s"), {"s": session_id})).mappings().first()
+    if not sess:
+        return {"completed": [], "proposals": None}
+    job = sess["job_id"]
+    env = (sess["metadata"] or {}).get("environment") or {}
+    facts = env.get("facts") or []
+    pend = [dict(r) for r in (await db.execute(text(
+        "SELECT s.node_key, d.title, d.prompt_template, d.node_type FROM assist_steps s "
+        "JOIN dag_nodes d ON d.job_id=s.job_id AND d.node_key=s.node_key "
+        "WHERE s.session_id=:s AND s.status='pending'"), {"s": session_id})).mappings().all()]
+    if not pend:
+        return {"completed": [], "proposals": None}
+    by_key = {p["node_key"]: p for p in pend}
+
+    # ── 1. SATISFIED → verify against the fact, complete if it passes ──
+    completed: list[dict] = []
+    done_keys: set[str] = set()
+    for cand in satisfied_candidates(facts, pend):
+        for nk in cand["node_keys"]:
+            if nk in done_keys or nk not in by_key:
+                continue
+            step = by_key[nk]
+            cached = await assist_guide.read_cached_guidance(session_id=session_id, node_key=nk, db=db)
+            dc = assist_guide.extract_done_criterion((cached or {}).get("guidance") or "")
+            verdict = await assist_guide.verify_step_success(
+                title=step["title"] or nk, task_prompt=step["prompt_template"] or "", tool="shell",
+                evidence=cand["fact"], done_criteria=dc, is_decision=is_decision_node(step["node_type"]))
+            if (verdict or {}).get("outcome") == "succeeded" and await _present_and_commit_step(
+                    session_id=session_id, node_key=nk, evidence=f"[reconciled from a confirmed fact] {cand['fact']}", db=db):
+                completed.append({"node_key": nk, "title": step["title"]})
+                done_keys.add(nk)
+
+    # remaining pending (after completions) for drop proposals
+    remaining = [p for p in pend if p["node_key"] not in done_keys]
+
+    # ── 2. OBSOLETE → drop proposals ──
+    proposals: list[dict] = []
+    seen_drop: set[str] = set()
+    for cand in obsolete_candidates(facts, [p for p in remaining]):
+        for nk in cand["node_keys"][:1]:
+            if nk in seen_drop or nk in done_keys:
+                continue
+            seen_drop.add(nk)
+            proposals.append({"node_key": nk, "action": "drop",
+                              "current_assumption": (by_key.get(nk, {}) or {}).get("title", ""),
+                              "proposed_change": f"A confirmed fact reversed this step's basis — {cand['fact'][:180]}"})
+
+    # ── 3. DUPLICATE (identity-aware) → drop proposals ──
+    smap = assist_inventory.build_system_map(env)
+    alias = {}  # machine name (lowercased) -> canonical id
+    for mid, m in (smap.get("machines") or {}).items() if isinstance(smap, dict) else []:
+        nm = (m.get("name") or "").strip().lower()
+        if nm:
+            alias[nm] = str(mid)
+    def canon(text_v: str) -> str:
+        # append the canonical machine id for any machine NAME mentioned, so a
+        # step naming "control-panel" shares the id token with one naming "111".
+        t = text_v or ""
+        low = t.lower()
+        for nm, mid in alias.items():
+            if nm and nm in low:
+                t += f" {mid}"
+        return t
+    dcl = near_duplicate_clusters([{"node_key": p["node_key"], "title": p["title"],
+                                    "match_text": canon((p["title"] or "") + " " + (p["prompt_template"] or ""))}
+                                   for p in remaining if p["node_key"] not in seen_drop])
+    for cl in dcl:
+        keep = cl[0]["node_key"]
+        for s in cl[1:]:
+            nk = s["node_key"]
+            if nk in seen_drop:
+                continue
+            seen_drop.add(nk)
+            proposals.append({"node_key": nk, "action": "drop",
+                              "current_assumption": (by_key.get(nk, {}) or {}).get("title", ""),
+                              "proposed_change": f"Duplicate of {keep} (same work) — drop the redundant step"})
+
+    prop_payload = None
+    if proposals:
+        prop_payload = {"proposals": proposals,
+                        "note_text": "Reconciling the plan against confirmed facts and the system map."}
+    if completed or proposals:
+        logger.info("assist_plan_reconcile session_id=%s completed=%d drop_proposals=%d",
+                    session_id, len(completed), len(proposals))
+    return {"completed": completed, "proposals": prop_payload}
