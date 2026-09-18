@@ -559,6 +559,9 @@ services:
       # feels comes from the SPA folding the runbook body behind disclosure
       # rows; this bounds the step's SCOPE, which verbosity never did.
       ASSIST_SINGLE_ACTION_ENABLED: "${ASSIST_SINGLE_ACTION_ENABLED:-true}"
+      # §17.1101 — match a paste to the pending step(s) it actually completes; §17.1102 — flag duplicate pending steps.
+      ASSIST_EVIDENCE_STEP_MATCH_ENABLED: "${ASSIST_EVIDENCE_STEP_MATCH_ENABLED:-true}"
+      ASSIST_FLAG_DUPLICATE_PENDING_STEPS: "${ASSIST_FLAG_DUPLICATE_PENDING_STEPS:-true}"
       ASSIST_SINGLE_ACTION_MAX_STEPS: "${ASSIST_SINGLE_ACTION_MAX_STEPS:-5}"
       # §17.742 — problem-solving discipline for tangled, multi-attempt steps:
       # honor confirmed CONSTRAINTS, stop cycling once approaches have failed
