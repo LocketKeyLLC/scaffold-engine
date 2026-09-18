@@ -40,7 +40,7 @@ POLL_REGISTRY: dict[tuple[str, str], dict] = {
     ("approvals.js", "setInterval(load, 4000)"): {"guard": "stopWaitPoll", "renders": True, "opens_modal": False},
     ("approvals.js", "setInterval(pollStatus, 2500)"): {"guard": "no-remount", "renders": False, "opens_modal": False},
     ("assist.js", "setInterval(paintStatus, 1000)"): {"guard": "no-remount", "renders": False, "opens_modal": False},
-    ("assist.js", "idlePoll = setInterval"): {"guard": "background", "renders": True, "opens_modal": True},
+    ("assist.js", "idlePoll = setInterval"): {"guard": "announce-once", "renders": True, "opens_modal": True},
     ("app.js", "attentionTimer = setInterval"): {"guard": "no-remount", "renders": False, "opens_modal": False},
     ("app.js", "healthTimer = setInterval"): {"guard": "document.hidden", "renders": True, "opens_modal": False},
 }
@@ -84,6 +84,7 @@ def test_every_registered_guard_token_is_present_in_its_file():
         "disposed": "disposed",
         "stopWaitPoll": "stopWaitPoll(",
         "background": "background: true",
+        "announce-once": "announcedReplanSigs",  # §17.1097 — opens at most once per proposal
         "no-remount": None,   # asserted structurally by the two tests below
     }
     missing = []
@@ -97,18 +98,21 @@ def test_every_registered_guard_token_is_present_in_its_file():
     assert not missing, "\n".join(missing)
 
 
-def test_a_modal_opening_poll_is_background_tagged():
-    """A timer whose render path can open a modal must be marked background AND
-    its render call must actually pass background:true (the §17.1093 fix)."""
+def test_a_modal_opening_poll_is_announce_once_guarded():
+    """A timer whose render path can open a modal must open it AT MOST ONCE per
+    proposal — the §17.1097 announce-once rule — never on every poll tick. The
+    decision opens only on first sighting (sig not yet in `announced`), and the
+    renderer records the sig before opening, so a later tick can't re-pop it.
+    (Replaces the §17.1093 `background` guard, which suppressed opening entirely
+    and made the surfacing inconsistent.)"""
+    src = (SPA / "views" / "assist.js").read_text(encoding="utf-8")
     for (f, needle), spec in POLL_REGISTRY.items():
         if not spec["opens_modal"]:
             continue
-        assert spec["guard"] == "background", f"{f} {needle}: a modal-opening poll must use the background guard"
-        src = (SPA / "views" / f).read_text(encoding="utf-8")
-        # the idle poll's body, up to its closing "}, <ms>)"
-        i = src.index(needle)
-        body = src[i:src.index("}, 25000)", i) if "}, 25000)" in src[i:] else i + 1200]
-        assert "background: true" in body, f"{f} {needle}: renders in a poll without background:true"
+        assert spec["guard"] == "announce-once", f"{f} {needle}: a modal-opening poll must use the announce-once guard"
+    assert "firstSighting = !inSet(announced)" in src, "the decision no longer opens only on first sighting"
+    assert "openModal = firstSighting" in src, "openModal is not gated on firstSighting"
+    assert "announcedReplanSigs.add(sig)" in src, "the renderer does not record the sig, so a poll tick could re-open it"
 
 
 def _callback_target(line: str) -> str | None:
@@ -143,7 +147,7 @@ def test_no_poll_remounts_a_view_that_holds_live_input_without_a_stop_guard():
     (stopWaitPoll) before any answer input renders."""
     offenders = []
     for (f, needle), spec in POLL_REGISTRY.items():
-        if not spec["renders"] or spec["guard"] in ("stopWaitPoll", "document.hidden", "background"):
+        if not spec["renders"] or spec["guard"] in ("stopWaitPoll", "document.hidden", "background", "announce-once"):
             continue
         path = SPA / "views" / f if (SPA / "views" / f).exists() else SPA / f
         src = path.read_text(encoding="utf-8")

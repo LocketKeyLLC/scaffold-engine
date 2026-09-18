@@ -1419,6 +1419,33 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
   letter-spacing: 0.04em; color: var(--text-faint);
 }
 
+/* §17.1097 — before → after diff, colour-coded so the change reads at a glance. */
+.replan-diff {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 8px; align-items: stretch; margin-top: 6px;
+}
+.replan-side {
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 7px 9px; border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 13px; min-width: 0;
+}
+.replan-before { background: color-mix(in srgb, var(--warn) 8%, transparent); border-color: color-mix(in srgb, var(--warn) 30%, var(--border)); }
+.replan-after  { background: color-mix(in srgb, var(--ok) 10%, transparent);   border-color: color-mix(in srgb, var(--ok) 34%, var(--border)); }
+.replan-side-drop { background: color-mix(in srgb, var(--err) 10%, transparent); border-color: color-mix(in srgb, var(--err) 34%, var(--border)); }
+.replan-side .replan-tag { min-width: 0; }
+.replan-before .replan-tag { color: var(--warn); }
+.replan-after .replan-tag { color: var(--ok); }
+.replan-side-drop .replan-tag { color: var(--err); }
+.replan-text { color: var(--text); overflow-wrap: anywhere; }
+.replan-side-drop .replan-text { text-decoration: line-through; color: var(--text-dim); }
+.replan-arrow { align-self: center; color: var(--text-dim); font-size: 16px; }
+@media (max-width: 560px) {
+  .replan-diff { grid-template-columns: 1fr; }
+  .replan-arrow { transform: rotate(90deg); justify-self: center; }
+}
+
 .replan-slot:empty { display: none; }
 .replan-chip {
   display: flex; align-items: center; gap: 10px;
