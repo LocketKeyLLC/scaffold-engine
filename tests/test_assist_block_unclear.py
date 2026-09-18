@@ -27,8 +27,10 @@ from app.routers import assist as assist_router
 
 
 def test_the_valve_exists_and_ships_off():
-    s = Settings()
-    assert s.assist_block_on_unclear_when_unsure is False, (
+    # The CODE default ships off (live-on via compose). Read the field default,
+    # not Settings() — the container test lane inherits the live compose env,
+    # where this valve is set ON, so Settings() would report the live value.
+    assert Settings.model_fields["assist_block_on_unclear_when_unsure"].default is False, (
         "behavioural valves ship code-default-off, live via compose"
     )
 

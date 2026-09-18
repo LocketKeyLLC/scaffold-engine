@@ -25,8 +25,12 @@ def test_startup_runs_alembic_after_the_sql_runner_and_only_if_it_succeeded():
 
 def test_three_mount_lists_carry_alembic():
     import pytest
-    if not (ROOT / "Dockerfile").exists():
-        pytest.skip("repo-shape check — runs where the Dockerfile is mounted (ci-tier-0's mount-parity test covers it)")
+    # Repo-shape check: needs the Dockerfile, the dev compose and the CI workflow
+    # all on disk. The container test lane mounts the Dockerfile but NOT the
+    # compose files, so skip there — ci-tier-0's mount-parity test covers this.
+    needed = [ROOT / "Dockerfile", ROOT / "docker-compose.dev.yml", ROOT / ".github" / "workflows" / "test.yml"]
+    if not all(p.exists() for p in needed):
+        pytest.skip("repo-shape check — runs where the repo tree is mounted (ci-tier-0's mount-parity test covers it)")
     assert "COPY --chown=root:root alembic/" in (ROOT / "Dockerfile").read_text()
     assert "./alembic:/code/alembic:ro" in (ROOT / "docker-compose.dev.yml").read_text()
     assert '"$PWD/alembic:/code/alembic:ro"' in (ROOT / ".github" / "workflows" / "test.yml").read_text()
