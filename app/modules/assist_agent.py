@@ -3980,11 +3980,18 @@ async def reconcile_plan_against_facts(*, session_id: str, db) -> dict:
                               "current_assumption": (by_key.get(nk, {}) or {}).get("title", ""),
                               "proposed_change": f"Duplicate of {keep} (same work) — drop the redundant step"})
 
-    prop_payload = None
+    # §17.1104b — STAGE the drops as a pending_replan so the operator's "Apply"
+    # in the modal applies them through the engine's own /replan/apply →
+    # apply_pending_replan (mark skipped; a skipped node satisfies the dep gate,
+    # so no re-point needed). Without staging, the modal shows the drops but
+    # Apply has nothing to act on. Thrash-suppression is handled by the stager.
+    staged = None
     if proposals:
-        prop_payload = {"proposals": proposals,
-                        "note_text": "Reconciling the plan against confirmed facts and the system map."}
+        from app.modules.assist_notes import _stage_replan_proposal
+        staged = await _stage_replan_proposal(
+            session_id=session_id, note_kind="reconcile", affected=proposals,
+            note_text="Reconciling the plan against confirmed facts and the system map.", db=db)
     if completed or proposals:
-        logger.info("assist_plan_reconcile session_id=%s completed=%d drop_proposals=%d",
-                    session_id, len(completed), len(proposals))
-    return {"completed": completed, "proposals": prop_payload}
+        logger.info("assist_plan_reconcile session_id=%s completed=%d drop_proposals=%d staged=%s",
+                    session_id, len(completed), len(proposals), bool(staged))
+    return {"completed": completed, "proposals": staged}
