@@ -1354,14 +1354,22 @@ def _astream(chunks):
 @pytest.mark.asyncio
 async def test_generate_guidance_stream_streams_then_done_and_persists():
     db = AsyncMock()
+    # Pin the §17.932 done-when footer ON (its code default is off, but compose
+    # sets it on) so this test is deterministic regardless of the lane's env —
+    # otherwise the footer's presence flips with ASSIST_DONE_CRITERION_ENABLED.
     with patch("app.modules.assist_guide.read_cached_guidance", new=AsyncMock(return_value=None)), \
+         patch.object(assist_guide.settings, "assist_done_criterion_enabled", True), \
          patch.object(assist_guide.model_router, "stream_chat", new=_astream(["## Run\n", "1. go"])), \
          patch.object(assist_guide, "persist_guidance", new=AsyncMock()) as persist:
         events = [ev async for ev in assist_guide.generate_guidance_stream(
             session_id="s", node_key="T3", ctx=_ctx("shell"), research=False, force=True, db=db)]
     deltas = [e["text"] for e in events if e["type"] == "delta"]
     done = [e for e in events if e["type"] == "done"][0]
-    assert "".join(deltas) == "## Run\n1. go"
+    # The model output streams first; the deterministic "Done when" premise
+    # (§17.932) is then composed in as a trailing delta.
+    joined = "".join(deltas)
+    assert joined.startswith("## Run\n1. go")
+    assert "## ✅ Done when" in joined
     assert done["status"] == "ready" and done["cached"] is False
     persist.assert_awaited_once()
 

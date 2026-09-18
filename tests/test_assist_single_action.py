@@ -92,6 +92,8 @@ def test_directive_reaches_both_guide_paths():
 
 def test_valve_is_off_by_default():
     # House rule: behavioral prompt changes ship code-default-off, live via compose.
+    # Read the field DEFAULT, not Settings() — the container test lane inherits the
+    # live compose env (ASSIST_SINGLE_ACTION_ENABLED=true), so Settings() reports it on.
     from app.config import Settings
-    assert Settings().assist_single_action_enabled is False
-    assert Settings().assist_single_action_max_steps == 5
+    assert Settings.model_fields["assist_single_action_enabled"].default is False
+    assert Settings.model_fields["assist_single_action_max_steps"].default == 5
