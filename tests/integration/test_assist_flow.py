@@ -574,6 +574,15 @@ async def test_reconcile_plan_against_facts(insert_job, monkeypatch):
     assert "N2" in drops                                                     # 100GB step proposed for drop (obsolete)
 
     assert statuses["N2"] == "pending"                                       # proposal only — not auto-dropped
+    # §17.1104b — the proposal is STAGED, so the engine's own Apply drops it (no script)
+    async with async_session() as db:
+        pend = await assist_agent.get_pending_replan(session_id=sid, db=db)
+        assert pend and "N2" in [p["node_key"] for p in pend["proposals"]], pend
+        applied = await assist_agent.apply_pending_replan(session_id=sid, decision="apply", db=db)
+        st2 = {r["node_key"]: r["status"] for r in (await db.execute(text(
+            "SELECT node_key,status FROM assist_steps WHERE session_id=:s"), {"s": sid})).mappings()}
+    assert "N2" in (applied.get("dropped") or []), applied
+    assert st2["N2"] == "skipped"                                            # engine's Apply dropped it
 
 
 @pytest.mark.validate
