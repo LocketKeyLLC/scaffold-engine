@@ -572,4 +572,41 @@ async def test_reconcile_plan_against_facts(insert_job, monkeypatch):
     assert statuses["N1"] in ("committed", "done")
     drops = [p["node_key"] for p in (res["proposals"] or {}).get("proposals", [])]
     assert "N2" in drops                                                     # 100GB step proposed for drop (obsolete)
+
     assert statuses["N2"] == "pending"                                       # proposal only — not auto-dropped
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
+async def test_reconcile_identity_dedup_is_precise(insert_job, monkeypatch):
+    """§17.1104 — identity-aware dedup proposes dropping a name-variant twin
+    (LXC 111 vs control-panel CT 111) but NOT a different action on the same
+    machine (start backend)."""
+    from unittest.mock import AsyncMock
+    from app.modules import assist_guide, assist_agent
+    job_id = await insert_job(status="planning", title="dedup",
+                              refined_brief={"description": "g", "goals": ["g"]})
+    nodes = [("M1", "Set static IP and gateway on LXC 111's net0", 1),
+             ("M2", "Set static IP and gateway on control-panel (CT 111) net0", 2),
+             ("M3", "Start the control-panel backend in LXC 111 on port 3001", 3)]
+    async with async_session() as db:
+        for nk, title, o in nodes:
+            await db.execute(text("""INSERT INTO dag_nodes (job_id,node_key,title,depends_on,execution_order,prompt_template,tool,domain)
+                VALUES (:j,:n,:t,'{}',:o,:p,'LLM','eng')"""), {"j": job_id, "n": nk, "t": title, "o": o, "p": title})
+        await db.commit()
+        out = await assist_agent.start_assist_session(job_id=job_id, replan_policy="disabled", db=db)
+        sid = out["session_id"]
+        # system map: 111 -> control-panel, so the name variants resolve to one machine
+        await assist_agent.set_environment(session_id=sid, db=db, substitutions={},
+            profile="Proxmox homelab: LXC 111 hostname control-panel")
+    monkeypatch.setattr(assist_guide, "verify_step_success", AsyncMock(return_value={"outcome": "incomplete"}))
+    monkeypatch.setattr(assist_guide, "read_cached_guidance", AsyncMock(return_value=None))
+    # force the system map to know 111 = control-panel
+    import app.modules.assist_inventory as inv
+    monkeypatch.setattr(inv, "build_system_map", lambda env: {"machines": {"111": {"name": "control-panel"}}})
+    async with async_session() as db:
+        res = await assist_agent.reconcile_plan_against_facts(session_id=sid, db=db)
+    drops = {p["node_key"] for p in (res["proposals"] or {}).get("proposals", [])}
+    assert "M2" in drops, res          # the name-variant twin is a duplicate
+    assert "M3" not in drops, res      # a different action on the same machine is NOT
+
