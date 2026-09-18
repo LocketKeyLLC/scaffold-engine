@@ -207,6 +207,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_assist_gates_registry.py \
 			tests/test_spa_poll_modal_wiring.py \
 			tests/test_assist_help_wiring.py \
+			tests/test_assist_fix_no_double_capture.py \
 			tests/test_ast_grep_rules.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
 	else \

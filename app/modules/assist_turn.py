@@ -1172,7 +1172,9 @@ async def _fix_flow(session_id: str, nk, error_text: str, history, db,
     yield _ev(ASSIST_TURN_STATUS, {"text": status_text})
     fix = await assist_agent.run_step_fix(
         session_id=session_id, node_key=nk, error=error_text,
-        history=history, research=True, db=db,
+        history=history, research=True,
+        capture_reply=False,   # §17.1099 — _fix_flow persists the final (trailer-augmented) copy below; run_step_fix must not also persist, or the fix appears twice
+        db=db,
     )
     # §17.876 — honest, actionable fallback (never a silent dead end).
     fix_text = (fix or {}).get("fix") or (
