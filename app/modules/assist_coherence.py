@@ -35,25 +35,23 @@ _CONTEXT_RE = re.compile(r"(?:^|\n)\s*(?:📍\s*)?On:\s*(.+)", re.IGNORECASE)
 # ── phase/part/stage headers: "### Phase 2: Install Caddy" ──────────────────
 _PHASE_RE = re.compile(r"(?im)^\s{0,3}#{0,4}\s*(?:phase|part|stage)\s+[0-9a-z]\b")
 
-# ── resource lifecycle-DOWN (terminal): the container goes away ─────────────
-# Reboot/restart RECOVER, so they are deliberately excluded — "reboot, then run
-# X inside" is coherent once it is back. (No re.VERBOSE: patterns contain literal
-# '#' and spaces.)
-_DOWN_RE = re.compile(
-    r"pct\s+(?:stop|shutdown|kill)\s+(\d+)"                     # pct stop|shutdown|kill 120
-    r"|qm\s+(?:stop|shutdown)\s+(\d+)"                          # qm stop|shutdown 106
-    r"|(?:stop|shut\s*down|halt|power\s*off|poweroff|disable)\b[^.\n]{0,40}?"
-    r"\b(?:container|ct|lxc|vm)\s*#?\s*(\d+)",                  # "stop the container 120"
+# ── resource lifecycle, as COMMANDS only ────────────────────────────────────
+# Measuring on 596 real turns showed prose ("stop the service inside container
+# 111", "the container stopped") and restart idioms (`qm stop N && qm start N`)
+# produce false contradictions. So the detector keys off the actual CLI verbs,
+# cancels on recovery, and ignores trailing/troubleshooting sections.
+# (No re.VERBOSE: patterns contain literal spaces.)
+_STOP_CMD_RE = re.compile(r"\b(?:pct|qm)\s+(?:stop|shutdown)\s+(\d+)", re.IGNORECASE)   # pct stop 120
+_RECOVER_CMD_RE = re.compile(r"\b(?:pct|qm)\s+(?:start|reboot|restart)\s+(\d+)", re.IGNORECASE)  # qm start 120
+_USE_CMD_RE = re.compile(                                              # needs it RUNNING
+    r"\bpct\s+(?:exec|enter)\s+(\d+)"                                  # pct exec|enter 120
+    r"|\bqm\s+(?:terminal|guest\s+exec)\s+(\d+)",                      # qm terminal 106
     re.IGNORECASE,
 )
-# ── resource USE (interactive / needs it running) ───────────────────────────
-_USE_RE = re.compile(
-    r"pct\s+(?:exec|enter)\s+(\d+)"                             # pct exec|enter 120
-    r"|qm\s+(?:terminal|guest\s+exec)\s+(\d+)"                  # qm terminal 106
-    r"|(?:console|shell\s+into|log\s+in\s+to|inside)\b[^.\n]{0,40}?"
-    r"\b(?:container|ct|lxc|vm)\s*#?\s*(\d+)"                   # "open the console of container 120"
-    r"|(?:container|ct|lxc|vm)\s*#?\s*(\d+)[^.\n]{0,30}?\bconsole\b",  # "container 120's console"
-    re.IGNORECASE,
+# Uses AFTER one of these headers are verifications / back-references, not new
+# instructions — a `pct exec` in "## Done when" or "## If that fails" is fine.
+_TRAILING_SECTION_RE = re.compile(
+    r"(?im)^\s{0,3}#{1,4}\s*(?:✅\s*)?(?:done when|if that fails|if it|if `|expected|troubleshoot|verify\b)",
 )
 
 
@@ -65,6 +63,13 @@ def _ids(rx: re.Pattern, text: str) -> list[tuple[int, str]]:
         if rid:
             out.append((m.start(), rid))
     return out
+
+
+def _trailing_section_at(text: str) -> int:
+    """Position of the first 'Done when / If that fails / …' header (len when
+    none) — uses after it are verifications/back-references, not new steps."""
+    m = _TRAILING_SECTION_RE.search(text or "")
+    return m.start() if m else len(text or "")
 
 
 def execution_contexts(text: str) -> list[str]:
@@ -95,20 +100,40 @@ def multi_action_issue(text: str) -> Optional[dict]:
 
 
 def self_contradictions(text: str) -> list[dict]:
-    """A resource is taken DOWN and then USED further along the SAME walkthrough
-    — you cannot exec into / open the console of a stopped container. Only the
-    down→use ORDER flags; use→down (the normal 'edit then stop' order) does not."""
-    downs = _ids(_DOWN_RE, text or "")
-    uses = _ids(_USE_RE, text or "")
+    """A resource is STOPPED by command and then USED (pct exec/enter, qm
+    terminal) while still down — you cannot exec into a stopped container.
+
+    Precise by construction (measured against 596 real turns):
+    - keys off the actual stop/use COMMANDS, not prose ("stop the service in
+      container N" is not a container stop);
+    - CANCELS on recovery: a `start`/`reboot` of the same id between the stop
+      and the use means it is back up (`qm stop N && qm start N` is a restart);
+    - IGNORES uses inside a trailing 'Done when / If that fails' section — those
+      are verifications and back-references, not new instructions;
+    - down→use ORDER only (use→down, the normal edit-then-stop order, is fine).
+    """
+    t = text or ""
+    cut = _trailing_section_at(t)
+    stops = _ids(_STOP_CMD_RE, t)
+    recovers = _ids(_RECOVER_CMD_RE, t)
+    uses = [(p, r) for p, r in _ids(_USE_CMD_RE, t) if p < cut]
     out = []
-    for rid in {r for _, r in downs}:
-        first_down = min((p for p, r in downs if r == rid), default=None)
-        if first_down is None:
+    for use_pos, rid in uses:
+        # the latest stop of this resource before the use
+        prior_stops = [p for p, r in stops if r == rid and p < use_pos]
+        if not prior_stops:
             continue
-        later_use = min((p for p, r in uses if r == rid and p > first_down), default=None)
-        if later_use is not None:
-            out.append({"resource": rid, "down_at": first_down, "use_at": later_use})
-    return sorted(out, key=lambda d: d["use_at"])
+        d = max(prior_stops)
+        # recovered if a start/reboot of the same id sits between the stop and use
+        if any(d < p < use_pos for p, r in recovers if r == rid):
+            continue
+        out.append({"resource": rid, "down_at": d, "use_at": use_pos})
+    # one per resource, earliest offending use
+    best: dict[str, dict] = {}
+    for c in out:
+        if c["resource"] not in best or c["use_at"] < best[c["resource"]]["use_at"]:
+            best[c["resource"]] = c
+    return sorted(best.values(), key=lambda d: d["use_at"])
 
 
 def coherence_issues(text: str) -> dict:

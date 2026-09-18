@@ -91,3 +91,24 @@ def test_directive_names_the_problem():
     assert "phases" in d.lower() and "one action" in d.lower()
     w = contradiction_warning(coherence_issues(STOP_THEN_EXEC))
     assert "120" in w and "stopped" in w.lower()
+
+
+# ── regression: the false-positive classes found by replaying 596 real turns ──
+def test_restart_idiom_is_not_a_contradiction():
+    # `qm stop N && qm start N` is a restart; the console after it is fine.
+    txt = "```bash\nqm stop 110 && qm start 110\n```\nThen open the **Console** tab for VM 110.\n```\nqm terminal 110\n```"
+    assert self_contradictions(txt) == []
+
+def test_stopping_a_service_inside_a_container_is_not_stopping_the_container():
+    txt = "## Steps\n1. Stop the service inside container 111:\n```bash\npct exec 111 -- systemctl stop control-panel.service\n```"
+    assert self_contradictions(txt) == []
+
+def test_use_in_a_trailing_troubleshooting_section_is_not_a_contradiction():
+    txt = ("1. Stop it:\n```bash\npct stop 120\n```\n"
+           "## If that fails\n- If `pct exec 120 -- truncate ...` printed an error, paste it.\n")
+    assert self_contradictions(txt) == []
+
+def test_use_in_done_when_verification_is_not_a_contradiction():
+    txt = ("1. Stop it:\n```bash\npct stop 120\n```\n"
+           "## ✅ Done when\n`pct exec 120 -- systemctl is-active caddy` returns active.\n")
+    assert self_contradictions(txt) == []
