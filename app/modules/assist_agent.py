@@ -3878,7 +3878,6 @@ async def reconcile_plan_against_facts(*, session_id: str, db) -> dict:
     from app.config import settings
     from app.modules import assist_guide
     from app.modules.assist_plan_facts import satisfied_candidates, obsolete_candidates
-    from app.modules.assist_evidence_match import near_duplicate_clusters
     from app.modules import assist_inventory
 
     sess = (await db.execute(text(
@@ -3930,29 +3929,51 @@ async def reconcile_plan_against_facts(*, session_id: str, db) -> dict:
                               "proposed_change": f"A confirmed fact reversed this step's basis — {cand['fact'][:180]}"})
 
     # ── 3. DUPLICATE (identity-aware) → drop proposals ──
+    # Resolve machine-name variants to the canonical id (control-panel → 111),
+    # then cluster by TITLE similarity ≥0.8 so two steps that are the SAME action
+    # on the same machine merge, but different actions on it (set-IP vs
+    # start-backend) do not. (Token overlap alone over-merged on the shared id.)
+    import re as _re
     smap = assist_inventory.build_system_map(env)
     alias = {}  # machine name (lowercased) -> canonical id
-    for mid, m in (smap.get("machines") or {}).items() if isinstance(smap, dict) else []:
-        nm = (m.get("name") or "").strip().lower()
+    machines = (smap.get("machines") if isinstance(smap, dict) else None) or {}
+    for mid, m in machines.items():
+        nm = (m.get("name") or "").strip().lower() if isinstance(m, dict) else ""
         if nm:
             alias[nm] = str(mid)
-    def canon(text_v: str) -> str:
-        # append the canonical machine id for any machine NAME mentioned, so a
-        # step naming "control-panel" shares the id token with one naming "111".
-        t = text_v or ""
-        low = t.lower()
+
+    def _canon_words(title: str) -> set[str]:
+        t = (title or "").lower()
         for nm, mid in alias.items():
-            if nm and nm in low:
-                t += f" {mid}"
-        return t
-    dcl = near_duplicate_clusters([{"node_key": p["node_key"], "title": p["title"],
-                                    "match_text": canon((p["title"] or "") + " " + (p["prompt_template"] or ""))}
-                                   for p in remaining if p["node_key"] not in seen_drop])
-    for cl in dcl:
-        keep = cl[0]["node_key"]
-        for s in cl[1:]:
-            nk = s["node_key"]
-            if nk in seen_drop:
+            if nm:
+                t = t.replace(nm, mid)          # control-panel → 111
+        return {w for w in _re.findall(r"[a-z0-9]{3,}", t)}
+
+    rem = [p for p in remaining if p["node_key"] not in seen_drop]
+    cw = {p["node_key"]: _canon_words(p["title"]) for p in rem}
+    n = len(rem)
+    parent = list(range(n))
+
+    def _find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = cw[rem[i]["node_key"]], cw[rem[j]["node_key"]]
+            if a and b and len(a & b) / len(a | b) >= 0.8:   # near-identical action after identity resolution
+                parent[_find(i)] = _find(j)
+    groups: dict[int, list[str]] = {}
+    for i, p in enumerate(rem):
+        groups.setdefault(_find(i), []).append(p["node_key"])
+    for keys in groups.values():
+        if len(keys) < 2:
+            continue
+        keep = sorted(keys)[0]
+        for nk in keys:
+            if nk == keep or nk in seen_drop:
                 continue
             seen_drop.add(nk)
             proposals.append({"node_key": nk, "action": "drop",
