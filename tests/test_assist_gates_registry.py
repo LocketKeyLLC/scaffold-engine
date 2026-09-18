@@ -59,9 +59,25 @@ def test_every_answer_surface_carries_every_gate_it_must(surface):
         elif g.name == "ingress_prerequisite":
             if "prerequisite_env=" not in region:
                 missing.append(g.name)
+        elif g.module == "assist_coherence":
+            continue  # attached via enforce_coherence — test_coherence_gate_attached_to_guide_funnels
         elif g.symbol not in region:
             missing.append(g.name)
     assert not missing, f"{surface} lacks gates {missing} in {fname} region {start!r}"
+
+
+def test_coherence_gate_attached_to_guide_funnels():
+    """§17.1098 — the single-action + no-self-contradiction gates run through
+    enforce_coherence, which must (a) route both detectors through run_gate
+    (fail-loud) and (b) be called on both the streamed and non-streamed guide
+    paths. Anchors the coverage exemption above."""
+    src = (MOD / "assist_guide.py").read_text(encoding="utf-8")
+    assert "async def enforce_coherence(" in src
+    assert 'run_gate("single_action", coh.multi_action_issue' in src
+    assert 'run_gate("no_self_contradiction", coh.self_contradictions' in src
+    # called on both guide surfaces (STREAM label + GUIDE label)
+    assert src.count("await enforce_coherence(") == 2, "enforce_coherence must be on both guide paths"
+    assert 'label="assist_guide_stream")' in src and 'label="assist_guide")' in src
 
 
 def test_both_renderers_carry_every_prompt_guard():
@@ -180,6 +196,14 @@ def test_replay_corpus(path):
         assert len(cands) == want["facts_flagged"], (cands, case["note"])
         if want.get("first_node"):
             assert cands[0]["node_keys"][0] == want["first_node"], (cands, case["note"])
+    elif case["surface"] == "coherence":
+        from app.modules.assist_coherence import multi_action_issue, self_contradictions
+        ma = multi_action_issue(case["text"])
+        sc = self_contradictions(case["text"])
+        if "single_action" in exp:
+            assert bool(ma) is exp["single_action"]["multi_action"], case["note"]
+        if "no_self_contradiction" in exp:
+            assert len(sc) == exp["no_self_contradiction"]["contradictions"], case["note"]
     elif case["surface"] == "fact_write":
         from app.modules.assist_inventory import reconcile_fact
         stored, upd = reconcile_fact(case["fact"], _ENV)
@@ -199,7 +223,9 @@ def test_corpus_has_a_hit_and_a_non_hit_for_every_gate_it_covers():
         case = json.loads(p.read_text(encoding="utf-8"))
         for key, val in case["expect"].items():
             gate = {"prerequisite": "ingress_prerequisite"}.get(key, key.split("_kinds")[0].split("_ports")[0])
-            none = val in ([], {}, None) or (isinstance(val, dict) and (val.get("is_screen") is False or val.get("facts_flagged") == 0 or val.get("issues") == 0))
+            none = val in ([], {}, None) or (isinstance(val, dict) and (
+                val.get("is_screen") is False or val.get("facts_flagged") == 0 or val.get("issues") == 0
+                or val.get("multi_action") is False or val.get("contradictions") == 0))
             seen.setdefault(gate, set()).add("none" if none else "hit")
     assert seen.get("ingress_target") == {"hit", "none"}
     assert "hit" in seen.get("state_invariants", set()) and "hit" in seen.get("fact_reconcile", set())
@@ -207,3 +233,5 @@ def test_corpus_has_a_hit_and_a_non_hit_for_every_gate_it_covers():
     assert seen.get("surface_fact") == {"hit", "none"}
     assert seen.get("fact_plan_trigger") == {"hit", "none"}
     assert seen.get("ingress_prerequisite") == {"hit", "none"}
+    assert seen.get("single_action") == {"hit", "none"}
+    assert seen.get("no_self_contradiction") == {"hit", "none"}

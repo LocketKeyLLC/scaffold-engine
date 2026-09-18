@@ -2444,6 +2444,12 @@ async def generate_guidance(
     _sourced_meta_guide: list[dict] = []  # §17.1030
     # §17.893 — banned-value enforcement: redraw once with the violation named;
     # a still-dirty draft gets the visible flag below.
+    # §17.1098 — single-action + coherence enforcement (non-stream): regenerate
+    # once or clip to the first action; the durable text carries the result.
+    coherence_meta: dict = {}
+    if text_out:
+        text_out, coherence_meta, _ = await enforce_coherence(
+            text_out=text_out, messages=gen_messages, role=role, label="assist_guide")
     banned_meta: list[dict] = []
     reskind_meta: list[dict] = []  # §17.898
     if text_out:
@@ -4876,6 +4882,88 @@ async def enforce_banned_values(
     return new, find_banned_values(new, banned), True
 
 
+async def enforce_coherence(
+    *, text_out: str, messages: list[dict], role: str, label: str,
+) -> tuple[str, dict, str]:
+    """§17.1098 — single-action + no-self-contradiction enforcement.
+
+    Detects (deterministically) a walkthrough that holds more than one action or
+    that stops a resource then uses it. Policy: regenerate ONCE with the problem
+    named; if the redraw is still not a single coherent action, CLIP to the first
+    action and hold the rest for the next step. A stubborn contradiction that
+    survives is FLAGGED visibly rather than shipped silently.
+
+    Returns ``(durable_text, meta, stream_block)``:
+    - ``durable_text`` — what to persist / reload (may be regenerated or clipped);
+    - ``meta`` — ``{}`` when clean, else the action taken and the issues found;
+    - ``stream_block`` — the delta to append on the STREAM path so the operator
+      sees the correction (``""`` when clean). The non-stream caller uses
+      ``durable_text`` and can ignore the block.
+
+    Fail-soft: any model failure falls back to clip-or-flag; a detector crash is
+    contained by ``run_gate`` and the turn proceeds with the original draft.
+    """
+    from app.modules import assist_coherence as coh
+    from app.modules.assist_gates import run_gate
+
+    if not (text_out or "").strip():
+        return text_out, {}, ""
+
+    ma = run_gate("single_action", coh.multi_action_issue, text_out, default=None)
+    sc = run_gate("no_self_contradiction", coh.self_contradictions, text_out, default=[])
+    issues: dict = {}
+    if ma:
+        issues["multi_action"] = ma
+    if sc:
+        issues["contradictions"] = sc
+    if not issues:
+        return text_out, {}, ""
+
+    logger.warning("assist_coherence_violation label=%s multi_action=%s contradictions=%d (regenerating)",
+                   label, bool(ma), len(sc))
+
+    # (1) regenerate once, naming the problem.
+    new = ""
+    try:
+        resp = await chat_until_nonempty(
+            model_router.chat,
+            list(messages) + [
+                {"role": "assistant", "content": text_out},
+                {"role": "user", "content": coh.coherence_directive(issues)},
+            ],
+            {"role": role},
+            temperature=0.3, max_tokens=settings.assist_guide_max_tokens,
+            draws=2, label=f"{label}_coherence_regen", think_off_rescue=True,
+        )
+        new = (resp.text or "").strip() if (resp and resp.success) else ""
+    except Exception:  # noqa: BLE001 — enforcement must not sink generation
+        new = ""
+
+    if new:
+        redo = coh.coherence_issues(new)
+        if not redo:
+            block = ("\n\n---\n♻️ **Rewritten as one step** — the draft above tried "
+                     "to do more than one thing; this version keeps just the first "
+                     "action (the corrected copy is what gets saved):\n\n" + new)
+            return new, {"action": "regenerated", "issues": issues}, block
+        # a cleaner-but-still-imperfect redraw is a better base to clip than the original
+        if len(coh.coherence_issues(new).get("contradictions", [])) < len(sc):
+            text_out = new
+            issues = redo
+
+    # (2) clip to the first action.
+    clipped, did = coh.first_action_only(text_out)
+    if did:
+        block = ("\n\n---\n✳️ **Trimmed to one action** — this walkthrough had more "
+                 "than one; keeping the first. Once it's done, press ✓ and I'll walk "
+                 "you through the rest as the next step.\n\n" + clipped)
+        return clipped, {"action": "clipped", "issues": issues}, block
+
+    # (3) can't cleanly clip (single-block contradiction) — flag it visibly.
+    warn = coh.contradiction_warning(issues)
+    return text_out + warn, {"action": "flagged", "issues": issues}, warn
+
+
 def guide_integrity_warning(text_out: str, user_prompt: str, failed_commands: str) -> str:
     """§17.887 (audit #8) — the §17.882/883 gates for GUIDE output. Returns a
     warning block to append ("" when clean). Guides get flag-don't-regen: a
@@ -6396,6 +6484,17 @@ async def generate_guidance_stream(
         model_used = getattr(resp, "model", role) if resp else role
         if text_out:
             yield {"type": "delta", "text": text_out}
+
+    # §17.1098 — single-action + coherence enforcement FIRST, so a regenerated
+    # or clipped walkthrough is what banned-values and every downstream guard
+    # (and the persisted/reloaded copy) operate on. The operator watched the
+    # multi-action draft stream, so the correction arrives as an appended block.
+    coherence_meta: dict = {}
+    if text_out:
+        text_out, coherence_meta, _coh_block = await enforce_coherence(
+            text_out=text_out, messages=messages, role=role, label="assist_guide_stream")
+        if _coh_block:
+            yield {"type": "delta", "text": _coh_block}
 
     # §17.893 — banned-value enforcement on the stream path: the operator
     # already watched the dirty draft stream, so a successful redraw is shown

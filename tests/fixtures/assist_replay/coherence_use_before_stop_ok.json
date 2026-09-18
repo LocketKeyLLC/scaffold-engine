@@ -1,0 +1,6 @@
+{
+  "surface": "coherence",
+  "note": "ADD11 (real, id 2407): USE container 120 (exec/truncate, exec/wc) BEFORE stopping it — the correct, common order. Must NOT flag. Contradiction NONE; single context so multi-action NONE.",
+  "text": "## Fix\n\nRun these commands one at a time, in order:\n\n1. Empty the Caddyfile:\n```bash\npct exec 120 -- truncate -s 0 /etc/caddy/Caddyfile\n```\n2. Confirm it is now 0 bytes:\n```bash\npct exec 120 -- wc -c /etc/caddy/Caddyfile\n```\n3. Stop the container:\n```bash\npct stop 120\n```\n4. Confirm it is stopped:\n```bash\npct status 120\n```",
+  "expect": { "single_action": { "multi_action": false }, "no_self_contradiction": { "contradictions": 0 } }
+}

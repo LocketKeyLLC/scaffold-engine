@@ -1,0 +1,6 @@
+{
+  "surface": "coherence",
+  "note": "A single-action step (real T37 shape): one context, no phases, one command → multi-action NONE; no stop→use → contradiction NONE.",
+  "text": "## 👉 Do this next\n\n📍 On: the Proxmox host shell (root@pve)\n\n**Run this now:**\n```bash\nqm start 106\n```\nThen tell me what it shows — you should see `started`.",
+  "expect": { "single_action": { "multi_action": false }, "no_self_contradiction": { "contradictions": 0 } }
+}
