@@ -1,0 +1,6 @@
+{
+  "surface": "coherence",
+  "note": "T35 (real): three '### Phase N' headers + two execution contexts in ONE step → multi-action HIT. No stop→use pair, so contradiction NONE.",
+  "text": "## 👉 Do this next\n\n### Phase 1: Create the Proxy Container\n📍 On: the Proxmox host shell (root@pve)\n```bash\npct create 120 local:vztmpl/debian-12.tar.zst --hostname caddy-proxy\n```\n\n### Phase 2: Install Caddy\n📍 On: the Proxmox host shell (root@pve)\n```bash\npct exec 120 -- apt-get install -y caddy\n```\n\n### Phase 3: Configure Reverse Proxy\n📍 On: the caddy container console (pct enter 120)\n```bash\nnano /etc/caddy/Caddyfile\n```\nThen tell me what you see.",
+  "expect": { "single_action": { "multi_action": true }, "no_self_contradiction": { "contradictions": 0 } }
+}

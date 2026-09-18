@@ -67,6 +67,11 @@ GATES: tuple[Gate, ...] = (
          "a second web query with the operator's specifics removed and the vendor kept — the threads by everyone who hit this before"),
     Gate("ingress_prerequisite", "answer", "assist_inventory", "prerequisite_issues", (GUIDE, FIX, RESEARCH, STREAM), "§17.1091",
          "a TLS/HTTPS symptom at the entry point while the router does not reach it yet is expected — no config rewrites; direct to the router step"),
+    # ── coherence gates: a walkthrough is ONE coherent action (§17.1098) ──
+    Gate("single_action", "answer", "assist_coherence", "multi_action_issue", (GUIDE, STREAM), "§17.1098",
+         "a step's walkthrough is one action in one place — not two phases or two execution contexts; enforced (regenerate-then-clip) via enforce_coherence"),
+    Gate("no_self_contradiction", "answer", "assist_coherence", "self_contradictions", (GUIDE, STREAM), "§17.1098",
+         "a walkthrough never stops a resource and then uses that same resource's console/exec afterwards; enforced via enforce_coherence"),
     # ── fix-path integrity gates ──
     Gate("no_repeat_fix", "answer", "assist_guide", "_gate(", (FIX,), "§17.906", "a fix does not repeat a command already tried on the step"),
     Gate("banned_values", "answer", "assist_guide", "find_banned_values", (FIX,), "§17.893", "a ruled-out value never comes back"),

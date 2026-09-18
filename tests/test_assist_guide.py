@@ -2167,3 +2167,58 @@ async def test_ensure_guidance_fresh_cache_served_without_sentinel():
     chat.assert_not_called()
     assert res["cached"] is True
     assert "_generated_at_raw" not in res
+
+
+# ── §17.1098 — enforce_coherence orchestration (regenerate → clip → flag) ──
+def _cohresp(text, ok=True):
+    return type("R", (), {"text": text, "success": ok})()
+
+_MULTI = ("### Phase 1: A\n📍 On: host shell\n```\npct create 120\n```\n"
+          "### Phase 2: B\n📍 On: the container console (pct enter 120)\n```\nnano x\n```\n")
+_CLEAN = "📍 On: host shell\n```\nqm start 106\n```\nThen tell me what it shows."
+_STOP_USE = ("1. Stop it:\n```\npct stop 120\n```\n2. Then open its console:\n```\npct exec 120 -- nano x\n```\n")
+
+
+@pytest.mark.asyncio
+async def test_enforce_coherence_passthrough_when_clean():
+    text, meta, block = await assist_guide.enforce_coherence(
+        text_out=_CLEAN, messages=[{"role": "user", "content": "u"}], role="r", label="assist_guide")
+    assert meta == {} and block == "" and text == _CLEAN
+
+
+@pytest.mark.asyncio
+async def test_enforce_coherence_regenerates_to_one_action():
+    with patch.object(assist_guide, "chat_until_nonempty", new=AsyncMock(return_value=_cohresp(_CLEAN))):
+        text, meta, block = await assist_guide.enforce_coherence(
+            text_out=_MULTI, messages=[{"role": "user", "content": "u"}], role="r", label="assist_guide")
+    assert meta["action"] == "regenerated"
+    assert text == _CLEAN and "Rewritten as one step" in block
+
+
+@pytest.mark.asyncio
+async def test_enforce_coherence_clips_when_redraw_still_multi():
+    # model keeps returning a multi-phase draft → clip to the first action
+    with patch.object(assist_guide, "chat_until_nonempty", new=AsyncMock(return_value=_cohresp(_MULTI))):
+        text, meta, block = await assist_guide.enforce_coherence(
+            text_out=_MULTI, messages=[{"role": "user", "content": "u"}], role="r", label="assist_guide")
+    assert meta["action"] == "clipped"
+    assert "Phase 1" in text and "Phase 2" not in text and "next step" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_enforce_coherence_flags_stubborn_contradiction():
+    # a single-block stop→use contradiction has no phase/context split to clip on;
+    # the model returns the same → flag it visibly.
+    with patch.object(assist_guide, "chat_until_nonempty", new=AsyncMock(return_value=_cohresp(_STOP_USE))):
+        text, meta, block = await assist_guide.enforce_coherence(
+            text_out=_STOP_USE, messages=[{"role": "user", "content": "u"}], role="r", label="assist_guide")
+    assert meta["action"] == "flagged"
+    assert "conflict" in block.lower() and "120" in block
+
+
+@pytest.mark.asyncio
+async def test_enforce_coherence_falls_back_to_clip_when_model_fails():
+    with patch.object(assist_guide, "chat_until_nonempty", new=AsyncMock(return_value=_cohresp("", ok=False))):
+        text, meta, block = await assist_guide.enforce_coherence(
+            text_out=_MULTI, messages=[{"role": "user", "content": "u"}], role="r", label="assist_guide")
+    assert meta["action"] == "clipped" and "Phase 2" not in text

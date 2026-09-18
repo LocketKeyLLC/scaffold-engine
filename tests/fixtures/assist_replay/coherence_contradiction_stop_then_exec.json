@@ -1,0 +1,6 @@
+{
+  "surface": "coherence",
+  "note": "Reported class (engine vocabulary): STOP container 120, then USE its exec/console afterwards — cannot work while stopped. Contradiction HIT; single context so multi-action NONE.",
+  "text": "## Fix\n\n1. Stop the container:\n```bash\npct stop 120\n```\nWait a few seconds for it to shut down.\n\n2. Now open its console to rebuild the config:\n```bash\npct exec 120 -- nano /etc/caddy/Caddyfile\n```\nSave and exit when done.",
+  "expect": { "single_action": { "multi_action": false }, "no_self_contradiction": { "contradictions": 1 } }
+}
