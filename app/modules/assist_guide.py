@@ -610,6 +610,7 @@ _VERIFY_DECISION_SYSTEM = (
 async def verify_step_success(
     *, title: str, task_prompt: str, tool: str, evidence: str,
     environment: Optional[dict] = None, is_decision: bool = False,
+    done_criteria: str = "",  # §17.1100 — the walkthrough's own "Done when" bar
 ) -> dict:
     """Judge whether pasted evidence indicates the step worked. Fail-soft.
 
@@ -678,9 +679,18 @@ async def verify_step_success(
             "'unclear' when you genuinely can't tell (do NOT guess 'incomplete' out "
             "of caution)."
         )
+        # §17.1100 — judge against the SAME finish line the operator was given.
+        # Without it the verifier re-derives its own, stricter bar and returns
+        # "I couldn't verify" on evidence that meets the stated done-when.
+        criteria_block = (
+            "The operator was told this step is DONE WHEN — judge the evidence "
+            f"against THIS bar, and return 'succeeded' when the evidence meets it:\n{done_criteria.strip()}\n\n"
+            if (done_criteria or "").strip() else ""
+        )
         user = (
             f"Task (this step's goal): {title}\n\n{task_prompt}\n\n"
             + (f"{env_block}\n\n" if env_block else "")
+            + criteria_block
             + f"Operator's pasted evidence / output for this step:\n{tail_keep(evidence)}\n\n"
             "Does the evidence show THIS step's goal was achieved? Call judge_step_outcome."
         )
@@ -6063,6 +6073,22 @@ def _with_advance_footer(guidance: Optional[str], title: str) -> str:
 def has_done_criterion(text_out: str) -> bool:
     """§17.932 — does this walkthrough already state an observable finish line?"""
     return bool(_DONE_WHEN_RE.search(text_out or ""))
+
+
+def extract_done_criterion(text_out: str) -> str:
+    """§17.1100 — the walkthrough's own 'Done when' block, verbatim: from the
+    header to the next top-level heading (or end). This is the exact bar the
+    operator was told to hit, and the completion verifier judges against it so a
+    paste that meets it auto-commits instead of getting 'I couldn't verify'."""
+    t = text_out or ""
+    m = _DONE_WHEN_RE.search(t)
+    if not m:
+        return ""
+    start = m.start()
+    # stop at the next top-level (## or ---) section after the header
+    nxt = re.search(r"\n\s*(?:#{1,4}\s|\s*---\s*\n)", t[m.end():])
+    end = m.end() + nxt.start() if nxt else len(t)
+    return t[start:end].strip()
 
 
 def advance_footer(title: str) -> str:

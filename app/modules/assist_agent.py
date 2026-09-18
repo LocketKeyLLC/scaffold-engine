@@ -2855,16 +2855,112 @@ async def verify_submit_outcome(
     if not row or row["status"] != "presented":
         return None
     from app.modules import assist_guide
+    # §17.1100 — judge against the walkthrough's own "Done when" bar (the finish
+    # line the operator was actually told), so a paste that meets it auto-commits.
+    done_criteria = ""
+    try:
+        cached = await assist_guide.read_cached_guidance(
+            session_id=session_id, node_key=node_key, db=db)
+        if cached:
+            done_criteria = assist_guide.extract_done_criterion(cached.get("guidance") or "")
+    except Exception:  # noqa: BLE001 — the criterion is a bonus, never a blocker
+        done_criteria = ""
     return await assist_guide.verify_step_success(
         title=row["title"] or node_key,
         task_prompt=row["prompt_template"] or "",
         tool=row["tool"] or "LLM",
         evidence=evidence,
         environment=_environment_from_metadata(row["metadata"]),
+        done_criteria=done_criteria,
         # §17.688 — a decision node is judged on the CHOICE, not the downstream
         # concrete artifact (its task text names a table/config later steps apply).
         is_decision=is_decision_node(row.get("node_type")),
     )
+
+
+async def _present_and_commit_step(*, session_id: str, node_key: str, evidence: str, db) -> bool:
+    """§17.1101 — commit a specific pending step out of cursor order: present it
+    (pending→presented) then submit_step it. Guarded so it only ever acts on a
+    row that is still 'pending' (the atomic UPDATE's rowcount). The session's
+    cursor step is left untouched. Divergence re-plan is skipped — a matched
+    completion is a straightforward done, not a plan divergence."""
+    upd = await db.execute(
+        text("UPDATE assist_steps SET status='presented', presented_at=NOW(), "
+             "updated_at=NOW() WHERE session_id=:sid AND node_key=:nk AND status='pending'"),
+        {"sid": session_id, "nk": node_key},
+    )
+    if upd.rowcount != 1:
+        return False
+    await db.commit()
+    res = await submit_step(
+        session_id=session_id, node_key=node_key, evidence=evidence,
+        action="submit", verdict_failed=False, skip_divergence_replan=True, db=db,
+    )
+    # submit_step reports success as status='committed' (there is no "committed" key).
+    return (res or {}).get("status") in ("committed", "done")
+
+
+async def match_and_commit_evidence(
+    *, session_id: str, evidence: str, exclude_node_key: str | None, db,
+    max_candidates: int | None = None,
+) -> Optional[dict]:
+    """§17.1101 — find the pending step(s) this evidence actually completes and
+    commit them. Precision by construction: a deterministic pre-filter shortlists
+    candidates by shared concrete tokens, each is verified against ITS OWN
+    'Done when', and only steps that come back 'succeeded' are committed. Returns
+    ``{"committed": [{node_key, title}], "considered": n}`` or None.
+    """
+    from app.config import settings
+    from app.modules import assist_guide
+    from app.modules.assist_evidence_match import shortlist_candidates
+    if not (evidence or "").strip():
+        return None
+    sess = (await db.execute(
+        text("SELECT job_id FROM assist_sessions WHERE id=:sid"), {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        return None
+    rows = (await db.execute(
+        text("""
+            SELECT s.node_key, d.title, d.prompt_template, d.node_type
+              FROM assist_steps s
+              JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid AND s.status = 'pending' AND s.node_key != :ex
+        """),
+        {"sid": session_id, "ex": exclude_node_key or ""},
+    )).mappings().all()
+    if not rows:
+        return None
+    cands = []
+    for r in rows:
+        cached = await assist_guide.read_cached_guidance(
+            session_id=session_id, node_key=r["node_key"], db=db)
+        dc = assist_guide.extract_done_criterion((cached or {}).get("guidance") or "")
+        cands.append({
+            "node_key": r["node_key"], "title": r["title"] or r["node_key"],
+            "prompt": r["prompt_template"] or "", "node_type": r["node_type"], "done": dc,
+            "match_text": f"{r['title'] or ''}\n{r['prompt_template'] or ''}\n{dc}",
+        })
+    cap = max_candidates or settings.assist_evidence_step_match_max_candidates
+    short = shortlist_candidates(evidence, cands, top_k=cap, min_score=3)
+    if not short:
+        return None
+    committed = []
+    for c in short:
+        verdict = await assist_guide.verify_step_success(
+            title=c["title"], task_prompt=c["prompt"], tool="shell", evidence=evidence,
+            done_criteria=c["done"], is_decision=is_decision_node(c["node_type"]),
+        )
+        if (verdict or {}).get("outcome") != "succeeded":
+            continue
+        if await _present_and_commit_step(
+                session_id=session_id, node_key=c["node_key"], evidence=evidence, db=db):
+            committed.append({"node_key": c["node_key"], "title": c["title"]})
+            logger.info("assist_evidence_matched_commit sid=%s node_key=%s (cursor=%s)",
+                        session_id, c["node_key"], exclude_node_key)
+    if not committed:
+        return None
+    return {"committed": committed, "considered": len(short)}
 
 
 # §17.690 — a GATHER step's task asks the operator to PROVIDE several specific
