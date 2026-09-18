@@ -579,6 +579,19 @@ async def get_next_step(*, session_id: str, db) -> Optional[dict]:
     # not-yet-submitted step instead of claiming a new (possibly far) node.
     in_flight = await _load_presented_step(session_id=session_id, job_id=job_id, db=db)
     if in_flight is not None:
+        # §17.1103 — re-establish the invariant: a presented step MUST be the
+        # cursor. A reopen/drop can null `current_node_key` while a step stays
+        # 'presented' (live: ADD58 presented, cursor NULL) — then every turn
+        # that grounds on `current_node_key` (classify / guide / verify) has no
+        # step and the engine "confuses itself" (guides the wrong step, can't
+        # verify a paste). Self-heal it here, idempotently (the claim branch
+        # below already sets it on a fresh claim).
+        await db.execute(
+            text("UPDATE assist_sessions SET current_node_key = :nk, updated_at = NOW() "
+                 "WHERE id = :sid AND status IN ('active', 'paused') "
+                 "AND current_node_key IS DISTINCT FROM :nk"),
+            {"sid": session_id, "nk": in_flight["node_key"]},
+        )
         await db.commit()
         if replan_notice:
             in_flight["replan_notice"] = replan_notice
@@ -2894,7 +2907,9 @@ async def _present_and_commit_step(*, session_id: str, node_key: str, evidence: 
     await db.commit()
     res = await submit_step(
         session_id=session_id, node_key=node_key, evidence=evidence,
-        action="submit", verdict_failed=False, skip_divergence_replan=True, db=db,
+        action="submit", verdict_failed=False, skip_divergence_replan=True,
+        advance_cursor=False,   # §17.1103 — never move the operator's cursor for a matched commit
+        db=db,
     )
     # submit_step reports success as status='committed' (there is no "committed" key).
     return (res or {}).get("status") in ("committed", "done")
@@ -3161,6 +3176,7 @@ async def submit_step(
     friction_note: str | None = None,
     verdict_failed: bool = False,
     skip_divergence_replan: bool = False,
+    advance_cursor: bool = True,   # §17.1103 — False for an out-of-cursor commit (evidence match): commit the step but DON'T move the operator's pointer
     db,
 ) -> dict:
     """Record human evidence for one step. Mirrors to `dag_nodes.output_text`.
@@ -3359,6 +3375,11 @@ async def submit_step(
     next_pending = await _next_pending_node_key(session_id=session_id, db=db)
     if next_pending is None:
         await _maybe_finalize_session(session_id=session_id, db=db)
+    elif not advance_cursor:
+        # §17.1103 — an out-of-cursor commit (evidence matched a DIFFERENT
+        # pending step) must NOT move the operator's pointer; leave it where it
+        # was so they stay on the step they were working.
+        await db.commit()
     else:
         # §17.638 — advance the session pointer off the step we just committed.
         # `current_node_key` was previously moved only by get_next_step (the
