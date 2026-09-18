@@ -1952,6 +1952,7 @@ async def run_step_fix(
     error: str,
     research: bool | None = None,
     history: list[dict] | None = None,
+    capture_reply: bool = True,   # §17.1099 — False when the caller persists the final (trailer-augmented) copy itself
     db,
 ) -> dict:
     """Diagnose an operator-reported error on a step and return corrected steps.
@@ -2106,7 +2107,11 @@ async def run_step_fix(
         )
         res["fix"] = resolved
     # §17.726 — record the corrective steps the engine gave the operator.
-    if (res.get("fix") or "").strip():
+    # §17.1099 — but ONLY when the caller isn't going to persist the final copy
+    # itself. `_fix_flow` (the turn-loop path) appends a trailer and captures the
+    # augmented version; without this guard BOTH persisted, so every composer
+    # fix appeared twice in the web UI (base copy + trailer copy).
+    if capture_reply and (res.get("fix") or "").strip():
         await capture_assistant_reply(
             session_id=session_id, node_key=nk, kind="fix",
             content=res["fix"], db=db,
