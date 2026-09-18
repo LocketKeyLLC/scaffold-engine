@@ -134,6 +134,10 @@ def _es_patches(es, outcome):
         patch.object(assist_router.settings, "assist_verify_on_submit", True),
         patch.object(assist_router.settings, "assist_block_on_failed_verify", True),
         patch.object(assist_router.settings, "assist_block_on_incomplete_verify", True),
+        # §17.1101 — these tests isolate the §17.731 block; the evidence→step
+        # matcher (a separate feature, its own tests) would otherwise run on the
+        # blocked path against a mock db. Pin it off here.
+        patch.object(assist_router.settings, "assist_evidence_step_match_enabled", False),
         patch.object(assist_router.assist_agent, "get_session",
                      new=AsyncMock(return_value={"status": "active",
                                                  "handoff_policy": "manual"})),
