@@ -1,36 +1,41 @@
-// §17.1093 — a staged plan-change proposal must not reappear after the operator
-// acts on it, and a background poll must never re-open the modal.
+// §17.1093/§17.1097 — a staged plan-change proposal auto-opens the modal
+// exactly ONCE (the first time it is seen, from any source), then only ever
+// shows the chip. It must never re-open after the operator acts on it, and a
+// background poll must never re-pop it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const { replanRenderDecision } = await import("../../app/ui/static/views/assist.js");
 const SIG = '[["T37","repair","fix it"]]';
 
-test("a fresh in-turn proposal opens the modal", () => {
-  const d = replanRenderDecision(SIG, { open: true, background: false, isNew: true, resolved: new Set(), snoozed: new Set() });
-  assert.deepEqual([d.show, d.openModal], [true, true]);
+test("first sighting opens the modal (any source)", () => {
+  const d = replanRenderDecision(SIG, { announced: new Set(), resolved: new Set(), snoozed: new Set() });
+  assert.deepEqual([d.show, d.openModal, d.firstSighting], [true, true, true]);
 });
 
-test("a background poll shows the chip but never force-opens", () => {
-  const d = replanRenderDecision(SIG, { open: true, background: true, isNew: true, resolved: new Set(), snoozed: new Set() });
+test("once announced, later renders show the chip but never re-open", () => {
+  const announced = new Set([SIG]);
+  const d = replanRenderDecision(SIG, { announced, resolved: new Set(), snoozed: new Set() });
   assert.deepEqual([d.show, d.openModal], [true, false]);
 });
 
 test("an applied/discarded proposal never renders again", () => {
   const resolved = new Set([SIG]);
-  for (const opts of [{ open: true, background: false }, { open: true, background: true }, { open: false }]) {
-    const d = replanRenderDecision(SIG, { ...opts, isNew: true, resolved, snoozed: new Set() });
-    assert.equal(d.show, false, JSON.stringify(opts));
+  for (const announced of [new Set(), new Set([SIG])]) {
+    const d = replanRenderDecision(SIG, { announced, resolved, snoozed: new Set() });
+    assert.equal(d.show, false);
   }
 });
 
-test("'Later' stops the modal re-opening but keeps the chip", () => {
+test("'Later' (snooze) suppresses the auto-open on first sighting but keeps the chip", () => {
   const snoozed = new Set([SIG]);
-  const d = replanRenderDecision(SIG, { open: true, background: false, isNew: true, resolved: new Set(), snoozed });
+  const d = replanRenderDecision(SIG, { announced: new Set(), resolved: new Set(), snoozed });
   assert.deepEqual([d.show, d.openModal], [true, false]);
 });
 
-test("the same proposal seen again in one view does not re-pop (isNew false)", () => {
-  const d = replanRenderDecision(SIG, { open: true, background: false, isNew: false, resolved: new Set(), snoozed: new Set() });
-  assert.deepEqual([d.show, d.openModal], [true, false]);
+test("a DIFFERENT new proposal still opens even after another was announced", () => {
+  const announced = new Set([SIG]);
+  const other = '[["ADD9","revise","do X"]]';
+  const d = replanRenderDecision(other, { announced, resolved: new Set(), snoozed: new Set() });
+  assert.deepEqual([d.show, d.openModal], [true, true]);
 });

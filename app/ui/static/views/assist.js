@@ -136,11 +136,21 @@ export function transcriptPlan(turns, pendingOps) {
 // and it force-OPENS the modal only for a fresh in-turn proposal — never from a
 // background poll or a reload, and never one closed with "Later". Pure so a
 // node test can pin it.
-export function replanRenderDecision(sig, { open = false, background = false, isNew = true, resolved, snoozed } = {}) {
-  const has = (set) => !!(set && (set.has ? set.has(sig) : set[sig]));
-  if (has(resolved)) return { show: false, openModal: false, isNew };
-  const openModal = open && !background && isNew && !has(snoozed);
-  return { show: true, openModal, isNew };
+// §17.1097 — announce-once. A NEW plan-change proposal auto-opens the modal
+// exactly the first time it is seen (from ANY source — an in-turn stream or a
+// fact-triggered background poll), then collapses to the "Review" chip and
+// never re-opens. This replaces the §17.1093 `background` guard (which made
+// the surfacing INCONSISTENT: in-turn proposals popped, background ones only
+// ever showed a chip) with one rule that is both consistent AND cannot nag:
+// the caller records the sig in `announced` on first render, so every later
+// render (the 25 s poll included) sees firstSighting=false → chip only.
+// `open`/`background` are accepted for call-site compatibility and ignored.
+export function replanRenderDecision(sig, { announced, resolved, snoozed, open, background, isNew } = {}) {
+  const inSet = (s) => !!(s && s.has && s.has(sig));
+  if (inSet(resolved)) return { show: false, openModal: false, firstSighting: false };
+  const firstSighting = !inSet(announced);
+  const openModal = firstSighting && !inSet(snoozed);
+  return { show: true, openModal, firstSighting };
 }
 
 export function openSectionFor(kind) {
@@ -257,7 +267,7 @@ export const ASSIST_HELP = {
     { title: "If the engine restarts mid-step", plain: "Nothing is lost. Every finished step and every message is saved. If a restart interrupts a message you'd sent, the engine puts your text back in the box and asks you to press Send to pick up exactly where you were." },
     { title: "The status line above the box", plain: "A spinner means the engine is working on your step right now. A clock means it's waiting on you. The small pulse dot means the session is alive and connected — if it stops, the page will tell you and recover on its own." },
     { title: "When the plan and reality disagree", plain: "The engine keeps a picture of your machines from what you've pasted. If a step assumes something that isn't true anymore, it says so and offers to fix the plan rather than pushing you through a step that can't work. 🩺 Verify state is how you ask it to check on purpose." },
-    { title: "A plan-change proposal", plain: "When something you've told the engine changes what the plan should be, a small chip appears by the box. Open it to see exactly what would change, then Accept to apply it or Keep to leave the plan as-is. Once you've answered, it stays answered — it won't keep popping back up." },
+    { title: "A plan-change proposal", plain: "When something you've told the engine changes what the plan should be, a card opens once showing the change as before → after — what the step says now and what it would say instead. Apply it, Keep the plan as-is, or Decide later. After that it collapses to a small 'Review' chip by the box and won't pop up again." },
     { title: "Why it won't invent values", plain: "The engine refuses to put an IP address, port, version or URL into an instruction unless it came from something you actually showed it. If it doesn't know a value yet, it asks you to run a command that prints it — that's deliberate, so it never sends you to the wrong place." },
     { title: "What the engine knows about your setup", plain: "As you paste command output, the engine builds a map of your machines — names, addresses, and how traffic reaches them — and shows it in Session details below. That map is what keeps every step pointed at the right machine." },
   ],
@@ -1296,6 +1306,9 @@ export function renderChat(container, sessionId, opts = {}) {
   // with {open:true} — "after accepting it just keeps appearing."
   const resolvedReplanSigs = new Set();
   const snoozedReplanSigs = new Set();
+  // §17.1097 — sigs whose modal has already been auto-opened once this view.
+  // First sighting → pop the modal; every later render (poll included) → chip.
+  const announcedReplanSigs = new Set();
 
   const REPLAN_ACTION_COPY = {
     rewrite: { icon: "✎", label: "Reword", blurb: "the confirmed fix showed this instruction is wrong here; exact phrase replaced" },
@@ -1306,23 +1319,27 @@ export function renderChat(container, sessionId, opts = {}) {
   };
 
   function replanChangeRow(ch) {
+    // §17.1097 — a real before→after diff, colour-coded, so the operator sees
+    // exactly what the plan says now and what it would say instead.
     const meta = REPLAN_ACTION_COPY[ch.action] || { icon: "•", label: ch.action || "change", blurb: "" };
-    const change = ch.proposed_change || ch.summary || ch.change || ch.reason || "";
+    const after = ch.proposed_change || ch.summary || ch.change || ch.reason || "";
+    const before = ch.current_assumption || "";
+    const isDrop = ch.action === "drop";
+    const isReopen = ch.action === "reopen";
+    const diff = el("div", { class: "replan-diff" },
+      el("div", { class: "replan-side replan-before" },
+        el("span", { class: "replan-tag", text: isReopen ? "Was" : "Now" }),
+        el("span", { class: "replan-text", text: before || (isReopen ? "marked finished" : "this step, as written") })),
+      el("div", { class: "replan-arrow", text: "→" }),
+      el("div", { class: "replan-side replan-after" + (isDrop ? " replan-side-drop" : "") },
+        el("span", { class: "replan-tag", text: isDrop ? "Remove" : isReopen ? "Back to" : "After" }),
+        el("span", { class: "replan-text", text: isDrop ? "dropped from the plan" : isReopen ? "in play again" : (after || "(updated)") })));
     return el("div", { class: "replan-change" },
       el("div", { class: "replan-change-head" },
-        el("span", { class: "replan-act", text: `${meta.icon} ${meta.label}` }),
+        el("span", { class: "replan-act act-" + (ch.action || "other"), text: `${meta.icon} ${meta.label}` }),
         el("span", { class: "mono replan-node", text: ch.node_key || "" }),
         meta.blurb ? el("span", { class: "dim small", text: `— ${meta.blurb}` }) : null),
-      ch.current_assumption
-        ? el("div", { class: "replan-line" },
-            el("span", { class: "replan-tag dim", text: "Plan assumes now" }),
-            el("span", { text: ch.current_assumption }))
-        : null,
-      change
-        ? el("div", { class: "replan-line" },
-            el("span", { class: "replan-tag", text: "Change to" }),
-            el("span", { text: change }))
-        : null);
+      diff);
   }
 
   // The outcome popup — brief, centred, with the REAL counts (§17.865).
@@ -1341,12 +1358,13 @@ export function renderChat(container, sessionId, opts = {}) {
     const changes = p.proposals || [];
     if (!changes.length) { mount(replanSlot); return; }
     const sig = JSON.stringify(changes.map((c) => [c.node_key, c.action, c.proposed_change]));
-    const d = replanRenderDecision(sig, { open, background, isNew: sig !== lastReplanSig,
+    const d = replanRenderDecision(sig, { announced: announcedReplanSigs,
                                           resolved: resolvedReplanSigs, snoozed: snoozedReplanSigs });
     lastReplanSig = sig;
     if (!d.show) { mount(replanSlot); return; }
-    const isNew = d.isNew;
     const shouldOpen = d.openModal;
+    // Mark announced NOW so no later render (the 25 s poll included) re-pops it.
+    announcedReplanSigs.add(sig);
 
     const counts = changes.reduce((a, c) => { a[c.action] = (a[c.action] || 0) + 1; return a; }, {});
     const countText = ["revise", "drop", "reopen", "rewrite", "repair"]
