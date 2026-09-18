@@ -213,6 +213,22 @@ function contractCard(onDismiss, session, force) {
 // §17.859 — exported: the job hub's Run tab embeds the walkthrough for
 // assisted_* jobs (it resolves the session via the idempotent /assist/start).
 // §17.1054 — the newest durable turn id (0 when none / optimistic-only).
+// §17.1095 — what to do when a turn was killed by an engine restart (the
+// "died" frame). If the operator's last message already got an answer, the
+// restart is stale noise — reassure, don't alarm. If it was NOT answered,
+// hand its text back so "resend" is one click, not a retype of a 48-line
+// paste. Pure so a node test can pin it.
+export function restartRecovery(turns, detail) {
+  const isRestart = /restarted mid-turn|stalled for more than/i.test(detail || "");
+  if (!isRestart) return { kind: "generic", text: "" };
+  const ops = (turns || []).filter((t) => t.role === "operator" && !t._pending && (t.content || "").trim());
+  if (!ops.length) return { kind: "generic", text: "" };
+  const last = ops[ops.length - 1];
+  const lastId = typeof last.id === "number" ? last.id : -1;
+  const answered = (turns || []).some((t) => t.role === "assistant" && typeof t.id === "number" && t.id > lastId);
+  return answered ? { kind: "answered", text: "" } : { kind: "restore", text: last.content };
+}
+
 export function maxTurnId(turns) {
   let m = 0;
   for (const t of turns || []) {
@@ -1476,11 +1492,22 @@ export function renderChat(container, sessionId, opts = {}) {
           case "assist_turn_done":
             sawDone = true;
             break;
-          case "error":
+          case "error": {
             sawDone = true;
             clearStatusLine();
-            appendBubble("assistant", "note", `⚠ ${data?.detail || "turn error"}`);
+            const rec = restartRecovery(turns, data?.detail || "");
+            if (rec.kind === "answered") {
+              // the restart killed a run whose work had already landed above
+              appendBubble("assistant", "note", "The engine restarted, but your last step is safe — its result is above. Continue when ready.");
+            } else if (rec.kind === "restore") {
+              // give the operator their input back instead of "retype it"
+              if (!composerText.value.trim()) composerText.value = rec.text;
+              appendBubble("assistant", "note", "⚠ The engine restarted mid-turn. Your message is restored in the box below — press Send to resume (nothing was lost).");
+            } else {
+              appendBubble("assistant", "note", `⚠ ${data?.detail || "turn error"}`);
+            }
             break;
+          }
           default:
             break;
         }
