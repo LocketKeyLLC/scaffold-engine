@@ -553,10 +553,13 @@ async def _run_turn_inner(
         if confident and action == "submit":
             done = False
             blocked_reason = None
+            elsewhere = False   # §17.1101 — the paste completed other pending step(s)
             async for e in _submit(session_id, d, text_, nk, history, db):
                 if e[0] == ASSIST_STEP_OUTCOME:
                     if e[1].get("status") == "committed":
                         done = True
+                    elif e[1].get("status") == "committed_elsewhere":
+                        elsewhere = True
                     elif e[1].get("status") in ("step_incomplete", "verification_failed",
                                                 "step_unverified"):  # §17.1016
                         blocked_reason = e[1].get("verify_reason") or "the step's goal isn't met yet"
@@ -565,6 +568,11 @@ async def _run_turn_inner(
                 await _clear_completion_confirm(session_id, db)
                 async for e in _claim_and_guide(session_id, None, history, db,
                                                 orient=False):
+                    yield e
+            elif elsewhere:
+                # §17.1101 — the matched steps are committed; re-present the step
+                # in focus so the operator continues where they were.
+                async for e in _claim_and_guide(session_id, nk, history, db, orient=True):
                     yield e
             elif blocked_reason is not None:
                 # §17.951 — OFFER the operator the commit on their word.
@@ -1246,6 +1254,21 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
             # dispatch can CONTINUE a blocked submit instead of dead-ending.
             "verify_reason": (((res or {}).get("success_verdict") or {}).get("reason") or ""),
         })
+        # §17.1101 — the paste completed OTHER pending step(s) (the cursor had
+        # drifted). Say which, durably, and let the branch re-guide this step.
+        if (res or {}).get("status") == "committed_elsewhere":
+            _mc = (res or {}).get("matched_commits") or []
+            _lines = "\n".join(f"- ✅ **{m['node_key']}** — {m['title']}" for m in _mc)
+            _msg = ("That output didn't match the step in focus, but it completes "
+                    f"{'this step' if len(_mc) == 1 else f'{len(_mc)} steps'} elsewhere in your "
+                    f"plan — marked done:\n\n{_lines}\n\nBack to the current step:")
+            yield _ev(ASSIST_ANSWER, {"kind": "note", "text": _msg})
+            try:
+                from app.modules import assist_agent as _aa
+                await _aa.capture_assistant_reply(
+                    session_id=session_id, node_key=nk, kind="note", content=_msg, db=db)
+            except Exception:  # noqa: BLE001 — capture never blocks
+                logger.warning("evidence_match_note_capture_failed sid=%s", session_id)
         async for e in _reconciliation_note(session_id, nk, res, db):  # §17.1043
             yield e
         # §17.889(#3) — a deliberating decision step computed a needs-input

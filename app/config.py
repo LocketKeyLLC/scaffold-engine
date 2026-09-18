@@ -1101,6 +1101,13 @@ class Settings(BaseSettings):
     # via compose. The step stays claimable so the operator finishes it — or
     # `/assist skip` to override a false block.
     assist_block_on_incomplete_verify: bool = False
+    # §17.1101 — when a paste doesn't verify against the CURRENT step, match it
+    # to the pending step(s) it actually completes (verified against each step's
+    # own 'Done when') and commit those. Off by default (behavioural), live via
+    # compose. §17.1102 — surface near-duplicate pending steps for dedup.
+    assist_evidence_step_match_enabled: bool = False
+    assist_evidence_step_match_max_candidates: int = 5
+    assist_flag_duplicate_pending_steps: bool = False
     # §17.1016 — block a commit when the verdict is 'unclear' AND the operator's
     # own message says they cannot tell. Surface-verified gap: §17.1014 stopped
     # "i believe it is done but am unsure" counting as a completion CLAIM, which

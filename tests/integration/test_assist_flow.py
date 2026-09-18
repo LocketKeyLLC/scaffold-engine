@@ -452,3 +452,58 @@ async def test_reconnect_paused_job_resumes_without_reset(seeded_job):
             {"j": job_id},
         )).scalar()
     assert t1 == "done", "prior committed node T1 was wrongly reset on resume"
+
+
+@pytest.mark.validate
+@pytest.mark.asyncio
+async def test_evidence_matches_and_commits_a_different_pending_step(insert_job, monkeypatch):
+    """§17.1101 — a paste that doesn't verify against the cursor step but proves
+    a DIFFERENT pending step commits that step (verified against its own bar),
+    leaving the cursor step untouched."""
+    from unittest.mock import AsyncMock
+    from app.modules import assist_guide
+    from app.routers.assist import assist_submit, AssistSubmitInput
+    from app.config import settings
+
+    job_id = await insert_job(status="planning", title="evidence match",
+                              refined_brief={"description": "g", "goals": ["g"]})
+    nodes = [("N1", "Configure the reverse proxy", [], 1),
+             ("N2", "Resize VM 106 scsi0 disk to 40G on local-lvm", [], 2),
+             ("N3", "Install the NVIDIA driver on the host", [], 3)]
+    async with async_session() as db:
+        for nk, title, deps, order in nodes:
+            await db.execute(text("""
+                INSERT INTO dag_nodes (job_id, node_key, title, depends_on, execution_order,
+                                       prompt_template, tool, domain)
+                VALUES (:jid,:nk,:t,:deps,:ord,:pt,'LLM','eng')"""),
+                {"jid": job_id, "nk": nk, "t": title, "deps": deps, "ord": order, "pt": f"do {title}"})
+        await db.commit()
+        out = await assist_agent.start_assist_session(job_id=job_id, replan_policy="disabled", db=db)
+        sid = out["session_id"]
+        await assist_agent.get_next_step(session_id=sid, db=db)   # presents N1 (cursor)
+
+    # verifier: N1 (cursor) is incomplete; the 40G step verifies succeeded.
+    async def fake_verify(*, title, task_prompt, tool, evidence, environment=None,
+                          is_decision=False, done_criteria=""):
+        if "40G" in title and "40G" in evidence:
+            return {"outcome": "succeeded", "reason": "shows size=40G"}
+        return {"outcome": "incomplete", "reason": "not this step"}
+    monkeypatch.setattr(assist_guide, "verify_step_success", fake_verify)
+    monkeypatch.setattr(assist_guide, "read_cached_guidance", AsyncMock(return_value=None))
+    monkeypatch.setattr(settings, "assist_evidence_step_match_enabled", True)
+    monkeypatch.setattr(settings, "assist_verify_on_submit", True)
+    monkeypatch.setattr(settings, "assist_block_on_incomplete_verify", True)
+
+    evidence = "root@pve:~# qm config 106 | grep scsi0\nscsi0: local-lvm:vm-106-disk-0,size=40G"
+    async with async_session() as db:
+        res = await assist_submit(sid, AssistSubmitInput(node_key="N1", output=evidence,
+                                                         action="submit"), db=db)
+    assert res["status"] == "committed_elsewhere", res
+    assert [m["node_key"] for m in res["matched_commits"]] == ["N2"], res
+
+    async with async_session() as db:
+        rows = dict((r["node_key"], r["status"]) for r in (await db.execute(text(
+            "SELECT node_key, status FROM assist_steps WHERE session_id=:sid"), {"sid": sid})).mappings())
+    assert rows["N2"] in ("committed", "done"), rows        # matched step committed
+    assert rows["N1"] == "presented", rows                  # cursor untouched
+    assert rows["N3"] == "pending", rows                    # unrelated step untouched

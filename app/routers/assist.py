@@ -931,6 +931,35 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
                       + f" — committed on their word: "
                       f"{verdict.get('reason', '')}"), db=db,
             )
+        if _blocked and settings.assist_evidence_step_match_enabled:
+            # §17.1101 — the evidence didn't verify against THIS step; maybe it
+            # completes a DIFFERENT pending step (the cursor drifted). Match it
+            # to the pending step(s) it actually completes and commit those,
+            # each verified against its own 'Done when'. The current step is
+            # left as-is.
+            matched = await assist_agent.match_and_commit_evidence(
+                session_id=session_id, evidence=body.output,
+                exclude_node_key=body.node_key, db=db,
+            )
+            if matched and matched.get("committed"):
+                await assist_agent.record_friction(
+                    session_id=session_id, node_key=body.node_key,
+                    note=("evidence didn't fit this step but completed "
+                          + ", ".join(m["node_key"] for m in matched["committed"])
+                          + " — committed those"), db=db,
+                )
+                return {
+                    "session_id": session_id,
+                    "node_key": body.node_key,
+                    "status": "committed_elsewhere",
+                    "committed": False,       # the CURRENT step was not committed
+                    "matched_commits": matched["committed"],
+                    "no_op": False,
+                    "next_node_key": None,
+                    "success_verdict": verdict,
+                    "mirror_divergence": False,
+                    "execution_context": captured_ctx,
+                }
         if _blocked:
             # Hard-block: do NOT commit — the step stays 'presented' (claimable)
             # for a clean re-submit. Log the blocker to the friction trail.
