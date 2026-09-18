@@ -870,6 +870,28 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 .assist-below { margin-top: 14px; }
 .assist-brief-slot { margin-top: 14px; }
 
+/* §17.1096 — the "?" help panel: a discoverable explanation of the controls
+   and the engine's own behaviours, one source of truth (ASSIST_HELP). */
+.assist-help {
+  margin: 0 0 14px; padding: 16px 18px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+.assist-help-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.assist-help-head h2 { margin: 0; font-size: var(--fs-lg, 18px); }
+.assist-help-close { flex: none; }
+.assist-help > .sub { margin: 4px 0 14px; }
+.assist-help-sec { margin-top: 14px; }
+.assist-help-sec + .assist-help-sec { border-top: 1px solid var(--border); padding-top: 14px; }
+.assist-help-sec h3 { margin: 0 0 8px; font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); }
+.assist-help-list { margin: 0; display: grid; grid-template-columns: minmax(150px, 220px) 1fr; gap: 6px 18px; align-items: baseline; }
+.assist-help-list dt { margin: 0; font-weight: var(--fw-semi); color: var(--text); }
+.assist-help-list dd { margin: 0; color: var(--text-dim); line-height: 1.5; }
+@media (max-width: 640px) {
+  .assist-help-list { grid-template-columns: 1fr; gap: 2px 0; }
+  .assist-help-list dd { margin: 0 0 8px; }
+}
+
 /* §17.845 — living project-brief editor */
 .brief-panel-body { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .bp-desc { width: 100%; resize: vertical; }

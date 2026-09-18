@@ -229,6 +229,57 @@ export function restartRecovery(turns, detail) {
   return answered ? { kind: "answered", text: "" } : { kind: "restore", text: last.content };
 }
 
+// §17.1096 — the in-product HELP source. The controls exist and the engine
+// does a lot on its own (restart recovery, state verification, plan-change
+// proposals), but nothing in the UI told the operator what any of it means:
+// the button titles were hover-only (invisible on touch, undiscoverable) and
+// the behaviours were explained nowhere. This is ONE source of truth — the
+// "?" panel is built from it, and a ci-tier-0 gate (test_assist_help_wiring)
+// fails if a `verb(...)` in this file has no entry here. A control cannot
+// ship without its plain-language explanation.
+export const ASSIST_HELP = {
+  // keyed by the exact label passed to verb(): what it does, in the
+  // operator's words, and when they'd reach for it.
+  controls: {
+    "✓ Done → next step": "Marks the step you're on as finished and walks you into the next one. If you pasted output into the box, that becomes the evidence the step was done; otherwise the conversation is used.",
+    "↩ Back a step": "Undoes the last step you completed and returns you to it — its walkthrough comes back exactly as it was. Use this if you pressed ✓ too soon.",
+    "↻ Re-show step": "Shows the current step's walkthrough again, from the top. Nothing changes — it just re-presents what to do.",
+    "🩺 Verify state": "Checks what is actually running on your machines against what the plan believes, using one read-only script. Where they disagree, it walks you through the repairs one at a time. Reach for this when a step keeps failing or you're not sure the plan is still accurate.",
+    "🔧 Fix error": "Paste the error into the box first, then press this. You get a diagnosis for YOUR environment — the engine reads it against what it already knows about your machines, not a generic answer.",
+    "⏩ Skip": "Skips the current step for now. It's recorded and you can come back to it later.",
+    "🤝 Engine does it": "Hands the step to the engine to finish on its own — but only work the engine itself can do (thinking, writing, planning). It never touches your machine for you.",
+    "↶ Restore a reopened step": "If a re-plan or a state check reopened a step you'd already finished, this puts it back to done with the evidence it had. It's refused once you've done more work on that step, so it can't erase real progress.",
+    "⏸": "Pauses the session so nothing runs while you step away; press it again to resume right where you left off.",
+  },
+  // things the engine does on its own that the operator should be able to
+  // understand — the behaviours built this session that had no UI explanation.
+  behaviors: [
+    { title: "If the engine restarts mid-step", plain: "Nothing is lost. Every finished step and every message is saved. If a restart interrupts a message you'd sent, the engine puts your text back in the box and asks you to press Send to pick up exactly where you were." },
+    { title: "The status line above the box", plain: "A spinner means the engine is working on your step right now. A clock means it's waiting on you. The small pulse dot means the session is alive and connected — if it stops, the page will tell you and recover on its own." },
+    { title: "When the plan and reality disagree", plain: "The engine keeps a picture of your machines from what you've pasted. If a step assumes something that isn't true anymore, it says so and offers to fix the plan rather than pushing you through a step that can't work. 🩺 Verify state is how you ask it to check on purpose." },
+    { title: "A plan-change proposal", plain: "When something you've told the engine changes what the plan should be, a small chip appears by the box. Open it to see exactly what would change, then Accept to apply it or Keep to leave the plan as-is. Once you've answered, it stays answered — it won't keep popping back up." },
+    { title: "Why it won't invent values", plain: "The engine refuses to put an IP address, port, version or URL into an instruction unless it came from something you actually showed it. If it doesn't know a value yet, it asks you to run a command that prints it — that's deliberate, so it never sends you to the wrong place." },
+    { title: "What the engine knows about your setup", plain: "As you paste command output, the engine builds a map of your machines — names, addresses, and how traffic reaches them — and shows it in Session details below. That map is what keeps every step pointed at the right machine." },
+  ],
+};
+
+// Pure: the help panel's sections, ready for the renderer. Kept out of the
+// DOM so it can be node-tested and so the wiring gate can read it.
+export function helpSections() {
+  return [
+    { heading: "The buttons", kind: "controls",
+      items: Object.entries(ASSIST_HELP.controls).map(([term, plain]) => ({ term, plain })) },
+    { heading: "What the assistant does on its own", kind: "behaviors",
+      items: ASSIST_HELP.behaviors.map((b) => ({ term: b.title, plain: b.plain })) },
+  ];
+}
+
+// The set of control labels the help source covers — the gate compares this
+// against the verb(...) calls in the file.
+export function helpControlLabels() {
+  return Object.keys(ASSIST_HELP.controls);
+}
+
 export function maxTurnId(turns) {
   let m = 0;
   for (const t of turns || []) {
@@ -636,11 +687,42 @@ export function renderChat(container, sessionId, opts = {}) {
     el("div", { class: "composer-actions" }, guideBtn, el("span", { class: "spacer" }), sendBtn)
   );
 
+  // §17.1096 — the "?" panel: a discoverable path that explains the controls
+  // and the engine's own behaviours, built from the single ASSIST_HELP source.
+  // Operator-initiated, so it never fights a background poll (no timer, no
+  // modal): a plain toggled panel.
+  const helpPanel = el("div", { class: "assist-help", hidden: true });
+  function buildHelp() {
+    const close = el("button", { class: "btn btn-sm btn-ghost assist-help-close", text: "✕", title: "Close help", onClick: () => toggleHelp(false) });
+    const secs = helpSections().map((s) =>
+      el("section", { class: "assist-help-sec" },
+        el("h3", { text: s.heading }),
+        el("dl", { class: "assist-help-list" },
+          ...s.items.flatMap((it) => [
+            el("dt", { text: it.term }),
+            el("dd", { text: it.plain }),
+          ]))));
+    mount(helpPanel,
+      el("div", { class: "assist-help-head" },
+        el("h2", { text: "How the Assistant works" }),
+        close),
+      el("p", { class: "sub", text: "Every button, and everything the engine does on its own. Hover a button any time to see the same note." }),
+      ...secs);
+  }
+  function toggleHelp(force) {
+    const show = typeof force === "boolean" ? force : helpPanel.hidden;
+    if (show && !helpPanel.childElementCount) buildHelp();
+    helpPanel.hidden = !show;
+    if (helpBtn) helpBtn.setAttribute("aria-expanded", show ? "true" : "false");
+    if (show) helpPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+  const helpBtn = el("button", { class: "btn btn-sm btn-ghost", text: "? Help", title: "What the buttons and the assistant do", "aria-expanded": "false", onClick: () => toggleHelp() });
+
   const header = el(
     "div",
     { class: "view-header" },
     el("div", {}, el("h1", { text: "Assistant" }), el("div", { class: "sub mono", text: shortId(sessionId) })),
-    el("div", { class: "header-actions" }, el("a", { class: "btn btn-sm btn-ghost", href: "#/assist", text: "← Sessions" }), el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => load() }))
+    el("div", { class: "header-actions" }, helpBtn, el("a", { class: "btn btn-sm btn-ghost", href: "#/assist", text: "← Sessions" }), el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => load() }))
   );
 
   const main = el("div", { class: "chat-main assist-main" + (embedded ? " embedded" : "") }, transcript, composer);
@@ -655,7 +737,7 @@ export function renderChat(container, sessionId, opts = {}) {
     el("summary", { text: "Session details — environment, pinned values, notes, brief" }),
     belowGrid, briefSlot);
   moreRow.addEventListener("toggle", () => { try { storage.set(ASSIST_MORE_KEY, moreRow.open ? "1" : "0"); } catch { /* private mode */ } });
-  mount(container, embedded ? null : header, contractCard(null, session), stepHero, main, moreRow);
+  mount(container, embedded ? null : header, helpPanel, contractCard(null, session), stepHero, main, moreRow);
   let briefMounted = false;
 
   // 📍 Current-step hero — where am I, what's the loop position (§17.738/741
