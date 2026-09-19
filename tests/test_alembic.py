@@ -10,8 +10,9 @@ def test_script_directory_loads_with_one_head():
     cfg = Config(str(ROOT / "alembic.ini")); cfg.set_main_option("script_location", str(ROOT / "alembic"))
     sd = ScriptDirectory.from_config(cfg)
     heads = sd.get_heads()
-    assert heads == ["0002_turn_run_timings"]        # §17.1109 — bump when a revision is added
+    assert heads == ["0003_turn_runs_session_fk"]    # §17.1128 — bump when a revision is added
     assert sd.get_revision("0002_turn_run_timings").down_revision == "0001_baseline"
+    assert sd.get_revision("0003_turn_runs_session_fk").down_revision == "0002_turn_run_timings"
     base = sd.get_revision("0001_baseline")
     assert base.down_revision is None
 
@@ -45,3 +46,12 @@ def test_env_never_reconfigures_an_already_configured_logging_stack():
     src = (ROOT / "alembic" / "env.py").read_text(encoding="utf-8")
     assert "not logging.getLogger().handlers" in src
     assert src.index("not logging.getLogger().handlers") < src.index("fileConfig(config.config_file_name)")
+
+
+def test_turn_runs_session_fk_revision_clears_orphans_then_cascades():
+    """§17.1128 — the revision must delete orphans BEFORE adding the FK (or it
+    fails on any deployment that already has them) and the FK must cascade."""
+    from pathlib import Path
+    src = Path("alembic/versions/0003_turn_runs_session_fk.py").read_text()
+    assert src.index("DELETE FROM assist_turn_runs") < src.index("ADD CONSTRAINT")
+    assert "REFERENCES assist_sessions(id) ON DELETE CASCADE" in src
