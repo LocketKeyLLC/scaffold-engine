@@ -31,9 +31,9 @@ def _check_reranker_state(state) -> dict:
 
     §17.187: also includes ``model`` + ``score_range`` so an operator can
     see (a) which reranker is loaded and (b) what range its scores arrive
-    on — "unknown (assumed [0,1])" flags an unregistered model that may
-    silently make ``settings.confidence_threshold`` either trivially-met
-    or never-met.
+    on — every family is scored raw-logit → sigmoid (§17.1124); an
+    "unknown family" label flags a MODEL_RERANKER this engine has not
+    measured for per-pair cost and golden-set quality.
 
     Pulled out of health() to keep it directly unit-testable. ``state``
     is the FastAPI app's state object (or any object with the same
