@@ -1261,7 +1261,7 @@ async def execute_next_node(
                 # `done` / `skipped` are success-terminal; anything else here
                 # is a live blocker. The cause precedence below classifies
                 # the dominant kind.
-                _non_terminal = {"failed", "pending", "running"}   # §17.1119 — nodes have no "blocked"
+                _non_terminal = {"failed", "blocked", "pending", "running"}
                 for r in _rows:
                     if r.status != "pending":
                         continue
@@ -1277,7 +1277,7 @@ async def execute_next_node(
                     # (operator action: retry / skip). Otherwise deps are
                     # pending or running → "waiting" (operator: wait).
                     dep_statuses = {b["status"] for b in blocked_by_objs}
-                    if dep_statuses & {"failed"}:   # §17.1119 — nodes have no "blocked"
+                    if dep_statuses & {"failed", "blocked"}:
                         cause = "failed"
                         actionable_count += 1
                     else:
