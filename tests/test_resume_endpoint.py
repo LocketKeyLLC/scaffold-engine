@@ -169,10 +169,11 @@ def test_resume_endpoint_409_on_wrong_status(client, patch_models_ok):
     assert detail["expected_status"] == "cancelled"
 
 
-def test_resume_endpoint_400_on_bad_uuid(client, patch_models_ok):
+def test_resume_endpoint_422_on_bad_uuid(client, patch_models_ok):
+    # §17.1131 — UuidPath rejects the path id before the handler (was the 400 guard)
     r = client.post("/jobs/not-a-uuid/resume", json={})
-    assert r.status_code == 400
-    assert "Invalid job_id" in r.json()["detail"]
+    assert r.status_code == 422
+    assert any(e["loc"] == ["path", "job_id"] for e in r.json()["detail"])
 
 
 def test_resume_endpoint_streams_on_success(client, patch_models_ok):
