@@ -16,63 +16,112 @@ _MAX_PAIRS = 20
 
 
 # ---------------------------------------------------------------------------
-# §17.187 — Per-reranker score normalization registry.
+# §17.187 / §17.1124 — reranker score normalisation: ONE rule.
 #
-# Different CrossEncoder models emit scores on different ranges:
+# Every CrossEncoder this engine loads is a single-logit classifier. The engine
+# takes the model's RAW logit (``predict(..., activation_fn=Identity)``, see
+# ``predict_raw``) and squashes it with a sigmoid ONCE, here — so the
+# downstream confidence threshold (``settings.confidence_threshold``, on
+# [0, 1]) survives a MODEL_RERANKER swap without per-deployment retuning.
 #
-#   * Qwen3-Reranker (production default) post-sigmoids inside the model;
-#     scores arrive in roughly [0, 1] — identity is correct.
-#   * cross-encoder/ms-marco-* outputs raw logits, roughly [-10, +10]; the
-#     downstream confidence threshold (0.8 by default) becomes either
-#     trivially-met or never-met without normalization.
-#   * BAAI/bge-reranker-* (large + base) similarly emits raw logits.
+# Why the previous per-model registry (identity for Qwen3, sigmoid for
+# ms-marco / bge) was wrong under sentence-transformers ≥ 3: ``predict``
+# applies a per-model DEFAULT activation before our normaliser ran — Sigmoid
+# for Qwen3 / bge / gte, Identity for ms-marco. "Qwen3 is already-sigmoid" was
+# that library default, not the model; bge got sigmoid TWICE (raw 7.99 → 1.0 →
+# 0.73, so its best hit could never clear a 0.8 threshold). Asking for the raw
+# logit removes the dependency on the library default entirely.
 #
-# MODEL_RERANKER is config-only per the project invariants (cannot be
-# swapped per-request) so the normalizer is selected once at the call
-# site against ``settings.model_reranker``. A model not in the registry
-# is conservatively assumed to be already-[0,1] (identity) and reported
-# as "unknown (assumed [0,1])" on /health so an operator sees the gap.
+# The family list survives only as the /health label: a name outside it is
+# still sigmoided (the safe default for a single-logit reranker) but reported
+# as an unregistered family so an operator sees the gap.
 #
-# Match is substring-on-lowercased name so we tolerate the common
-# variants (model org prefix, version suffix, etc.) without enumerating
-# every published tag.
+# MODEL_RERANKER is config-only per the project invariants (cannot be swapped
+# per-request), so both the normaliser and the pair template are selected
+# once at the call site against ``settings.model_reranker``. Match is
+# substring-on-lowercased name so the common variants (org prefix, version
+# suffix) match without enumerating every published tag.
 # ---------------------------------------------------------------------------
-
 def _normalize_identity(scores: list[float]) -> list[float]:
-    """Pass-through — score is already in the expected [0, 1] range."""
     return list(scores)
 
 
 def _normalize_sigmoid(scores: list[float]) -> list[float]:
-    """Apply sigmoid to map raw logits → (0, 1)."""
     return [1.0 / (1.0 + math.exp(-float(s))) for s in scores]
 
 
-# Pairs are (substring-in-model-name-lowercased, range_label, normalizer).
-# Order matters — first match wins.
-_RERANKER_NORMALIZERS: list[tuple[str, str, Callable[[list[float]], list[float]]]] = [
-    ("qwen3-reranker", "[0, 1] (already-sigmoid)", _normalize_identity),
-    ("ms-marco", "raw logits → sigmoid", _normalize_sigmoid),
-    ("bge-reranker", "raw logits → sigmoid", _normalize_sigmoid),
-]
+#: Reranker families this engine has measured (per-pair cost + golden-set
+#: quality, §17.1124). Membership only changes the /health label.
+_KNOWN_RERANKER_FAMILIES: tuple[str, ...] = (
+    "qwen3-reranker", "ms-marco", "bge-reranker", "gte-reranker",
+)
+_RAW_LOGIT_LABEL = "raw logit → sigmoid"
+
+#: Families whose training template wraps each pair in an instruct prompt
+#: (``reranker_prompt_system`` / ``_suffix`` / ``_default_instruction``).
+#: Every other family scores the plain (query, document) pair — sending a
+#: BERT-style cross-encoder the Qwen chat template is noise it was never
+#: trained on, and it costs ~60 tokens per pair (§17.1124).
+_INSTRUCT_TEMPLATE_FAMILIES: tuple[str, ...] = ("qwen3-reranker",)
 
 
 def get_score_range_info(
     model_name: str | None,
 ) -> tuple[str, Callable[[list[float]], list[float]]]:
-    """Return (range_label, normalizer) for the reranker ``model_name``.
+    """Return ``(range_label, normalizer)`` for the configured reranker.
 
-    Unknown models are assumed already-[0, 1] (identity) so the production
-    threshold survives a swap that didn't get registered here — but the
-    range_label flags the gap to an operator reading /health.
+    Every model is scored as a raw logit and sigmoided (see the module note);
+    the label tells /health whether the family is one this engine has
+    measured. ``None`` (no model configured) is distinct from an unknown
+    name so an operator can tell config-missing from config-unrecognised.
     """
     if not model_name:
         return ("unknown (no model configured)", _normalize_identity)
     name = model_name.lower()
-    for pat, label, fn in _RERANKER_NORMALIZERS:
-        if pat in name:
-            return (label, fn)
-    return ("unknown (assumed [0, 1])", _normalize_identity)
+    if any(fam in name for fam in _KNOWN_RERANKER_FAMILIES):
+        return (_RAW_LOGIT_LABEL, _normalize_sigmoid)
+    return (f"unknown family (assumed {_RAW_LOGIT_LABEL})", _normalize_sigmoid)
+
+
+def uses_instruct_template(model_name: str | None) -> bool:
+    """True when the configured reranker expects the instruct-wrapped pair."""
+    name = (model_name or "").lower()
+    return any(fam in name for fam in _INSTRUCT_TEMPLATE_FAMILIES)
+
+
+def build_pairs(
+    query: str, documents: list[str], model_name: str | None = None,
+) -> list[list[str]]:
+    """The ONE place a (query, document) pair is shaped for the reranker —
+    shared by the in-process path and the HTTP/sidecar path so the two can
+    never drift (§17.1124). Instruct families get the template; the rest get
+    the plain pair."""
+    from app.config import settings
+    name = settings.model_reranker if model_name is None else model_name
+    if uses_instruct_template(name):
+        return [[_format_query(query), _format_document(d)] for d in documents]
+    return [[query, d] for d in documents]
+
+
+def _raw_logits(scores):
+    """Identity activation: hand the model's logits back untouched."""
+    return scores
+
+
+def predict_raw(model, pairs: list[list[str]]):
+    """Score pairs as RAW logits, whatever the model's default activation.
+
+    sentence-transformers ≥ 3 picks a per-model default activation inside
+    ``predict`` (Sigmoid for Qwen3/bge/gte, Identity for ms-marco) unless an
+    ``activation_fn`` callable is passed; passing the identity explicitly is
+    what makes the single sigmoid in ``get_score_range_info`` correct for
+    every family. A plain callable (no torch import — the smoke CI lane has
+    none) is applied as ``activation_fn(scores)``. No fallback on purpose: a
+    ``predict`` that rejects the kwarg would silently reintroduce the double
+    sigmoid, and the pinned sentence-transformers accepts it.
+    """
+    return model.predict(pairs, activation_fn=_raw_logits)
+
 
 # ---------------------------------------------------------------------------
 # Lazy-loaded CrossEncoder singleton
@@ -232,13 +281,13 @@ def rerank_cross_encoder(
         return None
 
     docs = documents[:max_pairs]
-    pairs = [[_format_query(query), _format_document(doc)] for doc in docs]
+    pairs = build_pairs(query, docs)
 
     try:
         from app.config import settings
         t0 = time.monotonic()
-        raw_scores = model.predict(pairs)
-        # §17.187 — apply the per-model normalizer so threshold semantics
+        raw_scores = predict_raw(model, pairs)
+        # §17.187/§17.1124 — raw logit → one sigmoid, so threshold semantics
         # are stable across reranker swaps.
         _, normalize = get_score_range_info(settings.model_reranker)
         scores = normalize([float(s) for s in raw_scores])
@@ -308,9 +357,10 @@ def rerank_http(
     docs = documents[:max_pairs]
     if not docs:
         return RerankResult(items=[], backend="HTTP", latency_ms=0.0)
+    pairs = build_pairs(query, docs)
     payload = {
-        "query": _format_query(query),
-        "texts": [_format_document(d) for d in docs],
+        "query": pairs[0][0],
+        "texts": [p[1] for p in pairs],
         "raw_scores": True,
         "truncate": True,
     }

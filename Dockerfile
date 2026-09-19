@@ -47,7 +47,7 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 # right path. Fresh deployments now run the orchestrator + harness
 # sidecars in HF_HUB_OFFLINE mode from the image's pre-baked cache
 # (no rate-limited HF Hub round-trip; see §17.239).
-ARG MODEL_RERANKER=tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+ARG MODEL_RERANKER=cross-encoder/ms-marco-MiniLM-L-12-v2
 ENV HF_HOME=/code/.cache/huggingface
 # §17.423 — retry with backoff. The bare snapshot_download failed the WHOLE
 # image build whenever the HF Hub returned "429 Too Many Requests" on the

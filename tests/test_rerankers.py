@@ -125,60 +125,54 @@ def test_reset_reranker_clears_singleton_and_failure_flag():
 #
 # The downstream confidence threshold (default 0.8) is sensitive to the
 # reranker's raw output range. The §17.187 registry maps known model
-# patterns to (range_label, normalizer) so the threshold survives a
-# MODEL_RERANKER swap that emits raw logits rather than already-sigmoid'd
-# probabilities. Tests cover: identity for the production reranker, sigmoid
-# for the two known logit-emitting CrossEncoder families, conservative
-# fallback for unknown models, the normalizer math itself, and end-to-end
-# threading through ``rerank_cross_encoder``.
-
-
-@pytest.mark.smoke
-def test_get_score_range_info_recognizes_qwen3_reranker_identity():
-    label, fn = rerankers.get_score_range_info(
-        "tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
-    )
-    assert "0, 1" in label
-    assert "sigmoid" in label.lower()
-    # Identity short-circuits to ``list(scores)`` — no transform.
-    assert fn([0.3, 0.7]) == [0.3, 0.7]
+# §17.1124 — ONE rule: every family is scored as a raw logit and sigmoided
+# once; the registry only decides the /health label (measured family vs
+# unknown). Tests cover: the label + sigmoid for the measured families, the
+# unknown-family fallback (still sigmoid, flagged), the no-model case, the
+# normalizer math itself, the pair template selection, raw-logit prediction,
+# and end-to-end threading through ``rerank_cross_encoder``.
 
 
 @pytest.mark.smoke
 @pytest.mark.parametrize("name", [
+    "tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
     "cross-encoder/ms-marco-MiniLM-L-6-v2",
     "cross-encoder/ms-marco-MiniLM-L-12-v2",
     "MS-MARCO/some-future-variant",
-])
-def test_get_score_range_info_recognizes_ms_marco_as_logits(name):
-    label, fn = rerankers.get_score_range_info(name)
-    assert "logit" in label.lower()
-    out = fn([0.0])
-    assert out[0] == pytest.approx(0.5, abs=1e-9)
-
-
-@pytest.mark.smoke
-@pytest.mark.parametrize("name", [
     "BAAI/bge-reranker-base",
     "BAAI/bge-reranker-large",
     "bge-reranker-v2-m3",
+    "Alibaba-NLP/gte-reranker-modernbert-base",
 ])
-def test_get_score_range_info_recognizes_bge_reranker_as_logits(name):
+def test_get_score_range_info_measured_families_are_raw_logit_sigmoid(name):
     label, fn = rerankers.get_score_range_info(name)
-    assert "logit" in label.lower()
+    assert "logit" in label.lower() and "sigmoid" in label.lower()
+    assert "unknown" not in label.lower()
+    assert fn([0.0])[0] == pytest.approx(0.5, abs=1e-9)
     # Sigmoid bounds: large negative → ~0, large positive → ~1.
     assert fn([-100.0])[0] == pytest.approx(0.0, abs=1e-9)
     assert fn([100.0])[0] == pytest.approx(1.0, abs=1e-9)
 
 
 @pytest.mark.smoke
-def test_get_score_range_info_unknown_model_assumes_identity_with_warning_label():
-    """An unregistered model gets identity (conservative) + a label that
-    flags the gap so an operator reading /health sees the uncertainty."""
+def test_get_score_range_info_qwen3_is_no_longer_identity():
+    """§17.1124 regression pin: the old "already-sigmoid" identity for Qwen3
+    was sentence-transformers' default activation, not the model. With
+    predict_raw handing back logits, identity would leave raw logits (4.3,
+    0.84) on the [0, 1] threshold — so Qwen3 MUST sigmoid now."""
+    _, fn = rerankers.get_score_range_info("tomaarsen/Qwen3-Reranker-0.6B-seq-cls")
+    assert fn([4.3])[0] == pytest.approx(0.9866, abs=1e-3)
+    assert fn([0.3, 0.7]) != [0.3, 0.7]
+
+
+@pytest.mark.smoke
+def test_get_score_range_info_unknown_model_still_sigmoids_with_warning_label():
+    """An unregistered model is a single-logit reranker until proven
+    otherwise: sigmoid (safe default) + a label that flags the gap so an
+    operator reading /health sees the family was never measured."""
     label, fn = rerankers.get_score_range_info("vendor/some-future-reranker")
     assert "unknown" in label.lower()
-    # Identity behavior — same list back.
-    assert fn([0.42, 0.99]) == [0.42, 0.99]
+    assert fn([0.0])[0] == pytest.approx(0.5, abs=1e-9)
 
 
 @pytest.mark.smoke
@@ -198,7 +192,43 @@ def test_get_score_range_info_match_is_case_insensitive():
     drift between published model tags."""
     for name in ("Qwen3-Reranker-0.6B", "QWEN3-RERANKER", "vendor/qwen3-reranker"):
         label, _ = rerankers.get_score_range_info(name)
-        assert "0, 1" in label, f"failed for name={name!r}"
+        assert "unknown" not in label.lower(), f"failed for name={name!r}"
+
+
+# ---------------------------------------------------------------------------
+# §17.1124 — pair template is per family; predictions are raw logits
+# ---------------------------------------------------------------------------
+
+@pytest.mark.smoke
+def test_build_pairs_wraps_only_instruct_families():
+    qwen = rerankers.build_pairs("q", ["d1", "d2"], model_name="tomaarsen/Qwen3-Reranker-0.6B-seq-cls")
+    assert len(qwen) == 2
+    assert "<Query>: q" in qwen[0][0] and "<Instruct>:" in qwen[0][0]
+    assert qwen[0][1].startswith("<Document>: d1") and "<|im_end|>" in qwen[0][1]
+    for name in ("cross-encoder/ms-marco-MiniLM-L-12-v2", "BAAI/bge-reranker-base",
+                 "Alibaba-NLP/gte-reranker-modernbert-base", "vendor/unknown"):
+        plain = rerankers.build_pairs("q", ["d1", "d2"], model_name=name)
+        assert plain == [["q", "d1"], ["q", "d2"]], name
+
+
+@pytest.mark.smoke
+def test_build_pairs_defaults_to_configured_model(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "model_reranker", "BAAI/bge-reranker-base")
+    assert rerankers.build_pairs("q", ["d"]) == [["q", "d"]]
+    monkeypatch.setattr(settings, "model_reranker", "tomaarsen/Qwen3-Reranker-0.6B-seq-cls")
+    assert "<Document>: d" in rerankers.build_pairs("q", ["d"])[0][1]
+
+
+@pytest.mark.smoke
+def test_predict_raw_asks_for_identity_activation():
+    """The single sigmoid is only correct if the model hands back RAW logits:
+    predict must be called with an Identity activation, every time."""
+    model = MagicMock(); model.predict.return_value = [1.0]
+    assert rerankers.predict_raw(model, [["q", "d"]]) == [1.0]
+    fn = model.predict.call_args.kwargs.get("activation_fn")
+    assert fn is rerankers._raw_logits
+    assert fn([0.3, -2.0]) == [0.3, -2.0]
 
 
 @pytest.mark.smoke
@@ -232,42 +262,40 @@ def test_normalize_identity_returns_copy():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.smoke
-def test_rerank_cross_encoder_applies_sigmoid_for_logit_model(monkeypatch):
-    """When MODEL_RERANKER is a ms-marco model, raw model.predict outputs
-    (logits) get squashed to [0,1] before being returned as RerankedItem.score."""
+@pytest.mark.parametrize("name", [
+    "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
+    "BAAI/bge-reranker-base",
+])
+def test_rerank_cross_encoder_sigmoids_raw_logits_for_every_family(monkeypatch, name):
+    """Raw model logits get squashed to [0,1] before being returned as
+    RerankedItem.score — for the production Qwen3 exactly like the others
+    (§17.1124: the model is asked for raw logits, so identity would be wrong)."""
     from app.config import settings
-    monkeypatch.setattr(
-        settings, "model_reranker", "cross-encoder/ms-marco-MiniLM-L-6-v2",
-    )
+    monkeypatch.setattr(settings, "model_reranker", name)
     model = MagicMock()
     # Raw logits — without sigmoid, 5.0 would blow past the 0.8 threshold trivially.
     model.predict.return_value = [-2.0, 0.0, 5.0]
     with patch.object(rerankers, "_get_cross_encoder", return_value=model):
         result = rerankers.rerank_cross_encoder("q", ["a", "b", "c"], top_k=3)
     assert result is not None
-    # All scores in [0, 1] post-normalization.
+    assert "activation_fn" in model.predict.call_args.kwargs, "must score raw logits"
     for it in result.items:
         assert 0.0 <= it.score <= 1.0
-    # Top score is σ(5.0) ≈ 0.9933.
+    # Top score is σ(5.0) ≈ 0.9933; σ(0.0) = 0.5 — middle.
     assert result.items[0].score == pytest.approx(0.9933, abs=1e-3)
-    # σ(0.0) = 0.5 — middle.
     assert any(it.score == pytest.approx(0.5, abs=1e-9) for it in result.items)
 
 
 @pytest.mark.smoke
-def test_rerank_cross_encoder_leaves_qwen3_scores_unchanged(monkeypatch):
-    """The default production reranker (Qwen3) emits ~[0,1] already;
-    identity normalizer must not perturb existing behavior."""
+def test_rerank_cross_encoder_pairs_follow_the_family_template(monkeypatch):
     from app.config import settings
-    monkeypatch.setattr(
-        settings, "model_reranker", "tomaarsen/Qwen3-Reranker-0.6B-seq-cls",
-    )
-    model = MagicMock()
-    model.predict.return_value = [0.2, 0.95, 0.55]
+    model = MagicMock(); model.predict.return_value = [0.0]
+    monkeypatch.setattr(settings, "model_reranker", "tomaarsen/Qwen3-Reranker-0.6B-seq-cls")
     with patch.object(rerankers, "_get_cross_encoder", return_value=model):
-        result = rerankers.rerank_cross_encoder("q", ["a", "b", "c"], top_k=3)
-    assert result is not None
-    # Scores returned unchanged (identity normalizer); 0.95 still the top.
-    assert result.items[0].score == pytest.approx(0.95, abs=1e-9)
-    assert result.items[1].score == pytest.approx(0.55, abs=1e-9)
-    assert result.items[2].score == pytest.approx(0.2, abs=1e-9)
+        rerankers.rerank_cross_encoder("q", ["a"], top_k=1)
+    assert "<Document>: a" in model.predict.call_args.args[0][0][1]
+    monkeypatch.setattr(settings, "model_reranker", "BAAI/bge-reranker-base")
+    with patch.object(rerankers, "_get_cross_encoder", return_value=model):
+        rerankers.rerank_cross_encoder("q", ["a"], top_k=1)
+    assert model.predict.call_args.args[0] == [["q", "a"]]

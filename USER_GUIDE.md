@@ -599,7 +599,7 @@ Nine valve-switchable roles plus two config-locked singletons. Defaults (§17.81
 - **Cloud heavy** (`qwen3.5:latest`) — escalation target for retried nodes
 - **Cloud alt** (`qwen3.5:latest`) — alternate heavy tier
 - **Embedder** (`nomic-embed-text`) — config-locked, dimension-locked at 512d (see "Embedder portability" below)
-- **Reranker** (`tomaarsen/Qwen3-Reranker-0.6B-seq-cls`) — config-locked CrossEncoder singleton
+- **Reranker** (`cross-encoder/ms-marco-MiniLM-L-12-v2`) — config-locked CrossEncoder singleton
 
 `/model set <role> <model>` works for the nine switchable roles. The embedder and reranker need a config change + restart (and the embedder also needs a corpus reindex — see below).
 

@@ -45,3 +45,34 @@ def test_tei_failure_returns_none_not_raise():
          patch.object(settings, "reranker_url", "http://tei:80"):
         assert rerankers.rerank_http("q", ["a"]) is None
     assert rerankers.rerank_http("q", []).items == []
+
+
+def test_http_payload_uses_the_shared_pair_template(monkeypatch):
+    """§17.1124 — the sidecar sees the SAME pair shape as the in-process path:
+    instruct template for Qwen3, plain pair for every other family."""
+    rows = [{"index": 0, "score": 1.0}]
+    for name, wrapped in (("tomaarsen/Qwen3-Reranker-0.6B-seq-cls", True), ("BAAI/bge-reranker-base", False)):
+        client = _client_returning(rows)
+        with patch("httpx.Client", return_value=client), \
+             patch.object(settings, "reranker_url", "http://tei:80"), \
+             patch.object(settings, "model_reranker", name):
+            rerankers.rerank_http("q", ["a"], top_k=1)
+        payload = client.post.call_args.kwargs["json"]
+        assert payload["raw_scores"] is True
+        assert ("<Document>: a" in payload["texts"][0]) is wrapped, name
+        assert ("<Query>: q" in payload["query"]) is wrapped, name
+
+
+def test_sidecar_honours_raw_scores():
+    """The bundled sidecar must hand back RAW logits when asked (TEI contract),
+    or the client's sigmoid lands on already-sigmoided scores (double sigmoid)."""
+    import asyncio
+    from app import reranker_service
+    model = MagicMock(); model.predict.return_value = [3.0]
+    with patch.object(reranker_service, "_get_cross_encoder", return_value=model):
+        out = asyncio.run(reranker_service.rerank(reranker_service.RerankRequest(query="q", texts=["a"], raw_scores=True)))
+    assert out == [{"index": 0, "score": 3.0}]
+    assert model.predict.call_args.kwargs.get("activation_fn") is rerankers._raw_logits
+    with patch.object(reranker_service, "_get_cross_encoder", return_value=model):
+        asyncio.run(reranker_service.rerank(reranker_service.RerankRequest(query="q", texts=["a"], raw_scores=False)))
+    assert "activation_fn" not in model.predict.call_args.kwargs

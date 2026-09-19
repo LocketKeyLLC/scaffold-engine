@@ -311,7 +311,7 @@ services:
       # and rebuilds (`docker compose build scaffold-orchestrator`);
       # no manual Dockerfile edit needed.
       args:
-        MODEL_RERANKER: ${MODEL_RERANKER:-tomaarsen/Qwen3-Reranker-0.6B-seq-cls}
+        MODEL_RERANKER: ${MODEL_RERANKER:-cross-encoder/ms-marco-MiniLM-L-12-v2}
     container_name: scaffold-orchestrator
     logging: *default-logging
     # §17.232 — raised 3g → 6g. The CrossEncoder reranker batch under live
@@ -417,7 +417,7 @@ services:
       # to nomic-embed-text: 137M params (50× smaller), 768-dim native →
       # MRL-truncated to 512 by truncate_and_normalize, ~1s warm on CPU.
       MODEL_EMBEDDER_PIPELINE: nomic-embed-text
-      MODEL_RERANKER: tomaarsen/Qwen3-Reranker-0.6B-seq-cls
+      MODEL_RERANKER: cross-encoder/ms-marco-MiniLM-L-12-v2  # §17.1124 — 26× cheaper per pair than Qwen3-Reranker-0.6B at equal golden-set quality
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_MAX_FILES: "50"
       # §17.801 — bound the research fetch/extract fan-out. The semaphore in

@@ -610,7 +610,7 @@ Source: `app/modules/rag_pipeline.py` (~647 lines).
 1. **Embed query** — `qwen3-embedding:8b` via `model_router`, MRL-truncated to 512d, instruction-prefixed (`"Represent this query for retrieval: "`), Redis-cached at `embedv3:{model}:d{dim}:{hash}` (in-memory LRU + Redis two-tier).
 2. **Parallel search** — vector (COSINE + HNSW_SQ8) + keyword (TextMatch on `content`), via `asyncio.gather`. PyMilvus calls wrapped in `run_in_executor`.
 3. **RRF merge** — Reciprocal Rank Fusion combines results by `_key()` (entry_id; falls back to `content[:200]` when missing — flagged as collision risk).
-4. **CrossEncoder rerank** — `Qwen3-Reranker-0.6B-seq-cls`, in thread executor (`run_in_executor`). Pre-warmed at lifespan startup.
+4. **CrossEncoder rerank** — `cross-encoder/ms-marco-MiniLM-L-12-v2` (§17.1124; was Qwen3-Reranker-0.6B), in thread executor (`run_in_executor`). Pre-warmed at lifespan startup.
 5. **Return top-K** with scores + source URLs + tags.
 
 Domain fan-out: when `domain=None`, iterates `sorted(VALID_DOMAINS)` and fans out one search per partition. Merges by best score per `entry_id`. Single-domain queries use partition-key isolation (one Milvus call).
@@ -1575,7 +1575,7 @@ Source: `app/config.py`. Pydantic Settings — env vars with bounded defaults. R
 | Coder | `MODEL_CODER` | `qwen2.5-coder:7b` |
 | Router/triage/decompose | `MODEL_ROUTER` | `qwen3:4b` |
 | Embedder (config-only) | `MODEL_EMBEDDER_PIPELINE` | `qwen3-embedding:8b` |
-| Reranker (config-only) | `MODEL_RERANKER` | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls` |
+| Reranker (config-only) | `MODEL_RERANKER` | `cross-encoder/ms-marco-MiniLM-L-12-v2` |
 | Cloud heavy | `MODEL_CLOUD_HEAVY` | `qwen3-vl:235b-instruct-cloud` |
 | Cloud alt | `MODEL_CLOUD_ALT` | `qwen3.5:397b-cloud` |
 | Fallback | `MODEL_FALLBACK` | `qwen3.5:latest` |
@@ -2325,7 +2325,7 @@ Every project-specific term you'll see in chat, in CLI output, in the SDK, in co
 
 **RRF (Reciprocal Rank Fusion)** — the algorithm that merges vector-search and keyword-search results. Formula: `score = 1 / (k + rank)`, default `k=60`. See §7.1.
 
-**Reranker** — a CrossEncoder model (`Qwen3-Reranker-0.6B-seq-cls`) that scores query-document pairs more accurately than the initial retrieval. Runs in a thread executor (PyMilvus blocks; CrossEncoder blocks).
+**Reranker** — a CrossEncoder model (`cross-encoder/ms-marco-MiniLM-L-12-v2`, §17.1124) that scores query-document pairs more accurately than the initial retrieval. Runs in a thread executor (PyMilvus blocks; CrossEncoder blocks).
 
 **3-tier ingest** — RAG ingest's dedup policy. Cosine > 0.95 → reject. 0.90–0.95 → version chain (new entry supersedes the matched one). < 0.90 → new entry.
 

@@ -17,7 +17,7 @@ import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app.rerankers import _get_cross_encoder
+from app.rerankers import _get_cross_encoder, predict_raw
 
 logger = logging.getLogger("scaffold")
 app = FastAPI(title="scaffold reranker sidecar", docs_url=None, redoc_url=None)
@@ -51,6 +51,9 @@ async def rerank(req: RerankRequest) -> list[dict]:
     pairs = [[req.query, t] for t in req.texts]
     loop = asyncio.get_running_loop()
     t0 = time.monotonic()
-    scores = await loop.run_in_executor(None, model.predict, pairs)
+    # §17.1124 — honour ``raw_scores`` the way TEI does: hand back the raw
+    # logit so the client's single sigmoid is the only activation applied.
+    scorer = (lambda: predict_raw(model, pairs)) if req.raw_scores else (lambda: model.predict(pairs))
+    scores = await loop.run_in_executor(None, scorer)
     logger.info("reranker_sidecar_scored: docs=%d elapsed_ms=%.0f", len(pairs), (time.monotonic() - t0) * 1000)
     return [{"index": i, "score": float(s)} for i, s in enumerate(scores)]

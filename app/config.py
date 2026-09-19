@@ -378,7 +378,16 @@ class Settings(BaseSettings):
     # incumbent's 3.84s, on the path that gates every NL command.
     model_router: str = "qwen3:4b"  # §17.819 local-safe (tuned cloud pick: gemma4:cloud, §17.993)
     model_embedder_pipeline: str = "nomic-embed-text"
-    model_reranker: str = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
+    # §17.1124 — was tomaarsen/Qwen3-Reranker-0.6B-seq-cls (596M params, 1,392 ms
+    # per pair on this 4-core CPU; the reranker was ~53 of 57 s of a fix turn,
+    # §17.1109). Measured on the golden set (tests/fixtures/golden_set_corpus.json,
+    # 22 queries, live KB): MiniLM-L12 (33M) 54 ms/pair, coverage@5/10 1.0/1.0,
+    # MRR 0.856 vs 0.833, ctx precision 0.834 vs 0.812, ctx recall 1.0 — equal or
+    # better at 1/26 of the cost. gte-reranker-modernbert-base (233 ms) matched
+    # it; bge-reranker-base lost 4 of 22 @5; int8-dynamic on Qwen3 wrecked its
+    # scores (corr 0.21). Scores are raw-logit → sigmoid for every family
+    # (app/rerankers.py), so the 0.8 confidence threshold keeps its meaning.
+    model_reranker: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
     model_coder: str = "qwen2.5-coder:7b"  # §17.819 local-safe (tuned cloud pick: kimi-k2.7-code:cloud, §17.575/498)
     # §17.632 — was qwen3.5:397b-cloud; A/B'd (synthesis probe, 5 reps) →
     # deepseek-v4-pro:cloud is 3.4× faster (5.6s vs 19.2s) at equal reliability
