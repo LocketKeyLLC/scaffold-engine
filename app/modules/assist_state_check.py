@@ -380,7 +380,20 @@ def render_probe_script(probes: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render_probe_message(probes: list[dict], *, checked: int, unchecked: int) -> str:
+def _runner_offer(n: int) -> str:
+    """§17.1105 — at the moment of the paste-back toil, offer the engine's own
+    local runner (it exists but was never suggested). Shown only when no runner
+    is configured; once it is, assist_turn runs the probes itself (§17.1077)."""
+    return (
+        f"\n\n💡 **Don't want to paste {n} command{'s' if n != 1 else ''}?** I can run these "
+        "read-only checks for you — set up the local runner once (**Capabilities → "
+        "\"Let the state check run its own commands\" → Walk me through it**) and from then on "
+        "I run the state check myself, no copy-paste."
+    )
+
+
+def render_probe_message(probes: list[dict], *, checked: int, unchecked: int,
+                         offer_runner: bool = False) -> str:
     if not probes:
         if unchecked:
             return (f"🩺 **State check** — I could not build the checks this time: the model returned no usable "
@@ -397,6 +410,7 @@ def render_probe_message(probes: list[dict], *, checked: int, unchecked: int) ->
         "```bash\n" + render_probe_script(probes) + "\n```\n\n"
         "What each line checks:\n" + what
         + (f"\n\n({unchecked} claim{'s' if unchecked != 1 else ''} cannot be checked from a shell and are left as they are.)" if unchecked else "")
+        + (_runner_offer(len(probes)) if offer_runner else "")
     )
 
 
@@ -585,7 +599,17 @@ async def start_state_check(*, db, session_id: str, node_key: Optional[str], on_
     logger.warning("state_check_started session_id=%s node_key=%s claims=%d probes=%d refused=%d",
                    session_id, pending["node_key"], len(claims), len(probes), len(refused))
     targets = sum(1 for c in claims if c.get("kind") != "pin")
-    return {"message": render_probe_message(probes, checked=len(probes), unchecked=max(0, targets - len(probes))),
+    # §17.1105 — offer the local runner iff it isn't configured (when it is,
+    # assist_turn runs the probes itself and this paste message is never shown).
+    _runner_off = True
+    try:
+        from app.modules import assist_local_runner as _lr
+        _runner_off = (await _lr.runner_spec(db)) is None
+    except Exception:  # noqa: BLE001 — the offer is a courtesy, never blocks
+        _runner_off = True
+    return {"message": render_probe_message(probes, checked=len(probes),
+                                            unchecked=max(0, targets - len(probes)),
+                                            offer_runner=_runner_off),
             "probes": probes, "claims_total": len(claims), "refused": refused,
             "node_key": pending["node_key"]}
 

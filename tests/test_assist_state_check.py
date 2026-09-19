@@ -273,3 +273,16 @@ async def test_judge_strips_destructive_repairs_at_the_source(monkeypatch):
 
 def test_the_judge_prompt_forbids_destructive_repairs():
     assert "never propose" in sc._JUDGE_OPENING and "destructive" in sc._JUDGE_OPENING
+
+
+def test_probe_message_offers_the_local_runner_only_when_unconfigured():
+    """§17.1105 — at the paste-back moment, offer the engine's own local runner
+    when it isn't set up; stay silent (assist_turn runs it) when it is."""
+    from app.modules.assist_state_check import render_probe_message
+    probes = [{"id": "S:T2", "claim": "gpu passthrough", "command": "qm config 106"},
+              {"id": "S:T4", "claim": "zfs pool", "command": "zpool status"}]
+    offered = render_probe_message(probes, checked=2, unchecked=0, offer_runner=True)
+    silent = render_probe_message(probes, checked=2, unchecked=0, offer_runner=False)
+    assert "Capabilities" in offered and "Let the state check run its own commands" in offered
+    assert "run the state check myself" in offered
+    assert "Capabilities" not in silent            # once configured, no nag
