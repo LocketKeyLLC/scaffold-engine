@@ -11,6 +11,30 @@ import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
 import { toast } from "../components.js";
 import * as notify from "../notify.js";
 
+// §17.1113 (ledger U-3) — reconnect policy for a dropped run stream. Exported
+// for the node tests. A dropped stream is not a finished run: the run is
+// detached (§17.1007) and keeps going; the tab re-attaches and skips the
+// frames it already showed.
+export const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
+
+/**
+ * What to do after a stream drop, given the fresh /exec/status (or null when
+ * that call failed too): "reattach" while the run is live, "finished" when
+ * the engine says nothing is running, "retry" while unreachable and attempts
+ * remain, "give_up" on the last failed attempt.
+ */
+export function streamDropDecision(status, attempt, maxAttempts) {
+  if (status && typeof status === "object") {
+    return status.detached_running ? "reattach" : "finished";
+  }
+  return attempt >= maxAttempts ? "give_up" : "retry";
+}
+
+/** Frames to render from a replayed backlog after `seen` were already shown. */
+export function framesAfter(frames, seen) {
+  return Array.isArray(frames) ? frames.slice(Math.max(0, seen | 0)) : [];
+}
+
 const TERMINAL = new Set(["pipeline_complete", "execution_failed", "error", "budget_exhausted", "awaiting_assist"]);
 
 function eventIcon(ev) {
@@ -329,38 +353,84 @@ export function renderTheater(container, jobId, ctx = {}) {
   // know which happened, and must not race to guess.
   function attachRun() { return startRun({ attach: true }); }
 
-  async function startRun({ attach = false } = {}) {
+  // §17.1113 (Phase 1 ledger U-3) — frames this tab has already rendered from
+  // the current run. The broker replays its whole backlog to every new
+  // subscriber, so a re-attach after a dropped stream skips this many.
+  let framesSeen = 0;
+
+  async function startRun({ attach = false, resume = false } = {}) {
     running = true;
     summaryEl.classList.add("hidden");
-    // §17.1007 — the contract, stated up front, and it is now the good one:
-    // the run outlives this tab. (An earlier pass in this same change told the
-    // operator the opposite, which was true right up until the run was
-    // detached server-side.)
-    log("queued", "This run keeps going if you close the tab — reopen it any time to watch. ⚑ Alerts will tell you when it ends.", "ok");
+    if (!resume) {
+      // §17.1007 — the contract, stated up front, and it is now the good one:
+      // the run outlives this tab. (An earlier pass in this same change told the
+      // operator the opposite, which was true right up until the run was
+      // detached server-side.)
+      log("queued", "This run keeps going if you close the tab — reopen it any time to watch. ⚑ Alerts will tell you when it ends.", "ok");
+      framesSeen = 0;
+    }
     runBtn.textContent = "■ Stop";
     runBtn.classList.remove("btn-primary");
     runBtn.classList.add("btn-danger");
     abort = new AbortController();
-    if (!attach) logEl.replaceChildren();
-    log("queued", attach ? "Attached — streaming live events." : "Starting execution…");
+    if (!attach && !resume) logEl.replaceChildren();
+    if (!resume) log("queued", attach ? "Attached — streaming live events." : "Starting execution…");
 
     // cancelled jobs resume; everything else runs execute/all
     const cancelled = lastJobStatus === "cancelled";
     const path = cancelled ? `/jobs/${jobId}/resume` : "/execute/all";
     const body = cancelled ? {} : { job_id: jobId };
 
+    let skip = resume ? framesSeen : 0;
     try {
       for await (const { event, data } of api.stream(path, { body, signal: abort.signal })) {
         if (disposed) break;
+        if (skip > 0) { skip -= 1; continue; }      // already rendered before the drop
+        framesSeen += 1;
         handleEvent(event, data);
         if (TERMINAL.has(event)) break;
       }
     } catch (e) {
-      if (e.name === "AbortError") log("warning", "Stopped by operator.", "warn");
-      else log("error", `Stream error: ${e.message}`, "err");
-    } finally {
-      finishRun();
+      if (e.name === "AbortError") {
+        log("warning", "Stopped by operator.", "warn");
+      } else if (!disposed) {
+        // §17.1113 — a dropped stream is NOT a finished run: the run is
+        // detached and keeps going server-side. Before this, the catch fell
+        // into finishRun(), which reset the button to "▶ Run all" beside a
+        // status pill that said running. Now: reconnect with backoff.
+        log("warning", `Connection lost (${e.message}) — the run continues server-side; reconnecting…`, "warn");
+        const back = await reconnectRun();
+        if (back) return;          // the resumed stream owns finishRun now
+      }
     }
+    // terminal event, operator stop, run ended while disconnected, or every
+    // reconnect attempt failed — the run is over for this tab.
+    if (!disposed) finishRun();
+  }
+
+  // §17.1113 — try to re-attach to the in-flight run. Returns true when a
+  // resumed stream took over (it will call finishRun itself); false when the
+  // run is no longer live or every attempt failed (the caller finishes).
+  async function reconnectRun() {
+    for (let attempt = 1; attempt <= RECONNECT_DELAYS_MS.length; attempt++) {
+      if (disposed || !running) return false;
+      await new Promise((r) => setTimeout(r, RECONNECT_DELAYS_MS[attempt - 1]));
+      let status = null;
+      try { status = await api.get(`/exec/status/${jobId}`); } catch { /* still unreachable */ }
+      const decision = streamDropDecision(status, attempt, RECONNECT_DELAYS_MS.length);
+      if (decision === "finished") {
+        log("queued", "The run ended while this tab was disconnected — showing its final state.", "ok");
+        return false;
+      }
+      if (decision === "reattach") {
+        log("queued", `Reconnected (attempt ${attempt}) — resuming the live stream.`, "ok");
+        startRun({ attach: true, resume: true });   // not awaited: it owns the button now
+        return true;
+      }
+      log("warning", `Still can't reach the engine (attempt ${attempt}/${RECONNECT_DELAYS_MS.length})…`, "warn");
+    }
+    log("error", "Could not reconnect. The run may still be going server-side — reload this tab to re-attach.", "err");
+    return false;
   }
 
   function finishRun() {
