@@ -23,10 +23,19 @@ The dev override mounts `tests/`, the `Makefile`, and docs into the `scaffold-or
 make test
 ```
 
-Or target a specific file inside the container:
+`make test` runs the core suite in a **throwaway** dev container against a dedicated
+`scaffold_engine_test` database (created and migrated on first run by `make test-db`); the live
+orchestrator and the production database are never touched. The suite refuses to start against
+any database whose name does not end in `_test`. Integration-marked tests (they drive the live
+engine) are the explicit `make test-integration` lane.
+
+Or target a specific file (same throwaway container; `make -n test` prints the exact `docker run`):
 
 ```bash
-docker exec scaffold-orchestrator pytest tests/test_<name>.py -v
+make test-db && docker run --rm --network ai-network --env-file .env \
+  -e DATABASE_URL="$(docker exec scaffold-orchestrator printenv DATABASE_URL | sed 's|/scaffold_engine$|/scaffold_engine_test|')" \
+  -e HOME=/tmp --user "$(id -u):$(id -g)" -v "$PWD:/code" -w /code scaffold-engine:dev \
+  pytest tests/test_<name>.py -v
 ```
 
 All tests must pass before a PR is reviewed. If your change touches retrieval, run the retrieval-quality workflow locally where practical (see `.github/workflows/retrieval-quality.yml`).

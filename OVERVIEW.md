@@ -1917,7 +1917,7 @@ Pipeline tests require `--noconftest` because `tests/conftest.py` eager-loads `a
 
 | Target | Effect |
 |---|---|
-| `make test` | Full orchestrator suite (in-container) |
+| `make test` | Core suite — throwaway dev container + dedicated `scaffold_engine_test` DB (§17.1108); `make test-integration` is the explicit live lane |
 | `make test-sdk` | SDK suite (`/code/sdk/tests/`) |
 | `make test-cli` | CLI suite (`/code/cli/tests/`) |
 | `make ci` | CI-safe tests, dev image (no live deps) + bench gates |

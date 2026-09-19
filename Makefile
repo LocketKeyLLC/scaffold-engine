@@ -18,7 +18,7 @@ API_URL   ?= http://localhost:8000
 # §17.854 (audit H7) — completed the phony list: coverage/backup/restore/rebaseline/ci-smoke/
 # test-ui/lint-migrations/check-env-example/check-version/clean-pyc/bench-check-rag-* were real
 # targets missing here, so a same-named file at repo root would make them silently no-op.
-.PHONY: _ensure_dev test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain apply-preset model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
+.PHONY: _ensure_dev _ensure_dev_image test-db test-db-reset test-integration test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain apply-preset model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -53,33 +53,80 @@ _ensure_dev:
 		until docker ps --filter name=^$(CONTAINER)$$ --format '{{.Status}}' | grep -qE 'healthy|Up'; do sleep 2; done; \
 	fi
 
-test: _ensure_dev ## Core suite in dev image, MINUS the pipeline lane (those need --noconftest — see test-pipelines). Run test-all for both.
-	docker exec $(CONTAINER) pytest tests/ --timeout=30 -v --ignore-glob='*/test_scaffold_router_*'
+# §17.1108 (Phase 1 ledger L-2) — every test lane runs in a THROWAWAY dev
+# container against a DEDICATED database. Before this, `make test` swapped the
+# LIVE orchestrator to the dev image and ran the suite inside it against the
+# production database: in 14 days that left 8 test jobs, 3,042 fake-model
+# llm_call_logs rows and 59 false CRITICAL `migration.failed` alerts in the
+# operator's data, and every real alert was buried under them. The §17.934
+# guard blocked the HTTP client, not the DB session.
+#
+# The test database mirrors CI exactly (db/init.sql baseline → SQL runner →
+# alembic head → queue schema) and lives on the composed scaffold-postgres.
+# tests/conftest.py REFUSES to start against any database whose name does not
+# end in `_test` (SCAFFOLD_ALLOW_LIVE_TEST_WRITES=1 overrides, deliberately).
+# The production runtime is never touched; nothing to "restore" afterwards.
+TEST_DB_NAME ?= scaffold_engine_test
+# Same credentials/host as the composed engine, database name swapped — the
+# URL stays single-sourced in compose. Needs scaffold-orchestrator up (every
+# other DB-touching target here reads the URL the same way).
+TEST_DB_URL = $$(docker exec $(CONTAINER) printenv DATABASE_URL | sed 's|/scaffold_engine$$|/$(TEST_DB_NAME)|')
+# Mount set mirrors .github/workflows/test.yml (the image keeps /opt/venv and
+# /code/.cache; pipelines/ is read-write for the valve bootstrap).
+_TEST_MOUNTS = -v $(CURDIR)/app:/code/app:ro -v $(CURDIR)/tests:/code/tests:ro -v $(CURDIR)/cli:/code/cli:ro \
+	-v $(CURDIR)/sdk:/code/sdk:ro -v $(CURDIR)/scripts:/code/scripts:ro -v $(CURDIR)/db:/code/db:ro \
+	-v $(CURDIR)/alembic:/code/alembic:ro -v $(CURDIR)/alembic.ini:/code/alembic.ini:ro -v $(CURDIR)/pipelines:/code/pipelines \
+	-v $(CURDIR)/docs:/code/docs:ro -v $(CURDIR)/pyproject.toml:/code/pyproject.toml:ro -v $(CURDIR)/presets:/code/presets:ro \
+	-v $(CURDIR)/rules:/code/rules:ro -v $(CURDIR)/sgconfig.yml:/code/sgconfig.yml:ro -v $(CURDIR)/.env.example:/code/.env.example:ro \
+	-v $(CURDIR)/Makefile:/code/Makefile:ro
+_TEST_RUN = docker run --rm --network ai-network --env-file .env -e LOG_FILE= -e DATABASE_URL="$(TEST_DB_URL)" \
+	-e SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false -e HOME=/tmp -e COVERAGE_FILE=/tmp/.coverage \
+	--user $$(id -u):$$(id -g) $(_TEST_MOUNTS) -w /code scaffold-engine:dev
 
-test-pipelines: _ensure_dev ## §17.807 — OWUI pipeline tests (test_scaffold_router_*) with --noconftest (tests/conftest.py eager-loads app, shadowing the pipeline mocks)
-	docker exec $(CONTAINER) sh -c 'cd /code && pytest tests/test_scaffold_router_*.py --noconftest --timeout=30 -v'
+_ensure_dev_image:
+	@docker image inspect scaffold-engine:dev >/dev/null 2>&1 \
+	  || { printf '\033[1;36m→ building scaffold-engine:dev\033[0m\n'; docker build --target dev -t scaffold-engine:dev . ; }
 
-test-all: test test-pipelines ## §17.807 — run BOTH lanes: core suite + pipeline --noconftest lane (the full picture)
+test-db: _ensure_dev_image ## §17.1108 — create/upgrade the dedicated TEST database ($(TEST_DB_NAME)) on scaffold-postgres: init.sql baseline + SQL runner + alembic head + queue schema. Idempotent.
+	@if ! docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -tAc "SELECT 1 FROM pg_database WHERE datname='$(TEST_DB_NAME)'" | grep -q 1; then \
+		printf '\033[1;36m→ creating %s from db/init.sql\033[0m\n' '$(TEST_DB_NAME)'; \
+		docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -q -c 'CREATE DATABASE $(TEST_DB_NAME)'; \
+		docker exec -i scaffold-postgres psql -U scaffold -d $(TEST_DB_NAME) -q -v ON_ERROR_STOP=1 < db/init.sql; \
+	fi
+	@$(_TEST_RUN) sh -c 'python -m app.migrations && alembic upgrade head && python -c "import asyncio; from app.queue import apply_schema; asyncio.run(apply_schema())"' 2>&1 | grep -vE '^\{"event"' || true
+	@printf '\033[1;32m✓ test database %s ready\033[0m\n' '$(TEST_DB_NAME)'
 
-coverage: _ensure_dev ## §17.553/554 — app/ unit coverage in dev image; gates at COVERAGE_MIN% (default 77). Excludes validate/integration, so I/O-heavy modules under-report.
-	# COVERAGE_FILE under /tmp: /code is root-owned in the dev image but tests
-	# run as uid 1000, so coverage's default CWD-relative .coverage SQLite DB
-	# is unwritable (X.28, same as cache_dir). Env var beats config + survives
-	# a stale baked pyproject.
-	docker exec -e COVERAGE_FILE=/tmp/.coverage $(CONTAINER) pytest tests/ -m "not validate" --timeout=30 -q \
+test-db-reset: ## §17.1108 — drop and recreate the TEST database (never touches scaffold_engine)
+	docker exec scaffold-postgres psql -U scaffold -d scaffold_engine -c 'DROP DATABASE IF EXISTS $(TEST_DB_NAME)'
+	$(MAKE) test-db
+
+test: test-db ## Core suite in a THROWAWAY dev container against $(TEST_DB_NAME) (§17.1108), MINUS the pipeline lane (see test-pipelines) and MINUS integration-marked tests (see test-integration). Run test-all for both unit lanes.
+	$(_TEST_RUN) pytest tests/ --timeout=30 -v -m "not integration" --ignore-glob='*/test_scaffold_router_*'
+
+test-integration: _ensure_dev ## §17.1108 — the integration-marked lane. DELIBERATELY drives the LIVE engine (tests/integration + tests/test_integration.py post to localhost:8000 inside the orchestrator); swaps the live container to the dev image. Restore with `make build`.
+	@printf '\033[1;33m⚠ integration lane: runs INSIDE the live orchestrator and writes real jobs to scaffold_engine. Ctrl-C now if that is not intended.\033[0m\n'; sleep 3
+	docker exec $(CONTAINER) pytest tests/ --timeout=900 -v -m integration --ignore-glob='*/test_scaffold_router_*'
+
+test-pipelines: _ensure_dev_image ## §17.807 — OWUI pipeline tests (test_scaffold_router_*) with --noconftest (tests/conftest.py eager-loads app, shadowing the pipeline mocks); throwaway container (§17.1108)
+	$(_TEST_RUN) sh -c 'cd /code && pytest tests/test_scaffold_router_*.py --noconftest --timeout=30 -v'
+
+test-all: test test-pipelines ## §17.807 — run BOTH unit lanes: core suite + pipeline --noconftest lane (the full picture)
+
+coverage: test-db ## §17.553/554 — app/ unit coverage (throwaway dev container, test DB); gates at COVERAGE_MIN% (default 77). Excludes validate/integration, so I/O-heavy modules under-report.
+	$(_TEST_RUN) pytest tests/ -m "not validate and not integration" --timeout=30 -q \
 		--cov=app --cov-branch \
 		--cov-report=term-missing:skip-covered \
 		--cov-report=xml:/tmp/coverage.xml \
 		--cov-fail-under=$(COVERAGE_MIN)
 
-test-cli: _ensure_dev ## Run scaffold CLI tests (cli/tests/) inside the dev container
-	docker exec $(CONTAINER) sh -c "cd /code/cli && python -m pytest tests/ --timeout=10 -v"
+test-cli: _ensure_dev_image ## Run scaffold CLI tests (cli/tests/) in a throwaway dev container
+	$(_TEST_RUN) sh -c "cd /code/cli && python -m pytest tests/ --timeout=10 -v"
 
-test-sdk: _ensure_dev ## Run scaffold SDK tests (sdk/tests/) inside the dev container
-	docker exec $(CONTAINER) sh -c "cd /code/sdk && python -m pytest tests/ --timeout=10 -v"
+test-sdk: _ensure_dev_image ## Run scaffold SDK tests (sdk/tests/) in a throwaway dev container
+	$(_TEST_RUN) sh -c "cd /code/sdk && python -m pytest tests/ --timeout=10 -v"
 
-agent: _ensure_dev ## Run execution agent tests only (dev image)
-	docker exec $(CONTAINER) pytest tests/test_execution_agent.py -m smoke --timeout=30 -v
+agent: test-db ## Run execution agent tests only (throwaway dev container)
+	$(_TEST_RUN) pytest tests/test_execution_agent.py -m smoke --timeout=30 -v
 
 # §17.358 — `make eval` removed. tests/eval_retrieval.py + tests/ground_truth.json
 # were retired (Tier-2 #15 from §17.29). The canonical retrieval eval is now
@@ -209,6 +256,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_assist_help_wiring.py \
 			tests/test_assist_fix_no_double_capture.py \
 			tests/test_ast_grep_rules.py \
+			tests/test_test_db_isolation.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
 	else \
 		printf '\033[1;33m⚠ host pytest not found — skipped the inventory scans (byte-equal gates above still ran). Full coverage: make test\033[0m\n'; \
