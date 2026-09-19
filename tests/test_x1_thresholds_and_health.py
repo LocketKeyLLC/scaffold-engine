@@ -80,6 +80,13 @@ class TestCheckRerankerState:
     on /health. Six branches: up / down / skipped / unknown / state=None /
     state with no flags."""
 
+    @pytest.fixture(autouse=True)
+    def _loader_not_failed(self, monkeypatch):
+        """§17.1129 — pin the precondition instead of inheriting process
+        state: another file's TestClient(app) lifespan can leave the loader
+        flagged failed (5-min cooldown), which made every branch read 'down'."""
+        monkeypatch.setattr("app.rerankers.reranker_load_failed", lambda: False)
+
     def test_up_when_prewarmed_at_set(self):
         from app.main import _check_reranker_state
 

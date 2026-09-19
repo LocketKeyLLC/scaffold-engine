@@ -98,6 +98,19 @@ def test_core_lane_excludes_integration_and_uses_the_test_db():
     assert "test: test-db" in src, "the core lane provisions the test DB first"
 
 
+def test_unit_lane_never_loads_the_real_reranker():
+    """§17.1129 — the lifespan prewarm inside every ``TestClient(app)`` was
+    loading the REAL CrossEncoder in unit tests: a Hub download in CI, and a
+    permission-denied on the root-owned repo cache locally that flagged the
+    loader 'down' for 5 minutes and failed the health tests that ran after
+    it. The lane disables the prewarm and Hub access outright."""
+    src = (ROOT / "Makefile").read_text(encoding="utf-8")
+    m = re.search(r"_TEST_RUN = docker run(?:.*\\\n)*.*scaffold-engine:dev", src)
+    assert m, "_TEST_RUN definition not found"
+    assert "-e SCAFFOLD_PREWARM_RERANKER=false" in m.group(0)
+    assert "-e HF_HUB_OFFLINE=1" in m.group(0)
+
+
 def test_integration_lane_is_explicit_and_loud():
     block = _recipe("test-integration")
     assert "-m integration" in block
@@ -116,3 +129,12 @@ def test_ci_uses_a_test_named_database():
     wf = _CI_WORKFLOW.read_text(encoding="utf-8")
     assert "scaffold_engine_test" in wf
     assert not re.search(r"\bscaffold_engine\b", wf), "CI's throwaway Postgres must carry the _test name too"
+
+
+@pytest.mark.skipif(not (ROOT / "docker-compose.dev.yml").exists() or not _CI_WORKFLOW.exists(),
+                    reason="host-only static gate — runs in `make ci-tier-0`, not the container lane")
+def test_ci_unit_jobs_never_load_the_real_reranker():
+    """§17.1129 — same rule as the local lane (see test_unit_lane_never_loads_the_real_reranker)."""
+    wf = _CI_WORKFLOW.read_text(encoding="utf-8")
+    assert re.search(r'^\s+SCAFFOLD_PREWARM_RERANKER: "false"$', wf, re.M)
+    assert re.search(r'^\s+HF_HUB_OFFLINE: "1"$', wf, re.M)

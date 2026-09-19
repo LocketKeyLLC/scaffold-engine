@@ -36,6 +36,12 @@ env:
   SCAFFOLD_API_KEY: ci-test-key
   HF_HUB_DISABLE_TELEMETRY: "1"
   TOKENIZERS_PARALLELISM: "false"
+  # §17.1129 — unit lanes never load the REAL CrossEncoder: no lifespan
+  # prewarm (TestClient(app) was downloading the reranker in CI and failing
+  # on a root-owned cache locally, leaving the loader flagged "down" for
+  # 5 min) and no Hub access.
+  SCAFFOLD_PREWARM_RERANKER: "false"
+  HF_HUB_OFFLINE: "1"
   PYTHONPATH: /code
   # §17.555 — app/ coverage floor for the unit-test job. 77 = ~4-5 pts under
   # the measured baselines (81% in this scope, 82% for `-m "not validate"`);

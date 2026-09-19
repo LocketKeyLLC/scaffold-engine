@@ -81,6 +81,7 @@ _TEST_MOUNTS = -v $(CURDIR)/app:/code/app:ro -v $(CURDIR)/tests:/code/tests:ro -
 	-v $(CURDIR)/Makefile:/code/Makefile:ro
 _TEST_RUN = docker run --rm --network ai-network --env-file .env -e LOG_FILE= -e DATABASE_URL="$(TEST_DB_URL)" \
 	-e SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false -e HOME=/tmp -e COVERAGE_FILE=/tmp/.coverage \
+	-e SCAFFOLD_PREWARM_RERANKER=false -e HF_HUB_OFFLINE=1 \
 	--user $$(id -u):$$(id -g) $(_TEST_MOUNTS) -w /code scaffold-engine:dev
 
 _ensure_dev_image:

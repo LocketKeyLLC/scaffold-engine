@@ -231,7 +231,7 @@ class TestDockerfileReranker:
         prior version of this test only scanned RUN args and failed
         post-parameterization. Pin both halves of the contract:
 
-          1. An ARG line has ``MODEL_RERANKER=tomaarsen/Qwen3-Reranker-0.6B-seq-cls``
+          1. An ARG line has ``MODEL_RERANKER=<settings.model_reranker default>``
           2. The snapshot_download RUN step references ``${MODEL_RERANKER}``
              (or the literal name, for backward-compat with future un-
              parameterized rewrites — either form is correct as long as
@@ -243,15 +243,20 @@ class TestDockerfileReranker:
         wouldn't equal the ARG); a parameterized Dockerfile pointing at
         the canonical model (passes both).
         """
+        # §17.1129 — the canonical name is the config default (one source of
+        # truth, kept aligned with the Dockerfile ARG + .env.example by
+        # `make check-rerank-drift`); a literal here went stale at §17.1124.
+        from app.config import Settings
+        canonical_model = Settings.model_fields["model_reranker"].default
         arg_steps = [args for op, args in instructions if op == "ARG"]
-        canonical_arg = "MODEL_RERANKER=tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
+        canonical_arg = f"MODEL_RERANKER={canonical_model}"
         assert any(canonical_arg in a for a in arg_steps), (
             f"No ARG line sets {canonical_arg!r}; "
             f"saw ARGs: {arg_steps!r}"
         )
         run_steps = [args for op, args in instructions if op == "RUN"]
         download_refs_model = any(
-            "${MODEL_RERANKER}" in r or "Qwen3-Reranker-0.6B-seq-cls" in r
+            "${MODEL_RERANKER}" in r or canonical_model.split("/")[-1] in r
             for r in run_steps
         )
         assert download_refs_model, (

@@ -108,6 +108,7 @@ def _call_health(pg_up=True, ollama_up=True, milvus_up=True, pg_base_exc=False):
 
     async def do_call():
         with patch("app.main.engine", mock_engine), \
+             patch("app.rerankers.reranker_load_failed", return_value=False), \
              patch(
                  "app.utils.http_clients.get_ollama_client",
                  return_value=mock_ollama_client,
@@ -263,6 +264,7 @@ def _call_health_with_sidecars(*, ngspice_up=True, verilator_up=True, symbiyosys
 
     async def do_call():
         with patch("app.main.engine", mock_engine), \
+             patch("app.rerankers.reranker_load_failed", return_value=False), \
              patch("app.utils.http_clients.get_ollama_client", return_value=mock_ollama_client), \
              patch("app.main.get_milvus_client", return_value=mock_milvus_client), \
              patch("app.utils.embedding_cache.get_cache", return_value=mock_cache), \
@@ -445,6 +447,7 @@ def _call_health_with_calibration(*, last_row=None, db_raises=False):
 
     async def do_call():
         with patch("app.main.engine", mock_engine), \
+             patch("app.rerankers.reranker_load_failed", return_value=False), \
              patch(
                  "app.utils.http_clients.get_ollama_client",
                  return_value=mock_ollama_client,
@@ -654,6 +657,7 @@ def _call_health_with_oom(*, rows=None, host_rows=None, db_raises=False, window_
             _settings.oom_alerts_health_window_hours = window_hours
         try:
             with patch("app.main.engine", mock_engine), \
+             patch("app.rerankers.reranker_load_failed", return_value=False), \
                  patch(
                      "app.utils.http_clients.get_ollama_client",
                      return_value=mock_ollama_client,
