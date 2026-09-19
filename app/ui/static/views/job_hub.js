@@ -191,7 +191,15 @@ export default function jobHub(container, params) {
 
   const tabRow = el(
     "div",
-    { class: "job-tabs", role: "tablist" },
+    { class: "job-tabs", role: "tablist", onKeydown: (e) => {   // §17.1118 — arrow keys move between tabs
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      const tabs = Array.from(e.currentTarget.querySelectorAll('[role="tab"]'));
+      const i = tabs.indexOf(document.activeElement);
+      if (i === -1) return;
+      e.preventDefault();
+      const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+      next.focus(); next.click();
+    } },
     ...TABS.map(([key, label]) => {
       const a = el("a", {
         class: "job-tab" + (key === tab ? " active" : ""),

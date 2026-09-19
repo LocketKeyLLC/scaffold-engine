@@ -332,7 +332,7 @@ export default function research(container, params) {
         el("h2", { class: "audit-title", text: `Provenance audit · ${meta.topic || shortId(sessionId)}` }),
         el("span", { class: "spacer" }),
         statusBadge(meta.status),
-        el("button", { class: "btn btn-sm btn-ghost", text: "✕", onClick: () => (location.hash = "#/research") })
+        el("button", { class: "btn btn-sm btn-ghost", text: "✕", "aria-label": "Close", onClick: () => (location.hash = "#/research") })
       );
       const stats = el("div", { class: "summary-stats audit-stats" },
         stat("Provenance rows", fmtNum(t.provenance_rows)),

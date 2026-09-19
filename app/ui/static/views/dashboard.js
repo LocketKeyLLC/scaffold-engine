@@ -88,18 +88,35 @@ function workCard(job) {
 // §17.818 (plan 5.6) — live progress/ETA chip on in-flight cards, filled
 // lazily from /exec/status (compute-on-read §17.811 snapshot). Only jobs
 // actually executing get the extra request; everything else renders nothing.
+// §17.1118 (ledger U-10) — the chips register themselves; one batched
+// `/exec/statuses` call per dashboard tick fills them all (was one
+// `/exec/status/{id}` per executing job, every 10 s).
+const pendingChips = new Map();
 function progressChip(job) {
   if (!["executing", "running", "assisted_executing", "assisted_running"].includes(job.status)) return null;
   const chip = el("span", { class: "tag prog-chip", text: "…" });
-  api.get(`/exec/status/${job.id}`)
-    .then((d) => {
-      const pr = d.progress;
-      if (!pr || pr.total == null) { chip.remove(); return; }
-      chip.textContent = `${pr.pct ?? 0}%` + (pr.eta_human ? ` · ~${pr.eta_human}` : "");
-      chip.title = pr.summary || "";
-    })
-    .catch(() => chip.remove());
+  pendingChips.set(job.id, chip);
   return chip;
+}
+export function applyProgress(chip, d) {
+  const pr = d && d.progress;
+  if (!pr || pr.total == null) { chip.remove(); return false; }
+  chip.textContent = `${pr.pct ?? 0}%` + (pr.eta_human ? ` · ~${pr.eta_human}` : "");
+  chip.title = pr.summary || "";
+  return true;
+}
+async function fillProgressChips() {
+  const ids = [...pendingChips.keys()];
+  if (!ids.length) return;
+  const chips = new Map(pendingChips);
+  pendingChips.clear();
+  try {
+    const res = await api.get("/exec/statuses", { query: { ids: ids.join(",") } });
+    const statuses = (res && res.statuses) || {};
+    for (const [id, chip] of chips) applyProgress(chip, statuses[id]);
+  } catch {
+    for (const chip of chips.values()) chip.remove();
+  }
 }
 
 function recentRow(job) {
@@ -146,21 +163,29 @@ export default function dashboard(container) {
   );
   mount(outlet, loading("Loading system status…"));
 
+  // §17.1118 (ledger U-10) — enrichment (health, roles, account) changes
+  // slowly; refresh it on the first tick and every sixth (60 s), not every 10 s.
+  let tickN = 0;
+  let enrichment = { health: null, roles: null, account: null };
   async function load() {
     if (disposed) return;
     try {
       // Health + roles are enrichment — fail-soft to null so a degraded
       // orchestrator (or a non-admin key on /models/roles) still renders
       // the core dashboard.
+      const refreshEnrichment = tickN % 6 === 0;
+      tickN += 1;
       const [status, work, health, roles, account] = await Promise.all([
         api.get("/status"),
         api.get("/work"),
-        api.health().catch(() => null),
-        api.get("/models/roles").catch(() => null),
-        api.accountStatus(),
+        refreshEnrichment ? api.health().catch(() => null) : Promise.resolve(enrichment.health),
+        refreshEnrichment ? api.get("/models/roles").catch(() => null) : Promise.resolve(enrichment.roles),
+        refreshEnrichment ? api.accountStatus() : Promise.resolve(enrichment.account),
       ]);
       if (disposed) return;
+      enrichment = { health, roles, account };
       render(status, work, health, roles, account);
+      fillProgressChips();
     } catch (e) {
       if (!disposed) mount(outlet, errorPanel(e, () => load()));
     }

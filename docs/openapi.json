@@ -7914,6 +7914,51 @@
         "summary": "Exec Status"
       }
     },
+    "/exec/statuses": {
+      "get": {
+        "description": "§17.1118 (Phase 1 ledger U-10) — execution state for SEVERAL jobs in one\nround trip. The dashboard polled `/exec/status/{id}` once per executing job\nevery 10 s (N+1). Same per-job payload as `/exec/status/{id}` (including\n`detached_running`); ids that are invalid, not visible to the principal, or\nhave no execution state are listed under `missing` rather than failing the\nwhole call.",
+        "operationId": "exec_statuses_exec_statuses_get",
+        "parameters": [
+          {
+            "description": "comma-separated job ids (max 50)",
+            "in": "query",
+            "name": "ids",
+            "required": true,
+            "schema": {
+              "description": "comma-separated job ids (max 50)",
+              "title": "Ids",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Exec Statuses"
+      }
+    },
     "/execute": {
       "post": {
         "description": "Step 15: Execute the next pending DAG node for a job.\n\nNo request-scoped DB dependency: execute_next_node manages its own\nshort-lived sessions, and the §17.810 ownership check opens its own.",

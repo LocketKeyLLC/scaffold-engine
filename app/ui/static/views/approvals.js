@@ -275,7 +275,7 @@ function renderList(container) {
   }
 
   load();
-  timer = setInterval(load, 10000);
+  timer = setInterval(() => { if (!document.hidden) load(); }, 10000);   // §17.1118 — skip hidden tabs
 
   return () => {
     disposed = true;
@@ -397,7 +397,7 @@ export function renderApprovalDetail(container, jobId) {
 
   function startWaitPoll() {
     if (pollTimer) return;
-    pollTimer = setInterval(load, 4000);
+    pollTimer = setInterval(() => { if (!document.hidden) load(); }, 4000);   // §17.1118 — skip hidden tabs
   }
   function stopWaitPoll() {
     if (pollTimer) {

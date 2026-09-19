@@ -5,7 +5,7 @@
 // / assist_guide_done). Message composer persists via /assist/{id}/turn.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, fmtDate, mdToHtml, stickyScroll, selectionWithin } from "../util.js";
-import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, emptyState, openDialog } from "../components.js";
 import { briefPanel } from "./brief_panel.js";
 
 import { storage } from "../storage.js";
@@ -618,7 +618,7 @@ export function renderChat(container, sessionId, opts = {}) {
   // §17.1055 — three tiers, not one row of nine: the primary verb, the four
   // the loop uses every few turns, and the escape hatches behind "⋯ More".
   const moreMenu = el("details", { class: "verbs-more" },
-    el("summary", { class: "btn btn-sm btn-ghost", title: "More step actions", text: "⋯" }));
+    el("summary", { class: "btn btn-sm btn-ghost", title: "More step actions", "aria-label": "More step actions", text: "⋯" }));
   const verbsBar = el(
     "div",
     { class: "row row-wrap assist-verbs" },
@@ -713,7 +713,7 @@ export function renderChat(container, sessionId, opts = {}) {
   // modal): a plain toggled panel.
   const helpPanel = el("div", { class: "assist-help", hidden: true });
   function buildHelp() {
-    const close = el("button", { class: "btn btn-sm btn-ghost assist-help-close", text: "✕", title: "Close help", onClick: () => toggleHelp(false) });
+    const close = el("button", { class: "btn btn-sm btn-ghost assist-help-close", text: "✕", title: "Close help", "aria-label": "Close help", onClick: () => toggleHelp(false) });
     const secs = helpSections().map((s) =>
       el("section", { class: "assist-help-sec" },
         el("h3", { text: s.heading }),
@@ -877,6 +877,7 @@ export function renderChat(container, sessionId, opts = {}) {
         nk ? el("button", {
             class: "btn btn-ghost btn-sm plan-strip-help",
             title: "How assist mode works: ✦ Guide me → do it on your machine → paste what happened → ✓ Done",
+            "aria-label": "How assist mode works",
             text: "?",
             onClick: () => {
               const host = stepHero.parentNode;
@@ -885,7 +886,7 @@ export function renderChat(container, sessionId, opts = {}) {
               if (card) host.insertBefore(card, stepHero);
             },
           }) : null,
-        embedded ? el("button", { class: "btn btn-ghost btn-sm", title: "Reload the conversation and step state", text: "↻", onClick: () => load() }) : null),
+        embedded ? el("button", { class: "btn btn-ghost btn-sm", title: "Reload the conversation and step state", "aria-label": "Reload the conversation and step state", text: "↻", onClick: () => load() }) : null),
       el("div", { class: "plan-bar", title: `${done} of ${total} steps finished` },
         el("div", { class: "plan-bar-fill", style: `width:${pct}%` })),
       el("div", { class: "plan-strip-now" },
@@ -1171,7 +1172,7 @@ export function renderChat(container, sessionId, opts = {}) {
       ...Object.entries(subs).map(([k, v]) =>
         el("div", { class: "bp-item" },
           el("span", { class: "bp-item-text mono", text: `${k} = ${v}` }),
-          el("button", { class: "btn btn-ghost btn-sm bp-remove", text: "✕", title: "Clear this pin", onClick: () => putSub(k, "") }))),
+          el("button", { class: "btn btn-ghost btn-sm bp-remove", text: "✕", title: "Clear this pin", "aria-label": "Clear this pin", onClick: () => putSub(k, "") }))),
       el("div", { class: "row bp-add-row" }, keyIn, valIn, el("button", { class: "btn btn-sm", text: "＋ Pin", onClick: add }))
     );
   }
@@ -1354,7 +1355,7 @@ export function renderChat(container, sessionId, opts = {}) {
 
   // The outcome popup — brief, centred, with the REAL counts (§17.865).
   const ackPopup = (icon, title, body) => {
-    const overlay = el("div", { class: "ack-overlay" },
+    const overlay = el("div", { class: "ack-overlay", role: "status", "aria-live": "polite" },   // §17.1118 — announced, not focus-stealing
       el("div", { class: "card ack-card" },
         el("span", { class: "ack-icon", text: icon }),
         el("strong", { text: title }),
@@ -1381,8 +1382,11 @@ export function renderChat(container, sessionId, opts = {}) {
       .filter((k) => counts[k])
       .map((k) => `${counts[k]} to ${k}`).join(" · ");
 
-    let overlay = null;
-    const closeModal = () => { if (overlay) { overlay.remove(); overlay = null; } };
+    let overlay = null, dialog = null;
+    const closeModal = () => {
+      if (dialog) { dialog.close(); dialog = null; }      // §17.1118 — restore focus
+      if (overlay) { overlay.remove(); overlay = null; }
+    };
 
     const resolve = async (decision) => {
       const n = changes.length;
@@ -1434,7 +1438,7 @@ export function renderChat(container, sessionId, opts = {}) {
         el("div", { class: "card modal-card replan-modal" },
           el("div", { class: "modal-head" },
             el("strong", { text: "📋 This changes the plan" }),
-            el("button", { class: "btn btn-ghost btn-sm", text: "✕",
+            el("button", { class: "btn btn-ghost btn-sm", text: "✕", "aria-label": "Close",
               onClick: () => { closeModal(); renderChip(); } })),
           // WHY — the operator's own words are the cause; show them.
           p.note_text
@@ -1457,6 +1461,11 @@ export function renderChat(container, sessionId, opts = {}) {
         if (ev.target === overlay) { closeModal(); renderChip(); }
       });
       document.body.append(overlay);
+      // §17.1118 (ledger U-11) — a real dialog: role, focus moved in, Tab
+      // kept inside, Escape closes, focus returned to the Review chip.
+      dialog = openDialog(overlay.firstElementChild, {
+        label: "Plan change proposal", onClose: () => { closeModal(); renderChip(); },
+      });
     };
 
     const renderChip = () => {
@@ -1723,7 +1732,7 @@ export function renderChat(container, sessionId, opts = {}) {
   // surfaces within half a minute instead of on the next turn. The proposal
   // renderer dedupes by signature, so a repeat read draws nothing twice.
   const idlePoll = setInterval(async () => {
-    if (disposed || guiding) return;
+    if (disposed || guiding || document.hidden) return;   // §17.1118 — skip hidden tabs
     try {
       const s = await api.get(`/assist/${sessionId}`);
       if (disposed || guiding) return;
