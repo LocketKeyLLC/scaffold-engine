@@ -9,6 +9,30 @@ import { statusBadge, loading, errorPanel, toast, emptyState } from "../componen
 import { flowGuide } from "./flow_guide.js";
 import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
 
+// §17.1113 (ledger U-2) — the approve chain's outcome, typed. Exported for the
+// node tests: the bug this replaces was a null outcome read as success.
+export const CHAIN_POLL_MS = 2500;
+export const CHAIN_TIMEOUT_MS = 60 * 60 * 1000;
+export const CHAIN_UNREACHABLE_AFTER = 12;   // ~30 s of consecutive failed polls
+
+/** The chain state → a terminal outcome, or null while it is still running. */
+export function chainOutcome(st) {
+  if (!st || typeof st !== "object") return null;
+  if (st.chain === "done") return { chain: "done", phase: st.phase };
+  if (st.chain === "error") return { chain: "error", error: st.error || "unknown error" };
+  if (st.chain === "idle" && (st.node_count || 0) > 0) return { chain: "done", phase: st.phase };
+  return null;
+}
+
+/** Operator-facing sentence for a non-done outcome. Never says "approved". */
+export function chainFailureText(out) {
+  const kind = out && out.chain;
+  if (kind === "error") return `The engine could not finish approving: ${out.error || "unknown error"}.`;
+  if (kind === "unreachable") return `Lost contact with the engine while it was approving (${out.error || "no response"}). The chain may still be running server-side.`;
+  if (kind === "timeout") return "The approve chain has not finished after an hour. It may still be running server-side.";
+  return "The approve chain ended without a result.";
+}
+
 import { storage } from "../storage.js";
 
 // Phase 1 in flight — feasibility not ready for approval yet (e.g. a job just
@@ -557,23 +581,38 @@ export function renderApprovalDetail(container, jobId) {
   // §17.1036 — poll the server-owned chain until it is done (or errors).
   // Reloading this page mid-chain is fine: the chain keeps running and the
   // job page's own flow guide picks it up from status.
+  //
+  // §17.1113 (Phase 1 ledger U-2) — this used to swallow EVERY error, loop for
+  // an hour, then return null, and the caller read null as success: "Approved
+  // — plan generated" over a chain that never answered. Now the loop returns
+  // a typed outcome (`chainOutcome`): `unreachable` after
+  // CHAIN_UNREACHABLE_AFTER consecutive failed polls (the engine is down or
+  // this tab lost the network), `timeout` at the hour, and the caller never
+  // claims success for either. Failed polls are shown on the progress line
+  // as they happen, not hidden.
   async function waitForChain() {
     const t0 = Date.now();
-    while (!disposed && Date.now() - t0 < 60 * 60 * 1000) {
+    let failures = 0;
+    while (!disposed && Date.now() - t0 < CHAIN_TIMEOUT_MS) {
       try {
         const st = await api.get(`/jobs/${jobId}/approve`);
+        failures = 0;
         const phaseText = { research: "Researching & compiling…", planning: "Generating plan (DAG)…",
           assist: "Starting the guided walkthrough…", execute: "Starting execution…" }[st.phase];
         const line = progress.querySelector(".progress-msg");
         if (line && phaseText) line.textContent = phaseText;
-        if (st.chain === "done" || st.chain === "error") return st;
-        if (st.chain === "idle" && st.node_count > 0) return { chain: "done" };
-      } catch {
-        /* transient */
+        const out = chainOutcome(st);
+        if (out) return out;
+      } catch (e) {
+        failures += 1;
+        const line = progress.querySelector(".progress-msg");
+        if (line) line.textContent = `Could not reach the engine (${failures}/${CHAIN_UNREACHABLE_AFTER}) — retrying… ${e.detail || e.message || ""}`.trim();
+        if (failures >= CHAIN_UNREACHABLE_AFTER)
+          return { chain: "unreachable", error: e.detail || e.message || "no response" };
       }
-      await new Promise((r) => setTimeout(r, 2500));
+      await new Promise((r) => setTimeout(r, CHAIN_POLL_MS));
     }
-    return null;
+    return { chain: "timeout" };
   }
 
   async function approve() {
@@ -601,9 +640,17 @@ export function renderApprovalDetail(container, jobId) {
       if (disposed) return;
       const state = await waitForChain();
       if (disposed) return;
-      if (state && state.chain === "error") {
-        toast(`The engine could not finish approving: ${state.error || "unknown error"}`, "err");
-        router.navigate(`/job/${jobId}`);
+      if (state.chain !== "done") {
+        // §17.1113 — error / unreachable / timeout: say what is known, never
+        // "approved". The chain may well still be running server-side, so the
+        // message names the job page (whose flow guide reads the real status)
+        // and the panel stays put with the operator's answers intact.
+        toast(chainFailureText(state), "err");
+        progress.classList.remove("hidden");
+        mount(progress, el("span", { text: "⚠ " }),
+          el("span", { class: "progress-msg", text: chainFailureText(state) + " Open the job page to see its actual state." }),
+          el("a", { href: `#/job/${jobId}`, class: "btn btn-sm", text: "Open job" }));
+        setBusy(false);
         return;
       }
       if (assist) {
