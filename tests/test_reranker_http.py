@@ -67,13 +67,12 @@ def test_sidecar_honours_raw_scores():
     """The bundled sidecar must hand back RAW logits when asked (TEI contract),
     or the client's sigmoid lands on already-sigmoided scores (double sigmoid)."""
     import asyncio
-    import torch
     from app import reranker_service
     model = MagicMock(); model.predict.return_value = [3.0]
     with patch.object(reranker_service, "_get_cross_encoder", return_value=model):
         out = asyncio.run(reranker_service.rerank(reranker_service.RerankRequest(query="q", texts=["a"], raw_scores=True)))
     assert out == [{"index": 0, "score": 3.0}]
-    assert isinstance(model.predict.call_args.kwargs.get("activation_fn"), torch.nn.Identity)
+    assert model.predict.call_args.kwargs.get("activation_fn") is rerankers._raw_logits
     with patch.object(reranker_service, "_get_cross_encoder", return_value=model):
         asyncio.run(reranker_service.rerank(reranker_service.RerankRequest(query="q", texts=["a"], raw_scores=False)))
     assert "activation_fn" not in model.predict.call_args.kwargs

@@ -224,11 +224,11 @@ def test_build_pairs_defaults_to_configured_model(monkeypatch):
 def test_predict_raw_asks_for_identity_activation():
     """The single sigmoid is only correct if the model hands back RAW logits:
     predict must be called with an Identity activation, every time."""
-    import torch
     model = MagicMock(); model.predict.return_value = [1.0]
     assert rerankers.predict_raw(model, [["q", "d"]]) == [1.0]
-    kwargs = model.predict.call_args.kwargs
-    assert isinstance(kwargs.get("activation_fn"), torch.nn.Identity)
+    fn = model.predict.call_args.kwargs.get("activation_fn")
+    assert fn is rerankers._raw_logits
+    assert fn([0.3, -2.0]) == [0.3, -2.0]
 
 
 @pytest.mark.smoke

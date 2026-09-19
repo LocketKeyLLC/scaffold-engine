@@ -103,18 +103,24 @@ def build_pairs(
     return [[query, d] for d in documents]
 
 
+def _raw_logits(scores):
+    """Identity activation: hand the model's logits back untouched."""
+    return scores
+
+
 def predict_raw(model, pairs: list[list[str]]):
     """Score pairs as RAW logits, whatever the model's default activation.
 
     sentence-transformers ≥ 3 picks a per-model default activation inside
-    ``predict`` (Sigmoid for Qwen3/bge/gte, Identity for ms-marco); passing
-    ``Identity`` explicitly is what makes the single sigmoid in
-    ``get_score_range_info`` correct for every family. No fallback on
-    purpose: a ``predict`` that rejects the kwarg would silently reintroduce
-    the double sigmoid, and the pinned sentence-transformers accepts it.
+    ``predict`` (Sigmoid for Qwen3/bge/gte, Identity for ms-marco) unless an
+    ``activation_fn`` callable is passed; passing the identity explicitly is
+    what makes the single sigmoid in ``get_score_range_info`` correct for
+    every family. A plain callable (no torch import — the smoke CI lane has
+    none) is applied as ``activation_fn(scores)``. No fallback on purpose: a
+    ``predict`` that rejects the kwarg would silently reintroduce the double
+    sigmoid, and the pinned sentence-transformers accepts it.
     """
-    import torch
-    return model.predict(pairs, activation_fn=torch.nn.Identity())
+    return model.predict(pairs, activation_fn=_raw_logits)
 
 
 # ---------------------------------------------------------------------------
