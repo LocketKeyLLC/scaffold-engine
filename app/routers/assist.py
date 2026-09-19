@@ -1358,6 +1358,26 @@ async def _retire_step_mirrored(
              "WHERE job_id=:jid AND node_key=:nk AND status NOT IN ('done','skipped')"),
         {"n": note, "jid": job_id, "nk": node_key},
     )
+    # §17.1112 (ledger D-2/D-3) — the FSM forbids pending → committed: a step
+    # the operator finished before it was ever presented is PRESENTED first
+    # (claim), then committed from presented|awaiting_input — the
+    # `_present_and_commit_step` shape, through the oracle.
+    from app.modules.assist_step_fsm import check as _fsm_check
+    _prior = (await db.execute(
+        text("SELECT status FROM assist_steps WHERE session_id=:sid AND node_key=:nk"),
+        {"sid": session_id, "nk": node_key})).scalar()
+    if _prior == "pending":
+        _fsm_check("tracker_retire_claim", src="pending", dst="presented", node_status="pending",
+                   node_key=node_key, trigger="claim")
+        await db.execute(
+            text("UPDATE assist_steps SET status='presented', presented_at=COALESCE(presented_at, NOW()), "
+                 "updated_at=NOW() WHERE session_id=:sid AND node_key=:nk AND status='pending'"),
+            {"sid": session_id, "nk": node_key},
+        )
+        _prior = "presented"
+    if _prior in ("presented", "awaiting_input"):
+        _fsm_check("tracker_retire", src=_prior, dst="committed", node_status="done",
+                   node_key=node_key, trigger="commit")
     await db.execute(
         text("UPDATE assist_steps SET status='committed', committed_at=NOW(), "
              "submitted_at=COALESCE(submitted_at, NOW()), "
@@ -1369,7 +1389,7 @@ async def _retire_step_mirrored(
              "evidence_kind=COALESCE(evidence_kind, 'text'), "
              "evidence_meta=evidence_meta || CAST(:meta AS jsonb), "
              "updated_at=NOW() "
-             "WHERE session_id=:sid AND node_key=:nk AND status NOT IN ('committed','skipped')"),
+             "WHERE session_id=:sid AND node_key=:nk AND status IN ('presented','awaiting_input')"),
         {"sid": session_id, "nk": node_key, "ev": (evidence or "").strip()[:4000],
          "meta": json.dumps({"by": "tracker_retire", "evidence_kind": "text"})},
     )
@@ -1379,12 +1399,26 @@ async def _retire_step_mirrored(
     # re-resolved the finished step ("this node is done" on repeat). Point at
     # the next claimable step (None when the plan is exhausted); the claim path
     # re-sets it idempotently when the operator walks in.
-    nxt = await assist_agent._next_pending_node_key(session_id=session_id, db=db)
-    await db.execute(
-        text("UPDATE assist_sessions SET current_node_key = :nk, updated_at = NOW() "
-             "WHERE id = :sid AND status IN ('active', 'paused')"),
-        {"nk": nxt, "sid": session_id},
-    )
+    #
+    # §17.1112 (ledger D-2) — but ONLY when the retired step IS the cursor (or
+    # the cursor is empty). The tracker deliberately retires a step that "can
+    # sit on a DIFFERENT step" from the pointer (see the caller); moving the
+    # pointer then yanked the operator off the step they were working — the
+    # sibling of submit_step's `advance_cursor=False` (§17.1103) that never
+    # got it. An out-of-cursor retire leaves the pointer where it was.
+    _cur = (await db.execute(
+        text("SELECT current_node_key FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id})).scalar()
+    if _cur is None or str(_cur) == str(node_key):
+        nxt = await assist_agent._next_pending_node_key(session_id=session_id, db=db)
+        await db.execute(
+            text("UPDATE assist_sessions SET current_node_key = :nk, updated_at = NOW() "
+                 "WHERE id = :sid AND status IN ('active', 'paused')"),
+            {"nk": nxt, "sid": session_id},
+        )
+    else:
+        logger.info("assist_retire_out_of_cursor session=%s retired=%s cursor=%s (pointer kept, §17.1112)",
+                    session_id, node_key, _cur)
     await db.commit()
     # §17.881 — the tracker's retire is a commit too: reconcile memory with the
     # completed outcome (retire contradicted facts, fold playbook lessons).

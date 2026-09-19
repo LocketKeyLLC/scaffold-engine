@@ -7,7 +7,7 @@ stage, the right dispatch, one terminal done frame".
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -416,6 +416,12 @@ async def test_retire_step_mirrored_advances_pointer():
     pointer to the next claimable step, like the submit-commit path does."""
     from app.routers.assist import _retire_step_mirrored
     db = AsyncMock()
+    # §17.1112 — the retire reads the step's prior status (presented) and the
+    # session cursor (T14 = the step being retired → the pointer MOVES; a
+    # different cursor would keep it, see test_cursor_goto_retire).
+    def _res(scalar=None):
+        r = MagicMock(); r.scalar.return_value = scalar; return r
+    db.execute = AsyncMock(side_effect=[_res(), _res("presented"), _res(), _res("T14")] + [_res()] * 6)
     with patch("app.routers.assist.assist_agent._next_pending_node_key",
                new=AsyncMock(return_value="T15")):
         await _retire_step_mirrored(
@@ -423,9 +429,9 @@ async def test_retire_step_mirrored_advances_pointer():
     updates = [str(c.args[0]) for c in db.execute.await_args_list]
     assert any("UPDATE assist_sessions SET current_node_key" in u for u in updates)
     ptr_call = next(c for c in db.execute.await_args_list
-                    if "current_node_key" in str(c.args[0]))
+                    if "UPDATE assist_sessions SET current_node_key" in str(c.args[0]))
     assert ptr_call.args[1]["nk"] == "T15"
-    step_update = next(u for u in updates if "assist_steps" in u)
+    step_update = next(u for u in updates if "UPDATE assist_steps SET status='committed'" in u)
     assert "committed_at=NOW()" in step_update
 
 

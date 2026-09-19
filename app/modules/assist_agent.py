@@ -1517,6 +1517,19 @@ async def _reopen_step_mirrored(
         through and handed unfamiliar instructions. Keep the exact text they
         were working from.
     """
+    # §17.1112 — the reopened step becomes the cursor; any OTHER presented
+    # step would otherwise win `_load_presented_step` next turn (ledger D-1).
+    # The reopen itself goes through the oracle (terminal → pending|presented).
+    from app.modules.assist_step_fsm import check as _fsm_check
+    _prior = (await db.execute(
+        text("SELECT status FROM assist_steps WHERE session_id=:sid AND node_key=:nk"),
+        {"sid": session_id, "nk": node_key})).scalar()
+    await _unclaim_other_presented(db=db, session_id=session_id, keep_node_key=node_key,
+                                   site="reopen_step")
+    if isinstance(_prior, str) and _prior:
+        _fsm_check("reopen_step", src=_prior, dst="presented" if preserve_guidance else "pending",
+                   node_status="pending", node_key=node_key,
+                   trigger="reopen" if _prior in ("committed", "skipped", "handed_off", "escalated") else None)
     await db.execute(
         text("UPDATE dag_nodes SET status='pending', output_text=NULL, "
              "completed_at=NULL, updated_at=NOW() "
@@ -1605,6 +1618,41 @@ async def list_steps(*, session_id: str, db) -> list[dict]:
         return []
 
 
+async def _unclaim_other_presented(*, db, session_id: str, keep_node_key: str, site: str) -> list[str]:
+    """§17.1112 (Phase 1 ledger D-1) — a session may hold ONE presented step:
+    the one the cursor points at. `goto_step` and `_reopen_step_mirrored`
+    presented their target and moved the cursor but never un-claimed the step
+    the operator left, so `_load_presented_step` (EARLIEST presented) plus the
+    §17.1103 self-heal snapped the cursor back one turn later — a forward goto
+    lasted exactly one turn. This un-claims every OTHER presented/awaiting_input
+    step (FSM trigger `unclaim`: → pending), keeping its guidance and
+    presented_at so returning to it re-presents the same walkthrough (§17.901).
+    Returns the keys it un-claimed."""
+    from app.modules.assist_step_fsm import check as _fsm_check
+
+    others = (await db.execute(
+        text("SELECT node_key, status FROM assist_steps "
+             " WHERE session_id = :sid AND node_key <> :nk "
+             "   AND status IN ('presented', 'awaiting_input')"),
+        {"sid": session_id, "nk": keep_node_key},
+    )).mappings().all()
+    if not others:
+        return []
+    for o in others:
+        _fsm_check(site, src=o["status"], dst="pending", node_status="pending",
+                   node_key=o["node_key"], trigger="unclaim")
+    await db.execute(
+        text("UPDATE assist_steps SET status = 'pending', updated_at = NOW() "
+             " WHERE session_id = :sid AND node_key <> :nk "
+             "   AND status IN ('presented', 'awaiting_input')"),
+        {"sid": session_id, "nk": keep_node_key},
+    )
+    keys = [o["node_key"] for o in others]
+    logger.info("assist_unclaimed_stale_presented site=%s session_id=%s kept=%s unclaimed=%s",
+                site, session_id, keep_node_key, keys)
+    return keys
+
+
 async def goto_step(*, session_id: str, node_key: str, db) -> dict:
     """§17.938 — move the operator to `node_key` and present it.
 
@@ -1651,6 +1699,12 @@ async def goto_step(*, session_id: str, node_key: str, db) -> dict:
         return {"ok": False, "reason": "terminal_step",
                 "title": row["title"], "step_status": row["step_status"]}
 
+    # §17.1112 — ONE presented step per session: un-claim the one being left,
+    # then present the target. Both moves through the FSM oracle (§17.1074).
+    from app.modules.assist_step_fsm import check as _fsm_check
+    await _unclaim_other_presented(db=db, session_id=session_id, keep_node_key=node_key, site="goto_step")
+    _fsm_check("goto_step", src=row["step_status"], dst="presented", node_status=row["node_status"],
+               node_key=node_key, trigger="goto")
     await db.execute(
         text("UPDATE assist_steps "
              "   SET status = 'presented', "
