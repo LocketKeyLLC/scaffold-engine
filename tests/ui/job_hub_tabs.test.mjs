@@ -34,7 +34,7 @@ globalThis.window = { location: { hash: "" }, addEventListener() {}, matchMedia:
 // `#/job/:id/assist` rendered Overview silently (assist actually lives in the
 // Run tab). Same shape as §17.859, where a retired hash route rendered the
 // dashboard instead of erroring and a dead link survived for weeks.
-const { TAB_ALIASES, resolveTab } = await import("../../app/ui/static/views/job_hub.js");
+const { TAB_ALIASES, resolveTab, KNOWN_TABS, unknownTabNotice } = await import("../../app/ui/static/views/job_hub.js");
 
 test("every alias resolves to a REAL tab, not another alias", () => {
   const real = new Set(["overview", "plan", "run", "output", "traces", "costs"]);
@@ -55,3 +55,17 @@ test("assist resolves to the Run tab, and real tabs pass through", () => {
   assert.equal(resolveTab(undefined), "overview");
   assert.equal(resolveTab(""), "overview");
 });
+
+// ── §17.1114 (ledger U-1) — an unknown tab says so instead of silently showing Overview
+test("known tabs and their aliases produce no notice", () => {
+  for (const t of KNOWN_TABS) assert.equal(unknownTabNotice(t), "");
+  for (const a of Object.keys(TAB_ALIASES)) assert.equal(unknownTabNotice(a), "");
+  assert.equal(unknownTabNotice(undefined), "", "no tab segment at all is the Overview URL");
+});
+
+test("an unknown tab names itself in the notice", () => {
+  const n = unknownTabNotice("outputs");
+  assert.match(n, /No tab named “outputs”/);
+  assert.match(n, /Overview/);
+});
+

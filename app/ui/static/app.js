@@ -780,6 +780,7 @@ function lazy(name, title) {
     });
 }
 const VIEWS = {
+  notfound: lazy("notfound", "Page not found"),
   new: lazy("compose", "New idea"),
   chat: lazy("chat", "Chat"),
   dashboard: lazy("dashboard", "Dashboard"),
@@ -846,7 +847,9 @@ function registerRoutes() {
   router.route("/costs", (p) => loadAndRender("costs", p, router.currentPath()));
   router.route("/traces", (p) => loadAndRender("traces", p, router.currentPath()));
   router.route("/alerts", (p) => loadAndRender("alerts", p, router.currentPath()));
-  router.setNotFound(() => loadAndRender("dashboard", {}, "/"));
+  // §17.1114 (ledger U-1) — an unknown route is a visible "Page not found",
+  // never the Dashboard: a dead link must look like a dead link.
+  router.setNotFound((path) => loadAndRender("notfound", { path }, path));
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────

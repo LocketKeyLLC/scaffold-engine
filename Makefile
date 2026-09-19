@@ -257,6 +257,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_assist_fix_no_double_capture.py \
 			tests/test_ast_grep_rules.py \
 			tests/test_test_db_isolation.py \
+			tests/test_spa_status_pill_wiring.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
 	else \
 		printf '\033[1;33m⚠ host pytest not found — skipped the inventory scans (byte-equal gates above still ran). Full coverage: make test\033[0m\n'; \
