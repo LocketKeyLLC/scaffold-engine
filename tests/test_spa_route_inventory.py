@@ -119,3 +119,73 @@ def test_every_in_spa_link_resolves_to_a_registered_route():
         "fall through setNotFound to the Dashboard and fail SILENTLY:\n  "
         + "\n  ".join(dead)
     )
+
+
+# ── §17.1114 (Phase 1 ledger U-1) — links the ENGINE emits into chat/CLI ─────
+#
+# The scan above covers app/ui/static only. `pipelines/scaffold_router.py`
+# handed the operator `/ui/#/output/{job_id}` in every truncated node-output
+# reply — a route retired in §17.859 — and a pipeline test PINNED the dead link.
+# Python-emitted `#/…` links are scanned here against the same router registry.
+_PY_ROOTS = [
+    Path(__file__).resolve().parents[1] / "pipelines",
+    Path(__file__).resolve().parents[1] / "app" / "native_chat",
+    Path(__file__).resolve().parents[1] / "app" / "modules",
+    Path(__file__).resolve().parents[1] / "app" / "routers",
+    Path(__file__).resolve().parents[1] / "cli" / "scaffold_cli",
+]
+_PY_LINK_RE = re.compile(r"#/(?:\{[^}]*\}|[^\s\]\)\"'`<>]*)")
+
+
+def _python_targets() -> list[tuple[str, int, str]]:
+    out: list[tuple[str, int, str]] = []
+    for root in _PY_ROOTS:
+        if not root.exists():
+            continue
+        for py in sorted(root.rglob("*.py")):
+            for lineno, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                for m in _PY_LINK_RE.finditer(line):
+                    out.append((py.name, lineno, m.group(0)))
+    return out
+
+
+def _dead(targets, reg) -> list[str]:
+    dead = []
+    for name, lineno, raw in targets:
+        norm = re.sub(r"\{[^}]*\}|\$\{[^}]*\}", "X", raw.lstrip("#")).rstrip("/")
+        n = _segments(norm)
+        head = norm.split("/")[1] if n else ""
+        if head not in reg:
+            dead.append(f"{name}:{lineno} -> {raw} (no such route)")
+        elif n not in reg[head]:
+            dead.append(f"{name}:{lineno} -> {raw} ({n} segments; router accepts {sorted(reg[head])})")
+    return dead
+
+
+def test_python_link_scanner_hits_the_dead_shape():
+    """Guard the guard: the exact string that shipped dead must be flagged."""
+    reg = _registered()
+    assert _dead([("x.py", 1, "#/output/{job_id}")], reg) == ["x.py:1 -> #/output/{job_id} (no such route)"]
+    assert _dead([("x.py", 1, "#/job/{job_id}/output")], reg) == []
+
+
+def test_every_engine_emitted_link_resolves_to_a_registered_route():
+    reg = _registered()
+    targets = _python_targets()
+    assert targets, "no Python-emitted #/ links found — the scanner went blind"
+    dead = _dead(targets, reg)
+    assert not dead, (
+        "links the ENGINE hands the operator (chat replies, CLI) point at routes the SPA "
+        "does not register:\n  " + "\n  ".join(dead)
+    )
+
+
+def test_unknown_routes_render_a_visible_not_found_page():
+    """§17.1114 — the silent fallback to the Dashboard is gone."""
+    src = _APP_JS.read_text()
+    assert 'setNotFound(() => loadAndRender("dashboard"' not in src
+    assert 'loadAndRender("notfound"' in src
+    assert (_STATIC / "views" / "notfound.js").exists()
+

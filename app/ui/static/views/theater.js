@@ -441,8 +441,15 @@ export function renderTheater(container, jobId, ctx = {}) {
     runBtn.classList.add("btn-primary");
     runBtn.classList.remove("btn-danger");
     renderNodes();
-    // refresh authoritative status
-    api.get(`/exec/status/${jobId}`).then((d) => !disposed && setStatusPill(d.job_status)).catch(() => {});
+    // refresh authoritative status — and tell the hub header (§17.1114,
+    // ledger U-7): its pill was rendered once from the job row and listens for
+    // `scaffold:job-status`, which only the assist view dispatched, so an
+    // autonomous run finished under a header that still said "running".
+    api.get(`/exec/status/${jobId}`).then((d) => {
+      if (disposed) return;
+      setStatusPill(d.job_status);
+      window.dispatchEvent(new CustomEvent("scaffold:job-status", { detail: { jobId, status: d.job_status } }));
+    }).catch(() => {});
     // §17.1007 — and the flow guide with it: it was rendered once at mount, so
     // after a run it kept describing the pre-run state ("Plan ready, nothing
     // run yet") above a terminal success or failure card.

@@ -7065,7 +7065,9 @@ class Pipeline:
                 continue
             total = len(body)
             if total > cap:
-                body = body[:cap] + f"\n\n… [{total - cap} more chars — see /ui/#/output/{job_id}]"
+                # §17.1114 — `#/output/:id` was retired in §17.859 (job hub); the
+                # link a chat reply hands the operator must be a live route.
+                body = body[:cap] + f"\n\n… [{total - cap} more chars — see /ui/#/job/{job_id}/output]"
             lines.append(body)
             lines.append("")
 

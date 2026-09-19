@@ -44,6 +44,17 @@ export function resolveTab(raw) {
   return TAB_ALIASES[t] || t;
 }
 
+// §17.1114 (ledger U-1) — the tabs that exist. An unknown tab still renders
+// Overview (nothing else is sensible) but SAYS so, instead of silently
+// pretending the address was fine.
+export const KNOWN_TABS = ["overview", "plan", "run", "output", "traces", "costs"];
+
+export function unknownTabNotice(raw) {
+  if (!raw) return "";
+  const t = resolveTab(raw);
+  return KNOWN_TABS.includes(t) ? "" : `No tab named “${raw}” on this job — showing Overview.`;
+}
+
 // Statuses where the job is driven through an assist session — the Run tab
 // embeds the assist walkthrough instead of the autonomous theater. /assist/
 // start is idempotent per job, so resolving the session this way is safe for
@@ -193,6 +204,10 @@ export default function jobHub(container, params) {
   );
 
   const outlet = el("div", { class: "job-tab-outlet" }, loading("Loading…"));
+  const tabNoticeText = unknownTabNotice(params && params.tab);
+  const tabNotice = tabNoticeText
+    ? el("div", { class: "card warn-inline", text: "⚠ " + tabNoticeText })
+    : el("span", { hidden: true });
 
   mount(
     container,
@@ -205,6 +220,7 @@ export default function jobHub(container, params) {
       el("div", { class: "header-actions" }, pillSlot, compareLink)
     ),
     tabRow,
+    tabNotice,
     outlet
   );
 
