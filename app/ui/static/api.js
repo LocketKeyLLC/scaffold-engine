@@ -76,6 +76,12 @@ export async function req(path, { method = "GET", body, signal, query } = {}) {
     _maybeSignalUnauthorized(resp.status);
     throw await parseError(resp);
   }
+  // §17.1115 — every successful mutation announces itself, so the job store
+  // (store.js) can forget cached rows. This is the single funnel all API
+  // calls pass through; views never have to remember to invalidate.
+  if (method !== "GET" && typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+    try { window.dispatchEvent(new CustomEvent("scaffold:mutated", { detail: { method, path } })); } catch { /* never break a call */ }
+  }
   if (resp.status === 204) return null;
   const ct = resp.headers.get("content-type") || "";
   return ct.includes("application/json") ? resp.json() : resp.text();

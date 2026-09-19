@@ -7,6 +7,7 @@
 // PATCH /jobs/{id}/brief (sections replace; approval-gate answers stay an
 // immutable receipt). Reused on the assist page and the plan editor.
 import * as api from "../api.js";
+import { jobStore } from "../store.js";
 import { el, mount } from "../util.js";
 import { toast } from "../components.js";
 
@@ -121,7 +122,7 @@ export function briefPanel(jobId) {
 
   (async () => {
     try {
-      const job = await api.get(`/jobs/${jobId}`);
+      const job = await jobStore.get(jobId);
       brief = job.refined_brief || {};
       render();
     } catch (e) {

@@ -4,6 +4,7 @@
 // / pipeline_complete. node_token streaming is valve-gated (default OFF) — when
 // absent we simply show each node's full output on node_done.
 import * as api from "../api.js";
+import { jobStore } from "../store.js";
 import { el, mount, shortId, mdToHtml, fmtNum } from "../util.js";
 import { statusBadge, loading, errorPanel, makeClickable } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
@@ -129,7 +130,7 @@ export function renderTheater(container, jobId, ctx = {}) {
   // §17.850 — flow guide on the Run surface too (carry-through sweep).
   const flowSlot = el("div", {});
   let jobTitle = ""; // §17.1007 — names the job in the notification, not a UUID
-  api.get(`/jobs/${jobId}`).then((job) => {
+  jobStore.get(jobId).then((job) => {
     jobTitle = job.title || "";
     const fg = flowGuide(job, { here: `#/job/${jobId}/run` });
     if (fg) mount(flowSlot, fg);
@@ -453,7 +454,7 @@ export function renderTheater(container, jobId, ctx = {}) {
     // §17.1007 — and the flow guide with it: it was rendered once at mount, so
     // after a run it kept describing the pre-run state ("Plan ready, nothing
     // run yet") above a terminal success or failure card.
-    api.get(`/jobs/${jobId}`).then((job) => {
+    jobStore.get(jobId, { fresh: true }).then((job) => {   // the run just changed it
       if (disposed) return;
       jobTitle = job.title || jobTitle;
       const fg = flowGuide(job, { here: `#/job/${jobId}/run` });

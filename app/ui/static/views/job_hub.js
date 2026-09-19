@@ -11,6 +11,7 @@
 // The old per-view routes (#/theater/:id etc.) are gone (hard switch,
 // operator decision) — every in-SPA link now points here.
 import * as api from "../api.js";
+import { jobStore } from "../store.js";
 import { el, mount, shortId, timeAgo, setCurrentJob } from "../util.js";
 import { statusBadge, loading, errorPanel } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
@@ -227,7 +228,7 @@ export default function jobHub(container, params) {
   (async () => {
     let job = null;
     try {
-      job = await api.get(`/jobs/${jobId}`);
+      job = await jobStore.get(jobId);
     } catch (e) {
       if (!disposed) mount(outlet, errorPanel(e));
       return;

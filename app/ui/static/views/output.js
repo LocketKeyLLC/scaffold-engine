@@ -3,6 +3,7 @@
 // GET /logs/{id}?include_compiled=true&include_output=true and job metadata from
 // GET /jobs/{id}.
 import * as api from "../api.js";
+import { jobStore } from "../store.js";
 import { el, mount, mdToHtml, copy } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
 
@@ -27,7 +28,7 @@ export function renderOutput(container, jobId) {
   (async () => {
     try {
       const [job, logs] = await Promise.all([
-        api.get(`/jobs/${jobId}`),
+        jobStore.get(jobId),
         api.get(`/logs/${jobId}`, { query: { include_compiled: true, include_output: true } }),
       ]);
       if (disposed) return;

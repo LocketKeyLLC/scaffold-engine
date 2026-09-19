@@ -3,6 +3,7 @@
 // chain (POST /ideate/confirm → POST /dag, progress polled) then lands in the
 // plan editor with nothing executed; Reject cancels the job (non-destructive).
 import * as api from "../api.js";
+import { jobStore } from "../store.js";
 import * as router from "../router.js";
 import { el, mount, shortId, timeAgo, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
@@ -407,7 +408,7 @@ export function renderApprovalDetail(container, jobId) {
 
   async function load() {
     try {
-      const job = await api.get(`/jobs/${jobId}`);
+      const job = await jobStore.get(jobId);
       if (disposed) return;
       const st = job.status;
 
@@ -567,7 +568,7 @@ export function renderApprovalDetail(container, jobId) {
 
   async function pollStatus() {
     try {
-      const job = await api.get(`/jobs/${jobId}`);
+      const job = await jobStore.get(jobId, { fresh: true });   // waiting for it to change
       if (disposed) return;
       const nc = job.node_count || 0;
       const msg = nc > 0 ? `${job.status} · ${nc} nodes planned…` : `${job.status}…`;
@@ -694,7 +695,7 @@ export function renderApprovalDetail(container, jobId) {
         // instead of retyping everything on the worst step to lose state.
         let advanced = true;
         try {
-          const job = await api.get(`/jobs/${jobId}`);
+          const job = await jobStore.get(jobId, { fresh: true });
           advanced = job.status !== "awaiting_confirmation";
         } catch { /* status unknown → fall back to the reconcile rebuild */ }
         if (advanced) load();

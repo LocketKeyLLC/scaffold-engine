@@ -4,6 +4,7 @@
 // optimistic-lock (edit_version) 409 handling. "Execute plan" hands off to the
 // execution theater. Reached via the approval gate's Approve chain.
 import * as api from "../api.js";
+import { jobStore } from "../store.js";
 import { el, mount, moveItem } from "../util.js";
 import { statusBadge, loading, errorPanel, toast } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
@@ -85,7 +86,7 @@ export function renderPlan(container, jobId) {
   );
   // §17.843 — answer receipt: confirm the operator's approval-gate answers
   // reached the plan (server-side truth via /jobs/{id}.user_feedback).
-  api.get(`/jobs/${jobId}`).then((job) => {
+  jobStore.get(jobId).then((job) => {
     if (disposed || !job.user_feedback) return;
     const n = (job.user_feedback.match(/^Q:/gm) || []).length;
     guidance.append(
@@ -99,7 +100,7 @@ export function renderPlan(container, jobId) {
   }).catch(() => {});
   // §17.847 — flow guide (where am I → what next), filled once the job loads.
   const flowSlot = el("div", {});
-  api.get(`/jobs/${jobId}`).then((job) => {
+  jobStore.get(jobId).then((job) => {
     const fg = flowGuide(job, { here: `#/job/${jobId}/plan` });
     if (fg) mount(flowSlot, fg);
   }).catch(() => {});
