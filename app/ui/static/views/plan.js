@@ -144,7 +144,13 @@ export function renderPlan(container, jobId) {
       mount(changesPanel, el("details", { class: "brief-details", open: true },
         el("summary", {}, `🔁 Plan changes (${entries.length}) — what the confirmed fixes, decisions, notes and pins changed in the steps ahead`),
         ...rows));
-    } catch (e) { mount(changesPanel); }
+    } catch (e) {
+      // §17.1117 (ledger U-9) — an unreadable ledger used to look like "no
+      // plan changes"; say so, and offer the retry.
+      mount(changesPanel, el("div", { class: "card warn-inline" },
+        el("span", { text: `⚠ Could not load the plan change ledger: ${e.detail || e.message}. ` }),
+        el("button", { class: "btn btn-sm", text: "Retry", onClick: () => loadChanges() })));
+    }
   }
   loadChanges();
   mount(container, header, flowSlot, mobileNote, guidance, briefPanel(jobId), warning, changesPanel, reorderPanel, stage);

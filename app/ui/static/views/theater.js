@@ -251,8 +251,10 @@ export function renderTheater(container, jobId, ctx = {}) {
         log(ev[1], `${key}${payload.title || payload.message || payload.error || ev[1]}`,
             ev[1].includes("fail") || ev[1] === "error" ? "err" : "");
       }
-    } catch {
-      /* replay is a nicety — never break the Run tab over it */
+    } catch (e) {
+      // §17.1117 (ledger U-9) — replay is a nicety and must never break the
+      // Run tab, but a failed read is not an empty run: say which it was.
+      log("warning", `Could not load this run's event log (${(e && (e.detail || e.message)) || "unknown error"}) — the node states above are still authoritative.`, "warn");
     }
   }
 

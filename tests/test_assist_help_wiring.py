@@ -82,3 +82,34 @@ def test_help_covers_the_behaviours_built_this_session():
     joined = " ".join(titles).lower()
     for needle in ("restart", "status line", "plan", "proposal", "invent", "your setup"):
         assert needle in joined, f"no behaviour explains {needle!r}: {titles}"
+
+
+# ── §17.1117 (Phase 1 ledger U-8) — a behaviour the help panel describes must EXIST ──
+#
+# The "status line" entry described a "small pulse dot" that no code rendered:
+# `pulse()` bumped a timestamp and `assist_turn_pulse` drew nothing. A help
+# panel is the discoverable path (§17.1096) only while it describes real
+# controls. Each phrase here must map to a DOM class that both the view AND
+# the stylesheet know.
+# (class, needs_css): the dot and the spinner carry their own look; the clock
+# is text inside the styled status line.
+_HELP_PHRASE_TO_CLASS = {
+    "dot beside it": ("assist-pulse", True),
+    "spinner": ("spin", True),
+    "clock": ("status-text", False),
+}
+
+
+def test_every_described_status_line_control_exists_in_view_and_css():
+    css = (ROOT / "app" / "ui" / "static" / "app.css").read_text(encoding="utf-8")
+    m = re.search(r'title: "The status line above the box", plain: "([^"]+)"', SRC)
+    assert m, "the status-line help entry is gone"
+    plain = m.group(1)
+    for phrase, (cls, needs_css) in _HELP_PHRASE_TO_CLASS.items():
+        assert phrase in plain, f"help entry no longer mentions {phrase!r} — update the registry"
+        assert f'class: "{cls}"' in SRC or f'"{cls}"' in SRC, f"{phrase!r} described but .{cls} not rendered by assist.js"
+        if needs_css:
+            assert f".{cls}" in css, f".{cls} has no styles"
+    assert 'case "assist_turn_pulse":' in SRC and "pulse();" in SRC, "the pulse frame must drive the dot"
+    assert "pulseState(" in SRC, "the dot's state must come from pulseState (live/quiet/stale)"
+

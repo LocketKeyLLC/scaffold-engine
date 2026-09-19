@@ -89,8 +89,12 @@ export function mountCommandPalette() {
         run: () => router.navigate(routeForJob(j)),
       }));
       rebuild();
-    } catch {
-      /* transient — leave static items */
+    } catch (e) {
+      // §17.1117 (ledger U-9) — a failed job search used to leave the static
+      // items and nothing else, indistinguishable from "no matching jobs".
+      if (q !== curQuery) return;
+      jobItems = [{ label: "Job search failed", hint: (e && (e.detail || e.message)) || "engine unreachable", run: () => {} }];
+      rebuild();
     }
   }, 250);
 

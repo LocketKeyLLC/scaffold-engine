@@ -1674,3 +1674,11 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
 .conn-pill[hidden] { display: none; }
 .conn-pill[data-state="degraded"] { background: var(--warn); color: #1a1a1a; }
 
+/* §17.1117 (ledger U-8) — the assist status line's liveness dot */
+.assist-pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: middle;
+  background: var(--ok); box-shadow: 0 0 0 0 var(--ok); }
+.assist-pulse.beat { animation: assist-beat .8s ease-out 1; }
+.assist-pulse[data-state="quiet"] { background: var(--text-faint); box-shadow: none; }
+.assist-pulse[data-state="stale"] { background: var(--err); box-shadow: none; }
+@keyframes assist-beat { 0% { box-shadow: 0 0 0 0 var(--ok); } 100% { box-shadow: 0 0 0 8px rgba(0,0,0,0); } }
+
