@@ -63,8 +63,9 @@ function renderPicker(container, prefillA) {
             )
           )
         );
-      } catch {
-        /* transient */
+      } catch (e) {
+        // §17.1117 (ledger U-9) — a failed search is not "no matches".
+        mount(results, el("div", { class: "dim", text: `Search failed: ${(e && (e.detail || e.message)) || "engine unreachable"}` }));
       }
     }, 250);
     input.addEventListener("input", search);

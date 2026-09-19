@@ -247,6 +247,16 @@ export function restartRecovery(turns, detail) {
 // "?" panel is built from it, and a ci-tier-0 gate (test_assist_help_wiring)
 // fails if a `verb(...)` in this file has no entry here. A control cannot
 // ship without its plain-language explanation.
+// §17.1117 (ledger U-8) — the liveness dot's state from the time since the
+// engine last said anything. Exported for the node tests; the thresholds are
+// the ones the help panel quotes.
+export const PULSE_QUIET_MS = 45000;
+export const PULSE_STALE_MS = 120000;
+export function pulseState(quietMs) {
+  const q = Math.max(0, quietMs | 0);
+  return q >= PULSE_STALE_MS ? "stale" : q >= PULSE_QUIET_MS ? "quiet" : "live";
+}
+
 export const ASSIST_HELP = {
   // keyed by the exact label passed to verb(): what it does, in the
   // operator's words, and when they'd reach for it.
@@ -265,7 +275,7 @@ export const ASSIST_HELP = {
   // understand — the behaviours built this session that had no UI explanation.
   behaviors: [
     { title: "If the engine restarts mid-step", plain: "Nothing is lost. Every finished step and every message is saved. If a restart interrupts a message you'd sent, the engine puts your text back in the box and asks you to press Send to pick up exactly where you were." },
-    { title: "The status line above the box", plain: "A spinner means the engine is working on your step right now. A clock means it's waiting on you. The small pulse dot means the session is alive and connected — if it stops, the page will tell you and recover on its own." },
+    { title: "The status line above the box", plain: "A spinner means the engine is working on your step right now, with a clock counting how long. The small dot beside it blinks each time the engine reports progress; it turns grey after 45 seconds of silence and the line then tells you what to do, and red after two minutes — if it stays red, press ■ Stop and resend your message." },
     { title: "When the plan and reality disagree", plain: "The engine keeps a picture of your machines from what you've pasted. If a step assumes something that isn't true anymore, it says so and offers to fix the plan rather than pushing you through a step that can't work. 🩺 Verify state is how you ask it to check on purpose." },
     { title: "A plan-change proposal", plain: "When something you've told the engine changes what the plan should be, a card opens once showing the change as before → after — what the step says now and what it would say instead. Apply it, Keep the plan as-is, or Decide later. After that it collapses to a small 'Review' chip by the box and won't pop up again." },
     { title: "Why it won't invent values", plain: "The engine refuses to put an IP address, port, version or URL into an instruction unless it came from something you actually showed it. If it doesn't know a value yet, it asks you to run a command that prints it — that's deliberate, so it never sends you to the wrong place." },
@@ -1512,11 +1522,17 @@ export function renderChat(container, sessionId, opts = {}) {
       let tail = ` · working ${fmtElapsed(Date.now() - turnT0)}`;
       if (quiet > 45000) tail += ` — no word from the engine for ${fmtElapsed(quiet)}; if this keeps up, press ■ Stop and resend`;
       statusEl.querySelector(".status-text").textContent = statusText + tail;
+      // §17.1117 (ledger U-8) — the dot the help panel describes. It exists
+      // now: live while frames arrive, quiet after 45 s, stale after 2 min.
+      const dot = statusEl.querySelector(".assist-pulse");
+      if (dot) dot.dataset.state = pulseState(quiet);
     };
     const setStatusLine = (t) => {
       if (!statusEl) {
         statusEl = el("div", { class: "msg sys" },
-          el("div", { class: "msg-body dim" }, el("span", { class: "spin", style: "vertical-align:middle;margin-right:8px" }), el("span", { class: "status-text" })));
+          el("div", { class: "msg-body dim" },
+            el("span", { class: "assist-pulse", dataset: { state: "live" }, title: "Blinks each time the engine reports progress" }),
+            el("span", { class: "spin", style: "vertical-align:middle;margin-right:8px" }), el("span", { class: "status-text" })));
         transcript.append(statusEl);
         statusTimer = setInterval(paintStatus, 1000);
       }
@@ -1525,7 +1541,13 @@ export function renderChat(container, sessionId, opts = {}) {
       paintStatus();
       stick();
     };
-    const pulse = () => { lastSign = Date.now(); paintStatus(); };
+    const pulse = () => {
+      lastSign = Date.now();
+      paintStatus();
+      // restart the blink so every frame is a visible beat, not a steady glow
+      const dot = statusEl && statusEl.querySelector(".assist-pulse");
+      if (dot) { dot.classList.remove("beat"); void dot.offsetWidth; dot.classList.add("beat"); }
+    };
     const clearStatusLine = () => {
       if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
       if (statusEl) { statusEl.remove(); statusEl = null; }
