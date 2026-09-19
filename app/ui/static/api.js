@@ -79,8 +79,11 @@ export async function req(path, { method = "GET", body, signal, query } = {}) {
   // §17.1115 — every successful mutation announces itself, so the job store
   // (store.js) can forget cached rows. This is the single funnel all API
   // calls pass through; views never have to remember to invalidate.
-  if (method !== "GET" && typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-    try { window.dispatchEvent(new CustomEvent("scaffold:mutated", { detail: { method, path } })); } catch { /* never break a call */ }
+  if (method !== "GET") {
+    clearMemo();   // §17.1122 — a write may have changed any shell read
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+      try { window.dispatchEvent(new CustomEvent("scaffold:mutated", { detail: { method, path } })); } catch { /* never break a call */ }
+    }
   }
   if (resp.status === 204) return null;
   const ct = resp.headers.get("content-type") || "";
@@ -178,23 +181,66 @@ function parseFrame(raw) {
   return { event, data };
 }
 
+// ── §17.1122 — memoized shell reads ───────────────────────────────────
+// Every first paint issued the same handful of requests more than once:
+// /health twice (the sidebar poll's first tick + the dashboard), /status
+// twice (the attention poll + the dashboard), /auth/account/status two or
+// three times (boot, the first-run check, the dashboard). These are the
+// app's "shell" reads: one in-flight request per key is shared by every
+// caller, and the answer is reused for a short TTL. Any mutation clears
+// the memo (see req()), so nothing stale survives a write.
+const _memo = new Map();   // key → { value, at, inflight }
+
+export function memoized(key, ttlMs, fn, now = () => Date.now()) {
+  const m = _memo.get(key);
+  if (m && m.inflight) return m.inflight;
+  if (m && m.at != null && now() - m.at < ttlMs) return Promise.resolve(m.value);
+  let p;
+  try { p = Promise.resolve(fn()); } catch (e) { p = Promise.reject(e); }
+  const entry = { value: m ? m.value : undefined, at: m ? m.at : null, inflight: null };
+  entry.inflight = p.then((v) => { _memo.set(key, { value: v, at: now(), inflight: null }); return v; },
+                          (e) => { _memo.set(key, { value: entry.value, at: entry.at, inflight: null }); throw e; });
+  _memo.set(key, entry);
+  return entry.inflight;
+}
+
+export function clearMemo(key) {
+  if (key == null) _memo.clear(); else _memo.delete(key);
+}
+
+export const MEMO_TTL_MS = { health: 8000, status: 4000, account: 60000, firstRun: 60000 };
+
 // ── Health (unauthenticated) ──────────────────────────────────────────
-export async function health() {
-  const resp = await fetch("/health");
-  return resp.json();
+export function health() {
+  return memoized("health", MEMO_TTL_MS.health, async () => {
+    const resp = await fetch("/health");
+    return resp.json();
+  });
+}
+
+/** The job overview (`/status`): shared by the dashboard and the attention poll. */
+export function status() {
+  return memoized("status", MEMO_TTL_MS.status, () => get("/status"));
+}
+
+/** First-run state (`/meta/first-run`), read once per minute at most. */
+export function firstRun() {
+  return memoized("firstRun", MEMO_TTL_MS.firstRun, () => get("/meta/first-run"));
 }
 
 // ── Admin account (§17.840 — password unlocks the console) ────────────
 
 /** Public: {claimed, display_name, login_available}. Null on any failure
  *  (pre-§17.840 server) so the gate falls back to key-paste. */
-export async function accountStatus() {
-  try {
-    const resp = await fetch("/auth/account/status");
-    return resp.ok ? await resp.json() : null;
-  } catch {
-    return null;
-  }
+export function accountStatus() {
+  return memoized("account", MEMO_TTL_MS.account, async () => {
+    try {
+      const resp = await fetch("/auth/account/status");
+      return resp.ok ? await resp.json() : null;
+    } catch {
+      return null;
+    }
+  });
 }
 
 /** Password → console credential. Throws ApiError (401 wrong password,
@@ -208,6 +254,7 @@ export async function login(password) {
   if (!resp.ok) throw await parseError(resp);
   const out = await resp.json();
   if (out?.api_key) setKey(out.api_key);
+  clearMemo();   // §17.1122
   return out;
 }
 

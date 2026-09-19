@@ -38,3 +38,29 @@ def test_the_gate_regex_hits_the_shapes_it_replaced():
         assert _DIRECT_JOB_GET.search(s), s
     assert not _DIRECT_JOB_GET.search("api.get(`/jobs/${id}/costs`)"), "sub-resources are not job rows"
     assert not _DIRECT_JOB_GET.search("jobStore.get(jobId)")
+
+
+# ── §17.1122 — shell reads go through the memoized helpers ───────────────────
+
+_DIRECT_SHELL_GET = re.compile(r'api\.get\(\s*"/(status|meta/first-run)"')
+
+
+def test_no_code_fetches_a_shell_read_directly():
+    offenders = []
+    for js in sorted(list(_STATIC.glob("*.js")) + list((_STATIC / "views").glob("*.js"))):
+        if js.name == "api.js":
+            continue
+        for lineno, line in enumerate(js.read_text(encoding="utf-8").splitlines(), 1):
+            if _DIRECT_SHELL_GET.search(line):
+                offenders.append(f"{js.name}:{lineno}: {line.strip()[:80]}")
+    assert not offenders, "use api.status() / api.firstRun() (memoized, shared across callers):\n  " + "\n  ".join(offenders)
+
+
+def test_the_api_funnel_memoizes_shell_reads_and_clears_on_writes():
+    api = (_STATIC / "api.js").read_text(encoding="utf-8")
+    assert "export function memoized(" in api and "export function clearMemo(" in api
+    for helper in ("export function health()", "export function status()", "export function firstRun()", "export function accountStatus()"):
+        assert helper in api, helper
+    body = api[api.index("export async function req("):api.index("export const get =")]
+    assert "clearMemo();" in body and 'method !== "GET"' in body, "a write must clear the memo"
+

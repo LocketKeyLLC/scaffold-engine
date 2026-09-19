@@ -176,7 +176,7 @@ export default function dashboard(container) {
       const refreshEnrichment = tickN % 6 === 0;
       tickN += 1;
       const [status, work, health, roles, account] = await Promise.all([
-        api.get("/status"),
+        api.status(),   // §17.1122 — shared with the attention poll
         api.get("/work"),
         refreshEnrichment ? api.health().catch(() => null) : Promise.resolve(enrichment.health),
         refreshEnrichment ? api.get("/models/roles").catch(() => null) : Promise.resolve(enrichment.roles),

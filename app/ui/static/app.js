@@ -612,7 +612,7 @@ function startAttentionPolling() {
   async function tick() {
     let jobs;
     try {
-      const st = await api.get("/status");
+      const st = await api.status();   // §17.1122 — shared with the dashboard
       jobs = st.recent_jobs || [];
     } catch {
       return; // transient — the health dot already reports reachability
@@ -880,7 +880,7 @@ async function maybeFirstRun() {
   if (p?.is_admin === false) return;
   if (location.hash.startsWith("#/setup")) return;
   try {
-    const fr = await api.get("/meta/first-run");
+    const fr = await api.firstRun();   // §17.1122
     if (fr && fr.first_run) {
       location.hash = "#/setup";
       return;
