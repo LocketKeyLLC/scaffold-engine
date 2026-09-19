@@ -32,7 +32,11 @@ async def test_phase2_cancelled_marks_job_cancelled():
         raise asyncio.CancelledError()
 
     cancel_db_mock = MagicMock()
-    cancel_db_mock.execute = AsyncMock()
+    # §17.1107 — _cancel_job goes through job_state.transition(), whose single
+    # UPDATE … RETURNING prior_status must yield a row for the "moved" path.
+    _moved = MagicMock()
+    _moved.first.return_value = ("researching",)
+    cancel_db_mock.execute = AsyncMock(return_value=_moved)
     cancel_db_mock.commit = AsyncMock()
 
     class _SessionCtx:
@@ -46,8 +50,10 @@ async def test_phase2_cancelled_marks_job_cancelled():
         with pytest.raises(asyncio.CancelledError):
             await ideation_workflow.research_and_compile(job_id, db)
 
-    # _cancel_job ran exactly one UPDATE with the disconnect reason
+    # _cancel_job ran exactly one guarded UPDATE with the disconnect reason
+    # (§17.1107: never over a job that already reached a terminal status)
     assert cancel_db_mock.execute.await_count == 1
     assert cancel_db_mock.commit.await_count == 1
-    params = cancel_db_mock.execute.await_args.args[1]
-    assert params == {"err": "client_disconnect", "id": job_id}
+    sql_obj, params = cancel_db_mock.execute.await_args.args
+    assert "NOT IN ('cancelled', 'completed', 'failed')" in " ".join(str(sql_obj).split())
+    assert params == {"id": job_id, "to": "cancelled", "set_error_summary": "client_disconnect"}

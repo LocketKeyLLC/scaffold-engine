@@ -30,6 +30,7 @@ from app.modules.dag_validator import (
     render_corrections_block,
     validate_tool_picks,
 )
+from app.modules.job_state import transition
 from app.utils.job_utils import fail_job as _fail_job
 from app.utils.llm_parsing import diagnose_json_object_parse, parse_json_object
 
@@ -1828,14 +1829,11 @@ async def generate_dag(
         # re-entry with the same inputs is recognized as idempotent
         # (§17.181). The hash is stored *after* successful node persist so a
         # mid-flight failure doesn't leave a hash pointing at no DAG.
-        await db.execute(
-            text("""
-                UPDATE jobs
-                SET status = 'executing',
-                    dag_input_hash = :h
-                WHERE id = :id
-            """),
-            {"id": uid, "h": current_hash},
+        # §17.1107 (ledger S-3) — guarded: a cancel during DAG generation is
+        # no longer resurrected to 'executing' by this success write.
+        await transition(
+            db, uid, to="executing", set_columns={"dag_input_hash": current_hash},
+            reason="dag_generated",
         )
         await db.commit()
     except Exception as exc:

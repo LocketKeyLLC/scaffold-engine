@@ -18,6 +18,7 @@ import logging
 from sqlalchemy import text
 
 from app.database import async_session
+from app.modules.job_state import transition
 
 logger = logging.getLogger("scaffold.assist")
 
@@ -69,12 +70,10 @@ async def handoff_step(
     # Switch the job out of assisted_* into 'executing' so the autonomous
     # executor's status whitelist accepts it. We flip back to assist on
     # completion (single mode) or leave it in autonomous (all_remaining).
+    # §17.1107 (ledger S-3) — guarded: a job that reached a terminal status
+    # between the operator's click and this write stays there.
     async with async_session() as db2:
-        await db2.execute(
-            text("UPDATE jobs SET status = 'executing', updated_at = NOW() "
-                 "WHERE id = :jid"),
-            {"jid": job_id},
-        )
+        await transition(db2, job_id, to="executing", reason="assist_handoff")
         await db2.commit()
 
     yield _sse("assist_handoff_started", {

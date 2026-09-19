@@ -36,6 +36,7 @@ from app.authz import (
 )
 from app.config import settings
 from app.database import async_session, get_db
+from app.modules.job_state import transition
 from app.modules.dag_generator import generate_dag as _generate_dag
 from app.modules.decomposition import (
     MIN_COMPONENTS,
@@ -303,19 +304,28 @@ async def ideate_revise_endpoint(
         f"{body.notes.strip()}"
     ).strip()
 
+    # §17.1107 (ledger S-3) — the status flip is a guarded claim on
+    # 'awaiting_confirmation' (the 409 above is a read; this is the write that
+    # can race a cancel). The payload columns follow in the same transaction.
+    moved = await transition(
+        db, body.job_id, to="refining", expected_from=("awaiting_confirmation",),
+        set_columns={"input_text": revised_text, "refined_brief": None,
+                     "error_summary": None, "metadata": json.dumps(meta)},
+        reason="revise",
+    )
+    if moved is None:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="job left the approval gate while the revision was being recorded; reload and retry",
+        )
     await db.execute(
         text("""
             UPDATE jobs
-               SET input_text = :txt,
-                   status = 'refining',
-                   refined_brief = NULL,
-                   research_data = COALESCE(research_data, '{}'::jsonb) - 'feasibility',
-                   error_summary = NULL,
-                   metadata = :meta,
-                   updated_at = NOW()
+               SET research_data = COALESCE(research_data, '{}'::jsonb) - 'feasibility'
              WHERE id = :id
         """),
-        {"txt": revised_text, "meta": json.dumps(meta), "id": body.job_id},
+        {"id": body.job_id},
     )
     await db.commit()
 

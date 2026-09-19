@@ -40,6 +40,7 @@ from app.modules.gt_extractor import (
 from app.modules.idea_refinement import create_ideation_job, refine_idea
 from app.modules.rag_pipeline import ingest_entries
 from app.providers.base import Tool
+from app.modules.job_state import transition
 from app.utils.job_utils import fail_job as _fail_job
 from app.utils.tool_call_args import read_tool_args
 from app.utils.topic_detection import detect_topic_id
@@ -776,16 +777,13 @@ async def research_and_compile(
     # answers — the §17.844 assist fix covered ONE consumer; this closes ALL of
     # them at the source. The original request stays intact in input_text.
     async with async_session() as write_db:
-        await write_db.execute(
-            text(
-                "UPDATE jobs SET status = 'planning', "
-                "refined_brief = :brief, "
-                "research_data = :data, workflow_summary = :workflow "
-                "WHERE id = :id"
-            ),
-            {
-                "brief": json.dumps(brief),
-                "data": json.dumps(
+        # §17.1107 (ledger S-3) — guarded: a cancel that landed during the
+        # research loop used to be resurrected here (cancelled → planning).
+        await transition(
+            write_db, job_id, to="planning", reason="phase2_complete",
+            set_columns={
+                "refined_brief": json.dumps(brief),
+                "research_data": json.dumps(
                     {
                         "feasibility": feasibility,
                         "brief": brief,
@@ -797,8 +795,7 @@ async def research_and_compile(
                         "options": research_options,
                     }
                 ),
-                "workflow": json.dumps(workflow),
-                "id": job_id,
+                "workflow_summary": json.dumps(workflow),
             },
         )
         await write_db.commit()
@@ -834,13 +831,12 @@ async def research_and_compile(
 
 
 async def _cancel_job(db: AsyncSession, job_id: str, reason: str) -> None:
-    """Mark a job as cancelled (used for client_disconnect during Phase 2)."""
-    await db.execute(
-        text(
-            "UPDATE jobs SET status = 'cancelled', error_summary = :err "
-            "WHERE id = :id"
-        ),
-        {"err": reason, "id": job_id},
+    """Mark a job as cancelled (used for client_disconnect during Phase 2).
+    §17.1107 — guarded: never overwrites a job that already reached a terminal
+    status (a disconnect after a ``failed`` write used to flip it)."""
+    await transition(
+        db, job_id, to="cancelled", set_columns={"error_summary": reason},
+        reason=f"phase2_{reason}",
     )
     await db.commit()
 

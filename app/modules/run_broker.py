@@ -365,6 +365,7 @@ async def reconcile_on_startup(*, exclude: Iterable[str] = ()) -> None:
                                          || 'interrupted by an engine restart mid-run',
                            updated_at = NOW()
                      WHERE id = ANY(:ids)
+                       AND status IN ('running', 'executing')
                 """),
                 {"ids": job_ids},
             )
