@@ -197,7 +197,7 @@ RAW_STATUS_WRITE = re.compile(
 )
 # 2026-09-18 §17.1107: 37 sites → 28 after S-2..S-5. This number only goes DOWN.
 # A new raw `UPDATE jobs … SET status` belongs in job_state.transition().
-RAW_STATUS_WRITE_CEILING = 28
+RAW_STATUS_WRITE_CEILING = 27   # §17.1119: design_pipeline._set_job_status migrated
 
 
 def _raw_sites() -> dict[str, int]:

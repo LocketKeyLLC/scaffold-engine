@@ -686,13 +686,19 @@ async def test_set_job_status_refuses_to_overwrite_cancelled(monkeypatch):
     affects 0 rows and the caller can detect the race."""
     from app.sim.design_pipeline import _set_job_status
 
-    # Mock rowcount=0 to simulate the WHERE status != 'cancelled' guard
-    # rejecting the UPDATE (i.e. the row IS cancelled).
-    db_rejected = make_mock_db(rowcount=0)
+    # §17.1119 — _set_job_status goes through job_state.transition(): the
+    # guarded UPDATE … RETURNING prior_status yields no row when refused (the
+    # row is terminal — cancelled, and now also failed/completed), then a
+    # SELECT for the refusal log line.
+    from unittest.mock import AsyncMock, MagicMock
+    refused = MagicMock(); refused.first.return_value = None; refused.scalar.return_value = "cancelled"
+    db_rejected = MagicMock(); db_rejected.execute = AsyncMock(return_value=refused); db_rejected.commit = AsyncMock()
     transitioned = await _set_job_status(db_rejected, JOB_ID, "completed")
     assert transitioned is False
+    sql = " ".join(str(db_rejected.execute.await_args_list[0].args[0]).split())
+    assert "NOT IN ('cancelled', 'completed', 'failed')" in sql, "every terminal status is sticky now, not only cancelled"
 
-    # Mock rowcount=1 simulates a successful transition.
-    db_ok = make_mock_db(rowcount=1)
+    moved = MagicMock(); moved.first.return_value = ("executing",)
+    db_ok = MagicMock(); db_ok.execute = AsyncMock(return_value=moved); db_ok.commit = AsyncMock()
     transitioned = await _set_job_status(db_ok, JOB_ID, "completed")
     assert transitioned is True

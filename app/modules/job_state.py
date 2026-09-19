@@ -140,3 +140,18 @@ async def transition(
         "job_transition: job=%s from=%s to=%s reason=%s", job_id, prior, to, reason or "-",
     )
     return prior
+
+
+async def touch(db: AsyncSession, job_id: Any, *, reason: str = "") -> bool:
+    """§17.1119 (ledger S-7) — heartbeat. The executor bumped ``jobs.updated_at``
+    only at run start and exit, so a long run was reap-eligible between node
+    claims once ``stale_threshold_minutes`` passed (the reaper's staleness rule
+    reads ``updated_at``). Called at every node claim; touches only a job that
+    is actually mid-run. Not a status write."""
+    res = await db.execute(
+        text("UPDATE jobs SET updated_at = NOW() "
+             "WHERE id = :id AND status IN ('running', 'executing') RETURNING id"),
+        {"id": str(job_id)},
+    )
+    return res.first() is not None
+

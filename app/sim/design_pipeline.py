@@ -46,6 +46,8 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator
 
 from sqlalchemy import text
+
+from app.modules.job_state import transition
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -155,19 +157,16 @@ async def _set_job_status(
     cancelled — caller emits an SSE ``cancelled`` event and stops
     instead of yielding ``stage_done`` against a now-cancelled job.
     """
-    result = await db.execute(
-        text(
-            """
-            UPDATE jobs
-            SET status = :status, updated_at = NOW()
-            WHERE id = :id
-              AND status != 'cancelled'
-            """
-        ),
-        {"id": str(job_id), "status": new_status},
+    # §17.1119 (Phase 1 ledger S-6) — the guard was `!= 'cancelled'` only, so a
+    # stage's success write could turn `failed` into `completed` and a
+    # reaper-`failed` job could be resurrected to `executing`. The shared
+    # transition refuses every terminal status; a refusal is logged with the
+    # row's current status and returns False, exactly as the cancelled case did.
+    prior = await transition(
+        db, job_id, to=new_status, reason=f"design_pipeline:{new_status}",
     )
     await db.commit()
-    return bool(result.rowcount)
+    return prior is not None
 
 
 async def _job_was_cancelled(

@@ -35,7 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.database import async_session
-from app.modules.job_state import NODE_STATUSES, TERMINAL_JOB_STATUSES, sql_status_list, transition
+from app.modules.job_state import NODE_STATUSES, TERMINAL_JOB_STATUSES, sql_status_list, touch, transition
 from app import model_router
 from app.config import settings, get_model
 from app.utils.progress import EmitThrottle, ProgressTracker
@@ -1136,6 +1136,11 @@ async def execute_next_node(
             preclaimed_node if preclaimed_node is not None
             else await _get_next_node(db, job_id)
         )
+        # §17.1119 (ledger S-7) — heartbeat: a claim proves the run is alive.
+        # The reaper reads jobs.updated_at; without this a long run was
+        # reap-eligible between node claims once stale_threshold passed.
+        if node is not None and preclaimed_node is None:
+            await touch(db, job_id, reason="node_claim")
         if node is None:
             if await _all_nodes_done(db, job_id):
                 flipped = await _flip_job_completed(db, job_id)  # §17.854 (A1)
@@ -1256,7 +1261,7 @@ async def execute_next_node(
                 # `done` / `skipped` are success-terminal; anything else here
                 # is a live blocker. The cause precedence below classifies
                 # the dominant kind.
-                _non_terminal = {"failed", "blocked", "pending", "running"}
+                _non_terminal = {"failed", "pending", "running"}   # §17.1119 — nodes have no "blocked"
                 for r in _rows:
                     if r.status != "pending":
                         continue
@@ -1272,7 +1277,7 @@ async def execute_next_node(
                     # (operator action: retry / skip). Otherwise deps are
                     # pending or running → "waiting" (operator: wait).
                     dep_statuses = {b["status"] for b in blocked_by_objs}
-                    if dep_statuses & {"failed", "blocked"}:
+                    if dep_statuses & {"failed"}:   # §17.1119 — nodes have no "blocked"
                         cause = "failed"
                         actionable_count += 1
                     else:
@@ -2293,6 +2298,9 @@ async def _run_parallel_frontier(
             if free > 0:
                 async with async_session() as db:
                     claimed = await _claim_ready_nodes(db, job_id, free)
+                    if claimed:                                   # §17.1119 — heartbeat
+                        await touch(db, job_id, reason="node_claim")
+                        await db.commit()
                 for n in claimed:
                     yield _sse("node_start", {
                         "job_id": job_id, "node_key": n["node_key"],
