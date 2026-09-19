@@ -2,6 +2,7 @@
 // latency (GET /jobs/{id}/costs), and their compiled deliverables with an LCS
 // line-diff. Picker (two searchable selectors) when both ids aren't in the route.
 import * as api from "../api.js";
+import { jobStore } from "../store.js";
 import * as router from "../router.js";
 import { el, mount, shortId, debounce, fmtNum, fmtUsd } from "../util.js";
 import { statusBadge, loading, errorPanel } from "../components.js";
@@ -142,7 +143,7 @@ function diffTable(aText, bText) {
 // ── Compare ──────────────────────────────────────────────────────────
 async function fetchSide(id) {
   const [job, costs, logs] = await Promise.all([
-    api.get(`/jobs/${id}`),
+    jobStore.get(id),
     api.get(`/jobs/${id}/costs`).catch(() => null),
     api.get(`/logs/${id}`, { query: { include_compiled: true } }).catch(() => ({})),
   ]);
