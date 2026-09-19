@@ -39,6 +39,7 @@ def _db(*, session=("job-1", "active"), step=("pending", "pending", "Integrate m
     out = [
         _row({"job_id": session[0], "status": session[1]} if session else None),
         _row({"step_status": step[0], "node_status": step[1], "title": step[2]} if step else None),
+        _row([]),               # §17.1112 SELECT other presented steps (none)
         _row(),                 # UPDATE assist_steps
         _row(),                 # UPDATE assist_sessions
         _row(scalar=guidance),  # SELECT guidance
