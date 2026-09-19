@@ -31,6 +31,7 @@ from app.utils.milvus_utils import (
     close_client as close_milvus_client,
 )
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from app.model_router import close_client
 
 from app.auth import require_api_key
@@ -775,6 +776,32 @@ if settings.otel_enabled:
 # Starlette's inner ExceptionMiddleware, BEFORE ErrorLoggingMiddleware sees it, so
 # no error_logs row is written. Surfaced by the §17.441 stress test (deeply-nested
 # body 500'd on every JSON POST endpoint: /ideate, /research, /dag, /rag, /design).
+# §17.1131 — the same shape for input the DATABASE rejects: asyncpg's DataError
+# (invalid UUID, value out of int32/int64 range, a NUL byte in a text argument —
+# every one a fuzzer finding) is bad input, not a server fault. Typed path/query
+# params (UuidPath, bounded Query) stop most of it at the schema; this is the
+# backstop for what still reaches SQL (a NUL byte inside a JSON body field, an
+# id in a body). 422 with the driver's own one-line reason, logged at warning,
+# no error_logs row — a mistyped value must not page anyone.
+@app.exception_handler(DBAPIError)
+async def _dbapi_data_error_handler(request: Request, exc: DBAPIError):
+    orig = getattr(exc, "orig", None)
+    names = {c.__name__ for c in type(orig).__mro__} if orig is not None else set()
+    is_data_error = "DataError" in names
+    if not is_data_error:
+        # a wrapped DataError from the sqlalchemy/asyncpg adapter layer
+        inner = getattr(orig, "__cause__", None)
+        is_data_error = inner is not None and "DataError" in {c.__name__ for c in type(inner).__mro__}
+    if not is_data_error:
+        raise exc  # a real DB fault: let ErrorLoggingMiddleware record it as a 500
+    reason = str(orig).splitlines()[0][:200] if orig is not None else "invalid input"
+    logger.warning('event="db_data_error_rejected" path=%s reason=%r', request.url.path, reason)
+    return JSONResponse(
+        status_code=422,
+        content={"detail": [{"type": "data_error", "loc": [], "msg": f"invalid input: {reason}"}]},
+    )
+
+
 @app.exception_handler(RecursionError)
 async def _recursion_error_handler(request: Request, exc: RecursionError):
     logger.warning('event="recursion_error_rejected" path=%s', request.url.path)

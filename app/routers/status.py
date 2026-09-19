@@ -405,7 +405,7 @@ async def get_logs(
         description="Include jobs.compiled_output in the response.",
     ),
     limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
     db=Depends(get_db),
     principal: Principal = Depends(get_principal),
 ) -> LogsResponse:

@@ -37,3 +37,8 @@ def is_uuid(value: object) -> bool:
     runs before the endpoint's own parameter validation is reported — so it
     can step aside on a malformed id and let the endpoint's 422 win."""
     return isinstance(value, str) and _UUID_RE.fullmatch(value) is not None
+
+#: Integer path ids, bounded to the backing column so a fuzzed
+#: 448947330693740494848 is a 422 and not an asyncpg "value out of int32 range" 500.
+Int32Path = Annotated[int, Path(ge=1, le=2_147_483_647, description="integer id (int4)")]
+Int64Path = Annotated[int, Path(ge=1, le=9_223_372_036_854_775_807, description="integer id (int8)")]

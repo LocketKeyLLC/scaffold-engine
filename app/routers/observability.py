@@ -147,7 +147,7 @@ async def job_traces_endpoint(
     job_id: UuidPath,
     limit: int = Query(50, ge=1, le=500,
         description="Max trace rows returned (default 50)."),
-    offset: int = Query(0, ge=0,
+    offset: int = Query(0, ge=0, le=1_000_000,
         description="Rows to skip, for paging through a long run."),
     kind: str | None = Query(None,
         description="Filter to one request_kind: generate | chat | tool_call | embed."),

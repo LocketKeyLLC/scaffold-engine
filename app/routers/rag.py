@@ -49,7 +49,7 @@ async def query_rag(body: RagInput):
 
 
 @router.get("/rag/dedup", response_model=DedupLogResponse)
-async def list_dedup_log(limit: Annotated[int, Query(ge=1, le=500)] = 50, offset: Annotated[int, Query(ge=0)] = 0):
+async def list_dedup_log(limit: Annotated[int, Query(ge=1, le=500)] = 50, offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0):
     """List logged near-duplicate rejections for manual review."""
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=422, detail="limit must be 1..200")

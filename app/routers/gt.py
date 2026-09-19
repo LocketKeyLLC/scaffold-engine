@@ -35,6 +35,10 @@ async def extract_gt(body: GtInput):
     )
 
 
+#: Milvus rejects offset + limit above this (its default query window).
+MILVUS_MAX_WINDOW = 16_384
+
+
 @router.get("/gt/list")
 async def gt_list_endpoint(
     page: int = 1,
@@ -47,6 +51,13 @@ async def gt_list_endpoint(
         raise HTTPException(status_code=422, detail="page must be >= 1")
     if per_page < 1 or per_page > 100:
         raise HTTPException(status_code=422, detail="per_page must be 1..100")
+    # §17.1131 — Milvus caps offset + limit at 16,384 per query; a deeper page
+    # used to surface as a 503 (schemathesis: page=41171). Say so as a 422.
+    if page * per_page > MILVUS_MAX_WINDOW:
+        raise HTTPException(
+            status_code=422,
+            detail=f"page too deep: page * per_page must be <= {MILVUS_MAX_WINDOW} (the vector store's offset+limit cap)",
+        )
     if domain is not None:
         from app.config import VALID_DOMAINS
         if domain not in VALID_DOMAINS:

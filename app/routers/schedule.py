@@ -24,6 +24,7 @@ from app.authz import (
 from app.database import get_db
 from app.schemas import ScheduleCreate, ScheduleResponse
 from app.utils.model_validation import _require_valid_models
+from app.utils.ids import Int32Path
 
 router = APIRouter()
 
@@ -88,7 +89,7 @@ async def create_schedule(
 @router.get("/schedule")
 async def list_schedules(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -121,7 +122,7 @@ async def list_schedules(
 
 @router.delete("/schedule/{schedule_id}")
 async def delete_schedule(
-    schedule_id: int,
+    schedule_id: Int32Path,  # scheduled_jobs.id is int4 (§17.1131)
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
