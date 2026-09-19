@@ -3,6 +3,25 @@
 const routes = [];
 let notFound = null;
 let current = null;
+// §17.1116 (ledger U-6) — a view whose in-flight work dies with it (the
+// research stream cancels the session on disconnect) registers a guard:
+// a function returning a message while leaving would lose something, or
+// null. Navigating away then asks first; a refusal restores the hash.
+let navGuard = null;
+let suppressNext = false;
+
+export function setNavGuard(fn) {
+  navGuard = typeof fn === "function" ? fn : null;
+}
+
+/** Pure: may the navigation from `fromPath` to `toPath` proceed? `confirmFn`
+ *  is asked only when the guard has something to lose. */
+export function navAllowed(guard, fromPath, toPath, confirmFn) {
+  if (!guard || fromPath === toPath) return true;
+  const msg = guard(toPath);
+  if (!msg) return true;
+  return !!confirmFn(msg);
+}
 
 export function route(pattern, handler) {
   const parts = pattern.split("/").filter(Boolean);
@@ -58,7 +77,13 @@ export function getCurrent() {
 
 export function start() {
   const dispatch = () => {
+    if (suppressNext) { suppressNext = false; return; }   // the hash restore below
     const path = currentPath();
+    if (current && !navAllowed(navGuard, current.path, path, (msg) => window.confirm(msg))) {
+      suppressNext = true;
+      location.hash = "#" + current.path;
+      return;
+    }
     const m = match(path);
     if (m) {
       current = { path, params: m.params };
