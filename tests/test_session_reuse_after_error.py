@@ -21,6 +21,19 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Bound at collection time on purpose: `tests/test_validate_dag.py` stubs `sqlalchemy`
+# in sys.modules at ITS import, and this file collects before it (alphabetical), so
+# these names are the real objects in the full run. In an ad-hoc order where the stub
+# lands first, the DB proof skips with the reason instead of failing on the stub.
+try:
+    from app.database import async_session as _async_session
+    from app.utils.savepoint import savepoint as _savepoint
+    _DB_IMPORT_ERROR = None
+except Exception as _exc:  # noqa: BLE001 — the stub makes app.database unimportable
+    _async_session = _savepoint = None
+    _DB_IMPORT_ERROR = repr(_exc)
+
 DB_CALLS = ("execute", "commit", "flush", "scalar", "scalars", "get", "run_sync")
 SESSION_FACTORIES = ("async_session", "get_session")
 
@@ -135,8 +148,9 @@ async def test_savepoint_keeps_the_session_usable_after_a_failed_statement():
     import os
     if "_test" not in (os.environ.get("DATABASE_URL") or ""):
         pytest.skip("needs the test database (container lane)")
-    from app.database import async_session
-    from app.utils.savepoint import savepoint
+    if _async_session is None:
+        pytest.skip(f"app.database not importable at collection (a sys.modules stub landed first): {_DB_IMPORT_ERROR}")
+    async_session, savepoint = _async_session, _savepoint
 
     async def run(db, sql):
         conn = await db.connection()
