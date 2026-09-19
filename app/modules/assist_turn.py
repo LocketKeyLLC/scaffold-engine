@@ -92,8 +92,15 @@ async def start_turn_run(
     return run_id
 
 
-async def _append_frames(run_id: str, frames: list[_Event], db) -> None:
-    payload = _json.dumps([{"e": n, "d": d} for n, d in frames])
+async def _append_frames(run_id: str, frames: list[_Event], db,
+                         stamps: list[int] | None = None) -> None:
+    # §17.1109 — ``t`` = ms since the turn started, stamped at yield time (the
+    # driver passes ``stamps``); frames read back without it are pre-§17.1109.
+    if stamps is not None and len(stamps) == len(frames):
+        payload = _json.dumps([{"e": n, "d": d, "t": t}
+                               for (n, d), t in zip(frames, stamps, strict=True)])
+    else:
+        payload = _json.dumps([{"e": n, "d": d} for n, d in frames])
     try:
         await db.execute(
             _sqltext("UPDATE assist_turn_runs SET frames = frames || CAST(:f AS jsonb) WHERE id = :rid"),
@@ -140,8 +147,14 @@ async def _drive_turn_run(
     long walkthrough doesn't hammer the row with per-token commits."""
     from app.database import async_session
     from app.utils.progress import reset_turn_note_sink, set_turn_note_sink
+    from app.utils import turn_timing
 
     status = "done"
+    # §17.1109 (ledger L-1) — every operator-facing status frame opens a
+    # timed stage; model calls made inside it accrue to it (cost_tracking
+    # reads the ContextVar). The record lands on the run row at finalize.
+    timer = turn_timing.TurnTimer()
+    _timer_token = turn_timing.current_turn_timer.set(timer)
     # §17.1082 — deep code (the model router's retry loop) can say one line to
     # the operator's status line while this driver is blocked inside the loop.
     _note_tasks: set[asyncio.Task] = set()
@@ -154,18 +167,24 @@ async def _drive_turn_run(
     try:
         async with async_session() as db:
             buf: list[_Event] = []
+            stamps: list[int] = []
             last_flush = asyncio.get_event_loop().time()
             async for ev in run_turn(
                 session_id=session_id, message=message, command=command,
                 node_key=node_key, history=history, db=db,
             ):
+                if ev[0] == ASSIST_TURN_STATUS:
+                    timer.mark((ev[1] or {}).get("text"))
+                elif ev[0] == ASSIST_TURN_ROUTED:
+                    timer.annotate("action", (ev[1] or {}).get("action"))
                 buf.append(ev)
+                stamps.append(timer.elapsed_ms())
                 now = asyncio.get_event_loop().time()
                 if ev[0] != ASSIST_GUIDE_DELTA or (now - last_flush) >= 0.7:
-                    await _append_frames(run_id, buf, db)
-                    buf, last_flush = [], now
+                    await _append_frames(run_id, buf, db, stamps=stamps)
+                    buf, stamps, last_flush = [], [], now
             if buf:
-                await _append_frames(run_id, buf, db)
+                await _append_frames(run_id, buf, db, stamps=stamps)
     except Exception as exc:  # noqa: BLE001 — the run row carries the error
         status = "error"
         logger.exception("turn_run_failed run_id=%s", run_id)
@@ -178,11 +197,16 @@ async def _drive_turn_run(
         reset_turn_note_sink(_sink_token)
         if _note_tasks:
             await asyncio.gather(*_note_tasks, return_exceptions=True)
+        turn_timing.current_turn_timer.reset(_timer_token)
+        timings = timer.finish()
+        logger.info("assist_turn_timing: run_id=%s session_id=%s status=%s %s",
+                    run_id, session_id, status, timer.summary_line(timings))
         try:
             async with async_session() as db:
                 await db.execute(
-                    _sqltext("UPDATE assist_turn_runs SET status = :st, finished_at = now() WHERE id = :rid"),
-                    {"rid": run_id, "st": status},
+                    _sqltext("UPDATE assist_turn_runs SET status = :st, finished_at = now(), "
+                             "timings = CAST(:tm AS jsonb) WHERE id = :rid"),
+                    {"rid": run_id, "st": status, "tm": _json.dumps(timings)},
                 )
                 await db.commit()
         except Exception:  # noqa: BLE001

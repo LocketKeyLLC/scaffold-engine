@@ -10,7 +10,8 @@ def test_script_directory_loads_with_one_head():
     cfg = Config(str(ROOT / "alembic.ini")); cfg.set_main_option("script_location", str(ROOT / "alembic"))
     sd = ScriptDirectory.from_config(cfg)
     heads = sd.get_heads()
-    assert heads == ["0001_baseline"]
+    assert heads == ["0002_turn_run_timings"]        # §17.1109 — bump when a revision is added
+    assert sd.get_revision("0002_turn_run_timings").down_revision == "0001_baseline"
     base = sd.get_revision("0001_baseline")
     assert base.down_revision is None
 
