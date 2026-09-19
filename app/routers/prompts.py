@@ -19,12 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.modules.prompt_inspector import list_prompts, get_prompt, update_prompt, get_history
 from app.schemas import PromptUpdateInput
+from app.utils.ids import UuidPath
 
 router = APIRouter()
 
 
 @router.get("/prompts/{job_id}")
-async def prompts_list(job_id: str, db: AsyncSession = Depends(get_db)):
+async def prompts_list(job_id: UuidPath, db: AsyncSession = Depends(get_db)):
     """List all prompts for a job's DAG nodes."""
     try:
         result = await list_prompts(UUID(job_id), db)
@@ -36,7 +37,7 @@ async def prompts_list(job_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/prompts/{job_id}/{node_key}")
-async def prompts_detail(job_id: str, node_key: str, db: AsyncSession = Depends(get_db)):
+async def prompts_detail(job_id: UuidPath, node_key: str, db: AsyncSession = Depends(get_db)):
     """Get full prompt for a specific node."""
     try:
         result = await get_prompt(UUID(job_id), node_key, db)
@@ -48,7 +49,7 @@ async def prompts_detail(job_id: str, node_key: str, db: AsyncSession = Depends(
 
 
 @router.get("/prompts/{job_id}/{node_key}/history")
-async def prompts_history(job_id: str, node_key: str, db: AsyncSession = Depends(get_db)):
+async def prompts_history(job_id: UuidPath, node_key: str, db: AsyncSession = Depends(get_db)):
     """Return the audit trail of prompt edits for a node, newest-first.
 
     Closes audit items #7.8 (no audit trail) and #7.9 (structured response).
@@ -64,7 +65,7 @@ async def prompts_history(job_id: str, node_key: str, db: AsyncSession = Depends
 
 @router.post("/prompts/{job_id}/{node_key}")
 async def prompts_update(
-    job_id: str,
+    job_id: UuidPath,
     node_key: str,
     body: PromptUpdateInput,
     db: AsyncSession = Depends(get_db),

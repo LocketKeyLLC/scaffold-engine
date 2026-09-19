@@ -80,6 +80,7 @@ from app.schemas import (
     SkipNodeInput,
 )
 from app.utils.model_validation import _require_valid_models
+from app.utils.ids import UuidPath
 
 logger = logging.getLogger("scaffold")
 
@@ -371,7 +372,7 @@ async def ideate_confirm_endpoint(
 
 @router.get("/dag/{job_id}")
 async def get_dag(
-    job_id: str,
+    job_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -424,7 +425,7 @@ async def generate_dag_endpoint(
 
 @router.post("/jobs/{job_id}/advance", tags=["Workflow"])
 async def advance_job_endpoint(
-    job_id: str,
+    job_id: UuidPath,
     body: AdvanceInput,
     principal: Principal = Depends(get_principal),
 ):
@@ -491,7 +492,7 @@ async def advance_job_endpoint(
 
 @router.post("/jobs/{job_id}/approve", tags=["Workflow"])
 async def approve_job_endpoint(
-    job_id: str,
+    job_id: UuidPath,
     body: ApproveInput,
     principal: Principal = Depends(get_principal),
 ):
@@ -523,7 +524,7 @@ async def approve_job_endpoint(
 
 @router.get("/jobs/{job_id}/approve", tags=["Workflow"])
 async def approve_job_state_endpoint(
-    job_id: str,
+    job_id: UuidPath,
     principal: Principal = Depends(get_principal),
 ):
     """§17.1036 — the detached approval chain's state for a job."""
@@ -578,7 +579,7 @@ async def exec_statuses(
 
 @router.get("/exec/status/{job_id}")
 async def exec_status(
-    job_id: str,
+    job_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -604,7 +605,7 @@ async def exec_status(
 
 @router.get("/exec/events/{job_id}")
 async def exec_events(
-    job_id: str,
+    job_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -637,7 +638,7 @@ async def exec_events(
 
 @router.get("/exec/nodes/{job_id}")
 async def exec_nodes(
-    job_id: str,
+    job_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):

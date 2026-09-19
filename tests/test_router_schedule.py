@@ -216,13 +216,14 @@ def test_list_schedules_returns_paginated_payload(client, mock_db):
 def test_list_schedules_limit_bounds(client, mock_db, limit):
     r = client.get(f"/schedule?limit={limit}")
     assert r.status_code == 422
-    assert "limit" in r.json()["detail"]
+    # §17.1131 — bounded at the schema (Query ge/le); pydantic's detail is a list
+    assert any(e["loc"][-1] == "limit" for e in r.json()["detail"])
 
 
 def test_list_schedules_offset_negative(client, mock_db):
     r = client.get("/schedule?offset=-1")
     assert r.status_code == 422
-    assert "offset" in r.json()["detail"]
+    assert any(e["loc"][-1] == "offset" for e in r.json()["detail"])
 
 
 # ---------------------------------------------------------------------------

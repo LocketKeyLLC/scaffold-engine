@@ -27,6 +27,7 @@ from app.schemas import (
     ErrorLogResolveResponse,
     JobTracesResponse,
 )
+from app.utils.ids import UuidPath
 
 router = APIRouter(tags=["Observability"])
 
@@ -143,7 +144,7 @@ async def quality_rollup_endpoint(
     tags=["Observability"],
 )
 async def job_traces_endpoint(
-    job_id: str,
+    job_id: UuidPath,
     limit: int = Query(50, ge=1, le=500,
         description="Max trace rows returned (default 50)."),
     offset: int = Query(0, ge=0,
@@ -182,7 +183,7 @@ async def job_traces_endpoint(
     response_model=ErrorLogResolveResponse,
 )
 async def resolve_error_endpoint(
-    error_id: str,
+    error_id: UuidPath,
     body: ErrorLogResolveInput,
     db: AsyncSession = Depends(get_db),
 ) -> ErrorLogResolveResponse:

@@ -16,6 +16,7 @@ from sqlalchemy import text
 from app.authz import Principal, assert_visible, get_principal
 from app.database import get_db
 from app.schemas import ArtifactListResponse, ArtifactRead
+from app.utils.ids import UuidPath
 
 logger = logging.getLogger("scaffold.routers.artifacts")
 router = APIRouter()
@@ -47,7 +48,7 @@ def _require_uuid(raw: str, field: str) -> str:
 
 @router.get("/jobs/{job_id}/artifacts")
 async def list_job_artifacts(
-    job_id: str,
+    job_id: UuidPath,
     db=Depends(get_db),
     principal: Principal = Depends(get_principal),
 ) -> ArtifactListResponse:
@@ -70,7 +71,7 @@ async def list_job_artifacts(
 
 @router.get("/artifacts/{artifact_id}")
 async def get_artifact(
-    artifact_id: str,
+    artifact_id: UuidPath,
     db=Depends(get_db),
     principal: Principal = Depends(get_principal),
 ) -> ArtifactRead:

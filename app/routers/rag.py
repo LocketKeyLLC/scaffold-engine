@@ -9,7 +9,8 @@ Routes:
   POST /rag         — query_rag (Step 13)
   GET  /rag/dedup   — list_dedup_log
 """
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import text
 
 from app.database import async_session
@@ -48,7 +49,7 @@ async def query_rag(body: RagInput):
 
 
 @router.get("/rag/dedup", response_model=DedupLogResponse)
-async def list_dedup_log(limit: int = 50, offset: int = 0):
+async def list_dedup_log(limit: Annotated[int, Query(ge=1, le=500)] = 50, offset: Annotated[int, Query(ge=0)] = 0):
     """List logged near-duplicate rejections for manual review."""
     if limit < 1 or limit > 200:
         raise HTTPException(status_code=422, detail="limit must be 1..200")

@@ -169,7 +169,8 @@ def test_resolve_error_invalid_uuid_returns_422(client, mock_db):
         json={"resolved": True, "resolution": "fixed"},
     )
     assert r.status_code == 422
-    assert "UUID" in r.json()["detail"]
+    # §17.1131 — rejected by the UuidPath path type before the handler runs
+    assert any(e["loc"] == ["path", "error_id"] for e in r.json()["detail"])
     mock_db.execute.assert_not_awaited()
 
 

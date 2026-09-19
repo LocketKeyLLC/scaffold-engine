@@ -16,12 +16,13 @@ Routes:
   PATCH  /jobs/{job_id}/synthesis       — set_job_synthesis_override (Management)
   PATCH  /jobs/{job_id}/budget          — set_job_budget (Management) [§17.777]
 """
+from typing import Annotated
 import json
 import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
@@ -57,6 +58,7 @@ from app.schemas import (
     ResumeJobInput,
 )
 from app.utils.model_validation import _require_valid_models
+from app.utils.ids import UuidPath
 
 router = APIRouter()
 logger = logging.getLogger("scaffold")
@@ -81,7 +83,7 @@ async def cleanup_stale_jobs(
 
 @router.post("/jobs/{job_id}/resume", tags=["Management"])
 async def resume_job_endpoint(
-    job_id: str,
+    job_id: UuidPath,
     body: ResumeJobInput,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
@@ -138,7 +140,7 @@ async def resume_job_endpoint(
     tags=["Management"],
 )
 async def cancel_job_endpoint(
-    job_id: str,
+    job_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -225,8 +227,8 @@ async def list_jobs(
     status: str | None = None,
     q: str | None = None,
     synthesized: bool | None = None,
-    limit: int = 25,
-    offset: int = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -324,7 +326,7 @@ def _json_obj(v):
 
 @router.get("/jobs/{job_id}", response_model=JobDetailResponse, tags=["Management"])
 async def get_job(
-    job_id: str,
+    job_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -388,7 +390,7 @@ async def get_job(
 
 @router.patch("/jobs/{job_id}/brief", response_model=BriefUpdateResponse, tags=["Management"])
 async def update_brief(
-    job_id: str,
+    job_id: UuidPath,
     body: BriefUpdateInput,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
@@ -442,7 +444,7 @@ async def update_brief(
 
 @router.delete("/jobs/{job_id}", response_model=DeleteResponse, tags=["Management"])
 async def delete_job(
-    job_id: str,
+    job_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -469,7 +471,7 @@ async def delete_job(
 
 @router.patch("/jobs/{job_id}", response_model=JobSummary, tags=["Management"])
 async def rename_job(
-    job_id: str,
+    job_id: UuidPath,
     body: JobRenameInput,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
@@ -511,7 +513,7 @@ async def rename_job(
     tags=["Management"],
 )
 async def get_job_costs_endpoint(
-    job_id: str,
+    job_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -563,7 +565,7 @@ async def get_job_costs_endpoint(
     tags=["Management"],
 )
 async def set_job_synthesis_override(
-    job_id: str,
+    job_id: UuidPath,
     body: JobSynthesisOverrideInput,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
@@ -608,7 +610,7 @@ async def set_job_synthesis_override(
     tags=["Management"],
 )
 async def set_job_budget(
-    job_id: str,
+    job_id: UuidPath,
     body: JobBudgetInput,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
@@ -703,7 +705,7 @@ async def _visible_job_or_404(job_id: str, db: AsyncSession, principal: Principa
 
 @router.get("/jobs/{job_id}/reconciliation", tags=["Management"])
 async def get_job_reconciliation(
-    job_id: str,
+    job_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -719,7 +721,7 @@ async def get_job_reconciliation(
 
 @router.post("/jobs/{job_id}/reconciliation/{index}/revert", tags=["Management"])
 async def revert_job_reconciliation(
-    job_id: str,
+    job_id: UuidPath,
     index: int,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),

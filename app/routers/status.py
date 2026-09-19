@@ -21,6 +21,7 @@ from app.modules.recovery import next_actions_for
 from app.schemas import JOB_STATUSES, JobStatus
 from app.utils.progress import humanize_ms
 from app.modules.job_phase import phase_label_for
+from app.utils.ids import UuidPath
 
 # §17.811 — DAG job statuses for which a compute-on-read ETA is meaningful.
 _ETA_ACTIVE_STATUSES = frozenset({"running", "executing"})
@@ -397,7 +398,7 @@ async def get_work(
 
 @router.get("/logs/{job_id}")
 async def get_logs(
-    job_id: str,
+    job_id: UuidPath,
     include_output: bool = Query(default=False),
     include_compiled: bool = Query(
         default=False,
