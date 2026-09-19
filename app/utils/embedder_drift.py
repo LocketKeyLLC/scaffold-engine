@@ -106,6 +106,7 @@ async def check_embedder_drift(db: AsyncSession) -> dict:
             )
             await db.commit()
         except Exception as exc:
+            await db.rollback()  # §17.1132 — a failed commit leaves the session unusable until rolled back
             logger.debug("embedder_drift_touch_failed: err=%s", exc)
         return {"outcome": "unchanged", "current": current, "stored": stored}
 

@@ -309,6 +309,7 @@ from app.modules.assist_research_lib import (  # noqa: F401,E402
     _FAILURE_PREFIXES,
     _FLAG_UNKNOWNS_TOOL,
 )
+from app.utils.savepoint import savepoint
 
 
 # ── Research pre-pass (confirm unknowns) ──────────────────────────────────
@@ -6266,27 +6267,28 @@ async def apply_post_generation_guards(
     # changed — reply `skip` to retire it" as one coherent instruction, instead
     # of a skip offer stapled under a confident false statement.
     try:
-        if claims_plan_mutation(out):
-            _job_row = (await db.execute(
-                text("SELECT job_id FROM assist_sessions WHERE id = :sid"),
-                {"sid": session_id},
-            )).mappings().first()
-            _node_status = (await db.execute(
-                text("SELECT status FROM dag_nodes "
-                     "WHERE job_id = :jid AND node_key = :nk"),
-                {"jid": str(_job_row["job_id"]), "nk": node_key},
-            )).scalar() if _job_row else None
-            # 'skipped' means the claim is TRUE — leave it alone. 'done' does
-            # NOT: a COMPLETED step was not "removed from the plan", and
-            # §17.1013 found that conflation shielding the false claim on ADD3.
-            if _node_status is not None and _node_status != "skipped":
-                banner = false_plan_claim_banner(title)
-                out = (out + "\n\n" + banner) if banner_position == "append" \
-                    else (banner + out)
-                meta["false_plan_claim"] = True
-                logger.warning(  # LOUD: the model asserted state it cannot set
-                    "assist_false_plan_claim node_key=%s node_status=%s",
-                    node_key, _node_status)
+        async with savepoint(db):  # §17.1132 — a failure here rolls back ONLY this optional work
+            if claims_plan_mutation(out):
+                _job_row = (await db.execute(
+                    text("SELECT job_id FROM assist_sessions WHERE id = :sid"),
+                    {"sid": session_id},
+                )).mappings().first()
+                _node_status = (await db.execute(
+                    text("SELECT status FROM dag_nodes "
+                         "WHERE job_id = :jid AND node_key = :nk"),
+                    {"jid": str(_job_row["job_id"]), "nk": node_key},
+                )).scalar() if _job_row else None
+                # 'skipped' means the claim is TRUE — leave it alone. 'done' does
+                # NOT: a COMPLETED step was not "removed from the plan", and
+                # §17.1013 found that conflation shielding the false claim on ADD3.
+                if _node_status is not None and _node_status != "skipped":
+                    banner = false_plan_claim_banner(title)
+                    out = (out + "\n\n" + banner) if banner_position == "append" \
+                        else (banner + out)
+                    meta["false_plan_claim"] = True
+                    logger.warning(  # LOUD: the model asserted state it cannot set
+                        "assist_false_plan_claim node_key=%s node_status=%s",
+                        node_key, _node_status)
     except Exception as exc:  # noqa: BLE001 — a correction must never fail a guide
         logger.warning("assist_false_plan_claim_check_failed: %s", exc)
 

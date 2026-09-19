@@ -30,6 +30,7 @@ from typing import Any, AsyncGenerator, Optional
 from sqlalchemy import text
 
 from app.database import async_session
+from app.utils.savepoint import savepoint
 from app.modules.assist_inventory import topology_of as _topology_of  # §17.1083b
 from app.modules.prompt_assembly import (
     StepContext,
@@ -2087,16 +2088,17 @@ async def run_step_fix(
     # name SSH and a login prompt.
     recent_replies: list[str] = []
     try:
-        _rows = (await db.execute(
-            text("""
-                SELECT content FROM assist_turns
-                 WHERE session_id = :sid AND node_key = :nk
-                   AND role = 'assistant' AND kind IN ('fix', 'guide')
-                 ORDER BY created_at DESC, id DESC LIMIT 4
-            """),
-            {"sid": session_id, "nk": nk},
-        )).mappings().all()
-        recent_replies = [r.get("content") or "" for r in _rows]
+        async with savepoint(db):  # §17.1132 — a failure here rolls back ONLY this optional work
+            _rows = (await db.execute(
+                text("""
+                    SELECT content FROM assist_turns
+                     WHERE session_id = :sid AND node_key = :nk
+                       AND role = 'assistant' AND kind IN ('fix', 'guide')
+                     ORDER BY created_at DESC, id DESC LIMIT 4
+                """),
+                {"sid": session_id, "nk": nk},
+            )).mappings().all()
+            recent_replies = [r.get("content") or "" for r in _rows]
     except Exception as e:  # noqa: BLE001 — steering is never a blocker
         logger.warning("assist_recent_replies_failed session_id=%s err=%r",
                        session_id, e)
@@ -3712,61 +3714,63 @@ async def _maybe_finalize_session(*, session_id: str, db) -> None:
     # operator DID execute these steps) and prepends a positive assist header.
     # Best-effort: a compile failure must not block session finalization.
     try:
-        from app.modules.execution_compile import (
-            _compile_output, compute_deliverable_kind,
-        )
-        compiled, synthesized = await _compile_output(
-            str(sess["job_id"]), db, assist_completed=True,
-        )
-        if compiled:
-            kind = await compute_deliverable_kind(  # §17.519 → 'assist_completed'
+        async with savepoint(db):  # §17.1132 — a failure here rolls back ONLY this optional work
+            from app.modules.execution_compile import (
+                _compile_output, compute_deliverable_kind,
+            )
+            compiled, synthesized = await _compile_output(
                 str(sess["job_id"]), db, assist_completed=True,
             )
-            await db.execute(
-                text(
-                    "UPDATE jobs SET compiled_output = :co, "
-                    "compiled_output_synthesized = :syn, "
-                    "deliverable_kind = :dk, updated_at = NOW() "
-                    "WHERE id = :jid"
-                ),
-                {"co": compiled, "syn": synthesized,
-                 "dk": kind, "jid": sess["job_id"]},
-            )
-            # §17.565 — persist the assist deliverable as artifact rows.
-            from app.modules.artifacts import persist_job_artifacts
-            await persist_job_artifacts(
-                str(sess["job_id"]), db, deliverable_kind=kind,
-            )
-            # §17.702 — feed the learning flywheel from ASSIST too. A component
-            # finished in assist mode is OPERATOR-EXECUTED on real systems — the
-            # strongest kind of "proven solution" the exemplar corpus wants — but
-            # the flywheel hook lived ONLY on the autonomous execution path
-            # (execution_agent), so the operator's whole workflow never became a
-            # reusable exemplar even with the valve on. Operator-grounded ⇒ pass a
-            # high grounding score; maybe_ingest_exemplar still gates on the opt-in
-            # valve + plan_only/empty-output. Gate on ≥1 committed step so a
-            # walk that was entirely skipped (no real executed work) isn't learned.
-            try:
-                committed = (await db.execute(
-                    text("SELECT count(*) FROM assist_steps "
-                         "WHERE session_id = :sid AND status = 'committed'"),
-                    {"sid": session_id},
-                )).scalar() or 0
-                if committed:
-                    _dom = (await db.execute(
-                        text("SELECT refined_brief->>'domain' FROM jobs WHERE id = :jid"),
-                        {"jid": sess["job_id"]},
-                    )).scalar() or "eng"
-                    from app.modules.flywheel import maybe_ingest_exemplar
-                    await maybe_ingest_exemplar(
-                        job_id=str(sess["job_id"]), compiled_output=compiled,
-                        deliverable_kind=kind,
-                        grounding_score=_ASSIST_EXEMPLAR_GROUNDING, domain=_dom,
-                    )
-            except Exception as e:  # noqa: BLE001 — ingest is best-effort
-                logger.warning(
-                    "assist_exemplar_ingest_failed job_id=%s err=%s",
-                    sess["job_id"], e,
+            if compiled:
+                kind = await compute_deliverable_kind(  # §17.519 → 'assist_completed'
+                    str(sess["job_id"]), db, assist_completed=True,
+                )
+                await db.execute(
+                    text(
+                        "UPDATE jobs SET compiled_output = :co, "
+                        "compiled_output_synthesized = :syn, "
+                        "deliverable_kind = :dk, updated_at = NOW() "
+                        "WHERE id = :jid"
+                    ),
+                    {"co": compiled, "syn": synthesized,
+                     "dk": kind, "jid": sess["job_id"]},
+                )
+                # §17.565 — persist the assist deliverable as artifact rows.
+                from app.modules.artifacts import persist_job_artifacts
+                await persist_job_artifacts(
+                    str(sess["job_id"]), db, deliverable_kind=kind,
+                )
+                # §17.702 — feed the learning flywheel from ASSIST too. A component
+                # finished in assist mode is OPERATOR-EXECUTED on real systems — the
+                # strongest kind of "proven solution" the exemplar corpus wants — but
+                # the flywheel hook lived ONLY on the autonomous execution path
+                # (execution_agent), so the operator's whole workflow never became a
+                # reusable exemplar even with the valve on. Operator-grounded ⇒ pass a
+                # high grounding score; maybe_ingest_exemplar still gates on the opt-in
+                # valve + plan_only/empty-output. Gate on ≥1 committed step so a
+                # walk that was entirely skipped (no real executed work) isn't learned.
+                try:
+                    async with savepoint(db):  # §17.1132 — a failure here rolls back ONLY this optional work
+                        committed = (await db.execute(
+                            text("SELECT count(*) FROM assist_steps "
+                                 "WHERE session_id = :sid AND status = 'committed'"),
+                            {"sid": session_id},
+                        )).scalar() or 0
+                        if committed:
+                            _dom = (await db.execute(
+                                text("SELECT refined_brief->>'domain' FROM jobs WHERE id = :jid"),
+                                {"jid": sess["job_id"]},
+                            )).scalar() or "eng"
+                            from app.modules.flywheel import maybe_ingest_exemplar
+                            await maybe_ingest_exemplar(
+                                job_id=str(sess["job_id"]), compiled_output=compiled,
+                                deliverable_kind=kind,
+                                grounding_score=_ASSIST_EXEMPLAR_GROUNDING, domain=_dom,
+                            )
+                except Exception as e:  # noqa: BLE001 — ingest is best-effort
+                    logger.warning(
+                        "assist_exemplar_ingest_failed job_id=%s err=%s",
+                        sess["job_id"], e,
                 )
     except Exception as e:  # noqa: BLE001 — finalization must survive compile errors
         logger.warning(

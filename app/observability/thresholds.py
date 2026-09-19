@@ -25,6 +25,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.database import async_session
+from app.utils.savepoint import savepoint
 from app.modules import observability_rollups
 from app.observability import alerts as _alerts
 from app.observability import metrics as _metrics
@@ -57,26 +58,28 @@ async def refresh_gauges(db) -> int | None:
     """
     # Jobs by status. Cardinality bounded by JOB_STATUSES (~12 values).
     try:
-        rows = await db.execute(text(
-            "SELECT status, COUNT(*) AS c FROM jobs GROUP BY status"
-        ))
-        records = rows.mappings().all()
-        # Reset previously-seen statuses to 0 so a status that just emptied
-        # out doesn't keep its last value forever.
-        try:
-            _metrics.jobs_by_status.clear()
-        except Exception:
-            pass
-        for r in records:
-            _metrics.jobs_by_status.labels(status=r["status"] or "unknown").set(int(r["c"] or 0))
+        async with savepoint(db):  # §17.1132 — a failure here rolls back ONLY this optional work
+            rows = await db.execute(text(
+                "SELECT status, COUNT(*) AS c FROM jobs GROUP BY status"
+            ))
+            records = rows.mappings().all()
+            # Reset previously-seen statuses to 0 so a status that just emptied
+            # out doesn't keep its last value forever.
+            try:
+                _metrics.jobs_by_status.clear()
+            except Exception:
+                pass
+            for r in records:
+                _metrics.jobs_by_status.labels(status=r["status"] or "unknown").set(int(r["c"] or 0))
     except Exception as exc:
         logger.debug("refresh_jobs_by_status_failed: err=%s", exc)
 
     try:
-        row = await db.execute(text(
-            "SELECT COUNT(*) FROM research_sessions WHERE status = 'running'"
-        ))
-        _metrics.research_sessions_running.set(int(row.scalar() or 0))
+        async with savepoint(db):  # §17.1132 — a failure here rolls back ONLY this optional work
+            row = await db.execute(text(
+                "SELECT COUNT(*) FROM research_sessions WHERE status = 'running'"
+            ))
+            _metrics.research_sessions_running.set(int(row.scalar() or 0))
     except Exception as exc:
         logger.debug("refresh_research_sessions_running_failed: err=%s", exc)
 
