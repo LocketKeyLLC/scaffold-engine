@@ -254,6 +254,45 @@ async def test_reconcile_on_startup_settles_jobs_left_mid_run(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_on_startup_excludes_crash_resumed_jobs(monkeypatch):
+    """§17.1106 — crash-resume has just claimed some of the running|executing
+    rows for relaunch; the reconcile must leave those alone (and must still
+    select by status, so the un-resumed remainder is settled)."""
+    executed: list[tuple[str, dict]] = []
+
+    class FakeResult:
+        def scalars(self):
+            class S:
+                def all(self_inner):
+                    return ["job-b"]
+            return S()
+
+    class FakeSession:
+        async def execute(self, stmt, params=None):
+            executed.append((str(stmt), params or {}))
+            return FakeResult()
+
+        async def commit(self):
+            executed.append(("COMMIT", {}))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("app.database.async_session", lambda: FakeSession())
+    await run_broker.reconcile_on_startup(exclude=["job-a"])
+
+    select_sql, select_params = executed[0]
+    assert "status IN ('running', 'executing')" in select_sql
+    assert "NOT (id = ANY(:exclude))" in select_sql, "resumed ids must be excluded in SQL"
+    assert select_params == {"exclude": ["job-a"]}
+    ids = [p.get("ids") for _, p in executed if p.get("ids")]
+    assert ids and ids[0] == ["job-b"], "only the un-resumed job is settled"
+
+
+@pytest.mark.asyncio
 async def test_reconcile_on_startup_never_raises(monkeypatch):
     """It runs inside lifespan; a reconciliation problem must not stop boot."""
     def boom():

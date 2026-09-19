@@ -60,7 +60,7 @@ import asyncio
 import logging
 import time
 from collections import deque
-from typing import AsyncGenerator, AsyncIterator, Callable
+from typing import AsyncGenerator, AsyncIterator, Callable, Iterable
 
 logger = logging.getLogger("scaffold")
 
@@ -315,8 +315,15 @@ async def cancel(job_id: str) -> bool:
     return True
 
 
-async def reconcile_on_startup() -> None:
+async def reconcile_on_startup(*, exclude: Iterable[str] = ()) -> None:
     """§17.1008 — settle jobs the previous process left mid-run.
+
+    §17.1106 — ``exclude`` is the set of job ids crash-resume (§17.774) has
+    just claimed for relaunch. Both sweeps select ``running|executing``; before
+    this parameter existed the reconcile ran second and failed every job the
+    resume had just re-driven, on every restart that caught a run in flight.
+    The composition lives in ``execution_resume.settle_interrupted_runs`` —
+    call THAT from the lifespan, never this and the resume separately.
 
     Detaching a run from its response means a restart is now the only way to
     lose one, and the row it leaves says ``running`` while nothing is running.
@@ -335,11 +342,18 @@ async def reconcile_on_startup() -> None:
 
     from app.database import async_session
 
+    excluded = [str(j) for j in exclude]
     try:
         async with async_session() as db:
-            rows = (await db.execute(text(
-                "SELECT id FROM jobs WHERE status IN ('running', 'executing')"
-            ))).scalars().all()
+            if excluded:
+                rows = (await db.execute(text(
+                    "SELECT id FROM jobs WHERE status IN ('running', 'executing') "
+                    "AND NOT (id = ANY(:exclude))"
+                ), {"exclude": excluded})).scalars().all()
+            else:
+                rows = (await db.execute(text(
+                    "SELECT id FROM jobs WHERE status IN ('running', 'executing')"
+                ))).scalars().all()
             if not rows:
                 return
             job_ids = [str(r) for r in rows]

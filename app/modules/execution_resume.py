@@ -211,3 +211,35 @@ async def resume_orphaned_executions(*, spawn: bool = True) -> dict[str, Any]:
         "resumed": resumed,
         "budget_failed": budget_failed,
     }
+
+
+async def settle_interrupted_runs() -> dict[str, Any]:
+    """§17.1106 — the ONE startup entry for jobs a previous process left mid-run.
+
+    Two sweeps used to act on the same ``running|executing`` rows in sequence:
+    this module's crash-resume claimed each job back to ``executing`` and
+    spawned its drain, then ``run_broker.reconcile_on_startup`` (§17.1008)
+    selected ``running|executing`` again and marked every one of them
+    ``failed`` — including the ones just relaunched, whose drains kept running
+    under a failed row (and could never complete it: the terminal flip refuses
+    ``failed``). Every ``make build`` is a restart, so it fired on every deploy
+    that caught a run in flight.
+
+    Order here is the fix and is load-bearing:
+
+      1. resume bookkeeping WITHOUT spawning — claims + budget-fail, committed;
+      2. reconcile with the claimed ids excluded — settles only what resume
+         did not take (and everything, when the resume valve is off);
+      3. spawn the drains — nothing can flip a row to ``running`` before the
+         reconcile has run.
+
+    Returns the resume summary dict (see ``resume_orphaned_executions``).
+    """
+    from app.modules.run_broker import reconcile_on_startup
+
+    result = await resume_orphaned_executions(spawn=False)
+    resumed = list(result.get("resumed") or [])
+    await reconcile_on_startup(exclude=resumed)
+    for job_id in resumed:
+        _spawn_resume_drain(job_id)
+    return result

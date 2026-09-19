@@ -21,6 +21,7 @@ import app.modules.execution_resume as er
 from app.modules.execution_resume import (
     CRASH_RESUME_BUDGET_SUMMARY,
     resume_orphaned_executions,
+    settle_interrupted_runs,
 )
 
 
@@ -191,3 +192,93 @@ def test_recovery_hint_for_budget_exhausted():
     assert top["reason_kind"] == "crash_resume_budget"
     assert top["action"] == "retry_node"
     assert top["command"] == f"/exec retry {JID} T3"
+
+
+# ── §17.1106 — crash-resume and startup reconcile composed (Phase 1 ledger S-1)
+
+async def test_settle_reconciles_with_resumed_excluded_before_spawning():
+    """The two startup sweeps select the same running|executing rows. The
+    reconcile must run with the resumed ids EXCLUDED and BEFORE any drain is
+    spawned — otherwise it fails the job the resume just relaunched."""
+    candidate = {"id": JID, "resume_attempts": 0, "resume_done_marker": 0}
+    side = [
+        _result_candidates([candidate]),
+        _result_scalar(0),
+        _result_first(object()),
+    ]
+    cm, db = _mock_session(side)
+    calls: list[tuple] = []
+
+    async def fake_reconcile(*, exclude=()):
+        calls.append(("reconcile", list(exclude)))
+
+    def fake_spawn(job_id):
+        calls.append(("spawn", job_id))
+
+    with patch.object(er.settings, "execution_resume_on_startup_enabled", True), \
+         patch.object(er.settings, "execution_max_resume_attempts", 3), \
+         patch("app.modules.execution_resume.async_session", return_value=cm), \
+         patch("app.modules.run_broker.reconcile_on_startup", fake_reconcile), \
+         patch("app.modules.execution_resume._spawn_resume_drain", fake_spawn):
+        result = await settle_interrupted_runs()
+
+    assert result["resumed"] == [JID]
+    assert calls == [("reconcile", [JID]), ("spawn", JID)], calls
+
+
+async def test_settle_with_resume_valve_off_reconciles_everything():
+    """Valve off = no resume claims, so the §17.1008 reconcile keeps its full
+    scope: exclude is empty and nothing is spawned."""
+    calls: list[tuple] = []
+
+    async def fake_reconcile(*, exclude=()):
+        calls.append(("reconcile", list(exclude)))
+
+    with patch.object(er.settings, "execution_resume_on_startup_enabled", False), \
+         patch("app.modules.run_broker.reconcile_on_startup", fake_reconcile), \
+         patch("app.modules.execution_resume._spawn_resume_drain") as spawn:
+        result = await settle_interrupted_runs()
+
+    assert result["skipped"] is True
+    assert calls == [("reconcile", [])]
+    spawn.assert_not_called()
+
+
+async def test_budget_failed_job_is_not_spawned_and_not_excluded():
+    """A crash-loop-guarded job is already 'failed' by the resume; it is
+    neither relaunched nor shielded from the reconcile (which won't see it)."""
+    candidate = {"id": JID, "resume_attempts": 3, "resume_done_marker": 2}
+    side = [
+        _result_candidates([candidate]),
+        _result_scalar(2),          # no progress since the last launch
+        _result_first(object()),    # the budget-fail UPDATE returned a row
+    ]
+    cm, db = _mock_session(side)
+    calls: list[tuple] = []
+
+    async def fake_reconcile(*, exclude=()):
+        calls.append(("reconcile", list(exclude)))
+
+    with patch.object(er.settings, "execution_resume_on_startup_enabled", True), \
+         patch.object(er.settings, "execution_max_resume_attempts", 3), \
+         patch("app.modules.execution_resume.async_session", return_value=cm), \
+         patch("app.modules.run_broker.reconcile_on_startup", fake_reconcile), \
+         patch("app.modules.execution_resume._spawn_resume_drain") as spawn:
+        result = await settle_interrupted_runs()
+
+    assert result["budget_failed"] == [JID] and result["resumed"] == []
+    assert calls == [("reconcile", [])]
+    spawn.assert_not_called()
+
+
+def test_lifespan_has_one_startup_entry_for_both_sweeps():
+    """The lifespan must call settle_interrupted_runs() and must NOT call the
+    two sweeps separately — a second reconcile_on_startup() call after the
+    drains are spawned is exactly the S-1 defect."""
+    from pathlib import Path
+    src = Path(er.__file__).resolve().parents[1].joinpath("main.py").read_text(encoding="utf-8")
+    code = [ln for ln in src.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    joined = "\n".join(code)
+    assert joined.count("await settle_interrupted_runs()") == 1
+    assert "await reconcile_on_startup(" not in joined
+    assert "await resume_orphaned_executions(" not in joined
