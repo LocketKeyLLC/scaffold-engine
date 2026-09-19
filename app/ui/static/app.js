@@ -2,6 +2,7 @@
 import { el, mount, currentJob } from "./util.js";
 import * as api from "./api.js";
 import * as router from "./router.js";
+import { INITIAL as HEALTH_INITIAL, nextHealth, healthText as healthLabel, dotState, pillVisible } from "./health_state.js";
 import { placeholder } from "./views/placeholder.js";
 import { mountCommandPalette } from "./command_palette.js";
 import { toast } from "./components.js";
@@ -471,7 +472,9 @@ function buildChrome() {
     text: "☰",
     onClick: () => setSidebarCollapsed(false),
   });
-  const shell = el("div", { class: "shell" + (sidebarCollapsed() ? " sidebar-collapsed" : "") }, topbar, sidebar, scrim, rail, outlet);
+  // §17.1116 — the connection pill lives on the shell, not in the sidebar.
+  const connPill = el("div", { class: "conn-pill", role: "status", "aria-live": "polite", hidden: true });
+  const shell = el("div", { class: "shell" + (sidebarCollapsed() ? " sidebar-collapsed" : "") }, topbar, sidebar, scrim, rail, outlet, connPill);
   function setSidebarCollapsed(on) {
     shell.classList.toggle("sidebar-collapsed", !!on);
     try { on ? storage.set(SIDEBAR_COLLAPSED_KEY, "1") : storage.remove(SIDEBAR_COLLAPSED_KEY); } catch { /* private mode */ }
@@ -484,7 +487,7 @@ function buildChrome() {
   document.addEventListener("keydown", sidebarKeyHandler);
   mount(root, shell);
   mountCommandPalette(); // idempotent; overlay lives on document.body
-  startHealthPolling(healthDot, healthText);
+  startHealthPolling(healthDot, healthText, connPill);
   startAttentionPolling(); // §17.1007
 }
 
@@ -736,17 +739,29 @@ function topSegment(path) {
   return NAV.some((n) => n.id === seg) ? seg : "dashboard";
 }
 
-async function startHealthPolling(dot, text) {
+async function startHealthPolling(dot, text, pill) {
+  // §17.1116 (ledger U-5) — a state with memory (health_state.js): the text
+  // says "unreachable since 14:02 · last seen 3 min ago", and the fixed pill
+  // (outside the sidebar, so it survives the §17.1055 collapsed layout) is
+  // shown whenever the engine is not simply up.
+  let state = HEALTH_INITIAL;
+  function render() {
+    dot.dataset.state = dotState(state);
+    text.textContent = healthLabel(state);
+    if (pill) {
+      pill.dataset.state = state.state;
+      pill.textContent = pillVisible(state) ? `⚠ ${healthLabel(state)}` : "";
+      pill.hidden = !pillVisible(state);
+    }
+  }
   async function tick() {
     try {
       const h = await api.health();
-      const up = h.status === "ok" || h.status === "healthy" || h.status === "up";
-      dot.dataset.state = up ? "up" : "degraded";
-      text.textContent = up ? "orchestrator up" : `status: ${h.status}`;
-    } catch {
-      dot.dataset.state = "down";
-      text.textContent = "unreachable";
+      state = nextHealth(state, { ok: true, status: h && h.status });
+    } catch (e) {
+      state = nextHealth(state, { ok: false, error: e && (e.message || e.detail) });
     }
+    render();
   }
   await tick();
   // §17.854 (audit G5) — clear any prior poller so a chrome rebuild doesn't

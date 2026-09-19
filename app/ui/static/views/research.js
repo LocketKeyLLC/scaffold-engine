@@ -2,6 +2,15 @@
 // and runs new research live via POST /research (SSE) with the awaiting_reply
 // pause/reply channel (POST /research/reply). Reuses the fetch SSE reader.
 import * as api from "../api.js";
+import * as router from "../router.js";
+
+// §17.1116 (ledger U-6) — the streaming /research endpoint CANCELS the session
+// when its client disconnects (routers/research.py, _sse_with_disconnect_watch);
+// only the tab-close case was guarded (beforeunload), so a sidebar click or a
+// palette jump silently killed a 20-minute run. The router guard below asks
+// first. (Detaching research server-side needs a run broker like §17.1007's —
+// /research/start exists but returns no session id to follow.)
+export const RESEARCH_LEAVE_MSG = "Research is running on this page and will be CANCELLED if you leave it. Leave anyway?";
 import { el, mount, shortId, timeAgo, fmtNum, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState, makeClickable } from "../components.js";
 
@@ -63,7 +72,7 @@ export default function research(container, params) {
     el(
       "div",
       { class: "view-header" },
-      el("div", {}, el("h1", { text: "Research Explorer" }), el("div", { class: "sub", text: "Autonomous research sessions & live runs" })),
+      el("div", {}, el("h1", { text: "Research Explorer" }), el("div", { class: "sub", text: "Autonomous research sessions & live runs — a live run streams to this page and is cancelled if you leave it" })),
       el("div", { class: "header-actions" }, el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => loadSessions() }))
     ),
     runner,
@@ -102,6 +111,7 @@ export default function research(container, params) {
   async function startRun(topic) {
     running = true;
     window.addEventListener("beforeunload", beforeUnload);  // §17.854 G2
+    router.setNavGuard(() => (running ? RESEARCH_LEAVE_MSG : null));   // §17.1116
     activeSession = null;
     feed.replaceChildren();
     feed.classList.remove("hidden");
@@ -130,6 +140,7 @@ export default function research(container, params) {
 
   function finishRun() {
     running = false;
+    router.setNavGuard(null);                                  // §17.1116
     window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     abort = null;
     runBtn.textContent = "◎ Run research";
@@ -142,6 +153,7 @@ export default function research(container, params) {
     replyBox.classList.add("hidden");
     running = true;
     window.addEventListener("beforeunload", beforeUnload);  // §17.854 G2
+    router.setNavGuard(() => (running ? RESEARCH_LEAVE_MSG : null));   // §17.1116
     runBtn.textContent = "■ Stop";
     runBtn.classList.replace("btn-primary", "btn-danger");
     abort = new AbortController();
@@ -353,6 +365,7 @@ export default function research(container, params) {
 
   return () => {
     disposed = true;
+    router.setNavGuard(null);                                  // §17.1116
     window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     if (abort) abort.abort();
   };
