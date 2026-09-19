@@ -603,6 +603,18 @@ class Settings(BaseSettings):
     # a role is bound to OpenAI/Anthropic. When OFF the schema is dropped and
     # behavior is byte-identical to the pre-§17.773 path.
     structured_outputs_enabled: bool = Field(default=False)
+
+    # §17.1111 (Phase 1 ledger L-3) — adaptive think-off. A reasoning model
+    # whose chain-of-thought eats num_predict returns done_reason='length'
+    # with nothing usable; the §17.1053/§17.876 rescues switch that ONE call to
+    # think=False only after the wasted draw. Once a model has starved
+    # `think_off_after_starved_draws` times within `think_off_window_minutes`,
+    # every call that leaves `think` unset gets think=False on the FIRST draw
+    # (explicit think= is never overridden). The window decays. See
+    # app/utils/think_policy.py; the flip logs `think_policy_flipped`.
+    think_off_adaptive_enabled: bool = True
+    think_off_after_starved_draws: int = Field(default=2, ge=1, le=50)
+    think_off_window_minutes: int = Field(default=60, ge=1, le=1440)
     # §17.773 — opt-in override to ALSO apply the constraint on Ollama. Default
     # OFF because the cloud proxy ignores ``format`` (live smoke); flip ON only in
     # a deployment whose Ollama roles run LOCAL models (llama.cpp enforces GBNF
