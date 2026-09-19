@@ -16,6 +16,70 @@ export function runDropDecision(status, attempt, maxAttempts) {
   return attempt >= maxAttempts ? "give_up" : "retry";
 }
 
+// §17.1121 — one sentence per research event, from the fields the agent
+// ACTUALLY emits (app/modules/research_agent.py `_sse(...)` literals; the
+// static gate tests/test_research_feed_wiring.py keeps the two in step).
+// Before this, extraction/search/ingestion lines read "Extracted ? entries",
+// "new ?, versioned ?, rejected ?", and every research_fetch / progress /
+// extractor_fallback frame printed as its raw event name.
+// Returns { text, cls, key } — `key` marks a line that is updated in place —
+// or null for frames that are not feed lines (heartbeat, progress).
+const RESEARCH_FEED_IGNORED = new Set(["heartbeat", "progress"]);
+const n = (v) => (v == null ? "?" : v);
+export function feedText(event, d) {
+  d = d || {};
+  switch (event) {
+    case "research_started":
+      return { text: `Started · ${d.topic || ""} (${shortId(d.session_id)})${d.depth ? ` · ${d.depth}` : ""}${d.mode && d.mode !== "topic" ? ` · ${d.mode}` : ""}` };
+    case "research_resumed":
+      return { text: `Resumed · ${d.topic || ""} (${shortId(d.session_id)}) — reply: ${d.reply || ""}` };
+    case "decomposition_complete": {
+      const facets = Array.isArray(d.facets) ? d.facets.length : "?";
+      return { text: `Decomposed into ${facets} facets, ${n(d.query_count)} queries${d.complexity ? ` (${d.complexity})` : ""}` };
+    }
+    case "iteration_started":
+      return { text: `Iteration ${n(d.iteration)} started${d.query_count != null ? ` — ${d.query_count} queries` : ""}` };
+    case "iteration_complete":
+      return { text: `Iteration ${n(d.iteration)} complete${d.entries_extracted != null ? ` — extracted ${d.entries_extracted}` : ""}${d.entries_ingested != null ? `, ingested ${d.entries_ingested}` : ""}${d.reason ? ` (${d.reason})` : ""}` };
+    case "search_complete":
+      return { text: `Search: ${n(d.results_found)} results (${n(d.total_urls)} URLs so far)${d.page_count != null ? ` · ${d.page_count} pages` : ""}${d.mode && d.mode !== "topic" ? ` · ${d.mode}` : ""}` };
+    case "research_fetch":
+      return { key: `fetch-${n(d.iteration)}`, text: `Fetching pages ${n(d.fetched)}/${n(d.total)} — ok ${n(d.ok)}, failed ${n(d.failed)}${d.last_url ? ` · ${d.last_url}` : ""}` };
+    case "extraction_complete":
+      return { text: `Extracted ${n(d.entries_extracted)} entries` };
+    case "ingestion_complete": {
+      const parts = [];
+      if (d.new != null) parts.push(`new ${d.new}`);
+      if (d.versioned != null) parts.push(`versioned ${d.versioned}`);
+      if (d.rejected != null || d.total_rejected != null) parts.push(`rejected ${d.rejected ?? d.total_rejected}`);
+      return { cls: "ok", text: `Ingested ${n(d.entries_ingested)} this iteration — ${n(d.total_ingested)} total${parts.length ? ` (${parts.join(", ")})` : ""}` };
+    }
+    case "contradictions_detected":
+      return { cls: "warn", text: `Contradictions detected (${n(d.count)})` };
+    case "gap_analysis":
+      return { text: `Gap analysis — coverage ${d.coverage_pct != null ? Math.round(d.coverage_pct) + "%" : "?"}; gaps: ${(d.gap_facets || []).join(", ") || "none"}` };
+    case "convergence":
+      return { cls: "ok", text: `Converged — ${d.reason || d.message || ""}` };
+    case "content_truncated":
+      return { cls: "warn", text: `Content truncated to ${n(d.max_chars)} chars (${n(d.count)} entries, ${d.mode || "?"})` };
+    case "distill_bypassed":
+      return { text: `Distill bypassed for ${d.url || "?"} (${n(d.chunks)} chunks, ${d.source_type || "?"})` };
+    case "extractor_fallback":
+      return { cls: "warn", text: `Extractor fallback ${d.from || "?"} → ${d.to || "?"}${d.reason ? `: ${d.reason}` : ""}` };
+    case "awaiting_reply":
+      return { cls: "warn", text: `Awaiting reply: ${d.question || ""}` };
+    case "research_complete":
+      return { cls: "ok", text: `Complete — ${n(d.total_ingested)} entries ingested of ${n(d.total_entries)} in ${d.duration_ms != null ? (d.duration_ms / 1000).toFixed(1) + "s" : "?"} (${n(d.iterations)} iterations, ${n(d.total_urls_searched)} URLs)` };
+    case "error":
+      return { cls: "err", text: d.message || d.error || "Error" };
+    case "warning":
+      return { cls: "warn", text: `${d.message || "Warning"}${d.stage ? ` (${d.stage})` : ""}` };
+    default:
+      if (RESEARCH_FEED_IGNORED.has(event)) return null;
+      return { text: `${event}${d.message ? " — " + d.message : ""}` };
+  }
+}
+
 import { el, mount, shortId, timeAgo, fmtNum, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState, makeClickable } from "../components.js";
 
@@ -82,9 +146,15 @@ export default function research(container, params) {
     listOutlet
   );
 
-  function feedLine(ev, text, cls) {
+  function feedLine(ev, text, cls, key) {
     feed.classList.remove("hidden");
-    const line = el("div", { class: `log-line ${cls || ""}` }, el("span", { class: "log-ico", text: RESEARCH_ICON[ev] || "·" }), el("span", { class: "log-txt", text }));
+    // §17.1121 — a keyed line (fetch progress) is updated in place, not appended
+    // five times per iteration.
+    if (key) {
+      const existing = feed.querySelector(`.log-line[data-key="${key}"]`);
+      if (existing) { existing.querySelector(".log-txt").textContent = text; existing.className = `log-line ${cls || ""}`; return; }
+    }
+    const line = el("div", { class: `log-line ${cls || ""}`, dataset: key ? { key } : {} }, el("span", { class: "log-ico", text: RESEARCH_ICON[ev] || "·" }), el("span", { class: "log-txt", text }));
     feed.append(line);
     feed.scrollTop = feed.scrollHeight;
   }
@@ -230,58 +300,12 @@ export default function research(container, params) {
 
   function handleEvent(event, d) {
     if (d.session_id) activeSession = d.session_id;
-    switch (event) {
-      case "research_started":
-      case "research_resumed":
-        feedLine(event, `${event === "research_resumed" ? "Resumed" : "Started"} · ${d.topic || ""} (${shortId(d.session_id)})`);
-        break;
-      case "decomposition_complete":
-        feedLine(event, `Decomposed into ${d.facet_count ?? (d.facets || []).length ?? "?"} facets, ${d.query_count ?? (d.queries || []).length ?? "?"} queries`);
-        break;
-      case "iteration_started":
-        feedLine(event, `Iteration ${d.iteration ?? "?"} started`);
-        break;
-      case "iteration_complete":
-        feedLine(event, `Iteration ${d.iteration ?? "?"} complete`);
-        break;
-      case "search_complete":
-        feedLine(event, `Search: ${d.results ?? d.result_count ?? "?"} results from ${d.queries ?? d.query_count ?? "?"} queries`);
-        break;
-      case "extraction_complete":
-        feedLine(event, `Extracted ${d.extracted ?? d.count ?? "?"} entries`);
-        break;
-      case "ingestion_complete":
-        feedLine(event, `Ingested — new ${d.new ?? "?"}, versioned ${d.versioned ?? "?"}, rejected ${d.rejected ?? "?"}`, "ok");
-        break;
-      case "contradictions_detected":
-        feedLine(event, `Contradictions detected (${d.count ?? "?"})`, "warn");
-        break;
-      case "gap_analysis":
-        setCoverage(d.coverage_pct);
-        feedLine(event, `Gap analysis — coverage ${d.coverage_pct != null ? Math.round(d.coverage_pct) + "%" : "?"}; gaps: ${(d.gap_facets || []).join(", ") || "none"}`);
-        break;
-      case "convergence":
-        feedLine(event, `Converged — ${d.reason || ""}`, "ok");
-        break;
-      case "awaiting_reply":
-        showReply(d.question || "The agent needs clarification.");
-        feedLine(event, `Awaiting reply: ${d.question || ""}`, "warn");
-        break;
-      case "research_complete":
-        showSummary(d);
-        feedLine(event, `Complete — ${d.total_ingested ?? d.total_entries ?? "?"} entries in ${d.duration_ms != null ? (d.duration_ms / 1000).toFixed(1) + "s" : "?"}`, "ok");
-        break;
-      case "heartbeat":
-        break;
-      case "error":
-        feedLine("error", d.message || d.error || "Error", "err");
-        break;
-      case "warning":
-        feedLine("warning", d.message || "Warning", "warn");
-        break;
-      default:
-        feedLine(event, `${event}${d.message ? " — " + d.message : ""}`);
-    }
+    if (event === "gap_analysis") setCoverage(d.coverage_pct);
+    if (event === "convergence" && d.coverage_pct != null) setCoverage(d.coverage_pct);
+    if (event === "awaiting_reply") showReply(d.question || "The agent needs clarification.");
+    if (event === "research_complete") showSummary(d);
+    const r = feedText(event, d);
+    if (r) feedLine(event, r.text, r.cls, r.key);
   }
 
   function showReply(question) {
