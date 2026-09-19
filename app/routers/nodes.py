@@ -24,6 +24,7 @@ from app.schemas import (
     NodeReorderInput,
     NodeResetInput,
 )
+from app.utils.ids import UuidPath
 
 router = APIRouter()
 
@@ -76,7 +77,7 @@ def _attributed(principal: Principal, client_value: str | None) -> str:
 
 @router.get("/nodes/{job_id}")
 async def node_list(
-    job_id: str, db: AsyncSession = Depends(get_db),
+    job_id: UuidPath, db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     """Full editable node list for the /ui plan editor.
@@ -92,7 +93,7 @@ async def node_list(
 
 @router.patch("/nodes/{job_id}/{node_key}")
 async def node_edit(
-    job_id: str, node_key: str, body: NodeEditInput,
+    job_id: UuidPath, node_key: str, body: NodeEditInput,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -108,7 +109,7 @@ async def node_edit(
 
 @router.post("/nodes/{job_id}")
 async def node_insert(
-    job_id: str, body: NodeInsertInput, db: AsyncSession = Depends(get_db),
+    job_id: UuidPath, body: NodeInsertInput, db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     await _guard(db, principal, job_id)
@@ -121,7 +122,7 @@ async def node_insert(
 
 @router.delete("/nodes/{job_id}/{node_key}")
 async def node_delete(
-    job_id: str, node_key: str, edited_by: str | None = None,
+    job_id: UuidPath, node_key: str, edited_by: str | None = None,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -133,7 +134,7 @@ async def node_delete(
 
 @router.post("/nodes/{job_id}/reorder")
 async def node_reorder(
-    job_id: str, body: NodeReorderInput, db: AsyncSession = Depends(get_db),
+    job_id: UuidPath, body: NodeReorderInput, db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     await _guard(db, principal, job_id)
@@ -145,7 +146,7 @@ async def node_reorder(
 
 @router.post("/nodes/{job_id}/{node_key}/reset")
 async def node_reset(
-    job_id: str, node_key: str, body: NodeResetInput | None = None,
+    job_id: UuidPath, node_key: str, body: NodeResetInput | None = None,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):

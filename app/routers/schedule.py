@@ -10,7 +10,8 @@ Routes:
   GET    /schedule                  — list_schedules
   DELETE /schedule/{schedule_id}    — delete_schedule
 """
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -86,8 +87,8 @@ async def create_schedule(
 
 @router.get("/schedule")
 async def list_schedules(
-    limit: int = 50,
-    offset: int = 0,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):

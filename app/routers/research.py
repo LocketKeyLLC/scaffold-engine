@@ -17,6 +17,7 @@ Routes:
   DELETE /research/sessions/{session_id}        — delete_research_session
   PATCH  /research/sessions/{session_id}        — rename_research_session
 """
+from typing import Annotated
 import logging
 from uuid import UUID
 
@@ -60,6 +61,7 @@ templates = Jinja2Templates(directory="app/templates")
 # <script>/<style> in research_pdf_upload.html can be nonce'd under the
 # strict (no 'unsafe-inline') CSP.
 from app.middleware.security_headers import current_csp_nonce as _current_csp_nonce
+from app.utils.ids import UuidPath
 templates.env.globals["csp_nonce"] = _current_csp_nonce
 
 
@@ -170,7 +172,7 @@ async def research_run_reply(
 
 @router.get("/research/runs/{run_id}", tags=["Research"])
 async def research_run_status(
-    run_id: str,
+    run_id: UuidPath,
     principal: Principal = Depends(get_principal),
 ):
     """Is this run in flight? (The SPA asks before re-attaching after a reload
@@ -189,7 +191,7 @@ async def research_run_status(
 
 @router.get("/research/runs/{run_id}/stream", tags=["Research"])
 async def research_run_stream(
-    run_id: str,
+    run_id: UuidPath,
     principal: Principal = Depends(get_principal),
 ):
     """Tail a research run: its backlog first, then live frames until it ends.
@@ -221,7 +223,7 @@ async def research_run_stream(
 
 @router.post("/research/runs/{run_id}/cancel", tags=["Research"])
 async def research_run_cancel(
-    run_id: str,
+    run_id: UuidPath,
     principal: Principal = Depends(get_principal),
 ):
     """Stop a detached research run on purpose (closing the tab no longer does).
@@ -238,7 +240,7 @@ async def research_run_cancel(
 
 @router.get("/research/sessions/{session_id}", tags=["Management"])
 async def get_research_session(
-    session_id: str,
+    session_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -297,7 +299,7 @@ async def research_reply_endpoint(
 
 @router.get("/research/verify/{session_id}", tags=["Research"])
 async def research_verify_endpoint(
-    session_id: str,
+    session_id: UuidPath,
     recheck: bool = Query(False, description="If true, HEAD-request each entry's source_url to surface upstream reachability state."),
     compare_hash: bool = Query(False, description="If true (§17.126), GET each URL and SHA256-compare against the stored raw_upstream_hash. Implies recheck=true."),
     principal: Principal = Depends(get_principal),
@@ -407,8 +409,8 @@ async def research_pdf_upload_page(request: Request):
 async def list_research_sessions(
     status: str | None = None,
     q: str | None = None,
-    limit: int = 25,
-    offset: int = 0,
+    limit: Annotated[int, Query(ge=1, le=500)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -472,7 +474,7 @@ async def list_research_sessions(
 
 @router.delete("/research/sessions/{session_id}", response_model=DeleteResponse, tags=["Management"])
 async def delete_research_session(
-    session_id: str,
+    session_id: UuidPath,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
@@ -497,7 +499,7 @@ async def delete_research_session(
 
 @router.patch("/research/sessions/{session_id}", response_model=ResearchSessionSummary, tags=["Management"])
 async def rename_research_session(
-    session_id: str,
+    session_id: UuidPath,
     body: ResearchSessionRenameInput,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),

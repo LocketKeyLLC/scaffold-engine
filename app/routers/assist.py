@@ -28,6 +28,7 @@ from app.authz import (
 from app.config import settings
 from app.database import get_db
 from app.modules import assist_agent, assist_policy, assist_session_map
+from app.utils.ids import UuidPath, is_uuid
 
 logger = logging.getLogger("scaffold")
 
@@ -45,6 +46,11 @@ async def _require_assist_session_visible(
     principal: Principal = Depends(get_principal),
 ) -> None:
     sid = request.path_params.get("session_id")
+    # §17.1131 — a malformed id is nobody's session: step aside so the
+    # endpoint's UuidPath validation answers 422 (this dependency runs first
+    # and its 404 used to win — the last route that 500'd/404'd on garbage).
+    if sid and not is_uuid(sid):
+        return
     if sid:
         # §17.1068 — a malformed session id is a 404 HERE, for everyone. The
         # earlier "leave it to the handler" left every handler to cast it in
@@ -392,7 +398,7 @@ async def assist_candidates(
 
 
 @router.get("/assist/{session_id}")
-async def assist_get_session(session_id: str, db=Depends(get_db)):
+async def assist_get_session(session_id: UuidPath, db=Depends(get_db)):
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     if not sess:
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
@@ -409,7 +415,7 @@ async def assist_get_session(session_id: str, db=Depends(get_db)):
 
 
 @router.get("/assist/{session_id}/next")
-async def assist_next(session_id: str, db=Depends(get_db)):
+async def assist_next(session_id: UuidPath, db=Depends(get_db)):
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     if not sess:
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
@@ -460,7 +466,7 @@ class AssistMessageInput(BaseModel):
 
 @router.post("/assist/{session_id}/message")
 async def assist_message(
-    session_id: str, body: AssistMessageInput, request: Request, db=Depends(get_db),
+    session_id: UuidPath, body: AssistMessageInput, request: Request, db=Depends(get_db),
 ):
     """§17.868 — the server-side turn loop: ONE stream owns capture → gates →
     decide → dispatch → claim/premise → guidance, with a status frame at every
@@ -500,7 +506,7 @@ async def assist_message(
 
 
 @router.get("/assist/{session_id}/message/active")
-async def assist_message_active(session_id: str, db=Depends(get_db)):
+async def assist_message_active(session_id: UuidPath, db=Depends(get_db)):
     """§17.869 — the session's still-running turn (if any), for resume-on-load."""
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     if not sess:
@@ -512,7 +518,7 @@ async def assist_message_active(session_id: str, db=Depends(get_db)):
 
 @router.get("/assist/{session_id}/message/{run_id}/tail")
 async def assist_message_tail(
-    session_id: str, run_id: str, request: Request, db=Depends(get_db),
+    session_id: UuidPath, run_id: UuidPath, request: Request, db=Depends(get_db),
 ):
     """§17.869 — (re)attach to a turn run: replays every frame from the start,
     then follows live until the run finishes."""
@@ -537,7 +543,7 @@ async def assist_message_tail(
 
 
 @router.post("/assist/{session_id}/guide")
-async def assist_guide(session_id: str, body: AssistGuideInput, db=Depends(get_db)):
+async def assist_guide(session_id: UuidPath, body: AssistGuideInput, db=Depends(get_db)):
     """Generate (or return cached) the human walkthrough for a step.
 
     Separate from `/next` on purpose: this can take 10-60s (a thinking-model
@@ -564,7 +570,7 @@ async def assist_guide(session_id: str, body: AssistGuideInput, db=Depends(get_d
 
 @router.post("/assist/{session_id}/guide/stream")
 async def assist_guide_stream(
-    session_id: str, body: AssistGuideInput, request: Request, db=Depends(get_db),
+    session_id: UuidPath, body: AssistGuideInput, request: Request, db=Depends(get_db),
 ):
     """§17.493 — streaming variant of `/guide`. SSE: one `assist_guide_delta`
     per content chunk, then a single `assist_guide_done` with status +
@@ -609,7 +615,7 @@ async def assist_guide_stream(
 
 
 @router.post("/assist/{session_id}/research")
-async def assist_research(session_id: str, body: AssistResearchInput, db=Depends(get_db)):
+async def assist_research(session_id: UuidPath, body: AssistResearchInput, db=Depends(get_db)):
     """Confirm an operator-supplied question via SearXNG/Milvus + a short
     cited synthesis. A side query — not persisted to the step's guidance."""
     try:
@@ -628,7 +634,7 @@ async def assist_research(session_id: str, body: AssistResearchInput, db=Depends
 
 
 @router.post("/assist/{session_id}/fix")
-async def assist_fix(session_id: str, body: AssistFixInput, db=Depends(get_db)):
+async def assist_fix(session_id: UuidPath, body: AssistFixInput, db=Depends(get_db)):
     """Diagnose an operator-reported error on a step and return corrected steps."""
     # §17.710a/§17.812 — lossless capture of the operator's error report, BEFORE
     # diagnosis. Slash/CLI/SDK fixes never pass the pipeline's /turn capture, so
@@ -656,7 +662,7 @@ async def assist_fix(session_id: str, body: AssistFixInput, db=Depends(get_db)):
 
 
 @router.post("/assist/{session_id}/interpret")
-async def assist_interpret(session_id: str, body: AssistInterpretInput, db=Depends(get_db)):
+async def assist_interpret(session_id: UuidPath, body: AssistInterpretInput, db=Depends(get_db)):
     """§17.626 — classify a plain-language turn into an assist intent so the
     pipeline can route it (advance / skip / submit / fix / finalize / pause /
     question) without the operator typing a /assist subcommand. Fail-soft: an
@@ -668,7 +674,7 @@ async def assist_interpret(session_id: str, body: AssistInterpretInput, db=Depen
 
 
 @router.post("/assist/{session_id}/decide")
-async def assist_decide_turn(session_id: str, body: AssistInterpretInput, db=Depends(get_db)):
+async def assist_decide_turn(session_id: UuidPath, body: AssistInterpretInput, db=Depends(get_db)):
     """§17.771 (Phase 1) — the UNIFIED assist decision: one context-rich call that
     subsumes classify + progress-tracker + reroute, returning a full Decision
     {action, evidence/error_text/query/note_*, plan_impact, suggestion,
@@ -685,7 +691,7 @@ async def assist_decide_turn(session_id: str, body: AssistInterpretInput, db=Dep
 
 
 @router.put("/assist/{session_id}/env")
-async def assist_set_env(session_id: str, body: AssistEnvInput, db=Depends(get_db)):
+async def assist_set_env(session_id: UuidPath, body: AssistEnvInput, db=Depends(get_db)):
     """Set the operator's environment so walkthroughs use concrete commands."""
     # §17.1046 — the pins BEFORE this update are the old values a re-pin corrects.
     old_subs: dict = {}
@@ -726,7 +732,7 @@ async def assist_set_env(session_id: str, body: AssistEnvInput, db=Depends(get_d
 
 
 @router.get("/assist/{session_id}/env")
-async def assist_get_env(session_id: str, db=Depends(get_db)):
+async def assist_get_env(session_id: UuidPath, db=Depends(get_db)):
     env = await assist_agent.get_environment(session_id=session_id, db=db)
     # §17.1090 — the SYSTEM MAP (§17.1083) is what every prompt sees about the
     # operator's machines; the operator must see it too — it names the
@@ -742,7 +748,7 @@ async def assist_get_env(session_id: str, db=Depends(get_db)):
 
 
 @router.get("/assist/{session_id}/checklist")
-async def assist_get_checklist(session_id: str, db=Depends(get_db)):
+async def assist_get_checklist(session_id: UuidPath, db=Depends(get_db)):
     """§17.707 — the operator-input checklist (decisions to make + info to
     supply) for the session's plan, with live done/open status + values learned
     so far."""
@@ -753,7 +759,7 @@ async def assist_get_checklist(session_id: str, db=Depends(get_db)):
 
 
 @router.post("/assist/{session_id}/turn")
-async def assist_record_turn(session_id: str, body: AssistTurnInput, db=Depends(get_db)):
+async def assist_record_turn(session_id: UuidPath, body: AssistTurnInput, db=Depends(get_db)):
     """§17.710a — record ONE raw turn to the append-only transcript. The pipeline
     calls this first for every chat message so capture is unconditional (never
     gated on how the message later classifies). No-op unless the unified-memory
@@ -770,14 +776,14 @@ async def assist_record_turn(session_id: str, body: AssistTurnInput, db=Depends(
 
 
 @router.get("/assist/{session_id}/turns")
-async def assist_list_turns(session_id: str, limit: int = Query(200, ge=1, le=2000), db=Depends(get_db)):  # §17.1068 — a 24-digit limit reached SQL (schemathesis: 500)
+async def assist_list_turns(session_id: UuidPath, limit: int = Query(200, ge=1, le=2000), db=Depends(get_db)):  # §17.1068 — a 24-digit limit reached SQL (schemathesis: 500)
     """§17.710a — the session's raw transcript, oldest-first."""
     turns = await assist_agent.list_turns(session_id=session_id, limit=limit, db=db)
     return {"session_id": session_id, "turns": turns}
 
 
 @router.post("/assist/{session_id}/submit")
-async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get_db)):
+async def assist_submit(session_id: UuidPath, body: AssistSubmitInput, db=Depends(get_db)):
     # §17.710a — lossless capture, BEFORE any verify/deliberate/commit branching.
     # Source of truth for ALL clients (slash / curl / NL), so a submit is
     # recorded even on paths that never call the pipeline's /turn. No-op unless
@@ -1153,7 +1159,7 @@ async def assist_submit(session_id: str, body: AssistSubmitInput, db=Depends(get
 
 
 @router.post("/assist/{session_id}/handoff")
-async def assist_handoff(session_id: str, body: AssistHandoffInput, request: Request, db=Depends(get_db)):
+async def assist_handoff(session_id: UuidPath, body: AssistHandoffInput, request: Request, db=Depends(get_db)):
     # Validate session/node before opening the SSE stream — caller gets a
     # proper HTTP error instead of a half-empty stream.
     sess = await assist_agent.get_session(session_id=session_id, db=db)
@@ -1178,7 +1184,7 @@ async def assist_handoff(session_id: str, body: AssistHandoffInput, request: Req
 
 
 @router.post("/assist/{session_id}/pause")
-async def assist_pause(session_id: str, db=Depends(get_db)):
+async def assist_pause(session_id: UuidPath, db=Depends(get_db)):
     try:
         return await assist_agent.pause_session(session_id=session_id, db=db)
     except ValueError as exc:
@@ -1186,7 +1192,7 @@ async def assist_pause(session_id: str, db=Depends(get_db)):
 
 
 @router.post("/assist/{session_id}/resume")
-async def assist_resume(session_id: str, db=Depends(get_db)):
+async def assist_resume(session_id: UuidPath, db=Depends(get_db)):
     try:
         return await assist_agent.resume_session(session_id=session_id, db=db)
     except ValueError as exc:
@@ -1194,7 +1200,7 @@ async def assist_resume(session_id: str, db=Depends(get_db)):
 
 
 @router.delete("/assist/{session_id}")
-async def assist_abandon(session_id: str, db=Depends(get_db)):
+async def assist_abandon(session_id: UuidPath, db=Depends(get_db)):
     try:
         return await assist_agent.abandon_session(session_id=session_id, db=db)
     except ValueError as exc:
@@ -1202,7 +1208,7 @@ async def assist_abandon(session_id: str, db=Depends(get_db)):
 
 
 @router.post("/assist/{session_id}/friction")
-async def assist_friction(session_id: str, body: AssistFrictionInput, db=Depends(get_db)):
+async def assist_friction(session_id: UuidPath, body: AssistFrictionInput, db=Depends(get_db)):
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     if not sess:
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
@@ -1213,7 +1219,7 @@ async def assist_friction(session_id: str, body: AssistFrictionInput, db=Depends
 
 
 @router.get("/assist/{session_id}/friction")
-async def assist_friction_list(session_id: str, db=Depends(get_db)):
+async def assist_friction_list(session_id: UuidPath, db=Depends(get_db)):
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     if not sess:
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
@@ -1223,7 +1229,7 @@ async def assist_friction_list(session_id: str, db=Depends(get_db)):
 
 # §17.654 — session notes & additions (project-scoped, feed-forward into guidance)
 @router.post("/assist/{session_id}/note")
-async def assist_note(session_id: str, body: AssistNoteInput, db=Depends(get_db)):
+async def assist_note(session_id: UuidPath, body: AssistNoteInput, db=Depends(get_db)):
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     if not sess:
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
@@ -1279,7 +1285,7 @@ async def assist_note(session_id: str, body: AssistNoteInput, db=Depends(get_db)
 
 
 @router.post("/assist/{session_id}/add_step")
-async def assist_add_step(session_id: str, body: AssistAddStepInput, db=Depends(get_db)):
+async def assist_add_step(session_id: UuidPath, body: AssistAddStepInput, db=Depends(get_db)):
     """§17.736 — insert a new guided step (a foundational task the plan didn't
     cover) to run before the current step, then point the session at it. The
     caller follows with GET /assist/{sid}/next to present its walkthrough."""
@@ -1298,7 +1304,7 @@ async def assist_add_step(session_id: str, body: AssistAddStepInput, db=Depends(
 
 
 @router.post("/assist/{session_id}/reroute")
-async def assist_reroute(session_id: str, body: AssistInterpretInput, db=Depends(get_db)):
+async def assist_reroute(session_id: UuidPath, body: AssistInterpretInput, db=Depends(get_db)):
     """§17.693 — semantic pivot check for a substantive turn the classifier read
     as skip/question. Runs the §17.677 impact analyzer over the pending plan; if
     the message invalidates steps, records it as a decision note + stages a
@@ -1432,7 +1438,7 @@ async def _retire_step_mirrored(
 
 
 @router.post("/assist/{session_id}/track")
-async def assist_track(session_id: str, body: AssistInterpretInput, db=Depends(get_db)):
+async def assist_track(session_id: UuidPath, body: AssistInterpretInput, db=Depends(get_db)):
     """§17.754 — the progress-tracking agent. Reconcile the session pointer with
     where the operator actually is, and ACT to keep the plan in sync:
 
@@ -1569,7 +1575,7 @@ class AssistRestoreStepInput(BaseModel):
 
 @router.post("/assist/{session_id}/step/restore")
 async def assist_restore_step(
-    session_id: str, body: AssistRestoreStepInput, db=Depends(get_db),
+    session_id: UuidPath, body: AssistRestoreStepInput, db=Depends(get_db),
 ):
     """§17.1056 — undo a reopen from its pre-image (evidence + output are
     captured before every reopen now). Refused once the operator has worked
@@ -1584,7 +1590,7 @@ async def assist_restore_step(
 
 
 @router.get("/assist/{session_id}/steps")
-async def assist_list_steps(session_id: str, db=Depends(get_db)):
+async def assist_list_steps(session_id: UuidPath, db=Depends(get_db)):
     """§17.938 — the session's steps, for the step picker.
 
     Title + both statuses in one call, ordered the way the plan runs.
@@ -1599,7 +1605,7 @@ async def assist_list_steps(session_id: str, db=Depends(get_db)):
 
 @router.post("/assist/{session_id}/step/goto")
 async def assist_goto_step(
-    session_id: str, body: AssistGotoStepInput, db=Depends(get_db),
+    session_id: UuidPath, body: AssistGotoStepInput, db=Depends(get_db),
 ):
     """§17.938 — jump to an arbitrary step.
 
@@ -1647,7 +1653,7 @@ async def assist_goto_step(
 
 @router.post("/assist/{session_id}/step/back")
 async def assist_step_back(
-    session_id: str, body: AssistStepBackInput, db=Depends(get_db),
+    session_id: UuidPath, body: AssistStepBackInput, db=Depends(get_db),
 ):
     """§17.901 — undo the last completed step and return the operator to it.
 
@@ -1696,7 +1702,7 @@ async def assist_step_back(
 
 
 @router.get("/assist/{session_id}/replan")
-async def assist_replan_get(session_id: str, db=Depends(get_db)):
+async def assist_replan_get(session_id: UuidPath, db=Depends(get_db)):
     """§17.677 — the session's un-resolved note-triggered plan-fix proposal.
     Returns ``{pending: <proposal>|null}`` (used by the pipeline confirm-gate)."""
     sess = await assist_agent.get_session(session_id=session_id, db=db)
@@ -1708,7 +1714,7 @@ async def assist_replan_get(session_id: str, db=Depends(get_db)):
 
 @router.post("/assist/{session_id}/replan/apply")
 async def assist_replan_apply(
-    session_id: str, body: AssistReplanDecisionInput, db=Depends(get_db),
+    session_id: UuidPath, body: AssistReplanDecisionInput, db=Depends(get_db),
 ):
     """§17.677 — apply or discard the session's pending note-triggered plan fix."""
     sess = await assist_agent.get_session(session_id=session_id, db=db)
@@ -1721,7 +1727,7 @@ async def assist_replan_apply(
 
 
 @router.get("/assist/{session_id}/notes")
-async def assist_notes_list(session_id: str, db=Depends(get_db)):
+async def assist_notes_list(session_id: UuidPath, db=Depends(get_db)):
     sess = await assist_agent.get_session(session_id=session_id, db=db)
     if not sess:
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")

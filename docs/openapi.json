@@ -4890,11 +4890,14 @@
         "operationId": "get_artifact_artifacts__artifact_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "artifact_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Artifact Id",
               "type": "string"
             }
@@ -5167,11 +5170,14 @@
         "operationId": "assist_abandon_assist__session_id__delete",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5211,11 +5217,14 @@
         "operationId": "assist_get_session_assist__session_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5258,11 +5267,14 @@
         "operationId": "assist_add_step_assist__session_id__add_step_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5315,11 +5327,14 @@
         "operationId": "assist_get_checklist_assist__session_id__checklist_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5362,11 +5377,14 @@
         "operationId": "assist_decide_turn_assist__session_id__decide_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5418,11 +5436,14 @@
         "operationId": "assist_get_env_assist__session_id__env_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5463,11 +5484,14 @@
         "operationId": "assist_set_env_assist__session_id__env_put",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5520,11 +5544,14 @@
         "operationId": "assist_fix_assist__session_id__fix_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5576,11 +5603,14 @@
         "operationId": "assist_friction_list_assist__session_id__friction_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5620,11 +5650,14 @@
         "operationId": "assist_friction_assist__session_id__friction_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5677,11 +5710,14 @@
         "operationId": "assist_guide_assist__session_id__guide_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5734,11 +5770,14 @@
         "operationId": "assist_guide_stream_assist__session_id__guide_stream_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5790,11 +5829,14 @@
         "operationId": "assist_handoff_assist__session_id__handoff_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5847,11 +5889,14 @@
         "operationId": "assist_interpret_assist__session_id__interpret_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5904,11 +5949,14 @@
         "operationId": "assist_message_assist__session_id__message_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -5961,11 +6009,14 @@
         "operationId": "assist_message_active_assist__session_id__message_active_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6008,21 +6059,27 @@
         "operationId": "assist_message_tail_assist__session_id__message__run_id__tail_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
           },
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "run_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Run Id",
               "type": "string"
             }
@@ -6064,11 +6121,14 @@
         "operationId": "assist_next_assist__session_id__next_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6110,11 +6170,14 @@
         "operationId": "assist_note_assist__session_id__note_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6166,11 +6229,14 @@
         "operationId": "assist_notes_list_assist__session_id__notes_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6212,11 +6278,14 @@
         "operationId": "assist_pause_assist__session_id__pause_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6259,11 +6328,14 @@
         "operationId": "assist_replan_get_assist__session_id__replan_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6306,11 +6378,14 @@
         "operationId": "assist_replan_apply_assist__session_id__replan_apply_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6363,11 +6438,14 @@
         "operationId": "assist_reroute_assist__session_id__reroute_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6420,11 +6498,14 @@
         "operationId": "assist_research_assist__session_id__research_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6476,11 +6557,14 @@
         "operationId": "assist_resume_assist__session_id__resume_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6523,11 +6607,14 @@
         "operationId": "assist_step_back_assist__session_id__step_back_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6580,11 +6667,14 @@
         "operationId": "assist_goto_step_assist__session_id__step_goto_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6637,11 +6727,14 @@
         "operationId": "assist_restore_step_assist__session_id__step_restore_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6694,11 +6787,14 @@
         "operationId": "assist_list_steps_assist__session_id__steps_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6740,11 +6836,14 @@
         "operationId": "assist_submit_assist__session_id__submit_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6797,11 +6896,14 @@
         "operationId": "assist_track_assist__session_id__track_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6854,11 +6956,14 @@
         "operationId": "assist_record_turn_assist__session_id__turn_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -6911,11 +7016,14 @@
         "operationId": "assist_list_turns_assist__session_id__turns_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -7391,11 +7499,14 @@
         "operationId": "get_dag_dag__job_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -7746,11 +7857,14 @@
         "operationId": "exec_events_exec_events__job_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -7790,11 +7904,14 @@
         "operationId": "exec_nodes_exec_nodes__job_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -7876,11 +7993,14 @@
         "operationId": "exec_status_exec_status__job_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -8572,6 +8692,8 @@
             "required": false,
             "schema": {
               "default": 25,
+              "maximum": 500,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -8582,6 +8704,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "minimum": 0,
               "title": "Offset",
               "type": "integer"
             }
@@ -8651,11 +8774,14 @@
         "operationId": "delete_job_jobs__job_id__delete",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -8698,11 +8824,14 @@
         "operationId": "get_job_jobs__job_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -8745,11 +8874,14 @@
         "operationId": "rename_job_jobs__job_id__patch",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -8804,11 +8936,14 @@
         "operationId": "advance_job_endpoint_jobs__job_id__advance_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -8861,11 +8996,14 @@
         "operationId": "approve_job_state_endpoint_jobs__job_id__approve_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -8906,11 +9044,14 @@
         "operationId": "approve_job_endpoint_jobs__job_id__approve_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -8963,11 +9104,14 @@
         "operationId": "list_job_artifacts_jobs__job_id__artifacts_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -9009,11 +9153,14 @@
         "operationId": "update_brief_jobs__job_id__brief_patch",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -9068,11 +9215,14 @@
         "operationId": "set_job_budget_jobs__job_id__budget_patch",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -9127,11 +9277,14 @@
         "operationId": "cancel_job_endpoint_jobs__job_id__cancel_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -9176,11 +9329,14 @@
         "operationId": "get_job_costs_endpoint_jobs__job_id__costs_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -9225,11 +9381,14 @@
         "operationId": "get_job_reconciliation_jobs__job_id__reconciliation_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -9272,11 +9431,14 @@
         "operationId": "revert_job_reconciliation_jobs__job_id__reconciliation__index__revert_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -9328,11 +9490,14 @@
         "operationId": "resume_job_endpoint_jobs__job_id__resume_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -9385,11 +9550,14 @@
         "operationId": "set_job_synthesis_override_jobs__job_id__synthesis_patch",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -9444,11 +9612,14 @@
         "operationId": "get_logs_logs__job_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -10510,11 +10681,14 @@
         "operationId": "node_list_nodes__job_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -10551,11 +10725,14 @@
         "operationId": "node_insert_nodes__job_id__post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -10604,11 +10781,14 @@
         "operationId": "node_reorder_nodes__job_id__reorder_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -10657,11 +10837,14 @@
         "operationId": "node_delete_nodes__job_id___node_key__delete",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -10723,11 +10906,14 @@
         "operationId": "node_edit_nodes__job_id___node_key__patch",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -10785,11 +10971,14 @@
         "operationId": "node_reset_nodes__job_id___node_key__reset_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -11041,11 +11230,14 @@
         "operationId": "resolve_error_endpoint_observability_errors__error_id__patch",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "error_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Error Id",
               "type": "string"
             }
@@ -11376,11 +11568,14 @@
         "operationId": "prompts_list_prompts__job_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -11420,11 +11615,14 @@
         "operationId": "prompts_detail_prompts__job_id___node_key__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -11471,11 +11669,14 @@
         "operationId": "prompts_update_prompts__job_id___node_key__post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -11534,11 +11735,14 @@
         "operationId": "prompts_history_prompts__job_id___node_key__history_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }
@@ -11634,6 +11838,8 @@
             "required": false,
             "schema": {
               "default": 50,
+              "maximum": 500,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -11644,6 +11850,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "minimum": 0,
               "title": "Offset",
               "type": "integer"
             }
@@ -11962,11 +12169,14 @@
         "operationId": "research_run_status_research_runs__run_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "run_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Run Id",
               "type": "string"
             }
@@ -12009,11 +12219,14 @@
         "operationId": "research_run_cancel_research_runs__run_id__cancel_post",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "run_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Run Id",
               "type": "string"
             }
@@ -12056,11 +12269,14 @@
         "operationId": "research_run_stream_research_runs__run_id__stream_get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "run_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Run Id",
               "type": "string"
             }
@@ -12140,6 +12356,8 @@
             "required": false,
             "schema": {
               "default": 25,
+              "maximum": 500,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -12150,6 +12368,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "minimum": 0,
               "title": "Offset",
               "type": "integer"
             }
@@ -12194,11 +12413,14 @@
         "operationId": "delete_research_session_research_sessions__session_id__delete",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -12241,11 +12463,14 @@
         "operationId": "get_research_session_research_sessions__session_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -12286,11 +12511,14 @@
         "operationId": "rename_research_session_research_sessions__session_id__patch",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -12390,11 +12618,14 @@
         "operationId": "research_verify_endpoint_research_verify__session_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "session_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Session Id",
               "type": "string"
             }
@@ -12510,6 +12741,8 @@
             "required": false,
             "schema": {
               "default": 50,
+              "maximum": 200,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -12520,6 +12753,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "minimum": 0,
               "title": "Offset",
               "type": "integer"
             }
@@ -13149,11 +13383,14 @@
         "operationId": "job_traces_endpoint_trace__job_id__get",
         "parameters": [
           {
+            "description": "UUID (8-4-4-4-12 hex)",
             "in": "path",
             "name": "job_id",
             "required": true,
             "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
               "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
               "title": "Job Id",
               "type": "string"
             }

@@ -78,9 +78,11 @@ class TestAdvanceEndpoint:
     the OWUI pipeline composed client-side."""
 
     def test_rejects_non_uuid(self, client):
+        # §17.1131 — the path type rejects it before the handler (422), so the
+        # handler's own 400 guard is now unreachable for path params.
         resp = client.post("/jobs/not-a-uuid/advance", json={})
-        assert resp.status_code == 400
-        assert resp.json()["detail"] == "Invalid job_id format"
+        assert resp.status_code == 422
+        assert "pattern" in resp.text
 
     def _wire(self, monkeypatch, *, research, dag, execute_gen=None):
         class _CM:

@@ -136,8 +136,8 @@ def test_verify_endpoint_rejects_non_uuid():
     from app.main import app
     client = TestClient(app)
     r = client.get("/research/verify/not-a-uuid", headers=_auth_headers())
-    assert r.status_code == 400
-    assert "Invalid session_id" in r.json()["detail"]
+    assert r.status_code == 422  # §17.1131 — UuidPath rejects it before the handler (was a 400 guard)
+    assert any(e["loc"] == ["path", "session_id"] for e in r.json()["detail"])
 
 
 # ---------------------------------------------------------------------------
