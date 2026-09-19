@@ -975,9 +975,18 @@ class Settings(BaseSettings):
     #     contribution to the union). 10 → 5.
     #   assist_rerank_union_candidates — how many of the fused union the
     #     single rerank scores. Union of 3×5 is ≤15; 8 pairs ≈ 13 s here.
+    # §17.1125 — 5/8 → 10/16 once §17.1124 made a pair cost 54 ms instead of
+    # 1,392. Read-only replay of the REAL guide query sets of 36 operator steps
+    # (~/.local/share/playwright-venv/assist_cands_replay.py, live KB): at 5/8
+    # the fused union averaged 9.8 docs but only 6.8 were scored; at 10/16 the
+    # union is 18.8 and 13.6 are scored, the reranker's top-1 score rises on 10
+    # steps and falls on 0 (mean top-3 score 0.774 → 0.788), 33/36 steps gain a
+    # doc the 5-deep shortlist never showed it (e.g. `bind-mount-media-lxc`
+    # for "Mount media dataset into Jellyfin"). Cost: guide pre-pass p50
+    # 739 → 1,340 ms, once per fix turn. Golden set (single-query) unchanged.
     assist_research_rerank_once: bool = True
-    assist_rerank_max_candidates: int = Field(default=5, ge=1, le=64)
-    assist_rerank_union_candidates: int = Field(default=8, ge=1, le=64)
+    assist_rerank_max_candidates: int = Field(default=10, ge=1, le=64)
+    assist_rerank_union_candidates: int = Field(default=16, ge=1, le=64)
     assist_guide_model_role: str = "model_general"
     # §17.626 — natural-language assist turns. When a chat has an active assist
     # session, plain text is classified into an intent (advance / skip / submit /
