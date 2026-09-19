@@ -794,7 +794,8 @@ async def _dbapi_data_error_handler(request: Request, exc: DBAPIError):
         is_data_error = inner is not None and "DataError" in {c.__name__ for c in type(inner).__mro__}
     if not is_data_error:
         raise exc  # a real DB fault: let ErrorLoggingMiddleware record it as a 500
-    reason = str(orig).splitlines()[0][:200] if orig is not None else "invalid input"
+    reason = str(orig).splitlines()[0] if orig is not None else "invalid input"
+    reason = re.sub(r"^<class '[^']+'>:\s*", "", reason)[:200]  # sqlalchemy's adapter prefix is noise to a client
     logger.warning('event="db_data_error_rejected" path=%s reason=%r', request.url.path, reason)
     return JSONResponse(
         status_code=422,
