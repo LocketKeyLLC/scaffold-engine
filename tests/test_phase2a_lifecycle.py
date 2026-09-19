@@ -34,11 +34,14 @@ def test_init_clients_precedes_crash_resume():
         return next((i for i, ln in enumerate(code) if pred(ln)), -1)
 
     i_init = _first(lambda l: l == "init_clients()")
-    i_resume = _first(lambda l: "await resume_orphaned_executions()" in l)
+    # §17.1106 — the lifespan calls settle_interrupted_runs() (crash-resume +
+    # startup reconcile composed); it spawns the drains, so it is the call
+    # init_clients() must precede.
+    i_resume = _first(lambda l: "await settle_interrupted_runs()" in l)
     assert i_init != -1, "init_clients() call not found in app.main"
-    assert i_resume != -1, "resume_orphaned_executions() call not found in app.main"
+    assert i_resume != -1, "settle_interrupted_runs() call not found in app.main"
     assert i_init < i_resume, (
-        "init_clients() must precede resume_orphaned_executions() (audit C6)"
+        "init_clients() must precede settle_interrupted_runs() (audit C6)"
     )
 
 

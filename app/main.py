@@ -424,9 +424,19 @@ async def lifespan(app: FastAPI):
     # resuming at that node and reusing every already-'done' output. Bounded by
     # the crash-loop guard; gated by execution_resume_on_startup_enabled
     # (default on). Fail-soft — a hiccup here must not block startup.
+    #
+    # §17.1106 — settle_interrupted_runs is the ONE entry for both sweeps:
+    # crash-resume claims (no spawn yet) → run_broker.reconcile_on_startup
+    # (§17.1008) settles the rest to 'failed' with the claimed ids EXCLUDED →
+    # drains spawn. The reconcile used to run separately, ~170 lines later,
+    # after the drains were already spawned AND after the advance-chain
+    # resume task (§17.1036) had started: it selected running|executing again
+    # and failed every job the resume had just relaunched, on every deploy
+    # that caught a run in flight (Phase 1 ledger S-1). Never call the two
+    # separately from here again.
     try:
-        from app.modules.execution_resume import resume_orphaned_executions
-        resume_result = await resume_orphaned_executions()
+        from app.modules.execution_resume import settle_interrupted_runs
+        resume_result = await settle_interrupted_runs()
         if resume_result["skipped"]:
             logger.info("crash_resume_skipped: reason=%s", resume_result["reason"])
         elif resume_result["resumed"] or resume_result["budget_failed"]:
@@ -597,13 +607,9 @@ async def lifespan(app: FastAPI):
             # lifespan, i.e. TestClient). Skip the live session manager.
             logger.warning('event="mcp_session_manager_reentry_skipped" error=%s', exc)
             _mcp_ctx = None
-    # §17.1008 — settle any job the previous process left mid-run. Before the
-    # yield, so no freshly-started run can be mistaken for a stale row.
-    try:
-        from app.modules.run_broker import reconcile_on_startup
-        await reconcile_on_startup()
-    except Exception as exc:
-        logger.warning('event="run_broker_reconcile_failed" error=%s', exc)
+    # §17.1008 reconcile_on_startup now runs inside settle_interrupted_runs()
+    # above (§17.1106) — before any drain or the advance-chain resume task can
+    # flip a row to running, and with crash-resumed jobs excluded.
 
     yield
 
