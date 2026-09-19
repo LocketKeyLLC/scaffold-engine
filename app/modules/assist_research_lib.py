@@ -313,7 +313,7 @@ async def _deep_web_sources(query: str, *, top_n: int, skip=None,
 async def _confirm_query(
     query: str, *, node_key: str, domain: Optional[str], deep: bool = False,
     kb_query_extra: Optional[str] = None, web_query: Optional[str] = None,
-    operator_text: Optional[str] = None,
+    operator_text: Optional[str] = None, include_kb: bool = True,
 ) -> list[dict]:
     """Confirm one query via Milvus (local KB) + web.
 
@@ -328,15 +328,23 @@ async def _confirm_query(
     intact). Defaults to ``query`` so callers that don't focus are unchanged.
     Returns ``{query, kind, text[, url]}`` source dicts, only non-empty/
     non-failure. Never raises (helpers are fail-soft).
+
+    §17.1110 — ``include_kb=False`` skips the local-KB half: the guide
+    pre-pass now retrieves the KB ONCE for all its queries (fused union, one
+    rerank — ``_kb_union_block``) and uses this only for the web half. The KB
+    rerank here scores ``settings.assist_rerank_max_candidates`` pairs (5),
+    not the global 10.
     """
     from app.modules.execution_agent import _milvus_search, _searxng_search
 
     sources: list[dict] = []
     kb_query = f"{query}\n{kb_query_extra.strip()}" if (kb_query_extra or "").strip() else query
     web_q = (web_query or "").strip() or query
-    milvus = await _milvus_search(kb_query, node_key=node_key, domain=domain)
-    if _is_useful_grounding(milvus):
-        sources.append({"query": query, "kind": "milvus", "text": milvus.strip()})
+    if include_kb:
+        milvus = await _milvus_search(kb_query, node_key=node_key, domain=domain,
+                                      max_candidates=settings.assist_rerank_max_candidates)
+        if _is_useful_grounding(milvus):
+            sources.append({"query": query, "kind": "milvus", "text": milvus.strip()})
 
     if deep and settings.assist_research_fetch_top_n > 0:
         web = await _deep_web_sources(web_q, top_n=settings.assist_research_fetch_top_n,
@@ -360,6 +368,36 @@ _ACTION_STEP_RE = re.compile(
     re.IGNORECASE,
 )
 _ACTION_TOOLS = frozenset({"shell", "runbook", "code", "codegen"})
+
+
+async def _kb_union_block(
+    queries: list[str], *, rerank_query: str, node_key: str, domain: Optional[str],
+) -> str:
+    """§17.1110 — the local-KB half of the guide pre-pass, ONCE for all queries:
+    fuse every query's RRF shortlist, rerank the union a single time against
+    the step text. Renders exactly like ``_milvus_search`` so downstream
+    consumers see the same block shape. Fail-soft: '' on error."""
+    from app.modules.rag_pipeline import query_rag_multi
+
+    try:
+        resp = await query_rag_multi(
+            queries, rerank_query=rerank_query, top_k=5, domain=domain,
+        )
+    except Exception as exc:  # noqa: BLE001 — research must never break a guide
+        logger.warning("kb_union_search_failed node_key=%s err=%r", node_key, exc)
+        return ""
+    results = resp.get("results") or []
+    md = resp.get("metadata") or {}
+    lines = [f"[{i}] {d.get('title') or 'Unknown'}\n    {(d.get('content') or '')[:500]}"
+             for i, d in enumerate(results, 1)]
+    top = max((float((d.get("scores") or {}).get("final", 0.0) or 0.0) for d in results), default=0.0)
+    logger.info(
+        "milvus_retrieval_union node_key=%s queries=%d union=%d rerank_candidates=%d "
+        "results=%d reranked=%s top_score=%.4f latency_ms=%s",
+        node_key, md.get("queries", 0), md.get("union_size", 0), md.get("rerank_candidates", 0),
+        len(results), md.get("reranked"), top, md.get("latency_ms"),
+    )
+    return "\n\n".join(lines) if lines else "No knowledge base results found."
 
 
 def _floor_query(task_text: str, tool: str) -> str:
@@ -435,12 +473,29 @@ async def _research_prepass(
     elif not queries:
         return []  # declined with the floor off, or the machinery failed
     logger.info("assist_guide_research: %d queries node_key=%s deep=%s", len(queries), node_key, deep)
-    # One round-trip: all queries confirmed concurrently.
-    batches = await asyncio.gather(
-        *[_confirm_query(q, node_key=node_key, domain=domain, deep=deep) for q in queries],
-        return_exceptions=True,
-    )
     sources: list[dict] = []
+    if settings.assist_research_rerank_once and len(queries) > 1:
+        # §17.1110 (ledger L-1b) — the KB is searched ONCE for all queries
+        # (fused union, one CrossEncoder call against the step text) while the
+        # web half still runs per query, concurrently. Before: N concurrent
+        # 10-doc reranks at ~30 s each on this CPU.
+        kb_text, *batches = await asyncio.gather(
+            _kb_union_block(queries, rerank_query=task_text, node_key=node_key, domain=domain),
+            *[_confirm_query(q, node_key=node_key, domain=domain, deep=deep, include_kb=False)
+              for q in queries],
+            return_exceptions=True,
+        )
+        if isinstance(kb_text, BaseException):
+            logger.warning("assist_guide_kb_union_failed: %s", kb_text)
+        elif _is_useful_grounding(kb_text):
+            sources.append({"query": " | ".join(q[:80] for q in queries), "kind": "milvus",
+                            "text": str(kb_text).strip()})
+    else:
+        # One round-trip: all queries confirmed concurrently.
+        batches = await asyncio.gather(
+            *[_confirm_query(q, node_key=node_key, domain=domain, deep=deep) for q in queries],
+            return_exceptions=True,
+        )
     for b in batches:
         if isinstance(b, Exception):
             logger.warning("assist_guide_confirm_query_failed: %s", b)

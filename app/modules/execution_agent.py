@@ -997,10 +997,16 @@ async def _searxng_search(query: str, max_results: int = 5) -> str:
         logger.warning("searxng_search_failed: %s", e)
         return f"SearXNG search failed: {e}"
 
-async def _milvus_search(query: str, node_key: str = "?", domain: str | None = None) -> str:
-    """Call query_rag(), return formatted context with structured logging."""
+async def _milvus_search(query: str, node_key: str = "?", domain: str | None = None,
+                         *, max_candidates: int | None = None) -> str:
+    """Call query_rag(), return formatted context with structured logging.
+
+    §17.1110 — ``max_candidates`` caps the RRF shortlist the reranker scores
+    (None → ``settings.rerank_max_candidates``); the assist paths pass their
+    own smaller cap, execution nodes keep the default.
+    """
     try:
-        rag_result = await query_rag(query, domain=domain, top_k=5)
+        rag_result = await query_rag(query, domain=domain, top_k=5, max_candidates=max_candidates)
         results = rag_result.get("results", [])
         metadata = rag_result.get("metadata", {})
 
