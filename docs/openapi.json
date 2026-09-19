@@ -11866,6 +11866,237 @@
         ]
       }
     },
+    "/research/runs": {
+      "post": {
+        "description": "Start research as a DETACHED run and return its ``run_id`` at once. The\nrun keeps going when the client goes away; ``GET /research/runs/{id}/stream``\ntails it (backlog first), ``POST /research/runs/{id}/cancel`` stops it.\nReplaces the streaming ``POST /research`` for the SPA (which cancelled the\nsession on disconnect) and the handle-less ``POST /research/start``.",
+        "operationId": "research_run_start_research_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResearchInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Research Run Start",
+        "tags": [
+          "Research"
+        ]
+      }
+    },
+    "/research/runs/reply": {
+      "post": {
+        "description": "Answer an ``awaiting_reply`` session as a detached run (same contract as\n``POST /research/runs``). The session must be visible to the caller.",
+        "operationId": "research_run_reply_research_runs_reply_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResearchReplyInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Research Run Reply",
+        "tags": [
+          "Research"
+        ]
+      }
+    },
+    "/research/runs/{run_id}": {
+      "get": {
+        "description": "Is this run in flight? (The SPA asks before re-attaching after a reload\nor a dropped stream.)",
+        "operationId": "research_run_status_research_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Research Run Status",
+        "tags": [
+          "Research"
+        ]
+      }
+    },
+    "/research/runs/{run_id}/cancel": {
+      "post": {
+        "description": "Stop a detached research run on purpose (closing the tab no longer does).\nThe lifecycle wrapper finalizes the session as ``cancelled``.",
+        "operationId": "research_run_cancel_research_runs__run_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Research Run Cancel",
+        "tags": [
+          "Research"
+        ]
+      }
+    },
+    "/research/runs/{run_id}/stream": {
+      "get": {
+        "description": "Tail a research run: its backlog first, then live frames until it ends.\nAfter the run has ended, the frames persisted to Redis are replayed once\n(so a reload shows what happened). 404 when there is neither.",
+        "operationId": "research_run_stream_research_runs__run_id__stream_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Research Run Stream",
+        "tags": [
+          "Research"
+        ]
+      }
+    },
     "/research/sessions": {
       "get": {
         "description": "Paginated research session list with optional status + topic search.",

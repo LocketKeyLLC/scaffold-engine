@@ -2,15 +2,20 @@
 // and runs new research live via POST /research (SSE) with the awaiting_reply
 // pause/reply channel (POST /research/reply). Reuses the fetch SSE reader.
 import * as api from "../api.js";
-import * as router from "../router.js";
 
-// §17.1116 (ledger U-6) — the streaming /research endpoint CANCELS the session
-// when its client disconnects (routers/research.py, _sse_with_disconnect_watch);
-// only the tab-close case was guarded (beforeunload), so a sidebar click or a
-// palette jump silently killed a 20-minute run. The router guard below asks
-// first. (Detaching research server-side needs a run broker like §17.1007's —
-// /research/start exists but returns no session id to follow.)
-export const RESEARCH_LEAVE_MSG = "Research is running on this page and will be CANCELLED if you leave it. Leave anyway?";
+// §17.1120 — detached research runs. Exported for the node tests.
+export const RUN_KEY = "scaffold_research_run";
+export const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
+const API_RUNS = "/research/runs";   // an API path, not a hash route (the route gate scans `return \`/…` lines)
+export function runStreamPath(runId) { return API_RUNS + "/" + runId + "/stream"; }
+/** After a reload: re-attach only to a run the engine says is still in flight. */
+export function shouldReattach(status) { return !!(status && typeof status === "object" && status.running); }
+/** Same decision table as the theater's stream drop (§17.1113). */
+export function runDropDecision(status, attempt, maxAttempts) {
+  if (status && typeof status === "object") return status.running ? "reattach" : "finished";
+  return attempt >= maxAttempts ? "give_up" : "retry";
+}
+
 import { el, mount, shortId, timeAgo, fmtNum, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState, makeClickable } from "../components.js";
 
@@ -37,10 +42,6 @@ export default function research(container, params) {
   let running = false;
   let abort = null;
   // §17.854 (audit G2) — a research stream is cancel-on-disconnect too; warn on
-  // tab-close/reload while one is live.
-  function beforeUnload(e) {
-    if (running) { e.preventDefault(); e.returnValue = ""; return ""; }
-  }
   let activeSession = null;
 
   // ── New-research runner ────────────────────────────────────────────
@@ -72,7 +73,7 @@ export default function research(container, params) {
     el(
       "div",
       { class: "view-header" },
-      el("div", {}, el("h1", { text: "Research Explorer" }), el("div", { class: "sub", text: "Autonomous research sessions & live runs — a live run streams to this page and is cancelled if you leave it" })),
+      el("div", {}, el("h1", { text: "Research Explorer" }), el("div", { class: "sub", text: "Autonomous research sessions & live runs — a live run keeps going if you leave this page; come back to watch it" })),
       el("div", { class: "header-actions" }, el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => loadSessions() }))
     ),
     runner,
@@ -95,54 +96,118 @@ export default function research(container, params) {
     coverage.querySelector(".coverage-label").textContent = `coverage ${Math.round(pct)}%`;
   }
 
+  // §17.1120 — research runs are DETACHED now (POST /research/runs → run_id;
+  // GET /research/runs/{id}/stream tails it). Closing the tab or navigating
+  // away no longer cancels anything; ■ Stop is an explicit POST. A dropped
+  // stream reconnects (backoff, backlog skip — the §17.1113 theater pattern),
+  // and a reload re-attaches to the run id kept in sessionStorage.
+  let activeRun = null;
+  let framesSeen = 0;
+
   function toggleRun() {
     if (running) {
-      if (abort) abort.abort();
+      if (!activeRun) { if (abort) abort.abort(); return; }
+      if (!confirm("Stop this research run? What has been ingested so far is kept.")) return;
+      runBtn.disabled = true;
+      api.post(`/research/runs/${activeRun}/cancel`, {})
+        .then(() => { feedLine("warning", "Stopped by operator.", "warn"); })
+        .catch((e) => toast(`Could not stop the run: ${e.detail || e.message}`, "err"))
+        .finally(() => { runBtn.disabled = false; if (abort) abort.abort(); });
       return;
     }
     const topic = topicInput.value.trim();
-    if (!topic) {
-      toast("Enter a topic first.", "err");
-      return;
-    }
+    if (!topic) { topicInput.focus(); return; }
     startRun(topic);
   }
 
-  async function startRun(topic) {
+  function armRunning() {
     running = true;
-    window.addEventListener("beforeunload", beforeUnload);  // §17.854 G2
-    router.setNavGuard(() => (running ? RESEARCH_LEAVE_MSG : null));   // §17.1116
+    runBtn.textContent = "■ Stop";
+    runBtn.classList.replace("btn-primary", "btn-danger");
+  }
+
+  async function startRun(topic) {
+    armRunning();
     activeSession = null;
     feed.replaceChildren();
     feed.classList.remove("hidden");
     summaryBox.classList.add("hidden");
     replyBox.classList.add("hidden");
     coverage.classList.add("hidden");
-    runBtn.textContent = "■ Stop";
-    runBtn.classList.replace("btn-primary", "btn-danger");
-    abort = new AbortController();
     const body = { topic, depth: depthSel.value };
     if (domainInput.value.trim()) body.domain = domainInput.value.trim();
-    feedLine("research_started", `Starting ${depthSel.value} research…`);
+    feedLine("research_started", `Starting ${depthSel.value} research… (keeps going if you leave this page — come back to watch)`);
+    let res;
     try {
-      for await (const { event, data } of api.stream("/research", { body, signal: abort.signal })) {
+      res = await api.post("/research/runs", body);
+    } catch (e) {
+      feedLine("error", `Could not start research: ${e.detail || e.message}`, "err");
+      finishRun();
+      return;
+    }
+    rememberRun(res.run_id);
+    await attachRun(res.run_id, { resume: false });
+  }
+
+  function rememberRun(id) {
+    activeRun = id; framesSeen = 0;
+    try { sessionStorage.setItem(RUN_KEY, id); } catch (e) { console.debug("research: run id not stored", e); }
+  }
+
+  async function attachRun(id, { resume = false } = {}) {
+    armRunning();
+    activeRun = id;
+    if (!resume) framesSeen = 0;
+    abort = new AbortController();
+    let skip = resume ? framesSeen : 0;
+    let terminal = false;
+    try {
+      for await (const { event, data } of api.stream(runStreamPath(id), { method: "GET", signal: abort.signal })) {
         if (disposed) break;
+        if (skip > 0) { skip -= 1; continue; }
+        framesSeen += 1;
         handleEvent(event, data || {});
-        if (event === "research_complete" || event === "error") break;
+        if (event === "research_complete" || event === "error") { terminal = true; break; }
       }
     } catch (e) {
-      if (e.name === "AbortError") feedLine("warning", "Stopped by operator.", "warn");
-      else feedLine("error", `Stream error: ${e.message}`, "err");
-    } finally {
-      finishRun();
+      if (e.name === "AbortError") {
+        console.debug("research: tail dropped on purpose (Stop or navigation); the run is untouched");
+      } else if (!disposed) {
+        feedLine("warning", `Connection lost (${e.message}) — the run continues server-side; reconnecting…`, "warn");
+        const back = await reconnectRun(id);
+        if (back) return;
+      }
     }
+    if (!disposed) finishRun();
+  }
+
+  async function reconnectRun(id) {
+    for (let attempt = 1; attempt <= RECONNECT_DELAYS_MS.length; attempt++) {
+      if (disposed || !running) return false;
+      await new Promise((r) => setTimeout(r, RECONNECT_DELAYS_MS[attempt - 1]));
+      let status = null;
+      try { status = await api.get(`/research/runs/${id}`); } catch (e) { console.debug("research: status check failed", e); }
+      const decision = runDropDecision(status, attempt, RECONNECT_DELAYS_MS.length);
+      if (decision === "finished") {
+        feedLine("research_complete", "The run ended while this page was disconnected — refreshing the sessions list.", "ok");
+        return false;
+      }
+      if (decision === "reattach") {
+        feedLine("research_resumed", `Reconnected (attempt ${attempt}) — resuming the live feed.`, "ok");
+        attachRun(id, { resume: true });
+        return true;
+      }
+      feedLine("warning", `Still can't reach the engine (attempt ${attempt}/${RECONNECT_DELAYS_MS.length})…`, "warn");
+    }
+    feedLine("error", "Could not reconnect. The run may still be going — reload this page to re-attach.", "err");
+    return false;
   }
 
   function finishRun() {
     running = false;
-    router.setNavGuard(null);                                  // §17.1116
-    window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
     abort = null;
+    activeRun = null;
+    try { sessionStorage.removeItem(RUN_KEY); } catch (e) { console.debug("research: run id not cleared", e); }
     runBtn.textContent = "◎ Run research";
     runBtn.classList.replace("btn-danger", "btn-primary");
     loadSessions();
@@ -151,24 +216,16 @@ export default function research(container, params) {
   async function sendReply(text) {
     if (!activeSession) return;
     replyBox.classList.add("hidden");
-    running = true;
-    window.addEventListener("beforeunload", beforeUnload);  // §17.854 G2
-    router.setNavGuard(() => (running ? RESEARCH_LEAVE_MSG : null));   // §17.1116
-    runBtn.textContent = "■ Stop";
-    runBtn.classList.replace("btn-primary", "btn-danger");
-    abort = new AbortController();
     feedLine("research_resumed", `Replying: ${text}`);
+    let res;
     try {
-      for await (const { event, data } of api.stream("/research/reply", { body: { session_id: activeSession, reply: text }, signal: abort.signal })) {
-        if (disposed) break;
-        handleEvent(event, data || {});
-        if (event === "research_complete" || event === "error") break;
-      }
+      res = await api.post("/research/runs/reply", { session_id: activeSession, reply: text });
     } catch (e) {
-      feedLine("error", `Reply stream error: ${e.message}`, "err");
-    } finally {
-      finishRun();
+      feedLine("error", `Could not send the reply: ${e.detail || e.message}`, "err");
+      return;
     }
+    rememberRun(res.run_id);
+    await attachRun(res.run_id, { resume: false });
   }
 
   function handleEvent(event, d) {
@@ -363,10 +420,20 @@ export default function research(container, params) {
   loadSessions();
   if (params && params.sessionId) loadAudit(params.sessionId);
 
+  // §17.1120 — re-attach to the run this tab was watching before a reload.
+  try {
+    const stored = sessionStorage.getItem(RUN_KEY);
+    if (stored) {
+      api.get(`/research/runs/${stored}`).then((st) => {
+        if (disposed) return;
+        if (shouldReattach(st)) { feed.classList.remove("hidden"); feedLine("research_resumed", "Re-attaching to the run you were watching…"); attachRun(stored, { resume: false }); }
+        else { try { sessionStorage.removeItem(RUN_KEY); } catch (e) { console.debug("research: run id not cleared", e); } }
+      }).catch((e) => console.debug("research: could not check the stored run", e));
+    }
+  } catch (e) { console.debug("research: sessionStorage unavailable", e); }
+
   return () => {
     disposed = true;
-    router.setNavGuard(null);                                  // §17.1116
-    window.removeEventListener("beforeunload", beforeUnload);  // §17.854 G2
-    if (abort) abort.abort();
+    if (abort) abort.abort();   // drop the tail only — the run is detached (§17.1120)
   };
 }
