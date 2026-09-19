@@ -152,3 +152,55 @@ export function actionLink(label, href, opts = {}) {
     ...(opts.title ? { title: opts.title } : {}),
   });
 }
+
+// §17.1118 (Phase 1 ledger U-11) — focus management for anything that pops
+// over the page. The replan modal and the plan drawer had no dialog role, no
+// focus move, no Tab trap, no Escape, and no return-focus. This is the one
+// helper both use: it marks the element as a dialog, moves focus to its first
+// focusable, keeps Tab inside (modal) or just handles Escape (non-modal), and
+// hands focus back to wherever it came from on close.
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+export function focusables(root) {
+  return root ? Array.from(root.querySelectorAll(FOCUSABLE)).filter((n) => !n.hidden && n.offsetParent !== null || n === document.activeElement) : [];
+}
+
+/** Pure: the index Tab (or Shift+Tab) lands on inside a trap of `count` items. */
+export function nextFocusIndex(current, count, backwards) {
+  if (count <= 0) return -1;
+  if (current < 0) return backwards ? count - 1 : 0;
+  return backwards ? (current - 1 + count) % count : (current + 1) % count;
+}
+
+export function openDialog(node, { label, onClose, trap = true, initialFocus } = {}) {
+  const opener = typeof document !== "undefined" ? document.activeElement : null;
+  node.setAttribute("role", "dialog");
+  if (trap) node.setAttribute("aria-modal", "true");
+  if (label) node.setAttribute("aria-label", label);
+  if (!node.hasAttribute("tabindex")) node.setAttribute("tabindex", "-1");
+  const onKey = (e) => {
+    if (e.key === "Escape") { e.preventDefault(); if (onClose) onClose(); return; }
+    if (trap && e.key === "Tab") {
+      const items = focusables(node);
+      if (!items.length) { e.preventDefault(); node.focus(); return; }
+      const i = items.indexOf(document.activeElement);
+      const next = items[nextFocusIndex(i, items.length, e.shiftKey)];
+      if (i === -1 || (e.shiftKey && i === 0) || (!e.shiftKey && i === items.length - 1)) { e.preventDefault(); next.focus(); }
+    }
+  };
+  node.addEventListener("keydown", onKey);
+  const first = initialFocus || focusables(node)[0] || node;
+  try { first.focus(); } catch (e) { console.debug("openDialog: initial focus failed", e); }
+  let closed = false;
+  return {
+    close() {
+      if (closed) return;
+      closed = true;
+      node.removeEventListener("keydown", onKey);
+      if (opener && typeof opener.focus === "function" && document.contains(opener)) {
+        try { opener.focus(); } catch (e) { console.debug("openDialog: focus restore failed", e); }
+      }
+    },
+  };
+}
+

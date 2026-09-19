@@ -23,7 +23,7 @@ import json
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
@@ -535,6 +535,45 @@ async def approve_job_state_endpoint(
         await assert_visible(_s, principal, job_id, detail=f"job not found: {job_id}")
     from app.modules.advance_chain import chain_state
     return await chain_state(job_id)
+
+
+@router.get("/exec/statuses")
+async def exec_statuses(
+    ids: str = Query(..., description="comma-separated job ids (max 50)"),
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1118 (Phase 1 ledger U-10) — execution state for SEVERAL jobs in one
+    round trip. The dashboard polled `/exec/status/{id}` once per executing job
+    every 10 s (N+1). Same per-job payload as `/exec/status/{id}` (including
+    `detached_running`); ids that are invalid, not visible to the principal, or
+    have no execution state are listed under `missing` rather than failing the
+    whole call."""
+    raw = [s.strip() for s in (ids or "").split(",") if s.strip()]
+    if not raw:
+        raise HTTPException(status_code=400, detail="ids is required")
+    if len(raw) > 50:
+        raise HTTPException(status_code=400, detail="at most 50 ids per call")
+    statuses: dict[str, dict] = {}
+    missing: list[str] = []
+    for jid in dict.fromkeys(raw):          # de-duplicate, keep order
+        try:
+            parsed = UUID(jid)
+        except ValueError:
+            missing.append(jid)
+            continue
+        try:
+            await assert_visible(db, principal, str(parsed), detail="not visible")
+        except HTTPException:
+            missing.append(jid)
+            continue
+        result = await execution_status(parsed, db)
+        if "error" in result:
+            missing.append(jid)
+            continue
+        result["detached_running"] = run_broker.is_running(str(parsed))
+        statuses[str(parsed)] = result
+    return {"statuses": statuses, "missing": missing}
 
 
 @router.get("/exec/status/{job_id}")

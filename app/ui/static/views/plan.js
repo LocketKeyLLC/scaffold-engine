@@ -6,7 +6,7 @@
 import * as api from "../api.js";
 import { jobStore } from "../store.js";
 import { el, mount, moveItem } from "../util.js";
-import { statusBadge, loading, errorPanel, toast } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, openDialog } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
 import { briefPanel } from "./brief_panel.js";
 import { flowGuide } from "./flow_guide.js";
@@ -61,7 +61,8 @@ export function renderPlan(container, jobId) {
   );
 
   const canvas = el("div", { class: "dag-canvas" });
-  const drawer = el("div", { class: "dag-drawer hidden" });
+  const drawer = el("div", { class: "dag-drawer hidden", role: "dialog", "aria-label": "Step editor" });
+  let drawerDialog = null;   // §17.1118 — focus in on open, Escape closes, focus back on close
   const reorderPanel = el("div", { class: "reorder-panel hidden" });
   const stage = el("div", { class: "dag-stage" }, canvas, drawer);
   // Shown only at ≤820px (CSS): plan editing is a desktop-first surface.
@@ -163,6 +164,11 @@ export function renderPlan(container, jobId) {
     drawer.classList.add("hidden");
     selectedKey = null;
     graph.clearSelected();
+    if (drawerDialog) { drawerDialog.close(); drawerDialog = null; }
+  }
+  function armDrawer() {
+    if (drawerDialog) drawerDialog.close();
+    drawerDialog = openDialog(drawer, { label: "Step editor", onClose: closeDrawer, trap: false });
   }
 
   // ── Load ─────────────────────────────────────────────────────────
@@ -212,6 +218,7 @@ export function renderPlan(container, jobId) {
     selectedKey = node.node_key;
     graph.setSelected(node.node_key);
     drawer.classList.remove("hidden");
+    queueMicrotask(armDrawer);   // §17.1118 — after this function mounts the fields
 
     const titleIn = el("input", { class: "input", value: node.title || "" });
     const descIn = el("textarea", { class: "input node-textarea", rows: 2 }, node.description || "");
@@ -233,7 +240,7 @@ export function renderPlan(container, jobId) {
         "div",
         { class: "drawer-head" },
         el("div", { class: "row" }, statusBadge(node.status), el("span", { class: "tag", text: `v${node.edit_version}` })),
-        el("button", { class: "btn btn-sm btn-ghost drawer-close", text: "✕", onClick: () => closeDrawer() })
+        el("button", { class: "btn btn-sm btn-ghost drawer-close", text: "✕", "aria-label": "Close editor", onClick: () => closeDrawer() })
       ),
       el("h3", { class: "drawer-title", text: `${node.node_key} · edit` }),
       el(
@@ -348,6 +355,7 @@ export function renderPlan(container, jobId) {
     selectedKey = null;
     graph.clearSelected();
     drawer.classList.remove("hidden");
+    queueMicrotask(armDrawer);   // §17.1118 — after this function mounts the fields
 
     const keyIn = el("input", { class: "input mono", placeholder: "e.g. T99" });
     const titleIn = el("input", { class: "input", placeholder: "Node title" });
@@ -364,7 +372,7 @@ export function renderPlan(container, jobId) {
         "div",
         { class: "drawer-head" },
         el("div", { class: "row" }, el("span", { class: "tag", text: "new node" })),
-        el("button", { class: "btn btn-sm btn-ghost drawer-close", text: "✕", onClick: () => closeDrawer() })
+        el("button", { class: "btn btn-sm btn-ghost drawer-close", text: "✕", "aria-label": "Close editor", onClick: () => closeDrawer() })
       ),
       el("h3", { class: "drawer-title", text: "Insert node" }),
       el(

@@ -48,6 +48,7 @@ export function briefPanel(jobId) {
             el("button", {
               class: "btn btn-ghost btn-sm bp-remove",
               text: "✕",
+              "aria-label": "Close",
               title: "Remove",
               onClick: () => { items.splice(i, 1); markDirty(); renderItems(); },
             })
