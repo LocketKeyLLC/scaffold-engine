@@ -150,6 +150,17 @@ async def record_llm_call(resp) -> None:
     job_id = current_job_id.get()
     node_id = current_node_id.get()
     kind = current_call_kind.get()
+    # §17.1109 (ledger L-1) — attribute the call to the active assist turn's
+    # stage: accrue latency to it, and when the caller set no call_kind (every
+    # assist stage, until now) default to ``assist:<stage>`` so the call log
+    # says which stage paid. Fail-soft like everything else here.
+    try:
+        from app.utils import turn_timing
+        turn_timing.note_llm_call(latency_ms)
+        if kind is None:
+            kind = turn_timing.default_call_kind()
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         async with async_session() as db:
