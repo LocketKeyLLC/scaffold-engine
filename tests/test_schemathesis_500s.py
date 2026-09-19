@@ -84,5 +84,11 @@ def test_dbapi_handler_only_maps_data_errors():
     req = MagicMock(); req.url.path = "/x"
     ok = asyncio.run(_dbapi_data_error_handler(req, DBAPIError("s", {}, DataError("invalid input for query argument $1: 'x' (bad)"))))
     assert ok.status_code == 422 and b"invalid input" in ok.body
+    # sqlalchemy's asyncpg adapter stringifies orig as "<class '…DataError'>: msg" — the client gets the msg
+    class Adapter(Exception):
+        def __str__(self): return "<class 'asyncpg.exceptions.DataError'>: invalid input for query argument $1: 'x'"
+    Adapter.__name__ = "DataError"
+    r = asyncio.run(_dbapi_data_error_handler(req, DBAPIError("s", {}, Adapter())))
+    assert b"<class" not in r.body and b"invalid input for query argument" in r.body
     with pytest.raises(DBAPIError):
         asyncio.run(_dbapi_data_error_handler(req, DBAPIError("s", {}, OtherError("connection reset"))))
