@@ -1238,6 +1238,7 @@ async def execute_next_node(
                     await db.commit()
                     logger.info("partial_compiled: job=%s chars=%s", job_id, len(partial_result) if partial_result else 0)
             except Exception as exc:
+                await db.rollback()  # §17.1132 — a failed commit leaves the session unusable until rolled back
                 logger.warning("partial_compile_failed: job=%s error=%s", job_id, str(exc))
 
             # §17.295 — distinguish "blocked by failed upstream" (operator

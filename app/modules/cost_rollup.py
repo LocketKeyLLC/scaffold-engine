@@ -37,6 +37,7 @@ import logging
 from typing import Any
 
 from sqlalchemy import text
+from app.utils.savepoint import savepoint
 
 logger = logging.getLogger("scaffold.cost_rollup")
 
@@ -148,8 +149,9 @@ async def get_job_costs(job_id: str, db) -> dict[str, Any]:
     kind_ok = True
 
     try:
-        rows = await db.execute(text(_BREAKDOWN_SQL), {"jid": str(job_id)})
-        records = rows.mappings().all()
+        async with savepoint(db):  # §17.1132 — a failure here rolls back ONLY this optional work
+            rows = await db.execute(text(_BREAKDOWN_SQL), {"jid": str(job_id)})
+            records = rows.mappings().all()
     except Exception as exc:
         logger.debug(
             "get_job_costs_breakdown_failed: job=%s error=%s "

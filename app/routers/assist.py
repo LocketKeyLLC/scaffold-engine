@@ -27,6 +27,7 @@ from app.authz import (
 )
 from app.config import settings
 from app.database import get_db
+from app.utils.savepoint import savepoint
 from app.modules import assist_agent, assist_policy, assist_session_map
 from app.utils.ids import UuidPath, is_uuid
 
@@ -293,16 +294,17 @@ async def assist_chatmap_get(chat_id: str, db=Depends(get_db)):
         # Only `active` sessions are recoverable — a terminal session must NOT
         # capture plain chat back into assist.
         try:
-            row = (await db.execute(
-                text("""
-                    SELECT id, current_node_key
-                      FROM assist_sessions
-                     WHERE chat_id = :cid AND status = 'active'
-                     ORDER BY last_activity_at DESC
-                     LIMIT 1
-                """),
-                {"cid": chat_id},
-            )).mappings().first()
+            async with savepoint(db):  # §17.1132 — a failure here rolls back ONLY this optional work
+                row = (await db.execute(
+                    text("""
+                        SELECT id, current_node_key
+                          FROM assist_sessions
+                         WHERE chat_id = :cid AND status = 'active'
+                         ORDER BY last_activity_at DESC
+                         LIMIT 1
+                    """),
+                    {"cid": chat_id},
+                )).mappings().first()
         except Exception as exc:  # noqa: BLE001 — recovery is best-effort
             logger.warning("chatmap PG recovery failed for %s: %s", chat_id, exc)
             row = None
