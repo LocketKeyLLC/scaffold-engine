@@ -25,6 +25,8 @@ from typing import Any, Awaitable, Callable, Optional
 
 from sqlalchemy import text
 
+from app.modules.job_state import TERMINAL_JOB_STATUSES
+
 logger = logging.getLogger("scaffold")
 
 # Statuses the console renders. "on"/"off" come from detection; "blocked"
@@ -33,7 +35,8 @@ logger = logging.getLogger("scaffold")
 # operator's other machine) and only the walkthrough can confirm it.
 STATUSES = ("on", "off", "blocked", "in_progress", "manual")
 
-_OPEN_JOB_STATUSES = ("completed", "failed", "cancelled")
+# (name is historical — these are the statuses a job is NOT open in)
+_OPEN_JOB_STATUSES = tuple(sorted(TERMINAL_JOB_STATUSES))  # §17.1107 — one vocabulary
 
 
 @dataclass(frozen=True)

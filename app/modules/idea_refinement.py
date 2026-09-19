@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import model_router
 from app.providers.base import Tool
+from app.modules.job_state import transition
 from app.utils.job_utils import fail_job as _fail_job
 from app.utils.tool_call_args import read_tool_args
 
@@ -318,20 +319,11 @@ async def refine_idea(
 
     # 4. Update job with refined brief, transition to planning
     title = _truncate_title(brief.get("title") or idea_text)
-    await db.execute(
-        text("""
-            UPDATE jobs
-            SET title = :title,
-                refined_brief = :brief,
-                status = :target_status
-            WHERE id = :id
-        """),
-        {
-            "title": title,
-            "brief": json.dumps(brief),
-            "id": job_id,
-            "target_status": target_status,
-        },
+    # §17.1107 (ledger S-3) — guarded: a job cancelled mid-refine stays cancelled.
+    await transition(
+        db, job_id, to=target_status,
+        set_columns={"title": title, "refined_brief": json.dumps(brief)},
+        reason="idea_refined",
     )
     await db.commit()
     logger.info("job_refined: job=%s", job_id)

@@ -91,13 +91,18 @@ async def _fail(
 ) -> dict:
     """Mark the node failed with a verification reason (drives /exec/retry
     feedback) and return the failed summary dict."""
-    await db.execute(
+    # §17.1107 (ledger S-5) — guarded on 'running': a node the reaper or a
+    # cancel already reset is not overwritten by this stale result.
+    res = await db.execute(
         text(
             "UPDATE dag_nodes SET status = 'failed', "
-            "last_verification_reason = :r, completed_at = NOW() WHERE id = :nid"
+            "last_verification_reason = :r, completed_at = NOW() "
+            "WHERE id = :nid AND status = 'running' RETURNING id"
         ),
         {"r": reason, "nid": str(node_id)},
     )
+    if res.fetchone() is None:
+        logger.warning("node_status_write_refused: node=%s to=failed expected=running", node_id)
     await db.commit()
     logger.warning("mcp_node_failed: node=%s reason=%s", node_key, reason)
     return {
@@ -155,13 +160,15 @@ async def execute_mcp_node(
         return await _fail(db, node_id, node_key, title, str(exc))
 
     output = result.text or "(MCP tool returned no content)"
-    await db.execute(
+    res = await db.execute(
         text(
             "UPDATE dag_nodes SET status = 'done', output_text = :o, "
-            "completed_at = NOW() WHERE id = :nid"
+            "completed_at = NOW() WHERE id = :nid AND status = 'running' RETURNING id"
         ),
         {"o": output, "nid": str(node_id)},
     )
+    if res.fetchone() is None:
+        logger.warning("node_status_write_refused: node=%s to=done expected=running", node_id)
     await db.commit()
     logger.info(
         "mcp_node_done: node=%s server=%s tool=%s chars=%d",

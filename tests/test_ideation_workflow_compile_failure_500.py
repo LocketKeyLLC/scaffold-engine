@@ -28,6 +28,12 @@ def _wrap_async_session_no_op(mod) -> None:
     compile-failure branch's `async with async_session(): await
     _fail_job(...)` works without touching a real Postgres."""
     fake_fail_db = AsyncMock()
+    # §17.1107 — this stub is never restored, so later phase-2 tests in the
+    # same process inherit it; the success write is now job_state.transition()
+    # (UPDATE … RETURNING prior_status) and must read a row back.
+    _moved = MagicMock()
+    _moved.first.return_value = ("researching",)
+    fake_fail_db.execute = AsyncMock(return_value=_moved)
     fake_session = MagicMock()
     fake_session.__aenter__ = AsyncMock(return_value=fake_fail_db)
     fake_session.__aexit__ = AsyncMock(return_value=False)

@@ -46,12 +46,16 @@ def _make_happy_path_session(*, dag_node_count: int = 1):
     """Mock async_session that satisfies one happy-path execution."""
     guard_result = MagicMock(); guard_result.rowcount = 1
     dag_check = MagicMock(); dag_check.scalar.return_value = dag_node_count
-    cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "completed"
+    # §17.1107 — cleanup is a guarded transition; 'completed' refuses (no row),
+    # then a SELECT for the refusal log line.
+    cleanup_status = MagicMock(); cleanup_status.first.return_value = None
+    cleanup_status.scalar.return_value = "completed"
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[
         guard_result,    # Session 1 atomic guard
         dag_check,       # Session 3 DAG count
-        cleanup_status,  # finally cleanup status check
+        cleanup_status,  # finally: transition refused (already completed)
+        cleanup_status,  # finally: refusal-log SELECT status
     ] + [MagicMock()] * 8)
     db.commit = AsyncMock()
     ctx = AsyncMock()
@@ -245,16 +249,14 @@ class TestExecutionConcurrencyCap:
         # DAG count = 0 → execute_all_nodes calls dag_generator.generate_dag.
         dag_check = MagicMock(); dag_check.scalar.return_value = 0
         # Background cleanup task: SELECT status, then UPDATE jobs, UPDATE dag_nodes.
-        cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "running"
-        cleanup_update_jobs = MagicMock()
+        cleanup_update_jobs = MagicMock(); cleanup_update_jobs.first.return_value = ("running",)  # §17.1107
         cleanup_update_nodes = MagicMock()
 
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[
             guard_result,        # Session 1 atomic guard UPDATE
             dag_check,           # Session 3 SELECT COUNT(*) FROM dag_nodes
-            cleanup_status,      # cleanup task: SELECT status
-            cleanup_update_jobs, # cleanup task: UPDATE jobs SET status
+            cleanup_update_jobs, # cleanup task: guarded transition running -> cancelled (§17.1107)
             cleanup_update_nodes,# cleanup task: UPDATE dag_nodes
         ])
         db.commit = AsyncMock()
@@ -299,7 +301,8 @@ class TestExecutionConcurrencyCap:
         update_calls = [
             c for c in db.execute.call_args_list
             if len(c.args) > 1 and isinstance(c.args[1], dict)
-               and c.args[1].get("s") == "cancelled"
+               and c.args[1].get("to") == "cancelled"
+               and "status IN ('running')" in str(c.args[0])
         ]
         assert update_calls, "Cleanup UPDATE with status='cancelled' did not fire"
 

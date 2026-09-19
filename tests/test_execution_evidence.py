@@ -197,7 +197,10 @@ def test_the_executor_verifies_before_persisting_and_searches_by_need():
     body = src[src.index("async def execute_next_node("):]
     verify_at = body.index("verify_node_output(")
     assert verify_at < body.index('verify_status: Literal["pass", "fail", "skipped"]')
-    assert verify_at < body.index("expected_status=\"running\"")
+    # §17.1107 — earlier short-circuit writes (human/MCP-disabled) also pass
+    # expected_status="running" now; the persist that must FOLLOW the verify is
+    # the first occurrence AFTER verify_at.
+    assert body.index("expected_status=\"running\"", verify_at) > verify_at
     searx = body[body.index('elif tool_lower == "searxng":'):body.index("else:\n            rag_context")]
     assert "web_sources(" in searx and "_searxng_search(title)" not in searx
     assert "fetch_upstream_flagged(db, job_id, depends_on)" in body

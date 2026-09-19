@@ -35,6 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.database import async_session
+from app.modules.job_state import NODE_STATUSES, TERMINAL_JOB_STATUSES, sql_status_list, transition
 from app import model_router
 from app.config import settings, get_model
 from app.utils.progress import EmitThrottle, ProgressTracker
@@ -213,23 +214,21 @@ async def _cleanup_stuck_running_job(job_id: str, exit_reason: str | None) -> No
     longer at ``running`` (clean exits already set ``completed``/``blocked``)."""
     try:
         async with async_session() as db:
-            status_row = await db.execute(
-                text("SELECT status FROM jobs WHERE id = :jid"),
-                {"jid": job_id},
-            )
-            current_status = status_row.scalar()
-            if current_status != "running":
-                return
             if exit_reason == "cancelled":
                 terminal = "cancelled"
             elif exit_reason == "exception":
                 terminal = "failed"
             else:
                 terminal = "failed"  # safety default (Session 3 early-return etc.)
-            await db.execute(
-                text("UPDATE jobs SET status = :s, updated_at = now() WHERE id = :jid"),
-                {"s": terminal, "jid": job_id},
+            # §17.1107 (ledger S-4) — was SELECT status → if != running return →
+            # unguarded UPDATE: a cancel or completion landing between the two
+            # statements was overwritten with 'failed'. One guarded claim now.
+            prior = await transition(
+                db, job_id, to=terminal, expected_from=("running",),
+                reason=f"execute_all_nodes_cleanup:{exit_reason}",
             )
+            if prior is None:
+                return
             await db.execute(
                 text(
                     "UPDATE dag_nodes SET status = 'failed', completed_at = NOW() "
@@ -552,9 +551,14 @@ async def _set_node_status(
     verification_reason: str | None = None,
     confidence: float | None = None,
     set_confidence: bool = False,
-    expected_status: str | None = None,
+    expected_status: str | tuple[str, ...] | None = None,
 ) -> bool:
     """Update node status. COALESCE preserves prior values when caller passes None.
+
+    §17.1107 (ledger S-5) — ``expected_status`` also accepts a tuple
+    (``status IN (...)``), every terminal write in the execution body passes
+    it, and a refused write is logged (``node_status_write_refused``) so the
+    stale-writer case leaves evidence instead of silently losing.
 
     ``verification_reason`` writes to ``last_verification_reason``. When the
     caller passes ``None`` we COALESCE so a successful pass after a prior
@@ -581,7 +585,9 @@ async def _set_node_status(
     on startup (default) or via `make migrate` after deploy.
     """
     where = "WHERE id = :id"
-    if expected_status is not None:
+    if isinstance(expected_status, tuple):
+        where += f" AND status IN ({sql_status_list(expected_status, vocabulary=NODE_STATUSES)})"
+    elif expected_status is not None:
         where += " AND status = :expected"
     res = await db.execute(
         text(f"""
@@ -606,10 +612,15 @@ async def _set_node_status(
             "verification_reason": verification_reason,
             "confidence": confidence,
             "set_confidence": set_confidence,
-            **({"expected": expected_status} if expected_status is not None else {}),
+            **({"expected": expected_status} if isinstance(expected_status, str) else {}),
         },
     )
     updated = res.fetchone() is not None
+    if not updated and expected_status is not None:
+        logger.warning(
+            "node_status_write_refused: node=%s to=%s expected=%s",
+            node_id, status, expected_status,
+        )
     await db.commit()
     return updated
 
@@ -650,7 +661,7 @@ async def _all_nodes_done(db: AsyncSession, job_id: str) -> bool:
 # §17.854 (audit A1/A5) — terminal job-status flips funnel through these two
 # guarded helpers so the "don't overwrite a terminal state" predicate lives in
 # ONE place across the three autocomplete/blocked copies inside execute_next_node.
-_TERMINAL_JOB_STATUSES = ("completed", "cancelled", "failed")
+_TERMINAL_JOB_STATUSES = tuple(sorted(TERMINAL_JOB_STATUSES))  # §17.1107 — one vocabulary
 
 
 async def _flip_job_completed(db: AsyncSession, job_id: str) -> bool:
@@ -1352,14 +1363,7 @@ async def execute_next_node(
         # ── Human: single atomic UPDATE short-circuit (H3) ──
         if tool.lower() in ("human", "human_review"):
             skip_msg = "Skipped: human review not required in auto mode"
-            await db.execute(
-                text(
-                    "UPDATE dag_nodes "
-                    "SET status = 'done', output_text = :o, completed_at = NOW() "
-                    "WHERE id = :nid"
-                ),
-                {"o": skip_msg, "nid": str(node_id)},
-            )
+            await _set_node_status(db, node_id, "done", output=skip_msg, expected_status="running")
             await db.commit()
             await _log_execution(db, job_id, str(node_id), "info", f"Tool dispatch: {tool} skipped")
             logger.info("tool_dispatch: %s skip node=%s", tool, node_key)
@@ -1409,7 +1413,7 @@ async def execute_next_node(
             async with async_session() as _err_db:
                 await _set_node_status(
                     _err_db, node_id, "failed",
-                    verification_reason=err_msg,
+                    verification_reason=err_msg, expected_status="running",
                 )
                 await _log_execution(_err_db, job_id, node_id, "error", err_msg)
             return {
@@ -1436,13 +1440,7 @@ async def execute_next_node(
         if tool_lower == "mcp":
             if not settings.mcp_tool_enabled:
                 skip_msg = "Skipped: MCP tool execution disabled (mcp_tool_enabled=false)"
-                await db.execute(
-                    text(
-                        "UPDATE dag_nodes SET status = 'done', output_text = :o, "
-                        "completed_at = NOW() WHERE id = :nid"
-                    ),
-                    {"o": skip_msg, "nid": str(node_id)},
-                )
+                await _set_node_status(db, node_id, "done", output=skip_msg, expected_status="running")
                 await db.commit()
                 await _log_execution(db, job_id, str(node_id), "info", "MCP node skipped (disabled)")
                 return {
@@ -1591,7 +1589,7 @@ async def execute_next_node(
         async with async_session() as _err_db:
             await _set_node_status(
                 _err_db, node_id, "failed",
-                verification_reason=err_msg,
+                verification_reason=err_msg, expected_status="running",
             )
             await _log_execution(_err_db, job_id, node_id, "error", err_msg)
         return {
@@ -1748,7 +1746,7 @@ async def execute_next_node(
             await _set_node_status(
                 db, node_id, "failed",
                 output=timeout_msg, optimized_prompt=exec_prompt,
-                verification_reason=timeout_msg,
+                verification_reason=timeout_msg, expected_status="running",
             )
             await _log_execution(db, job_id, node_id, "error", timeout_msg)
         # §17.294 — operator-actionable message. Pre-§17.294 this was
@@ -1779,7 +1777,7 @@ async def execute_next_node(
             await _set_node_status(
                 db, node_id, "failed",
                 optimized_prompt=exec_prompt,
-                verification_reason=f"execution error: {e}",
+                verification_reason=f"execution error: {e}", expected_status="running",
             )
             await _log_execution(db, job_id, node_id, "error", str(e))
         return {
@@ -2139,7 +2137,10 @@ async def skip_node(job_id: str, node_key: str, db: AsyncSession) -> dict:
     r = row.mappings().first()
     if not r:
         return {"status": "error", "message": f"Node '{node_key}' not found"}
-    await _set_node_status(db, r["id"], "skipped")
+    # §17.1107 — a 'done' node is never skipped over; a running one may be
+    # (the executor's own terminal write is guarded on 'running' and loses).
+    if not await _set_node_status(db, r["id"], "skipped", expected_status=("pending", "running", "failed")):
+        return {"status": "error", "message": f"Node '{node_key}' is already done; nothing to skip"}
     return {"status": "skipped", "node_key": node_key}
 
 # §17.299 — `retry_failed_node` lives in `execution_retry`. The auto-
