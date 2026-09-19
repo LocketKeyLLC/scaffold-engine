@@ -61,6 +61,16 @@ def _load_module():
     # sqlalchemy.text passthrough
     stubs["sqlalchemy"].text = lambda s: s
 
+    # §17.1107 — the phase-2 success write goes through job_state.transition(),
+    # ONE guarded `UPDATE … RETURNING prior_status`; the short-lived write
+    # session it opens must hand back a row or the helper reads it as refused.
+    _write_db = AsyncMock()
+    _moved = MagicMock()
+    _moved.first.return_value = ("researching",)
+    _write_db.execute = AsyncMock(return_value=_moved)
+    stubs["app.database"].async_session.return_value.__aenter__ = AsyncMock(return_value=_write_db)
+    stubs["app.database"].async_session.return_value.__aexit__ = AsyncMock(return_value=None)
+
     # settings.ideation_max_* need real ints for slicing
     stubs["app.config"].settings.ideation_max_queries = 5
     stubs["app.config"].settings.ideation_max_distill_results = 15
@@ -93,9 +103,15 @@ def _load_module():
     # feasibility pass now imports them, and a bare MagicMock stub for the
     # parent packages would ModuleNotFoundError the ``from ... import`` lines
     # and skip-cascade every Phase-1/2 test (same class as the §17.290 heal).
+    # §17.1107 — app.modules.job_state (sqlalchemy.text + logging only): the
+    # phase-2 success write and _cancel_job go through job_state.transition().
+    # Without the real load, `from app.modules.job_state import transition`
+    # resolves only when an EARLIER test file happened to import it — the
+    # module loaded in the full suite and skip-cascaded when run alone.
     for _real_name, _rel in [
         ("app.providers.base", ("app", "providers", "base.py")),
         ("app.utils.tool_call_args", ("app", "utils", "tool_call_args.py")),
+        ("app.modules.job_state", ("app", "modules", "job_state.py")),
     ]:
         _p = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", *_rel))
         _s = importlib.util.spec_from_file_location(_real_name, _p)

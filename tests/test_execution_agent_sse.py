@@ -234,8 +234,9 @@ class TestExecuteAllNodesAbnormalExit:
         # disabled (trivial DAG), so no extra `progress` frames in this assertion.
         prog_count = MagicMock()
         prog_count.mappings.return_value.first.return_value = {"total": 1, "done": 0}
-        cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "running"
-        cleanup_update = MagicMock()
+        # §17.1107 — the cleanup is ONE guarded transition (UPDATE … WHERE
+        # status='running' RETURNING prior_status), no SELECT-then-UPDATE.
+        cleanup_update = MagicMock(); cleanup_update.first.return_value = ("running",)
 
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[
@@ -243,8 +244,7 @@ class TestExecuteAllNodesAbnormalExit:
             dag_check,        # Session 3 DAG COUNT
             dag_tools,        # §17.624 hands-on gate: SELECT tool FROM dag_nodes
             prog_count,       # §17.811 progress-tracker node count
-            cleanup_status,   # finally: SELECT status
-            cleanup_update,   # finally: UPDATE status='failed'
+            cleanup_update,   # finally: guarded transition running -> failed
         ])
         db.commit = AsyncMock()
 
@@ -274,7 +274,8 @@ class TestExecuteAllNodesAbnormalExit:
         update_calls = [
             c for c in db.execute.call_args_list
             if len(c.args) > 1 and isinstance(c.args[1], dict)
-               and c.args[1].get("s") == "failed"
+               and c.args[1].get("to") == "failed"
+               and "status IN ('running')" in str(c.args[0])
         ]
         assert len(update_calls) >= 1, "Cleanup UPDATE with status='failed' not found"
 
@@ -288,12 +289,11 @@ class TestExecuteAllNodesAbnormalExit:
         # §17.811 — progress-tracker node count (total=1 → tracker stays disabled).
         prog_count = MagicMock()
         prog_count.mappings.return_value.first.return_value = {"total": 1, "done": 0}
-        cleanup_status = MagicMock(); cleanup_status.scalar.return_value = "running"
-        cleanup_update = MagicMock()
+        cleanup_update = MagicMock(); cleanup_update.first.return_value = ("running",)  # §17.1107
 
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[
-            guard_result, dag_check, dag_tools, prog_count, cleanup_status, cleanup_update,
+            guard_result, dag_check, dag_tools, prog_count, cleanup_update,
         ])
         db.commit = AsyncMock()
 
@@ -330,7 +330,8 @@ class TestExecuteAllNodesAbnormalExit:
         update_calls = [
             c for c in db.execute.call_args_list
             if len(c.args) > 1 and isinstance(c.args[1], dict)
-               and c.args[1].get("s") == "cancelled"
+               and c.args[1].get("to") == "cancelled"
+               and "status IN ('running')" in str(c.args[0])
         ]
         assert len(update_calls) >= 1, "Cleanup UPDATE with status='cancelled' not found"
 
@@ -342,7 +343,11 @@ class TestExecuteAllNodesAbnormalExit:
         # runs a SELECT compiled_output, returns empty. Then finally's SELECT status
         # returns 'completed' (clean exit already transitioned via execute_next_node).
         co_select = MagicMock(); co_select.scalar.return_value = ""
+        # §17.1107 — the cleanup is a guarded transition on status='running';
+        # a job already 'completed' REFUSES (no row back), then the helper
+        # reads the current status for its refusal log line.
         cleanup_status_completed = MagicMock()
+        cleanup_status_completed.first.return_value = None
         cleanup_status_completed.scalar.return_value = "completed"
 
         db = AsyncMock()
@@ -350,7 +355,8 @@ class TestExecuteAllNodesAbnormalExit:
             guard_result,            # guard
             dag_check,               # DAG count
             co_select,               # _build_pipeline_summary compiled_output SELECT
-            cleanup_status_completed # finally SELECT status='completed' -> no-op
+            cleanup_status_completed,# finally: transition refused (already completed)
+            cleanup_status_completed,# finally: refusal-log SELECT status
         ])
         db.commit = AsyncMock()
 
