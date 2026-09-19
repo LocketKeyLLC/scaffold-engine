@@ -31,9 +31,11 @@ def _resp(*docs: dict) -> dict:
 # ── settings ─────────────────────────────────────────────────────────────────
 
 def test_assist_rerank_defaults_are_the_measured_trade():
+    """§17.1110 set 5/8 when a pair cost 1.4 s; §17.1125 measured 10/16 on the
+    real guide-query corpus once a pair cost 54 ms (§17.1124)."""
     assert settings.assist_research_rerank_once is True
-    assert settings.assist_rerank_max_candidates == 5
-    assert settings.assist_rerank_union_candidates == 8
+    assert settings.assist_rerank_max_candidates == 10
+    assert settings.assist_rerank_union_candidates == 16
     assert settings.rerank_max_candidates == 10, "the global /rag + execution cap is untouched"
 
 
@@ -193,7 +195,7 @@ async def test_confirm_query_kb_half_uses_the_assist_cap_and_can_be_skipped():
     sx = AsyncMock(return_value="")
     with patch.object(ea, "_milvus_search", ms), patch.object(ea, "_searxng_search", sx):
         out = await lib._confirm_query("q", node_key="N1", domain="eng", deep=False)
-        assert ms.await_args.kwargs["max_candidates"] == settings.assist_rerank_max_candidates == 5
+        assert ms.await_args.kwargs["max_candidates"] == settings.assist_rerank_max_candidates == 10
         assert any(s["kind"] == "milvus" for s in out)
         ms.reset_mock()
         out = await lib._confirm_query("q", node_key="N1", domain="eng", deep=False, include_kb=False)

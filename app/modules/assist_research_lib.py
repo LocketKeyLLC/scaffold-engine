@@ -332,7 +332,7 @@ async def _confirm_query(
     §17.1110 — ``include_kb=False`` skips the local-KB half: the guide
     pre-pass now retrieves the KB ONCE for all its queries (fused union, one
     rerank — ``_kb_union_block``) and uses this only for the web half. The KB
-    rerank here scores ``settings.assist_rerank_max_candidates`` pairs (5),
+    rerank here scores ``settings.assist_rerank_max_candidates`` pairs (10, §17.1125),
     not the global 10.
     """
     from app.modules.execution_agent import _milvus_search, _searxng_search
