@@ -8704,6 +8704,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 1000000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
@@ -9664,6 +9665,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 1000000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
@@ -10444,10 +10446,14 @@
         "operationId": "accept_proposal_endpoint_models_proposals__proposal_id__accept_post",
         "parameters": [
           {
+            "description": "integer id (int8)",
             "in": "path",
             "name": "proposal_id",
             "required": true,
             "schema": {
+              "description": "integer id (int8)",
+              "maximum": 9223372036854775807,
+              "minimum": 1,
               "title": "Proposal Id",
               "type": "integer"
             }
@@ -10494,10 +10500,14 @@
         "operationId": "dismiss_proposal_endpoint_models_proposals__proposal_id__dismiss_post",
         "parameters": [
           {
+            "description": "integer id (int8)",
             "in": "path",
             "name": "proposal_id",
             "required": true,
             "schema": {
+              "description": "integer id (int8)",
+              "maximum": 9223372036854775807,
+              "minimum": 1,
               "title": "Proposal Id",
               "type": "integer"
             }
@@ -11850,6 +11860,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 1000000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
@@ -12368,6 +12379,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 1000000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
@@ -12753,6 +12765,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 1000000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
@@ -12834,10 +12847,14 @@
         "operationId": "delete_schedule_schedule__schedule_id__delete",
         "parameters": [
           {
+            "description": "integer id (int4)",
             "in": "path",
             "name": "schedule_id",
             "required": true,
             "schema": {
+              "description": "integer id (int4)",
+              "maximum": 2147483647,
+              "minimum": 1,
               "title": "Schedule Id",
               "type": "integer"
             }
@@ -13417,6 +13434,7 @@
             "schema": {
               "default": 0,
               "description": "Rows to skip, for paging through a long run.",
+              "maximum": 1000000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"

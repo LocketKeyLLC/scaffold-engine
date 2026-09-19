@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.modules import model_role_learning as _mrl
+from app.utils.ids import Int64Path
 
 router = APIRouter(tags=["Models"])
 
@@ -31,7 +32,7 @@ async def list_proposals_endpoint(db: AsyncSession = Depends(get_db)) -> dict:
 
 @router.post("/models/proposals/{proposal_id}/accept")
 async def accept_proposal_endpoint(
-    proposal_id: int, db: AsyncSession = Depends(get_db),
+    proposal_id: Int64Path, db: AsyncSession = Depends(get_db),  # model_role_proposals.id is int8 (§17.1131)
 ) -> dict:
     """Apply a staged swap (set_override) and mark the proposal accepted.
 
@@ -46,7 +47,7 @@ async def accept_proposal_endpoint(
 
 @router.post("/models/proposals/{proposal_id}/dismiss")
 async def dismiss_proposal_endpoint(
-    proposal_id: int, db: AsyncSession = Depends(get_db),
+    proposal_id: Int64Path, db: AsyncSession = Depends(get_db),  # model_role_proposals.id is int8 (§17.1131)
 ) -> dict:
     """Dismiss a staged proposal without applying it."""
     result = await _mrl.dismiss_proposal(proposal_id, db)

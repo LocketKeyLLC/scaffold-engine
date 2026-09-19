@@ -22,10 +22,11 @@ NON_UUID_ID_PARAMS = {
     "chat_id",       # assist_sessions.chat_id — the OWUI chat id (text)
     "entry_id",      # KB entry slug (toon_v2 entry_id, rag_entry_provenance.entry_id — text)
     "recipe_id",     # setup recipe slug
-    "proposal_id",   # model_role_proposals.id — bigint (declared int)
-    "schedule_id",   # scheduled_jobs.id — integer (declared int)
+    "proposal_id",   # model_role_proposals.id — bigint → Int64Path
+    "schedule_id",   # scheduled_jobs.id — integer → Int32Path
 }
 UUID_OK = {"UuidPath", "uuid.UUID", "UUID"}
+INT_OK = {"Int32Path", "Int64Path"}
 ROUTE_METHODS = {"get", "post", "put", "patch", "delete"}
 
 
@@ -79,7 +80,7 @@ def _depends_targets():
 def test_dependency_targets_declare_uuid_ids_as_uuidpath(fname, func, name, ann):
     if name in NON_UUID_ID_PARAMS:
         return
-    assert ann in UUID_OK, (
+    assert ann in UUID_OK or ann in INT_OK, (
         f"{fname}: dependency `{func}({name}: {ann})` — declare it `{name}: UuidPath`; "
         "a plain str here lets the dependency run on a malformed id before the 422 is raised"
     )
@@ -113,7 +114,9 @@ def test_the_scan_finds_the_routes():
                          ids=lambda v: v if isinstance(v, str) and v.startswith("/") else None)
 def test_uuid_id_path_params_are_typed_uuidpath(fname, path, name, ann):
     if name in NON_UUID_ID_PARAMS:
-        assert ann in {"str", "int"}, f"{fname} {path}: {name} is text/int-keyed, got {ann}"
+        # text keys stay str; integer ids must be bounded to their column
+        # (a fuzzed 21-digit schedule_id was an asyncpg int32 overflow 500)
+        assert ann == "str" or ann in INT_OK, f"{fname} {path}: {name} — text key → str, integer id → Int32Path/Int64Path; got {ann}"
         return
     assert ann in UUID_OK, (
         f"{fname} {path}: `{name}: {ann}` — declare it `{name}: UuidPath` "
@@ -129,11 +132,11 @@ def test_limit_and_offset_are_bounded_queries():
                 continue
             ds = ast.unparse(d) if d is not None else ""
             ann = ast.unparse(a.annotation) if a.annotation else ""
-            bounded_default = ds.startswith("Query(") and "ge=" in ds
-            bounded_annotated = ann.startswith("Annotated[") and "Query(" in ann and "ge=" in ann
+            bounded_default = ds.startswith("Query(") and "ge=" in ds and "le=" in ds
+            bounded_annotated = ann.startswith("Annotated[") and "Query(" in ann and "ge=" in ann and "le=" in ann
             if not (bounded_default or bounded_annotated):
                 bad.append(f"{fname} {path} {a.arg}: {ann} = {ds or '-'}")
-    assert not bad, "unbounded pagination params (a negative limit reaches SQL as a 500):\n" + "\n".join(bad)
+    assert not bad, "pagination params need BOTH ge= and le= (a negative limit, or an offset above int64, reaches SQL as a 500):\n" + "\n".join(bad)
 
 
 def test_uuidpath_pattern_is_the_canonical_form():

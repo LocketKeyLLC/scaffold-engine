@@ -410,7 +410,7 @@ async def list_research_sessions(
     status: str | None = None,
     q: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 25,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
