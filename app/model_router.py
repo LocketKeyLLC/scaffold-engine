@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 
 from app.config import settings
+from app.utils import think_policy as _think_policy
 from app.providers.base import ModelResponse, Tool, ToolCall  # noqa: F401 — public re-export
 
 if TYPE_CHECKING:  # §17.1059 — annotation-only; the runtime import lives in the provider seam
@@ -612,6 +613,7 @@ async def generate(
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
         schema = _effective_response_schema(response_schema, provider)
+        think = _think_policy.resolve(resolved_model, think)   # §17.1111
         resp = await _retry_provider_call(
             lambda: provider.generate(
                 resolved_model, prompt,
@@ -622,12 +624,14 @@ async def generate(
         )
         if not resp.success:
             resp.error = _format_provider_error(resp, role)
+        _note_if_starved(resp, where="generate", budget=max_tokens)
         return await _record_call(resp)
 
     # Legacy direct path is always Ollama — gate against the ollama provider.
     from app.providers import get_provider
     schema = _effective_response_schema(response_schema, get_provider("ollama"))
     model = model or settings.model_general
+    think = _think_policy.resolve(model, think)   # §17.1111
     payload: dict[str, Any] = {
         "model": model,
         "prompt": prompt,
@@ -641,6 +645,7 @@ async def generate(
     if schema:
         payload["format"] = schema
     resp = await _dispatch_with_retry("/api/generate", payload, model, fallback)
+    _note_if_starved(resp, where="generate", budget=max_tokens)
     return await _record_call(resp)
 
 
@@ -715,6 +720,7 @@ async def chat(
     if role:
         resolved_model, provider = _resolve_role(role, overrides)
         schema = _effective_response_schema(response_schema, provider)
+        think = _think_policy.resolve(resolved_model, think)   # §17.1111
         resp = await _retry_provider_call(
             lambda: provider.chat_completion(
                 resolved_model, messages,
@@ -725,12 +731,14 @@ async def chat(
         )
         if not resp.success:
             resp.error = _format_provider_error(resp, role)
+        _note_if_starved(resp, where="chat", budget=max_tokens)
         return await _record_call(resp)
 
     # Legacy direct path is always Ollama — gate against the ollama provider.
     from app.providers import get_provider
     schema = _effective_response_schema(response_schema, get_provider("ollama"))
     model = model or settings.model_general
+    think = _think_policy.resolve(model, think)   # §17.1111
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -742,6 +750,7 @@ async def chat(
     if schema:
         payload["format"] = schema
     resp = await _dispatch_with_retry("/api/chat", payload, model, fallback)
+    _note_if_starved(resp, where="chat", budget=max_tokens)
     return await _record_call(resp)
 
 
@@ -881,6 +890,10 @@ async def tool_call(
     # §17.1056 — a caller may switch reasoning off from the FIRST draw (a
     # classification needs none); the §17.1053 starved-draw rescue only
     # engages when the caller left it open.
+    # §17.1111 — a model this process has already seen starve its budget on
+    # reasoning gets think=False on the FIRST draw (the rescue below only
+    # helps after a wasted one). Explicit think= is never overridden.
+    think = _think_policy.resolve(_model_for_policy(model, role, overrides), think)
     for d in range(attempts):
         resp = await _tool_call_once(
             messages, tools, model,
@@ -928,6 +941,11 @@ async def tool_call(
         # decision. `generate` has had this rescue since §17.876
         # (`llm_think_off_rescue`); tool_call did not. Remaining draws run with
         # think=False so the budget goes to the answer.
+        if _draw_starved(resp):
+            _think_policy.note_starved_draw(
+                getattr(resp, "model", "") or _model_for_policy(model, role, overrides),
+                where="tool_call", budget=max_tokens,
+            )
         if think is None and _draw_starved(resp):
             think = False
             logger.warning(
@@ -938,6 +956,28 @@ async def tool_call(
             )
     assert resp is not None  # attempts >= 1, so the loop ran at least once
     return resp
+
+
+def _model_for_policy(model: str | None, role: str | None, overrides: dict | None) -> str:
+    """§17.1111 — the model name the think policy keys on, resolved the way the
+    dispatch will resolve it. Fail-soft: an unresolvable role falls back to the
+    role name itself (the policy then simply never matches)."""
+    try:
+        if role:
+            return _resolve_role(role, overrides)[0]
+        return model or settings.model_general
+    except Exception:  # noqa: BLE001
+        return model or role or settings.model_general
+
+
+def _note_if_starved(resp, *, where: str, budget: int | None) -> None:
+    """§17.1111 — record a starved generate/chat draw with the policy (the
+    rescues in llm_retry handle THIS call; the policy handles the next one)."""
+    try:
+        if resp is not None and resp.success and _think_policy.is_starved(resp):
+            _think_policy.note_starved_draw(getattr(resp, "model", ""), where=where, budget=budget)
+    except Exception:  # noqa: BLE001 — never let telemetry break a call
+        pass
 
 
 def _draw_starved(resp) -> bool:
