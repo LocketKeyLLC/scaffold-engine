@@ -225,6 +225,13 @@ def is_running(job_id: str) -> bool:
     return bool(run and not run.done.is_set())
 
 
+def get_run(job_id: str) -> "_Run | None":
+    """§17.1120 — the live run for a key (None when none is in flight), so a
+    caller outside this module can subscribe without touching `_runs`."""
+    run = _runs.get(job_id)
+    return run if run is not None and not run.done.is_set() else None
+
+
 async def _pump(run: _Run, source: AsyncIterator[str]) -> None:
     """Consume the run generator — the ONLY consumer — into the frame buffer."""
     try:

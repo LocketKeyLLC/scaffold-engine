@@ -121,6 +121,121 @@ async def research_start_endpoint(
     return {"status": "started", "topic": body.topic.strip(), "depth": body.depth}
 
 
+# ── §17.1120 — detached research runs (the §17.1007 shape) ───────────────────
+
+@router.post("/research/runs", tags=["Research"])
+async def research_run_start(
+    body: ResearchInput,
+    principal: Principal = Depends(get_principal),
+):
+    """Start research as a DETACHED run and return its ``run_id`` at once. The
+    run keeps going when the client goes away; ``GET /research/runs/{id}/stream``
+    tails it (backlog first), ``POST /research/runs/{id}/cancel`` stops it.
+    Replaces the streaming ``POST /research`` for the SPA (which cancelled the
+    session on disconnect) and the handle-less ``POST /research/start``."""
+    await _require_valid_models(body.model_overrides)
+    from app.modules import research_runs
+    run_id = research_runs.start(
+        lambda: run_research(
+            topic=body.topic, depth=body.depth, domain=body.domain,
+            model_overrides=body.model_overrides, owner=principal.identity,
+        ),
+        owner=principal.identity, kind="research", label=body.topic.strip(),
+    )
+    return {"run_id": run_id, "status": "started", "topic": body.topic.strip(), "depth": body.depth}
+
+
+@router.post("/research/runs/reply", tags=["Research"])
+async def research_run_reply(
+    body: ResearchReplyInput,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """Answer an ``awaiting_reply`` session as a detached run (same contract as
+    ``POST /research/runs``). The session must be visible to the caller."""
+    await _require_valid_models(body.model_overrides)
+    owner_clause, owner_params = owner_filter(principal, column="owner")
+    row = (await db.execute(text(
+        f"SELECT id FROM research_sessions WHERE id = :id{owner_clause}"
+    ), {"id": body.session_id, **owner_params})).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"research_session not found: {body.session_id}")
+    from app.modules import research_runs
+    run_id = research_runs.start(
+        lambda: resume_research(body.session_id, body.reply, model_overrides=body.model_overrides),
+        owner=principal.identity, kind="research_reply", label=body.session_id,
+    )
+    return {"run_id": run_id, "status": "started", "session_id": body.session_id}
+
+
+@router.get("/research/runs/{run_id}", tags=["Research"])
+async def research_run_status(
+    run_id: str,
+    principal: Principal = Depends(get_principal),
+):
+    """Is this run in flight? (The SPA asks before re-attaching after a reload
+    or a dropped stream.)"""
+    from app.modules import research_runs
+    try:
+        UUID(run_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="run_id must be a valid UUID")
+    if not research_runs.visible(run_id, principal):
+        raise HTTPException(status_code=404, detail=f"research run not found: {run_id}")
+    m = research_runs.meta(run_id) or {}
+    return {"run_id": run_id, "running": research_runs.is_running(run_id),
+            "kind": m.get("kind"), "label": m.get("label")}
+
+
+@router.get("/research/runs/{run_id}/stream", tags=["Research"])
+async def research_run_stream(
+    run_id: str,
+    principal: Principal = Depends(get_principal),
+):
+    """Tail a research run: its backlog first, then live frames until it ends.
+    After the run has ended, the frames persisted to Redis are replayed once
+    (so a reload shows what happened). 404 when there is neither."""
+    from app.modules import research_runs
+    try:
+        UUID(run_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="run_id must be a valid UUID")
+    if not research_runs.visible(run_id, principal):
+        raise HTTPException(status_code=404, detail=f"research run not found: {run_id}")
+    run = research_runs.get_run(run_id)
+    if run is not None:
+        from app.modules.run_broker import subscribe
+        source = subscribe(run)
+    else:
+        frames = await research_runs.replay(run_id)
+        if not frames:
+            raise HTTPException(status_code=404, detail=f"research run not found: {run_id}")
+
+        async def _replay():
+            for f in frames:
+                yield f
+        source = _replay()
+    return StreamingResponse(source, media_type="text/event-stream",
+                             headers={"X-Accel-Buffering": "no"})
+
+
+@router.post("/research/runs/{run_id}/cancel", tags=["Research"])
+async def research_run_cancel(
+    run_id: str,
+    principal: Principal = Depends(get_principal),
+):
+    """Stop a detached research run on purpose (closing the tab no longer does).
+    The lifecycle wrapper finalizes the session as ``cancelled``."""
+    from app.modules import research_runs
+    try:
+        UUID(run_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="run_id must be a valid UUID")
+    if not research_runs.visible(run_id, principal):
+        raise HTTPException(status_code=404, detail=f"research run not found: {run_id}")
+    return {"run_id": run_id, "cancelled": await research_runs.cancel(run_id)}
+
+
 @router.get("/research/sessions/{session_id}", tags=["Management"])
 async def get_research_session(
     session_id: str,
