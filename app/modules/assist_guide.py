@@ -2983,33 +2983,80 @@ _BACKTICKED_RE = re.compile(r"`([^`\n]{3,120})`")
 _CLAIM_WINDOW = 220
 
 
+# §17.1123 — a fact that itself records the value as absent / failing: a draft
+# saying the same thing AGREES with the ledger, it does not contradict it.
+_NEGATIVE_FACT_RE = re.compile(
+    r"\b(?:does\s+not\s+exist|doesn't\s+exist|do\s+not\s+exist|not\s+exist|is\s+missing|missing\b|"
+    r"no\s+such\s+file|not\s+found|not\s+present|is\s+absent|isn't\s+(?:there|present)|"
+    r"fails?\b|failed\b|cannot\s+load|could\s+not)",
+    re.IGNORECASE,
+)
+# "If the command says `X` does not exist…" / "the error `… does not exist`":
+# quoted or conditional text about a value is not the draft's own claim.
+_QUOTED_OR_CONDITIONAL_RE = re.compile(
+    r"\b(?:if|when|unless|says?|said|reports?|returns?|prints?|shows?|error|message|output|"
+    r"complains?|warning)\b",
+    re.IGNORECASE,
+)
+_SUBJECT_BEFORE = 48   # the claim's subject sits right before the claim phrase
+_SUBJECT_AFTER = 24    # … or right after it ("does not exist: `X`")
+_MIN_VALUE_LEN = 4     # `pct`, `local`: too short to be a confirmed value the draft disowns
+
+
 def find_contradicted_facts(text_out: str, environment: dict | None) -> list[dict]:
     """Values the draft calls fake/absent that the confirmed facts record as
     real. Returns ``[{value, claim}]``.
 
-    Requires BOTH an explicit does-not-exist claim and, near it, a backticked
-    value that appears verbatim in the ledger — narrow on purpose, because
-    "X does not exist" is a legitimate thing to say about a value the facts have
-    never confirmed.
+    §17.1123 — re-measured read-only on the real corpus (517 stored fix/guide
+    replies, 2 sessions with facts): the first cut flagged 24 (4.6 %) and every
+    one was false — any backticked value within ±220 chars of a does-not-exist
+    phrase was taken as its subject, values matched the facts as substrings
+    (`local` inside `local-lvm`, `pct` inside a sentence), placeholder
+    instructions ("Replace each `<PLACEHOLDER>`") tripped the "placeholder"
+    word, quoted error text ("If it says `storage does not exist`") counted as
+    the draft's own claim, and a draft that said a file was missing when the
+    fact ITSELF said the file was missing was flagged as a contradiction —
+    three of five scratch fix turns regenerated on exactly that. Now:
+
+    * the subject is the backticked value immediately before the claim (or
+      immediately after, for "does not exist: `X`");
+    * it must match the facts as a whole token, be ≥4 chars, and not be a
+      placeholder shape;
+    * quoted / conditional lead-in text is not a claim;
+    * a fact that records the value as absent or failing makes the draft's
+      absence claim AGREEMENT, not contradiction.
     """
-    facts = " \n".join(str(f) for f in ((environment or {}).get("facts") or []))
+    facts_list = [str(f) for f in ((environment or {}).get("facts") or [])]
+    facts = " \n".join(facts_list)
     if not facts.strip() or not (text_out or "").strip():
         return []
     hits: list[dict] = []
     seen: set[str] = set()
     for m in _FAKE_VALUE_CLAIM_RE.finditer(text_out):
-        lo = max(0, m.start() - _CLAIM_WINDOW)
-        hi = min(len(text_out), m.end() + _CLAIM_WINDOW)
-        window = text_out[lo:hi]
-        for value in _BACKTICKED_RE.findall(window):
-            v = value.strip()
-            if v and v in facts and v not in seen:
-                seen.add(v)
-                hits.append({
-                    "value": v,
-                    "claim": " ".join(window[
-                        max(0, m.start() - lo - 60):m.end() - lo + 60].split())[:160],
-                })
+        before = text_out[max(0, m.start() - _SUBJECT_BEFORE):m.start()]
+        cands = _BACKTICKED_RE.findall(before)
+        if not cands:
+            cands = _BACKTICKED_RE.findall(text_out[m.end():m.end() + _SUBJECT_AFTER])[:1]
+        if not cands:
+            continue
+        v = cands[-1].strip()
+        if len(v) < _MIN_VALUE_LEN or v.startswith("<") or "PLACEHOLDER" in v.upper():
+            continue
+        lead = text_out[max(0, m.start() - 90):m.start()]
+        if _QUOTED_OR_CONDITIONAL_RE.search(lead):
+            continue
+        if not re.search(r"(?<![A-Za-z0-9_./-])" + re.escape(v) + r"(?![A-Za-z0-9_./-])", facts):
+            continue
+        if any(v in f and _NEGATIVE_FACT_RE.search(f) for f in facts_list):
+            continue   # the ledger says it is absent too — agreement
+        if v in seen:
+            continue
+        seen.add(v)
+        lo = max(0, m.start() - 60)
+        hits.append({
+            "value": v,
+            "claim": " ".join(text_out[lo:m.end() + 60].split())[:160],
+        })
     return hits
 
 
