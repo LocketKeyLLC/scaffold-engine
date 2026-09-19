@@ -1183,6 +1183,125 @@ async def query_rag(
 # Ingest
 # ---------------------------------------------------------------------------
 
+async def query_rag_multi(
+    queries: list[str],
+    *,
+    rerank_query: str,
+    top_k: int = 5,
+    per_query_candidates: int | None = None,
+    union_candidates: int | None = None,
+    domain: str | None = None,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
+) -> "RagResponseDict":
+    """§17.1110 (ledger L-1b) — retrieve for SEVERAL queries, fuse, rerank ONCE.
+
+    The assist guide pre-pass runs 2–4 expansion queries of one step and used
+    to call ``query_rag`` per query, each reranking its own 10-doc shortlist —
+    three concurrent CrossEncoder calls at ~30 s each on this CPU (§17.1109).
+    Here every query's RRF shortlist (``per_query_candidates`` deep,
+    ``skip_rerank=True`` so the per-query path is embed + Milvus only) is
+    fused by summing RRF scores across queries (a doc two queries agree on
+    rises), the top ``union_candidates`` of the union are reranked once
+    against ``rerank_query`` (the step text the queries were derived from),
+    and the usual confidence gate + top-3 fallback apply. Same response shape
+    as ``query_rag``; ``metadata.queries/union_size/rerank_candidates`` say
+    what happened. Per-query supersede sweeps have already run inside
+    ``query_rag``, so the union carries no superseded rows.
+    """
+    t0 = time.monotonic()
+    warnings: list[str] = []
+    qs = [q for q in (queries or []) if (q or "").strip()]
+    empty: RagResponseDict = {  # type: ignore[typeddict-item]
+        "status": "ok", "query": rerank_query, "result_count": 0, "results": [],
+        "metadata": {"queries": 0, "union_size": 0, "rerank_candidates": 0,
+                     "reranked": False, "reranker_backend": None, "warnings": warnings,
+                     "latency_ms": 0.0},
+    }
+    if not qs:
+        return empty
+    per_k = int(per_query_candidates if per_query_candidates is not None
+                else settings.assist_rerank_max_candidates)
+    union_k = int(union_candidates if union_candidates is not None
+                  else settings.assist_rerank_union_candidates)
+
+    responses = await asyncio.gather(
+        *[query_rag(q, domain=domain, top_k=per_k, skip_rerank=True) for q in qs],
+        return_exceptions=True,
+    )
+    union: dict[str, RagResult] = {}
+    fused_rrf: dict[str, float] = {}
+    hits: dict[str, int] = {}
+    for q, resp in zip(qs, responses, strict=True):
+        if isinstance(resp, BaseException):
+            warnings.append("query_failed")
+            logger.warning("rag_multi_query_failed: query=%r err=%r", q[:80], resp)
+            continue
+        for d in (resp.get("results") or []):
+            key = d.get("entry_id") or hashlib.sha1((d.get("content") or "").encode("utf-8")).hexdigest()
+            rrf = float((d.get("scores") or {}).get("rrf", 0.0) or 0.0)
+            fused_rrf[key] = fused_rrf.get(key, 0.0) + rrf
+            hits[key] = hits.get(key, 0) + 1
+            if key not in union:
+                union[key] = RagResult(
+                    content=d.get("content") or "", title=d.get("title") or "",
+                    tags=d.get("tags") or "", source_url=d.get("source_url") or "",
+                    entry_id=key, domain=d.get("domain") or "",
+                    vector_score=float((d.get("scores") or {}).get("vector", 0.0) or 0.0),
+                    keyword_score=float((d.get("scores") or {}).get("keyword", 0.0) or 0.0),
+                    version=int(d.get("version") or 1), supersedes_id=d.get("supersedes_id") or "",
+                    confidence_score=float(d.get("confidence_score") or 0.0),
+                    source_type=d.get("source_type") or "",
+                )
+    if not union:
+        empty["metadata"]["queries"] = len(qs)
+        empty["metadata"]["latency_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        return empty
+
+    ordered = [replace(union[k], rrf_score=fused_rrf[k], final_score=fused_rrf[k])
+               for k in sorted(union, key=lambda k: (fused_rrf[k], hits[k]), reverse=True)]
+    candidates = ordered[:union_k]
+    ranked, rerank_meta = await _rerank(rerank_query, candidates, top_k, max_candidates=union_k)
+    warnings.extend(rerank_meta.get("warnings") or [])
+    skipped_rerank = bool(rerank_meta.get("skipped_rerank"))
+    fell_back_to_top3 = False
+    if skipped_rerank or confidence_threshold <= 0.0:
+        filtered = list(ranked)
+    else:
+        filtered = [r for r in ranked if r.final_score >= confidence_threshold]
+        if not filtered and ranked:
+            filtered, fell_back_to_top3 = list(ranked[:3]), True
+            warnings.append("threshold_relaxed_to_top3")
+    filtered = filtered[:top_k]
+
+    result_dicts = [{
+        "content": r.content, "title": r.title, "tags": r.tags, "source_url": r.source_url,
+        "entry_id": r.entry_id, "domain": r.domain, "version": r.version,
+        "supersedes_id": r.supersedes_id, "confidence_score": r.confidence_score,
+        "source_type": r.source_type, "provenance": None,
+        "scores": {"vector": round(r.vector_score, 4), "keyword": round(r.keyword_score, 4),
+                   "rrf": round(r.rrf_score, 4), "rerank": round(r.rerank_score, 4),
+                   "final": round(r.final_score, 4), "quality_bump": 1.0,
+                   "query_hits": hits.get(r.entry_id, 1)},
+    } for r in filtered]
+    latency_ms = round((time.monotonic() - t0) * 1000, 1)
+    top_score = round(filtered[0].final_score, 4) if filtered else 0.0
+    logger.info(
+        "retrieval_union_completed: queries=%d union=%d reranked=%d n_results=%d "
+        "top_score=%.4f latency_ms=%.1f",
+        len(qs), len(union), len(candidates), len(filtered), top_score, latency_ms,
+    )
+    return {  # type: ignore[return-value]
+        "status": "ok", "query": rerank_query, "result_count": len(result_dicts),
+        "results": result_dicts,
+        "metadata": {
+            "queries": len(qs), "union_size": len(union), "rerank_candidates": len(candidates),
+            "reranked": not skipped_rerank, "reranker_backend": rerank_meta.get("backend"),
+            "fell_back_to_top3": fell_back_to_top3, "warnings": warnings,
+            "latency_ms": latency_ms,
+        },
+    }
+
+
 def _build_embedding_text(entry: dict) -> str:
     parts = []
     if entry.get("title"):

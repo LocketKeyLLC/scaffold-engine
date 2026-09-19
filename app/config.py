@@ -940,6 +940,23 @@ class Settings(BaseSettings):
     #                                §17.465 empty-content failure mode).
     assist_auto_guide: bool = True
     assist_guide_research: bool = True
+    # §17.1110 (Phase 1 ledger L-1b) — the reranker's share of an assist turn.
+    # §17.1109 measured the CPU CrossEncoder at 16–34 s per 10-doc query in the
+    # assist research path, paid FOUR times per fix turn (3 guide queries
+    # reranked concurrently + the fix need-query): 53 of a 112 s turn's 57
+    # non-model seconds. Two knobs, both assist-only (the /rag surface and
+    # execution nodes keep rerank_max_candidates):
+    #   assist_research_rerank_once   — the guide pre-pass fuses the RRF
+    #     shortlists of ALL its queries and reranks the union ONCE against
+    #     the step text, instead of once per query. Off → per-query rerank.
+    #   assist_rerank_max_candidates  — per-query RRF shortlist handed to the
+    #     reranker on assist paths (the fix need-query; each guide query's
+    #     contribution to the union). 10 → 5.
+    #   assist_rerank_union_candidates — how many of the fused union the
+    #     single rerank scores. Union of 3×5 is ≤15; 8 pairs ≈ 13 s here.
+    assist_research_rerank_once: bool = True
+    assist_rerank_max_candidates: int = Field(default=5, ge=1, le=64)
+    assist_rerank_union_candidates: int = Field(default=8, ge=1, le=64)
     assist_guide_model_role: str = "model_general"
     # §17.626 — natural-language assist turns. When a chat has an active assist
     # session, plain text is classified into an intent (advance / skip / submit /
