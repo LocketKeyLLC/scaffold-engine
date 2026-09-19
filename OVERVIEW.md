@@ -122,7 +122,7 @@ User types `/idea X` in Open WebUI:
 7. **Execute** (`execution_agent.py`): topological order, RAG context injected as upstream, verifier-gated, auto-retry up to `max_retries`.
 8. **Compile** (`_compile_output`): prefers explicit `is_output_node=TRUE` (Strategy 0); falls back to title heuristic / last CodeGen / concatenation.
 
-**Job status flow:** `pending → refining → awaiting_confirmation → researching → planning → executing → running → completed | failed | cancelled | blocked`. Assist Mode branch: `... → assisted_executing → assisted_running → completed`.
+**Job status flow** (§17.1119 — as the code actually writes it): jobs are INSERTED at `refining` (`aggregating` for an umbrella, `awaiting_confirmation` for a design job; nothing ever writes `pending`) `→ awaiting_confirmation → researching → planning → executing → running → completed | failed | cancelled`. Terminal = `completed | failed | cancelled` (`app/modules/job_state.py`). `blocked` is NOT terminal — retry, reopen and assist-start leave it. Assist branch: `… → awaiting_assist | assisted_executing → assisted_running ⇄ assisted_paused → completed`. Reopen edges (`cancelled|failed|blocked|completed → executing`, `completed|cancelled → assisted_executing`) are deliberate operator actions. Node statuses: `pending → running → done | failed | skipped` (success is `done`; nodes have no `blocked`).
 
 **Middleware order** (declared in `app/main.py` as `ErrorLogging → Performance → RequestId`; Starlette runs in **reverse-add order**, so the runtime stack from outermost is `RequestId → Performance → ErrorLogging`). `request_id` binds first so every downstream log line carries it.
 
@@ -285,7 +285,7 @@ A sibling to autonomous execute. After `/dag` produces a plan, the operator opts
 | `metadata` | JSONB DEFAULT `{}` | (Pydantic field is `meta` — alias drift, see Known Issues) |
 | `created_at`, `updated_at`, `completed_at` | TIMESTAMPTZ | `updated_at` auto-trigger |
 
-`status` lifecycle: `pending → refining → awaiting_confirmation → researching → planning → executing → running → completed | failed | cancelled | blocked` plus `assisted_executing | assisted_running | assisted_paused`.
+`status` lifecycle: `refining → awaiting_confirmation → researching → planning → executing → running → completed | failed | cancelled` (terminal: the last three; `blocked` re-enterable) plus `aggregating | awaiting_assist | assisted_executing | assisted_running | assisted_paused` — every write goes through `job_state.transition()` or a guarded raw site (§17.1107 ratchet). Nodes: `pending → running → done | failed | skipped`.
 
 `job_type` branch: `legacy` (default) drives the original `/ideate → /confirm → /execute/all` chain. `design_circuit` (§17.151) drives the `/design → /specs/{id}/confirm → /design/{id}/advance?stage={topology,size,report}` chain — same `status` set, different routers and per-stage audit tables (see §11.11).
 

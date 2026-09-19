@@ -150,7 +150,7 @@ def plan_changes(nodes: list[dict], steps: list[dict], corrections: list[dict],
     node_updates: list[dict] = []
     for n in nodes or []:
         nk = n.get("node_key")
-        if nk == source_node_key or (n.get("status") or "") not in ("pending", "blocked"):
+        if nk == source_node_key or (n.get("status") or "") != "pending":
             continue
         txt = n.get("prompt_template") or ""
         # Earlier provenance lines quote the old value; they are never a match
@@ -340,7 +340,7 @@ def decision_changes(nodes: list[dict], steps: list[dict], *, source_node_key: s
     node_updates: list[dict] = []
     for n in nodes or []:
         nk = n.get("node_key")
-        if nk == source_node_key or (n.get("status") or "") not in ("pending", "blocked"):
+        if nk == source_node_key or (n.get("status") or "") != "pending":
             continue
         txt = n.get("prompt_template") or ""
         if f"{DECISION_PREFIX} {source_node_key}:" in txt:
@@ -407,7 +407,7 @@ async def _decision_trigger(*, db, session_id: str, job_id: str, node_key: str,
     for u in changes["node_updates"]:
         await db.execute(text("""
             UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
-             WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+             WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
         """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
     for nk in changes["guidance_resets"]:
         await db.execute(text("""
@@ -539,7 +539,7 @@ async def reconcile_after_note(*, db, session_id: str, job_id: str, note_text: s
             SELECT node_key, status, guidance FROM assist_steps WHERE session_id = :sid
         """), {"sid": session_id})).mappings().all()]
         plan_text = "\n".join((n.get("prompt_template") or "") for n in nodes
-                              if (n.get("status") or "") in ("pending", "blocked"))
+                              if (n.get("status") or "") == "pending")
         corrections, declined = note_corrections(note_text, plan_text)
         if declined:
             logger.info("plan_reconcile_note_declined session_id=%s pairs=%r", session_id, declined[:4])
@@ -553,7 +553,7 @@ async def reconcile_after_note(*, db, session_id: str, job_id: str, note_text: s
         for u in changes["node_updates"]:
             await db.execute(text("""
                 UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
-                 WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+                 WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
             """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
         for nk in changes["guidance_resets"]:
             await db.execute(text("""
@@ -666,7 +666,7 @@ async def reconcile_after_substitution(*, db, session_id: str, job_id: str,
         for u in changes["node_updates"]:
             await db.execute(text("""
                 UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
-                 WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+                 WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
             """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
         for nk in changes["guidance_resets"]:
             await db.execute(text("""
@@ -724,7 +724,7 @@ def revertable(entry: dict, nodes: list[dict]) -> list[dict]:
     out: list[dict] = []
     for ch in entry.get("changes") or []:
         n = cur.get(ch.get("node_key"))
-        if not n or (n.get("status") or "") not in ("pending", "blocked"):
+        if not n or (n.get("status") or "") != "pending":
             continue
         if (n.get("prompt_template") or "") != (ch.get("after") or ""):
             continue
@@ -778,7 +778,7 @@ async def revert_reconciliation(*, db, job_id: str, index: int) -> dict:
     for ch in rv:
         res = await db.execute(text("""
             UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
-             WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+             WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
                AND prompt_template = :after
         """), {"pt": ch["before"], "jid": job_id, "nk": ch["node_key"], "after": ch["after"]})
         if res.rowcount:
@@ -901,7 +901,7 @@ def grounded_proposals(raw: list, nodes: list[dict], *, evidence_text: str) -> t
         reason = str(item.get("reason") or "").strip()[:300]
         why = None
         n = by_key.get(nk)
-        if not n or (n.get("status") or "") not in ("pending", "blocked"):
+        if not n or (n.get("status") or "") != "pending":
             why = "node not pending"
         elif len(old) < 4 or locate_phrase(old, n.get("prompt_template") or "") is None:
             why = "old_text not verbatim in the step"
@@ -928,7 +928,7 @@ async def propose_corrections(*, nodes: list[dict], failing_pastes: list[str], f
                               closing_paste: str, confirmed_facts: str = "",
                               model_overrides: Optional[dict] = None) -> tuple[list[dict], list[dict]]:
     """One model call → grounded proposals. Fail-soft → ``([], [])``."""
-    pending = [n for n in nodes or [] if (n.get("status") or "") in ("pending", "blocked")]
+    pending = [n for n in nodes or [] if (n.get("status") or "") == "pending"]
     if not pending or not fix_replies:
         return [], []
     steps_block = "\n".join(
@@ -991,7 +991,7 @@ async def apply_rewrite_proposals(*, db, session_id: str, job_id: str, proposals
         for u in ch["node_updates"]:
             await db.execute(text("""
                 UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
-                 WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+                 WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
             """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
             all_updates.append(u)
             corrections_done.append({**corr[0], "node_key": u["node_key"], "reason": p.get("reason", "")})
@@ -1105,7 +1105,7 @@ async def reconcile_after_commit(*, db, session_id: str, job_id: str, node_key: 
             return None
         closing = (evidence or "") + "\n" + (ctx["closing"] or "")
         plan_text = "\n".join((n.get("prompt_template") or "") for n in nodes
-                              if (n.get("status") or "") in ("pending", "blocked"))
+                              if (n.get("status") or "") == "pending")
         from app.modules.assist_environment import _environment_from_metadata
         from app.modules.assist_evidence import ledger_text
         meta = (await db.execute(text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
@@ -1136,7 +1136,7 @@ async def reconcile_after_commit(*, db, session_id: str, job_id: str, node_key: 
         for u in changes["node_updates"]:
             await db.execute(text("""
                 UPDATE dag_nodes SET prompt_template = :pt, updated_at = NOW()
-                 WHERE job_id = :jid AND node_key = :nk AND status IN ('pending', 'blocked')
+                 WHERE job_id = :jid AND node_key = :nk AND status = 'pending'
             """), {"pt": u["prompt_template"], "jid": job_id, "nk": u["node_key"]})
         for nk in changes["guidance_resets"]:
             await db.execute(text("""

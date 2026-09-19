@@ -242,7 +242,7 @@ async def start_assist_session(
                    SET status = 'pending', output_text = NULL,
                        started_at = NULL, completed_at = NULL,
                        retry_count = 0, updated_at = NOW()
-                 WHERE job_id = :jid AND status <> 'pending'
+                 WHERE job_id = :jid AND status NOT IN ('pending', 'running')
             """),
             {"jid": job_id},
         )
@@ -1530,10 +1530,12 @@ async def _reopen_step_mirrored(
         _fsm_check("reopen_step", src=_prior, dst="presented" if preserve_guidance else "pending",
                    node_status="pending", node_key=node_key,
                    trigger="reopen" if _prior in ("committed", "skipped", "handed_off", "escalated") else None)
+    # §17.1119 (ledger S-8) — never reset a node the executor is running (a
+    # §17.856 handoff in flight); its own guarded write settles it.
     await db.execute(
         text("UPDATE dag_nodes SET status='pending', output_text=NULL, "
              "completed_at=NULL, updated_at=NOW() "
-             "WHERE job_id=:jid AND node_key=:nk"),
+             "WHERE job_id=:jid AND node_key=:nk AND status <> 'running'"),
         {"jid": job_id, "nk": node_key},
     )
     if preserve_guidance:

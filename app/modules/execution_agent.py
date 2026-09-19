@@ -35,7 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.database import async_session
-from app.modules.job_state import NODE_STATUSES, TERMINAL_JOB_STATUSES, sql_status_list, transition
+from app.modules.job_state import NODE_STATUSES, TERMINAL_JOB_STATUSES, sql_status_list, touch, transition
 from app import model_router
 from app.config import settings, get_model
 from app.utils.progress import EmitThrottle, ProgressTracker
@@ -1136,6 +1136,11 @@ async def execute_next_node(
             preclaimed_node if preclaimed_node is not None
             else await _get_next_node(db, job_id)
         )
+        # §17.1119 (ledger S-7) — heartbeat: a claim proves the run is alive.
+        # The reaper reads jobs.updated_at; without this a long run was
+        # reap-eligible between node claims once stale_threshold passed.
+        if node is not None and preclaimed_node is None:
+            await touch(db, job_id, reason="node_claim")
         if node is None:
             if await _all_nodes_done(db, job_id):
                 flipped = await _flip_job_completed(db, job_id)  # §17.854 (A1)
@@ -2293,6 +2298,9 @@ async def _run_parallel_frontier(
             if free > 0:
                 async with async_session() as db:
                     claimed = await _claim_ready_nodes(db, job_id, free)
+                    if claimed:                                   # §17.1119 — heartbeat
+                        await touch(db, job_id, reason="node_claim")
+                        await db.commit()
                 for n in claimed:
                     yield _sse("node_start", {
                         "job_id": job_id, "node_key": n["node_key"],
