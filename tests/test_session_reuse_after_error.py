@@ -128,35 +128,41 @@ def test_the_scanner_recognises_the_shape(tmp_path):
 @pytest.mark.asyncio
 async def test_savepoint_keeps_the_session_usable_after_a_failed_statement():
     """Against the real (test) Postgres: the L-5 shape reproduces without a
-    savepoint and is gone with one."""
+    savepoint and is gone with one. Uses the connection's driver-level execute
+    (no ``text()``): an earlier test in the full run stubs ``sqlalchemy`` in
+    ``sys.modules``, and a ``text()`` from a second module copy is rejected by
+    the session ("Executable SQL or text() construct expected")."""
     import os
-    from sqlalchemy import text
-    from sqlalchemy.exc import DBAPIError, PendingRollbackError
     if "_test" not in (os.environ.get("DATABASE_URL") or ""):
         pytest.skip("needs the test database (container lane)")
     from app.database import async_session
+    from app.utils.savepoint import savepoint
+
+    async def run(db, sql):
+        conn = await db.connection()
+        return await conn.exec_driver_sql(sql)
 
     async with async_session() as db:
-        await db.execute(text("SELECT 1"))
+        await run(db, "SELECT 1")
         try:
-            await db.execute(text("SELECT 1/0"))
-        except DBAPIError:
+            await run(db, "SELECT 1/0")
+        except Exception:  # noqa: BLE001 — the swallowed optional failure
             pass
         # the session is unusable: asyncpg reports Postgres's "current transaction is
         # aborted" on the first reuse, SQLAlchemy's PendingRollbackError after that
-        with pytest.raises((DBAPIError, PendingRollbackError)) as ei:
-            await db.execute(text("SELECT 1"))
-        assert "aborted" in str(ei.value) or "rolled back" in str(ei.value)
+        with pytest.raises(Exception) as ei:
+            await run(db, "SELECT 1")
+        assert "aborted" in str(ei.value) or "rolled back" in str(ei.value), str(ei.value)[:200]
         await db.rollback()
 
     async with async_session() as db:
-        await db.execute(text("SELECT 1"))
+        await run(db, "SELECT 1")
         try:
-            async with db.begin_nested():
-                await db.execute(text("SELECT 1/0"))
-        except DBAPIError:
+            async with savepoint(db):
+                await run(db, "SELECT 1/0")
+        except Exception:  # noqa: BLE001
             pass
-        assert (await db.execute(text("SELECT 41 + 1"))).scalar() == 42
+        assert (await run(db, "SELECT 41 + 1")).scalar() == 42
         await db.rollback()
 
 
