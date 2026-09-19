@@ -104,6 +104,46 @@ class LiveEngineWriteBlocked(RuntimeError):
     """A unit test tried to reach the operator's live orchestrator."""
 
 
+#: §17.1108 (Phase 1 ledger L-2) — the DB half of the guard. The HTTP hooks
+#: below stop a test reaching the live ENGINE; nothing stopped a test's real
+#: session reaching the live DATABASE. `make test` used to run inside the
+#: orchestrator container with the production DATABASE_URL: unit tests wrote
+#: 3,042 fake-model `llm_call_logs` rows and 59 false CRITICAL
+#: `migration.failed` alerts, and the integration lane's "List three sorting
+#: algorithms" jobs, into the operator's data in 14 days. A test database is
+#: any database whose name ends in this suffix; conftest refuses anything else.
+TEST_DB_SUFFIX = "_test"
+
+
+def database_name(url: str) -> str:
+    """The database name in a SQLAlchemy/libpq URL ('' when there is none)."""
+    path = urlparse(url).path or ""
+    return path.rsplit("/", 1)[-1].split("?", 1)[0]
+
+
+def explain_non_test_database() -> str | None:
+    """Why the suite must not start, or None when it may.
+
+    Only an EXPLICIT ``DATABASE_URL`` is judged: the host-side static lanes
+    (ci-tier-0, the cloud ci-smoke job) set none and never open a session. The
+    same ``SCAFFOLD_ALLOW_LIVE_TEST_WRITES=1`` that disables the network guard
+    disables this one — deliberately, loudly, from a throwaway box.
+    """
+    url = os.environ.get("DATABASE_URL", "")
+    if not url or guard_disabled():
+        return None
+    name = database_name(url)
+    if name.endswith(TEST_DB_SUFFIX):
+        return None
+    return (
+        f"REFUSING TO RUN: DATABASE_URL points at database {name!r}, which is not a "
+        f"test database (name must end in {TEST_DB_SUFFIX!r}). `make test` provisions "
+        f"and uses scaffold_engine_test (§17.1108); the integration lane is "
+        f"`make test-integration`. Set SCAFFOLD_ALLOW_LIVE_TEST_WRITES=1 only to drive "
+        f"the live engine deliberately from a throwaway box."
+    )
+
+
 def guard_disabled() -> bool:
     return os.getenv(_ENV_ESCAPE, "").strip().lower() in ("1", "true", "yes", "on")
 

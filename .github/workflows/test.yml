@@ -28,8 +28,8 @@ concurrency:
 env:
   POSTGRES_USER: scaffold
   POSTGRES_PASSWORD: scaffold_ci_pw
-  POSTGRES_DB: scaffold_engine
-  DATABASE_URL: postgresql+asyncpg://scaffold:scaffold_ci_pw@localhost:5432/scaffold_engine
+  POSTGRES_DB: scaffold_engine_test
+  DATABASE_URL: postgresql+asyncpg://scaffold:scaffold_ci_pw@localhost:5432/scaffold_engine_test
   OLLAMA_BASE_URL: http://localhost:11434
   MILVUS_URI: http://localhost:19530
   SEARXNG_URL: http://localhost:8080
@@ -66,13 +66,13 @@ jobs:
         # Postgres build prod uses, not a floating postgres:16 tag.
         image: postgres:16@sha256:2586e2a95d1c9b31cb2967feb562948f7d364854453d703039b6efa45fe48417
         env:
-          POSTGRES_DB: scaffold_engine
+          POSTGRES_DB: scaffold_engine_test
           POSTGRES_USER: scaffold
           POSTGRES_PASSWORD: scaffold_ci_pw
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U scaffold -d scaffold_engine"
+          --health-cmd "pg_isready -U scaffold -d scaffold_engine_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -85,7 +85,7 @@ jobs:
           fetch-depth: 0
 
       - name: Apply DB schema
-        run: PGPASSWORD=scaffold_ci_pw psql -h localhost -U scaffold -d scaffold_engine -f db/init.sql
+        run: PGPASSWORD=scaffold_ci_pw psql -h localhost -U scaffold -d scaffold_engine_test -f db/init.sql
 
       # §17.588 (#102) — lowercase ghcr ref for the prebuilt image.
       - name: Compute CI image ref
@@ -219,7 +219,7 @@ jobs:
       # so a broken migration can't slip through on exception-handler coverage.
       - name: Assert RBAC/runtime schema is present
         run: |
-          PGPASSWORD=scaffold_ci_pw psql -h localhost -U scaffold -d scaffold_engine \
+          PGPASSWORD=scaffold_ci_pw psql -h localhost -U scaffold -d scaffold_engine_test \
             -v ON_ERROR_STOP=1 -c \
             "SELECT 'api_keys'::regclass, 'runtime_profile'::regclass, 'model_overrides'::regclass;" \
             -c "SELECT owner FROM jobs LIMIT 0;" \

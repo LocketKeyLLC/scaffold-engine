@@ -12,6 +12,15 @@ convert the test suite to use `tests/` as a proper package (add
 """
 import os
 
+# §17.1108 — refuse to start against anything but a *_test database. Runs
+# BEFORE `app` is imported so no engine is ever built against the wrong URL.
+from tests import _live_write_guard as _db_guard  # noqa: E402
+
+_non_test_db = _db_guard.explain_non_test_database()
+if _non_test_db:
+    import pytest as _pytest
+    _pytest.exit(_non_test_db, returncode=3)
+
 import app  # noqa: F401  — load-bearing; see note above
 import app.model_router  # noqa: F401  — load-bearing; see note above
 import pytest

@@ -1,0 +1,118 @@
+"""§17.1108 (Phase 1 ledger L-2) — the test suite never runs against the
+production database.
+
+Two halves, both gated here:
+
+  * ``tests/_live_write_guard.explain_non_test_database`` — conftest refuses
+    to start when DATABASE_URL names a database that does not end in ``_test``.
+  * the Makefile contract — no unit lane ``docker exec``s pytest into the live
+    orchestrator any more; every lane is a throwaway container on the test DB,
+    and the integration lane is explicit.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+from tests import _live_write_guard as g
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+# ── the URL judgement ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("url,name", [
+    ("postgresql+asyncpg://u:p@scaffold-postgres:5432/scaffold_engine", "scaffold_engine"),
+    ("postgresql+asyncpg://u:p@localhost:5432/scaffold_engine_test", "scaffold_engine_test"),
+    ("postgresql://u:p@h/scaffold_engine_test?ssl=require", "scaffold_engine_test"),
+    ("postgresql://u:p@h", ""),
+])
+def test_database_name_parses_the_last_path_segment(url, name):
+    assert g.database_name(url) == name
+
+
+def test_production_database_is_refused(monkeypatch):
+    monkeypatch.delenv(g._ENV_ESCAPE, raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@scaffold-postgres:5432/scaffold_engine")
+    msg = g.explain_non_test_database()
+    assert msg and "REFUSING TO RUN" in msg and "'scaffold_engine'" in msg
+    assert "make test-integration" in msg, "the refusal must name the sanctioned live lane"
+
+
+def test_test_database_is_allowed(monkeypatch):
+    monkeypatch.delenv(g._ENV_ESCAPE, raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@scaffold-postgres:5432/scaffold_engine_test")
+    assert g.explain_non_test_database() is None
+
+
+def test_no_database_url_is_not_judged(monkeypatch):
+    """Host-side static lanes (ci-tier-0, ci-smoke) set no DATABASE_URL and
+    never open a session — they must keep running."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert g.explain_non_test_database() is None
+
+
+def test_explicit_escape_hatch_disables_the_refusal(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@scaffold-postgres:5432/scaffold_engine")
+    monkeypatch.setenv(g._ENV_ESCAPE, "1")
+    assert g.explain_non_test_database() is None
+
+
+def test_conftest_refuses_before_importing_app():
+    """The check must precede `import app` so no engine is ever built against
+    the wrong URL — order in the file, not just presence."""
+    src = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    i_guard = src.index("explain_non_test_database()")
+    i_exit = src.index("_pytest.exit(_non_test_db")
+    i_app = src.index("import app  # noqa: F401")
+    assert i_guard < i_exit < i_app
+
+
+# ── the Makefile contract ────────────────────────────────────────────────────
+
+def _recipe(target: str) -> str:
+    """The recipe lines of a Makefile target (tab-indented block after `target:`)."""
+    src = (ROOT / "Makefile").read_text(encoding="utf-8")
+    m = re.search(rf"^{re.escape(target)}:[^\n]*\n((?:\t[^\n]*\n|\n)*)", src, re.M)
+    assert m, f"target {target} not found"
+    return m.group(0)
+
+
+@pytest.mark.parametrize("target", ["test", "test-pipelines", "coverage", "test-cli", "test-sdk", "agent"])
+def test_unit_lanes_never_exec_into_the_live_orchestrator(target):
+    block = _recipe(target)
+    head = block.splitlines()[0]
+    assert not re.search(r"\b_ensure_dev\b(?!_image)", head), (
+        f"{target} still swaps the live orchestrator to the dev image")
+    assert "docker exec $(CONTAINER)" not in block, f"{target} still runs inside the live container"
+    assert "$(_TEST_RUN)" in block, f"{target} must use the throwaway-container macro"
+
+
+def test_core_lane_excludes_integration_and_uses_the_test_db():
+    src = (ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "TEST_DB_NAME ?= scaffold_engine_test" in src
+    assert re.search(r'_TEST_RUN = docker run .*-e DATABASE_URL="\$\(TEST_DB_URL\)"', src)
+    assert '-m "not integration"' in _recipe("test")
+    assert "test: test-db" in src, "the core lane provisions the test DB first"
+
+
+def test_integration_lane_is_explicit_and_loud():
+    block = _recipe("test-integration")
+    assert "-m integration" in block
+    assert "LIVE" in block, "the integration lane must say it drives the live engine"
+
+
+# `.github/` is not mounted into the container lane (the image carries a baked,
+# possibly stale copy) — same rule as test_ci_mount_parity: host-only, runs in
+# `make ci-tier-0`.
+_CI_WORKFLOW = ROOT / ".github" / "workflows" / "test.yml"
+
+
+@pytest.mark.skipif(not (ROOT / "docker-compose.dev.yml").exists() or not _CI_WORKFLOW.exists(),
+                    reason="host-only static gate — runs in `make ci-tier-0`, not the container lane")
+def test_ci_uses_a_test_named_database():
+    wf = _CI_WORKFLOW.read_text(encoding="utf-8")
+    assert "scaffold_engine_test" in wf
+    assert not re.search(r"\bscaffold_engine\b", wf), "CI's throwaway Postgres must carry the _test name too"
