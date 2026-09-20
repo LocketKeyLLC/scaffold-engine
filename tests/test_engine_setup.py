@@ -304,46 +304,126 @@ def test_every_recipe_carries_plan_steps_that_carry_the_facts():
         for _, what in r.steps:
             assert "Done when" in what, (r.id, what[:60])      # every step says what finishes it
     lr = " ".join(w for _, w in es.BY_ID["local_runner"].steps)
-    for fact in ("8790", "X-Runner-Token", "run_readonly", "ASSIST_LOCAL_RUNNER_SERVER=pve-runner", "/mcp/servers", "Verify state"):
+    for fact in ("{runner_port}", "{runner_name}", "{engine_url}/setup/runner/local_runner_mcp.py",
+                 "{token}", "{target_ip}", "Verify state", "[local-runner]"):
         assert fact in lr, fact
+    assert "scp" not in lr and "ENGINE_USER" not in lr        # single shell on the target; nothing on the engine host
     # prerequisites chain first, and every inserted description carries the recipe marker
     steps = es.recipe_steps(es.BY_ID["runner_sudo"])
     assert len(steps) == len(es.BY_ID["local_runner"].steps) + len(es.BY_ID["runner_sudo"].steps)
-    assert steps[0]["title"] == es.BY_ID["local_runner"].steps[0][0]
+    assert steps[0]["title"].startswith(es.BY_ID["local_runner"].steps[0][0].split("{")[0])
     assert all(f"{es.RECIPE_STEP_MARK} " in st["description"] for st in steps)
-    assert steps[-1]["description"].endswith("runner_sudo_")
+    assert steps[-1]["description"].endswith(f"runner_sudo v{es.recipe_version(es.BY_ID['runner_sudo'])}_")
 
 
-async def test_setup_offer_round_trip_and_in_plan_insertion(monkeypatch):
-    db = MagicMock(); db.execute = AsyncMock(); db.commit = AsyncMock()
-    await es.stage_setup_offer(session_id="s1", recipe_id="local_runner", db=db)
-    sql = " ".join(str(db.execute.await_args[0][0]).split())
-    assert "COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb)" in sql
-    assert es.SETUP_OFFER_KEY in db.execute.await_args[0][1]["patch"]
-    row = MagicMock(); row.mappings.return_value.first.return_value = {"metadata": {es.SETUP_OFFER_KEY: {"recipe_id": "nope"}}}
+def test_steps_are_filled_in_from_what_the_engine_knows_and_placeholders_stay_honest():
+    """§17.1146 — live: the guide asked for <ENGINE_HOST_IP> and <ENGINE_USER>
+    while the session knew the Proxmox host (192.168.1.156, root@pve) and the
+    engine had just served the request from its own address."""
+    ctx = {"target_ip": "192.168.1.156", "target_host": "pve", "target_user": "root",
+           "engine_url": "http://192.168.1.43:8000", "token": "abc123"}
+    st = es.recipe_steps(es.BY_ID["local_runner"], ctx=ctx)
+    d = st[0]["description"]
+    assert "curl -fsSL -o /root/local_runner_mcp.py http://192.168.1.43:8000/setup/runner/local_runner_mcp.py" in d
+    assert "--port 8790 --token abc123" in d and "pve-runner" in d and "192.168.1.156:8790" in d
+    assert st[0]["title"] == "Install the engine's local runner helper on pve"
+    assert "{" not in d and "<" not in d
+    # unknown values stay visible placeholders (the guide asks for that one thing), never invented
+    raw = es.recipe_steps(es.BY_ID["local_runner"])[0]["description"]
+    assert "<the engine host's IP>" in raw and "<the target machine's IP>" in raw
+    assert es.known(ctx, "target_ip") and not es.known(dict(es._UNKNOWN), "target_ip")
+
+
+async def test_recipe_context_reads_the_system_map_profile_and_engine_url():
+    db = MagicMock()
+    row = MagicMock(); row.mappings.return_value.first.return_value = {"metadata": {"environment": {
+        "system_state": {"host": {"kind": "host", "attrs": {"ip": "192.168.1.156"}}},
+        "profile": "Operator runs commands as root@pve in ONE interactive shell …",
+        "engine_url": "http://192.168.1.43:8000"}}}
     db.execute = AsyncMock(return_value=row)
-    assert await es.get_pending_setup_offer(session_id="s1", db=db) is None
-    row.mappings.return_value.first.return_value = {"metadata": {es.SETUP_OFFER_KEY: {"recipe_id": "local_runner"}}}
-    assert (await es.get_pending_setup_offer(session_id="s1", db=db))["recipe_id"] == "local_runner"
-    db.execute = AsyncMock()
-    await es.clear_pending_setup_offer(session_id="s1", db=db)
-    assert f"- '{es.SETUP_OFFER_KEY}'" in " ".join(str(db.execute.await_args[0][0]).split())
-    # insertion goes through add_step with PRE-DRAFTED steps — no model draft, before the current step
-    from app.modules import assist_notes
+    ctx = await es.recipe_context(db, "s1")
+    assert (ctx["target_ip"], ctx["target_host"], ctx["target_user"], ctx["engine_url"]) == \
+        ("192.168.1.156", "pve", "root", "http://192.168.1.43:8000")
+    assert len(ctx["token"]) == 48
+    # an empty session → placeholders, and a loopback engine url is not trusted
+    row.mappings.return_value.first.return_value = {"metadata": {"environment": {"engine_url": "http://localhost:8000"}}}
+    ctx2 = await es.recipe_context(db, "s1")
+    assert not es.known(ctx2, "target_ip") and not es.known(ctx2, "engine_url")
+
+
+async def test_remember_engine_url_skips_loopback_and_writes_the_environment_key():
+    db = MagicMock(); db.execute = AsyncMock(); db.commit = AsyncMock()
+    await es.remember_engine_url(db, "s1", "http://localhost:8000/")
+    await es.remember_engine_url(db, "s1", "http://127.0.0.1:8000/")
+    assert db.execute.await_count == 0
+    await es.remember_engine_url(db, "s1", "http://192.168.1.43:8000/")
+    sql = " ".join(str(db.execute.await_args[0][0]).split())
+    assert "'{environment,engine_url}'" in sql and db.execute.await_args[0][1]["u"] == "http://192.168.1.43:8000"
+
+
+async def test_the_engine_registers_the_runner_itself(monkeypatch):
+    from app.modules import mcp_registry
     seen = {}
-    async def fake_add_step(*, session_id, request, before_node_key=None, proposal=None, steps=None, db):
-        seen.update(request=request, before=before_node_key, steps=steps)
-        return {"node_key": "ADD61", "steps": [{"node_key": "ADD61", "title": steps[0]["title"]}]}
-    monkeypatch.setattr(assist_notes, "add_step", fake_add_step)
-    res = await es.add_recipe_to_plan(db, "s1", es.BY_ID["local_runner"], before_node_key="T6")
-    assert res["node_key"] == "ADD61" and seen["before"] == "T6"
-    assert [st["title"] for st in seen["steps"]] == [t for t, _ in es.BY_ID["local_runner"].steps]
-    # plan_has_recipe: the first still-open recipe step, committed ones ignored
+    async def fake_upsert(db, spec): seen["spec"] = spec; return spec
+    monkeypatch.setattr(mcp_registry, "upsert_server", fake_upsert)
+    db = MagicMock(); db.commit = AsyncMock()
+    ctx = {**es._UNKNOWN, "target_ip": "192.168.1.156", "target_host": "pve", "token": "tok"}
+    assert await es.register_local_runner(db, ctx) is True
+    sp = seen["spec"]
+    assert (sp.name, sp.transport, sp.endpoint) == ("pve-runner", "streamable_http", "http://192.168.1.156:8790/mcp/")
+    assert sp.headers == {"X-Runner-Token": "tok"} and sp.description.startswith(es.LOCAL_RUNNER_MARK) and sp.enabled
+    # no target ip → nothing registered, no invented endpoint
+    assert await es.register_local_runner(db, dict(es._UNKNOWN)) is False
+
+
+async def test_runner_spec_honours_the_assist_registration_without_env_or_restart(monkeypatch):
+    from app.modules import assist_local_runner as lr, mcp_registry
+    from app.config import settings
+    assert settings.assist_local_runner_server == ""
+    tagged = MagicMock(); tagged.enabled = True; tagged.description = f"{es.LOCAL_RUNNER_MARK} registered by the assist for pve"; tagged.name = "pve-runner"
+    other = MagicMock(); other.enabled = True; other.description = "some other server"
+    monkeypatch.setattr(mcp_registry, "list_servers", AsyncMock(return_value=[other, tagged]))
+    assert (await lr.runner_spec(AsyncMock())) is tagged
+    monkeypatch.setattr(mcp_registry, "list_servers", AsyncMock(return_value=[other]))
+    assert await lr.runner_spec(AsyncMock()) is None
+
+
+def test_the_helper_script_is_served_to_the_target_without_a_key():
+    from app import auth
+    assert "/setup/runner/local_runner_mcp.py" in auth._AUTH_EXEMPT_PATHS
+    from app.routers import setup as setup_router
+    paths = {r.path for r in setup_router.router.routes}
+    assert "/setup/runner/local_runner_mcp.py" in paths
+    assert (ROOT / "scripts" / "local_runner_mcp.py").exists()
+
+
+async def test_stale_recipe_steps_are_detected_and_replaced(monkeypatch):
+    db = MagicMock(); db.commit = AsyncMock()
+    # the unversioned first cut (live ADD70–ADD73, placeholders inside) is stale
     rows = MagicMock(); rows.mappings.return_value.all.return_value = [
-        {"node_key": "ADD61", "title": "a", "status": "committed"}, {"node_key": "ADD62", "title": "b", "status": "pending"}]
+        {"node_key": "ADD70", "title": "Install the engine's local runner helper on the target machine", "status": "pending",
+         "description": "scp <ENGINE_USER>@… \n\n_Engine capability recipe: local_runner_"},
+        {"node_key": "ADD71", "title": "Register the runner with the engine", "status": "pending",
+         "description": "… _Engine capability recipe: local_runner_"}]
     db.execute = AsyncMock(return_value=rows)
-    assert (await es.plan_has_recipe(db, "s1", "local_runner"))["node_key"] == "ADD62"
-    assert f"{es.RECIPE_STEP_MARK} local_runner_" in db.execute.await_args[0][1]["mark"]
+    ip = await es.plan_has_recipe(db, "s1", "local_runner")
+    assert ip["stale"] is True and ip["open_keys"] == ["ADD70", "ADD71"] and "description" not in ip
+    ans = es.capability_answer(es.BY_ID["local_runner"], status="off", detail="x", in_plan=ip, current_step="T6")
+    assert "older version" in ans and "ADD70, ADD71" in ans and "Reply **yes**" in ans
+    fresh = MagicMock(); fresh.mappings.return_value.all.return_value = [
+        {"node_key": "ADD74", "title": "Install the engine's local runner helper on pve", "status": "pending",
+         "description": f"… _Engine capability recipe: local_runner v{es.recipe_version(es.BY_ID['local_runner'])}_"}]
+    db.execute = AsyncMock(return_value=fresh)
+    assert (await es.plan_has_recipe(db, "s1", "local_runner"))["stale"] is False
+    # editing a recipe's steps changes its version → previously inserted steps become stale
+    assert es.recipe_version(es.BY_ID["local_runner"]) != es.recipe_version(es.BY_ID["runner_sudo"])
+    # retire marks both tables skipped for every open step of that recipe
+    rows2 = MagicMock(); rows2.mappings.return_value.all.return_value = [{"node_key": "ADD70", "job_id": "j"}, {"node_key": "ADD71", "job_id": "j"}]
+    db.execute = AsyncMock(return_value=rows2)
+    assert await es.retire_recipe_steps(db, "s1", "local_runner") == ["ADD70", "ADD71"]
+    sqls = [" ".join(str(c[0][0]).split()) for c in db.execute.await_args_list[1:]]
+    assert sum("UPDATE assist_steps SET status = 'skipped'" in q for q in sqls) == 2
+    assert sum("UPDATE dag_nodes SET status = 'skipped'" in q for q in sqls) == 2
 
 
 def test_add_step_inserts_pre_drafted_steps_without_a_model_draft():
@@ -366,6 +446,7 @@ def test_turn_loop_answers_engine_questions_before_the_decision_layer():
     assert src.index("get_pending_setup_offer") < src.index("match_recipe(")
     assert src.count("clear_pending_setup_offer") >= 3          # yes, no, supersede
     assert "add_recipe_to_plan" in src and "capability_answer" in src and "plan_has_recipe" in src
+    assert 'replace=bool(_setup_offer.get("replace"))' in src        # §17.1146 — stale steps get replaced
     assert src.index("add_recipe_to_plan") < src.index("_claim_and_guide(session_id, (_added or {}).get(\"node_key\")")
     assert "start_recipe" not in src.replace("start_recipe_for_session", "") or "start_recipe_for_session" not in src
     assert "dashboard" not in src.split("# 2a.")[1].split("# 2b.")[0].replace("never sent to the dashboard", "")

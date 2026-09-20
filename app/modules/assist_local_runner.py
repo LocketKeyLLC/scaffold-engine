@@ -32,6 +32,16 @@ async def runner_spec(db):
     from app.config import settings
     name = (settings.assist_local_runner_server or "").strip()
     if not name:
+        # §17.1146 — a runner the ASSIST registered (from the in-plan recipe)
+        # is tagged on its registry row; no .env edit or restart needed.
+        try:
+            from app.modules.engine_setup import LOCAL_RUNNER_MARK
+            from app.modules.mcp_registry import list_servers
+            for spec in await list_servers(db):
+                if spec.enabled and (spec.description or "").startswith(LOCAL_RUNNER_MARK):
+                    return spec
+        except Exception as exc:
+            logger.warning("local_runner_tagged_lookup_failed err=%r", exc)
         return None
     from app.modules.mcp_registry import get_server
     spec = await get_server(db, name)

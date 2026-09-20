@@ -47,6 +47,7 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 _AUTH_EXEMPT_PATHS = frozenset({
     "/health", "/", settings.metrics_path,
     "/auth/login", "/auth/account/status",
+    "/setup/runner/local_runner_mcp.py",   # §17.1146 — the target machine fetches the helper with plain curl
 })
 
 # Prefix-based auth exemption. ``/ui/*`` is the standalone operator SPA
