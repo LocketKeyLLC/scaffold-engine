@@ -158,3 +158,14 @@ def test_ci_runs_the_audit_gate_as_its_own_job():
     wf = _CI_MAIN.read_text(encoding="utf-8")
     assert "tool-audit:" in wf and "make audit-gate" in wf
     assert "pyright==1.1.414" in wf and "vulture==2.16" in wf and "hadolint/releases/download/v2.15.1" in wf
+
+
+def test_dockerfile_user_lines_carry_no_inline_comment():
+    """§17.1141 — Docker keeps `# …` on a USER line as PART of the value: the
+    image ran as user '10001:10001  # scaffold…' and `docker run` refused it
+    (CI unit-tests job, PR #559). Comments go on their own line."""
+    lines = (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
+    users = [ln for ln in lines if ln.startswith("USER ")]
+    assert users, "Dockerfile has no USER instruction"
+    for ln in users:
+        assert re.fullmatch(r"USER \S+", ln.rstrip()), f"inline comment on a USER line: {ln!r}"

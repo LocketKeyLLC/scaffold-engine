@@ -149,7 +149,9 @@ COPY --chown=root:root cli/scaffold_cli/          /code/cli/scaffold_cli/
 # itself stays root-owned: the app does not write under /code.
 RUN mkdir -p /var/log/scaffold && chown scaffold:scaffold /var/log/scaffold
 
-USER 10001:10001  # scaffold:scaffold — numeric so the host can resolve it (hadolint DL3066, §17.1141)
+# scaffold:scaffold — numeric so the host can resolve it (hadolint DL3066, §17.1141).
+# NOT an inline comment: Docker keeps `# …` on a USER line as part of the value.
+USER 10001:10001
 EXPOSE 8000
 CMD ["python", "-m", "app.run_server"]
 
@@ -227,6 +229,8 @@ COPY --chown=root:root pyproject.toml /code/pyproject.toml
 
 RUN mkdir -p /var/log/scaffold && chown scaffold:scaffold /var/log/scaffold
 
-USER 10001:10001  # scaffold:scaffold — numeric so the host can resolve it (hadolint DL3066, §17.1141)
+# scaffold:scaffold — numeric so the host can resolve it (hadolint DL3066, §17.1141).
+# NOT an inline comment: Docker keeps `# …` on a USER line as part of the value.
+USER 10001:10001
 EXPOSE 8000
 CMD ["python", "-m", "app.run_server"]
