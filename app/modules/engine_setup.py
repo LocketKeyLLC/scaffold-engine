@@ -1024,8 +1024,9 @@ async def render_recipe_guide(node_description: Optional[str], *, db) -> Optiona
                          f"{lead}\n\n{done}\n\nNothing to paste — press **✓ Done → next step** (or type `next`).")
         else:
             repair = pr.get("repair") or (tail or "Fix that on the target, then press Guide me on this step to check again.")
+            # §17.1148b — the step's own lead ("Nothing to type: …") contradicts a
+            # block the operator has to paste; it is not repeated under a ❌.
             parts.append(f"## ❌ The engine could not reach the runner yet\n\n{repair}\n\n"
-                         f"_{lead}_\n\n"
                          f"(Or press **Guide me** on this step to re-check without pasting.)")
         return {"text": "\n".join(parts), "meta": meta}
     parts.append("## 👉 Do this next\n")
