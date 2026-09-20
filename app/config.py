@@ -1903,6 +1903,11 @@ class Settings(BaseSettings):
     # Bounds a single trace row so a runaway prompt/response can't bloat the
     # table; the truncated text is suffixed with a "…[+N chars]" marker.
     trace_capture_max_chars: int = Field(default=8000, ge=256, le=1_000_000)
+    # §17.1140 (ledger O-1) — traces are worth keeping only if they cannot
+    # grow without bound: rows older than this are swept by the cleanup loop.
+    # Sized on this box: ~690 calls/day × ~11 KB captured ≈ 7.5 MB/day, so 14
+    # days ≈ 100 MB. 0 = keep forever (not recommended with capture on).
+    trace_retention_days: int = Field(default=14, ge=0, le=365)
     # §17.442 — bound concurrent ideation requests (/ideas + /ideate). Unlike
     # execution, ideation had NO cap: the §17.441 stress test fired 6 concurrent
     # /ideate and all 6 hit the cloud at once (latency 33→81 s). The cap queues

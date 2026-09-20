@@ -64,6 +64,7 @@ import asyncio
 import json as _json
 
 from sqlalchemy import text as _sqltext
+from app.utils.cost_tracking import current_job_id
 
 
 async def start_turn_run(
@@ -155,6 +156,20 @@ async def _drive_turn_run(
     # reads the ContextVar). The record lands on the run row at finalize.
     timer = turn_timing.TurnTimer()
     _timer_token = turn_timing.current_turn_timer.set(timer)
+    # §17.1140 (ledger O-1) — attribute every model call in this turn to the
+    # session's JOB: llm_call_logs / llm_traces / cost rollups were job-less
+    # for assist turns (only the executor set the ContextVar), so a captured
+    # assist prompt could not be found from the job's Traces tab.
+    _job_token = None
+    try:
+        async with async_session() as _jdb:
+            _jid = (await _jdb.execute(
+                _sqltext("SELECT job_id FROM assist_sessions WHERE id = :sid"), {"sid": session_id},
+            )).scalar()
+        if _jid:
+            _job_token = current_job_id.set(str(_jid))
+    except Exception as exc:  # noqa: BLE001 — attribution is best-effort
+        logger.debug("assist_turn_job_attribution_failed sid=%s err=%r", session_id, exc)
     # §17.1082 — deep code (the model router's retry loop) can say one line to
     # the operator's status line while this driver is blocked inside the loop.
     _note_tasks: set[asyncio.Task] = set()
@@ -198,6 +213,8 @@ async def _drive_turn_run(
         if _note_tasks:
             await asyncio.gather(*_note_tasks, return_exceptions=True)
         turn_timing.current_turn_timer.reset(_timer_token)
+        if _job_token is not None:
+            current_job_id.reset(_job_token)  # §17.1140
         timings = timer.finish()
         logger.info("assist_turn_timing: run_id=%s session_id=%s status=%s %s",
                     run_id, session_id, status, timer.summary_line(timings))
