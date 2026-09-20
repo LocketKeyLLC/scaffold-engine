@@ -59,7 +59,7 @@ class Recipe:
     # §17.1147 — the engine's own check for the step carrying PROBE_MARK:
     # ``async (db) -> (ok, detail)``. Time-bounded; never touches the target
     # beyond the registered endpoint.
-    probe: Optional[Callable[..., Awaitable[tuple[bool, str]]]] = field(default=None, compare=False)
+    probe: Optional[Callable[..., Awaitable[dict]]] = field(default=None, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -194,13 +194,17 @@ def runner_repair_block(diag: dict, *, engine_ip: Optional[str] = None) -> str:
                 f"the service is up:\n\n```bash\n{cmd}\n```\n\n"
                 f"Paste what it printed here. If the address differs from {host}, tell me the right one and I re-register the runner.")
     if cls == "token":
+        tok, url = ch.get("token") or "<the token the engine registered>", ch.get("script_url") or RUNNER_SCRIPT_FALLBACK_URL
+        cmd = (f"curl -fsSL {url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
+               f"--port {port} --token {tok}")
         return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
-                f"Re-run the install line from the previous step (it carries the token the engine registered); the "
-                f"installer replaces the running service. Then paste its last line here.")
+                f"Re-run the install with the token the engine registered — the installer replaces the running "
+                f"service:\n\n```bash\n{cmd}\n```\n\nPaste its last line here and I re-check the connection right away.")
     if cls == "not_runner":
         return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
-                f"Something else is listening on port {port} of {host}. On the target: `ss -tlnp | grep {port}` — paste "
-                f"what it shows here.")
+                f"Something else is listening on port {port} of {host}. On the target, this shows what holds the port "
+                f"and whether the runner service is up:\n\n```bash\nss -tlnp | grep {port}; systemctl status "
+                f"local-runner-mcp --no-pager\n```\n\nPaste what it printed here and I re-check the connection right away.")
     cmd = f"systemctl status local-runner-mcp --no-pager; journalctl -u local-runner-mcp -n 20 --no-pager; ss -tlnp | grep {port}"
     return (f"**What I checked from the engine host:** {diag.get('detail') or 'the connection failed'}\n\n"
             f"On the target:\n\n```bash\n{cmd}\n```\n\nPaste what it printed here and I re-check the connection right away.")
@@ -219,6 +223,9 @@ async def probe_local_runner(db) -> dict:
         return {"ok": False, "class": "unregistered", "repair": "",
                 "detail": "no runner is registered on the engine side (ask me for the local runner again and answer yes)."}
     diag = await diagnose_runner_path(spec)
+    diag.setdefault("checks", {})
+    diag["checks"]["token"] = (spec.headers or {}).get("X-Runner-Token") if isinstance(spec.headers, dict) else None
+    diag["checks"]["script_url"] = RUNNER_SCRIPT_FALLBACK_URL
     engine_ip = None
     try:
         engine_ip = await _engine_ip_from_sessions(db)
@@ -982,26 +989,39 @@ def recipe_of_node(description: Optional[str]) -> Optional[Recipe]:
     return r
 
 
-def _split_step_text(description: str) -> tuple[str, list[str], str, str]:
-    """``(lead, code_blocks, done_when, tail)`` from a step description written
-    in the recipe layout: prose, ```fenced``` command blocks, a sentence that
-    starts with 'Done when', then the marker lines (dropped)."""
+def _split_step_text(description: str) -> tuple[str, list[str], str, str, str]:
+    """``(lead, code_blocks, after, done_when, tail)`` from a step description
+    written in the recipe layout: prose, ```fenced``` command blocks, prose
+    after them, a sentence that starts with 'Done when', then the marker
+    lines (dropped)."""
     import re as _re
     body = description or ""
     body = body.replace(PROBE_MARK, "")
     body = _re.sub(r"_?" + _re.escape(RECIPE_STEP_MARK) + r"[^\n]*", "", body).strip()
+    body = _re.sub(r"_?" + _re.escape(REPAIR_MARK) + r"[^\n]*", "", body).strip()
     blocks = _re.findall(r"```(?:bash|sh)?\n(.*?)```", body, _re.S)
-    prose = _re.sub(r"```(?:bash|sh)?\n.*?```", "", body, flags=_re.S)
-    prose = _re.sub(r"[ \t]*\n[ \t]*", "\n", prose).strip()
-    m = _re.search(r"Done when\b", prose)
-    lead, done = (prose[:m.start()].strip(), prose[m.end():].strip()) if m else (prose, "")
+    fence_end = max((m.end() for m in _re.finditer(r"```(?:bash|sh)?\n.*?```", body, _re.S)), default=None)
+    before = body if fence_end is None else body[:body.find("```")]
+    rest = "" if fence_end is None else body[fence_end:]
+    if fence_end is None:
+        before, rest = "", body
+    def _clean(t: str) -> str:
+        t = _re.sub(r"```(?:bash|sh)?\n.*?```", "", t, flags=_re.S)
+        return _re.sub(r"[ \t]*\n[ \t]*", "\n", t).strip()
+    lead, rest = _clean(before), _clean(rest)
+    m = _re.search(r"Done when\b", rest)
+    after, done = (rest[:m.start()].strip(), rest[m.end():].strip()) if m else (rest, "")
+    if fence_end is None and not m:
+        lead, after = after, ""
+    if fence_end is None and m:
+        lead, after = after, ""
     if done:
         done = done[0].upper() + done[1:]
     tail = ""
     m2 = _re.search(r"\bIf (?:it|the check) (?:starts with|fails)[^\n]*", done)
     if m2:
         done, tail = done[:m2.start()].strip(), done[m2.start():].strip()
-    return lead, [b.strip() for b in blocks], done, tail
+    return lead, [b.strip() for b in blocks], after, done, tail
 
 
 async def render_recipe_guide(node_description: Optional[str], *, db) -> Optional[dict]:
@@ -1009,14 +1029,17 @@ async def render_recipe_guide(node_description: Optional[str], *, db) -> Optiona
     ``{"text", "meta"}`` or None when the step is not a current recipe step.
     A step carrying PROBE_MARK is checked by the engine right here (the
     recipe's ``probe``), and the result IS the walkthrough."""
-    r = recipe_of_node(node_description)
+    r = recipe_of_node(node_description) or repair_of_node(node_description)
     if r is None:
         return None
-    lead, blocks, done, tail = _split_step_text(node_description or "")
+    lead, blocks, after, done, tail = _split_step_text(node_description or "")
     meta: dict[str, Any] = {"recipe": r.id, "deterministic": True, "status": "ready"}
+    is_repair = repair_of_node(node_description) is not None
+    if is_repair:
+        meta["repair"] = _repair_class(node_description)
     parts: list[str] = []
     if PROBE_MARK in (node_description or "") and r.probe is not None:
-        pr = await r.probe(db)
+        pr = await _probe_cached(r, db, node_description)
         ok, detail = bool(pr.get("ok")), str(pr.get("detail") or "")
         meta["probe"] = {"ok": ok, "detail": detail, "class": pr.get("class")}
         if ok:
@@ -1034,11 +1057,17 @@ async def render_recipe_guide(node_description: Optional[str], *, db) -> Optiona
         parts.append(lead + "\n")
     for b in blocks:
         parts.append(f"**Run this now:**\n\n```bash\n{b}\n```\n")
+    if after:
+        parts.append(after + "\n")
     if done:
         parts.append(f"## ✅ Done when\n\n{done}\n")
     if tail:
         parts.append(tail + "\n")
-    parts.append("Paste what it printed here, or press **✓ Done → next step** (or type `next`) once it says OK.")
+    if is_repair:
+        parts.append("Paste what it printed here — I re-check the connection from the engine host on every paste, "
+                     "and mark this done the moment it gets through.")
+    else:
+        parts.append("Paste what it printed here, or press **✓ Done → next step** (or type `next`) once it says OK.")
     return {"text": "\n".join(parts), "meta": meta}
 
 
@@ -1093,8 +1122,41 @@ async def verify_recipe_submit(*, db, session_id: str, node_key: str, evidence: 
         return None
     r = recipe_of_node(desc)
     if r is None:
-        return None
+        rr = repair_of_node(desc)
+        if rr is None or rr.probe is None:
+            return None
+        # §17.1149 — a REPAIR step: the engine re-checks the path on every paste.
+        # Reached → the repair is done (and the verify step behind it will pass).
+        # A DIFFERENT failure now → a fresh diagnosis (incomplete). The SAME
+        # failure → None: the ordinary verifier reads what the operator pasted.
+        pr = await rr.probe(db)
+        cls = _repair_class(desc)
+        if pr.get("ok"):
+            v = {"outcome": "success", "reason": pr.get("detail") or "the engine reaches the runner now",
+                 "summary": "the engine reaches the runner now", "recipe": rr.id, "probe_class": "ok"}
+        elif pr.get("class") != cls:
+            v = {"outcome": "incomplete", "summary": pr.get("detail") or "still not reachable", "recipe": rr.id,
+                 "probe_class": pr.get("class"),
+                 "reason": (f"**Progress — the failure changed:** {pr.get('detail') or ''}\n\n" + (pr.get("repair") or ""))}
+        else:
+            # §17.1149 — the SAME failure after the repair: the step is not done
+            # (its Done-when is "the engine reaches the runner"), so no commit —
+            # but the engine's own knowledge is exhausted here, and the turn
+            # loop continues into the fix flow so the model reads the paste for
+            # the next thing to check. Live drive: deferring to the ordinary
+            # verifier COMMITTED the step on a paste that proved nothing.
+            v = {"outcome": "incomplete", "summary": pr.get("detail") or "still not reachable", "recipe": rr.id,
+                 "probe_class": pr.get("class"), "exhausted": True,
+                 "reason": (f"**Still not reachable from the engine host after that** — {pr.get('detail') or ''}\n\n"
+                            f"So this step is not done yet. I read what you pasted for the next thing to check:")}
+            logger.info("recipe_repair_same_class sid=%s nk=%s class=%s — not done; the fix flow reads the paste",
+                        session_id, node_key, cls)
+            return v
+        logger.info("recipe_submit_verified sid=%s nk=%s recipe=%s outcome=%s class=%s repair=%s",
+                    session_id, node_key, rr.id, v["outcome"], pr.get("class"), cls)
+        return v
     if PROBE_MARK in (desc or "") and r.probe is not None:
+        forget_probe(r.id)
         pr = await r.probe(db)
         if pr.get("ok"):
             v = {"outcome": "success", "reason": pr.get("detail") or "the engine reached the runner",
@@ -1115,3 +1177,170 @@ async def verify_recipe_submit(*, db, session_id: str, node_key: str, evidence: 
         logger.info("recipe_submit_verified sid=%s nk=%s recipe=%s outcome=%s", session_id, node_key, r.id, v["outcome"])
         return v
     return None
+
+
+# ---------------------------------------------------------------------------
+# §17.1149 — a runner repair is a PLAN STEP. Live: the ❌ card carried the
+# diagnosis and the firewall block, and the operator pressed Guide me and read
+# "the same error". A repair the engine can name is walked like every other
+# step: inserted before the verify step, guided (deterministically), pasted,
+# verified by re-probing, then the verify step passes on its own.
+# ---------------------------------------------------------------------------
+
+REPAIR_MARK = "Engine capability repair:"
+_PROBE_CACHE: dict[str, tuple[float, dict]] = {}
+PROBE_CACHE_S = 45.0
+
+
+async def _probe_cached(r: Recipe, db, node_description: Optional[str]) -> dict:
+    """One probe per guide: prepare_recipe_step probes, the render that follows
+    reuses it (a ✅/❌ is never older than PROBE_CACHE_S)."""
+    import time as _t
+    key = f"{r.id}:{id(r.probe)}"
+    hit = _PROBE_CACHE.get(key)
+    if hit and hit[0] > _t.monotonic():
+        return hit[1]
+    if r.probe is None:
+        return {"ok": False, "class": "unknown", "detail": "this recipe has no probe", "repair": ""}
+    pr = await r.probe(db)
+    _PROBE_CACHE[key] = (_t.monotonic() + PROBE_CACHE_S, pr)
+    return pr
+
+
+def forget_probe(recipe_id: str) -> None:
+    for k in [k for k in _PROBE_CACHE if k.startswith(f"{recipe_id}:")]:
+        _PROBE_CACHE.pop(k, None)
+
+
+def repair_of_node(description: Optional[str]) -> Optional[Recipe]:
+    import re as _re
+    m = _re.search(_re.escape(REPAIR_MARK) + r" ([a-z_]+) ([a-z_]+)_", description or "")
+    return BY_ID.get(m.group(1)) if m else None
+
+
+def _repair_class(description: Optional[str]) -> Optional[str]:
+    import re as _re
+    m = _re.search(_re.escape(REPAIR_MARK) + r" ([a-z_]+) ([a-z_]+)_", description or "")
+    return m.group(2) if m else None
+
+
+_REPAIR_TITLES = {
+    "port_filtered": "Open port {port} on {host}'s firewall for the engine",
+    "port_closed": "Start the local runner service on {host}",
+    "host_down": "Confirm {host}'s address and that the runner is up",
+    "token": "Re-run the runner install so its token matches the engine's",
+    "not_runner": "Free port {port} on {host} for the local runner",
+    "unknown": "Get the local runner on {host} answering the engine",
+}
+
+
+def repair_step(recipe: Recipe, pr: dict) -> Optional[dict]:
+    """``{title, description}`` for the repair the probe named, in the recipe
+    layout (lead, one fenced block, Done when) + the repair marker. None when
+    the probe found nothing to repair (ok / unregistered)."""
+    cls = pr.get("class") or "unknown"
+    if cls in ("ok", "unregistered"):
+        return None
+    ch = pr.get("checks") or {}
+    host, port = ch.get("host") or "the target", ch.get("port") or RUNNER_PORT
+    repair = pr.get("repair") or ""
+    import re as _re
+    m = _re.search(r"```bash\n(.*?)```", repair, _re.S)
+    block = m.group(1).strip() if m else ""
+    lead = repair.split("```")[0].strip() if "```" in repair else repair.strip()
+    lead = lead.replace("**What I checked from the engine host:**", "What the engine checked from its own host:")
+    after = repair.split("```", 2)[2].strip() if repair.count("```") >= 2 else ""
+    after = _re.sub(r"Paste what it printed here and I re-check the connection right away\.?", "", after).strip()
+    done = {
+        "port_filtered": f"Done when the paste shows the ACCEPT rule for port {port} and pve-firewall status says enabled/running — I re-check the connection from the engine on every paste.",
+        "port_closed": "Done when systemctl status shows active (running) and ss shows python listening on the port — I re-check the connection from the engine on every paste.",
+        "host_down": f"Done when the paste shows the address and an active service; if the address is not {host}, tell me the right one — I re-check the connection from the engine on every paste.",
+        "token": "Done when the installer's last line starts with OK: — I re-check the connection from the engine on every paste.",
+        "not_runner": f"Done when nothing else holds port {port} and the runner service is active — I re-check the connection from the engine on every paste.",
+        "unknown": "Done when the paste shows the service active and listening — I re-check the connection from the engine on every paste.",
+    }[cls]
+    desc = lead + ("\n```bash\n" + block + "\n```\n" if block else "\n") + (after + "\n" if after else "") + done
+    title = _REPAIR_TITLES.get(cls, _REPAIR_TITLES["unknown"]).format(host=host, port=port)
+    return {"title": title, "description": f"{desc}\n\n_{REPAIR_MARK} {recipe.id} {cls}_"}
+
+
+async def open_repair_step(db, session_id: str, recipe_id: str) -> Optional[str]:
+    """The node_key of this recipe's still-open repair step in the session, or None."""
+    try:
+        row = (await db.execute(text("""
+            SELECT d.node_key FROM assist_steps s JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid AND d.description LIKE :mark
+               AND s.status NOT IN ('committed', 'skipped', 'handed_off')
+             ORDER BY d.node_key LIMIT 1
+        """), {"sid": session_id, "mark": f"%{REPAIR_MARK} {recipe_id} %"})).mappings().first()
+        return row["node_key"] if row else None
+    except Exception as exc:
+        logger.warning("open_repair_step_lookup_failed sid=%s err=%r", session_id, exc)
+        return None
+
+
+async def prepare_recipe_step(db, session_id: str, node_key: str) -> Optional[dict]:
+    """§17.1149 — run BEFORE a step is guided. For a recipe VERIFY step whose
+    probe fails with a repair the engine can name: insert the repair step
+    before it (or find the one already open), present it, and return
+    ``{"node_key", "title", "note", "existing", "class"}`` so the caller guides
+    THAT step. None when there is nothing to divert to."""
+    try:
+        desc = (await db.execute(text("""
+            SELECT d.description FROM assist_steps s JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid AND s.node_key = :nk
+        """), {"sid": session_id, "nk": node_key})).scalar()
+    except Exception as exc:
+        logger.warning("prepare_recipe_step_lookup_failed sid=%s nk=%s err=%r", session_id, node_key, exc)
+        return None
+    r = recipe_of_node(desc)
+    if r is None or r.probe is None or PROBE_MARK not in (desc or ""):
+        return None
+    forget_probe(r.id)                      # a Guide press is a fresh check
+    pr = await _probe_cached(r, db, desc)
+    if pr.get("ok"):
+        return None
+    step = repair_step(r, pr)
+    if step is None:
+        return None
+    existing = await open_repair_step(db, session_id, r.id)
+    if existing:
+        try:
+            await _present(db, session_id, existing)
+        except Exception as exc:
+            logger.warning("repair_step_present_failed sid=%s nk=%s err=%r", session_id, existing, exc)
+        logger.info("recipe_repair_step_existing sid=%s verify=%s repair=%s class=%s", session_id, node_key, existing, pr.get("class"))
+        return {"node_key": existing, "title": step["title"], "existing": True, "class": pr.get("class"),
+                "note": (f"🔧 I checked the runner again: {pr.get('detail')}\n\nThe repair step **{existing}: {step['title']}** "
+                         f"is still open — here it is:")}
+    from app.modules import assist_notes
+    res = await assist_notes.add_step(session_id=session_id, request=step["title"], before_node_key=node_key,
+                                      steps=[step], db=db)
+    new_key = (res or {}).get("node_key")
+    if not new_key:
+        return None
+    try:
+        await _present(db, session_id, new_key)
+    except Exception as exc:
+        logger.warning("repair_step_present_failed sid=%s nk=%s err=%r", session_id, new_key, exc)
+    logger.info("recipe_repair_step_added sid=%s verify=%s repair=%s class=%s", session_id, node_key, new_key, pr.get("class"))
+    return {"node_key": new_key, "title": step["title"], "existing": False, "class": pr.get("class"),
+            "note": (f"🔧 I checked the runner from the engine host: {pr.get('detail')}\n\n"
+                     f"That is something to fix on the target, so I added it to the plan as **{new_key}: {step['title']}**, "
+                     f"right before this step. We come back here when it is done — here is the repair step:")}
+
+
+async def _present(db, session_id: str, node_key: str) -> None:
+    """Claim a pending step for the operator (pending → presented on the
+    step, pointer on it) — the same shape assist_next produces."""
+    from app.modules.assist_step_fsm import check as _fsm_check
+    st = (await db.execute(text("SELECT status FROM assist_steps WHERE session_id = :sid AND node_key = :nk"),
+                           {"sid": session_id, "nk": node_key})).scalar()
+    if st == "pending":
+        _fsm_check("repair_step_present", src="pending", dst="presented", node_status=None, node_key=node_key, trigger="claim")
+        await db.execute(text("UPDATE assist_steps SET status = 'presented', presented_at = NOW(), updated_at = NOW() "
+                              "WHERE session_id = :sid AND node_key = :nk AND status = 'pending'"),
+                         {"sid": session_id, "nk": node_key})
+    await db.execute(text("UPDATE assist_sessions SET current_node_key = :nk, updated_at = NOW() WHERE id = :sid"),
+                     {"sid": session_id, "nk": node_key})
+    await db.commit()

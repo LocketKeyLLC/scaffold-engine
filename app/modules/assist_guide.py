@@ -6334,7 +6334,8 @@ async def apply_post_generation_guards(
 # line the operator had to paste.
 async def _recipe_guidance(*, session_id: str, node_key: str, node_description: Optional[str], db) -> Optional[dict]:
     from app.modules import engine_setup as _es
-    if not node_description or _es.RECIPE_STEP_MARK not in node_description:
+    if not node_description or (_es.RECIPE_STEP_MARK not in node_description
+                                and _es.REPAIR_MARK not in node_description):   # §17.1149 — repair steps too
         return None
     rendered = await _es.render_recipe_guide(node_description, db=db)
     if not rendered:

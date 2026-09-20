@@ -697,6 +697,7 @@ async def _run_turn_inner(
         done = False
         blocked_reason = None
         recipe_blocked = False
+        recipe_exhausted = False
         elsewhere = False   # §17.1101 — the paste completed other pending step(s)
         async for e in _submit(session_id, d, text_, nk, history, db):
             if e[0] == ASSIST_STEP_OUTCOME:
@@ -709,6 +710,7 @@ async def _run_turn_inner(
                     blocked_reason = e[1].get("verify_reason") or "the step's goal isn't met yet"
                     if e[1].get("recipe"):
                         recipe_blocked = True   # §17.1148 — answered by the recipe already
+                        recipe_exhausted = bool(e[1].get("exhausted"))   # §17.1149
             yield e
         if done:
             await _clear_completion_confirm(session_id, db)
@@ -724,8 +726,24 @@ async def _run_turn_inner(
             # §17.1148 — the engine itself established the step is not done
             # (it re-probed the runner / read the installer's verdict) and has
             # already said what to run and paste. No "reply confirm" offer —
-            # the engine is not guessing — and no model fix flow over a
-            # deterministic diagnosis. ⏩ Skip remains the operator's override.
+            # the engine is not guessing. §17.1149 — when its own knowledge is
+            # EXHAUSTED (the same failure after the repair it named), it
+            # continues into the fix flow so the model reads the paste for the
+            # next thing to check; otherwise the diagnosis stands on its own.
+            # ⏩ Skip remains the operator's override.
+            if recipe_exhausted:
+                async for e in _fix_flow(
+                    session_id, nk,
+                    (f"{text_}\n\n[The engine re-checked from its own host after this: {blocked_reason}] "
+                     "The step is NOT done. From the output above, work out the next thing to check or change "
+                     "on the target so the engine host can reach the runner's port — use the concrete values "
+                     "it contains."),
+                    history, db,
+                    status_text="The engine still can't get through — reading what you pasted for the next thing to check…",
+                ):
+                    yield e
+                handled["v"] = "submit_recipe_exhausted"
+                return
             handled["v"] = "submit_recipe_blocked"
             return
         elif blocked_reason is not None:
@@ -1443,6 +1461,7 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
             # dispatch can CONTINUE a blocked submit instead of dead-ending.
             "verify_reason": (_sv.get("reason") or ""),
             "recipe": _sv.get("recipe") or "",   # §17.1148 — the ENGINE established this verdict
+            "exhausted": bool(_sv.get("exhausted")),   # §17.1149 — …and has nothing further of its own to say
         })
         if _sv.get("recipe") and (res or {}).get("status") in ("step_incomplete", "verification_failed"):
             # §17.1148 — the reason IS the troubleshooting (what the engine
@@ -1620,7 +1639,7 @@ async def _claim_and_guide(
                 # SPA ("pressed Guide, saw nothing"). Honest fallback frame.
                 yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": "I couldn't generate the walkthrough just now (the model returned nothing usable). Press Guide again to retry — nothing is stuck."})
             yield _ev(ASSIST_GUIDE_DONE, {
-                "status": ev.get("status"), "node_key": nk,
+                "status": ev.get("status"), "node_key": ev.get("node_key") or nk,   # §17.1149
                 "guidance_meta": ev.get("guidance_meta") or {},
                 "cached": ev.get("cached", False),
             })
