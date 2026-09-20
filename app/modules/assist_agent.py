@@ -1176,6 +1176,7 @@ async def run_step_research(
     node_key: str | None = None,
     question: str,
     history: list[dict] | None = None,
+    capture_reply: bool = True,   # §17.1136 — False when the caller persists the reply itself (one persist per path)
     db,
 ) -> dict:
     """Confirm an operator-supplied question via the research helpers.
@@ -1338,7 +1339,11 @@ async def run_step_research(
                   "separator the program expects")
         res["answer"] = _fixed + assist_guide.unavailable_tools_note(_notes)
     # §17.726 — the answer is what the engine told the operator; record it.
-    if (res.get("answer") or "").strip():
+    # §17.1136 (ledger D-4) — unless the caller persists it: the turn loop used
+    # to capture the same answer again under ITS node key, and when that key was
+    # None while this helper had resolved the cursor, the node-scoped dedupe
+    # let two rows through.
+    if capture_reply and (res.get("answer") or "").strip():
         await capture_assistant_reply(
             session_id=session_id, node_key=nk, kind="ask",
             content=res["answer"], db=db,
