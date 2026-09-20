@@ -74,6 +74,15 @@ export function feedText(event, d) {
       return { cls: "err", text: d.message || d.error || "Error" };
     case "warning":
       return { cls: "warn", text: `${d.message || "Warning"}${d.stage ? ` (${d.stage})` : ""}` };
+    case "cache_hit_upstream":
+      // §17.1133 — mode telemetry (forum/github/hf): upstream fetch cache counters
+      return { text: `Upstream cache (${d.mode || "mode"}): ${fmtNum(d.hits || 0)} hits, ${fmtNum(d.misses || 0)} misses`, cls: "dim" };
+    case "quality_gate_filtered": {
+      const stats = Object.entries(d).filter(([k, v]) => typeof v === "number" && k !== "iteration").map(([k, v]) => `${k} ${fmtNum(v)}`);
+      return { text: `Quality gate (${d.mode || "mode"}): ${stats.join(", ") || "no stats"}`, cls: "dim" };
+    }
+    case "source_ref_resolved":
+      return { text: `Source ref (${d.mode || "mode"}): ${d.ref_hint || "default"} → ${d.resolved_ref || "?"}`, cls: "dim" };
     default:
       if (RESEARCH_FEED_IGNORED.has(event)) return null;
       return { text: `${event}${d.message ? " — " + d.message : ""}` };

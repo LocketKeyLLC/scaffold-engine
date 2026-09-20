@@ -44,3 +44,16 @@ test("completion summarises with the payload's own counters", () => {
   const t = feedText("research_complete", { total_ingested: 449, total_entries: 449, duration_ms: 407900, iterations: 2, total_urls_searched: 47 }).text;
   assert.equal(t, "Complete — 449 entries ingested of 449 in 407.9s (2 iterations, 47 URLs)");
 });
+
+// §17.1133 (ledger D-5) — research-mode telemetry that used to render as a raw event name
+test("mode telemetry renders by name: cache_hit_upstream / quality_gate_filtered / source_ref_resolved", () => {
+  const cache = feedText("cache_hit_upstream", { iteration: 1, mode: "github", hits: 3, misses: 1 });
+  assert.match(cache.text, /Upstream cache \(github\): 3 hits, 1 misses/);
+  const gate = feedText("quality_gate_filtered", { iteration: 1, mode: "forum", kept: 4, filtered: 2 });
+  assert.match(gate.text, /Quality gate \(forum\): /);
+  assert.match(gate.text, /kept 4/);
+  assert.match(gate.text, /filtered 2/);
+  const ref = feedText("source_ref_resolved", { iteration: 1, mode: "github", ref_hint: "main", resolved_ref: "abc123" });
+  assert.match(ref.text, /Source ref \(github\): main → abc123/);
+  for (const r of [cache, gate, ref]) assert.ok(!/^[a-z_]+( —|$)/.test(r.text), "must not be the raw event name");
+});

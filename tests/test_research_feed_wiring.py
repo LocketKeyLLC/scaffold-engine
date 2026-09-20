@@ -16,6 +16,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 _RESEARCH_PY = [ROOT / "app" / "modules" / f for f in ("research_agent.py", "research_state.py", "research_extractors.py")]
+# §17.1133 (ledger D-5) — the per-mode emitters (forum/github/hf/openapi) were outside the gate;
+# their telemetry rendered as raw event names in the feed.
+_RESEARCH_PY += sorted((ROOT / "app" / "modules" / "research_modes").glob("*.py"))
 _VIEW = ROOT / "app" / "ui" / "static" / "views" / "research.js"
 # events the feed deliberately does not render as lines
 IGNORED = {"heartbeat", "progress"}

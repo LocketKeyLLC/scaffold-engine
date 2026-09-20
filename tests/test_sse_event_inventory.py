@@ -1,192 +1,217 @@
-"""§17.190 — drift guards for app/sse_events.py + pipelines/_vendor/_sse_events.py.
+"""§17.190 / §17.1133 (ledger D-5) — the SSE event inventory gate.
 
-Two distinct guards:
+``app/sse_events.py`` is the single vocabulary. Before §17.1133 this gate
+scanned four emitter files for ``_sse("literal")`` and one consumer
+(``scaffold_router``) for ``event_type == "literal"``; everything else —
+``assist_turn.py`` (``_ev``), ``routers/workflow.py`` (``_sse_event``), the
+research modes, the SPA, the CLI, and every constant-based emitter or consumer
+— was outside it. Found on the first full scan: a constant defined but missing
+from the set (``assist_turn_started``), a CLI loop waiting on ``node_completed``
+(dead since §17.190), and three research-mode telemetry events with no
+renderer.
 
-  1. ``test_sse_events_byte_equal`` — parallel to ``test_sdk_schema_parity``.
-     Enforces that the vendored OWUI-side copy is byte-equal to the source.
-     Backstop for ``make check-sse-events`` which is the fast-fail CI gate
-     (§17.190 CI step). The in-suite test catches a developer who pushes
-     past the gate (broken CI, direct push to a feature branch).
-
-  2. ``test_emitter_event_names_are_in_inventory`` /
-     ``test_consumer_event_names_are_in_inventory`` — scans the orchestrator
-     emitter files (execution_agent / assist_agent / research_agent /
-     design_pipeline) for ``_sse("name", ...)`` literals and the consumer
-     (scaffold_router) for ``event_type == "name"`` literals, then asserts
-     every name is present in ``ALL_EVENT_NAMES``. A new event added on
-     either side without updating the constants module fires these tests.
-
-The pre-§17.190 audit found ``pipelines/scaffold_router.py`` matching
-``"node_started"`` / ``"node_completed"`` — dead-code branches because the
-orchestrator emits ``node_start`` / ``node_done``. The consumer scan
-would have caught that drift; the test now stands guard against
-re-introduction.
+Contract (all surfaces, literal or constant):
+  1. the vendored OWUI copy is byte-equal (``make check-sse-events`` backstop);
+  2. every EMITTED name is in the inventory;
+  3. every CONSUMED name (pipeline, vendored handlers, SPA, CLI) is in the
+     inventory — a consumer matching a name nobody emits is a dead branch;
+  4. every inventory name is emitted somewhere, or declared in
+     ``NOT_EMITTED_BY_THE_ORCHESTRATOR`` with the reason;
+  5. every emitted name is rendered by SOME consumer, or declared in
+     ``UNRENDERED_BY_DESIGN`` with the reason — a new event cannot appear
+     without either a renderer or a written decision;
+  6. no SPA event switch drops an unknown event silently.
 """
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 
 import pytest
 
-from app.sse_events import ALL_EVENT_NAMES
-
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = REPO_ROOT / "app" / "sse_events.py"
 VENDORED = REPO_ROOT / "pipelines" / "_vendor" / "_sse_events.py"
 
-EMITTER_FILES = [
-    REPO_ROOT / "app" / "modules" / "execution_agent.py",
-    REPO_ROOT / "app" / "modules" / "assist_agent.py",
-    REPO_ROOT / "app" / "modules" / "research_agent.py",
-    REPO_ROOT / "app" / "sim" / "design_pipeline.py",
+_spec = importlib.util.spec_from_file_location("_sse_events_src", SOURCE)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+ALL_EVENT_NAMES: frozenset[str] = _mod.ALL_EVENT_NAMES
+CONSTANTS: dict[str, str] = {k: v for k, v in vars(_mod).items() if k.isupper() and isinstance(v, str)}
+
+#: Inventory names the orchestrator never emits itself.
+NOT_EMITTED_BY_THE_ORCHESTRATOR: dict[str, str] = {
+    "stream_stalled": "synthesized by the OWUI pipeline when a stream goes quiet (§17.360)",
+    "blocked": "legacy: the terminal blocked frame is a `done`/status payload since §17.295; the pipeline branch stays for old streams",
+}
+#: Emitted names no consumer renders by name — each needs a written reason.
+UNRENDERED_BY_DESIGN: dict[str, str] = {
+    "advance_phase": "POST /jobs/{id}/approve stream telemetry; the SPA follows the detached chain via GET /approve (§17.1036), SDK/CLI readers get every frame",
+    "advance_complete": "same stream as advance_phase",
+    "stage_start": "design pipeline (/design/{id}/advance) stream — SDK-consumed generically; no SPA sim view",
+    "stage_done": "same as stage_start",
+    "stage_error": "same as stage_start",
+}
+
+_EMIT_CALL = r"\b(?:_sse|_sse_event|_ev|sse_event|emit_sse)\s*\(\s*"
+_EMIT_LITERAL = re.compile(_EMIT_CALL + r"""["']([a-z_]+)["']""")
+_EMIT_CONST = re.compile(_EMIT_CALL + r"(?:[A-Za-z_]+\.)?([A-Z][A-Z_]+)\b")
+
+
+def _strip_docstrings(src: str) -> str:
+    """Prose that quotes the idiom (``_sse("name", ...)`` in a docstring) is not an emitter."""
+    return re.sub(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'', "", src)
+
+
+def _emitted() -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for p in sorted((REPO_ROOT / "app").rglob("*.py")):
+        if p == SOURCE:
+            continue
+        src = _strip_docstrings(p.read_text(encoding="utf-8"))
+        for name in _EMIT_LITERAL.findall(src):
+            out.setdefault(name, set()).add(str(p.relative_to(REPO_ROOT)))
+        for const in _EMIT_CONST.findall(src):
+            if const in CONSTANTS:
+                out.setdefault(CONSTANTS[const], set()).add(str(p.relative_to(REPO_ROOT)))
+    return out
+
+
+_PY_CMP = re.compile(r"""\b(?:event_type|event|ev|evt|etype|event_name|name)\s*(?:==|!=)\s*(?:["']([a-z_]+)["']|(?:[A-Za-z_]+\.)?([A-Z][A-Z_]+))""")
+_PY_IN = re.compile(r"""\b(?:event_type|event|ev|etype|name)\s+(?:not\s+)?in\s*\(([^)]*)\)""")
+_JS_CASE = re.compile(r"""case\s+["']([a-z_]+)["']\s*:""")
+
+
+def _py_consumed(path: Path) -> set[str]:
+    src = path.read_text(encoding="utf-8")
+    names: set[str] = set()
+    for lit, const in _PY_CMP.findall(src):
+        if lit:
+            names.add(lit)
+        elif const in CONSTANTS:
+            names.add(CONSTANTS[const])
+    for grp in _PY_IN.findall(src):
+        for tok in grp.split(","):
+            tok = tok.strip()
+            if re.fullmatch(r"""["'][a-z_]+["']""", tok):
+                names.add(tok.strip("\"'"))
+            elif tok.split(".")[-1] in CONSTANTS:
+                names.add(CONSTANTS[tok.split(".")[-1]])
+    return names
+
+
+def _js_event_switch_cases(path: Path) -> set[str]:
+    """`case "x":` labels inside a `switch (event)` block only."""
+    src = path.read_text(encoding="utf-8")
+    names: set[str] = set()
+    for m in re.finditer(r"switch\s*\(\s*(?:event|ev|type|evt)\s*\)\s*\{", src):
+        depth, i = 0, m.end() - 1
+        while i < len(src):
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        names |= set(_JS_CASE.findall(src[m.start():i]))
+    return names
+
+
+CONSUMER_PY = [
+    REPO_ROOT / "pipelines" / "scaffold_router.py",
+    REPO_ROOT / "pipelines" / "_vendor" / "_assist_handlers.py",
+    REPO_ROOT / "cli" / "scaffold_cli" / "main.py",
 ]
-CONSUMER_FILE = REPO_ROOT / "pipelines" / "scaffold_router.py"
+CONSUMER_JS = sorted((REPO_ROOT / "app" / "ui" / "static" / "views").glob("*.js")) + [REPO_ROOT / "app" / "ui" / "static" / "api.js"]
 
 
-# ---------------------------------------------------------------------------
-# Byte-equal vendor guard (defense-in-depth alongside `make check-sse-events`)
-# ---------------------------------------------------------------------------
+def _consumed() -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for p in CONSUMER_PY:
+        if not p.is_file():
+            continue  # pipelines/ and cli/ are not in every image (§17.207)
+        for n in _py_consumed(p):
+            out.setdefault(n, set()).add(p.name)
+    for p in CONSUMER_JS:
+        for n in _js_event_switch_cases(p):
+            out.setdefault(n, set()).add("spa:" + p.name)
+    return out
 
-def test_sse_events_files_exist():
-    # §17.207: the orchestrator's Docker image intentionally omits
-    # ``pipelines/`` (the OWUI pipelines container is a separate service
-    # with its own bind-mounts); when this test runs INSIDE that image,
-    # the vendored copy isn't present and that's expected. The primary
-    # CI gate for vendor drift is ``make check-sse-events`` (a host-side
-    # ``diff -q`` step in ci.yml), which always runs regardless of which
-    # container the test suite lives in. Skip here so the in-suite
-    # defense-in-depth doesn't false-fail in container-only test runs.
-    if not VENDORED.is_file():
-        import pytest
-        pytest.skip(
-            f"{VENDORED.relative_to(REPO_ROOT)} not present in this image "
-            "(expected when running inside the orchestrator container); "
-            "the host-side `make check-sse-events` gate covers drift."
-        )
-    assert SOURCE.is_file(), f"missing {SOURCE}"
 
+#: Generic frame names every stream may carry; consumers handle them by shape.
+GENERIC = {"done", "error", "warning", "heartbeat", "progress", "queued", "cancelled", "message"}
+
+
+# ── 1. vendor byte-equal ────────────────────────────────────────────────────
 
 def test_sse_events_byte_equal():
     if not VENDORED.is_file():
-        import pytest
-        pytest.skip(
-            f"{VENDORED.relative_to(REPO_ROOT)} not present in this image; "
-            "drift is covered by the host-side `make check-sse-events` gate."
-        )
-    src = SOURCE.read_bytes()
-    vendored = VENDORED.read_bytes()
-    if src != vendored:
-        raise AssertionError(
-            f"{VENDORED.relative_to(REPO_ROOT)} has drifted from "
-            f"{SOURCE.relative_to(REPO_ROOT)}. Run `make sync-sse-events` "
-            "to refresh the vendored copy, then re-run the suite."
-        )
-
-
-# ---------------------------------------------------------------------------
-# Emitter / consumer inventory scans
-# ---------------------------------------------------------------------------
-
-# Match ``_sse("event_name", ...)`` — captures the literal between the
-# parens. Tolerates whitespace around the ``(`` and single or double quotes.
-_EMITTER_RE = re.compile(r"""_sse\s*\(\s*["']([a-z_]+)["']""")
-
-# Match ``event_type == "name"`` — the consumer-side string comparison.
-_CONSUMER_RE = re.compile(r"""event_type\s*==\s*["']([a-z_]+)["']""")
-
-
-def _scan(paths: list[Path], pattern: re.Pattern[str]) -> dict[str, list[Path]]:
-    """Return {event_name: [paths_where_it_appears]} for the given regex."""
-    hits: dict[str, list[Path]] = {}
-    for p in paths:
-        if not p.exists():
-            continue
-        for name in pattern.findall(p.read_text()):
-            hits.setdefault(name, []).append(p)
-    return hits
-
-
-def test_emitter_event_names_are_in_inventory():
-    """Every ``_sse("...")`` literal emitted by the orchestrator must be
-    declared in ``app/sse_events.py::ALL_EVENT_NAMES``. A new emitter that
-    invents a name without registering it here fails this test, forcing
-    the author to either add the constant or use an existing one."""
-    emitted = _scan(EMITTER_FILES, _EMITTER_RE)
-    unknown = {
-        name: [str(p.relative_to(REPO_ROOT)) for p in sorted(set(paths))]
-        for name, paths in emitted.items()
-        if name not in ALL_EVENT_NAMES
-    }
-    assert unknown == {}, (
-        "Orchestrator emits SSE event names not declared in "
-        "app/sse_events.py::ALL_EVENT_NAMES — add the constants or "
-        f"rename the literals. Unregistered: {unknown}"
-    )
-
-
-def test_consumer_event_names_are_in_inventory():
-    """Every ``event_type == "name"`` match in scaffold_router.py must be
-    declared in ``app/sse_events.py::ALL_EVENT_NAMES`` — catches a
-    consumer rendering a string the orchestrator never emits (e.g. the
-    pre-§17.190 ``node_started`` / ``node_completed`` dead-branch drift)."""
-    consumed = _scan([CONSUMER_FILE], _CONSUMER_RE)
-    unknown = {
-        name: [str(p.relative_to(REPO_ROOT)) for p in sorted(set(paths))]
-        for name, paths in consumed.items()
-        if name not in ALL_EVENT_NAMES
-    }
-    assert unknown == {}, (
-        "scaffold_router.py matches event_type strings not declared in "
-        "app/sse_events.py::ALL_EVENT_NAMES. Likely dead branches from "
-        f"renamed events. Unregistered: {unknown}"
-    )
+        pytest.skip("vendored copy not present in this image; `make check-sse-events` covers drift")
+    assert SOURCE.read_bytes() == VENDORED.read_bytes(), "run `make sync-sse-events`"
 
 
 def test_inventory_is_non_empty():
-    """Sanity check — a future ``ALL_EVENT_NAMES = frozenset()`` regression
-    would trivially pass both unknown-name tests above."""
-    assert len(ALL_EVENT_NAMES) >= 30, (
-        f"ALL_EVENT_NAMES has only {len(ALL_EVENT_NAMES)} entries — "
-        "expected at least 30 across emitter modules"
+    assert len(ALL_EVENT_NAMES) >= 30
+
+
+# ── 2. emitted ⊆ inventory ──────────────────────────────────────────────────
+
+def test_the_scan_sees_every_emitter_idiom():
+    emitted = _emitted()
+    assert len(emitted) >= 45, sorted(emitted)
+    for must in ("assist_turn_routed", "advance_phase", "stage_start", "cache_hit_upstream", "assist_guide_delta"):
+        assert must in emitted, f"{must} not seen — an emitter idiom fell out of the scan"
+
+
+def test_emitted_event_names_are_in_inventory():
+    unknown = {n: sorted(f) for n, f in _emitted().items() if n not in ALL_EVENT_NAMES}
+    assert unknown == {}, f"emitted but not in app/sse_events.py: {unknown}"
+
+
+# ── 3. consumed ⊆ inventory (a consumer of a name nobody emits is dead code) ─
+
+def test_consumed_event_names_are_in_inventory():
+    unknown = {n: sorted(s) for n, s in _consumed().items() if n not in ALL_EVENT_NAMES}
+    assert unknown == {}, f"consumer matches a name that is not in the inventory (dead branch?): {unknown}"
+
+
+# ── 4. inventory ⊆ emitted ∪ declared ───────────────────────────────────────
+
+def test_every_inventory_name_is_emitted_or_declared():
+    emitted = set(_emitted())
+    dead = sorted(ALL_EVENT_NAMES - emitted - set(NOT_EMITTED_BY_THE_ORCHESTRATOR))
+    assert dead == [], f"in the inventory but never emitted — remove it or declare it with a reason: {dead}"
+    stale = sorted(set(NOT_EMITTED_BY_THE_ORCHESTRATOR) & emitted)
+    assert stale == [], f"declared not-emitted but an emitter exists now — drop the declaration: {stale}"
+
+
+# ── 5. emitted ⊆ rendered ∪ declared ────────────────────────────────────────
+
+def test_every_emitted_event_is_rendered_or_declared():
+    if not (REPO_ROOT / "pipelines" / "scaffold_router.py").is_file():
+        pytest.skip("consumer surfaces not present in this image")
+    emitted = set(_emitted()) - GENERIC
+    rendered = set(_consumed())
+    unrendered = sorted(emitted - rendered - set(UNRENDERED_BY_DESIGN))
+    assert unrendered == [], (
+        "emitted but no consumer (pipeline / vendored handlers / SPA switch / CLI) renders it by name — "
+        "add a renderer or declare it in UNRENDERED_BY_DESIGN with the reason: " + str(unrendered)
     )
+    stale = sorted(set(UNRENDERED_BY_DESIGN) & rendered)
+    assert stale == [], f"declared unrendered but a consumer renders it now — drop the declaration: {stale}"
 
 
-# ---------------------------------------------------------------------------
-# Drift parity — every consumed name should have at least one emitter
-# ---------------------------------------------------------------------------
-# Not asserted as a hard requirement (generic events like ``error`` /
-# ``heartbeat`` are produced by the SSE wrapper rather than emitted via
-# ``_sse(...)``), but worth surfacing as a list for review.
+# ── 6. no silent drop in the SPA ────────────────────────────────────────────
 
-def test_consumed_names_are_emitter_aware_or_generic():
-    """Document the relationship between consumed names and the emitter set.
-
-    A consumed name that has no _sse(...) emitter AND isn't one of the
-    allowed documented exceptions should be flagged — likely the same
-    drift pattern that the pre-§17.190 ``node_started`` /
-    ``node_completed`` bug had.
-
-    Allowed exceptions are explicit:
-      * Generic control events (ERROR / WARNING / HEARTBEAT / DONE / QUEUED)
-        — produced by the SSE wrapper, not via _sse(...).
-      * BLOCKED — emitted from execution_agent via _sse(status, ...) where
-        status is a variable; the regex can't see the literal.
-      * STREAM_STALLED — synthesized inside scaffold_router itself when N
-        keepalives elapse with no real event; consumer-only by design.
-    """
-    from app import sse_events as ev
-    consumed = set(_scan([CONSUMER_FILE], _CONSUMER_RE).keys())
-    emitted = set(_scan(EMITTER_FILES, _EMITTER_RE).keys())
-    allowed = {
-        ev.ERROR, ev.WARNING, ev.HEARTBEAT, ev.DONE, ev.QUEUED,
-        ev.BLOCKED, ev.STREAM_STALLED,
-    }
-    orphaned = consumed - emitted - allowed
-    assert orphaned == set(), (
-        "scaffold_router.py matches event names that are neither emitted "
-        "via _sse(...) nor in the documented allowed-exceptions set. "
-        "Likely dead branches from drift — see test docstring for the "
-        f"allowed-exception list. Orphaned: {sorted(orphaned)}"
-    )
+@pytest.mark.parametrize("path", [p for p in CONSUMER_JS if "switch (event)" in p.read_text(encoding="utf-8")],
+                         ids=lambda p: p.name)
+def test_spa_event_switch_default_is_not_a_bare_break(path: Path):
+    src = path.read_text(encoding="utf-8")
+    for m in re.finditer(r"switch\s*\(\s*event\s*\)\s*\{", src):
+        block = src[m.start():]
+        d = re.search(r"default:\s*\n((?:\s*//[^\n]*\n)*)\s*break;", block)
+        assert d is None or "console." in d.group(0) or "log(" in d.group(0), (
+            f"{path.name}: `switch (event)` default is a bare break — an unknown event vanishes; log it"
+        )

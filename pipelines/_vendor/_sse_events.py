@@ -204,30 +204,12 @@ QUEUED = "queued"
 # inventory-scan test (test_sse_event_inventory.py) fails with the
 # unmatched literal.
 
-ALL_EVENT_NAMES = frozenset({
-    # execution
-    NODE_START, NODE_DONE, NODE_RETRY, NODE_FAILED, NODE_TOKEN,
-    # assist
-    ASSIST_HANDOFF_STARTED, ASSIST_HANDOFF_DONE, ASSIST_HANDOFF_NOOP,
-    ASSIST_GUIDE_DELTA, ASSIST_GUIDE_DONE,
-    # research
-    RESEARCH_STARTED, RESEARCH_RESUMED, RESEARCH_COMPLETE,
-    SEARCH_COMPLETE, RESEARCH_FETCH, EXTRACTION_COMPLETE, INGESTION_COMPLETE,
-    DECOMPOSITION_COMPLETE, ITERATION_STARTED, ITERATION_COMPLETE,
-    CONVERGENCE, GAP_ANALYSIS, CACHE_HIT_UPSTREAM,
-    SOURCE_REF_RESOLVED, DISTILL_BYPASSED, CONTENT_TRUNCATED,
-    EXTRACTOR_FALLBACK, QUALITY_GATE_FILTERED, CONTRADICTIONS_DETECTED,
-    AWAITING_REPLY, PIPELINE_COMPLETE,
-    # DAG / job-terminal
-    DAG_GENERATED, EXECUTION_FAILED, BLOCKED, AWAITING_ASSIST, BUDGET_EXHAUSTED,
-    # server-side auto-chain (§17.855)
-    ADVANCE_PHASE, ADVANCE_COMPLETE,
-    # design
-    STAGE_START, STAGE_DONE, STAGE_ERROR, CANCELLED,
-    # consumer-synthesized
-    STREAM_STALLED,
-    # progress / ETA (§17.811)
-    PROGRESS,
-    # generic
-    DONE, ERROR, WARNING, HEARTBEAT, QUEUED,
-})
+ALL_EVENT_NAMES = frozenset(
+    # §17.1133 — DERIVED from every uppercase string constant in this module.
+    # The hand-maintained set had drifted: eight assist-turn constants
+    # (ASSIST_TURN_STATUS … ASSIST_TURN_STARTED) were defined above but never
+    # added, so the inventory gate could not see the assist turn stream at
+    # all. Defining a constant IS adding it to the vocabulary now.
+    value for name, value in globals().items()
+    if name.isupper() and isinstance(value, str) and not name.startswith("_")
+)

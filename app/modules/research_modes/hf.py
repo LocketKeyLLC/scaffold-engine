@@ -66,7 +66,8 @@ async def run_research_hf_mode(
             "iteration": 1,
             "mode": "hf",
             "hf_kind": kind,
-            **_cache_delta,
+            "hits": _cache_delta["hits"],  # §17.1133 — explicit keys: the feed renderer reads them (gated)
+            "misses": _cache_delta["misses"],
         })
 
     # §17.110 — emit resolved revision SHA / arXiv id for UI display.

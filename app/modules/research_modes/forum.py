@@ -106,7 +106,8 @@ async def run_research_forum_mode(
         yield _sse("cache_hit_upstream", {
             "iteration": 1,
             "mode": prefix,
-            **_cache_delta,
+            "hits": _cache_delta["hits"],  # §17.1133 — explicit keys: the feed renderer reads them (gated)
+            "misses": _cache_delta["misses"],
         })
 
     # Emit gate stats before checking emptiness so the UI sees the "why".

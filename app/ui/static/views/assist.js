@@ -1588,6 +1588,10 @@ export function renderChat(container, sessionId, opts = {}) {
           case "assist_turn_status":
             setStatusLine(data?.text || "…");
             break;
+          case "assist_turn_routed":
+            // §17.1133 — the router's decision was emitted but never shown (ledger D-5)
+            setStatusLine(`→ ${data?.action || "…"}${data?.override ? ` (${data.override})` : ""}`);
+            break;
           case "assist_turn_pulse":
             pulse();
             break;
@@ -1646,6 +1650,9 @@ export function renderChat(container, sessionId, opts = {}) {
             break;
           }
           default:
+            // §17.1133 — never drop an event silently: a renamed or new frame
+            // shows up in the console instead of vanishing (ledger D-5)
+            console.debug("assist: unhandled SSE event", event, data);
             break;
         }
       }

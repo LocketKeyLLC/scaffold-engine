@@ -122,7 +122,8 @@ async def run_research_github_mode(
         yield _sse("cache_hit_upstream", {
             "iteration": 1,
             "mode": "github",
-            **_cache_delta,
+            "hits": _cache_delta["hits"],  # §17.1133 — explicit keys: the feed renderer reads them (gated)
+            "misses": _cache_delta["misses"],
         })
 
     yield _sse("search_complete", {

@@ -381,10 +381,10 @@ def _confirm_chain_continue(cfg, job_id: str) -> None:
                         snippet = str(data)[:60]
                     click.secho(f"[{name}] ", fg="cyan", nl=False)
                     click.echo(snippet)
-                    if name in ("all_complete", "complete", "done"):
+                    if name in ("pipeline_complete", "done"):  # §17.1133 — the names the stream emits
                         final_status = "completed"
                         break
-                    if name in ("failed", "all_failed", "blocked"):
+                    if name in ("execution_failed", "error"):
                         final_status = name
                         break
             except ScaffoldError as exc:
@@ -1586,7 +1586,7 @@ def _stream_research(api_url: str, api_key: str | None, payload: dict, path: str
                     else:
                         click.secho(f"[{name}] ", fg="cyan", nl=False)
                         click.echo(str(data)[:80])
-                    if name in ("convergence", "complete", "done"):
+                    if name in ("research_complete", "convergence", "awaiting_reply", "done"):  # §17.1133
                         break
             except Exception as exc:
                 click.secho(f"stream error: {exc}", fg="red", err=True)
@@ -1680,7 +1680,7 @@ def research_reply(
                             snippet = f"{first_key}={str(data[first_key])[:60]}"
                     click.secho(f"[{name}] ", fg="cyan", nl=False)
                     click.echo(snippet or str(data)[:80])
-                    if name in ("convergence", "complete", "done"):
+                    if name in ("research_complete", "convergence", "awaiting_reply", "done"):  # §17.1133
                         break
             except ScaffoldError as exc:
                 click.secho(f"reply failed: {exc}", fg="red", err=True)
@@ -1726,7 +1726,7 @@ def research_pdf(
                             snippet = f"{first_key}={str(data[first_key])[:60]}"
                     click.secho(f"[{name}] ", fg="cyan", nl=False)
                     click.echo(snippet or str(data)[:80])
-                    if name in ("ingested", "complete", "done"):
+                    if name in ("research_complete", "ingestion_complete", "done"):  # §17.1133
                         break
             except ScaffoldError as exc:
                 click.secho(f"pdf ingest failed: {exc}", fg="red", err=True)
@@ -2858,7 +2858,9 @@ def assist_handoff(
                     else:
                         click.secho(f"[{name}] ", fg="cyan", nl=False)
                         click.echo(str(data)[:80])
-                    if name in ("complete", "done", "node_completed", "all_complete"):
+                    # §17.1133 — the handoff stream ends with assist_handoff_done / _noop;
+                    # the old set named events no emitter produces (node_completed died in §17.190)
+                    if name in ("assist_handoff_done", "assist_handoff_noop", "done", "error"):
                         break
             except ScaffoldError as exc:
                 click.secho(f"handoff failed: {exc}", fg="red", err=True)
