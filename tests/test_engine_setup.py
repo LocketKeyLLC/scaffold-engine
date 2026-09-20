@@ -240,3 +240,100 @@ async def test_env_endpoint_returns_the_map_text():
     assert r.status_code == 200
     body = r.json()
     assert body["environment"] == env and "CT 120 (caddy-proxy) · IP 192.168.1.26" in body["system_map"]
+
+
+# ── §17.1144 — the assist knows the engine's own capabilities ──────────────
+# Live: "please assist me in setting up the local runner on the proxmox server"
+# went to the web and came back as a plan to build a CI-runner VM.
+
+
+@pytest.mark.parametrize("msg,rid", [
+    ("please assist me in setting up the local runner on the proxmox server to assist with this.", "local_runner"),
+    ("How do I set up the local runner?", "local_runner"),
+    ("can the state check run its own checks instead of me pasting", "local_runner"),
+    ("stop asking me to paste, run it yourself", "local_runner"),
+    ("how do i give the runner sudo for pct config", "runner_sudo"),
+    ("move the reranker sidecar to its own container?", "reranker_sidecar"),
+    ("what is the queue worker for", "queue_worker"),
+])
+def test_engine_capability_questions_match_their_recipe(msg, rid):
+    assert es.match_recipe(msg).id == rid
+
+
+@pytest.mark.parametrize("msg", [
+    # real operator turns from the live session — none of them is about the engine
+    "i found that mac address but it wouldn't allow me to port forward. An the Proxmox b4:af:15's ip is 192.168.1.129",
+    "connection timed out",
+    "in the spectrum app, under the port forwarding i don't see 192.168.1..26, i see what appear to be MAC addresses.",
+    "root@pve:~# qm status 100\nstatus: running\nroot@pve:~#",
+    # the world's 'runner' is a CI runner; only OUR phrases match
+    "set up a github actions runner on the vm",
+    "install the gitlab runner",
+    # a paste that merely contains the phrase is evidence, not a question
+    "root@pve:~# systemctl status local-runner\n● local-runner.service - x\n   Active: active (running)\nroot@pve:~#",
+    "",
+])
+def test_non_engine_messages_do_not_match(msg):
+    assert es.match_recipe(msg) is None
+
+
+def test_capability_answer_carries_content_state_and_the_offer():
+    r = es.BY_ID["local_runner"]
+    off = es.capability_answer(r, status="off", detail="ASSIST_LOCAL_RUNNER_SERVER is empty — the state check asks you to paste.")
+    for must in (r.title, r.summary, r.why_off, "ASSIST_LOCAL_RUNNER_SERVER is empty", "Reply **yes**", r.effort, "Capabilities →"):
+        assert must in off, must
+    assert "not part of your homelab plan" in off
+    on = es.capability_answer(r, status="on", detail="probes run through 'pve-runner' at http://x:8790/mcp/.")
+    assert "already on" in on and "pve-runner" in on and "Reply **yes**" not in on
+    prog = es.capability_answer(r, status="in_progress", detail="", job={"job_id": "abcdef12-3456", "status": "planning"})
+    assert "already open" in prog and "abcdef12" in prog
+    blocked = es.capability_answer(es.BY_ID["runner_sudo"], status="blocked", detail="Turn on the local runner first.")
+    assert "Not available yet" in blocked and "prerequisite" in blocked
+
+
+async def test_setup_offer_round_trip_and_owner_lookup(monkeypatch):
+    db = MagicMock(); db.execute = AsyncMock(); db.commit = AsyncMock()
+    await es.stage_setup_offer(session_id="s1", recipe_id="local_runner", db=db)
+    sql = " ".join(str(db.execute.await_args[0][0]).split())
+    assert "COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb)" in sql
+    assert es.SETUP_OFFER_KEY in db.execute.await_args[0][1]["patch"]
+    # read: a malformed / unknown-recipe offer is not actionable
+    row = MagicMock(); row.mappings.return_value.first.return_value = {"metadata": {es.SETUP_OFFER_KEY: {"recipe_id": "nope"}}}
+    db.execute = AsyncMock(return_value=row)
+    assert await es.get_pending_setup_offer(session_id="s1", db=db) is None
+    row.mappings.return_value.first.return_value = {"metadata": {es.SETUP_OFFER_KEY: {"recipe_id": "local_runner"}}}
+    assert (await es.get_pending_setup_offer(session_id="s1", db=db))["recipe_id"] == "local_runner"
+    # clear removes only that key
+    db.execute = AsyncMock()
+    await es.clear_pending_setup_offer(session_id="s1", db=db)
+    sql = " ".join(str(db.execute.await_args[0][0]).split())
+    assert f"- '{es.SETUP_OFFER_KEY}'" in sql
+    # start on the session's behalf: owner comes from the parent job
+    seen = {}
+    async def fake_start(db_, rid, owner=None):
+        seen.update(rid=rid, owner=owner); return {"job_id": "j-1", "status": "refining"}
+    monkeypatch.setattr(es, "start_recipe", fake_start)
+    row = MagicMock(); row.mappings.return_value.first.return_value = {"owner": "alice"}
+    db.execute = AsyncMock(return_value=row)
+    assert (await es.start_recipe_for_session(db, "s1", "local_runner"))["job_id"] == "j-1"
+    assert seen == {"rid": "local_runner", "owner": "alice"}
+
+
+def test_turn_loop_answers_engine_questions_before_the_decision_layer():
+    """The classifier has no action for 'about the engine'; the bridge must run
+    before decide_turn, and a staged offer must resolve on yes / no / supersede."""
+    import inspect
+    from app.modules import assist_turn
+    src = inspect.getsource(assist_turn._run_turn_inner)
+    assert src.index("match_recipe(") < src.index("decide_turn(")
+    assert src.index("get_pending_setup_offer") < src.index("match_recipe(")
+    assert src.count("clear_pending_setup_offer") >= 3          # yes, no, supersede
+    assert "start_recipe_for_session" in src and "capability_answer" in src
+    assert 'handled["v"] = "engine_capability"' in src
+
+
+def test_every_recipe_has_keywords_and_none_is_a_bare_common_word():
+    for r in es.RECIPES:
+        assert r.keywords, r.id
+        for k in r.keywords:
+            assert " " in k or "_" in k or "-" in k, (r.id, k)   # a phrase, never a bare word

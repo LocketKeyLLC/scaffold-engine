@@ -538,6 +538,76 @@ async def _run_turn_inner(
         handled["v"] = "reopen"
         return
 
+    # 2a. §17.1144 — a question about the ENGINE's own capabilities is answered
+    # from the recipe registry, never from the web. Live: "please assist me in
+    # setting up the local runner on the proxmox server" was researched as
+    # "SAX1V1K ES2251 node Proxmox local runner setup…" and answered as a plan
+    # to build a CI-runner VM. Runs ahead of the decision layer because the
+    # classifier has no action for "about the engine"; and its yes/no is a
+    # STAGED offer (scoped, like the completion offer), so a bare "yes" here
+    # opens the walkthrough instead of being routed as a claim.
+    from app.modules import engine_setup as _es
+    _setup_offer = await _es.get_pending_setup_offer(session_id=session_id, db=db)
+    if _setup_offer:
+        if assist_policy.looks_like_confirmation(text_):
+            _rid = _setup_offer["recipe_id"]
+            await _es.clear_pending_setup_offer(session_id=session_id, db=db)
+            yield _ev(ASSIST_TURN_STATUS, {"text": "Opening the walkthrough as its own job…"})
+            try:
+                _started = await _es.start_recipe_for_session(db, session_id, _rid)
+                _jid = str(_started.get("job_id") or "")
+                _reply = (f"## Walkthrough opened\n\n**{_es.BY_ID[_rid].title}** is now its own job "
+                          f"(`{_jid[:8]}…`) on the dashboard — open it there, approve its plan, and it walks you "
+                          f"through the setup step by step. This session stays where it is — your current step here is unchanged.")
+            except Exception as exc:
+                logger.warning("setup_offer_start_failed sid=%s recipe=%s err=%r", session_id, _rid, exc)
+                _reply = (f"I could not open the walkthrough ({str(exc)[:160]}). You can start it from "
+                          f"**Capabilities → {_es.BY_ID[_rid].title}** in the console.")
+            yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _reply})
+            try:
+                await assist_agent.capture_assistant_reply(
+                    session_id=session_id, node_key=node_key, kind="ask", content=_reply, db=db)
+            except Exception:
+                logger.warning("setup_offer_capture_failed sid=%s", session_id)
+            handled["v"] = "setup_recipe_started"
+            return
+        if assist_policy.looks_like_decline(text_):
+            await _es.clear_pending_setup_offer(session_id=session_id, db=db)
+            _reply = "Understood — not opening it. It stays available under **Capabilities** whenever you want it."
+            yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _reply})
+            try:
+                await assist_agent.capture_assistant_reply(
+                    session_id=session_id, node_key=node_key, kind="ask", content=_reply, db=db)
+            except Exception:
+                logger.warning("setup_offer_capture_failed sid=%s", session_id)
+            handled["v"] = "setup_recipe_declined"
+            return
+        # anything else supersedes the offer — the operator has moved on
+        await _es.clear_pending_setup_offer(session_id=session_id, db=db)
+    _recipe = _es.match_recipe(text_)
+    if _recipe is not None:
+        yield _ev(ASSIST_TURN_ROUTED, {"action": "ask", "override": "engine_capability"})
+        _status, _detail, _job = "off", "", None
+        try:
+            for _r in await _es.list_recipes(db):
+                if _r["id"] == _recipe.id:
+                    _status, _detail = _r["status"], _r["status_detail"]
+                    _job = {"job_id": _r["job_id"], "status": _r["job_status"]} if _r.get("job_id") else None
+        except Exception as exc:
+            logger.warning("engine_capability_status_failed recipe=%s err=%r", _recipe.id, exc)
+        _reply = _es.capability_answer(_recipe, status=_status, detail=_detail, job=_job)
+        if _status != "on":
+            await _es.stage_setup_offer(session_id=session_id, recipe_id=_recipe.id, db=db)
+        logger.info("engine_capability_answered sid=%s recipe=%s status=%s", session_id, _recipe.id, _status)
+        yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _reply})
+        try:
+            await assist_agent.capture_assistant_reply(
+                session_id=session_id, node_key=node_key, kind="ask", content=_reply, db=db)
+        except Exception:
+            logger.warning("engine_capability_capture_failed sid=%s", session_id)
+        handled["v"] = "engine_capability"
+        return
+
     # 2b. §17.903 — the operator is BLOCKED, not merely erroring. This runs
     # ahead of the decision layer because being unable to reach the step at
     # all is the dominant fact of the turn: the plan's premise is broken, so
