@@ -340,12 +340,80 @@ async def run_turn(
     (GeneratorExit), which would mask the real teardown.
     """
     handled = {"v": "none"}
-    async for e in _run_turn_inner(
-        session_id=session_id, message=message, command=command,
-        node_key=node_key, history=history, db=db, handled=handled,
-    ):
-        yield e
+    # §17.1150 — the connected local runner carries the engine's own read-only
+    # look-ups: when the reply this turn ends on asks the operator to run a
+    # purely read-only block and report back, the engine runs it through the
+    # runner, the output re-enters the loop as the paste would have, and the
+    # turn continues — at most MAX_AUTO_ROUNDS times per operator turn.
+    from app.modules import assist_runner_lookup as _rl
+    msg, cmd, rounds = message, command, 0
+    while True:
+        tail = _rl.ReplyTail()
+        async for e in _run_turn_inner(
+            session_id=session_id, message=msg, command=cmd,
+            node_key=node_key, history=history, db=db, handled=handled,
+        ):
+            tail.feed(e[0], e[1])
+            yield e
+        if rounds >= _rl.MAX_AUTO_ROUNDS:
+            break
+        record = None
+        async for e in _auto_lookup(session_id, tail.text(), db):
+            if e[0] == "_record":
+                record = e[1]["text"]
+            else:
+                yield e
+        if not record:
+            break
+        msg, cmd, rounds = record, "message", rounds + 1
+        node_key = None    # the pointer may have moved; the loop resolves it
+    if rounds:
+        handled["v"] = handled["v"] + "+lookup" * rounds
     yield _ev(ASSIST_TURN_DONE, {"handled": handled["v"]})
+
+
+async def _auto_lookup(session_id: str, reply_text: str, db) -> AsyncIterator[_Event]:
+    """§17.1150 — run the reply's read-only look-up through the local runner.
+    Yields status frames + an ephemeral note, then a private ``_record`` frame
+    carrying the operator turn the output becomes. Yields nothing when there
+    is no runner, no block, or the block is not purely read-only."""
+    import asyncio
+    from app.modules import assist_runner_lookup as _rl
+    if not (reply_text or "").strip():
+        return
+    commands = _rl.is_lookup(reply_text)
+    if not commands:
+        return
+    try:
+        from app.modules import assist_local_runner as _lr
+        spec = await _lr.runner_spec(db)
+    except Exception as exc:
+        logger.warning("runner_lookup_spec_failed sid=%s err=%r", session_id, exc)
+        return
+    if spec is None:
+        return
+    yield _ev(ASSIST_TURN_STATUS, {"text": f"🔁 Your local runner is connected — running that read-only look-up myself through {spec.name}…"})
+    q: asyncio.Queue = asyncio.Queue()
+    async def _p(i: int, n: int) -> None:
+        await q.put(f"🔁 Local runner: {i} of {n} commands done…")
+    task = asyncio.create_task(_rl.run_lookup(spec, commands, on_progress=_p))
+    while not task.done():
+        try:
+            yield _ev(ASSIST_TURN_STATUS, {"text": await asyncio.wait_for(q.get(), timeout=1.0)})
+        except asyncio.TimeoutError:
+            continue
+    try:
+        pasted, executed = task.result()
+    except Exception as exc:
+        logger.warning("runner_lookup_failed sid=%s err=%r", session_id, exc)
+        yield _ev(ASSIST_TURN_STATUS, {"text": f"🔁 The local runner could not run that ({str(exc)[:120]}) — run it yourself and paste what it shows."})
+        return
+    if not executed:
+        return
+    logger.warning("runner_lookup_executed sid=%s commands=%d ok=%d", session_id, len(executed),
+                   sum(1 for e in executed if e.get("ok")))
+    yield _ev(ASSIST_ANSWER, {"kind": "note", "text": _rl.render_note(spec.name, executed, pasted)})
+    yield ("_record", {"text": _rl.record_text(spec.name, executed, pasted)})
 
 
 async def _run_turn_inner(

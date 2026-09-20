@@ -1,0 +1,121 @@
+"""§17.1150 — the connected local runner carries the engine's own read-only look-ups."""
+import inspect
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.modules import assist_runner_lookup as rl
+
+GUIDE = """📍 On: the Proxmox host shell (root@pve)
+
+## 👉 Do this next
+
+**Run this now:**
+
+```bash
+cat /etc/pve/firewall/host.fw
+pve-firewall status
+iptables -S PVEFW-HOST-IN
+```
+
+Then tell me what it shows.
+
+## Run this
+
+1. Later, the real change:
+
+```bash
+pvesh create /nodes/$(hostname)/firewall/groups --group media
+```
+"""
+
+
+def test_first_block_is_the_run_this_now_one_and_read_only_lines_are_the_lookup():
+    blk = rl.first_lookup_block(GUIDE)
+    assert blk.startswith("cat /etc/pve/firewall/host.fw") and "pvesh create" not in blk
+    runnable, refused = rl.lookup_lines(blk)
+    assert runnable == ["cat /etc/pve/firewall/host.fw", "pve-firewall status", "iptables -S PVEFW-HOST-IN"] and refused == []
+    assert rl.is_lookup(GUIDE) == runnable
+    # all-or-nothing: a read-only line after a refused one may only mean something once the refused one ran
+    mixed = GUIDE.replace("pve-firewall status\n", "systemctl restart pve-firewall\npve-firewall status\n")
+    assert rl.is_lookup(mixed) is None
+    # an older helper on the target refuses a form the engine now allows → the note says how to refresh it
+    note = rl.render_note("pve-runner", [{"id": "L1", "command": "dpkg -l x", "ok": True, "chars": 3}], "== L1 ==\n(refused by the local runner: mutation verb dpkg)\n")
+    assert "older than the engine's read-only rules" in note
+    # a block that writes anywhere is NOT a look-up — it stays the operator's
+    doing = "**Run this now:**\n\n```bash\nls /etc/pve/firewall/groups/\nsystemctl restart pve-firewall\n```\nThen tell me."
+    assert rl.is_lookup(doing) is None
+    assert rl.lookup_lines("ls /x\nrm -rf /y\n# comment\n\n$ cat /z")[1] == ["rm -rf /y"]
+    assert rl.lookup_lines("cd /tmp\nexport A=1\ncat /etc/hostname")[0] == ["cat /etc/hostname"]
+    assert rl.is_lookup("no fence here") is None and rl.is_lookup("") is None
+    # a fix answer without the header still counts by its first fence
+    assert rl.is_lookup("Try this:\n```bash\nls /etc/pve/firewall/groups/\n```") == ["ls /etc/pve/firewall/groups/"]
+
+
+def test_record_and_note_carry_each_command_with_its_output():
+    executed = [{"id": "L1", "command": "cat /etc/hostname", "ok": True, "chars": 4},
+                {"id": "L2", "command": "pve-firewall status", "ok": True, "chars": 0}]
+    pasted = "== L1 ==\npve\n== L2 ==\n\n"
+    rec = rl.record_text("pve-runner", executed, pasted)
+    assert rec.startswith("[local-runner] ran the walkthrough's read-only look-up through your local runner (pve-runner)")
+    assert "ON THE TARGET MACHINE itself" in rec.splitlines()[0]     # the model must not read the runner as a sandbox
+    assert "$ cat /etc/hostname\npve" in rec and "$ pve-firewall status\n(no output)" in rec
+    note = rl.render_note("pve-runner", executed, pasted)
+    assert note.startswith("🔁 Your local runner is connected, so I ran that look-up myself (2 read-only commands through pve-runner)")
+    assert "$ cat /etc/hostname" in note
+
+
+def test_reply_tail_keeps_the_last_guide_or_fix():
+    t = rl.ReplyTail()
+    t.feed("assist_guide_delta", {"text": "## 👉 Do this next\n```bash\ncat /a\n```"}); t.feed("assist_guide_done", {})
+    assert "cat /a" in t.text()
+    t.feed("assist_answer", {"kind": "ask", "text": "a question"})           # not a reply that carries commands
+    assert "cat /a" in t.text()
+    t.feed("assist_answer", {"kind": "fix", "text": "```bash\nls /b\n```"})
+    assert t.text() == "```bash\nls /b\n```"
+    t.feed("assist_guide_delta", {"text": "new guide"}); t.feed("assist_guide_done", {})
+    assert t.text() == "new guide"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_runs_the_lookup_and_reenters_with_the_output_bounded(monkeypatch):
+    """The wiring: a turn ending on a read-only block → the runner runs it →
+    the output re-enters as the operator's paste → at most MAX_AUTO_ROUNDS."""
+    from app.modules import assist_turn, assist_local_runner as lr
+    seen = []
+    async def _inner(*, session_id, message, command, node_key, history, db, handled):
+        seen.append((command, (message or "")[:60], node_key))
+        handled["v"] = "guide"
+        yield ("assist_guide_delta", {"text": "**Run this now:**\n```bash\ncat /etc/hostname\n```\nThen tell me what it shows."})
+        yield ("assist_guide_done", {"status": "ready", "node_key": "T6"})
+    spec = MagicMock(); spec.name = "pve-runner"
+    monkeypatch.setattr(assist_turn, "_run_turn_inner", _inner)
+    monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
+    monkeypatch.setattr(rl, "run_lookup", AsyncMock(return_value=("== L1 ==\npve\n", [{"id": "L1", "command": "cat /etc/hostname", "ok": True, "chars": 3}])))
+    ev = [e async for e in assist_turn.run_turn(session_id="s", message=None, command="guide", node_key="T6", history=[], db=MagicMock())]
+    names = [e[0] for e in ev]
+    assert names.count("assist_guide_done") == 1 + rl.MAX_AUTO_ROUNDS        # guide, then one re-entry per round
+    assert names[-1] == "assist_turn_done" and ev[-1][1]["handled"] == "guide+lookup+lookup"
+    assert "_record" not in names                                          # the private frame never reaches the client
+    notes = [e for e in ev if e[0] == "assist_answer" and e[1].get("kind") == "note"]
+    assert len(notes) == rl.MAX_AUTO_ROUNDS and notes[0][1]["text"].startswith("🔁 Your local runner is connected")
+    assert seen[0] == ("guide", "", "T6")
+    assert seen[1][0] == "message" and seen[1][1].startswith("[local-runner] ran the walkthrough") and seen[1][2] is None
+    # no runner → no round trip at all
+    seen.clear(); monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=None))
+    ev = [e async for e in assist_turn.run_turn(session_id="s", message=None, command="guide", node_key="T6", history=[], db=MagicMock())]
+    assert len(seen) == 1 and ev[-1][1]["handled"] == "guide"
+    # a mutating block → the operator's hands, no round trip
+    async def _inner2(*, session_id, message, command, node_key, history, db, handled):
+        handled["v"] = "fix"
+        yield ("assist_answer", {"kind": "fix", "text": "```bash\nsystemctl restart pve-firewall\n```"})
+    monkeypatch.setattr(assist_turn, "_run_turn_inner", _inner2); monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
+    ev = [e async for e in assist_turn.run_turn(session_id="s", message="x", command="message", node_key="T6", history=[], db=MagicMock())]
+    assert ev[-1][1]["handled"] == "fix" and not [e for e in ev if e[0] == "assist_turn_status" and "runner" in e[1]["text"]]
+
+
+def test_run_turn_is_the_single_wiring_point():
+    from app.modules import assist_turn
+    src = inspect.getsource(assist_turn.run_turn)
+    assert "_auto_lookup(" in src and "MAX_AUTO_ROUNDS" in src and 'cmd, rounds = record, "message"' in src
+    assert src.index("_run_turn_inner(") < src.index("_auto_lookup(")

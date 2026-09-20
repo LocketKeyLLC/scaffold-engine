@@ -192,3 +192,33 @@ def test_installer_refuses_without_root_or_token_and_install_binds_all_interface
     seen = {}
     monkeypatch.setattr(mod, "install", lambda a: seen.update(host=a.host, dir=a.install_dir) or 0)
     assert mod.main() == 0 and seen == {"host": "0.0.0.0", "dir": "/opt/scaffold-runner"}
+
+
+# ---------------------------------------------------------------------------
+# §17.1150 — READ forms of mutation-headed tools, the same table at both ends.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cmd", ["dpkg -l pve-firewall", "dpkg -l | grep '^ii'", "iptables -S PVEFW-HOST-IN", "iptables -t nat -L -n -v",
+                                 "pip list", "pip3 show mcp", "crontab -l", "ufw status verbose", "nft list ruleset",
+                                 "apt list --installed", "firewall-cmd --list-all", "sudo iptables -S", "make -n"])
+def test_read_forms_pass_both_gates(cmd):
+    from app.modules.assist_state_check import read_only_command
+    assert read_only_command(cmd), cmd
+    assert _load_runner_script().read_only(cmd) == (True, ""), cmd
+
+
+@pytest.mark.parametrize("cmd", ["dpkg -i x.deb", "iptables -A INPUT -p tcp --dport 8790 -j ACCEPT", "iptables -S; iptables -F",
+                                 "pip install x", "crontab -e", "ufw allow 22", "apt install jq", "nft add rule x y", "make install",
+                                 "iptables -L -F", "npm install x"])
+def test_write_forms_of_the_same_tools_stay_refused_at_both_gates(cmd):
+    from app.modules.assist_state_check import read_only_command
+    assert not read_only_command(cmd), cmd
+    assert _load_runner_script().read_only(cmd)[0] is False, cmd
+
+
+def test_read_form_table_is_identical_at_both_ends():
+    import inspect
+    from app.modules import assist_state_check as sc
+    mod = _load_runner_script()
+    assert mod._READ_FORMS == sc._READ_FORMS
+    assert inspect.getsource(mod.read_form) == inspect.getsource(sc.read_form)

@@ -169,6 +169,54 @@ _SUBCOMMAND_HEADS = frozenset({
     "npm", "yarn", "cargo", "make", "kill", "pkill", "nft", "iptables", "update-alternatives", "update-grub", "update-initramfs",
 })
 
+# §17.1150 — READ forms of tools whose HEAD is a mutation verb: `dpkg -l`,
+# `iptables -S`, `pip list`, `crontab -l`… The head table stays conservative
+# (a bare `iptables` is a write); these exact query shapes are the exception,
+# judged on the argv, with an explicit deny list where a read flag can share
+# a line with a write flag. THE SAME TABLE lives in scripts/local_runner_mcp.py
+# (the runner re-gates on its side); tests/test_local_runner.py asserts parity.
+_READ_FORMS: dict = {
+    "dpkg": {"flags": {"-l", "-L", "-s", "-S", "-V", "-p", "--list", "--status", "--listfiles", "--search",
+                       "--print-architecture", "--get-selections", "--print-avail", "--verify"}},
+    "apt": {"subs": {"list", "show", "policy", "search", "depends", "rdepends"}},
+    "apt-get": {"subs": {"check"}},
+    "iptables": {"flags": {"-S", "-L", "--list", "--list-rules"},
+                 "deny": {"-A", "-I", "-D", "-F", "-X", "-P", "-N", "-R", "-E", "-Z", "-C", "--append", "--insert", "--delete",
+                          "--flush", "--policy", "--new-chain", "--delete-chain", "--rename-chain", "--replace", "--zero"}},
+    "ip6tables": {"flags": {"-S", "-L", "--list", "--list-rules"},
+                  "deny": {"-A", "-I", "-D", "-F", "-X", "-P", "-N", "-R", "-E", "-Z", "-C", "--append", "--insert", "--delete",
+                           "--flush", "--policy", "--new-chain", "--delete-chain", "--rename-chain", "--replace", "--zero"}},
+    "nft": {"subs": {"list"}},
+    "pip": {"subs": {"list", "show", "freeze", "check", "debug"}},
+    "pip3": {"subs": {"list", "show", "freeze", "check", "debug"}},
+    "npm": {"subs": {"ls", "list", "view", "outdated", "version"}},
+    "snap": {"subs": {"list", "info", "find", "version", "changes"}},
+    "crontab": {"flags": {"-l"}, "deny": {"-e", "-r", "-i"}},
+    "ufw": {"subs": {"status", "version", "show"}},
+    "firewall-cmd": {"flag_prefix": ("--list-", "--get-", "--state", "--query-", "--info-", "--version")},
+    "update-alternatives": {"flags": {"--display", "--list", "--query", "--get-selections"}},
+    "make": {"flags": {"-n", "--dry-run", "-q", "--question", "-p", "--print-data-base", "--version"}},
+}
+
+
+def read_form(argv) -> bool:
+    """True when ``argv`` is one of the READ shapes in ``_READ_FORMS``."""
+    rule = _READ_FORMS.get(argv[0].rsplit("/", 1)[-1]) if argv else None
+    if not rule:
+        return False
+    args = list(argv[1:])
+    if any(a in rule.get("deny", ()) for a in args):
+        return False
+    if "flags" in rule:
+        return any(a in rule["flags"] for a in args)
+    if "subs" in rule:
+        first = next((a for a in args if not a.startswith("-")), None)
+        return first in rule["subs"]
+    if "flag_prefix" in rule:
+        opts = [a for a in args if a.startswith("-")]
+        return bool(opts) and all(a.startswith(rule["flag_prefix"]) for a in opts)
+    return False
+
 
 def read_only_command(cmd: str) -> bool:
     """True when the command can only read. Conservative: any mutation verb at
@@ -194,6 +242,8 @@ def read_only_command(cmd: str) -> bool:
     if not facts.commands:
         return False
     for argv, head in zip(facts.commands, facts.heads, strict=True):
+        if read_form(argv):        # §17.1150 — `dpkg -l`, `iptables -S`, `pip list`…
+            continue
         # argv[0] alone decides for most commands; the joined unquoted head
         # (`systemctl start`, `pct destroy`, `ip link add`, `sed -i`) only
         # for the families whose verb is a subcommand or a flag.
