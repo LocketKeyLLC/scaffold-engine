@@ -154,10 +154,42 @@ async def diagnose_runner_path(spec) -> dict:
     names = [t.get("name") for t in tools]
     checks["tools"] = names
     if "run_readonly" in names:
+        # §17.1151 — the helper's version rides its tool description; an older
+        # helper refuses forms the engine now allows (live: `grep -E 'a|b'` →
+        # "unparsable" three times in a row, `dpkg -l` → "mutation verb").
+        desc = next((t.get("description") or "" for t in tools if t.get("name") == "run_readonly"), "")
+        import re as _re
+        m = _re.search(r"\(helper v([^)]+)\)", desc)
+        checks["helper_version"] = m.group(1) if m else None
+        want = expected_helper_version()
+        if want and checks["helper_version"] != want:
+            return {"class": "stale_helper", "checks": checks,
+                    "detail": (f"reached {host}:{port} as '{spec.name}', but the helper running there is "
+                               f"{'version ' + checks['helper_version'] if checks['helper_version'] else 'an older build'} "
+                               f"and the engine ships version {want} — it refuses read-only commands the engine now allows.")}
         return {"class": "ok", "checks": checks,
                 "detail": f"reached http://{host}:{port}/mcp/ as '{spec.name}' and found its run_readonly tool"}
     return {"class": "not_runner", "checks": checks,
             "detail": f"reached {host}:{port} but it lists {names or 'no tools'} — that is not the local runner helper."}
+
+
+_EXPECTED_HELPER_VERSION: Optional[str] = None
+
+
+def expected_helper_version() -> Optional[str]:
+    """The HELPER_VERSION in the script this engine ships (what the target
+    fetches). None when the script is not in the image (nothing to compare)."""
+    global _EXPECTED_HELPER_VERSION
+    if _EXPECTED_HELPER_VERSION is None:
+        import re as _re
+        from pathlib import Path
+        try:
+            src = (Path(__file__).resolve().parents[2] / "scripts" / "local_runner_mcp.py").read_text()
+            m = _re.search(r'^HELPER_VERSION\s*=\s*"([^"]+)"', src, _re.M)
+            _EXPECTED_HELPER_VERSION = m.group(1) if m else ""
+        except Exception:
+            _EXPECTED_HELPER_VERSION = ""
+    return _EXPECTED_HELPER_VERSION or None
 
 
 def runner_repair_block(diag: dict, *, engine_ip: Optional[str] = None) -> str:
@@ -193,6 +225,13 @@ def runner_repair_block(diag: dict, *, engine_ip: Optional[str] = None) -> str:
                 f"The engine has this runner registered at **{host}**. On the target, confirm its address and that "
                 f"the service is up:\n\n```bash\n{cmd}\n```\n\n"
                 f"Paste what it printed here. If the address differs from {host}, tell me the right one and I re-register the runner.")
+    if cls == "stale_helper":
+        tok, url = ch.get("token") or "<the token the engine registered>", ch.get("script_url") or RUNNER_SCRIPT_FALLBACK_URL
+        cmd = (f"curl -fsSL {url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
+               f"--port {port} --token {tok}")
+        return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
+                f"Refresh it with the same one line as the install (same token; the installer replaces the running "
+                f"service):\n\n```bash\n{cmd}\n```\n\nPaste its last line here and I re-check right away.")
     if cls == "token":
         tok, url = ch.get("token") or "<the token the engine registered>", ch.get("script_url") or RUNNER_SCRIPT_FALLBACK_URL
         cmd = (f"curl -fsSL {url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
@@ -1229,6 +1268,7 @@ _REPAIR_TITLES = {
     "port_closed": "Start the local runner service on {host}",
     "host_down": "Confirm {host}'s address and that the runner is up",
     "token": "Re-run the runner install so its token matches the engine's",
+    "stale_helper": "Refresh the local runner helper on {host} (one paste)",
     "not_runner": "Free port {port} on {host} for the local runner",
     "unknown": "Get the local runner on {host} answering the engine",
 }
@@ -1256,6 +1296,7 @@ def repair_step(recipe: Recipe, pr: dict) -> Optional[dict]:
         "port_closed": "Done when systemctl status shows active (running) and ss shows python listening on the port — I re-check the connection from the engine on every paste.",
         "host_down": f"Done when the paste shows the address and an active service; if the address is not {host}, tell me the right one — I re-check the connection from the engine on every paste.",
         "token": "Done when the installer's last line starts with OK: — I re-check the connection from the engine on every paste.",
+        "stale_helper": "Done when the installer's last line starts with OK: — I re-check the helper's version from the engine on every paste.",
         "not_runner": f"Done when nothing else holds port {port} and the runner service is active — I re-check the connection from the engine on every paste.",
         "unknown": "Done when the paste shows the service active and listening — I re-check the connection from the engine on every paste.",
     }[cls]
@@ -1344,3 +1385,37 @@ async def _present(db, session_id: str, node_key: str) -> None:
     await db.execute(text("UPDATE assist_sessions SET current_node_key = :nk, updated_at = NOW() WHERE id = :sid"),
                      {"sid": session_id, "nk": node_key})
     await db.commit()
+
+
+async def ensure_helper_refresh_step(db, session_id: str, node_key: Optional[str]) -> Optional[dict]:
+    """§17.1151 — when the helper on the target is older than the engine's
+    gate, the refresh is a plan step (like any repair): inserted before the
+    current step, presented, guided. Returns ``{node_key, title, note, existing}``
+    or None when the helper is current (or nothing is registered)."""
+    r = BY_ID["local_runner"]
+    forget_probe(r.id)
+    pr = await _probe_cached(r, db, PROBE_MARK)
+    if pr.get("class") != "stale_helper":
+        return None
+    step = repair_step(r, pr)
+    if step is None:
+        return None
+    existing = await open_repair_step(db, session_id, r.id)
+    if existing:
+        await _present(db, session_id, existing)
+        return {"node_key": existing, "title": step["title"], "existing": True, "class": "stale_helper",
+                "note": f"🔧 {pr.get('detail')}\n\nThe refresh step **{existing}: {step['title']}** is still open — here it is:"}
+    if not node_key:
+        row = (await db.execute(text("SELECT current_node_key FROM assist_sessions WHERE id = :sid"), {"sid": session_id})).scalar()
+        node_key = row
+    from app.modules import assist_notes
+    res = await assist_notes.add_step(session_id=session_id, request=step["title"], before_node_key=node_key,
+                                      steps=[step], db=db)
+    new_key = (res or {}).get("node_key")
+    if not new_key:
+        return None
+    await _present(db, session_id, new_key)
+    logger.info("helper_refresh_step_added sid=%s before=%s repair=%s", session_id, node_key, new_key)
+    return {"node_key": new_key, "title": step["title"], "existing": False, "class": "stale_helper",
+            "note": (f"🔧 {pr.get('detail')}\n\nI added **{new_key}: {step['title']}** right before your current step — one "
+                     f"paste, then we continue where we were:")}

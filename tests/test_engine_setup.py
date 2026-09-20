@@ -583,8 +583,9 @@ async def test_probe_local_runner_reads_the_registry_and_diagnoses_the_path(monk
     tcp = {}
     async def _tcp(host, port): return tcp.get(port, "open")
     monkeypatch.setattr(es, "_tcp", _tcp)
-    # hit
-    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "run_readonly"}]))
+    # hit (a current helper announces its version in the tool description — §17.1151)
+    _cur = [{"name": "run_readonly", "description": f"Run ONE read-only… (helper v{es.expected_helper_version()})"}]
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=_cur))
     pr = await es.probe_local_runner(db)
     assert pr["ok"] is True and pr["class"] == "ok" and "run_readonly" in pr["detail"] and pr["repair"] == ""
     assert mcp_client.list_tools.await_args.kwargs == {"use_cache": False}     # never a cached answer
@@ -840,3 +841,73 @@ async def test_repair_steps_take_the_deterministic_guide_path(monkeypatch):
     res = await ag.ensure_guidance(session_id="s1", node_key="ADD3", ctx=MagicMock(), node_description=st["description"],
                                    research=True, force=True, db=MagicMock())
     assert res["status"] == "ready" and "pvesh create" in res["guidance"] and persisted["guidance_meta"]["repair"] == "port_filtered"
+
+
+# ---------------------------------------------------------------------------
+# §17.1151 — a stale helper is detected from its tool description and refreshed as a plan step.
+# ---------------------------------------------------------------------------
+
+async def test_stale_helper_is_a_probe_class_with_a_one_paste_refresh(monkeypatch):
+    from app.modules import assist_local_runner as lr, mcp_client
+    spec = MagicMock(); spec.name = "pve-runner"; spec.endpoint = "http://192.168.1.156:8790/mcp/"; spec.command = None
+    spec.headers = {"X-Runner-Token": "tok123"}
+    db = MagicMock(); db.execute = AsyncMock(return_value=MagicMock(mappings=lambda: MagicMock(first=lambda: None)))
+    monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
+    async def _tcp(host, port): return "open"
+    monkeypatch.setattr(es, "_tcp", _tcp)
+    monkeypatch.setattr(es, "_EXPECTED_HELPER_VERSION", "3")
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "run_readonly", "description": "Run ONE read-only… Refuses anything that writes."}]))
+    pr = await es.probe_local_runner(db)
+    assert pr["ok"] is False and pr["class"] == "stale_helper" and "older build" in pr["detail"] and "version 3" in pr["detail"]
+    assert "--token tok123" in pr["repair"] and "```bash" in pr["repair"]
+    st = es.repair_step(es.BY_ID["local_runner"], pr)
+    assert st["title"].startswith("Refresh the local runner helper on 192.168.1.156") and st["description"].endswith("_Engine capability repair: local_runner stale_helper_")
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "run_readonly", "description": "… (helper v2)"}]))
+    pr = await es.probe_local_runner(db)
+    assert pr["class"] == "stale_helper" and "version 2" in pr["detail"]
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "run_readonly", "description": "… (helper v3)"}]))
+    pr = await es.probe_local_runner(db)
+    assert pr["ok"] is True and pr["class"] == "ok"
+
+
+async def test_ensure_helper_refresh_step_inserts_before_the_current_step_and_diverts_the_lookup(monkeypatch):
+    import dataclasses
+    from app.modules import assist_notes, assist_turn, assist_local_runner as lr, assist_runner_lookup as rl
+    base = es.BY_ID["local_runner"]
+    calls = {}
+    async def _add(**kw): calls["add"] = kw; return {"node_key": "ADD80"}
+    async def _present(db, sid, nk): calls.setdefault("present", []).append(nk)
+    monkeypatch.setattr(assist_notes, "add_step", _add); monkeypatch.setattr(es, "_present", _present)
+    monkeypatch.setattr(es, "open_repair_step", AsyncMock(return_value=None))
+    db = MagicMock(); db.execute = AsyncMock(return_value=MagicMock(scalar=lambda: "ADD49"))
+    try:
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value={"ok": False, "class": "stale_helper", "detail": "older build", "repair": "**What I checked from the engine host:** x\n\n```bash\ncurl … --install --token t\n```", "checks": {"host": "h", "port": 8790}}))
+        d = await es.ensure_helper_refresh_step(db, "s", None)
+        assert d["node_key"] == "ADD80" and d["class"] == "stale_helper" and calls["add"]["before_node_key"] == "ADD49" and calls["present"] == ["ADD80"]
+        assert "one paste" in d["note"] or "ADD80" in d["note"]
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value={"ok": True, "class": "ok", "detail": "fine", "repair": ""}))
+        es.forget_probe("local_runner")
+        assert await es.ensure_helper_refresh_step(db, "s", None) is None
+    finally:
+        es.BY_ID["local_runner"] = base; es.forget_probe("local_runner")
+    # the look-up path checks the helper FIRST and diverts the turn to the refresh step
+    src = __import__("inspect").getsource(assist_turn._auto_lookup)
+    assert src.index("ensure_helper_refresh_step(") < src.index("running that read-only look-up myself")
+    assert '("_record", {"text": None, "diverted": True})' in src
+    rsrc = __import__("inspect").getsource(assist_turn.run_turn)
+    assert 'handled["v"] + "+helper_refresh"' in rsrc
+    seen = []
+    async def _inner(*, session_id, message, command, node_key, history, db, handled):
+        seen.append(command); handled["v"] = "guide"
+        yield ("assist_guide_delta", {"text": "**Run this now:**\n```bash\ncat /etc/hostname\n```"}); yield ("assist_guide_done", {})
+    spec = MagicMock(); spec.name = "pve-runner"
+    monkeypatch.setattr(assist_turn, "_run_turn_inner", _inner); monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
+    monkeypatch.setattr(es, "ensure_helper_refresh_step", AsyncMock(return_value={"node_key": "ADD80", "title": "Refresh", "note": "🔧 stale", "existing": False, "class": "stale_helper"}))
+    async def _cag(sid, nk, hist, db, *, orient): yield ("assist_guide_delta", {"text": f"guide for {nk}"}); yield ("assist_guide_done", {"node_key": nk})
+    monkeypatch.setattr(assist_turn, "_claim_and_guide", _cag)
+    monkeypatch.setattr(rl, "run_lookup", AsyncMock(side_effect=AssertionError("must not run a look-up through a stale helper")))
+    from app.modules import assist_agent
+    monkeypatch.setattr(assist_agent, "capture_assistant_reply", AsyncMock())
+    ev = [e async for e in assist_turn.run_turn(session_id="s", message=None, command="guide", node_key="ADD49", history=[], db=MagicMock())]
+    assert seen == ["guide"] and ev[-1][1]["handled"] == "guide+helper_refresh"
+    assert any(e[0] == "assist_guide_done" and e[1].get("node_key") == "ADD80" for e in ev)

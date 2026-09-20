@@ -218,6 +218,25 @@ def read_form(argv) -> bool:
     return False
 
 
+_SSH_FLAGS_WITH_ARG = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-W", "-b", "-c", "-e", "-I", "-m", "-O", "-Q", "-S", "-w", "-E", "-B"}
+
+
+def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
+    """``ssh [opts] [user@]host <remote command>``: the remote command must pass
+    the same gate; no remote command (an interactive login) is refused."""
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in _SSH_FLAGS_WITH_ARG else 1
+    if i >= len(argv):
+        return False, "ssh without a host"
+    remote = " ".join(argv[i + 1:]).strip()
+    if not remote:
+        return False, "interactive ssh"
+    res = judge(remote)
+    ok = res[0] if isinstance(res, tuple) else bool(res)
+    return (True, "") if ok else (False, "ssh remote command writes")
+
+
 def read_only_command(cmd: str) -> bool:
     """True when the command can only read. Conservative: any mutation verb at
     the HEAD of any command (nested scripts and substitutions included), any
@@ -242,6 +261,11 @@ def read_only_command(cmd: str) -> bool:
     if not facts.commands:
         return False
     for argv, head in zip(facts.commands, facts.heads, strict=True):
+        if argv[0].rsplit("/", 1)[-1] == "ssh":   # §17.1151 — the remote command is judged like a local one
+            ok, _why = ssh_remote_read_only(argv, read_only_command)
+            if not ok:
+                return False
+            continue
         if read_form(argv):        # §17.1150 — `dpkg -l`, `iptables -S`, `pip list`…
             continue
         # argv[0] alone decides for most commands; the joined unquoted head
