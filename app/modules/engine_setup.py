@@ -84,34 +84,161 @@ async def _detect_local_runner(db) -> tuple[str, str]:
     return "on", f"probes run through '{spec.name}' at {spec.endpoint or spec.command}."
 
 
-async def probe_local_runner(db) -> tuple[bool, str]:
-    """§17.1147 — the engine's half of 'Verify the engine reaches the runner':
-    open the registered endpoint and list its tools. ``(True, detail)`` when
-    ``run_readonly`` is there; ``(False, why)`` otherwise. Bounded to a few
-    seconds so a dead host cannot stall the guide."""
+PROBE_TIMEOUT_S = 8.0
+TCP_TIMEOUT_S = 4.0
+# ports a Proxmox host / any Linux box normally answers on — used to tell
+# "the host is down" from "this one port is filtered"
+_SIBLING_PORTS = (22, 8006)
+
+
+async def _tcp(host: str, port: int) -> str:
+    """'open' | 'refused' | 'timeout' | 'error: …' — one bounded connect."""
     import asyncio
-    from app.modules import assist_local_runner as _lr
     try:
-        spec = await _lr.runner_spec(db)
-    except Exception as exc:
-        return False, f"registry lookup failed: {exc}"
-    if spec is None:
-        return False, "no runner is registered on the engine side (ask me for the local runner again and answer yes)."
-    where = spec.endpoint or spec.command or spec.name
+        _, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=TCP_TIMEOUT_S)
+        w.close()
+        try:
+            await w.wait_closed()
+        except Exception:
+            pass
+        return "open"
+    except asyncio.TimeoutError:
+        return "timeout"
+    except ConnectionRefusedError:
+        return "refused"
+    except OSError as exc:
+        return f"error: {exc.strerror or exc}"[:80]
+
+
+async def diagnose_runner_path(spec) -> dict:
+    """§17.1148 — what stands between the engine and the runner, as facts the
+    engine can establish on its own: ``{"class", "detail", "checks"}``.
+    class ∈ ok | token | port_closed | port_filtered | host_down | not_runner |
+    unknown. Bounded: three TCP connects (4 s each) + one tools listing (8 s).
+    Live: the operator's install printed OK on pve, the engine's probe said
+    "did not answer" and stopped there; the host answered on 22 and 8006 while
+    8790 timed out — a filtered port, i.e. the Proxmox host firewall."""
+    import asyncio
+    from urllib.parse import urlparse
+    u = urlparse(spec.endpoint or "")
+    host, port = u.hostname or "", u.port or RUNNER_PORT
+    checks: dict[str, Any] = {"host": host, "port": port}
+    if not host:
+        return {"class": "unknown", "detail": f"the registered endpoint {spec.endpoint!r} has no host", "checks": checks}
+    checks["runner_port"] = await _tcp(host, port)
+    if checks["runner_port"] != "open":
+        sib = await asyncio.gather(*[_tcp(host, p) for p in _SIBLING_PORTS])
+        checks["siblings"] = dict(zip(_SIBLING_PORTS, sib, strict=True))
+        alive = [p for p, r in checks["siblings"].items() if r in ("open", "refused")]
+        if checks["runner_port"] == "refused":
+            return {"class": "port_closed", "checks": checks,
+                    "detail": f"{host} refused the connection on port {port} — nothing is listening there (the service is not running)."}
+        if alive:
+            return {"class": "port_filtered", "checks": checks,
+                    "detail": (f"{host} is reachable from the engine host (it answers on port {', '.join(str(p) for p in alive)}) "
+                               f"but port {port} times out — the port is being dropped by a firewall on that host.")}
+        return {"class": "host_down", "checks": checks,
+                "detail": f"nothing on {host} answers from the engine host (ports {port}, {', '.join(str(p) for p in _SIBLING_PORTS)} all time out) — wrong address, or the host is down/unreachable."}
     try:
         from app.modules import mcp_client
         tools = await asyncio.wait_for(mcp_client.list_tools(spec, use_cache=False), timeout=PROBE_TIMEOUT_S)
     except asyncio.TimeoutError:
-        return False, f"{where} did not answer within {PROBE_TIMEOUT_S:.0f} s (is the service running, and is port {RUNNER_PORT} reachable from the engine host?)"
+        return {"class": "unknown", "checks": checks,
+                "detail": f"port {port} on {host} accepts connections but the MCP handshake did not finish within {PROBE_TIMEOUT_S:.0f} s."}
     except Exception as exc:
-        return False, _probe_failure_words(where, exc)
+        raw = str(exc)
+        if "401" in raw or "unauthorized" in raw.lower():
+            return {"class": "token", "checks": checks,
+                    "detail": f"{host}:{port} answered but rejected the token — the helper that is running was started with a different --token."}
+        return {"class": "unknown", "checks": checks, "detail": _probe_failure_words(f"http://{host}:{port}/mcp/", exc)}
     names = [t.get("name") for t in tools]
+    checks["tools"] = names
     if "run_readonly" in names:
-        return True, f"reached {where} as '{spec.name}' and found its run_readonly tool"
-    return False, f"reached {where} but it lists {names or 'no tools'} — not the local runner helper"
+        return {"class": "ok", "checks": checks,
+                "detail": f"reached http://{host}:{port}/mcp/ as '{spec.name}' and found its run_readonly tool"}
+    return {"class": "not_runner", "checks": checks,
+            "detail": f"reached {host}:{port} but it lists {names or 'no tools'} — that is not the local runner helper."}
 
 
-PROBE_TIMEOUT_S = 8.0
+def runner_repair_block(diag: dict, *, engine_ip: Optional[str] = None) -> str:
+    """The troubleshooting the operator does on the TARGET, per failure class:
+    what the engine established, ONE fenced block to paste, and what to do
+    with the result. Deterministic; no model."""
+    cls = diag.get("class") or "unknown"
+    ch = diag.get("checks") or {}
+    host, port = ch.get("host") or "<the target's IP>", ch.get("port") or RUNNER_PORT
+    if cls == "ok":
+        return ""
+    if cls == "port_filtered":
+        # the engine's own address when known, else the target's /24 (the token still guards the port)
+        src = engine_ip or (".".join(str(host).split(".")[:3]) + ".0/24" if str(host).count(".") == 3 else "0.0.0.0/0")
+        cmd = ("pve-firewall status; ss -tlnp | grep {port}\n"
+               "pvesh create /nodes/$(hostname)/firewall/rules --type in --action ACCEPT --proto tcp --dport {port} "
+               "--source {src} --enable 1 --comment 'scaffold local runner'\n"
+               "sleep 3; pve-firewall status").format(port=port, src=src)
+        return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
+                f"On Proxmox that is the host firewall. This opens port {port} to {src} only (the helper still requires "
+                f"the token), then shows the firewall state:\n\n```bash\n{cmd}\n```\n\n"
+                f"If `pve-firewall status` says **disabled**, the drop is elsewhere — paste the output of "
+                f"`iptables -S INPUT | head -20; nft list ruleset 2>/dev/null | grep -n {port}` instead.\n\n"
+                f"Paste what it printed here and I re-check the connection right away.")
+    if cls == "port_closed":
+        cmd = f"systemctl status local-runner-mcp --no-pager; journalctl -u local-runner-mcp -n 20 --no-pager; ss -tlnp | grep {port}"
+        return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
+                f"On the target, this shows whether the service is running and why it stopped:\n\n```bash\n{cmd}\n```\n\n"
+                f"Paste what it printed here and I re-check the connection right away.")
+    if cls == "host_down":
+        cmd = "hostname; ip -4 -brief addr; systemctl is-active local-runner-mcp"
+        return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
+                f"The engine has this runner registered at **{host}**. On the target, confirm its address and that "
+                f"the service is up:\n\n```bash\n{cmd}\n```\n\n"
+                f"Paste what it printed here. If the address differs from {host}, tell me the right one and I re-register the runner.")
+    if cls == "token":
+        return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
+                f"Re-run the install line from the previous step (it carries the token the engine registered); the "
+                f"installer replaces the running service. Then paste its last line here.")
+    if cls == "not_runner":
+        return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
+                f"Something else is listening on port {port} of {host}. On the target: `ss -tlnp | grep {port}` — paste "
+                f"what it shows here.")
+    cmd = f"systemctl status local-runner-mcp --no-pager; journalctl -u local-runner-mcp -n 20 --no-pager; ss -tlnp | grep {port}"
+    return (f"**What I checked from the engine host:** {diag.get('detail') or 'the connection failed'}\n\n"
+            f"On the target:\n\n```bash\n{cmd}\n```\n\nPaste what it printed here and I re-check the connection right away.")
+
+
+async def probe_local_runner(db) -> dict:
+    """§17.1147/1148 — the engine's half of 'Verify the engine reaches the
+    runner': ``{"ok", "detail", "class", "repair"}``. Bounded; never touches
+    the target beyond the registered endpoint."""
+    from app.modules import assist_local_runner as _lr
+    try:
+        spec = await _lr.runner_spec(db)
+    except Exception as exc:
+        return {"ok": False, "class": "unknown", "detail": f"registry lookup failed: {exc}", "repair": ""}
+    if spec is None:
+        return {"ok": False, "class": "unregistered", "repair": "",
+                "detail": "no runner is registered on the engine side (ask me for the local runner again and answer yes)."}
+    diag = await diagnose_runner_path(spec)
+    engine_ip = None
+    try:
+        engine_ip = await _engine_ip_from_sessions(db)
+    except Exception:
+        engine_ip = None
+    return {"ok": diag["class"] == "ok", "class": diag["class"], "detail": diag["detail"],
+            "checks": diag.get("checks") or {}, "repair": runner_repair_block(diag, engine_ip=engine_ip)}
+
+
+async def _engine_ip_from_sessions(db) -> Optional[str]:
+    """The engine's LAN address, when any session learned it (§17.1146
+    remember_engine_url). None on this host (the API binds to 127.0.0.1)."""
+    from urllib.parse import urlparse
+    row = (await db.execute(text("""
+        SELECT metadata->'environment'->>'engine_url' AS u FROM assist_sessions
+         WHERE metadata->'environment'->>'engine_url' IS NOT NULL ORDER BY updated_at DESC LIMIT 1
+    """))).mappings().first()
+    host = urlparse((row or {}).get("u") or "").hostname
+    return host if host and not _url_is_local(f"http://{host}") else None
+
 
 
 def _probe_failure_words(where: str, exc: BaseException) -> str:
@@ -642,9 +769,9 @@ def recipe_steps(recipe: Recipe, *, with_prerequisites: bool = True, ctx: Option
     chain = list(recipe.requires) if with_prerequisites else []
     for rid in chain + [recipe.id]:
         r = BY_ID[rid]
-        for title, what in r.steps:
+        for i, (title, what) in enumerate(r.steps):
             out.append({"title": title.format_map(values),
-                        "description": f"{what.format_map(values)}\n\n_{RECIPE_STEP_MARK} {r.id} v{recipe_version(r)}_"})
+                        "description": f"{what.format_map(values)}\n\n_{RECIPE_STEP_MARK} {r.id} v{recipe_version(r)} #{i}_"})
     return out
 
 
@@ -845,7 +972,7 @@ def recipe_of_node(description: Optional[str]) -> Optional[Recipe]:
     global _MARK_RE
     import re as _re
     if _MARK_RE is None:
-        _MARK_RE = _re.compile(_re.escape(RECIPE_STEP_MARK) + r" ([a-z_]+) v([0-9a-f]{8})_")
+        _MARK_RE = _re.compile(_re.escape(RECIPE_STEP_MARK) + r" ([a-z_]+) v([0-9a-f]{8})(?: #(\d+))?_")
     m = _MARK_RE.search(description or "")
     if not m:
         return None
@@ -889,15 +1016,17 @@ async def render_recipe_guide(node_description: Optional[str], *, db) -> Optiona
     meta: dict[str, Any] = {"recipe": r.id, "deterministic": True, "status": "ready"}
     parts: list[str] = []
     if PROBE_MARK in (node_description or "") and r.probe is not None:
-        ok, detail = await r.probe(db)
-        meta["probe"] = {"ok": ok, "detail": detail}
+        pr = await r.probe(db)
+        ok, detail = bool(pr.get("ok")), str(pr.get("detail") or "")
+        meta["probe"] = {"ok": ok, "detail": detail, "class": pr.get("class")}
         if ok:
             parts.append(f"## ✅ The engine reached your runner\n\n{detail[0].upper() + detail[1:]}.\n\n"
                          f"{lead}\n\n{done}\n\nNothing to paste — press **✓ Done → next step** (or type `next`).")
         else:
-            parts.append(f"## ❌ The engine could not reach the runner yet\n\n{detail}\n\n{lead}\n\n"
-                         f"{tail or 'Fix that on the target, then press Guide me on this step to check again.'}\n\n"
-                         f"Press **Guide me** on this step to check again once it is fixed.")
+            repair = pr.get("repair") or (tail or "Fix that on the target, then press Guide me on this step to check again.")
+            parts.append(f"## ❌ The engine could not reach the runner yet\n\n{repair}\n\n"
+                         f"_{lead}_\n\n"
+                         f"(Or press **Guide me** on this step to re-check without pasting.)")
         return {"text": "\n".join(parts), "meta": meta}
     parts.append("## 👉 Do this next\n")
     if lead:
@@ -910,3 +1039,78 @@ async def render_recipe_guide(node_description: Optional[str], *, db) -> Optiona
         parts.append(tail + "\n")
     parts.append("Paste what it printed here, or press **✓ Done → next step** (or type `next`) once it says OK.")
     return {"text": "\n".join(parts), "meta": meta}
+
+
+def recipe_step_index(description: Optional[str]) -> Optional[int]:
+    """Which of the recipe's steps this node is (from the ``#n`` in its marker);
+    None for markers stamped before §17.1148."""
+    recipe_of_node(description)   # compiles _MARK_RE
+    m = _MARK_RE.search(description or "") if _MARK_RE else None
+    return int(m.group(3)) if m and m.group(3) else None
+
+
+_INSTALL_MARKERS = ("[1/4]", "[2/4]", "[3/4]", "[4/4]", "OK:", "FAILED:")
+
+
+def check_install_output(evidence: str) -> Optional[dict]:
+    """§17.1148 — the install step's own Done-when, read by the engine: the
+    installer prints ONE verdict line. ``None`` when the paste is not the
+    installer's output at all (the ordinary verifier judges it)."""
+    ev = evidence or ""
+    if not any(m in ev for m in _INSTALL_MARKERS):
+        return None
+    lines = [ln.strip() for ln in ev.splitlines() if ln.strip()]
+    ok = [ln for ln in lines if ln.startswith("OK: local runner active")]
+    failed = [i for i, ln in enumerate(lines) if ln.startswith("FAILED:")]
+    if ok:
+        return {"outcome": "success", "reason": ok[-1], "summary": "the installer printed its OK line"}
+    if failed:
+        i = failed[-1]
+        return {"outcome": "failed", "summary": lines[i],
+                "reason": "The installer stopped:\n\n```\n" + "\n".join(lines[i:i + 8]) + "\n```\n\n"
+                          "Paste is recorded — let's fix that and re-run the same install line."}
+    return {"outcome": "incomplete", "summary": "the installer's verdict line is missing",
+            "reason": ("The install is not finished, or the paste stopped early: the installer ends with ONE line "
+                       "starting with `OK:` or `FAILED:` and that line is not here. Let it finish (the dependency "
+                       "step can take a minute), then paste from `[1/4]` through the last line.")}
+
+
+async def verify_recipe_submit(*, db, session_id: str, node_key: str, evidence: str) -> Optional[dict]:
+    """§17.1148 — a recipe step is verified BY THE RECIPE, before (instead of)
+    the model verifier: the verify step re-runs the engine's probe; the install
+    step reads the installer's verdict line. Returns the verdict dict the
+    submit endpoint already understands (``outcome`` success | incomplete |
+    failed, ``reason``, ``summary``) plus ``recipe``; None when the step is not
+    a current recipe step or the recipe has nothing to say."""
+    try:
+        desc = (await db.execute(text("""
+            SELECT d.description FROM assist_steps s JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid AND s.node_key = :nk
+        """), {"sid": session_id, "nk": node_key})).scalar()
+    except Exception as exc:
+        logger.warning("verify_recipe_submit_lookup_failed sid=%s nk=%s err=%r", session_id, node_key, exc)
+        return None
+    r = recipe_of_node(desc)
+    if r is None:
+        return None
+    if PROBE_MARK in (desc or "") and r.probe is not None:
+        pr = await r.probe(db)
+        if pr.get("ok"):
+            v = {"outcome": "success", "reason": pr.get("detail") or "the engine reached the runner",
+                 "summary": "the engine reached the runner"}
+        else:
+            v = {"outcome": "incomplete", "summary": pr.get("detail") or "the engine could not reach the runner",
+                 "reason": (f"**The engine still cannot reach the runner** — {pr.get('detail') or ''}\n\n"
+                            + (pr.get("repair") or ""))}
+        v.update({"recipe": r.id, "probe_class": pr.get("class")})
+        logger.info("recipe_submit_verified sid=%s nk=%s recipe=%s outcome=%s class=%s",
+                    session_id, node_key, r.id, v["outcome"], pr.get("class"))
+        return v
+    if r.id == "local_runner" and recipe_step_index(desc) in (0, None) and "--install" in (desc or ""):
+        v = check_install_output(evidence)
+        if v is None:
+            return None
+        v["recipe"] = r.id
+        logger.info("recipe_submit_verified sid=%s nk=%s recipe=%s outcome=%s", session_id, node_key, r.id, v["outcome"])
+        return v
+    return None

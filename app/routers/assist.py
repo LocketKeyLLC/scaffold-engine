@@ -880,10 +880,45 @@ async def assist_submit(session_id: UuidPath, body: AssistSubmitInput, db=Depend
     commit_evidence = body.output
     decision_message = None
     decision_kind = None
+    # §17.1148 — a step the ENGINE wrote (an engine-capability recipe step) is
+    # verified BY THE RECIPE: the verify step re-runs the engine's own probe of
+    # the runner, the install step reads the installer's verdict line. Live:
+    # the operator's install printed OK on pve, the probe could not reach it,
+    # and the model paths had nothing true to say about why. Runs regardless
+    # of the step's claim state (the pointer is the claim, §17.1052).
+    _recipe_verdict = None
+    if body.action == "submit" and deliberation is None:
+        try:
+            from app.modules import engine_setup as _es
+            _recipe_verdict = await _es.verify_recipe_submit(
+                db=db, session_id=session_id, node_key=body.node_key, evidence=body.output)
+        except Exception as exc:
+            logger.warning("recipe_verify_failed sid=%s nk=%s err=%r", session_id, body.node_key, exc)
+            _recipe_verdict = None
     if deliberation is not None and deliberation["status"] == "resolved":
         commit_evidence = deliberation["decision_record"]
         decision_message = deliberation.get("message") or None
         decision_kind = deliberation.get("collect_kind")
+    elif _recipe_verdict is not None:
+        verdict = _recipe_verdict
+        if verdict["outcome"] in ("incomplete", "failed"):
+            # the engine established this itself; no operator word overrides
+            # it (⏩ Skip is the override), and no model fix flow rewrites it.
+            await assist_agent.record_friction(
+                session_id=session_id, node_key=body.node_key,
+                note=f"recipe-verify blocked ({verdict['outcome']}): {verdict.get('summary', '')}", db=db,
+            )
+            return {
+                "session_id": session_id,
+                "node_key": body.node_key,
+                "status": "step_incomplete" if verdict["outcome"] == "incomplete" else "verification_failed",
+                "committed": False,
+                "no_op": False,
+                "next_node_key": None,
+                "success_verdict": verdict,
+                "mirror_divergence": False,
+                "execution_context": captured_ctx,
+            }
     elif body.action == "submit" and settings.assist_verify_on_submit:
         verdict = await assist_agent.verify_submit_outcome(
             session_id=session_id, node_key=body.node_key, evidence=body.output, db=db,
