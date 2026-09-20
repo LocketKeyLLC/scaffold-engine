@@ -2048,6 +2048,13 @@ class Settings(BaseSettings):
 
     alert_unresolved_errors_threshold: int = Field(default=1, ge=0, le=10000)
     alert_cost_window_usd_threshold: float = Field(default=5.0, ge=0.0, le=100000.0)
+    # §17.1139 (ledger L-7) — provider rejections. Failed LLM calls whose error
+    # says the PROVIDER refused (HTTP 4xx/5xx, "past due", quota, unreachable,
+    # timeout) are counted per (provider, model) over the eval window; at or
+    # above this many, a `provider.rejections` alert fires (deduped per model)
+    # and /health carries a warning. 0 disables. The 2026-06-07 past-due 403s
+    # and the 2026-09-06..09 gemma4 rejections were invisible to /health.
+    alert_provider_rejections_threshold: int = Field(default=5, ge=0, le=100000)
     alert_p95_latency_ms_threshold: int = Field(default=120000, ge=0, le=3600000)
 
     # Embedding-cache pressure alert. Fires only when BOTH conditions hold

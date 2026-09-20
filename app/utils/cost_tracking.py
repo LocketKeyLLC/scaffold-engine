@@ -146,6 +146,9 @@ async def record_llm_call(resp) -> None:
     completion_tokens = int(getattr(resp, "tokens_completion", 0) or 0)
     latency_ms = int(getattr(resp, "total_duration_ms", 0) or 0)
     success = bool(getattr(resp, "success", False))
+    # §17.1139 (ledger L-7) — keep WHY it failed: the provider's/driver's text,
+    # bounded. A zero-latency `success=false` row was unclassifiable before.
+    error = None if success else (str(getattr(resp, "error", "") or "")[:300] or None)
 
     job_id = current_job_id.get()
     node_id = current_node_id.get()
@@ -172,11 +175,11 @@ async def record_llm_call(resp) -> None:
                     "INSERT INTO llm_call_logs ("
                     "  job_id, node_id, provider, model, "
                     "  prompt_tokens, completion_tokens, latency_ms, "
-                    "  cost_usd, success, call_kind"
+                    "  cost_usd, success, call_kind, error"
                     ") VALUES ("
                     "  :job_id, :node_id, :provider, :model, "
                     "  :prompt_tokens, :completion_tokens, :latency_ms, "
-                    "  :cost_usd, :success, :call_kind"
+                    "  :cost_usd, :success, :call_kind, :error"
                     ")"
                 ),
                 {
@@ -190,6 +193,7 @@ async def record_llm_call(resp) -> None:
                     "cost_usd": cost,
                     "success": success,
                     "call_kind": kind,
+                    "error": error,
                 },
             )
             await db.commit()
