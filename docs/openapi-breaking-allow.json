@@ -1,14 +1,1 @@
-[
-  {
-    "id": "request-parameter-type-changed",
-    "text_contains": "the `format` was changed from `none` to `uuid`",
-    "reason": "§17.1070 — path ids were always uuid columns and the routers 404 anything else; declaring format: uuid corrects the contract to what the handlers enforce. One-time.",
-    "expires": "2026-09-21"
-  },
-  {
-    "id": "request-parameter-pattern-added",
-    "text_contains": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
-    "reason": "§17.1131 (ledger L-6) — every UUID-keyed path id is now `UuidPath`: the pattern documents what the uuid columns always required; a malformed id is a 422 instead of an asyncpg 500 (or a per-file 400/404). One-time.",
-    "expires": "2026-09-22"
-  }
-]
+[]
