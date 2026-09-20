@@ -856,6 +856,10 @@ export function renderChat(container, sessionId, opts = {}) {
           `⏸ Finish this one and Phase ${cur.phase} is done — a clean place to stop. Your progress is saved; ✦ pick it up here whenever.`);
       }
     }
+    // §17.1134 — the presentation payload's guidance status, when we have read one
+    const guidanceTag = lastNext && lastNext.node_key === nk && lastNext.guidance_status && lastNext.guidance_status !== "none"
+      ? el("span", { class: "tag", title: "Walkthrough status reported by /next", text: `guidance: ${lastNext.guidance_status}` })
+      : null;
     const title = cur?.title || session.current_node_title || "";
     const short = (t, n = 64) => (t || "").length > n ? (t || "").slice(0, n - 1) + "…" : (t || "");
     // §17.1055 — the strip. Top: where in the plan (count + phase + bar),
@@ -871,6 +875,7 @@ export function renderChat(container, sessionId, opts = {}) {
           ? el("span", { class: "plan-strip-count", text: `Step ${pos.index} of ${total}` })
           : el("span", { class: "plan-strip-count", text: total ? `${done} of ${total} done` : "Plan" }),
         phaseTag,
+        guidanceTag,  // §17.1134
         el("span", { class: "spacer" }),
         el("span", { class: "plan-strip-done dim small", text: total ? `${done}/${total} done · ${pct}%` : "" }),
         statusBadge(session.status),
@@ -1005,7 +1010,7 @@ export function renderChat(container, sessionId, opts = {}) {
             class: "btn btn-primary",
             text: "✦ Guide me through the current step",
             onClick: async () => {
-              if (!session?.current_node_key) await api.get(`/assist/${sessionId}/next`).catch(() => {});
+              if (!session?.current_node_key) await presentNext();
               await load();
               guideCurrent();
             },
@@ -1230,6 +1235,22 @@ export function renderChat(container, sessionId, opts = {}) {
   }
   function row(k, v) {
     return el("div", { class: "meta-row" }, el("span", { class: "meta-k", text: k }), el("span", { class: "meta-v", text: v ?? "—" }));
+  }
+
+  // §17.1134 (ledger D-8) — /next is the step-presentation payload, not just a
+  // claim side effect. Read it: a divergence replan_notice is surfaced by the
+  // server EXACTLY ONCE (§17.699) and used to vanish here; the guidance
+  // status and an upstream-context truncation are worth a line.
+  let lastNext = null;
+  async function presentNext() {
+    let nx = null;
+    try { nx = await api.get(`/assist/${sessionId}/next`); } catch (e) { console.debug("assist: /next failed", e); return null; }
+    lastNext = nx;
+    if (nx?.replan_notice?.proposals?.length) renderReplanProposal(nx.replan_notice, { open: true });
+    if (Array.isArray(nx?.upstream_truncated_keys) && nx.upstream_truncated_keys.length) {
+      toast(`Upstream context was truncated for: ${nx.upstream_truncated_keys.join(", ")}`, "");
+    }
+    return nx;
   }
 
   async function load() {

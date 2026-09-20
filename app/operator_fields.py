@@ -132,6 +132,35 @@ JOB_DETAIL_INTERNAL_FIELDS: dict[str, str] = {}
 # ---------------------------------------------------------------------------
 # GET /assist/{session_id}/steps — assist_agent::list_steps rows
 # ---------------------------------------------------------------------------
+# §17.1134 (ledger D-8) — `GET /assist/{sid}/next`, the step-presentation payload.
+# 16 keys on the wire; the SPA fetched it once for the claim side effect and
+# read NOTHING — the divergence `replan_notice` (surfaced exactly once, §17.699)
+# was lost for SPA operators. Declared per surface: the SPA shows the notice,
+# the guidance status and an upstream-truncation warning; OWUI renders the
+# base prompt and the upstream outputs; the CLI prints the JSON.
+ASSIST_NEXT_OPERATOR_FIELDS: dict[str, frozenset[str]] = {
+    "node_key":               frozenset({SPA, CLI, OWUI}),
+    "title":                  frozenset({SPA, CLI, OWUI}),
+    "description":            frozenset({SPA, OWUI}),
+    "tool":                   frozenset({SPA, OWUI}),
+    "domain":                 frozenset({SPA}),
+    "depends_on":             frozenset({SPA}),
+    "replan_notice":          frozenset({SPA, OWUI}),
+    "guidance_status":        frozenset({SPA}),
+    "upstream_truncated_keys": frozenset({SPA}),
+    "upstream_outputs":       frozenset({OWUI}),
+    "base_prompt":            frozenset({OWUI}),
+    "step_counts":            frozenset({SPA, CLI}),
+    "status":                 frozenset({SPA, CLI, OWUI}),
+}
+ASSIST_NEXT_INTERNAL_FIELDS: dict[str, str] = {
+    "assembled_prompt": "the full LLM prompt — OWUI/CLI diagnostics, not an operator field",
+    "system_prompt": "the system half of the assembled prompt — diagnostics, not an operator field",
+    "job_id": "identifier the SPA already holds from the route",
+    "session_id": "identifier the SPA already holds from the route",
+    "re_presented": "§17.1103 cursor bookkeeping — the server's own invariant flag",
+}
+
 ASSIST_STEP_OPERATOR_FIELDS: dict[str, frozenset[str]] = {
     "node_key":        frozenset({SPA}),
     "title":           frozenset({SPA}),
@@ -182,6 +211,13 @@ JOB_SUMMARY_INTERNAL_FIELDS: dict[str, str] = {}
 #   "dict_literal" — ast-parse the named function and take the payload dict
 #   "pydantic"     — read the model's declared fields
 PAYLOADS: dict[str, dict] = {
+    "assist_next": {
+        "kind": "dict_literal",
+        "producer": "app/modules/assist_agent.py",
+        "function": "get_next_step",
+        "operator_fields": ASSIST_NEXT_OPERATOR_FIELDS,
+        "internal_fields": ASSIST_NEXT_INTERNAL_FIELDS,
+    },
     "exec_status_node": {
         "kind": "dict_literal",
         "producer": "app/modules/execution_handler.py",

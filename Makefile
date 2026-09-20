@@ -257,7 +257,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_assist_help_wiring.py \
 			tests/test_assist_fix_no_double_capture.py \
 			tests/test_ast_grep_rules.py \
-			tests/test_test_db_isolation.py tests/test_route_id_params.py tests/test_session_reuse_after_error.py \
+			tests/test_test_db_isolation.py tests/test_route_id_params.py tests/test_session_reuse_after_error.py tests/test_next_actions_parity.py \
 			tests/test_spa_status_pill_wiring.py \
 			tests/test_spa_job_store_wiring.py \
 			tests/test_spa_silent_catch_ratchet.py \

@@ -1,5 +1,7 @@
 // Reusable UI components shared across views.
 import { el } from "./util.js";
+import * as api from "./api.js";
+import { filterRenderable, actionLabel, actionTarget } from "./next_actions.js";
 
 /**
  * §17.854 (audit G6) — make a non-button element behave like a button for
@@ -132,6 +134,28 @@ export function toast(msg, kind = "", opts = {}) {
   const ttl = opts.duration ?? (kind === "err" ? 0 : 3200);
   if (ttl > 0) setTimeout(dismiss, ttl);
   return dismiss;
+}
+
+/** §17.1134 (ledger D-6) — render a job's `next_actions` as chips: navigation
+ *  to the hub tab where the verb lives, or the id-in-path call the registry
+ *  spells out (destructive ones confirm first). Noise ("wait") is filtered. */
+export function nextActionChips(actions, { jobId, limit = 3, onDone } = {}) {
+  const list = filterRenderable(actions).slice(0, limit);
+  if (!list.length) return null;
+  return el("div", { class: "row row-wrap next-actions" }, ...list.map((a) => {
+    const t = actionTarget(a, jobId);
+    const label = actionLabel(a);
+    if (t.kind === "nav") return el("a", { class: "btn btn-sm btn-ghost next-action", href: t.href, text: label, title: a.description || "" });
+    return el("button", {
+      class: "btn btn-sm btn-ghost next-action", text: label, title: a.description || "",
+      onClick: async (ev) => {
+        ev.preventDefault();
+        if (t.confirm && !window.confirm(t.confirm)) return;
+        try { await api.req(t.endpoint, { method: t.method }); toast(`${label}: done`, "ok"); onDone?.(); }
+        catch (e) { toast(String(e?.message || e), "err"); }
+      },
+    });
+  }));
 }
 
 /** Extract an assist session id from a job's next_actions (endpoint /assist/<id>/...). */
