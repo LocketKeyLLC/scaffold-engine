@@ -164,5 +164,5 @@ async def test_goto_and_step_back_both_record_a_durable_turn():
     goto_src = inspect.getsource(assist_router.assist_goto_step)
     back_src = inspect.getsource(assist_router.assist_step_back)
     for src in (goto_src, back_src):
-        assert "ingest_turn" in src
+        assert "capture_assistant_reply" in src  # §17.1137 — the one assistant-row writer
         assert 'kind="track"' in src

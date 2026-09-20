@@ -596,6 +596,14 @@ def _render_memory_or_legacy(
     return out
 
 
+
+#: §17.1137 (ledger D-9) — the public name for the memory decision point. Any
+#: prompt that wants "the operator's system" must ask THIS, never
+#: ``render_environment_block`` directly: that legacy renderer carries none of
+#: the system state / tool lacks / file writes that ``render_session_memory``
+#: is the single injection path for (§17.751/913/1083). Gated statically.
+memory_prompt_parts = _render_memory_or_legacy
+
 def render_conversation_block(
     history: list[dict] | None, *, max_chars: int = 4000,
 ) -> str:
