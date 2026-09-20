@@ -9,6 +9,7 @@ import {
   loading,
   errorPanel,
   assistSessionFromActions,
+  nextActionChips,
   makeClickable,
 } from "../components.js";
 
@@ -73,6 +74,8 @@ function workCard(job) {
       el("span", { class: "faint", text: timeAgo(job.updated_at) })
     ),
     el("div", { class: "work-title", text: job.title || "(untitled)" }),
+    // §17.1134 — the server's next_actions as chips (ledger D-6: 0 of 17 rendered)
+    nextActionChips(job.next_actions, { jobId: job.id, limit: 2 }),
     el(
       "div",
       { class: "row row-wrap work-foot" },

@@ -3161,11 +3161,8 @@ class Pipeline:
         reads as broken in /here·/next. Those degrade to "—" → the user opens
         `/results` for node detail.
         """
-        for a in (actions or []):
-            if not isinstance(a, dict):
-                continue
-            if a.get("action") == "wait":
-                continue
+        # §17.1134 — the ONE noise filter (vendored SDK helper), not an inline copy
+        for a in _next_actions.filter_renderable(actions or []):
             cmd = a.get("command")
             if cmd and "{" not in cmd:
                 return f"`{cmd}`"
@@ -5648,9 +5645,7 @@ class Pipeline:
             if actionable:
                 lines.append("")
                 lines.append("**Next steps:**")
-                for a in (actionable.get("next_actions") or [])[:2]:
-                    if a.get("action") == "wait":
-                        continue
+                for a in _next_actions.filter_renderable(actionable.get("next_actions") or [])[:2]:  # §17.1134
                     cmd = a.get("command")
                     desc = a.get("description", "")
                     if cmd:

@@ -6,7 +6,7 @@
 import * as api from "../api.js";
 import { jobStore } from "../store.js";
 import { el, mount, shortId, mdToHtml, fmtNum } from "../util.js";
-import { statusBadge, loading, errorPanel, makeClickable } from "../components.js";
+import { statusBadge, loading, errorPanel, makeClickable, nextActionChips } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
 import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
 import { toast } from "../components.js";
@@ -138,9 +138,11 @@ export function renderTheater(container, jobId, ctx = {}) {
   mount(container, header, flowSlot, progressBar, grid);
 
   let lastJobStatus = null; // §17.818 — compare payload state, not DOM text
-  function setStatusPill(status) {
+  function setStatusPill(status, actions) {
     lastJobStatus = status;
-    mount(statusPill, statusBadge(status));
+    // §17.1134 — /exec/status carries next_actions (retry/skip/resume …); render them
+    // beside the pill instead of leaving the recovery vocabulary on the wire (ledger D-6)
+    mount(statusPill, statusBadge(status), nextActionChips(actions, { jobId, limit: 3 }));
   }
 
   // §17.1007 — call the operator back when a run ends while they are looking
@@ -262,7 +264,7 @@ export function renderTheater(container, jobId, ctx = {}) {
     try {
       const data = await api.get(`/exec/status/${jobId}`);
       if (disposed) return;
-      setStatusPill(data.job_status);
+      setStatusPill(data.job_status, data.next_actions);
       nodeState.clear();
       // §17.1007 — `failure_reason` has been in this exact payload since
       // §17.450 (execution_handler.py:153, from dag_nodes.last_verification_reason)
@@ -450,7 +452,7 @@ export function renderTheater(container, jobId, ctx = {}) {
     // autonomous run finished under a header that still said "running".
     api.get(`/exec/status/${jobId}`).then((d) => {
       if (disposed) return;
-      setStatusPill(d.job_status);
+      setStatusPill(d.job_status, d.next_actions);
       window.dispatchEvent(new CustomEvent("scaffold:job-status", { detail: { jobId, status: d.job_status } }));
     }).catch(() => {});
     // §17.1007 — and the flow guide with it: it was rendered once at mount, so
