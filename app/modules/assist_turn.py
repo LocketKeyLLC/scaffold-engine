@@ -358,11 +358,15 @@ async def run_turn(
         if rounds >= _rl.MAX_AUTO_ROUNDS:
             break
         record = None
+        diverted = False
         async for e in _auto_lookup(session_id, tail.text(), db):
             if e[0] == "_record":
-                record = e[1]["text"]
+                record, diverted = e[1].get("text"), bool(e[1].get("diverted"))
             else:
                 yield e
+        if diverted:
+            handled["v"] = handled["v"] + "+helper_refresh"
+            break
         if not record:
             break
         msg, cmd, rounds = record, "message", rounds + 1
@@ -391,6 +395,27 @@ async def _auto_lookup(session_id: str, reply_text: str, db) -> AsyncIterator[_E
         logger.warning("runner_lookup_spec_failed sid=%s err=%r", session_id, exc)
         return
     if spec is None:
+        return
+    # §17.1151 — an older helper refuses forms the engine allows; a look-up
+    # through it feeds the model refusals. The refresh is a plan step: insert
+    # (or find) it, guide it, and end this turn there.
+    try:
+        from app.modules import engine_setup as _es
+        _refresh = await _es.ensure_helper_refresh_step(db, session_id, None)
+    except Exception as exc:
+        logger.warning("helper_refresh_check_failed sid=%s err=%r", session_id, exc)
+        _refresh = None
+    if _refresh:
+        yield _ev(ASSIST_TURN_STATUS, {"text": _refresh["note"]})
+        try:
+            from app.modules import assist_agent as _aa
+            await _aa.capture_assistant_reply(session_id=session_id, node_key=_refresh["node_key"], kind="note",
+                                              content=_refresh["note"], db=db)
+        except Exception:
+            logger.warning("helper_refresh_note_capture_failed sid=%s", session_id)
+        async for e in _claim_and_guide(session_id, _refresh["node_key"], [], db, orient=False):
+            yield e
+        yield ("_record", {"text": None, "diverted": True})
         return
     yield _ev(ASSIST_TURN_STATUS, {"text": f"🔁 Your local runner is connected — running that read-only look-up myself through {spec.name}…"})
     q: asyncio.Queue = asyncio.Queue()

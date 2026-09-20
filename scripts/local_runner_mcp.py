@@ -54,6 +54,12 @@ import time
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("local-runner")
 
+# §17.1151 — bump when the read-only gate changes. The engine compares this
+# with the copy it ships (the tool description carries it) and, when the
+# helper on the target is older, walks the operator through a one-paste
+# refresh instead of feeding itself refusals it cannot act on.
+HELPER_VERSION = "3"
+
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
 _MUTATION = re.compile(
@@ -123,12 +129,62 @@ def read_form(argv) -> bool:
     return False
 
 
+def split_segments(cmd: str) -> list[str]:
+    """§17.1151 — split on `||`, `&&`, `;`, `|` OUTSIDE quotes. The naive split
+    broke `grep -E 'net0|hostpci'` into an unbalanced quote → "unparsable"
+    (live, three refusals in a row on the operator's step)."""
+    out: list[str] = []
+    buf: list[str] = []
+    q: str | None = None
+    i = 0
+    while i < len(cmd):
+        ch = cmd[i]
+        if q:
+            buf.append(ch)
+            if ch == "\\" and q == '"' and i + 1 < len(cmd):
+                buf.append(cmd[i + 1]); i += 2; continue
+            if ch == q:
+                q = None
+        elif ch in ("'", '"'):
+            q = ch; buf.append(ch)
+        elif ch == "\\" and i + 1 < len(cmd):
+            buf.append(ch); buf.append(cmd[i + 1]); i += 2; continue
+        elif cmd.startswith(("||", "&&"), i):
+            out.append("".join(buf)); buf = []; i += 2; continue
+        elif ch in (";", "|"):
+            out.append("".join(buf)); buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    out.append("".join(buf))
+    return [o for o in out if o.strip()]
+
+
+_SSH_FLAGS_WITH_ARG = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-W", "-b", "-c", "-e", "-I", "-m", "-O", "-Q", "-S", "-w", "-E", "-B"}
+
+
+def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
+    """``ssh [opts] [user@]host <remote command>``: the remote command must pass
+    the same gate; no remote command (an interactive login) is refused."""
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in _SSH_FLAGS_WITH_ARG else 1
+    if i >= len(argv):
+        return False, "ssh without a host"
+    remote = " ".join(argv[i + 1:]).strip()
+    if not remote:
+        return False, "interactive ssh"
+    res = judge(remote)
+    ok = res[0] if isinstance(res, tuple) else bool(res)
+    return (True, "") if ok else (False, "ssh remote command writes")
+
+
 def read_only(cmd: str) -> tuple[bool, str]:
     if not cmd.strip() or "$(" in cmd or "`" in cmd or "<<" in cmd:
         return False, "substitution/heredoc"
     if re.search(r"(?<![<>])>(?!\s*/dev/null|&\d)", cmd) or re.search(r">>", cmd):
         return False, "redirect"
-    for segment in re.split(r"\|\||&&|;|\|", cmd):
+    for segment in split_segments(cmd):
         try:
             argv = shlex.split(segment.strip())
         except ValueError:
@@ -138,6 +194,11 @@ def read_only(cmd: str) -> tuple[bool, str]:
         head = argv[0].rsplit("/", 1)[-1]
         if head == "sudo" and len(argv) > 1:
             argv = argv[1:]; head = argv[0].rsplit("/", 1)[-1]
+        if head == "ssh":         # §17.1151 — a remote command is judged like a local one; interactive ssh is refused
+            ok, why = ssh_remote_read_only(argv, read_only)
+            if not ok:
+                return False, why
+            continue
         if read_form(argv):       # §17.1150 — the same READ shapes the engine allows
             continue
         if head in _INTERPRETERS and segment is not None and cmd.find(segment) > 0 and "|" in cmd[:cmd.find(segment)]:
@@ -182,9 +243,9 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None):
     mcp = MCPServer("scaffold-local-runner")
     allow = list(sudo_allow or [])
 
-    @mcp.tool()
+    @mcp.tool(description=f"Run ONE read-only shell command on this machine and return its output. "
+                          f"Refuses anything that writes. (helper v{HELPER_VERSION})")
     async def run_readonly(command: str, timeout_s: int = 20) -> str:
-        """Run ONE read-only shell command on this machine and return its output. Refuses anything that writes."""
         ok, why = read_only(command)
         if not ok:
             log.warning("REFUSED (%s): %s", why, command)

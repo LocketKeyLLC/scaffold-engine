@@ -222,3 +222,41 @@ def test_read_form_table_is_identical_at_both_ends():
     mod = _load_runner_script()
     assert mod._READ_FORMS == sc._READ_FORMS
     assert inspect.getsource(mod.read_form) == inspect.getsource(sc.read_form)
+
+
+# ---------------------------------------------------------------------------
+# §17.1151 — quoted pipes parse, ssh remote commands are judged, the helper is versioned.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cmd", ["qm config 110 | grep -E 'net0|hostpci|boot'", "echo 'a;b' | grep b", "grep -E \"a|b\" /etc/hosts",
+                                 "ssh aedefruscio@192.168.1.127 nvidia-smi", "ssh -p 2222 root@h 'cat /etc/os-release' | head -2"])
+def test_quoted_separators_and_read_only_ssh_pass_both_gates(cmd):
+    from app.modules.assist_state_check import read_only_command
+    assert _load_runner_script().read_only(cmd) == (True, ""), cmd
+    assert read_only_command(cmd), cmd
+
+
+@pytest.mark.parametrize("cmd", ["ssh aedefruscio@192.168.1.127", "ssh -p 2222 root@h 'rm -rf /x'", "ssh root@h systemctl restart nginx",
+                                 "ssh root@h 'cat /a' > /tmp/out"])
+def test_interactive_or_writing_ssh_is_refused_at_both_gates(cmd):
+    from app.modules.assist_state_check import read_only_command
+    assert _load_runner_script().read_only(cmd)[0] is False, cmd
+    assert not read_only_command(cmd), cmd
+
+
+def test_split_segments_respects_quotes():
+    mod = _load_runner_script()
+    assert mod.split_segments("a | b; c && d || e") == ["a ", " b", " c ", " d ", " e"]
+    assert mod.split_segments("grep -E 'x|y' f | wc -l") == ["grep -E 'x|y' f ", " wc -l"]
+    assert mod.split_segments('echo "a;b"; ls') == ['echo "a;b"', " ls"]
+
+
+def test_helper_is_versioned_and_the_engine_ships_the_same_number():
+    import re
+    from app.modules import engine_setup as es
+    mod = _load_runner_script()
+    assert re.fullmatch(r"\d+", mod.HELPER_VERSION)
+    es._EXPECTED_HELPER_VERSION = None
+    assert es.expected_helper_version() == mod.HELPER_VERSION
+    src = (ROOT / "scripts" / "local_runner_mcp.py").read_text()
+    assert "(helper v{HELPER_VERSION})" in src and "@mcp.tool(description=" in src   # the version rides the tool description
