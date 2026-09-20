@@ -128,7 +128,7 @@ RECIPES: tuple[Recipe, ...] = (
             ("Install the engine's local runner helper on {target_host}",
              "On {target_host} ({target_user}@{target_host}, this same shell): download the helper from the engine and run it as a "
              "service on port {runner_port} with the token the engine already generated for it.\n"
-             "curl -fsSL -o /root/local_runner_mcp.py {engine_url}/setup/runner/local_runner_mcp.py\n"
+             "curl -fsSL -o /root/local_runner_mcp.py {script_url}\n"
              "python3 -m venv /root/runner-venv && /root/runner-venv/bin/pip install -q \"mcp>=2.0\" uvicorn starlette\n"
              "Then create /etc/systemd/system/local-runner-mcp.service with ExecStart=/root/runner-venv/bin/python "
              "/root/local_runner_mcp.py --host 0.0.0.0 --port {runner_port} --token {token} (Restart=on-failure, "
@@ -474,7 +474,12 @@ _UNKNOWN = {
     "target_ip": "<the target machine's IP>", "target_host": "the target machine", "target_user": "<the login user>",
     "engine_url": "http://<the engine host's IP>:8000", "token": "<the token the engine generated>",
     "runner_name": RUNNER_NAME, "runner_port": str(RUNNER_PORT),
+    "script_url": "",   # filled by recipe_context: the engine's own route when it is LAN-reachable, else the public repo
 }
+# Where the target fetches the helper when the engine is not reachable from it (this
+# host binds the API to 127.0.0.1 — the browser's requests arrive as localhost, so the
+# engine's own URL is unknown to the target). The repo is public; `main` carries the script.
+RUNNER_SCRIPT_FALLBACK_URL = "https://raw.githubusercontent.com/LocketKeyLLC/scaffold-engine/main/scripts/local_runner_mcp.py"
 
 
 def _url_is_local(url: str) -> bool:
@@ -531,6 +536,8 @@ async def recipe_context(db, session_id: str) -> dict:
             ctx["engine_url"] = url
     except Exception as exc:
         logger.warning("recipe_context_failed sid=%s err=%r", session_id, exc)
+    ctx["script_url"] = (f"{ctx['engine_url']}/setup/runner/local_runner_mcp.py" if known(ctx, "engine_url")
+                         else RUNNER_SCRIPT_FALLBACK_URL)
     return ctx
 
 
@@ -570,6 +577,9 @@ def recipe_steps(recipe: Recipe, *, with_prerequisites: bool = True, ctx: Option
     it already carries this recipe."""
     out: list[dict] = []
     values = {**_UNKNOWN, **(ctx or {})}
+    if not values.get("script_url"):
+        values["script_url"] = (f"{values['engine_url']}/setup/runner/local_runner_mcp.py"
+                                if known(values, "engine_url") else RUNNER_SCRIPT_FALLBACK_URL)
     chain = list(recipe.requires) if with_prerequisites else []
     for rid in chain + [recipe.id]:
         r = BY_ID[rid]
