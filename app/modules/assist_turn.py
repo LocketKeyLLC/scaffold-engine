@@ -696,6 +696,7 @@ async def _run_turn_inner(
     if confident and action == "submit":
         done = False
         blocked_reason = None
+        recipe_blocked = False
         elsewhere = False   # §17.1101 — the paste completed other pending step(s)
         async for e in _submit(session_id, d, text_, nk, history, db):
             if e[0] == ASSIST_STEP_OUTCOME:
@@ -706,6 +707,8 @@ async def _run_turn_inner(
                 elif e[1].get("status") in ("step_incomplete", "verification_failed",
                                             "step_unverified"):  # §17.1016
                     blocked_reason = e[1].get("verify_reason") or "the step's goal isn't met yet"
+                    if e[1].get("recipe"):
+                        recipe_blocked = True   # §17.1148 — answered by the recipe already
             yield e
         if done:
             await _clear_completion_confirm(session_id, db)
@@ -717,6 +720,14 @@ async def _run_turn_inner(
             # in focus so the operator continues where they were.
             async for e in _claim_and_guide(session_id, nk, history, db, orient=True):
                 yield e
+        elif recipe_blocked:
+            # §17.1148 — the engine itself established the step is not done
+            # (it re-probed the runner / read the installer's verdict) and has
+            # already said what to run and paste. No "reply confirm" offer —
+            # the engine is not guessing — and no model fix flow over a
+            # deterministic diagnosis. ⏩ Skip remains the operator's override.
+            handled["v"] = "submit_recipe_blocked"
+            return
         elif blocked_reason is not None:
             # §17.951 — OFFER the operator the commit on their word.
             # §17.890 already honours a BARE claim, but the common real
@@ -1425,12 +1436,25 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
             })
             await assist_next(session_id, db=db)
             res = await _try_submit()
+        _sv = (res or {}).get("success_verdict") or {}
         yield _ev(ASSIST_STEP_OUTCOME, {
             "node_key": nk, "status": (res or {}).get("status") or "recorded",
             # §17.884 — the verifier's reason rides the outcome frame so the
             # dispatch can CONTINUE a blocked submit instead of dead-ending.
-            "verify_reason": (((res or {}).get("success_verdict") or {}).get("reason") or ""),
+            "verify_reason": (_sv.get("reason") or ""),
+            "recipe": _sv.get("recipe") or "",   # §17.1148 — the ENGINE established this verdict
         })
+        if _sv.get("recipe") and (res or {}).get("status") in ("step_incomplete", "verification_failed"):
+            # §17.1148 — the reason IS the troubleshooting (what the engine
+            # checked, the block to paste on the target); say it durably.
+            _rtxt = f"⚠ Not done yet — {_sv.get('reason') or _sv.get('summary') or ''}"
+            yield _ev(ASSIST_ANSWER, {"kind": "verify", "text": _rtxt})
+            try:
+                from app.modules import assist_agent as _aa
+                await _aa.capture_assistant_reply(
+                    session_id=session_id, node_key=nk, kind="verify", content=_rtxt, db=db)
+            except Exception:
+                logger.warning("recipe_verify_capture_failed sid=%s", session_id)
         # §17.1101 — the paste completed OTHER pending step(s) (the cursor had
         # drifted). Say which, durably, and let the branch re-guide this step.
         if (res or {}).get("status") == "committed_elsewhere":

@@ -314,7 +314,8 @@ def test_every_recipe_carries_plan_steps_that_carry_the_facts():
     assert len(steps) == len(es.BY_ID["local_runner"].steps) + len(es.BY_ID["runner_sudo"].steps)
     assert steps[0]["title"].startswith(es.BY_ID["local_runner"].steps[0][0].split("{")[0])
     assert all(f"{es.RECIPE_STEP_MARK} " in st["description"] for st in steps)
-    assert steps[-1]["description"].endswith(f"runner_sudo v{es.recipe_version(es.BY_ID['runner_sudo'])}_")
+    assert steps[-1]["description"].endswith(f"runner_sudo v{es.recipe_version(es.BY_ID['runner_sudo'])} #2_")
+    assert [es.recipe_step_index(st["description"]) for st in steps] == [0, 1, 0, 1, 2]
 
 
 def test_steps_are_filled_in_from_what_the_engine_knows_and_placeholders_stay_honest():
@@ -547,49 +548,140 @@ async def test_the_verify_step_is_checked_by_the_engine_hit_and_miss(monkeypatch
     assert es.PROBE_MARK in desc
     base = es.BY_ID["local_runner"]
     try:
-        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value=(True, "reached http://192.168.1.156:8790/mcp/ as 'pve-runner' and found its run_readonly tool")))
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value={"ok": True, "class": "ok", "repair": "", "detail": "reached http://192.168.1.156:8790/mcp/ as 'pve-runner' and found its run_readonly tool"}))
         hit = await es.render_recipe_guide(desc, db=None)
         assert hit["text"].startswith("## ✅ The engine reached your runner") and "press **✓ Done" in hit["text"]
-        assert hit["meta"]["probe"] == {"ok": True, "detail": "reached http://192.168.1.156:8790/mcp/ as 'pve-runner' and found its run_readonly tool"}
+        assert hit["meta"]["probe"] == {"ok": True, "class": "ok", "detail": "reached http://192.168.1.156:8790/mcp/ as 'pve-runner' and found its run_readonly tool"}
         assert "```" not in hit["text"] and "<" not in hit["text"]
-        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value=(False, "http://192.168.1.156:8790/mcp/ did not answer within 8 s")))
+        # §17.1148 — a miss renders the engine's own diagnosis + the block to paste, not a shrug
+        diag = {"class": "port_filtered", "detail": "192.168.1.156 is reachable from the engine host (it answers on port 22, 8006) but port 8790 times out — the port is being dropped by a firewall on that host.",
+                "checks": {"host": "192.168.1.156", "port": 8790}}
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value={"ok": False, "class": "port_filtered", "detail": diag["detail"], "repair": es.runner_repair_block(diag)}))
         miss = await es.render_recipe_guide(desc, db=None)
         assert miss["text"].startswith("## ❌ The engine could not reach the runner yet")
-        assert "journalctl -u local-runner-mcp -n 20 --no-pager" in miss["text"] and "Guide me" in miss["text"]
-        assert miss["meta"]["probe"]["ok"] is False and "✓ Done" not in miss["text"]
+        assert "What I checked from the engine host" in miss["text"] and "pvesh create /nodes/$(hostname)/firewall/rules" in miss["text"]
+        assert "--dport 8790 --source 192.168.1.0/24" in miss["text"] and "Paste what it printed here" in miss["text"]
+        assert miss["meta"]["probe"]["class"] == "port_filtered" and "✓ Done" not in miss["text"]
     finally:
         es.BY_ID["local_runner"] = base
 
 
-async def test_probe_local_runner_reads_the_registry_and_is_time_bounded(monkeypatch):
+async def test_probe_local_runner_reads_the_registry_and_diagnoses_the_path(monkeypatch):
+    """§17.1148 — live: the install printed OK on pve, the engine's probe said
+    'did not answer' and STOPPED. The engine can establish on its own whether
+    the host is up (22/8006), whether the port is refused (service down) or
+    dropped (firewall), and whether the token matches — and say what to do."""
     import asyncio
     from app.modules import assist_local_runner as lr, mcp_client
     spec = MagicMock(); spec.name = "pve-runner"; spec.endpoint = "http://192.168.1.156:8790/mcp/"; spec.command = None
+    db = MagicMock(); db.execute = AsyncMock(return_value=MagicMock(mappings=lambda: MagicMock(first=lambda: None)))
     monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=None))
-    ok, why = await es.probe_local_runner(MagicMock())
-    assert ok is False and "no runner is registered" in why
+    pr = await es.probe_local_runner(db)
+    assert pr["ok"] is False and pr["class"] == "unregistered" and "no runner is registered" in pr["detail"]
     monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
+    tcp = {}
+    async def _tcp(host, port): return tcp.get(port, "open")
+    monkeypatch.setattr(es, "_tcp", _tcp)
+    # hit
     monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "run_readonly"}]))
-    ok, why = await es.probe_local_runner(MagicMock())
-    assert ok is True and "run_readonly" in why and "pve-runner" in why
+    pr = await es.probe_local_runner(db)
+    assert pr["ok"] is True and pr["class"] == "ok" and "run_readonly" in pr["detail"] and pr["repair"] == ""
     assert mcp_client.list_tools.await_args.kwargs == {"use_cache": False}     # never a cached answer
+    # filtered: host answers on 22/8006, runner port times out → the firewall rule, scoped to the target's /24
+    tcp.update({8790: "timeout", 22: "open", 8006: "open"})
+    pr = await es.probe_local_runner(db)
+    assert pr["class"] == "port_filtered" and "answers on port 22, 8006" in pr["detail"]
+    assert "pve-firewall status" in pr["repair"] and "--dport 8790 --source 192.168.1.0/24" in pr["repair"]
+    # …scoped to the engine's own address when a session learned it
+    assert "--source 192.168.1.43 " in es.runner_repair_block(await es.diagnose_runner_path(spec), engine_ip="192.168.1.43")
+    # refused: service not listening → systemctl/journalctl to paste
+    tcp.update({8790: "refused"})
+    pr = await es.probe_local_runner(db)
+    assert pr["class"] == "port_closed" and "journalctl -u local-runner-mcp" in pr["repair"]
+    # host down: nothing answers anywhere → address/host check
+    tcp.update({8790: "timeout", 22: "timeout", 8006: "timeout"})
+    pr = await es.probe_local_runner(db)
+    assert pr["class"] == "host_down" and "ip -4 -brief addr" in pr["repair"] and "192.168.1.156" in pr["repair"]
+    # token mismatch
+    tcp.clear()
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("HTTP 401 Unauthorized")))
+    pr = await es.probe_local_runner(db)
+    assert pr["class"] == "token" and "Re-run the install line" in pr["repair"]
+    # not the runner
     monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "other"}]))
-    ok, why = await es.probe_local_runner(MagicMock())
-    assert ok is False and "not the local runner helper" in why
+    pr = await es.probe_local_runner(db)
+    assert pr["class"] == "not_runner" and "not the local runner helper" in pr["detail"]
+    # handshake hang is bounded
     async def _hang(*a, **k): await asyncio.sleep(30)
     monkeypatch.setattr(mcp_client, "list_tools", _hang); monkeypatch.setattr(es, "PROBE_TIMEOUT_S", 0.05)
-    ok, why = await es.probe_local_runner(MagicMock())
-    assert ok is False and "did not answer" in why
-    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("connection refused")))
-    ok, why = await es.probe_local_runner(MagicMock())
-    assert ok is False and "refused the connection" in why and "8790" in why
-    # §17.1147b — live: the SDK's ConnectTimeout carries an EMPTY message; the operator gets words, not a class name
-    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("mcp server 'pve-runner': list_tools failed: ConnectTimeout: ")))
-    ok, why = await es.probe_local_runner(MagicMock())
-    assert ok is False and "nothing answered at http://192.168.1.156:8790/mcp/" in why and "ConnectTimeout" not in why
-    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("HTTP 401 Unauthorized")))
-    ok, why = await es.probe_local_runner(MagicMock())
-    assert ok is False and "different --token" in why
+    pr = await es.probe_local_runner(db)
+    assert pr["class"] == "unknown" and "did not finish" in pr["detail"]
+    # every failing class carries a fenced block to paste (or an explicit re-run) — never a bare shrug
+    for cls in ("port_filtered", "port_closed", "host_down", "token", "not_runner", "unknown"):
+        blk = es.runner_repair_block({"class": cls, "detail": "d", "checks": {"host": "10.0.0.5", "port": 8790}})
+        assert "What I checked from the engine host" in blk and ("```bash" in blk or "Re-run" in blk or "ss -tlnp" in blk), cls
+
+
+def test_install_output_is_read_by_the_engine_not_the_model():
+    ok = "root@pve:~# curl … && python3 /tmp/local_runner_mcp.py --install --port 8790 --token t\n[1/4] helper copied\n[2/4] venv created\n[3/4] service written\n[4/4] port 8790 answers (HTTP 400)\nOK: local runner active on 0.0.0.0:8790/mcp/ (service local-runner-mcp); the engine can now run its read-only checks here."
+    assert es.check_install_output(ok)["outcome"] == "success"
+    partial = "\n".join(ok.splitlines()[:3])
+    v = es.check_install_output(partial)
+    assert v["outcome"] == "incomplete" and "paste stopped early" in v["reason"] and "[1/4]" in v["reason"]
+    v = es.check_install_output("[1/4] helper copied\nFAILED: nothing answered on port 8790 (refused).\nSep 20 journal line")
+    assert v["outcome"] == "failed" and "FAILED: nothing answered" in v["reason"] and "journal line" in v["reason"]
+    assert es.check_install_output("I did it, it's running") is None      # prose → the ordinary verifier
+
+
+async def test_verify_recipe_submit_reprobes_the_verify_step_and_reads_the_install_step(monkeypatch):
+    import dataclasses
+    ctx = {"target_ip": "192.168.1.156", "target_host": "pve", "target_user": "root", "token": "abc123"}
+    steps = es.recipe_steps(es.BY_ID["local_runner"], ctx=ctx)
+    base = es.BY_ID["local_runner"]
+    def _db(desc):
+        db = MagicMock(); db.execute = AsyncMock(return_value=MagicMock(scalar=lambda: desc)); return db
+    try:
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value={"ok": False, "class": "port_filtered", "detail": "8790 times out", "repair": "**What I checked from the engine host:** … ```bash\npve-firewall status\n```"}))
+        v = await es.verify_recipe_submit(db=_db(steps[1]["description"]), session_id="s", node_key="ADD77", evidence="pve-firewall status: enabled")
+        assert v["outcome"] == "incomplete" and v["recipe"] == "local_runner" and v["probe_class"] == "port_filtered"
+        assert "still cannot reach the runner" in v["reason"] and "pve-firewall status" in v["reason"]
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value={"ok": True, "class": "ok", "detail": "reached it", "repair": ""}))
+        v = await es.verify_recipe_submit(db=_db(steps[1]["description"]), session_id="s", node_key="ADD77", evidence="anything")
+        assert v["outcome"] == "success" and v["recipe"] == "local_runner"
+    finally:
+        es.BY_ID["local_runner"] = base
+    v = await es.verify_recipe_submit(db=_db(steps[0]["description"]), session_id="s", node_key="ADD76", evidence="[1/4] copied\n[2/4] venv")
+    assert v["outcome"] == "incomplete" and v["recipe"] == "local_runner"
+    v = await es.verify_recipe_submit(db=_db(steps[0]["description"]), session_id="s", node_key="ADD76", evidence="…\nOK: local runner active on 0.0.0.0:8790/mcp/")
+    assert v["outcome"] == "success"
+    assert await es.verify_recipe_submit(db=_db(steps[0]["description"]), session_id="s", node_key="ADD76", evidence="done") is None
+    assert await es.verify_recipe_submit(db=_db("Install nginx"), session_id="s", node_key="T1", evidence="OK: local runner active") is None
+    # the live ADD77 marker (stamped before the #index) is still a probe step
+    old = steps[1]["description"].replace(" #1_", "_")
+    assert es.recipe_step_index(old) is None and es.recipe_of_node(old) is not None
+
+
+def test_submit_endpoint_and_turn_loop_let_the_recipe_verify_its_own_steps():
+    """The recipe verdict runs BEFORE the model verifier and is not overridden
+    by a completion claim; the verifier also judges a pointer-pending step
+    (live: ADD76 committed with NO verification); a recipe-blocked submit shows
+    the engine's diagnosis and ends — no 'reply confirm' offer, no model fix."""
+    import inspect
+    from app.routers import assist as r
+    from app.modules import assist_agent, assist_turn
+    src = inspect.getsource(r.assist_submit)
+    assert src.index("verify_recipe_submit(") < src.index("verify_submit_outcome(")
+    assert 'elif _recipe_verdict is not None:' in src and src.index("elif _recipe_verdict is not None:") < src.index("settings.assist_verify_on_submit:")
+    blk = src.split("elif _recipe_verdict is not None:")[1].split("elif body.action")[0]
+    assert '{"incomplete": "step_incomplete", "failed": "verification_failed"}[verdict["outcome"]]' in blk
+    assert "looks_like_completion_claim" not in blk and "operator_affirmed" not in blk
+    vsrc = inspect.getsource(assist_agent.verify_submit_outcome)
+    assert 'row["status"] == "pending" and row.get("current_node_key") == node_key' in vsrc and "ss.current_node_key" in vsrc
+    tsrc = inspect.getsource(assist_turn._submit)
+    assert '"recipe": _sv.get("recipe")' in tsrc and 'kind="verify"' in tsrc
+    rsrc = inspect.getsource(assist_turn._run_turn_inner)
+    assert rsrc.index("elif recipe_blocked:") < rsrc.index("elif blocked_reason is not None:")
+    assert 'handled["v"] = "submit_recipe_blocked"' in rsrc
 
 
 async def test_both_guide_paths_short_circuit_on_a_recipe_step(monkeypatch):
