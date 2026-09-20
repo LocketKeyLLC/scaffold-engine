@@ -562,6 +562,7 @@ async def test_the_verify_step_is_checked_by_the_engine_hit_and_miss(monkeypatch
         assert "What I checked from the engine host" in miss["text"] and "pvesh create /nodes/$(hostname)/firewall/rules" in miss["text"]
         assert "--dport 8790 --source 192.168.1.0/24" in miss["text"] and "Paste what it printed here" in miss["text"]
         assert miss["meta"]["probe"]["class"] == "port_filtered" and "✓ Done" not in miss["text"]
+        assert "Nothing to type" not in miss["text"]      # §17.1148b — a ❌ never says "nothing to type"
     finally:
         es.BY_ID["local_runner"] = base
 
