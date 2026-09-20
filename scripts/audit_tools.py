@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
               f"{s.get('errorCount', '?')} errors / {s.get('warningCount', '?')} warnings across {s.get('filesAnalyzed', '?')} files — not enforced",
               [f"- {k}: {v}" for k, v in top] + [f"- {d['file'].replace(str(ROOT)+'/', '')}:{d['range']['start']['line']+1} {d.get('rule')} — {d['message'][:110]}"
                                                   for d in [x for x in diags if x.get('severity') == 'error'][:25]])
-    except Exception:  # noqa: BLE001
+    except Exception:
         r.add("pyright (whole app, basic)", "n/a", out.strip().splitlines()[-1] if out.strip() else "no output")
 
     # ── ast-grep ──
@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         for h in warns: by[h["ruleId"]] = by.get(h["ruleId"], 0) + 1
         r.add("ast-grep rules", "ok" if not errs else "FINDINGS", f"{len(errs)} error(s), {len(warns)} advisory warning(s)",
               [f"- {k}: {v}" for k, v in by.items()] + [f"- {h['file']}:{h['range']['start']['line']+1} {h['ruleId']}" for h in warns[:30]])
-    except Exception:  # noqa: BLE001
+    except Exception:
         r.add("ast-grep rules", "n/a", out.strip()[:120])
 
     # ── import-linter ──
@@ -148,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
             for x in res: by[x["check_id"].rsplit(".", 1)[-1]] = by.get(x["check_id"].rsplit(".", 1)[-1], 0) + 1
             r.add("semgrep (p/python + p/security-audit)", "advisory" if res else "ok", f"{len(res)} finding(s)",
                   [f"- {k}: {v}" for k, v in by.items()] + [f"- {x['path']}:{x['start']['line']} {x['check_id'].rsplit('.',1)[-1]}" for x in res[:25]])
-        except Exception:  # noqa: BLE001
+        except Exception:
             r.add("semgrep", "n/a", out.strip().splitlines()[-1][:120] if out.strip() else "no output")
         # ── trivy (image) ──
         tag = os.environ.get("SCAFFOLD_IMAGE_TAG", "local")
@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             top = sorted(pkgs.items(), key=lambda x: -x[1])[:12]
             r.add(f"trivy (scaffold-engine:{tag})", "advisory", f"{tot.get('CRITICAL',0)} critical, {tot.get('HIGH',0)} high; {fixable} with a fixed version",
                   [f"- {k}: {v}" for k, v in top])
-        except Exception:  # noqa: BLE001
+        except Exception:
             r.add("trivy", "n/a", out.strip().splitlines()[-1][:120] if out.strip() else "no output")
         # ── dive ──
         rc, out = sh(["dive", f"scaffold-engine:{tag}"], env={"CI": "true"}, timeout=600)

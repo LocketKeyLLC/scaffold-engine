@@ -108,7 +108,7 @@ async def _append_frames(run_id: str, frames: list[_Event], db,
             {"rid": run_id, "f": payload},
         )
         await db.commit()
-    except Exception:  # noqa: BLE001 — §17.888(#14) chokepoint: a fail-soft
+    except Exception:
         # somewhere upstream may have poisoned the shared transaction
         # (InFailedSQLTransactionError); one rollback + retry saves the frame —
         # and with it the generated answer — instead of erroring the whole run.
@@ -135,7 +135,7 @@ async def _append_note_detached(run_id: str, text_value: str) -> None:
                 {"rid": run_id, "f": payload},
             )
             await db.commit()
-    except Exception as exc:  # noqa: BLE001 — a note must never break the turn
+    except Exception as exc:
         logger.warning("turn_note_append_failed run_id=%s err=%r", run_id, exc)
 
 
@@ -168,7 +168,7 @@ async def _drive_turn_run(
             )).scalar()
         if _jid:
             _job_token = current_job_id.set(str(_jid))
-    except Exception as exc:  # noqa: BLE001 — attribution is best-effort
+    except Exception as exc:
         logger.debug("assist_turn_job_attribution_failed sid=%s err=%r", session_id, exc)
     # §17.1082 — deep code (the model router's retry loop) can say one line to
     # the operator's status line while this driver is blocked inside the loop.
@@ -200,13 +200,13 @@ async def _drive_turn_run(
                     buf, stamps, last_flush = [], [], now
             if buf:
                 await _append_frames(run_id, buf, db, stamps=stamps)
-    except Exception as exc:  # noqa: BLE001 — the run row carries the error
+    except Exception as exc:
         status = "error"
         logger.exception("turn_run_failed run_id=%s", run_id)
         try:
             async with async_session() as db:
                 await _append_frames(run_id, [("error", {"detail": str(exc)})], db)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     finally:
         reset_turn_note_sink(_sink_token)
@@ -226,7 +226,7 @@ async def _drive_turn_run(
                     {"rid": run_id, "st": status, "tm": _json.dumps(timings)},
                 )
                 await db.commit()
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("turn_run_finalize_failed run_id=%s", run_id)
 
 
@@ -354,501 +354,540 @@ async def _run_turn_inner(
 ) -> AsyncIterator[_Event]:
     from app.modules import assist_agent
 
-    if True:  # single indent block — keeps the dispatch ladder's early returns flat
-        if command == "verify_state":  # §17.1050 — the 🩺 button
-            # §17.1104 — reconcile the PENDING plan against confirmed facts +
-            # system map FIRST (complete already-done steps, propose dropping
-            # obsolete/duplicate ones), so the state check runs on a clean plan.
-            async for e in _reconcile_plan(session_id, node_key, db):
+    if command == "verify_state":  # §17.1050 — the 🩺 button
+        # §17.1104 — reconcile the PENDING plan against confirmed facts +
+        # system map FIRST (complete already-done steps, propose dropping
+        # obsolete/duplicate ones), so the state check runs on a clean plan.
+        async for e in _reconcile_plan(session_id, node_key, db):
+            yield e
+        async for e in _start_state_check(session_id, node_key, db):
+            yield e
+        handled["v"] = "verify_state"
+        return
+    if command == "guide":
+        # §17.950 — "Guide me" used to go STRAIGHT to claim-and-guide, with
+        # no notion of whether the step was already finished. So an operator
+        # who completed a step and pressed Guide me expecting to move on got
+        # the same walkthrough back, forever.
+        #
+        # It now reuses the message path's gates EXACTLY — no weaker: the
+        # operator's OWN most recent words on this step must carry a §17.891
+        # advancement signal, AND the tracker must independently judge the
+        # step done above the confidence threshold. A Guide press is not
+        # itself evidence of anything, so a step with no such message behind
+        # it re-guides exactly as before.
+        _adv_msg = await _recent_advance_message(session_id, node_key, db)
+        if _adv_msg:
+            async for e in _track_then_continue(
+                    session_id, _adv_msg, node_key, history, db):
                 yield e
+            handled["v"] = "guide_advanced"
+            return
+        async for e in _claim_and_guide(session_id, node_key, history, db,
+                                        orient=False):
+            yield e
+        handled["v"] = "guide"
+        return
+
+    text_ = (message or "").strip()
+    if not text_:
+        handled["v"] = "empty"
+        return  # the outer generator emits the single TURN_DONE frame
+
+    # 1. Unconditional capture (§17.710a) — fail-soft, never blocks.
+    yield _ev(ASSIST_TURN_STATUS, {"text": "Reading that…"})
+    try:
+        await assist_agent.ingest_turn(
+            session_id=session_id, role="operator", kind="message",
+            content=text_, node_key=node_key, db=db,
+        )
+    except Exception as exc:
+        logger.warning("turn_loop_capture_failed sid=%s err=%r", session_id, exc)
+
+    # 1a′. §17.1050 — a pending state check: the operator pasted the probe
+    # script's output (the `== id ==` markers attribute it), or asked for
+    # one by phrase. Anything else clears the pending check and continues.
+    try:
+        from app.modules import assist_state_check as _sc
+        if _sc.STATE_CHECK_PHRASE_RE.search(text_) and settings.assist_state_check_enabled:
             async for e in _start_state_check(session_id, node_key, db):
                 yield e
             handled["v"] = "verify_state"
             return
-        if command == "guide":
-            # §17.950 — "Guide me" used to go STRAIGHT to claim-and-guide, with
-            # no notion of whether the step was already finished. So an operator
-            # who completed a step and pressed Guide me expecting to move on got
-            # the same walkthrough back, forever.
-            #
-            # It now reuses the message path's gates EXACTLY — no weaker: the
-            # operator's OWN most recent words on this step must carry a §17.891
-            # advancement signal, AND the tracker must independently judge the
-            # step done above the confidence threshold. A Guide press is not
-            # itself evidence of anything, so a step with no such message behind
-            # it re-guides exactly as before.
-            _adv_msg = await _recent_advance_message(session_id, node_key, db)
-            if _adv_msg:
-                async for e in _track_then_continue(
-                        session_id, _adv_msg, node_key, history, db):
-                    yield e
-                handled["v"] = "guide_advanced"
-                return
-            async for e in _claim_and_guide(session_id, node_key, history, db,
-                                            orient=False):
+        _pending_sc = await _sc.get_pending_state_check(db=db, session_id=session_id)
+        if _pending_sc and _sc.looks_like_probe_output(text_):
+            async for e in _resolve_state_check(session_id, node_key, text_, history, db):
                 yield e
-            handled["v"] = "guide"
+            handled["v"] = "state_check_resolved"
             return
+        if _pending_sc and _sc.STATE_CHECK_SKIP_RE.search(text_):
+            # §17.1138 — "skip the rest": finish with what was answered so far
+            async for e in _resolve_state_check(session_id, node_key, "", history, db, finish=True):
+                yield e
+            handled["v"] = "state_check_finished"
+            return
+        if _pending_sc:
+            await _sc.clear_pending_state_check(db=db, session_id=session_id)
+    except Exception as exc:
+        logger.warning("state_check_route_failed sid=%s err=%r", session_id, exc)
 
-        text_ = (message or "").strip()
-        if not text_:
-            handled["v"] = "empty"
-            return  # the outer generator emits the single TURN_DONE frame
+    # 1b. §17.951 — resolve a pending completion confirmation.
+    #
+    # Runs BEFORE the decision layer on purpose: a bare "yes" or "confirm"
+    # carries no intent the classifier could route sensibly, and the ONLY
+    # thing that makes reading it as a completion is that the engine just
+    # asked. Scoping it to a staged offer is what makes a loose affirmative
+    # safe — outside that window "yes" is just a word.
+    try:
+        from app.modules import assist_notes
 
-        # 1. Unconditional capture (§17.710a) — fail-soft, never blocks.
-        yield _ev(ASSIST_TURN_STATUS, {"text": "Reading that…"})
-        try:
-            await assist_agent.ingest_turn(
-                session_id=session_id, role="operator", kind="message",
-                content=text_, node_key=node_key, db=db,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("turn_loop_capture_failed sid=%s err=%r", session_id, exc)
-
-        # 1a′. §17.1050 — a pending state check: the operator pasted the probe
-        # script's output (the `== id ==` markers attribute it), or asked for
-        # one by phrase. Anything else clears the pending check and continues.
-        try:
-            from app.modules import assist_state_check as _sc
-            if _sc.STATE_CHECK_PHRASE_RE.search(text_) and settings.assist_state_check_enabled:
-                async for e in _start_state_check(session_id, node_key, db):
-                    yield e
-                handled["v"] = "verify_state"
-                return
-            _pending_sc = await _sc.get_pending_state_check(db=db, session_id=session_id)
-            if _pending_sc and _sc.looks_like_probe_output(text_):
-                async for e in _resolve_state_check(session_id, node_key, text_, history, db):
-                    yield e
-                handled["v"] = "state_check_resolved"
-                return
-            if _pending_sc and _sc.STATE_CHECK_SKIP_RE.search(text_):
-                # §17.1138 — "skip the rest": finish with what was answered so far
-                async for e in _resolve_state_check(session_id, node_key, "", history, db, finish=True):
-                    yield e
-                handled["v"] = "state_check_finished"
-                return
-            if _pending_sc:
-                await _sc.clear_pending_state_check(db=db, session_id=session_id)
-        except Exception as exc:  # noqa: BLE001 — a state check never strands a turn
-            logger.warning("state_check_route_failed sid=%s err=%r", session_id, exc)
-
-        # 1b. §17.951 — resolve a pending completion confirmation.
-        #
-        # Runs BEFORE the decision layer on purpose: a bare "yes" or "confirm"
-        # carries no intent the classifier could route sensibly, and the ONLY
-        # thing that makes reading it as a completion is that the engine just
-        # asked. Scoping it to a staged offer is what makes a loose affirmative
-        # safe — outside that window "yes" is just a word.
-        try:
-            from app.modules import assist_notes
-
-            _offer = await assist_notes.get_pending_completion_confirm(
-                session_id=session_id, db=db)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("completion_confirm_probe_failed sid=%s err=%r",
-                           session_id, exc)
-            _offer = None
-        if _offer:
-            _onk = _offer.get("node_key")
-            # §17.970 — accept the claim wherever the operator put it. The
-            # anchored `looks_like_confirmation` misses "based on the previous
-            # commands i believe it is done, as well as the following: <paste>",
-            # which is how they actually answered — three times, each of which
-            # SUPERSEDED the offer instead of resolving it. Scoped to the staged
-            # window, so §17.890's narrow bare claim still governs elsewhere.
-            if (assist_policy.looks_like_confirmation(text_)
-                    or assist_policy.claims_completion_in_prose(text_)):
+        _offer = await assist_notes.get_pending_completion_confirm(
+            session_id=session_id, db=db)
+    except Exception as exc:
+        logger.warning("completion_confirm_probe_failed sid=%s err=%r",
+                       session_id, exc)
+        _offer = None
+    if _offer:
+        _onk = _offer.get("node_key")
+        # §17.970 — accept the claim wherever the operator put it. The
+        # anchored `looks_like_confirmation` misses "based on the previous
+        # commands i believe it is done, as well as the following: <paste>",
+        # which is how they actually answered — three times, each of which
+        # SUPERSEDED the offer instead of resolving it. Scoped to the staged
+        # window, so §17.890's narrow bare claim still governs elsewhere.
+        if (assist_policy.looks_like_confirmation(text_)
+                or assist_policy.claims_completion_in_prose(text_)):
+            yield _ev(ASSIST_TURN_STATUS, {
+                "text": "Marking this step complete on your word…"})
+            await _clear_completion_confirm(session_id, db)
+            from app.routers.assist import AssistSubmitInput, assist_submit
+            try:
+                # The operator's affirmation IS the evidence (§17.890): a
+                # bare claim is exempt from the verify hard-block, so this
+                # commits rather than looping back through the same veto
+                # that produced the offer.
+                res = await assist_submit(
+                    session_id,
+                    AssistSubmitInput(
+                        node_key=_onk,
+                        output=(f"Operator confirmed this step is complete: "
+                                f"{text_.strip()[:200]}"),
+                        # §17.971 — say so as DATA. The text above embeds
+                        # their message (paste and all), so re-deriving the
+                        # §17.890 exemption from it fails exactly when the
+                        # operator answers with evidence attached.
+                        operator_affirmed=True,
+                        action="submit", history=history),
+                    db=db,
+                ) or {}
+                if res.get("committed"):
+                    yield _ev(ASSIST_STEP_OUTCOME,
+                              {"node_key": _onk, "status": "committed"})
+                    logger.info(
+                        "assist_completion_confirmed session_id=%s node_key=%s",
+                        session_id, _onk)
+                    async for e in _reconciliation_note(session_id, _onk, res, db):
+                        yield e
+                    async for e in _claim_and_guide(session_id, None, history,
+                                                    db, orient=False):
+                        yield e
+                    handled["v"] = "completion_confirmed"
+                    return
+                logger.warning(
+                    "completion_confirm_not_committed sid=%s nk=%s res=%r",
+                    session_id, _onk, str(res)[:200])
+            except Exception as exc:
+                logger.error("completion_confirm_commit_failed sid=%s err=%r",
+                             session_id, exc)
                 yield _ev(ASSIST_TURN_STATUS, {
-                    "text": "Marking this step complete on your word…"})
-                await _clear_completion_confirm(session_id, db)
-                from app.routers.assist import AssistSubmitInput, assist_submit
-                try:
-                    # The operator's affirmation IS the evidence (§17.890): a
-                    # bare claim is exempt from the verify hard-block, so this
-                    # commits rather than looping back through the same veto
-                    # that produced the offer.
-                    res = await assist_submit(
-                        session_id,
-                        AssistSubmitInput(
-                            node_key=_onk,
-                            output=(f"Operator confirmed this step is complete: "
-                                    f"{text_.strip()[:200]}"),
-                            # §17.971 — say so as DATA. The text above embeds
-                            # their message (paste and all), so re-deriving the
-                            # §17.890 exemption from it fails exactly when the
-                            # operator answers with evidence attached.
-                            operator_affirmed=True,
-                            action="submit", history=history),
-                        db=db,
-                    ) or {}
-                    if res.get("committed"):
-                        yield _ev(ASSIST_STEP_OUTCOME,
-                                  {"node_key": _onk, "status": "committed"})
-                        logger.info(
-                            "assist_completion_confirmed session_id=%s node_key=%s",
-                            session_id, _onk)
-                        async for e in _reconciliation_note(session_id, _onk, res, db):
-                            yield e
-                        async for e in _claim_and_guide(session_id, None, history,
-                                                        db, orient=False):
-                            yield e
-                        handled["v"] = "completion_confirmed"
-                        return
-                    logger.warning(
-                        "completion_confirm_not_committed sid=%s nk=%s res=%r",
-                        session_id, _onk, str(res)[:200])
-                except Exception as exc:  # noqa: BLE001 — never strand the turn
-                    logger.error("completion_confirm_commit_failed sid=%s err=%r",
-                                 session_id, exc)
-                    yield _ev(ASSIST_TURN_STATUS, {
-                        "text": f"Couldn't close the step out ({exc}) — it stays open."})
-            elif assist_policy.looks_like_decline(text_):
-                # Not done after all: drop the offer and carry on normally, so
-                # the "no" is answered as a message rather than re-asked.
-                await _clear_completion_confirm(session_id, db)
-                logger.info("assist_completion_confirm_declined session_id=%s nk=%s",
-                            session_id, _onk)
-            else:
-                # Anything else supersedes the offer — the operator has moved on
-                # to something new and a stale "confirm?" must not linger.
-                await _clear_completion_confirm(session_id, db)
+                    "text": f"Couldn't close the step out ({exc}) — it stays open."})
+        elif assist_policy.looks_like_decline(text_):
+            # Not done after all: drop the offer and carry on normally, so
+            # the "no" is answered as a message rather than re-asked.
+            await _clear_completion_confirm(session_id, db)
+            logger.info("assist_completion_confirm_declined session_id=%s nk=%s",
+                        session_id, _onk)
+        else:
+            # Anything else supersedes the offer — the operator has moved on
+            # to something new and a stale "confirm?" must not linger.
+            await _clear_completion_confirm(session_id, db)
 
-        # 2a. §17.899 — "that wasn't actually done". Runs BEFORE the decision
-        # layer and before orientation, because every downstream step reads the
-        # completed-work digest: while a step is wrongly `done`, the decision
-        # model, the guide, and the verifier are all reasoning from a false
-        # premise. Deterministic + tightly bounded (see reopen_denied_step);
-        # a no-op returns None and the turn continues normally.
-        reopened = await assist_agent.reopen_denied_step(
-            session_id=session_id, message=text_, db=db,
-        )
-        if reopened:
-            yield _ev(ASSIST_TURN_ROUTED, {"action": "reopen", "override": "denial"})
-            yield _ev(ASSIST_STEP_OUTCOME, {
-                "node_key": reopened["node_key"], "status": "reopened",
-            })
-            yield _ev(ASSIST_TURN_STATUS, {"text": (
-                f"↩︎ Got it — I'd marked **{reopened['node_key']}: "
-                f"{reopened['title']}** done, and you're telling me it wasn't. "
-                "Reopening it and picking that step back up."
-            )})
-            # node_key=None so the claim path resolves the (now reopened) step.
+    # 2a. §17.899 — "that wasn't actually done". Runs BEFORE the decision
+    # layer and before orientation, because every downstream step reads the
+    # completed-work digest: while a step is wrongly `done`, the decision
+    # model, the guide, and the verifier are all reasoning from a false
+    # premise. Deterministic + tightly bounded (see reopen_denied_step);
+    # a no-op returns None and the turn continues normally.
+    reopened = await assist_agent.reopen_denied_step(
+        session_id=session_id, message=text_, db=db,
+    )
+    if reopened:
+        yield _ev(ASSIST_TURN_ROUTED, {"action": "reopen", "override": "denial"})
+        yield _ev(ASSIST_STEP_OUTCOME, {
+            "node_key": reopened["node_key"], "status": "reopened",
+        })
+        yield _ev(ASSIST_TURN_STATUS, {"text": (
+            f"↩︎ Got it — I'd marked **{reopened['node_key']}: "
+            f"{reopened['title']}** done, and you're telling me it wasn't. "
+            "Reopening it and picking that step back up."
+        )})
+        # node_key=None so the claim path resolves the (now reopened) step.
+        async for e in _claim_and_guide(session_id, None, history, db,
+                                        orient=False):
+            yield e
+        handled["v"] = "reopen"
+        return
+
+    # 2b. §17.903 — the operator is BLOCKED, not merely erroring. This runs
+    # ahead of the decision layer because being unable to reach the step at
+    # all is the dominant fact of the turn: the plan's premise is broken, so
+    # any walkthrough for the current step is answering the wrong question.
+    # Live failure: "i hit the reboot now and its still hung up" while the
+    # pointer sat on "Install PalWorld server" — the next guide opened with
+    # `sudo apt update` on a VM whose own Prerequisites said it must be
+    # "fully installed and reachable", the exact thing just reported broken.
+    if assist_policy.looks_like_blocked(text_):
+        async for e in _blocked_flow(session_id, text_, node_key, history, db):
+            yield e
+        handled["v"] = "blocked"
+        return
+
+    # 2. Deterministic orientation (§17.867) — zero model calls.
+    if assist_policy.looks_like_whats_next(text_):
+        yield _ev(ASSIST_TURN_ROUTED, {"action": "status", "override": "whats_next"})
+        async for e in _claim_and_guide(session_id, node_key, history, db,
+                                        orient=True):
+            yield e
+        handled["v"] = "status"
+        return
+
+    # 3. The unified decision (§17.771 + §17.855 overrides run inside).
+    yield _ev(ASSIST_TURN_STATUS, {"text": "Deciding how to act on that…"})
+    d: dict = {}
+    try:
+        from app.modules import assist_decide
+        d = await assist_decide.decide_turn(
+            session_id=session_id, message=text_, node_key=node_key,
+            history=history, db=db,
+        ) or {}
+    except Exception as exc:
+        logger.warning("turn_loop_decide_failed sid=%s err=%r", session_id, exc)
+    action = (d.get("action") or "").strip()
+    confident = (d.get("confidence") or "low") != "low"
+    yield _ev(ASSIST_TURN_ROUTED, {
+        "action": action or "fallback",
+        "override": d.get("override"),
+    })
+    impact = (d.get("plan_impact") or "none").strip()
+    nk = (str(d.get("node_key") or "").strip() or node_key)
+
+    # 4. Dispatch — mirrors the pipeline's `_dispatch_decision` semantics.
+    # §17.1053b — add_step IS the plan change; a reshape tag on it must
+    # not divert the turn to the note path (live: "add a step for this"
+    # routed add_step + reshape → filed as a note, nothing added).
+    if confident and (action == "note" or (impact == "reshape" and action != "add_step")):
+        async for e in _note(session_id, d, text_, nk, db):
+            yield e
+        # §17.903 — recording is not answering. A pivot framed as a QUESTION
+        # was overridden ask→note, filed, and the turn ENDED — the operator's
+        # direct "delete this VM and start over?" got no reply at all, and
+        # they pressed Guide out of the silence, straight into a walkthrough
+        # whose premise was already broken. The note still gets recorded (the
+        # plan impact matters); it just no longer swallows the answer.
+        q = (d.get("answer_query") or "").strip()
+        if q:
+            async for e in _answer(session_id, q, nk, history, db,
+                                   status_text="Recorded that — now answering your question…"):
+                yield e
+        handled["v"] = "note"
+        return
+    if confident and action == "submit":
+        done = False
+        blocked_reason = None
+        elsewhere = False   # §17.1101 — the paste completed other pending step(s)
+        async for e in _submit(session_id, d, text_, nk, history, db):
+            if e[0] == ASSIST_STEP_OUTCOME:
+                if e[1].get("status") == "committed":
+                    done = True
+                elif e[1].get("status") == "committed_elsewhere":
+                    elsewhere = True
+                elif e[1].get("status") in ("step_incomplete", "verification_failed",
+                                            "step_unverified"):  # §17.1016
+                    blocked_reason = e[1].get("verify_reason") or "the step's goal isn't met yet"
+            yield e
+        if done:
+            await _clear_completion_confirm(session_id, db)
             async for e in _claim_and_guide(session_id, None, history, db,
                                             orient=False):
                 yield e
-            handled["v"] = "reopen"
-            return
-
-        # 2b. §17.903 — the operator is BLOCKED, not merely erroring. This runs
-        # ahead of the decision layer because being unable to reach the step at
-        # all is the dominant fact of the turn: the plan's premise is broken, so
-        # any walkthrough for the current step is answering the wrong question.
-        # Live failure: "i hit the reboot now and its still hung up" while the
-        # pointer sat on "Install PalWorld server" — the next guide opened with
-        # `sudo apt update` on a VM whose own Prerequisites said it must be
-        # "fully installed and reachable", the exact thing just reported broken.
-        if assist_policy.looks_like_blocked(text_):
-            async for e in _blocked_flow(session_id, text_, node_key, history, db):
+        elif elsewhere:
+            # §17.1101 — the matched steps are committed; re-present the step
+            # in focus so the operator continues where they were.
+            async for e in _claim_and_guide(session_id, nk, history, db, orient=True):
                 yield e
-            handled["v"] = "blocked"
-            return
-
-        # 2. Deterministic orientation (§17.867) — zero model calls.
-        if assist_policy.looks_like_whats_next(text_):
-            yield _ev(ASSIST_TURN_ROUTED, {"action": "status", "override": "whats_next"})
-            async for e in _claim_and_guide(session_id, node_key, history, db,
-                                            orient=True):
-                yield e
-            handled["v"] = "status"
-            return
-
-        # 3. The unified decision (§17.771 + §17.855 overrides run inside).
-        yield _ev(ASSIST_TURN_STATUS, {"text": "Deciding how to act on that…"})
-        d: dict = {}
-        try:
-            from app.modules import assist_decide
-            d = await assist_decide.decide_turn(
-                session_id=session_id, message=text_, node_key=node_key,
-                history=history, db=db,
-            ) or {}
-        except Exception as exc:  # noqa: BLE001 — decide down → fallback below
-            logger.warning("turn_loop_decide_failed sid=%s err=%r", session_id, exc)
-        action = (d.get("action") or "").strip()
-        confident = (d.get("confidence") or "low") != "low"
-        yield _ev(ASSIST_TURN_ROUTED, {
-            "action": action or "fallback",
-            "override": d.get("override"),
-        })
-        impact = (d.get("plan_impact") or "none").strip()
-        nk = (str(d.get("node_key") or "").strip() or node_key)
-
-        # 4. Dispatch — mirrors the pipeline's `_dispatch_decision` semantics.
-        # §17.1053b — add_step IS the plan change; a reshape tag on it must
-        # not divert the turn to the note path (live: "add a step for this"
-        # routed add_step + reshape → filed as a note, nothing added).
-        if confident and (action == "note" or (impact == "reshape" and action != "add_step")):
-            async for e in _note(session_id, d, text_, nk, db):
-                yield e
-            # §17.903 — recording is not answering. A pivot framed as a QUESTION
-            # was overridden ask→note, filed, and the turn ENDED — the operator's
-            # direct "delete this VM and start over?" got no reply at all, and
-            # they pressed Guide out of the silence, straight into a walkthrough
-            # whose premise was already broken. The note still gets recorded (the
-            # plan impact matters); it just no longer swallows the answer.
-            q = (d.get("answer_query") or "").strip()
-            if q:
-                async for e in _answer(session_id, q, nk, history, db,
-                                       status_text="Recorded that — now answering your question…"):
-                    yield e
-            handled["v"] = "note"
-            return
-        if confident and action == "submit":
-            done = False
-            blocked_reason = None
-            elsewhere = False   # §17.1101 — the paste completed other pending step(s)
-            async for e in _submit(session_id, d, text_, nk, history, db):
-                if e[0] == ASSIST_STEP_OUTCOME:
-                    if e[1].get("status") == "committed":
-                        done = True
-                    elif e[1].get("status") == "committed_elsewhere":
-                        elsewhere = True
-                    elif e[1].get("status") in ("step_incomplete", "verification_failed",
-                                                "step_unverified"):  # §17.1016
-                        blocked_reason = e[1].get("verify_reason") or "the step's goal isn't met yet"
-                yield e
-            if done:
-                await _clear_completion_confirm(session_id, db)
-                async for e in _claim_and_guide(session_id, None, history, db,
-                                                orient=False):
-                    yield e
-            elif elsewhere:
-                # §17.1101 — the matched steps are committed; re-present the step
-                # in focus so the operator continues where they were.
-                async for e in _claim_and_guide(session_id, nk, history, db, orient=True):
-                    yield e
-            elif blocked_reason is not None:
-                # §17.951 — OFFER the operator the commit on their word.
-                # §17.890 already honours a BARE claim, but the common real
-                # shape — evidence plus an assertion, or a long report ending
-                # "all of that was downloaded" — takes the evidence path,
-                # verifies `incomplete`, and the operator got another fix
-                # instead of being asked. Staged BEFORE the fix flow so the
-                # invitation leads; they still get the help underneath it if it
-                # genuinely is not done.
-                _offer_made = False
-                # §17.1014 — if the operator just told us they cannot tell,
-                # leading with "reply `confirm`" hands the question back to the
-                # one person who has already said they cannot answer it. Live
-                # (ADD3/T35, 2026-09-11 02:03–02:11): "i believe it is done but
-                # am unsure" and "all i could do was add a security group i am
-                # unsure where dmz came from" were each answered with the
-                # confirm offer, twice, and the operator reported the engine
-                # could not help them CHECK. The step's own `## Verify` section
-                # is the answer to their actual question and is already stored.
-                _check = ""
-                if assist_policy.expresses_uncertainty(text_ or ""):
-                    try:
-                        from app.modules import assist_guide  # deferred: cycle-safe
-                        _check = await assist_guide.how_to_check_block(
-                            session_id=session_id, node_key=nk, db=db)
-                    except Exception as exc:  # noqa: BLE001 — a hint never blocks
-                        logger.warning("how_to_check_failed sid=%s err=%r",
-                                       session_id, exc)
-                _confirm_offer_text = (
-                    (f"I couldn't verify this step myself — {blocked_reason}\n\n"
-                     + _check + "\n\n"
-                     "Once you can see the result, paste it and I'll take it "
-                     "from there. **If you'd rather I take your word for it, "
-                     "reply `confirm`** and I'll mark it complete and move on.")
-                    if _check else
-                    (f"I couldn't verify this step myself — {blocked_reason}\n\n"
-                     "**If it IS done, reply `confirm`** and I'll mark it "
-                     "complete on your word and move to the next step. You "
-                     "know your machine; I only see what you paste.\n\n"
-                     "If something is still outstanding, here's where I'd "
-                     "look next:"))
+        elif blocked_reason is not None:
+            # §17.951 — OFFER the operator the commit on their word.
+            # §17.890 already honours a BARE claim, but the common real
+            # shape — evidence plus an assertion, or a long report ending
+            # "all of that was downloaded" — takes the evidence path,
+            # verifies `incomplete`, and the operator got another fix
+            # instead of being asked. Staged BEFORE the fix flow so the
+            # invitation leads; they still get the help underneath it if it
+            # genuinely is not done.
+            _offer_made = False
+            # §17.1014 — if the operator just told us they cannot tell,
+            # leading with "reply `confirm`" hands the question back to the
+            # one person who has already said they cannot answer it. Live
+            # (ADD3/T35, 2026-09-11 02:03–02:11): "i believe it is done but
+            # am unsure" and "all i could do was add a security group i am
+            # unsure where dmz came from" were each answered with the
+            # confirm offer, twice, and the operator reported the engine
+            # could not help them CHECK. The step's own `## Verify` section
+            # is the answer to their actual question and is already stored.
+            _check = ""
+            if assist_policy.expresses_uncertainty(text_ or ""):
                 try:
-                    from app.modules import assist_notes
-                    await assist_notes.stage_completion_confirm(
-                        session_id=session_id, node_key=nk,
-                        reason=blocked_reason, db=db)
-                    yield _ev(ASSIST_ANSWER,
-                              {"kind": "ask", "text": _confirm_offer_text})
-                except Exception as exc:  # noqa: BLE001 — an offer never blocks
-                    logger.warning("completion_confirm_offer_failed sid=%s err=%r",
+                    from app.modules import assist_guide  # deferred: cycle-safe
+                    _check = await assist_guide.how_to_check_block(
+                        session_id=session_id, node_key=nk, db=db)
+                except Exception as exc:
+                    logger.warning("how_to_check_failed sid=%s err=%r",
                                    session_id, exc)
-                else:
-                    # §17.952 — the offer is a QUESTION awaiting an answer, so it
-                    # has to survive a reload like every other substantive reply
-                    # (§17.873). It did not: staging recorded THAT the engine
-                    # asked (session metadata), the transcript never recorded
-                    # WHAT it asked. The SPA renders the streamed bubble into
-                    # `ephemeralTail` only, and rebuilds from `assist_turns` on
-                    # every reload — so the invitation evaporated and the
-                    # operator was left reading a run of fixes, with no sign the
-                    # engine had ever offered to take their word. Live on
-                    # 2026-09-06: staged three times (T29 11:37, T29 11:40,
-                    # T31 12:09), present in ZERO of the session's 584 turns;
-                    # the operator gave up and forced T29 with the Done button.
-                    try:
-                        await assist_agent.capture_assistant_reply(
-                            session_id=session_id, node_key=nk, kind="ask",
-                            content=_confirm_offer_text, db=db,
-                        )
-                    except Exception:  # noqa: BLE001 — capture never blocks
-                        logger.warning(
-                            "completion_confirm_capture_failed sid=%s", session_id)
-                    _offer_made = True
-                # §17.884 — a blocked submit must NEVER dead-end. Live incident:
-                # the operator ran the discovery command the engine asked for,
-                # pasted the ground truth back, the verifier (correctly) said
-                # "step not complete" — and the turn ENDED, discarding the very
-                # information the engine had requested. Continue into the fix
-                # flow seeded with the evidence + the verifier's reason: the
-                # pasted values are now provenance-legal grounding, so the next
-                # command can use them directly.
-                # §17.953 — the offer leads (for anyone reading top-down) and a
-                # one-liner closes the reply, where the eye actually lands in a
-                # chat pinned to its bottom. §17.1056 — that closer is the fix's
-                # last line, not a third bubble.
-                _nudge = ("↩︎ Or — if this step is in fact already done on "
-                          "your machine, reply `confirm` and I'll mark it "
-                          "complete and move to the next one.") if _offer_made else None
-                async for e in _fix_flow(
-                    session_id, nk,
-                    (f"{text_}\n\n[Progress noted, but the step is not complete "
-                     f"yet — verifier: {blocked_reason}] Continue from the "
-                     "output above: use the concrete values it contains."),
-                    history, db,
-                    status_text="Good progress — the step isn't finished yet, so I'm working out your next move from what you just pasted…",
-                    trailer=_nudge,
-                ):
-                    yield e
-            handled["v"] = "submit"
-            return
-        if confident and action == "skip":
-            # §17.886(#2) — explicit skip was silently answered with a re-guide.
-            from app.routers.assist import AssistSubmitInput, assist_submit
+            _confirm_offer_text = (
+                (f"I couldn't verify this step myself — {blocked_reason}\n\n"
+                 + _check + "\n\n"
+                 "Once you can see the result, paste it and I'll take it "
+                 "from there. **If you'd rather I take your word for it, "
+                 "reply `confirm`** and I'll mark it complete and move on.")
+                if _check else
+                (f"I couldn't verify this step myself — {blocked_reason}\n\n"
+                 "**If it IS done, reply `confirm`** and I'll mark it "
+                 "complete on your word and move to the next step. You "
+                 "know your machine; I only see what you paste.\n\n"
+                 "If something is still outstanding, here's where I'd "
+                 "look next:"))
             try:
-                yield _ev(ASSIST_TURN_STATUS, {"text": "⏩ Skipping this step (recorded — you can revisit it later)…"})
-                await assist_submit(
-                    session_id,
-                    AssistSubmitInput(node_key=nk, output=text_, action="skip",
-                                      history=history),
-                    db=db,
-                )
-                yield _ev(ASSIST_STEP_OUTCOME, {"node_key": nk, "status": "skipped"})
-                async for e in _claim_and_guide(session_id, None, history, db, orient=False):
-                    yield e
-            except Exception as exc:  # noqa: BLE001
-                yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't skip that step ({exc}). It stays open."})
-            handled["v"] = "skip"
-            return
-        if confident and action in ("advance", "finalize"):
-            # §17.886(#2) — run the tracker reconcile, then honor EVERY result
-            # action (the old code matched only 'advanced', so 'finalized' and
-            # 'added_step' re-guided the stale node).
-            async for e in _track_then_continue(session_id, text_, nk, history, db):
-                yield e
-            handled["v"] = action
-            return
-        if confident and action == "pause":
-            from app.routers.assist import assist_pause
-            try:
-                await assist_pause(session_id, db=db)
-                yield _ev(ASSIST_TURN_STATUS, {"text": "⏸ Session paused — say \"resume\" whenever you're ready and we'll pick up exactly here."})
-            except Exception as exc:  # noqa: BLE001
-                yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't pause ({exc})."})
-            handled["v"] = "pause"
-            return
-        if confident and action == "add_step":
-            from app.routers.assist import AssistAddStepInput, assist_add_step
-            try:
-                yield _ev(ASSIST_TURN_STATUS, {"text": "➕ Adding that as its own step…"})
-                res = await assist_add_step(
-                    session_id, AssistAddStepInput(request=text_, before_node_key=nk), db=db,
-                )
-                new_nk = (res or {}).get("node_key")
-                # §17.1053 — name what was inserted (one step or a chain), so a
-                # proposal of several fixes reads as several steps, not as the
-                # first one silently swallowing the rest.
-                _steps = (res or {}).get("steps") or []
-                if len(_steps) > 1:
-                    _lines = "\n".join(
-                        f"- **{st.get('node_key')}**: {st.get('title')}" for st in _steps)
-                    yield _ev(ASSIST_TURN_STATUS, {
-                        "text": (f"➕ Added {len(_steps)} steps before **{nk}**, in order:\n"
-                                 f"{_lines}\nStarting with the first.")})
-                elif _steps:
-                    yield _ev(ASSIST_TURN_STATUS, {
-                        "text": (f"➕ Added a step: **{_steps[0].get('title')}** — we'll do "
-                                 f"this first, then return to **{nk}**.")})
-                async for e in _claim_and_guide(session_id, new_nk, history, db, orient=False):
-                    yield e
-            except Exception as exc:  # noqa: BLE001
-                yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't add the step ({exc}) — tell me again with a bit more detail."})
-            handled["v"] = "add_step"
-            return
-        if confident and action == "handoff":
-            yield _ev(ASSIST_TURN_STATUS, {"text": "🤝 To hand this step to the engine, press the step's Handoff button in the panel — chat-initiated handoff isn't wired yet, and I'd rather tell you that than pretend."})
-            handled["v"] = "handoff"
-            return
-        if confident and action == "explain_plan":
-            from app.routers.assist import assist_get_checklist
-            try:
-                cl = await assist_get_checklist(session_id, db=db)
-                items = (cl or {}).get("steps") or (cl or {}).get("checklist") or []
-                lines = [f"- {'✅' if (i.get('status') in ('committed','skipped')) else '👉' if i.get('node_key')==nk else '·'} {i.get('node_key')}: {(i.get('title') or '')[:70]}" for i in items[:30]]
-                yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": "**The plan so far:**\n" + "\n".join(lines)})
-            except Exception as exc:  # noqa: BLE001
-                yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't render the plan ({exc})."})
-            handled["v"] = "explain_plan"
-            return
-        if confident and action in ("set_env", "set_verbosity"):
-            import re as _re2
-            from app.routers.assist import AssistEnvInput, assist_set_env
-            try:
-                subs = dict(_re2.findall(r"([A-Za-z_]\w*)=(\S+)", text_))
-                verb = ("terse" if "terse" in text_.lower() else
-                        "detailed" if "detail" in text_.lower() else
-                        "normal" if action == "set_verbosity" else None)
-                _env_res = await assist_set_env(
-                    session_id,
-                    AssistEnvInput(substitutions=subs or None, verbosity=verb),
-                    db=db,
-                )
-                yield _ev(ASSIST_TURN_STATUS, {"text": "Noted — environment updated."})
-                async for e in _reconciliation_note(session_id, nk, _env_res, db):  # §17.1046
-                    yield e
-            except Exception as exc:  # noqa: BLE001
-                yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't update the environment ({exc})."})
-            handled["v"] = "set_env"
-            return
-        if confident and action == "fix":
-            # §17.874 — fixes are RESEARCH-BACKED, unconditionally. The live
-            # incident: two consecutive fixes cycled GUESSED Servarr repo URLs
-            # from training memory while the operator's paste showed the
-            # keyring downloading as ASCII text (an error page) — the current
-            # correct apt instructions are a fact only live research can
-            # supply. The operator's standing requirement: unsure → research →
-            # derive from up-to-date information. Costs ~a minute; the status
-            # frame carries it.
+                from app.modules import assist_notes
+                await assist_notes.stage_completion_confirm(
+                    session_id=session_id, node_key=nk,
+                    reason=blocked_reason, db=db)
+                yield _ev(ASSIST_ANSWER,
+                          {"kind": "ask", "text": _confirm_offer_text})
+            except Exception as exc:
+                logger.warning("completion_confirm_offer_failed sid=%s err=%r",
+                               session_id, exc)
+            else:
+                # §17.952 — the offer is a QUESTION awaiting an answer, so it
+                # has to survive a reload like every other substantive reply
+                # (§17.873). It did not: staging recorded THAT the engine
+                # asked (session metadata), the transcript never recorded
+                # WHAT it asked. The SPA renders the streamed bubble into
+                # `ephemeralTail` only, and rebuilds from `assist_turns` on
+                # every reload — so the invitation evaporated and the
+                # operator was left reading a run of fixes, with no sign the
+                # engine had ever offered to take their word. Live on
+                # 2026-09-06: staged three times (T29 11:37, T29 11:40,
+                # T31 12:09), present in ZERO of the session's 584 turns;
+                # the operator gave up and forced T29 with the Done button.
+                try:
+                    await assist_agent.capture_assistant_reply(
+                        session_id=session_id, node_key=nk, kind="ask",
+                        content=_confirm_offer_text, db=db,
+                    )
+                except Exception:
+                    logger.warning(
+                        "completion_confirm_capture_failed sid=%s", session_id)
+                _offer_made = True
+            # §17.884 — a blocked submit must NEVER dead-end. Live incident:
+            # the operator ran the discovery command the engine asked for,
+            # pasted the ground truth back, the verifier (correctly) said
+            # "step not complete" — and the turn ENDED, discarding the very
+            # information the engine had requested. Continue into the fix
+            # flow seeded with the evidence + the verifier's reason: the
+            # pasted values are now provenance-legal grounding, so the next
+            # command can use them directly.
+            # §17.953 — the offer leads (for anyone reading top-down) and a
+            # one-liner closes the reply, where the eye actually lands in a
+            # chat pinned to its bottom. §17.1056 — that closer is the fix's
+            # last line, not a third bubble.
+            _nudge = ("↩︎ Or — if this step is in fact already done on "
+                      "your machine, reply `confirm` and I'll mark it "
+                      "complete and move to the next one.") if _offer_made else None
             async for e in _fix_flow(
-                session_id, nk, text_, history, db,  # §17.886(#4) — full paste, not the ≤2000-char echo
-                status_text="Diagnosing the error — researching current, up-to-date fixes for it (this can take a minute or two)…",
+                session_id, nk,
+                (f"{text_}\n\n[Progress noted, but the step is not complete "
+                 f"yet — verifier: {blocked_reason}] Continue from the "
+                 "output above: use the concrete values it contains."),
+                history, db,
+                status_text="Good progress — the step isn't finished yet, so I'm working out your next move from what you just pasted…",
+                trailer=_nudge,
             ):
                 yield e
-            if impact == "surface":
-                async for e in _surface(session_id, d, text_, nk, db):
-                    yield e
-            handled["v"] = "fix"
-            return
-        if confident and action in ("ask", "question"):
-            yield _ev(ASSIST_TURN_STATUS, {"text": "Researching your question against the project's current state — this can take a minute or two…"})
+        handled["v"] = "submit"
+        return
+    if confident and action == "skip":
+        # §17.886(#2) — explicit skip was silently answered with a re-guide.
+        from app.routers.assist import AssistSubmitInput, assist_submit
+        try:
+            yield _ev(ASSIST_TURN_STATUS, {"text": "⏩ Skipping this step (recorded — you can revisit it later)…"})
+            await assist_submit(
+                session_id,
+                AssistSubmitInput(node_key=nk, output=text_, action="skip",
+                                  history=history),
+                db=db,
+            )
+            yield _ev(ASSIST_STEP_OUTCOME, {"node_key": nk, "status": "skipped"})
+            async for e in _claim_and_guide(session_id, None, history, db, orient=False):
+                yield e
+        except Exception as exc:
+            yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't skip that step ({exc}). It stays open."})
+        handled["v"] = "skip"
+        return
+    if confident and action in ("advance", "finalize"):
+        # §17.886(#2) — run the tracker reconcile, then honor EVERY result
+        # action (the old code matched only 'advanced', so 'finalized' and
+        # 'added_step' re-guided the stale node).
+        async for e in _track_then_continue(session_id, text_, nk, history, db):
+            yield e
+        handled["v"] = action
+        return
+    if confident and action == "pause":
+        from app.routers.assist import assist_pause
+        try:
+            await assist_pause(session_id, db=db)
+            yield _ev(ASSIST_TURN_STATUS, {"text": "⏸ Session paused — say \"resume\" whenever you're ready and we'll pick up exactly here."})
+        except Exception as exc:
+            yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't pause ({exc})."})
+        handled["v"] = "pause"
+        return
+    if confident and action == "add_step":
+        from app.routers.assist import AssistAddStepInput, assist_add_step
+        try:
+            yield _ev(ASSIST_TURN_STATUS, {"text": "➕ Adding that as its own step…"})
+            res = await assist_add_step(
+                session_id, AssistAddStepInput(request=text_, before_node_key=nk), db=db,
+            )
+            new_nk = (res or {}).get("node_key")
+            # §17.1053 — name what was inserted (one step or a chain), so a
+            # proposal of several fixes reads as several steps, not as the
+            # first one silently swallowing the rest.
+            _steps = (res or {}).get("steps") or []
+            if len(_steps) > 1:
+                _lines = "\n".join(
+                    f"- **{st.get('node_key')}**: {st.get('title')}" for st in _steps)
+                yield _ev(ASSIST_TURN_STATUS, {
+                    "text": (f"➕ Added {len(_steps)} steps before **{nk}**, in order:\n"
+                             f"{_lines}\nStarting with the first.")})
+            elif _steps:
+                yield _ev(ASSIST_TURN_STATUS, {
+                    "text": (f"➕ Added a step: **{_steps[0].get('title')}** — we'll do "
+                             f"this first, then return to **{nk}**.")})
+            async for e in _claim_and_guide(session_id, new_nk, history, db, orient=False):
+                yield e
+        except Exception as exc:
+            yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't add the step ({exc}) — tell me again with a bit more detail."})
+        handled["v"] = "add_step"
+        return
+    if confident and action == "handoff":
+        yield _ev(ASSIST_TURN_STATUS, {"text": "🤝 To hand this step to the engine, press the step's Handoff button in the panel — chat-initiated handoff isn't wired yet, and I'd rather tell you that than pretend."})
+        handled["v"] = "handoff"
+        return
+    if confident and action == "explain_plan":
+        from app.routers.assist import assist_get_checklist
+        try:
+            cl = await assist_get_checklist(session_id, db=db)
+            items = (cl or {}).get("steps") or (cl or {}).get("checklist") or []
+            lines = [f"- {'✅' if (i.get('status') in ('committed','skipped')) else '👉' if i.get('node_key')==nk else '·'} {i.get('node_key')}: {(i.get('title') or '')[:70]}" for i in items[:30]]
+            yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": "**The plan so far:**\n" + "\n".join(lines)})
+        except Exception as exc:
+            yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't render the plan ({exc})."})
+        handled["v"] = "explain_plan"
+        return
+    if confident and action in ("set_env", "set_verbosity"):
+        import re as _re2
+        from app.routers.assist import AssistEnvInput, assist_set_env
+        try:
+            subs = dict(_re2.findall(r"([A-Za-z_]\w*)=(\S+)", text_))
+            verb = ("terse" if "terse" in text_.lower() else
+                    "detailed" if "detail" in text_.lower() else
+                    "normal" if action == "set_verbosity" else None)
+            _env_res = await assist_set_env(
+                session_id,
+                AssistEnvInput(substitutions=subs or None, verbosity=verb),
+                db=db,
+            )
+            yield _ev(ASSIST_TURN_STATUS, {"text": "Noted — environment updated."})
+            async for e in _reconciliation_note(session_id, nk, _env_res, db):  # §17.1046
+                yield e
+        except Exception as exc:
+            yield _ev(ASSIST_TURN_STATUS, {"text": f"Couldn't update the environment ({exc})."})
+        handled["v"] = "set_env"
+        return
+    if confident and action == "fix":
+        # §17.874 — fixes are RESEARCH-BACKED, unconditionally. The live
+        # incident: two consecutive fixes cycled GUESSED Servarr repo URLs
+        # from training memory while the operator's paste showed the
+        # keyring downloading as ASCII text (an error page) — the current
+        # correct apt instructions are a fact only live research can
+        # supply. The operator's standing requirement: unsure → research →
+        # derive from up-to-date information. Costs ~a minute; the status
+        # frame carries it.
+        async for e in _fix_flow(
+            session_id, nk, text_, history, db,  # §17.886(#4) — full paste, not the ≤2000-char echo
+            status_text="Diagnosing the error — researching current, up-to-date fixes for it (this can take a minute or two)…",
+        ):
+            yield e
+        if impact == "surface":
+            async for e in _surface(session_id, d, text_, nk, db):
+                yield e
+        handled["v"] = "fix"
+        return
+    if confident and action in ("ask", "question"):
+        yield _ev(ASSIST_TURN_STATUS, {"text": "Researching your question against the project's current state — this can take a minute or two…"})
+        res = await assist_agent.run_step_research(
+            session_id=session_id, node_key=nk,
+            question=text_, history=history, db=db,  # §17.886(#4)
+            capture_reply=False,  # §17.1136 — persisted once, below, under the resolved key
+        )
+        answer = (res or {}).get("answer") or ""
+        if answer.strip():
+            yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": answer})
+            try:  # §17.873 — durable transcript capture (dedupe-safe)
+                await assist_agent.capture_assistant_reply(
+                    session_id=session_id, node_key=(res or {}).get("node_key") or nk, kind="ask",
+                    content=answer, db=db,
+                )
+            except Exception:
+                logger.warning("turn_loop_ask_capture_failed sid=%s", session_id)
+        else:
+            yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": "I couldn't put together a useful answer for that — try rephrasing, or ask me to guide the current step."})
+        if impact == "surface":
+            async for e in _surface(session_id, d, text_, nk, db):
+                yield e
+        handled["v"] = "ask"
+        return
+    if confident and action == "status":
+        async for e in _claim_and_guide(session_id, nk, history, db, orient=True):
+            yield e
+        handled["v"] = "status"
+        return
+
+    # 5a. §17.869 (operator requirement) — UNSURE about a question means
+    # RESEARCH, not a walkthrough rerun. When the decision layer couldn't
+    # confidently route a question-shaped message, obtain the information
+    # instead of guessing: the job-aware research path (§17.650) grounds
+    # the answer in the project's own state + retrieval.
+    import re as _re
+    _questionish = _re.search(
+        r"\?\s*$|^(can|could|how|what|why|where|which|who|should|is|are|do|does|will|would)\b",
+        text_, _re.IGNORECASE)
+    if _questionish:
+        yield _ev(ASSIST_TURN_STATUS, {"text": "I'm not certain how to act on that — researching it against the project's current state…"})
+        try:
             res = await assist_agent.run_step_research(
-                session_id=session_id, node_key=nk,
-                question=text_, history=history, db=db,  # §17.886(#4)
-                capture_reply=False,  # §17.1136 — persisted once, below, under the resolved key
+                session_id=session_id, node_key=nk, question=text_,
+                history=history, db=db,
+                capture_reply=False,  # §17.1136
             )
             answer = (res or {}).get("answer") or ""
             if answer.strip():
@@ -858,59 +897,19 @@ async def _run_turn_inner(
                         session_id=session_id, node_key=(res or {}).get("node_key") or nk, kind="ask",
                         content=answer, db=db,
                     )
-                except Exception:  # noqa: BLE001
-                    logger.warning("turn_loop_ask_capture_failed sid=%s", session_id)
-            else:
-                yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": "I couldn't put together a useful answer for that — try rephrasing, or ask me to guide the current step."})
-            if impact == "surface":
-                async for e in _surface(session_id, d, text_, nk, db):
-                    yield e
-            handled["v"] = "ask"
-            return
-        if confident and action == "status":
-            async for e in _claim_and_guide(session_id, nk, history, db, orient=True):
-                yield e
-            handled["v"] = "status"
-            return
+                except Exception:
+                    logger.warning("turn_loop_research_capture_failed sid=%s", session_id)
+                handled["v"] = "research_fallback"
+                return
+        except Exception as exc:
+            logger.warning("turn_loop_research_fallback_failed sid=%s err=%r",
+                           session_id, exc)
 
-        # 5a. §17.869 (operator requirement) — UNSURE about a question means
-        # RESEARCH, not a walkthrough rerun. When the decision layer couldn't
-        # confidently route a question-shaped message, obtain the information
-        # instead of guessing: the job-aware research path (§17.650) grounds
-        # the answer in the project's own state + retrieval.
-        import re as _re
-        _questionish = _re.search(
-            r"\?\s*$|^(can|could|how|what|why|where|which|who|should|is|are|do|does|will|would)\b",
-            text_, _re.IGNORECASE)
-        if _questionish:
-            yield _ev(ASSIST_TURN_STATUS, {"text": "I'm not certain how to act on that — researching it against the project's current state…"})
-            try:
-                res = await assist_agent.run_step_research(
-                    session_id=session_id, node_key=nk, question=text_,
-                    history=history, db=db,
-                    capture_reply=False,  # §17.1136
-                )
-                answer = (res or {}).get("answer") or ""
-                if answer.strip():
-                    yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": answer})
-                    try:  # §17.873 — durable transcript capture (dedupe-safe)
-                        await assist_agent.capture_assistant_reply(
-                            session_id=session_id, node_key=(res or {}).get("node_key") or nk, kind="ask",
-                            content=answer, db=db,
-                        )
-                    except Exception:  # noqa: BLE001
-                        logger.warning("turn_loop_research_capture_failed sid=%s", session_id)
-                    handled["v"] = "research_fallback"
-                    return
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("turn_loop_research_fallback_failed sid=%s err=%r",
-                               session_id, exc)
-
-        # 5b. Fallback (low confidence / unhandled action): the progress
-        # tracker, then guidance — the pre-§17.771 default, server-side.
-        async for e in _track_then_continue(session_id, text_, nk, history, db):
-            yield e
-        handled["v"] = "fallback"
+    # 5b. Fallback (low confidence / unhandled action): the progress
+    # tracker, then guidance — the pre-§17.771 default, server-side.
+    async for e in _track_then_continue(session_id, text_, nk, history, db):
+        yield e
+    handled["v"] = "fallback"
 
 
 async def _note(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterator[_Event]:
@@ -940,7 +939,7 @@ async def _surface(session_id: str, d: dict, text_: str, nk, db) -> AsyncIterato
         async for e in _note(session_id, d, text_, nk, db):
             if e[0] != ASSIST_TURN_STATUS:  # keep surface quiet unless material
                 yield e
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("turn_loop_surface_failed sid=%s err=%r", session_id, exc)
 
 
@@ -953,7 +952,7 @@ async def _clear_completion_confirm(session_id: str, db) -> None:
         from app.modules import assist_notes
         await assist_notes.clear_pending_completion_confirm(
             session_id=session_id, db=db)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("completion_confirm_clear_failed sid=%s err=%r", session_id, exc)
 
 
@@ -992,7 +991,7 @@ async def _recent_advance_message(session_id: str, node_key, db) -> str | None:
                 "turn_loop_guide_advance_candidate sid=%s nk=%s msg=%r",
                 session_id, node_key, msg[:120])
             return msg
-    except Exception as exc:  # noqa: BLE001 — never break Guide me
+    except Exception as exc:
         logger.warning("guide_advance_probe_failed sid=%s err=%r", session_id, exc)
     return None
 
@@ -1011,7 +1010,7 @@ async def _track_then_continue(session_id: str, text_: str, nk, history, db) -> 
             session_id, AssistInterpretInput(message=text_, node_key=nk, history=history),
             db=db,
         ) or {}
-    except Exception as exc:  # noqa: BLE001 — §17.885 lesson: log LOUD
+    except Exception as exc:
         logger.error("turn_loop_track_failed sid=%s err=%r", session_id, exc)
     act = tr.get("action")
     if act in ("advanced", "finalized"):
@@ -1050,7 +1049,7 @@ async def _answer(session_id: str, question: str, nk, history, db,
             capture_reply=False,  # §17.1136 — persisted once, below, under the resolved key
         )
         answer = (res or {}).get("answer") or ""
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("turn_loop_answer_failed sid=%s err=%r", session_id, exc)
         answer = ""
     if not answer.strip():
@@ -1064,7 +1063,7 @@ async def _answer(session_id: str, question: str, nk, history, db,
         await assist_agent.capture_assistant_reply(
             session_id=session_id, node_key=(res or {}).get("node_key") or nk, kind="ask", content=answer, db=db,
         )
-    except Exception:  # noqa: BLE001 — capture is best-effort
+    except Exception:
         logger.warning("turn_loop_answer_capture_failed sid=%s", session_id)
 
 
@@ -1093,7 +1092,7 @@ async def _blocked_flow(session_id: str, text_: str, node_key, history, db
                 "SELECT n.title FROM dag_nodes n JOIN assist_sessions s "
                 "ON s.job_id = n.job_id WHERE s.id = :sid AND n.node_key = :nk"),
                 {"sid": session_id, "nk": nk})).scalar() or ""
-        except Exception:  # noqa: BLE001 — the callout degrades, never fails
+        except Exception:
             title = ""
 
     step_label = f"**{nk}: {title}**" if title else (f"**{nk}**" if nk else "this step")
@@ -1122,7 +1121,7 @@ async def _blocked_flow(session_id: str, text_: str, node_key, history, db
         )
         if res.get("replan_proposal"):
             yield _ev(ASSIST_REPLAN_PROPOSAL, {"proposal": res["replan_proposal"]})
-    except Exception as exc:  # noqa: BLE001 — surfacing is an enhancement
+    except Exception as exc:
         logger.warning("turn_loop_blocked_note_failed sid=%s err=%r", session_id, exc)
 
 
@@ -1146,7 +1145,7 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
             except asyncio.TimeoutError:
                 continue
         res = task.result()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": f"I couldn't start the state check ({exc}). Tell me in your own words what is and is not working."})
         return
     # §17.1077 — the opt-in local runner closes the loop: run the probes,
@@ -1154,7 +1153,7 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
     try:
         from app.modules import assist_local_runner as _lr
         _spec = await _lr.runner_spec(db)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("local_runner_lookup_failed sid=%s err=%r", session_id, exc)
         _spec = None
     if _spec is not None and res.get("probes"):
@@ -1177,7 +1176,7 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
             try:
                 await assist_agent.ingest_turn(session_id=session_id, role="operator", kind="message",
                                                content=record, node_key=_rnk, db=db)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning("local_runner_record_failed sid=%s", session_id)
             logger.warning("local_runner_executed sid=%s node_key=%s probes=%d ok=%d",
                            session_id, _rnk, len(executed), sum(1 for e in executed if e["ok"]))
@@ -1195,7 +1194,7 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
     try:
         await assist_agent.capture_assistant_reply(
             session_id=session_id, node_key=nk, kind="ask", content=_msg, db=db)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("state_check_capture_failed sid=%s", session_id)
 
 
@@ -1212,7 +1211,7 @@ async def _resolve_state_check(session_id: str, nk, pasted: str, history, db,
         try:
             await assist_agent.capture_assistant_reply(
                 session_id=session_id, node_key=nk, kind="ask", content=res["message"], db=db)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("state_check_result_capture_failed sid=%s", session_id)
     if res.get("proposal"):
         yield _ev(ASSIST_REPLAN_PROPOSAL, {"proposal": res["proposal"]})
@@ -1225,7 +1224,7 @@ async def _reconcile_plan(session_id: str, node_key, db) -> AsyncIterator[_Event
     from app.modules import assist_agent
     try:
         res = await assist_agent.reconcile_plan_against_facts(session_id=session_id, db=db)
-    except Exception as exc:  # noqa: BLE001 — reconciliation never strands the turn
+    except Exception as exc:
         logger.warning("plan_reconcile_failed sid=%s err=%r", session_id, exc)
         return
     comp = res.get("completed") or []
@@ -1238,7 +1237,7 @@ async def _reconcile_plan(session_id: str, node_key, db) -> AsyncIterator[_Event
         try:
             await assist_agent.capture_assistant_reply(
                 session_id=session_id, node_key=node_key, kind="note", content=msg, db=db)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("plan_reconcile_note_capture_failed sid=%s", session_id)
     prop = res.get("proposals")
     if prop and prop.get("proposals"):
@@ -1261,7 +1260,7 @@ async def _fix_flow(session_id: str, nk, error_text: str, history, db,
                 _offer = _sc.offer_text(_streak)
                 yield _ev(ASSIST_ANSWER, {"kind": "note", "text": _offer})
                 logger.info("state_check_offered sid=%s node_key=%s streak=%d", session_id, nk, _streak)
-    except Exception as exc:  # noqa: BLE001 — the offer never blocks the fix
+    except Exception as exc:
         logger.warning("state_check_offer_failed sid=%s err=%r", session_id, exc)
     yield _ev(ASSIST_TURN_STATUS, {"text": status_text})
     fix = await assist_agent.run_step_fix(
@@ -1289,7 +1288,7 @@ async def _fix_flow(session_id: str, nk, error_text: str, history, db,
             session_id=session_id, node_key=nk, kind="fix",
             content=fix_text, db=db,
         )
-    except Exception:  # noqa: BLE001 — capture is best-effort
+    except Exception:
         logger.warning("turn_loop_fix_capture_failed sid=%s", session_id)
 
 
@@ -1316,7 +1315,7 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
     try:
         try:
             res = await _try_submit()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # §17.878 — SELF-HEAL the unclaimed-step trap. Live incident: the
             # tracker committed T13 and moved the session pointer to T14 without
             # a formal claim (presented_at NULL); guide/fix flowed all day off
@@ -1353,7 +1352,7 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
                 from app.modules import assist_agent as _aa
                 await _aa.capture_assistant_reply(
                     session_id=session_id, node_key=nk, kind="note", content=_msg, db=db)
-            except Exception:  # noqa: BLE001 — capture never blocks
+            except Exception:
                 logger.warning("evidence_match_note_capture_failed sid=%s", session_id)
         async for e in _reconciliation_note(session_id, nk, res, db):  # §17.1043
             yield e
@@ -1367,7 +1366,7 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
             # deliberation reply run_step_decision already persisted (kind
             # "deliberation") on the way through the submit endpoint. A second
             # capture under the turn's key was the helper-and-caller double persist.
-    except Exception as exc:  # noqa: BLE001 — a refused submit must not kill the turn
+    except Exception as exc:
         # §17.889(#11) — durable answer (status lines vanish at turn end) and an
         # actual continuation instead of a dangling "Continuing…".
         msg = (f"I recorded what you pasted, but the step wouldn't accept it as a "
@@ -1376,7 +1375,7 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
         try:
             async for e in _claim_and_guide(session_id, nk, history, db, orient=True):
                 yield e
-        except Exception:  # noqa: BLE001 — orientation is best-effort here
+        except Exception:
             logger.warning("turn_loop_refused_submit_orient_failed sid=%s", session_id)
 
 
@@ -1396,7 +1395,7 @@ async def _reconciliation_note(session_id: str, nk, res, db) -> AsyncIterator[_E
         from app.modules import assist_agent as _aa
         await _aa.capture_assistant_reply(
             session_id=session_id, node_key=nk, kind="note", content=note, db=db)
-    except Exception:  # noqa: BLE001 — capture never blocks
+    except Exception:
         logger.warning("plan_reconcile_note_capture_failed sid=%s", session_id)
 
 
@@ -1442,7 +1441,7 @@ async def _claim_and_guide(
                     "text": f"✅ Step {nk} is already done — moving on to the next step…",
                 })
                 nk = None
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("turn_loop_claim_repair_failed sid=%s err=%r", session_id, exc)
     if not nk:
         yield _ev(ASSIST_TURN_STATUS, {"text": "Finding the next step and verifying it against what we know…"})
@@ -1470,7 +1469,7 @@ async def _claim_and_guide(
                         session_id=session_id, node_key=None, kind="ask",
                         content=_done_text, db=db,
                     )
-                except Exception:  # noqa: BLE001 — capture never blocks
+                except Exception:
                     logger.warning("project_complete_capture_failed sid=%s",
                                    session_id)
             elif st == "paused":
@@ -1479,7 +1478,7 @@ async def _claim_and_guide(
                 try:
                     from app.modules.assist_notes import get_pending_replan
                     pend = await get_pending_replan(session_id=session_id, db=db)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pend = None
                 if pend:
                     yield _ev(ASSIST_TURN_STATUS, {"text": "A plan-change proposal is waiting for your decision (see the card above) — answer it and we'll continue."})

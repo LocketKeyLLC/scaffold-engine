@@ -573,6 +573,6 @@ class OpenAIProvider(LLMProvider):
 
 # Register the singleton at import time. ``app/providers/__init__.py``
 # triggers this via its ``_autoload`` helper.
-from app.providers import register  # noqa: E402
+from app.providers import register
 
 register("openai", OpenAIProvider())

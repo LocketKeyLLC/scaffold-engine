@@ -383,7 +383,7 @@ async def _kb_union_block(
         resp = await query_rag_multi(
             queries, rerank_query=rerank_query, top_k=5, domain=domain,
         )
-    except Exception as exc:  # noqa: BLE001 — research must never break a guide
+    except Exception as exc:
         logger.warning("kb_union_search_failed node_key=%s err=%r", node_key, exc)
         return ""
     results = resp.get("results") or []
@@ -600,7 +600,7 @@ async def _focus_web_query(question: str, *, role: str, hint: str = "") -> str:
             label="assist_focus_query",
             think_off_rescue=True,  # §17.876
         )
-    except Exception as exc:  # noqa: BLE001 — never block research on this
+    except Exception as exc:
         logger.debug("assist_focus_web_query_failed: %s", exc)
         return q
     if resp and resp.success:
@@ -807,13 +807,13 @@ async def research_one(
                                             operator_text=question)
             have = {s.get("url") for s in sources if s.get("url")}
             sources.extend(x for x in (extra or []) if not x.get("url") or x["url"] not in have)
-    except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
+    except Exception as exc:
         logger.warning("assist_research_class_query_failed: %s", exc)
     # §17.1036/1037 — a QUESTION about a program deserves its documentation.
     try:
         sources.extend(await _documentation_sources(need, web_q or question, sources, node_key=node_key,
                                                     operator_text=question))
-    except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
+    except Exception as exc:
         logger.warning("assist_research_docs_query_failed: %s", exc)
     sources = rank_evidence(sources, need, node_key=node_key)  # §17.1027
     answer: Optional[str] = None

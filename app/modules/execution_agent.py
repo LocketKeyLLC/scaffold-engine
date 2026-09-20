@@ -61,7 +61,7 @@ from app.modules.prompt_optimizer import optimize_prompt
 # prompt_assembly the single source of truth and re-exports here so
 # every `from app.modules.execution_agent import EXECUTION_SYSTEM_*`
 # call site keeps working unchanged.
-from app.modules.prompt_assembly import (  # noqa: F401  re-exported for callers
+from app.modules.prompt_assembly import (
     EXECUTION_SYSTEM_LLM,
     EXECUTION_SYSTEM_CODEGEN,
     EXECUTION_SYSTEM_RUNBOOK,
@@ -138,7 +138,7 @@ async def _make_dag_progress_tracker(
             ).mappings().first()
         total = int((row and row["total"]) or 0)
         done = int((row and row["done"]) or 0)
-    except Exception as exc:  # noqa: BLE001 — progress is best-effort
+    except Exception as exc:
         logger.warning("progress_tracker_init_failed: job=%s err=%s", job_id, exc)
         return None
     if total < 2:
@@ -939,9 +939,9 @@ def _build_prompt(node: dict, brief: dict) -> str:
 # audit's hot-path-file convention is met. Re-import keeps the original
 # name reachable from this module (tests + the `_build_prompt` caller above
 # both reference it on `execution_agent`).
-from app.modules.execution_retry import _format_reviewer_feedback  # noqa: E402
+from app.modules.execution_retry import _format_reviewer_feedback
 # §17.1039 — the evidence layer on the executor (need → dated sources → verified output).
-from app.modules.execution_evidence import (  # noqa: E402
+from app.modules.execution_evidence import (
     evidence_summary, fetch_upstream_flagged, node_need, render_node_sources,
     verify_node_output, web_sources, node_task_text as node_task_text_for,
 )
@@ -1699,7 +1699,7 @@ async def execute_next_node(
                         }))
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 — fall back to recorded path
+            except Exception as exc:
                 logger.warning(
                     "node_token_stream_failed: node=%s error=%s (falling back to chat)",
                     node_key, exc,
@@ -1833,7 +1833,7 @@ async def execute_next_node(
             regenerate=_regen_node,
         )
         _evidence_summary = evidence_summary(_evidence_report)
-    except Exception as exc:  # noqa: BLE001 — verification never fails a node
+    except Exception as exc:
         logger.warning("node_output_verification_failed node=%s err=%r", node_key, exc)
 
     verify_status: Literal["pass", "fail", "skipped"]
@@ -2161,7 +2161,7 @@ async def skip_node(job_id: str, node_key: str, db: AsyncSession) -> dict:
 # `app/routers/workflow.py` imports it from
 # `app.modules.execution_agent` via this re-export. Both call sites
 # keep working byte-for-byte.
-from app.modules.execution_retry import retry_failed_node  # noqa: E402
+from app.modules.execution_retry import retry_failed_node
 
 # ---------------------------------------------------------------------------
 # Full-DAG auto-execution (SSE streaming)
@@ -2281,7 +2281,7 @@ async def _run_parallel_frontier(
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception as e:  # noqa: BLE001 — surface as a failed node
+            except Exception as e:
                 res = {
                     "status": "failed", "node_key": node.get("node_key"),
                     "title": node.get("title"), "error": f"worker error: {e}",

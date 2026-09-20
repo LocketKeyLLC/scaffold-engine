@@ -269,7 +269,7 @@ async def run_learning_cycle(db) -> dict:
             staged.append({"id": pid, "role": role, "candidate": decision["candidate"]})
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001 — fail-soft governance job
+        except Exception as exc:
             logger.exception(
                 'event="model_role_learning_failed" role=%s err=%s', role, exc
             )
@@ -289,7 +289,7 @@ async def tick() -> None:
     except asyncio.CancelledError:
         logger.warning('event="model_role_learning_tick_cancelled"')
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception('event="model_role_learning_tick_failed" err=%s', exc)
 
 

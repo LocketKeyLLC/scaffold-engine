@@ -108,7 +108,7 @@ async def _pulled_tags() -> set[str] | None:
             r = await client.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags")
             r.raise_for_status()
             return {m.get("name", "") for m in (r.json().get("models") or [])}
-    except Exception as exc:  # noqa: BLE001 — connection/timeout/parse
+    except Exception as exc:
         logger.warning("models_api tag-list unreachable: %s", exc)
         return None
 
@@ -133,7 +133,7 @@ async def _generate_probe(model: str, timeout: float = 60.0) -> dict:
             return {"ok": False, "latency_ms": latency_ms,
                     "error": f"HTTP {r.status_code}: {r.text[:300]}"}
         return {"ok": True, "latency_ms": latency_ms, "error": None}
-    except Exception as exc:  # noqa: BLE001 — surface, don't raise
+    except Exception as exc:
         latency_ms = int((time.monotonic() - t0) * 1000)
         return {"ok": False, "latency_ms": latency_ms, "error": repr(exc)[:300]}
 
@@ -207,7 +207,7 @@ async def get_available_models(provider: str | None = None) -> dict:
         )
     try:
         models = await pconn.list_provider_models(name)
-    except Exception as exc:  # noqa: BLE001 — an unconfigured provider is a
+    except Exception as exc:
         # normal, renderable state, not a server error.
         return {"reachable": False, "provider": name, "models": [],
                 "local": [], "cloud": [], "error": pconn._explain(exc)}
@@ -335,7 +335,7 @@ async def put_model_role(
         # exercises the URL and the key together.
         try:
             available = await pconn.list_provider_models(provider)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise HTTPException(
                 status_code=422,
                 detail=(f"cannot reach provider {provider!r}: "

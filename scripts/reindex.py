@@ -50,10 +50,10 @@ from typing import Any
 
 # These imports require the orchestrator's PYTHONPATH (/code). The
 # Makefile target arranges that via ``docker exec``.
-from app import model_router  # noqa: E402
-from app.config import VALID_DOMAINS, settings  # noqa: E402
-from app.utils.embedding_cache import truncate_and_normalize  # noqa: E402
-from app.utils.milvus_utils import COLLECTION_NAME, get_client  # noqa: E402
+from app import model_router
+from app.config import VALID_DOMAINS, settings
+from app.utils.embedding_cache import truncate_and_normalize
+from app.utils.milvus_utils import COLLECTION_NAME, get_client
 
 logger = logging.getLogger("scaffold.reindex")
 

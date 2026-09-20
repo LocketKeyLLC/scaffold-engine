@@ -566,7 +566,7 @@ async def _execute_model_ab_job(schedule_id: int, topic: str, depth: str) -> Non
         status = "cancelled"
         logger.warning('event="model_ab_drain_cancelled" schedule_id=%s', schedule_id)
         raise
-    except Exception as exc:  # noqa: BLE001 — fail-soft governance job
+    except Exception as exc:
         status = "failed"
         logger.exception('event="model_ab_failed" schedule_id=%s err=%s', schedule_id, exc)
     finally:

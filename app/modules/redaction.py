@@ -44,7 +44,7 @@ def _scan_line(line: str) -> list[tuple[str, str]]:
     try:
         from detect_secrets.core import scan
         from detect_secrets.settings import transient_settings
-    except Exception:  # noqa: BLE001 — optional at import time; pinned in requirements
+    except Exception:
         return []
     out: list[tuple[str, str]] = []
     with transient_settings({"plugins_used": _PLUGINS}):

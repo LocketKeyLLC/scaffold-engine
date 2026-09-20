@@ -8,6 +8,10 @@ FROM python:3.14.7-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60
 WORKDIR /code
 
 # Build-time only: compilers/headers if any wheel needs them.
+# §17.1141 — apt packages are deliberately unpinned: the base image is pinned by digest, so the
+# apt index it ships with is reproducible per digest, and Debian drops superseded versions from
+# the index, which makes `pkg=version` pins the thing that breaks rebuilds.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
@@ -20,7 +24,9 @@ ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 RUN pip install --no-cache-dir "setuptools==84.0.0"  # §17.585 — was 71.1.0 (PYSEC-2025-49)
 
 COPY requirements.txt requirements-dev.txt ./
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+# hadolint DL3059 (info): the three pip installs stay separate RUNs on purpose — torch (~200 MB) gets
+# its own cache layer so a requirements change does not re-download it (§17.1141).
+RUN pip install --no-cache-dir "torch==2.14.0" --index-url https://download.pytorch.org/whl/cpu  # §17.1141 — pinned (was floating; hadolint DL3013)
 RUN pip install --no-cache-dir -r requirements.txt
 # Dev deps live in the same venv but only the runtime stage prunes them.
 RUN pip install --no-cache-dir -r requirements-dev.txt
@@ -83,6 +89,10 @@ WORKDIR /code
 
 # Runtime-only system deps. (curl + jq retained for healthchecks/debug;
 # 'make' dropped — runtime never invokes Make.)
+# §17.1141 — apt packages are deliberately unpinned: the base image is pinned by digest, so the
+# apt index it ships with is reproducible per digest, and Debian drops superseded versions from
+# the index, which makes `pkg=version` pins the thing that breaks rebuilds.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         jq \
@@ -139,7 +149,7 @@ COPY --chown=root:root cli/scaffold_cli/          /code/cli/scaffold_cli/
 # itself stays root-owned: the app does not write under /code.
 RUN mkdir -p /var/log/scaffold && chown scaffold:scaffold /var/log/scaffold
 
-USER scaffold:scaffold
+USER 10001:10001  # scaffold:scaffold — numeric so the host can resolve it (hadolint DL3066, §17.1141)
 EXPOSE 8000
 CMD ["python", "-m", "app.run_server"]
 
@@ -154,6 +164,10 @@ FROM python:3.14.7-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60
 
 WORKDIR /code
 
+# §17.1141 — apt packages are deliberately unpinned: the base image is pinned by digest, so the
+# apt index it ships with is reproducible per digest, and Debian drops superseded versions from
+# the index, which makes `pkg=version` pins the thing that breaks rebuilds.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         jq \
@@ -213,6 +227,6 @@ COPY --chown=root:root pyproject.toml /code/pyproject.toml
 
 RUN mkdir -p /var/log/scaffold && chown scaffold:scaffold /var/log/scaffold
 
-USER scaffold:scaffold
+USER 10001:10001  # scaffold:scaffold — numeric so the host can resolve it (hadolint DL3066, §17.1141)
 EXPOSE 8000
 CMD ["python", "-m", "app.run_server"]

@@ -335,5 +335,5 @@ async def close_embedding_cache() -> None:
     if _cache is not None:
         try:
             await _cache.close()
-        except Exception:  # noqa: BLE001 — shutdown best-effort
+        except Exception:
             pass

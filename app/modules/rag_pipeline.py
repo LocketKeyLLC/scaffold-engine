@@ -1253,8 +1253,10 @@ async def query_rag_multi(
                     source_type=d.get("source_type") or "",
                 )
     if not union:
-        empty["metadata"]["queries"] = len(qs)
-        empty["metadata"]["latency_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        _md = dict(empty["metadata"])  # §17.1141 — pyright: item assignment into the TypedDict
+        _md["queries"] = len(qs)
+        _md["latency_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        empty["metadata"] = _md  # type: ignore[typeddict-item]
         return empty
 
     ordered = [replace(union[k], rrf_score=fused_rrf[k], final_score=fused_rrf[k])
@@ -1559,7 +1561,7 @@ async def ingest_entries(
         if _ing_thr.ready(final=final):
             try:
                 progress_cb(done, _ing_total)
-            except Exception:  # noqa: BLE001 — progress is best-effort
+            except Exception:
                 pass
 
     for _idx, (p, vector) in enumerate(zip(prepared, vectors, strict=True)):

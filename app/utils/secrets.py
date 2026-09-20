@@ -92,7 +92,7 @@ def decrypt(ciphertext: str | None) -> str | None:
         return None
     try:
         return _fernet().decrypt(ciphertext.encode("ascii")).decode("utf-8")
-    except Exception as e:  # noqa: BLE001 — see docstring
+    except Exception as e:
         logger.warning(
             "provider_credential_undecryptable err=%s — falling back to env; "
             "re-enter the key in Settings → Connections to restore it",

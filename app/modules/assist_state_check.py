@@ -210,7 +210,7 @@ def read_only_command(cmd: str) -> bool:
         from app.modules.assist_guide import find_shell_unsafe_commands
         if find_shell_unsafe_commands("```bash\n" + c + "\n```"):
             return False
-    except Exception:  # noqa: BLE001 — the local gate above stands on its own
+    except Exception:
         pass
     return True
 
@@ -339,7 +339,7 @@ async def plan_probes(claims: list[dict], environment: Optional[dict], *,
         if on_progress is not None:
             try:
                 await on_progress(bi, len(batches), len(probes))
-            except Exception:  # noqa: BLE001 — progress is a courtesy
+            except Exception:
                 pass
         claims_block = "\n".join(f"- {c['id']}: {c['text']}" for c in batch)
         msg = _PROBE_OPENING + context + f"\n\nCLAIMS (give a probe for each of the {len(batch)}, or an empty command):\n" + claims_block
@@ -349,7 +349,7 @@ async def plan_probes(claims: list[dict], environment: Optional[dict], *,
                 role="model_general", overrides=model_overrides, temperature=0.0,
                 tool_choice="auto", max_tokens=2500)
             raw = ((read_tool_args(resp) or {}).get("probes")) or []
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("state_check_probe_model_failed batch=%d/%d: %r", bi, len(batches), exc)
             raw = []
         got = 0
@@ -550,7 +550,7 @@ async def judge_outputs(probes: list[dict], pasted: str, *,
                 tools=[RECORD_VERDICTS_TOOL], role="model_general", overrides=model_overrides,
                 temperature=0.0, tool_choice="auto", max_tokens=3000)
             raw = ((read_tool_args(resp) or {}).get("verdicts")) or []
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("state_check_judge_model_failed: %r", exc)
             raw = []
         for item in raw if isinstance(raw, list) else []:
@@ -638,7 +638,7 @@ async def start_state_check(*, db, session_id: str, node_key: Optional[str], on_
     try:
         from app.modules import assist_local_runner as _lr
         _runner_off = (await _lr.runner_spec(db)) is None
-    except Exception:  # noqa: BLE001 — the offer is a courtesy, never blocks
+    except Exception:
         _runner_off = True
     msg = render_probe_message(probes, checked=len(all_probes),
                                unchecked=max(0, targets - len(all_probes)),
@@ -658,7 +658,7 @@ async def get_pending_state_check(*, db, session_id: str) -> Optional[dict]:
             meta = json.loads(meta)
         p = (meta or {}).get("pending_state_check") if isinstance(meta, dict) else None
         return p if isinstance(p, dict) and p.get("probes") else None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("state_check_pending_read_failed sid=%s err=%r", session_id, exc)
         return None
 
@@ -730,7 +730,7 @@ async def resolve_state_check(*, db, session_id: str, pasted: str, finish: bool 
                                       facts=[f"State check at {pending.get('node_key') or '?'}: NOT true any more — {v['claim'][:120]} ({v['reason'][:100]})"
                                              for v in contradicted if v["kind"] == "fact"])
                 retracted = facts
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("state_check_retract_failed sid=%s err=%r", session_id, exc)
     proposal = None
     affected = proposals_from_verdicts(verdicts, anchor_node_key=pending.get("node_key"))
@@ -742,7 +742,7 @@ async def resolve_state_check(*, db, session_id: str, pasted: str, finish: bool 
                          + "; ".join(f"{v['id']} {v['reason'][:80]}" for v in structural)[:400])
             proposal = await _stage_replan_proposal(
                 session_id=session_id, note_text=note_text, note_kind="state_check", affected=affected, db=db)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("state_check_stage_failed sid=%s err=%r", session_id, exc)
     # record the check on the session (for the automatic-offer guard) and clear the pending
     unknown_v = [v for v in verdicts if v["verdict"] == "unknown"]
@@ -870,7 +870,7 @@ async def state_check_done_on_step(*, db, session_id: str, node_key: Optional[st
             meta = json.loads(meta)
         checks = (meta or {}).get("state_checks") if isinstance(meta, dict) else None
         return any(isinstance(c, dict) and c.get("node_key") == node_key for c in (checks or []))
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
 

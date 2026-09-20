@@ -87,7 +87,7 @@ setup_logging(
 # §17.855 (audit B7) — /health probe logic lives in app/health.py.
 # Re-exported here so `from app.main import _check_reranker_state /
 # _model_role_warnings / health` and the existing tests keep working.
-from app.health import (  # noqa: E402
+from app.health import (
     _check_reranker_state,
     _model_role_warnings,
     build_health_response,
@@ -299,7 +299,7 @@ async def lifespan(app: FastAPI):
         _swept = await sweep_zombie_runs()
         if _swept:
             logger.info("startup_turn_run_sweep: zombies_marked=%d", _swept)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("startup_turn_run_sweep_failed: error=%s", exc)
 
     # Run schema migrations before anything else touches the DB (#10).
@@ -334,7 +334,7 @@ async def lifespan(app: FastAPI):
                 _al = await run_alembic_upgrade()
                 if _al.get("status") == "error":
                     _mig_failure = f"alembic: {_al.get('error')}"
-            except Exception as al_exc:  # noqa: BLE001
+            except Exception as al_exc:
                 logger.error("alembic_hook_crashed: error=%s", al_exc)
                 _mig_failure = f"alembic hook crashed: {al_exc}"
 
@@ -631,14 +631,14 @@ async def lifespan(app: FastAPI):
         _advance_resume_task.cancel()
         try:
             await _advance_resume_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        except (asyncio.CancelledError, Exception):
             pass
-    if _cleanup_task is not None:
-        _cleanup_task.cancel()
-    try:
-        await _cleanup_task
-    except asyncio.CancelledError:
-        pass
+    if _cleanup_task is not None:  # §17.1141 — was awaited unguarded: shutdown raised
+        _cleanup_task.cancel()      # TypeError when the cleanup task had never started
+        try:
+            await _cleanup_task
+        except asyncio.CancelledError:
+            pass
     try:
         from app.scheduler import shutdown_scheduler
         await shutdown_scheduler()
@@ -659,7 +659,7 @@ async def lifespan(app: FastAPI):
         try:
             _mod = __import__(_closer_mod, fromlist=[_closer_fn])
             await getattr(_mod, _closer_fn)()
-        except Exception as exc:  # noqa: BLE001 — shutdown best-effort
+        except Exception as exc:
             logger.warning('event="cache_close_failed" cache=%s error=%s', _closer_mod, exc)
     # MilvusClient.close() is sync; wrap on the same async-first principle
     # as the startup connect above (§17.591).
@@ -830,24 +830,24 @@ app.include_router(design_router)
 # the OpenAPI snapshot (paths block sorted alphabetically by FastAPI)
 # stays byte-identical; the include_router order only matters for
 # routes with overlapping paths (none here).
-from app.routers.workflow import router as workflow_router  # noqa: E402
-from app.routers.research import router as research_router  # noqa: E402
-from app.routers.jobs import router as jobs_router  # noqa: E402
-from app.routers.schedule import router as schedule_router  # noqa: E402
-from app.routers.gt import router as gt_router  # noqa: E402
-from app.routers.prompts import router as prompts_router  # noqa: E402
-from app.routers.rag import router as rag_router  # noqa: E402
-from app.routers.nodes import router as nodes_router  # noqa: E402 — §17.478
-from app.routers.artifacts import router as artifacts_router  # noqa: E402 — §17.565
-from app.routers.route import router as route_router  # noqa: E402 — §17.628
-from app.routers.mcp import router as mcp_router  # noqa: E402 — §17.772
-from app.routers.model_proposals import router as model_proposals_router  # noqa: E402 — §17.803
-from app.routers.models import router as models_router  # noqa: E402 — §17.813
-from app.routers.auth_info import router as auth_info_router  # noqa: E402 — §17.815
-from app.routers.operator_account import router as operator_account_router  # noqa: E402 — §17.840
-from app.routers.meta import router as meta_router  # noqa: E402 — §17.817
-from app.routers.setup import router as setup_router  # noqa: E402 — §17.1081
-from app.routers.profiles import router as profiles_router  # noqa: E402 — §17.809
+from app.routers.workflow import router as workflow_router
+from app.routers.research import router as research_router
+from app.routers.jobs import router as jobs_router
+from app.routers.schedule import router as schedule_router
+from app.routers.gt import router as gt_router
+from app.routers.prompts import router as prompts_router
+from app.routers.rag import router as rag_router
+from app.routers.nodes import router as nodes_router
+from app.routers.artifacts import router as artifacts_router
+from app.routers.route import router as route_router
+from app.routers.mcp import router as mcp_router
+from app.routers.model_proposals import router as model_proposals_router
+from app.routers.models import router as models_router
+from app.routers.auth_info import router as auth_info_router
+from app.routers.operator_account import router as operator_account_router
+from app.routers.meta import router as meta_router
+from app.routers.setup import router as setup_router
+from app.routers.profiles import router as profiles_router
 app.include_router(workflow_router)
 app.include_router(research_router)
 app.include_router(jobs_router)
@@ -901,7 +901,7 @@ app.mount("/ui", StaticFiles(directory="app/ui", html=True), name="ui")
 # is run in the lifespan above. The stdio transport (`python -m app.mcp_server`)
 # is independent of this mount.
 if settings.mcp_server_enabled:
-    from app.mcp_server import ApiKeyASGIGuard, streamable_http_app  # noqa: E402
+    from app.mcp_server import ApiKeyASGIGuard, streamable_http_app
     app.mount(
         "/mcp",
         ApiKeyASGIGuard(
@@ -916,7 +916,7 @@ if settings.mcp_server_enabled:
 # Gated on native_openai_enabled (default off) — the OWUI pipeline path is
 # unchanged while off. See docs/native_openai_surface_plan.md.
 if settings.native_openai_enabled:
-    from app.routers.openai_compat import openai_app  # noqa: E402
+    from app.routers.openai_compat import openai_app
     app.mount("/v1", openai_app)
 
 

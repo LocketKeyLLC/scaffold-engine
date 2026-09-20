@@ -278,7 +278,7 @@ async def assist_chatmap_put(
             {"cid": chat_id, "sid": body.session_id},
         )
         await db.commit()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         await db.rollback()
         logger.warning("chatmap durable-link write failed for %s: %s", chat_id, exc)
     return {"chat_id": chat_id, "stored": True}
@@ -305,7 +305,7 @@ async def assist_chatmap_get(chat_id: str, db=Depends(get_db)):
                     """),
                     {"cid": chat_id},
                 )).mappings().first()
-        except Exception as exc:  # noqa: BLE001 — recovery is best-effort
+        except Exception as exc:
             logger.warning("chatmap PG recovery failed for %s: %s", chat_id, exc)
             row = None
         if row is None:
@@ -332,7 +332,7 @@ async def assist_chatmap_get(chat_id: str, db=Depends(get_db)):
                 {"sid": sid},
             )).mappings().first()
             status = row["status"] if row else None
-        except Exception:  # noqa: BLE001 — status is advisory; never 500 the map
+        except Exception:
             status = None
     return {"chat_id": chat_id, **entry, "status": status}
 
@@ -411,7 +411,7 @@ async def assist_get_session(session_id: UuidPath, db=Depends(get_db)):
     try:
         sess["pending_replan"] = await assist_agent.get_pending_replan(
             session_id=session_id, db=db)
-    except Exception:  # noqa: BLE001 — additive field, never break the session read
+    except Exception:
         sess["pending_replan"] = None
     return sess
 
@@ -704,7 +704,7 @@ async def assist_set_env(session_id: UuidPath, body: AssistEnvInput, db=Depends(
             job_id = str((sess or {}).get("job_id") or "") or None
             prev = await assist_agent.get_environment(session_id=session_id, db=db)
             old_subs = dict((prev or {}).get("substitutions") or {})
-        except Exception:  # noqa: BLE001 — the diff is a courtesy, the update is not
+        except Exception:
             old_subs, job_id = {}, None
     try:
         env = await assist_agent.set_environment(
@@ -742,7 +742,7 @@ async def assist_get_env(session_id: UuidPath, db=Depends(get_db)):
     try:
         from app.modules.assist_inventory import render_system_map
         system_map = render_system_map(env)
-    except Exception:  # noqa: BLE001 — derived; never breaks the read
+    except Exception:
         system_map = ""
     if env is None:
         raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
@@ -1145,7 +1145,7 @@ async def assist_submit(session_id: UuidPath, body: AssistSubmitInput, db=Depend
                 note = render_note(result.get("reconciliation") or {})
                 if note:
                     result["reconciliation_note"] = note
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         return result
     except ValueError as exc:

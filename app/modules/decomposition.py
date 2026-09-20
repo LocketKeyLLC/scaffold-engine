@@ -453,7 +453,7 @@ async def run_component_pipeline(
         # consume the SSE generator to completion to run the child autonomously.
         async for _ in execute_all_nodes(child_id, model_overrides=model_overrides):
             pass
-    except Exception as e:  # noqa: BLE001 — best-effort; never strand a child
+    except Exception as e:
         logger.exception("component_pipeline_failed: child=%s", child_id)
         try:
             async with async_session() as fdb:

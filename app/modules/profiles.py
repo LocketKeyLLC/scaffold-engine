@@ -360,7 +360,7 @@ async def mark_job_quick(job_id) -> None:
         async with async_session() as s:
             await s.execute(_MARK_QUICK, {"job_id": str(job_id)})
             await s.commit()
-    except Exception as exc:   # noqa: BLE001 — best-effort flag, never fatal
+    except Exception as exc:
         logger.warning("mark_job_quick_failed job_id=%s err=%s", job_id, exc)
 
 
@@ -380,7 +380,7 @@ async def resolve_job_overrides(
             ).first()
         if row and row[0]:
             return merge_quick_overrides(request_overrides)
-    except Exception as exc:   # noqa: BLE001 — read-only probe, fail open
+    except Exception as exc:
         logger.warning(
             "resolve_job_overrides_failed job_id=%s err=%s", job_id, exc
         )

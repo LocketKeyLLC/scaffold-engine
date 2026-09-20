@@ -128,7 +128,7 @@ def is_starved(resp: Any) -> bool:
             return True
         thinking = raw.get("thinking") or msg.get("thinking") or ""
         return bool(str(thinking).strip())
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
 

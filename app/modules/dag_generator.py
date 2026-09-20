@@ -419,7 +419,7 @@ async def _build_mcp_catalog_block() -> str:
         for spec in servers:
             try:
                 tools = await mcp_client.list_tools(spec)
-            except Exception:  # noqa: BLE001 — skip an unreachable server
+            except Exception:
                 continue
             if not tools:
                 continue
@@ -438,7 +438,7 @@ async def _build_mcp_catalog_block() -> str:
             "ONLY when a listed tool clearly fits the step; otherwise use the "
             "normal tools. Registered MCP tools:\n" + "\n".join(lines) + "\n\n"
         )
-    except Exception:  # noqa: BLE001 — never let MCP discovery break planning
+    except Exception:
         return ""
 
 

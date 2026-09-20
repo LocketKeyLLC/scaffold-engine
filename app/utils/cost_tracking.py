@@ -162,7 +162,7 @@ async def record_llm_call(resp) -> None:
         turn_timing.note_llm_call(latency_ms)
         if kind is None:
             kind = turn_timing.default_call_kind()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     try:

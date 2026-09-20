@@ -268,6 +268,33 @@ jobs:
   # Requires: live compose stack + scaffold-engine_hf-cache populated
   # (the harness pre-flight probes §17.240-§17.242 catch missing
   # state before any sidecar fires).
+  tool-audit:
+    name: "Tool audit gate (pyright · vulture · hadolint)"
+    # §17.1141 (ledger O-2) — the advisory tools' zero state, enforced: pyright 0
+    # errors over the whole app (basic mode), vulture clean at 100 % confidence,
+    # hadolint no warning/error on the Dockerfile. Its own job because pyright
+    # takes ~6 min; `make audit-gate` locally.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the audit tools (pinned)
+        run: |
+          pip install --upgrade pip
+          pip install pyright==1.1.414 vulture==2.16
+          curl -sSL -o /usr/local/bin/hadolint \
+            https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-Linux-x86_64
+          chmod +x /usr/local/bin/hadolint
+          hadolint --version
+
+      - name: make audit-gate
+        run: make audit-gate
+
   integration:
     name: "Tier 2 · Full-stack integration (§17.247)"
     runs-on: self-hosted

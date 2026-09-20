@@ -542,7 +542,7 @@ async def capture_execution_context(
         return await _apply_shell_context(
             session_id=session_id, user=user, host=host, db=db, source=source,
         )
-    except Exception as e:  # noqa: BLE001 — context capture must never break submit
+    except Exception as e:
         logger.debug(
             "shell_context_capture_failed session_id=%s err=%r", session_id, e,
         )

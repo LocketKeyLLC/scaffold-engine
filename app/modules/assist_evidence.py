@@ -500,7 +500,7 @@ def source_authority(url: str) -> float:
     try:
         from app.modules.research_extractors import _score_source
         base = float(_score_source(url))
-    except Exception:  # noqa: BLE001
+    except Exception:
         base = 0.5
     m = re.match(r"https?://([^/?#]+)([^?#]*)", url.lower())
     if m and (_DOC_HOST_RE.match(m.group(1)) or _DOC_PATH_RE.search(m.group(2) or "")):
@@ -733,7 +733,7 @@ def ledger_text(environment: Optional[dict], operator_notes: Optional[list] = No
         import json as _json
         try:
             parts.append(_json.dumps(st))
-        except Exception:  # noqa: BLE001
+        except Exception:
             parts.append(str(st))
     for n in (operator_notes or []):
         parts.append(str((n.get("text") if isinstance(n, dict) else n) or ""))
@@ -956,7 +956,7 @@ async def citation_report(answer: str, sources: list) -> Optional[dict]:
         if not parse_citations(answer, len(sources)):
             return None
         return await score_citation_faithfulness(answer, sources)
-    except Exception as exc:  # noqa: BLE001 — verification never breaks a turn
+    except Exception as exc:
         logger.warning("assist_citation_report_failed: %s", exc)
         return None
 
@@ -1186,7 +1186,7 @@ async def verify_answer(
             candidate = (await regenerate(grounding_notice(
                 unsupported, cite, off_question=_q if off else None,
                 shape=shape) + ingress_notice(ingress, topology or {}) + prerequisite_notice(prereq, prerequisite_env)) or "").strip()
-        except Exception as exc:  # noqa: BLE001 — verification never breaks a turn
+        except Exception as exc:
             logger.warning("assist_answer_grounding_regen_failed: %s", exc)
             candidate = ""
         if candidate:

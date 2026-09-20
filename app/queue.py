@@ -51,7 +51,7 @@ async def cleanup_sweep(timestamp: int) -> dict:
         reaped = await reap_stale_jobs(db)
     try:
         swept = await sweep_expired()
-    except Exception:  # noqa: BLE001 — same fail-soft as the loop
+    except Exception:
         logger.warning("staleness_sweep_failed", exc_info=True)
         swept = {"error": True}
     out = {"reaped": reaped, "swept": swept, "ts": timestamp}

@@ -489,7 +489,7 @@ async def analyze_note_impact(
             # tight cap returns empty content (see thinking_model_empty_content).
             max_tokens=4096,
         )
-    except Exception as e:  # noqa: BLE001 — a flaky detector must never block
+    except Exception as e:
         logger.warning("note_impact_detector_failed: %s", e)
         return {"affected": []}
     args = read_tool_args(resp)
@@ -741,7 +741,7 @@ async def apply_note_replan(
             added = await add_step(session_id=session_id, request=req, before_node_key=_anchor, db=db)
             if added and added.get("node_key"):
                 repaired.append(added["node_key"])
-        except Exception as exc:  # noqa: BLE001 — one failed repair must not lose the rest
+        except Exception as exc:
             logger.warning("state_check_repair_add_failed sid=%s err=%r", session_id, exc)
     # §17.1054 — one pointer, one truth. After repairs the session points at
     # the FIRST of them (add_step left it on the last); after reopens with no
@@ -1019,7 +1019,7 @@ async def stage_divergence_replan(
             model_overrides=model_overrides, facts_block=facts_block,  # §17.752
             project_recap_block=project_recap_block,  # §17.753
         )
-    except Exception as e:  # noqa: BLE001 — a flaky analyzer must never surface
+    except Exception as e:
         logger.warning("divergence_replan_analyze_failed session_id=%s err=%r", session_id, e)
         return None
     affected = impact.get("affected") or []

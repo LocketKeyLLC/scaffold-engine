@@ -58,7 +58,7 @@ def turn_note(text: str) -> None:
         return
     try:
         sink(text)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
 

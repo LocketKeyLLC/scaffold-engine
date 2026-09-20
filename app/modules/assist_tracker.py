@@ -210,7 +210,7 @@ async def assess_progress(*, session_id: str, message: str, db,
             tool_choice="auto",
             max_tokens=2048,        # thinking model reasons before the tool call
         )
-    except Exception as e:  # noqa: BLE001 — a flaky tracker must never trap the turn
+    except Exception as e:
         logger.warning("assist_progress_tracker_failed session_id=%s err=%r", session_id, e)
         return {**_NOOP, "reason": "tracker_unavailable"}
     args = read_tool_args(resp)

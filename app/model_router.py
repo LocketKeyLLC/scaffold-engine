@@ -31,7 +31,7 @@ import httpx
 
 from app.config import settings
 from app.utils import think_policy as _think_policy
-from app.providers.base import ModelResponse, Tool, ToolCall  # noqa: F401 — public re-export
+from app.providers.base import ModelResponse, Tool, ToolCall
 
 if TYPE_CHECKING:  # §17.1059 — annotation-only; the runtime import lives in the provider seam
     from app.providers.base import LLMProvider
@@ -826,7 +826,7 @@ def _empty_draw_diag(resp) -> str:
             bits.append(f"arg_keys={sorted(args)[:6] if isinstance(args, dict) else type(args).__name__}")
         bits.append(f"content={((msg.get('content') or '')[:160])!r}")
         return " ".join(bits)
-    except Exception as exc:  # noqa: BLE001 — never let a diagnostic raise
+    except Exception as exc:
         return f"diag_failed={type(exc).__name__}"
 
 
@@ -966,7 +966,7 @@ def _model_for_policy(model: str | None, role: str | None, overrides: dict | Non
         if role:
             return _resolve_role(role, overrides)[0]
         return model or settings.model_general
-    except Exception:  # noqa: BLE001
+    except Exception:
         return model or role or settings.model_general
 
 
@@ -976,7 +976,7 @@ def _note_if_starved(resp, *, where: str, budget: int | None) -> None:
     try:
         if resp is not None and resp.success and _think_policy.is_starved(resp):
             _think_policy.note_starved_draw(getattr(resp, "model", ""), where=where, budget=budget)
-    except Exception:  # noqa: BLE001 — never let telemetry break a call
+    except Exception:
         pass
 
 
@@ -992,7 +992,7 @@ def _draw_starved(resp) -> bool:
             return False
         return not (msg.get("content") or "").strip() and not (
             getattr(resp, "text", "") or "").strip()
-    except Exception:  # noqa: BLE001 — a diagnostic must never raise
+    except Exception:
         return False
 
 

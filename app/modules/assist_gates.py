@@ -149,7 +149,7 @@ def run_gate(name: str, fn: Callable[..., Any], *args: Any, default: Any = None,
     _RUNS[name] = _RUNS.get(name, 0) + 1
     try:
         return fn(*args, **kwargs)
-    except Exception as exc:  # noqa: BLE001 — the whole point: contain AND report
+    except Exception as exc:
         c = _CRASHES.setdefault(name, _Crash(gate=name))
         c.count += 1
         c.last_error = f"{type(exc).__name__}: {exc}"[:300]
@@ -163,7 +163,7 @@ async def run_gate_async(name: str, fn: Callable[..., Any], *args: Any, default:
     _RUNS[name] = _RUNS.get(name, 0) + 1
     try:
         return await fn(*args, **kwargs)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         c = _CRASHES.setdefault(name, _Crash(gate=name))
         c.count += 1
         c.last_error = f"{type(exc).__name__}: {exc}"[:300]

@@ -23,7 +23,7 @@ from app.modules.gt_extractor import TOPIC_KEYWORDS
 from app.utils.http_clients import get_generic_http_client
 # §17.829 — re-export for backward compatibility (see the note at the guard's
 # original location, ~:440); the guard itself lives in net_guard now.
-from app.utils.net_guard import _PRIVATE_HOSTNAMES, _is_public_host  # noqa: F401
+from app.utils.net_guard import _PRIVATE_HOSTNAMES, _is_public_host
 from app.utils.topic_detection import detect_topic_id
 
 logger = logging.getLogger("scaffold.research.extractors")
@@ -512,7 +512,7 @@ async def _fetch_impersonated(url: str, *, cap: int, timeout: float) -> str | No
     byte cap. Returns None on any failure; never raises."""
     try:
         from curl_cffi.requests import AsyncSession
-    except Exception as exc:  # noqa: BLE001 — optional dependency at import time
+    except Exception as exc:
         logger.warning("url_fetch_impersonate_unavailable: %s", exc)
         return None
     try:
@@ -535,7 +535,7 @@ async def _fetch_impersonated(url: str, *, cap: int, timeout: float) -> str | No
             return None
         enc = r.encoding or "utf-8"
         return body.decode(enc, errors="replace")
-    except Exception as exc:  # noqa: BLE001 — a fallback must never raise
+    except Exception as exc:
         logger.warning("url_fetch_impersonate_failed: url=%s error=%s", url, exc)
         return None
 

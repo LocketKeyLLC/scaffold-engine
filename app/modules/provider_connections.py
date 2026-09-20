@@ -159,7 +159,7 @@ def _apply_to_settings(provider: str, *, api_key: str | None, base_url: str | No
         try:
             from app.utils.http_clients import rebuild_client
             rebuild_client(spec["client"])
-        except Exception as exc:  # noqa: BLE001 — never fail a write on this
+        except Exception as exc:
             logger.warning("provider_client_rebuild_failed provider=%s err=%r",
                            provider, exc)
 
@@ -235,7 +235,7 @@ async def delete_connection(provider: str, db) -> None:
         try:
             from app.utils.http_clients import rebuild_client
             rebuild_client(spec["client"])
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     logger.info("provider_connection_deleted provider=%s (reverted to env)", provider)
 
@@ -294,7 +294,7 @@ async def load_connections_into_settings(db) -> int:
     applied = 0
     try:
         rows = (await db.execute(_SELECT_ALL)).mappings().all()
-    except Exception as exc:  # noqa: BLE001 — pre-migration boot must not die
+    except Exception as exc:
         logger.warning("provider_connections_load_skipped err=%r", exc)
         return 0
     for r in rows:
@@ -346,7 +346,7 @@ async def load_default_provider(db) -> str | None:
     from app.config import settings, valid_provider_names
     try:
         row = (await db.execute(_FLAG_GET, {"k": _DEFAULT_FLAG})).scalar()
-    except Exception as exc:  # noqa: BLE001 — pre-migration boot must not die
+    except Exception as exc:
         logger.warning("default_provider_load_skipped err=%r", exc)
         return None
     if not row:
@@ -375,7 +375,7 @@ async def test_connection(provider: str, db=None) -> dict:
     try:
         models = await list_provider_models(provider)
         ok, detail = True, f"reachable — {len(models)} model(s) available"
-    except Exception as exc:  # noqa: BLE001 — every failure is a report, not a raise
+    except Exception as exc:
         ok, detail, models = False, _explain(exc), []
     if db is not None:
         try:
@@ -386,7 +386,7 @@ async def test_connection(provider: str, db=None) -> dict:
                 "err": None if ok else detail[:500],
             })
             await db.commit()
-        except Exception:  # noqa: BLE001 — recording the result must not fail it
+        except Exception:
             logger.warning("provider_connection_mark_failed provider=%s", provider)
     logger.info("provider_connection_test provider=%s ok=%s", provider, ok)
     return {"ok": ok, "detail": detail, "models": models}

@@ -23,7 +23,10 @@ def test_startup_delegates_the_loop_only_when_the_queue_owns_it():
     src = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     block = src[src.index("if settings.queue_enabled:"):src.index("_cleanup_task = start_cleanup_task()") + 40]
     assert "cleanup_loop_delegated_to_queue" in block and "_cleanup_task = None" in block
-    assert "if _cleanup_task is not None:\n        _cleanup_task.cancel()" in src
+    # §17.1141 — the cancel AND the await sit inside the guard (a never-started
+    # task made shutdown raise TypeError); the guard line may carry a comment.
+    assert re.search(r"if _cleanup_task is not None:[^\n]*\n        _cleanup_task\.cancel\(\)[^\n]*\n"
+                     r"        try:\n            await _cleanup_task\n", src)
 
 
 # ── §17.1078 — the follow-ons: interval jobs + zombie sweep on the queue ──
@@ -44,6 +47,8 @@ def test_cron_from_seconds_rounds_down_to_a_divisor_and_never_slower():
     assert c(7 * 86400) == "0 0 */7 * *" and c(90 * 86400) == "0 0 */28 * *"
     assert c(10) == "*/1 * * * *"
 
+
+import re
 
 import pytest
 

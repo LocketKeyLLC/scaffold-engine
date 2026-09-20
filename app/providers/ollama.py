@@ -83,7 +83,7 @@ class OllamaProvider(LLMProvider):
         *,
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        timeout: int = 600,  # noqa: ARG002 — model_router resolves cloud vs local
+        timeout: int = 600,
         fallback: str | None = None,
         **opts: Any,
     ) -> ModelResponse:
@@ -119,7 +119,7 @@ class OllamaProvider(LLMProvider):
         system: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
-        timeout: int = 600,  # noqa: ARG002 — model_router resolves cloud vs local
+        timeout: int = 600,
         fallback: str | None = None,
         **opts: Any,
     ) -> ModelResponse:
@@ -281,7 +281,7 @@ class OllamaProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = 4096,
         timeout: int = 600,
-        tool_choice: str = "auto",  # noqa: ARG002 — Ollama always negotiates choice with the model
+        tool_choice: str = "auto",
         **opts: Any,
     ) -> ModelResponse:
         """Native tool calling via Ollama 0.3+.
@@ -428,6 +428,6 @@ class OllamaProvider(LLMProvider):
 
 # Register the singleton at import time. ``app/providers/__init__.py``
 # triggers this via its ``_autoload`` helper.
-from app.providers import register  # noqa: E402
+from app.providers import register
 
 register("ollama", OllamaProvider())
