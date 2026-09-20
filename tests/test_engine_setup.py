@@ -607,7 +607,7 @@ async def test_probe_local_runner_reads_the_registry_and_diagnoses_the_path(monk
     tcp.clear()
     monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("HTTP 401 Unauthorized")))
     pr = await es.probe_local_runner(db)
-    assert pr["class"] == "token" and "Re-run the install line" in pr["repair"]
+    assert pr["class"] == "token" and "Re-run the install with the token" in pr["repair"] and "```bash" in pr["repair"]
     # not the runner
     monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "other"}]))
     pr = await es.probe_local_runner(db)
@@ -683,6 +683,10 @@ def test_submit_endpoint_and_turn_loop_let_the_recipe_verify_its_own_steps():
     rsrc = inspect.getsource(assist_turn._run_turn_inner)
     assert rsrc.index("elif recipe_blocked:") < rsrc.index("elif blocked_reason is not None:")
     assert 'handled["v"] = "submit_recipe_blocked"' in rsrc
+    # §17.1149 — exhausted → the fix flow reads the paste (no confirm offer); the frame carries the flag
+    blk = rsrc.split("elif recipe_blocked:")[1].split("elif blocked_reason is not None:")[0]
+    assert "if recipe_exhausted:" in blk and "_fix_flow(" in blk and "stage_completion_confirm" not in blk
+    assert '"exhausted": bool(_sv.get("exhausted"))' in inspect.getsource(assist_turn._submit)
 
 
 async def test_both_guide_paths_short_circuit_on_a_recipe_step(monkeypatch):
@@ -710,3 +714,129 @@ async def test_both_guide_paths_short_circuit_on_a_recipe_step(monkeypatch):
     assert [e["type"] for e in events] == ["delta", "done"] and events[1]["cached"] is False
     # a non-recipe step is untouched by the bypass
     assert await ag._recipe_guidance(session_id="s1", node_key="T1", node_description="Install nginx", db=None) is None
+
+
+# ---------------------------------------------------------------------------
+# §17.1149 — a runner repair is a PLAN STEP the engine inserts and guides.
+# ---------------------------------------------------------------------------
+
+def _diag(cls, **extra):
+    d = {"class": cls, "detail": f"{cls} detail", "checks": {"host": "192.168.1.156", "port": 8790, **extra}}
+    return {"ok": cls == "ok", **d, "repair": es.runner_repair_block(d)}
+
+
+async def test_repair_step_is_rendered_like_any_recipe_step_and_verified_by_reprobing(monkeypatch):
+    import dataclasses
+    st = es.repair_step(es.BY_ID["local_runner"], _diag("port_filtered"))
+    assert st["title"] == "Open port 8790 on 192.168.1.156's firewall for the engine"
+    assert st["description"].endswith("_Engine capability repair: local_runner port_filtered_")
+    assert es.repair_of_node(st["description"]) is es.BY_ID["local_runner"] and es._repair_class(st["description"]) == "port_filtered"
+    assert es.recipe_of_node(st["description"]) is None
+    g = await es.render_recipe_guide(st["description"], db=None)
+    txt = g["text"]
+    assert txt.startswith("## 👉 Do this next") and txt.count("```bash") == 1 and "## ✅ Done when" in txt
+    assert txt.index("pvesh create") < txt.index("If `pve-firewall status` says **disabled**")   # prose after the fence stays after it
+    assert "re-check the connection from the engine host on every paste" in txt and "✓ Done" not in txt
+    assert g["meta"]["repair"] == "port_filtered"
+    for cls in ("port_closed", "host_down", "token", "not_runner", "unknown"):
+        s2 = es.repair_step(es.BY_ID["local_runner"], _diag(cls, token="abc"))
+        g2 = await es.render_recipe_guide(s2["description"], db=None)
+        assert "```bash" in g2["text"] and "## ✅ Done when" in g2["text"], cls
+    assert "--token abc" in es.repair_step(es.BY_ID["local_runner"], _diag("token", token="abc"))["description"]
+    assert es.repair_step(es.BY_ID["local_runner"], _diag("ok")) is None
+    # verify: reached → success; a different failure → fresh diagnosis; the same failure → the ordinary verifier
+    base = es.BY_ID["local_runner"]
+    def _db(desc):
+        db = MagicMock(); db.execute = AsyncMock(return_value=MagicMock(scalar=lambda: desc)); return db
+    try:
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value=_diag("ok")))
+        v = await es.verify_recipe_submit(db=_db(st["description"]), session_id="s", node_key="ADD78", evidence="rule added")
+        assert v["outcome"] == "success" and v["probe_class"] == "ok"
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value=_diag("port_closed")))
+        v = await es.verify_recipe_submit(db=_db(st["description"]), session_id="s", node_key="ADD78", evidence="rule added")
+        assert v["outcome"] == "incomplete" and "the failure changed" in v["reason"] and "journalctl" in v["reason"]
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value=_diag("port_filtered")))
+        v = await es.verify_recipe_submit(db=_db(st["description"]), session_id="s", node_key="ADD78", evidence="pve-firewall status: disabled")
+        assert v["outcome"] == "incomplete" and v["exhausted"] is True and "Still not reachable" in v["reason"]   # never a commit
+    finally:
+        es.BY_ID["local_runner"] = base
+
+
+async def test_prepare_recipe_step_inserts_or_finds_the_repair_step_and_presents_it(monkeypatch):
+    """Live: Guide me on the verify step showed the ❌ card again. Now the
+    engine probes, inserts the repair step BEFORE the verify step through the
+    ordinary add_step path, presents it, and the guide diverts to it; a second
+    Guide press finds the open repair step instead of inserting another."""
+    import dataclasses
+    ctx = {"target_ip": "192.168.1.156", "target_host": "pve", "target_user": "root", "token": "abc123"}
+    verify_desc = es.recipe_steps(es.BY_ID["local_runner"], ctx=ctx)[1]["description"]
+    base = es.BY_ID["local_runner"]
+    calls = {}
+    async def _add(**kw): calls["add"] = kw; return {"node_key": "ADD78", "title": kw["steps"][0]["title"]}
+    async def _present(db, sid, nk): calls.setdefault("present", []).append(nk)
+    from app.modules import assist_notes
+    monkeypatch.setattr(assist_notes, "add_step", _add); monkeypatch.setattr(es, "_present", _present)
+    db = MagicMock(); db.execute = AsyncMock(return_value=MagicMock(scalar=lambda: verify_desc))
+    try:
+        # probe ok → nothing to divert to
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value=_diag("ok")))
+        assert await es.prepare_recipe_step(db, "s", "ADD77") is None
+        # probe fails → repair step inserted before the verify step, presented, note explains
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value=_diag("port_filtered")))
+        monkeypatch.setattr(es, "open_repair_step", AsyncMock(return_value=None))
+        d = await es.prepare_recipe_step(db, "s", "ADD77")
+        assert d["node_key"] == "ADD78" and d["existing"] is False and d["class"] == "port_filtered"
+        assert calls["add"]["before_node_key"] == "ADD77" and calls["add"]["steps"][0]["title"].startswith("Open port 8790")
+        assert "_Engine capability repair: local_runner port_filtered_" in calls["add"]["steps"][0]["description"]
+        assert calls["present"] == ["ADD78"] and "added it to the plan as **ADD78" in d["note"] and "port 8790 times out" not in d["note"] or "detail" in d["note"]
+        # a repair step already open → found, presented, not inserted again
+        calls.clear()
+        monkeypatch.setattr(es, "open_repair_step", AsyncMock(return_value="ADD78"))
+        d = await es.prepare_recipe_step(db, "s", "ADD77")
+        assert d["existing"] is True and d["node_key"] == "ADD78" and "add" not in calls and calls["present"] == ["ADD78"]
+        # a non-probe step / a non-recipe step never diverts
+        install_desc = es.recipe_steps(es.BY_ID["local_runner"], ctx=ctx)[0]["description"]
+        db.execute = AsyncMock(return_value=MagicMock(scalar=lambda: install_desc))
+        assert await es.prepare_recipe_step(db, "s", "ADD76") is None
+        db.execute = AsyncMock(return_value=MagicMock(scalar=lambda: "Install nginx"))
+        assert await es.prepare_recipe_step(db, "s", "T1") is None
+    finally:
+        es.BY_ID["local_runner"] = base
+        es.forget_probe("local_runner")
+    # the probe result is shared with the render that follows (one probe per Guide press)
+    es._PROBE_CACHE.clear()
+    r2 = dataclasses.replace(base, probe=AsyncMock(return_value=_diag("ok")))
+    assert (await es._probe_cached(r2, None, verify_desc))["ok"] and (await es._probe_cached(r2, None, verify_desc))["ok"]
+    assert r2.probe.await_count == 1
+    es._PROBE_CACHE.clear()
+
+
+def test_both_guide_entry_points_divert_to_the_repair_step_and_the_done_frame_names_it():
+    import inspect
+    from app.modules import assist_agent, assist_turn
+    for fn in (assist_agent.generate_step_guidance, assist_agent.generate_step_guidance_stream):
+        src = inspect.getsource(fn)
+        assert "prepare_recipe_step(db, session_id, nk)" in src
+        assert src.index("prepare_recipe_step(") < src.index("_assemble_ctx_for_node(")
+        assert 'nk = _divert["node_key"]' in src
+    ssrc = inspect.getsource(assist_agent.generate_step_guidance_stream)
+    assert '"node_key": nk' in ssrc and 'yield {"type": "delta", "text": _divert["note"]' in ssrc
+    nsrc = inspect.getsource(assist_agent.generate_step_guidance)
+    assert 'result["diverted_to"]' in nsrc and "_divert['note']" in nsrc
+    tsrc = inspect.getsource(assist_turn._claim_and_guide)
+    assert '"node_key": ev.get("node_key") or nk' in tsrc
+    from app.modules import assist_guide
+    gsrc = inspect.getsource(assist_guide._recipe_guidance)
+    assert "REPAIR_MARK" in gsrc     # live drive: the repair step's guide came from the model until this
+
+
+async def test_repair_steps_take_the_deterministic_guide_path(monkeypatch):
+    from app.modules import assist_guide as ag
+    persisted = {}
+    async def _persist(**kw): persisted.update(kw)
+    monkeypatch.setattr(ag, "persist_guidance", _persist)
+    monkeypatch.setattr(ag, "generate_guidance", AsyncMock(side_effect=AssertionError("model path must not run")))
+    st = es.repair_step(es.BY_ID["local_runner"], _diag("port_filtered"))
+    res = await ag.ensure_guidance(session_id="s1", node_key="ADD3", ctx=MagicMock(), node_description=st["description"],
+                                   research=True, force=True, db=MagicMock())
+    assert res["status"] == "ready" and "pvesh create" in res["guidance"] and persisted["guidance_meta"]["repair"] == "port_filtered"

@@ -965,6 +965,17 @@ async def generate_step_guidance(
             "run /assist done to see the result, or /assist next to re-check"
         )
 
+    # §17.1149 — a recipe VERIFY step whose engine-side probe fails is not
+    # guided as a ❌ card: the engine inserts (or finds) the repair step and
+    # guides THAT. Fail-soft: any error leaves the ordinary path untouched.
+    _divert = None
+    try:
+        from app.modules import engine_setup as _es
+        _divert = await _es.prepare_recipe_step(db, session_id, nk)
+    except Exception as exc:
+        logger.warning("recipe_prepare_failed sid=%s nk=%s err=%r", session_id, nk, exc)
+    if _divert:
+        nk = _divert["node_key"]
     if research is None:
         research = settings.assist_guide_research
 
@@ -1024,6 +1035,9 @@ async def generate_step_guidance(
         "tool": ctx.tool,
         **res,
     }
+    if _divert:
+        result["guidance"] = f"{_divert['note']}\n\n{res.get('guidance') or ''}"
+        result["diverted_to"] = {"node_key": nk, "title": _divert["title"], "class": _divert.get("class")}
     # §17.741 — surface the recap to the operator as a "📍 Where we are" panel
     # above the walkthrough (the non-stream path renders result["status_panel"];
     # the stream path yields it as a leading delta — see below).
@@ -1077,6 +1091,17 @@ async def generate_step_guidance_stream(
             "no live step to guide; the session's steps are all finished — "
             "run /assist done to see the result, or /assist next to re-check"
         )
+    # §17.1149 — a recipe VERIFY step whose engine-side probe fails is not
+    # guided as a ❌ card: the engine inserts (or finds) the repair step and
+    # guides THAT. Fail-soft: any error leaves the ordinary path untouched.
+    _divert = None
+    try:
+        from app.modules import engine_setup as _es
+        _divert = await _es.prepare_recipe_step(db, session_id, nk)
+    except Exception as exc:
+        logger.warning("recipe_prepare_failed sid=%s nk=%s err=%r", session_id, nk, exc)
+    if _divert:
+        nk = _divert["node_key"]
     if research is None:
         research = settings.assist_guide_research
 
@@ -1096,6 +1121,8 @@ async def generate_step_guidance_stream(
         _panel = assist_guide.render_status_panel(mem.recap)
         if _panel:
             yield {"type": "delta", "text": _panel + "\n\n"}
+    if _divert:
+        yield {"type": "delta", "text": _divert["note"] + "\n\n"}
 
     # §17.726 — tee the streamed walkthrough so the assembled reply lands in the
     # transcript once the stream completes.
@@ -1127,6 +1154,7 @@ async def generate_step_guidance_stream(
             await _record_sourced_values(
                 session_id=session_id, node_key=nk,
                 values=(ev.get("guidance_meta") or {}).get("sourced_values"), db=db)
+            ev = {**ev, "node_key": nk}   # §17.1149 — the step actually guided (a repair may have diverted it)
         yield ev
     # §17.812 (gap 2) — cached streams are captured too; the in-capture dedupe
     # keeps back-to-back replays out of the transcript.
