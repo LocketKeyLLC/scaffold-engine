@@ -104,7 +104,7 @@ async def probe_local_runner(db) -> tuple[bool, str]:
     except asyncio.TimeoutError:
         return False, f"{where} did not answer within {PROBE_TIMEOUT_S:.0f} s (is the service running, and is port {RUNNER_PORT} reachable from the engine host?)"
     except Exception as exc:
-        return False, f"{where}: {str(exc)[:240]}"
+        return False, _probe_failure_words(where, exc)
     names = [t.get("name") for t in tools]
     if "run_readonly" in names:
         return True, f"reached {where} as '{spec.name}' and found its run_readonly tool"
@@ -112,6 +112,23 @@ async def probe_local_runner(db) -> tuple[bool, str]:
 
 
 PROBE_TIMEOUT_S = 8.0
+
+
+def _probe_failure_words(where: str, exc: BaseException) -> str:
+    """§17.1147b — live: the first probe printed ``ConnectTimeout: `` (an empty
+    message). A transport failure is said in the operator's words: what is
+    listening where, and what to check."""
+    raw = str(exc)
+    low = raw.lower()
+    if "connecttimeout" in low or "timed out" in low or "timeout" in low:
+        return (f"nothing answered at {where} within a few seconds — the service is not running yet, or port "
+                f"{RUNNER_PORT} is not reachable from the engine host.")
+    if "refused" in low or "connecterror" in low or "connection error" in low:
+        return f"{where} refused the connection — nothing is listening on port {RUNNER_PORT} there yet."
+    if "401" in raw or "unauthorized" in low:
+        return f"{where} answered but rejected the token — the running helper was started with a different --token; re-run the install line."
+    tail = raw.split(":")[-1].strip() or raw.strip()
+    return f"{where}: {tail[:200] or exc.__class__.__name__}"
 
 
 async def _detect_runner_sudo(db) -> tuple[str, str]:

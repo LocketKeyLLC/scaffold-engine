@@ -582,7 +582,14 @@ async def test_probe_local_runner_reads_the_registry_and_is_time_bounded(monkeyp
     assert ok is False and "did not answer" in why
     monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("connection refused")))
     ok, why = await es.probe_local_runner(MagicMock())
-    assert ok is False and "connection refused" in why
+    assert ok is False and "refused the connection" in why and "8790" in why
+    # §17.1147b — live: the SDK's ConnectTimeout carries an EMPTY message; the operator gets words, not a class name
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("mcp server 'pve-runner': list_tools failed: ConnectTimeout: ")))
+    ok, why = await es.probe_local_runner(MagicMock())
+    assert ok is False and "nothing answered at http://192.168.1.156:8790/mcp/" in why and "ConnectTimeout" not in why
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("HTTP 401 Unauthorized")))
+    ok, why = await es.probe_local_runner(MagicMock())
+    assert ok is False and "different --token" in why
 
 
 async def test_both_guide_paths_short_circuit_on_a_recipe_step(monkeypatch):
