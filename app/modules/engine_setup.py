@@ -65,17 +65,19 @@ class Recipe:
 
 async def _detect_local_runner(db) -> tuple[str, str]:
     from app.config import settings
+    from app.modules import assist_local_runner as _lr
     name = (settings.assist_local_runner_server or "").strip()
-    if not name:
-        return "off", "ASSIST_LOCAL_RUNNER_SERVER is empty — the state check asks you to paste."
     try:
-        from app.modules.mcp_registry import get_server
-        spec = await get_server(db, name)
+        spec = await _lr.runner_spec(db)
     except Exception as exc:
         return "off", f"registry lookup failed: {exc}"
-    if spec is None or not spec.enabled:
-        return "off", f"ASSIST_LOCAL_RUNNER_SERVER={name} but no enabled MCP server of that name is registered."
-    return "on", f"probes run through '{name}' at {spec.endpoint or spec.command}."
+    if spec is None:
+        if name:
+            return "off", f"ASSIST_LOCAL_RUNNER_SERVER={name} but no enabled MCP server of that name is registered."
+        return "off", "no runner is registered — the state check asks you to paste."
+    if (spec.description or "").startswith(LOCAL_RUNNER_MARK):
+        return "on", f"registered by the assist as '{spec.name}' at {spec.endpoint}; a Verify state proves it answers."
+    return "on", f"probes run through '{spec.name}' at {spec.endpoint or spec.command}."
 
 
 async def _detect_runner_sudo(db) -> tuple[str, str]:
@@ -121,29 +123,26 @@ _ENGINE_HOST = ("The engine host is this machine: the repo is at ~/scaffold-engi
 RECIPES: tuple[Recipe, ...] = (
     Recipe(
         id="local_runner",
-        steps=(
-            ("Install the engine's local runner helper on the target machine",
-             "On the machine the plan is about (the Proxmox host): copy scripts/local_runner_mcp.py from the engine host "
-             "(scp ~/scaffold-engine/scripts/local_runner_mcp.py root@<target>:~/), create a venv (python3 -m venv ~/runner-venv), "
-             "install \"mcp>=2.0\" uvicorn starlette into it, choose a long random secret token (openssl rand -hex 24), and start "
-             "the helper: ~/runner-venv/bin/python ~/local_runner_mcp.py --host 0.0.0.0 --port 8790 --token <secret>. It must "
-             "keep running after logout (a systemd unit or nohup). Only the engine host needs to reach port 8790. Done when "
-             "curl -s http://<target-ip>:8790/mcp/ from the engine host answers (any HTTP status, not a connection refusal)."),
-            ("Register the runner with the engine",
-             "On the engine host: POST http://localhost:8000/mcp/servers with header X-API-Key: <SCAFFOLD_API_KEY from "
-             "~/scaffold-engine/.env> and JSON body {\"name\":\"pve-runner\",\"transport\":\"streamable_http\","
-             "\"endpoint\":\"http://<target-ip>:8790/mcp/\",\"headers\":{\"X-Runner-Token\":\"<secret>\"}}. "
-             "Done when GET http://localhost:8000/mcp/servers/pve-runner/tools (same header) lists a tool named run_readonly."),
-            ("Point the engine's state check at the runner",
-             "On the engine host: add the line ASSIST_LOCAL_RUNNER_SERVER=pve-runner to ~/scaffold-engine/.env, then restart "
-             "the engine with: cd ~/scaffold-engine && docker compose up -d scaffold-orchestrator. Done when "
-             "curl -s localhost:8000/health reports \"healthy\"."),
-            ("Verify the state check runs through the runner",
-             "In this assist session press Verify state on any step. Done when the reply says it is running the read-only "
-             "checks through your local runner (pve-runner) instead of asking you to paste; every command it runs is recorded "
-             "in this transcript marked [local-runner]."),
-        ),
         keywords=("local runner", "local-runner", "scaffold runner", "the runner on", "run its own checks", "run its own commands", "state check run", "stop asking me to paste", "verify state paste", "local_runner_mcp"),
+        steps=(
+            ("Install the engine's local runner helper on {target_host}",
+             "On {target_host} ({target_user}@{target_host}, this same shell): download the helper from the engine and run it as a "
+             "service on port {runner_port} with the token the engine already generated for it.\n"
+             "curl -fsSL -o /root/local_runner_mcp.py {engine_url}/setup/runner/local_runner_mcp.py\n"
+             "python3 -m venv /root/runner-venv && /root/runner-venv/bin/pip install -q \"mcp>=2.0\" uvicorn starlette\n"
+             "Then create /etc/systemd/system/local-runner-mcp.service with ExecStart=/root/runner-venv/bin/python "
+             "/root/local_runner_mcp.py --host 0.0.0.0 --port {runner_port} --token {token} (Restart=on-failure, "
+             "WantedBy=multi-user.target), then systemctl daemon-reload && systemctl enable --now local-runner-mcp.\n"
+             "The token {token} is the one the engine registered under the name {runner_name} for {target_ip}:{runner_port}; "
+             "use it exactly. Done when systemctl is-active local-runner-mcp prints active and ss -tlnp | grep {runner_port} "
+             "shows python listening."),
+            ("Verify the engine reaches the runner",
+             "The engine already registered this runner as {runner_name} at http://{target_ip}:{runner_port}/mcp/ with the token "
+             "from the previous step — nothing to configure on the engine side. Press Verify state on this step. Done when the "
+             "reply says it is running the read-only checks through your local runner ({runner_name}) instead of asking you to "
+             "paste; every command it runs is recorded in this transcript marked [local-runner]. If it still asks you to paste, "
+             "paste the output of: ss -tlnp | grep {runner_port}; journalctl -u local-runner-mcp -n 20 --no-pager"),
+        ),
         title="Let the state check run its own commands",
         summary="Verify state runs its read-only checks through a small helper on the target machine instead of asking you to paste.",
         why_off="The engine's rule is that it never touches your machine; this is the one fenced exception, and only you can open it.",
@@ -177,14 +176,15 @@ RECIPES: tuple[Recipe, ...] = (
         id="runner_sudo",
         steps=(
             ("Decide which read-only commands the runner may run as root",
-             "List the exact commands the state check needs root for on the target machine (typical on Proxmox: pct config, "
+             "List the exact commands the state check needs root for on {target_host} (typical on Proxmox: pct config, "
              "qm config, pvesm status, nginx -t). Find each one's full path with: which pct qm pvesm nginx. Done when you have "
              "the list with full paths."),
             ("Write the sudoers rule for the runner's user",
              "On the target machine, as root: sudo visudo -f /etc/sudoers.d/scaffold-runner and add ONE line of the form "
-             "<runner-user> ALL=(root) NOPASSWD: /usr/sbin/pct config *, /usr/sbin/qm config *, /usr/sbin/pvesm status "
+             "{target_user} ALL=(root) NOPASSWD: /usr/sbin/pct config *, /usr/sbin/qm config *, /usr/sbin/pvesm status "
              "— full paths, one entry per command, a trailing * only where arguments follow. Done when visudo saves without "
-             "a syntax error and sudo -n /usr/sbin/pvesm status (as the runner's user) prints output, not a password prompt."),
+             "a syntax error and sudo -n /usr/sbin/pvesm status (as {target_user}) prints output, not a password prompt. "
+             "If the helper already runs as root, nothing here is needed — say so and skip this step."),
             ("Restart the helper with the matching allow-list",
              "On the target machine restart local_runner_mcp.py with the same --host/--port/--token plus "
              "--sudo-allow \"pct config\" \"qm config\" \"pvesm status\" (the same commands as the sudoers line). "
@@ -459,17 +459,123 @@ def match_recipe(text: str) -> Optional[Recipe]:
 RECIPE_STEP_MARK = "Engine capability recipe:"
 
 
-def recipe_steps(recipe: Recipe, *, with_prerequisites: bool = True) -> list[dict]:
+def recipe_version(recipe: "Recipe") -> str:
+    """A short hash of the recipe's step templates: steps stamped with an older
+    version are stale (§17.1146 — the first-cut steps carried placeholders)."""
+    import hashlib
+    return hashlib.sha1("\n".join(f"{t}\n{w}" for t, w in recipe.steps).encode()).hexdigest()[:8]
+LOCAL_RUNNER_MARK = "[scaffold local runner]"   # description tag on the mcp_servers row the assist registers
+RUNNER_NAME = "pve-runner"
+RUNNER_PORT = 8790
+
+# Placeholders shown when a value is not known yet — the guide then asks for
+# that ONE thing instead of inventing it.
+_UNKNOWN = {
+    "target_ip": "<the target machine's IP>", "target_host": "the target machine", "target_user": "<the login user>",
+    "engine_url": "http://<the engine host's IP>:8000", "token": "<the token the engine generated>",
+    "runner_name": RUNNER_NAME, "runner_port": str(RUNNER_PORT),
+}
+
+
+def _url_is_local(url: str) -> bool:
+    from urllib.parse import urlparse
+    host = (urlparse(url or "").hostname or "").lower()
+    return host in ("", "localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
+async def remember_engine_url(db, session_id: str, base_url: str) -> None:
+    """§17.1146 — the engine learns its own reachable address from the request
+    the operator's browser makes: the ONE fact every setup step needs and that
+    no fact ledger records. Loopback addresses are not remembered (they are
+    not reachable from the target machine). Fail-soft."""
+    url = (base_url or "").rstrip("/")
+    if not url or _url_is_local(url):
+        return
+    try:
+        await db.execute(text("""
+            UPDATE assist_sessions
+               SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{environment,engine_url}',
+                                        to_jsonb(CAST(:u AS text)), true)
+             WHERE id = :sid AND COALESCE(metadata->'environment'->>'engine_url', '') <> :u
+        """), {"sid": session_id, "u": url})
+        await db.commit()
+    except Exception as exc:
+        logger.warning("engine_url_remember_failed sid=%s err=%r", session_id, exc)
+
+
+async def recipe_context(db, session_id: str) -> dict:
+    """What the engine already knows that a recipe step needs: the target
+    machine (system map host + the profile's `user@host`), its own reachable
+    URL (remembered from the operator's requests), and a fresh token."""
+    import re as _re
+    import secrets
+    ctx = dict(_UNKNOWN)
+    ctx["token"] = secrets.token_hex(24)
+    try:
+        row = (await db.execute(text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
+                                {"sid": session_id})).mappings().first()
+        meta = (row or {}).get("metadata") or {}
+        env = meta.get("environment") if isinstance(meta, dict) else {}
+        env = env if isinstance(env, dict) else {}
+        host = ((env.get("system_state") or {}).get("host") or {})
+        ip = str(((host.get("attrs") or {}).get("ip") or "")).strip()
+        if ip:
+            ctx["target_ip"] = ip
+        m = _re.search(r"\b([a-z_][a-z0-9_-]*)@([a-z0-9][a-z0-9.-]*)", str(env.get("profile") or ""), _re.I)
+        if m:
+            ctx["target_user"], ctx["target_host"] = m.group(1), m.group(2)
+        elif ip:
+            ctx["target_host"] = ip
+        url = str(env.get("engine_url") or "").strip().rstrip("/")
+        if url and not _url_is_local(url):
+            ctx["engine_url"] = url
+    except Exception as exc:
+        logger.warning("recipe_context_failed sid=%s err=%r", session_id, exc)
+    return ctx
+
+
+def known(ctx: dict, key: str) -> bool:
+    return bool(ctx.get(key)) and ctx[key] != _UNKNOWN.get(key)
+
+
+async def register_local_runner(db, ctx: dict) -> bool:
+    """§17.1146 — the engine-side half of the recipe, done BY the engine: the
+    mcp_servers row for the runner (name, endpoint, token header) so the operator
+    only ever touches the target machine. Idempotent; needs the target IP."""
+    if not known(ctx, "target_ip"):
+        return False
+    from app.modules.mcp_registry import McpServerSpec, upsert_server
+    spec = McpServerSpec(
+        name=ctx["runner_name"], transport="streamable_http",
+        endpoint=f"http://{ctx['target_ip']}:{ctx['runner_port']}/mcp/",
+        headers={"X-Runner-Token": ctx["token"]}, enabled=True,
+        description=f"{LOCAL_RUNNER_MARK} registered by the assist for {ctx['target_host']}",
+    )
+    spec.validate()
+    await upsert_server(db, spec)
+    await db.commit()
+    try:
+        from app.modules import mcp_client
+        mcp_client.clear_tool_cache(spec.name)
+    except Exception:
+        pass
+    logger.info("local_runner_registered name=%s endpoint=%s", spec.name, spec.endpoint)
+    return True
+
+
+def recipe_steps(recipe: Recipe, *, with_prerequisites: bool = True, ctx: Optional[dict] = None) -> list[dict]:
     """The recipe (and, when asked, its missing prerequisites first) as
     ``[{title, description}]`` ready for ``assist_notes.add_step(steps=…)``.
     Each description ends with a marker line so the plan can be asked whether
     it already carries this recipe."""
     out: list[dict] = []
+    values = {**_UNKNOWN, **(ctx or {})}
     chain = list(recipe.requires) if with_prerequisites else []
     for rid in chain + [recipe.id]:
         r = BY_ID[rid]
         for title, what in r.steps:
-            out.append({"title": title, "description": f"{what}\n\n_{RECIPE_STEP_MARK} {r.id}_"})
+            out.append({"title": title.format_map(values),
+                        "description": f"{what.format_map(values)}\n\n_{RECIPE_STEP_MARK} {r.id} v{recipe_version(r)}_"})
     return out
 
 
@@ -478,13 +584,22 @@ async def plan_has_recipe(db, session_id: str, recipe_id: str) -> Optional[dict]
     (``{node_key, title, status}``), or None. Fail-soft."""
     try:
         rows = (await db.execute(text("""
-            SELECT d.node_key, d.title, s.status
+            SELECT d.node_key, d.title, s.status, d.description
               FROM assist_steps s JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
-             WHERE s.session_id = :sid AND d.description LIKE :mark
+             WHERE s.session_id = :sid AND (d.description LIKE :mark_v OR d.description LIKE :mark_old)
              ORDER BY d.node_key
-        """), {"sid": session_id, "mark": f"%{RECIPE_STEP_MARK} {recipe_id}_%"})).mappings().all()
+        """), {"sid": session_id, "mark_v": f"%{RECIPE_STEP_MARK} {recipe_id} v%",
+               "mark_old": f"%{RECIPE_STEP_MARK} {recipe_id}_%"})).mappings().all()
         opened = [dict(r) for r in rows if r["status"] not in ("committed", "skipped", "handed_off")]
-        return opened[0] if opened else None
+        if not opened:
+            return None
+        # §17.1146 — steps stamped by an OLDER version of the recipe (or by the
+        # unversioned first cut) are stale: offer to replace, never guide them.
+        want = f"{RECIPE_STEP_MARK} {recipe_id} v{recipe_version(BY_ID[recipe_id])}"
+        first = {k: v for k, v in opened[0].items() if k != "description"}
+        first["stale"] = any(want not in (r.get("description") or "") for r in opened)
+        first["open_keys"] = [r["node_key"] for r in opened]
+        return first
     except Exception as exc:
         logger.warning("plan_has_recipe_failed sid=%s recipe=%s err=%r", session_id, recipe_id, exc)
         return None
@@ -500,14 +615,19 @@ def capability_answer(recipe: Recipe, *, status: str, detail: str, in_plan: Opti
             f"{recipe.summary} {recipe.why_off}\n\n")
     n_steps = len(recipe_steps(recipe))
     where = f" right before **{current_step}**" if current_step else ""
-    if status == "on":
-        state = f"**It is already on here:** {detail}\n\n"
-        offer = ("Nothing to set up — press **Verify state** on any step and the checks run through it. "
-                 "Everything it runs is recorded in this transcript, marked `[local-runner]`.")
-    elif in_plan:
+    if in_plan and not in_plan.get("stale"):
         state = (f"**Its steps are already in this plan** — the next open one is **{in_plan['node_key']}: "
                  f"{in_plan['title']}**.\n\n")
         offer = f"Say **guide me on {in_plan['node_key']}** (or press Guide me on that step) and we continue there."
+    elif status == "on":
+        state = f"**It is already on here:** {detail}\n\n"
+        offer = ("Nothing to set up — press **Verify state** on any step and the checks run through it. "
+                 "Everything it runs is recorded in this transcript, marked `[local-runner]`.")
+    elif in_plan and in_plan.get("stale"):
+        keys = ", ".join(in_plan.get("open_keys") or [in_plan["node_key"]])
+        state = f"**An older version of its steps is in this plan** ({keys}).\n\n"
+        offer = (f"Reply **yes** and I will mark those skipped and add the current {n_steps} steps in their place{where}, "
+                 f"filled in with what I already know, and walk you through the first one now.")
     elif status == "blocked":
         pre = ", ".join(BY_ID[x].title for x in recipe.requires) or "its prerequisite"
         state = f"**Not available yet:** {detail}\n\n"
@@ -520,20 +640,64 @@ def capability_answer(recipe: Recipe, *, status: str, detail: str, in_plan: Opti
     return head + body + state + offer
 
 
-async def add_recipe_to_plan(db, session_id: str, recipe: Recipe, *, before_node_key: Optional[str]) -> dict:
+async def retire_recipe_steps(db, session_id: str, recipe_id: str) -> list[str]:
+    """§17.1146 — mark this recipe's still-open steps skipped (an older version
+    is being replaced). Returns the node keys retired."""
+    from app.modules.assist_step_fsm import check as _fsm_check  # §17.1074 — the oracle runs before every status write
+    rows = (await db.execute(text("""
+        SELECT s.node_key, s.job_id, s.status FROM assist_steps s JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+         WHERE s.session_id = :sid AND (d.description LIKE :mark_v OR d.description LIKE :mark_old)
+           AND s.status NOT IN ('committed', 'skipped', 'handed_off')
+    """), {"sid": session_id, "mark_v": f"%{RECIPE_STEP_MARK} {recipe_id} v%",
+           "mark_old": f"%{RECIPE_STEP_MARK} {recipe_id}_%"})).mappings().all()
+    keys = [r["node_key"] for r in rows]
+    for r in rows:
+        _fsm_check("retire_recipe_step", src=r["status"], dst="skipped", node_status="skipped",
+                   node_key=r["node_key"], trigger="skip")
+        await db.execute(text("UPDATE assist_steps SET status = 'skipped', updated_at = NOW() WHERE session_id = :sid AND node_key = :nk"),
+                         {"sid": session_id, "nk": r["node_key"]})
+        await db.execute(text("UPDATE dag_nodes SET status = 'skipped', updated_at = NOW() WHERE job_id = :jid AND node_key = :nk"),
+                         {"jid": r["job_id"], "nk": r["node_key"]})
+    if keys:
+        await db.commit()
+        logger.info("recipe_steps_retired sid=%s recipe=%s keys=%s", session_id, recipe_id, keys)
+    return keys
+
+
+async def add_recipe_to_plan(db, session_id: str, recipe: Recipe, *, before_node_key: Optional[str],
+                             replace: bool = False) -> dict:
     """Insert the recipe's steps (prerequisites first) into the session's plan
-    before the current step, through the ordinary add_step persist path (no
-    model call), and point the session at the first of them."""
+    before the current step, FILLED IN with what the engine already knows
+    (target machine, its own URL, a generated token), through the ordinary
+    add_step persist path (no model call), and point the session at the first.
+    The engine-side half (registering the runner) is done here, by the engine."""
     from app.modules import assist_notes
-    return await assist_notes.add_step(
+    ctx = await recipe_context(db, session_id)
+    retired: list[str] = []
+    if replace:
+        retired = await retire_recipe_steps(db, session_id, recipe.id)
+    registered = False
+    if recipe.id in ("local_runner", "runner_sudo"):
+        try:
+            registered = await register_local_runner(db, ctx)
+        except Exception as exc:
+            logger.warning("local_runner_register_failed sid=%s err=%r", session_id, exc)
+    res = await assist_notes.add_step(
         session_id=session_id, request=recipe.title, before_node_key=before_node_key,
-        steps=recipe_steps(recipe), db=db,
+        steps=recipe_steps(recipe, ctx=ctx), db=db,
     )
+    res = dict(res or {})
+    res["retired"] = retired
+    res["registered"] = registered
+    res["known"] = {k: known(ctx, k) for k in ("target_ip", "target_user", "engine_url")}
+    logger.info("recipe_added_to_plan sid=%s recipe=%s known=%s registered=%s retired=%s",
+                session_id, recipe.id, res["known"], registered, retired)
+    return res
 
 
-async def stage_setup_offer(*, session_id: str, recipe_id: str, db) -> None:
+async def stage_setup_offer(*, session_id: str, recipe_id: str, db, replace: bool = False) -> None:
     from datetime import datetime, timezone
-    offer = {"recipe_id": recipe_id, "staged_at": datetime.now(timezone.utc).isoformat()}
+    offer = {"recipe_id": recipe_id, "replace": bool(replace), "staged_at": datetime.now(timezone.utc).isoformat()}
     await db.execute(text("""
         UPDATE assist_sessions
            SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb), updated_at = NOW()

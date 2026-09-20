@@ -484,6 +484,14 @@ async def assist_message(
     from app.modules import assist_turn
     from app.utils.sse import _sse_with_disconnect_watch
 
+    # §17.1146 — the engine learns its own reachable address from this request
+    # (the one fact every setup step needs and no ledger records). Fail-soft.
+    try:
+        from app.modules import engine_setup as _es
+        await _es.remember_engine_url(db, session_id, str(request.base_url))
+    except Exception:
+        logger.warning("engine_url_remember_failed sid=%s", session_id)
+
     # §17.869 — DETACHED: the loop runs as a background task writing frames to
     # assist_turn_runs; this response only TAILS the row. A disconnect (reload,
     # impatient navigation) kills the tail, never the turn — reconnecting via

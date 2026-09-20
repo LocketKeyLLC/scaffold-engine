@@ -558,13 +558,21 @@ async def _run_turn_inner(
             await _es.clear_pending_setup_offer(session_id=session_id, db=db)
             yield _ev(ASSIST_TURN_STATUS, {"text": "➕ Adding its steps to this plan…"})
             try:
-                _added = await _es.add_recipe_to_plan(db, session_id, _recipe, before_node_key=node_key)
+                _added = await _es.add_recipe_to_plan(db, session_id, _recipe, before_node_key=node_key,
+                                                      replace=bool(_setup_offer.get("replace")))
                 _steps = (_added or {}).get("steps") or []
                 _lines = "\n".join(f"- **{st.get('node_key')}**: {st.get('title')}" for st in _steps)
                 _anchor = f" before **{node_key}**" if node_key else ""
+                _retired = (_added or {}).get("retired") or []
+                _pre = f"⏩ Retired the older steps {', '.join(_retired)}.\n" if _retired else ""
+                _kn = (_added or {}).get("known") or {}
+                _filled = ", ".join(k.replace("_", " ") for k, v in _kn.items() if v)
+                _post = (f"\nFilled in from what I already know: {_filled}." if _filled else "")
+                if (_added or {}).get("registered"):
+                    _post += " The engine has registered the runner on its side already."
                 yield _ev(ASSIST_TURN_STATUS, {
-                    "text": (f"➕ Added {len(_steps)} steps{_anchor}, in order:\n{_lines}\n"
-                             f"Starting with the first; we return to your step after.")})
+                    "text": (f"{_pre}➕ Added {len(_steps)} steps{_anchor}, in order:\n{_lines}\n"
+                             f"Starting with the first; we return to your step after.{_post}")})
                 logger.info("engine_capability_steps_added sid=%s recipe=%s steps=%d first=%s",
                             session_id, _rid, len(_steps), (_added or {}).get("node_key"))
                 async for e in _claim_and_guide(session_id, (_added or {}).get("node_key"), history, db, orient=False):
@@ -608,8 +616,9 @@ async def _run_turn_inner(
         _in_plan = await _es.plan_has_recipe(db, session_id, _recipe.id)
         _reply = _es.capability_answer(_recipe, status=_status, detail=_detail, in_plan=_in_plan,
                                        current_step=node_key)
-        if _status != "on" and not _in_plan:
-            await _es.stage_setup_offer(session_id=session_id, recipe_id=_recipe.id, db=db)
+        if _status != "on" and (not _in_plan or _in_plan.get("stale")):
+            await _es.stage_setup_offer(session_id=session_id, recipe_id=_recipe.id, db=db,
+                                        replace=bool(_in_plan and _in_plan.get("stale")))
         logger.info("engine_capability_answered sid=%s recipe=%s status=%s in_plan=%s",
                     session_id, _recipe.id, _status, bool(_in_plan))
         yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _reply})
