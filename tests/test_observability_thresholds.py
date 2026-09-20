@@ -343,3 +343,59 @@ class TestThresholdsDisabledBySettings:
             f"{knob}={value} should disable {kind_for_knob} alerts; "
             f"got fired: {matches}"
         )
+
+
+# ── §17.1139 (ledger L-7) — provider rejections ─────────────────────────────
+
+class TestProviderRejections:
+    def test_classification_names_the_refusal_not_the_empty_draw(self):
+        from app.observability.thresholds import classify_provider_error as cls
+        assert cls('HTTP 403: {"error":"your subscription payment is past due"}') == "auth"
+        assert cls("HTTP 429: rate limit exceeded") == "quota"
+        assert cls("HTTP 404: model 'x' not found, try pulling it first") == "not_found"
+        assert cls("HTTP 500: internal error") == "outage"
+        assert cls("Timeout after 120s") == "timeout"
+        assert cls("All connection attempts failed") == "unreachable"
+        assert cls("no attempt") is None
+        assert cls("") is None and cls(None) is None
+
+    @pytest.mark.asyncio
+    async def test_rule_fires_per_model_at_threshold_with_the_providers_words(self, monkeypatch):
+        from app.config import settings
+        from app.observability import thresholds as th
+        rows = [
+            {"provider": "ollama", "model": "gemma4:cloud", "error": "HTTP 403: past due", "n": 6},
+            {"provider": "ollama", "model": "gemma4:cloud", "error": "HTTP 429: rate limit", "n": 1},
+            {"provider": "ollama", "model": "deepseek-v4-pro:cloud", "error": "no attempt", "n": 40},
+            {"provider": "ollama", "model": "glm-5.3-flash:cloud", "error": "HTTP 500: boom", "n": 2},
+        ]
+
+        async def _execute(sql, params=None):
+            result = MagicMock()
+            if "FROM llm_call_logs" in str(sql) and "error IS NOT NULL" in str(sql):
+                result.mappings.return_value.all.return_value = rows
+                return result
+            if "FROM error_logs" in str(sql):
+                result.scalar.return_value = 0; return result
+            if "FROM system_alerts" in str(sql):
+                result.first.return_value = None; return result
+            if "INSERT INTO system_alerts" in str(sql):
+                result.scalar.return_value = "alert-id"; return result
+            return result
+        db = AsyncMock(); db.execute = AsyncMock(side_effect=_execute); db.commit = AsyncMock()
+        monkeypatch.setattr(settings, "alert_provider_rejections_threshold", 5)
+        monkeypatch.setattr(settings, "alert_eval_window_minutes", 60)
+        emitted = []
+
+        async def fake_emit(**kw):
+            emitted.append(kw); return {"emitted": True, "suppressed": False, "id": "x", "reason": None}
+        monkeypatch.setattr(th._alerts, "emit", fake_emit)
+        monkeypatch.setattr(th, "llm_rollup_for_window", AsyncMock(return_value=(0.0, 0)), raising=False)
+        summary = await th.evaluate_thresholds(db, unresolved_count=0)
+        rej = {r["model"]: r for r in summary["provider_rejections"]}
+        assert rej["gemma4:cloud"]["count"] == 7 and rej["gemma4:cloud"]["klass"] == "auth"
+        assert "deepseek-v4-pro:cloud" not in rej, "the router's own 'no attempt' is not a provider refusal"
+        assert rej["glm-5.3-flash:cloud"]["count"] == 2
+        kinds = [(e["kind"], e["payload"]["model"]) for e in emitted if e["kind"] == "provider.rejections"]
+        assert kinds == [("provider.rejections", "gemma4:cloud")], "only gemma4 reached the threshold"
+        assert "past due" in next(e for e in emitted if e["kind"] == "provider.rejections")["message"]

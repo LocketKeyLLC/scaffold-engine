@@ -350,3 +350,35 @@ class TestCallKindTelemetry:
         assert captured["call_kind"] is None
         # Original context unaffected — copy_context isolates the change.
         assert current_job_id.get() is None
+
+
+# ── §17.1139 (ledger L-7) — a failed call keeps the provider's reason ─────────
+
+@pytest.mark.asyncio
+async def test_record_llm_call_stores_the_error_text_on_failed_rows(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+    captured = {}
+
+    class _Db:
+        async def execute(self, sql, params=None):
+            if "INSERT INTO llm_call_logs" in str(sql):
+                captured.update(params or {})
+            res = MagicMock(); res.scalar.return_value = None; res.first.return_value = None; return res
+        async def commit(self): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+
+    import app.utils.cost_tracking as ct
+    monkeypatch.setattr("app.database.async_session", lambda: _Db())  # imported inside record_llm_call
+    monkeypatch.setattr(ct, "compute_cost_usd", AsyncMock(return_value=0.0))
+    resp = SimpleNamespace(provider="ollama", model="gemma4:cloud", tokens_prompt=0, tokens_completion=0,
+                           total_duration_ms=12, success=False,
+                           error="HTTP 403: {\"error\":\"your subscription payment is past due\"} " + "x" * 400)
+    await ct.record_llm_call(resp)
+    assert captured["success"] is False
+    assert captured["error"].startswith("HTTP 403") and len(captured["error"]) == 300, "bounded to 300 chars"
+    ok = SimpleNamespace(provider="ollama", model="gemma4:cloud", tokens_prompt=3, tokens_completion=1,
+                         total_duration_ms=200, success=True, error=None)
+    captured.clear(); await ct.record_llm_call(ok)
+    assert captured["error"] is None

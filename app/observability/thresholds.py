@@ -155,6 +155,29 @@ async def evaluate_thresholds(db, *, unresolved_count: int | None = None) -> dic
         rollup = {"total_cost_usd": 0.0, "by_model": []}
 
     cost_usd = float(rollup.get("total_cost_usd") or 0.0)
+    # §17.1139 (ledger L-7) — provider rejections per (provider, model).
+    rejections: list[dict] = []
+    try:
+        rejections = await provider_rejections(db, window_minutes=window)
+    except Exception as exc:  # noqa: BLE001 — a rule must never sink the tick
+        logger.debug("threshold_provider_rejections_failed: err=%s", exc)
+    summary["provider_rejections"] = rejections
+    thr = settings.alert_provider_rejections_threshold
+    for r in rejections:
+        if thr <= 0 or r["count"] < thr:
+            continue
+        result = await _alerts.emit(
+            kind="provider.rejections",
+            severity="warning",
+            message=(
+                f"{r['provider']}/{r['model']}: {r['count']} call(s) refused in last {window}m "
+                f"({r['klass']}) — e.g. {r['sample'][:160]}"
+            ),
+            payload={**r, "window_minutes": window},
+            dedup_key=f"provider.rejections:{r['provider']}:{r['model']}:{window}",
+            db=db,
+        )
+        summary["fired"].append((f"provider.rejections:{r['provider']}:{r['model']}", result))
     summary["total_cost_usd"] = cost_usd
     if cost_usd > settings.alert_cost_window_usd_threshold > 0:
         result = await _alerts.emit(
@@ -345,3 +368,55 @@ async def tick() -> None:
     except Exception as exc:
         # Don't let scheduler tick errors crash the scheduler thread.
         logger.error('event="threshold_tick_failed" err=%s', exc)
+
+# §17.1139 — what the provider said, in five words. Order matters: the first
+# match wins, and "auth" must beat "http" so a past-due 403 reads as billing.
+_REJECTION_CLASSES: tuple[tuple[str, str], ...] = (
+    ("auth", r"past due|payment|unauthori[sz]ed|forbidden|HTTP 40[13]\b|invalid api key|api key"),
+    ("quota", r"HTTP 429\b|rate limit|too many requests|quota|usage (?:cap|limit)"),
+    ("not_found", r"HTTP 404\b|model .* not found|no such model|pull model"),
+    ("outage", r"HTTP 5\d\d\b|bad gateway|service unavailable|overloaded"),
+    ("timeout", r"^Timeout|timed? ?out|ReadTimeout"),
+    ("unreachable", r"connect|connection refused|name resolution|unreachable|reset by peer"),
+)
+
+
+def classify_provider_error(error: str | None) -> str | None:
+    """Return the rejection class for a failed call's error text, or None when
+    the failure is not the provider refusing (an empty draw, a validation
+    miss, the router's own "no attempt")."""
+    if not error:
+        return None
+    import re as _re
+    for klass, pat in _REJECTION_CLASSES:
+        if _re.search(pat, error, _re.I):
+            return klass
+    return None
+
+
+async def provider_rejections(db, *, window_minutes: int) -> list[dict]:
+    """Failed calls in the window whose error says the provider refused,
+    grouped by (provider, model): ``[{provider, model, count, klass, sample}]``,
+    largest first. Rows without an error text (pre-§17.1139) are not counted."""
+    rows = await db.execute(
+        text(
+            "SELECT provider, model, error, COUNT(*) AS n "
+            "FROM llm_call_logs "
+            "WHERE success = FALSE AND error IS NOT NULL "
+            "  AND created_at >= NOW() - (:w * INTERVAL '1 minute') "
+            "GROUP BY provider, model, error"
+        ),
+        {"w": window_minutes},
+    )
+    agg: dict[tuple[str, str], dict] = {}
+    for r in rows.mappings().all():
+        klass = classify_provider_error(r["error"])
+        if not klass:
+            continue
+        key = (r["provider"] or "unknown", r["model"] or "unknown")
+        cur = agg.setdefault(key, {"provider": key[0], "model": key[1], "count": 0, "klass": klass, "sample": r["error"] or ""})
+        cur["count"] += int(r["n"] or 0)
+        if int(r["n"] or 0) > cur.get("_top", 0):
+            cur["_top"] = int(r["n"] or 0); cur["klass"] = klass; cur["sample"] = r["error"] or ""
+    out = [{k: v for k, v in d.items() if k != "_top"} for d in agg.values()]
+    return sorted(out, key=lambda d: -d["count"])

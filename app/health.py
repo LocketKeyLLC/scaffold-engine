@@ -480,6 +480,36 @@ async def build_health_response(app, migration_state) -> dict:
                 "by_container": {},
             }
 
+    async def _check_provider_rejections():
+        """§17.1139 (ledger L-7) — surface `provider.rejections` alerts on
+        /health. The June past-due 403s and the September gemma4 rejections
+        were invisible here: /health lists loaded models but never invokes
+        one, so a provider refusing every call looked healthy. Same fail-safe
+        posture as the OOM blocks: every error → empty rollup."""
+        window_m = int(settings.alert_eval_window_minutes) * 2
+        try:
+            async with async_session() as db:
+                rows = await asyncio.wait_for(db.execute(
+                    text(
+                        "SELECT payload->>'provider' AS provider, payload->>'model' AS model, "
+                        "payload->>'klass' AS klass, MAX(created_at) AS most_recent, "
+                        "MAX((payload->>'count')::int) AS count "
+                        "FROM system_alerts "
+                        "WHERE kind = 'provider.rejections' "
+                        f"  AND created_at >= NOW() - INTERVAL '{window_m} minutes' "
+                        "GROUP BY 1, 2, 3 ORDER BY count DESC"
+                    ),
+                ), timeout=2.0)
+                records = rows.mappings().all()
+            items = [{"provider": r["provider"], "model": r["model"], "klass": r["klass"],
+                      "count": int(r["count"] or 0),
+                      "most_recent_at": r["most_recent"].isoformat() if r["most_recent"] else None}
+                     for r in records]
+            return {"window_minutes": window_m, "total": sum(i["count"] for i in items), "models": items}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("health_provider_rejections_probe_failed: %s", exc)
+            return {"window_minutes": window_m, "total": 0, "models": []}
+
     async def _check_host_oom_alerts():
         """§17.387 — surface §17.387 host-scope OOM alerts on /health.
 
@@ -545,7 +575,7 @@ async def build_health_response(app, migration_state) -> dict:
             return {"status": "unknown", "error": str(exc)[:120]}
 
     (pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys, calibration,
-     oom_alerts, host_oom_alerts, searxng) = await asyncio.gather(
+     oom_alerts, host_oom_alerts, searxng, provider_rejections) = await asyncio.gather(
         _check_pg(), _check_ollama(), _check_milvus(), _check_redis(),
         _check_ngspice(), _check_verilator(), _check_symbiyosys(),
         _check_calibration(), _check_oom_alerts(), _check_host_oom_alerts(),
@@ -554,6 +584,7 @@ async def build_health_response(app, migration_state) -> dict:
         # a slow searxng costs /health nothing the other probes weren't
         # already spending.
         _check_searxng(),
+        _check_provider_rejections(),  # §17.1139
         return_exceptions=True,
     )
     # §17.171 — defensive unpack. If _check_redis raises a BaseException
@@ -581,6 +612,10 @@ async def build_health_response(app, migration_state) -> dict:
     if isinstance(calibration, BaseException):
         logger.warning("health_calibration_check_raised: %s", calibration)
         calibration = {"status": "unknown", "last_check_at": None, "last_kind": None}
+    # §17.1139 — provider-rejections probe; same fail-safe pattern.
+    if isinstance(provider_rejections, BaseException):
+        logger.warning("health_provider_rejections_check_raised: %s", provider_rejections)
+        provider_rejections = {"window_minutes": 0, "total": 0, "models": []}
     # §17.386 — oom_alerts probe; same fail-safe pattern.
     if isinstance(oom_alerts, BaseException):
         logger.warning("health_oom_alerts_check_raised: %s", oom_alerts)
@@ -650,6 +685,7 @@ async def build_health_response(app, migration_state) -> dict:
         # service-degradation signal (the container has already been
         # restarted by docker by the time /health reads this).
         "oom_alerts": oom_alerts,
+        "provider_rejections": provider_rejections,  # §17.1139
         # §17.387 — host-scope OOM-event rollup, parallel to oom_alerts.
         # Source: §17.387 host-side host_oom_watcher → system_alerts rows
         # with kind='host.oom_killed'. Same fail-safe posture; same
@@ -697,6 +733,12 @@ async def build_health_response(app, migration_state) -> dict:
         warnings.append(
             f"{oom_alerts['total']} container OOM event(s) in the last "
             f"{oom_alerts.get('window_hours')}h — check mem_limits"
+        )
+    for _pr in (provider_rejections.get("models") or [])[:3]:
+        warnings.append(
+            f"{_pr.get('provider')}/{_pr.get('model')} refused {_pr.get('count')} call(s) "
+            f"({_pr.get('klass')}) in the last {provider_rejections.get('window_minutes')}m — "
+            "check the provider account / quota; /health cannot invoke a model to tell"
         )
     if (host_oom_alerts.get("total") or 0) > 0:
         warnings.append(
