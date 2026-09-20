@@ -56,6 +56,10 @@ class Recipe:
     # §17.1145 — the recipe as PLAN STEPS (title, what to do), inserted into the
     # operator's own plan when they ask the assist for it. No separate job.
     steps: tuple[tuple[str, str], ...] = ()
+    # §17.1147 — the engine's own check for the step carrying PROBE_MARK:
+    # ``async (db) -> (ok, detail)``. Time-bounded; never touches the target
+    # beyond the registered endpoint.
+    probe: Optional[Callable[..., Awaitable[tuple[bool, str]]]] = field(default=None, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +82,36 @@ async def _detect_local_runner(db) -> tuple[str, str]:
     if (spec.description or "").startswith(LOCAL_RUNNER_MARK):
         return "on", f"registered by the assist as '{spec.name}' at {spec.endpoint}; a Verify state proves it answers."
     return "on", f"probes run through '{spec.name}' at {spec.endpoint or spec.command}."
+
+
+async def probe_local_runner(db) -> tuple[bool, str]:
+    """§17.1147 — the engine's half of 'Verify the engine reaches the runner':
+    open the registered endpoint and list its tools. ``(True, detail)`` when
+    ``run_readonly`` is there; ``(False, why)`` otherwise. Bounded to a few
+    seconds so a dead host cannot stall the guide."""
+    import asyncio
+    from app.modules import assist_local_runner as _lr
+    try:
+        spec = await _lr.runner_spec(db)
+    except Exception as exc:
+        return False, f"registry lookup failed: {exc}"
+    if spec is None:
+        return False, "no runner is registered on the engine side (ask me for the local runner again and answer yes)."
+    where = spec.endpoint or spec.command or spec.name
+    try:
+        from app.modules import mcp_client
+        tools = await asyncio.wait_for(mcp_client.list_tools(spec, use_cache=False), timeout=PROBE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return False, f"{where} did not answer within {PROBE_TIMEOUT_S:.0f} s (is the service running, and is port {RUNNER_PORT} reachable from the engine host?)"
+    except Exception as exc:
+        return False, f"{where}: {str(exc)[:240]}"
+    names = [t.get("name") for t in tools]
+    if "run_readonly" in names:
+        return True, f"reached {where} as '{spec.name}' and found its run_readonly tool"
+    return False, f"reached {where} but it lists {names or 'no tools'} — not the local runner helper"
+
+
+PROBE_TIMEOUT_S = 8.0
 
 
 async def _detect_runner_sudo(db) -> tuple[str, str]:
@@ -120,28 +154,35 @@ _ENGINE_HOST = ("The engine host is this machine: the repo is at ~/scaffold-engi
                 "cd ~/scaffold-engine && docker compose up -d scaffold-orchestrator), and the API key is the "
                 "SCAFFOLD_API_KEY value in that file, sent as the X-API-Key header.")
 
+# §17.1147 — a step carrying this line is checked BY THE ENGINE when the operator
+# opens it (render_recipe_guide runs the recipe's probe and reports the result).
+PROBE_MARK = "_The engine checks this itself when you open the step._"
+
 RECIPES: tuple[Recipe, ...] = (
     Recipe(
         id="local_runner",
         keywords=("local runner", "local-runner", "scaffold runner", "the runner on", "run its own checks", "run its own commands", "state check run", "stop asking me to paste", "verify state paste", "local_runner_mcp"),
         steps=(
             ("Install the engine's local runner helper on {target_host}",
-             "On {target_host} ({target_user}@{target_host}, this same shell): download the helper from the engine and run it as a "
-             "service on port {runner_port} with the token the engine already generated for it.\n"
-             "curl -fsSL -o /root/local_runner_mcp.py {script_url}\n"
-             "python3 -m venv /root/runner-venv && /root/runner-venv/bin/pip install -q \"mcp>=2.0\" uvicorn starlette\n"
-             "Then create /etc/systemd/system/local-runner-mcp.service with ExecStart=/root/runner-venv/bin/python "
-             "/root/local_runner_mcp.py --host 0.0.0.0 --port {runner_port} --token {token} (Restart=on-failure, "
-             "WantedBy=multi-user.target), then systemctl daemon-reload && systemctl enable --now local-runner-mcp.\n"
-             "The token {token} is the one the engine registered under the name {runner_name} for {target_ip}:{runner_port}; "
-             "use it exactly. Done when systemctl is-active local-runner-mcp prints active and ss -tlnp | grep {runner_port} "
-             "shows python listening."),
+             "On {target_host} ({target_user}@{target_host}, this same shell), paste this one line. It downloads the "
+             "helper and installs it as the service local-runner-mcp on port {runner_port}, with the token the engine "
+             "already generated for it (the helper makes its own Python environment under /opt/scaffold-runner and "
+             "installs python3-venv first if the box lacks it). The token {token} is the one the engine registered "
+             "under the name {runner_name} for {target_ip}:{runner_port}; the line below already carries it.\n"
+             "```bash\n"
+             "curl -fsSL {script_url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
+             "--port {runner_port} --token {token}\n"
+             "```\n"
+             "Done when the last line printed starts with OK: local runner active. If it starts with FAILED:, paste "
+             "everything it printed."),
             ("Verify the engine reaches the runner",
-             "The engine already registered this runner as {runner_name} at http://{target_ip}:{runner_port}/mcp/ with the token "
-             "from the previous step — nothing to configure on the engine side. Press Verify state on this step. Done when the "
-             "reply says it is running the read-only checks through your local runner ({runner_name}) instead of asking you to "
-             "paste; every command it runs is recorded in this transcript marked [local-runner]. If it still asks you to paste, "
-             "paste the output of: ss -tlnp | grep {runner_port}; journalctl -u local-runner-mcp -n 20 --no-pager"),
+             "Nothing to type: the engine already registered this runner as {runner_name} at "
+             "http://{target_ip}:{runner_port}/mcp/ with that token, and it checks the connection itself when you open "
+             "this step. Done when the step reports that it reached the runner and found its run_readonly tool; from "
+             "then on Verify state runs the read-only checks through {runner_name} instead of asking you to paste, and "
+             "every command it runs is recorded in this transcript marked [local-runner]. If the check fails, paste "
+             "the output of: systemctl status local-runner-mcp --no-pager; journalctl -u local-runner-mcp -n 20 --no-pager\n"
+             + PROBE_MARK),
         ),
         title="Let the state check run its own commands",
         summary="Verify state runs its read-only checks through a small helper on the target machine instead of asking you to paste.",
@@ -149,6 +190,7 @@ RECIPES: tuple[Recipe, ...] = (
         effort="30 min",
         requires=(),
         detect=_detect_local_runner,
+        probe=probe_local_runner,
         brief=(
             "Set up the scaffold-engine local runner so the assist state check can execute its own read-only "
             "probes instead of asking me to paste command output.\n\n"
@@ -625,6 +667,8 @@ def capability_answer(recipe: Recipe, *, status: str, detail: str, in_plan: Opti
             f"{recipe.summary} {recipe.why_off}\n\n")
     n_steps = len(recipe_steps(recipe))
     where = f" right before **{current_step}**" if current_step else ""
+    if in_plan and current_step and current_step in (in_plan.get("open_keys") or []):
+        where = ""   # §17.1147 — the current step IS one of the stale ones; the new steps take its place
     if in_plan and not in_plan.get("stale"):
         state = (f"**Its steps are already in this plan** — the next open one is **{in_plan['node_key']}: "
                  f"{in_plan['title']}**.\n\n")
@@ -686,6 +730,12 @@ async def add_recipe_to_plan(db, session_id: str, recipe: Recipe, *, before_node
     retired: list[str] = []
     if replace:
         retired = await retire_recipe_steps(db, session_id, recipe.id)
+        # §17.1147 — live: the anchor was the retired step itself (ADD70 was the
+        # current step), and add_step REOPENS its anchor, so the placeholder step
+        # came back as pending behind the new ones. Anchor on the step the old
+        # ones ran before instead.
+        if retired and (not before_node_key or before_node_key in retired):
+            before_node_key = await successor_anchor(db, session_id, retired) or None
     registered = False
     if recipe.id in ("local_runner", "runner_sudo"):
         try:
@@ -738,3 +788,108 @@ async def clear_pending_setup_offer(*, session_id: str, db) -> None:
         await db.commit()
     except Exception as exc:
         logger.warning("setup_offer_clear_failed sid=%s err=%r", session_id, exc)
+
+
+async def successor_anchor(db, session_id: str, retired: list[str]) -> Optional[str]:
+    """§17.1147 — the first still-open NON-recipe step that depends on any of
+    the retired recipe steps: the step the recipe was inserted before. None
+    when nothing depends on them (add_step then anchors on the session's
+    pointer, which the caller has already ruled out)."""
+    if not retired:
+        return None
+    try:
+        rows = (await db.execute(text("""
+            SELECT d.node_key FROM dag_nodes d JOIN assist_steps s ON s.job_id = d.job_id AND s.node_key = d.node_key
+             WHERE s.session_id = :sid AND d.depends_on && CAST(:keys AS text[])
+               AND d.description NOT LIKE :mark AND s.status NOT IN ('committed', 'skipped', 'handed_off')
+             ORDER BY d.execution_order NULLS LAST, d.node_key
+        """), {"sid": session_id, "keys": list(retired), "mark": f"%{RECIPE_STEP_MARK}%"})).mappings().all()
+    except Exception as exc:
+        logger.warning("successor_anchor_failed sid=%s err=%r", session_id, exc)
+        return None
+    return rows[0]["node_key"] if rows else None
+
+
+# ---------------------------------------------------------------------------
+# §17.1147 — recipe steps are guided BY THE RECIPE, not by the model. Live: the
+# guide for the install step spent 42 s, two web searches and five model calls
+# to re-derive a step the engine had written itself — and opened with an
+# `ls` check of its own invention before the one line the operator had to
+# paste. The engine knows exactly what these steps say; it renders them.
+# ---------------------------------------------------------------------------
+
+_MARK_RE = None
+
+
+def recipe_of_node(description: Optional[str]) -> Optional[Recipe]:
+    """The recipe a plan step belongs to, from its marker line — only for the
+    CURRENT version of its steps (older stamps are stale and get replaced,
+    never guided from a template they no longer match)."""
+    global _MARK_RE
+    import re as _re
+    if _MARK_RE is None:
+        _MARK_RE = _re.compile(_re.escape(RECIPE_STEP_MARK) + r" ([a-z_]+) v([0-9a-f]{8})_")
+    m = _MARK_RE.search(description or "")
+    if not m:
+        return None
+    r = BY_ID.get(m.group(1))
+    if r is None or recipe_version(r) != m.group(2):
+        return None
+    return r
+
+
+def _split_step_text(description: str) -> tuple[str, list[str], str, str]:
+    """``(lead, code_blocks, done_when, tail)`` from a step description written
+    in the recipe layout: prose, ```fenced``` command blocks, a sentence that
+    starts with 'Done when', then the marker lines (dropped)."""
+    import re as _re
+    body = description or ""
+    body = body.replace(PROBE_MARK, "")
+    body = _re.sub(r"_?" + _re.escape(RECIPE_STEP_MARK) + r"[^\n]*", "", body).strip()
+    blocks = _re.findall(r"```(?:bash|sh)?\n(.*?)```", body, _re.S)
+    prose = _re.sub(r"```(?:bash|sh)?\n.*?```", "", body, flags=_re.S)
+    prose = _re.sub(r"[ \t]*\n[ \t]*", "\n", prose).strip()
+    m = _re.search(r"Done when\b", prose)
+    lead, done = (prose[:m.start()].strip(), prose[m.end():].strip()) if m else (prose, "")
+    if done:
+        done = done[0].upper() + done[1:]
+    tail = ""
+    m2 = _re.search(r"\bIf (?:it|the check) (?:starts with|fails)[^\n]*", done)
+    if m2:
+        done, tail = done[:m2.start()].strip(), done[m2.start():].strip()
+    return lead, [b.strip() for b in blocks], done, tail
+
+
+async def render_recipe_guide(node_description: Optional[str], *, db) -> Optional[dict]:
+    """The walkthrough for a recipe step, rendered from the step itself:
+    ``{"text", "meta"}`` or None when the step is not a current recipe step.
+    A step carrying PROBE_MARK is checked by the engine right here (the
+    recipe's ``probe``), and the result IS the walkthrough."""
+    r = recipe_of_node(node_description)
+    if r is None:
+        return None
+    lead, blocks, done, tail = _split_step_text(node_description or "")
+    meta: dict[str, Any] = {"recipe": r.id, "deterministic": True, "status": "ready"}
+    parts: list[str] = []
+    if PROBE_MARK in (node_description or "") and r.probe is not None:
+        ok, detail = await r.probe(db)
+        meta["probe"] = {"ok": ok, "detail": detail}
+        if ok:
+            parts.append(f"## ✅ The engine reached your runner\n\n{detail[0].upper() + detail[1:]}.\n\n"
+                         f"{lead}\n\n{done}\n\nNothing to paste — press **✓ Done → next step** (or type `next`).")
+        else:
+            parts.append(f"## ❌ The engine could not reach the runner yet\n\n{detail}\n\n{lead}\n\n"
+                         f"{tail or 'Fix that on the target, then press Guide me on this step to check again.'}\n\n"
+                         f"Press **Guide me** on this step to check again once it is fixed.")
+        return {"text": "\n".join(parts), "meta": meta}
+    parts.append("## 👉 Do this next\n")
+    if lead:
+        parts.append(lead + "\n")
+    for b in blocks:
+        parts.append(f"**Run this now:**\n\n```bash\n{b}\n```\n")
+    if done:
+        parts.append(f"## ✅ Done when\n\n{done}\n")
+    if tail:
+        parts.append(tail + "\n")
+    parts.append("Paste what it printed here, or press **✓ Done → next step** (or type `next`) once it says OK.")
+    return {"text": "\n".join(parts), "meta": meta}

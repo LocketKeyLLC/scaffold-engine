@@ -12,6 +12,15 @@ state check stops asking you to paste.
     pip install "mcp>=2.0"        # the only dependency
     python3 local_runner_mcp.py --host 0.0.0.0 --port 8790 --token <secret>
 
+One-paste install (§17.1147, as root on the target): copies this file to
+/opt/scaffold-runner, makes a venv there (installing python3-venv with apt if
+the box lacks it), installs the dependencies, writes and starts the systemd
+unit ``local-runner-mcp`` and checks that the port answers — then prints one
+line starting with ``OK:`` or ``FAILED:``. Re-running it re-installs cleanly
+(a new --token replaces the old one):
+
+    python3 local_runner_mcp.py --install --port 8790 --token <secret>
+
 Every executed command is echoed to this process's log and recorded by the
 engine in the session transcript.
 
@@ -34,9 +43,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
+import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("local-runner")
@@ -139,14 +152,179 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None):
     return mcp
 
 
+# ---------------------------------------------------------------------------
+# §17.1147 — one-paste install. The recipe used to hand the operator three
+# commands plus a systemd unit to type by hand; the box then had to have
+# python3-venv already. Everything below is what a careful admin would do,
+# done by the script, with ONE final line that says whether it worked.
+# ---------------------------------------------------------------------------
+
+INSTALL_DIR = "/opt/scaffold-runner"
+UNIT_NAME = "local-runner-mcp"
+DEPS = ('"mcp>=2.0"', "uvicorn", "starlette")
+
+
+def unit_text(*, python: str, script: str, host: str, port: int, token: str | None,
+              sudo_allow: list[str] | None = None) -> str:
+    """The systemd unit, as text. Pure: tests read it without a root shell."""
+    cmd = [python, script, "--host", host, "--port", str(port)]
+    if token:
+        cmd += ["--token", token]
+    if sudo_allow:
+        cmd += ["--sudo-allow", *sudo_allow]
+    exec_start = " ".join(shlex.quote(c) for c in cmd)
+    return (
+        "[Unit]\n"
+        "Description=scaffold-engine local runner (read-only MCP helper)\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n\n"
+        "[Service]\n"
+        f"ExecStart={exec_start}\n"
+        "Restart=on-failure\n"
+        "RestartSec=3\n\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **kw)
+
+
+def ensure_venv(venv: str, *, run=_run, apt: bool = True) -> tuple[bool, str]:
+    """Create ``venv`` if missing. Debian/Proxmox ships python3 without
+    ``ensurepip``; when ``python3 -m venv`` fails for that reason and apt is
+    available, install python3-venv and try once more."""
+    py = os.path.join(venv, "bin", "python")
+    if os.path.exists(py):
+        return True, "venv already present"
+    r = run([sys.executable, "-m", "venv", venv])
+    if r.returncode == 0:
+        return True, "venv created"
+    out = r.stdout or ""
+    if apt and shutil.which("apt-get") and ("ensurepip" in out or "venv" in out.lower()):
+        ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+        r2 = run(["apt-get", "install", "-y", "-q", f"python{ver}-venv"])
+        if r2.returncode != 0:
+            r2 = run(["apt-get", "install", "-y", "-q", "python3-venv"])
+        if r2.returncode != 0:
+            return False, f"python3 -m venv failed ({out.strip()[-200:]}) and apt-get install python3-venv failed too:\n{(r2.stdout or '')[-400:]}"
+        shutil.rmtree(venv, ignore_errors=True)
+        r = run([sys.executable, "-m", "venv", venv])
+        if r.returncode == 0:
+            return True, "venv created after installing python3-venv"
+    return False, f"python3 -m venv failed:\n{out.strip()[-400:]}"
+
+
+def port_answers(host: str, port: int, token: str | None, *, timeout: float = 2.0) -> tuple[bool, str]:
+    """Does the runner answer on ``port``? ANY HTTP status is an answer (the
+    MCP endpoint rejects a plain GET); a connection refusal is not. 401 means
+    the running service has a DIFFERENT token."""
+    import urllib.error
+    import urllib.request
+    url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}/mcp/"
+    req = urllib.request.Request(url, headers={"X-Runner-Token": token or "", "Accept": "application/json, text/event-stream"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return True, f"HTTP {resp.status}"
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return False, "HTTP 401 — the service that is running uses a different token"
+        return True, f"HTTP {exc.code}"
+    except Exception as exc:  # connection refused / timeout
+        return False, str(exc)
+
+
+def install(args, *, run=_run) -> int:
+    """Everything the install step used to ask the operator to type. Prints
+    progress lines and ONE verdict line (``OK: …`` / ``FAILED: …``)."""
+    if os.geteuid() != 0:
+        print("FAILED: run the install as root (sudo python3 local_runner_mcp.py --install …).")
+        return 2
+    if not args.token:
+        print("FAILED: --install needs --token <secret> (the engine generated one for this runner).")
+        return 2
+    dest_dir = args.install_dir
+    os.makedirs(dest_dir, exist_ok=True)
+    script = os.path.join(dest_dir, "local_runner_mcp.py")
+    src = os.path.abspath(__file__)
+    if os.path.abspath(script) != src:
+        shutil.copyfile(src, script)
+    print(f"[1/4] helper copied to {script}")
+    venv = os.path.join(dest_dir, "venv")
+    ok, why = ensure_venv(venv, run=run)
+    if not ok:
+        print(f"FAILED: {why}")
+        return 1
+    print(f"[2/4] {why}; installing dependencies (10–60 s)…")
+    r = run([os.path.join(venv, "bin", "pip"), "install", "-q", "--disable-pip-version-check", *[d.strip('"') for d in DEPS]])
+    if r.returncode != 0:
+        print(f"FAILED: pip install did not finish:\n{(r.stdout or '')[-600:]}")
+        return 1
+    unit = unit_text(python=os.path.join(venv, "bin", "python"), script=script, host=args.host, port=args.port,
+                     token=args.token, sudo_allow=args.sudo_allow)
+    detached = not shutil.which("systemctl")
+    if detached:
+        # no systemd (a container, a BSD): start it detached and say so plainly.
+        # A previous detached helper still holds the port (and the OLD token):
+        # stop it first, by the pid this installer recorded.
+        pidfile = os.path.join(dest_dir, "runner.pid")
+        try:
+            old_pid = int(open(pidfile).read().strip())
+            os.kill(old_pid, 15)
+            time.sleep(1)
+        except (OSError, ValueError):
+            pass
+        cmd = shlex.split(unit.split("ExecStart=", 1)[1].splitlines()[0])
+        proc = subprocess.Popen(cmd, stdout=open(os.path.join(dest_dir, "runner.log"), "ab"), stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+        with open(pidfile, "w") as fh:
+            fh.write(str(proc.pid))
+        print(f"[3/4] no systemd here — started the helper detached (pid {proc.pid}, log: {dest_dir}/runner.log); it will NOT survive a reboot")
+    else:
+        unit_path = f"/etc/systemd/system/{UNIT_NAME}.service"
+        with open(unit_path, "w") as fh:
+            fh.write(unit)
+        for cmd in (["systemctl", "daemon-reload"], ["systemctl", "enable", "--now", UNIT_NAME], ["systemctl", "restart", UNIT_NAME]):
+            r = run(cmd)
+            if r.returncode != 0:
+                print(f"FAILED: {' '.join(cmd)}:\n{(r.stdout or '')[-600:]}")
+                return 1
+        print(f"[3/4] service {UNIT_NAME} written to {unit_path}, enabled and started")
+    deadline = time.time() + 20
+    ok, why = False, ""
+    while time.time() < deadline:
+        ok, why = port_answers(args.host, args.port, args.token)
+        if ok or "401" in why:
+            break
+        time.sleep(1)
+    if not ok:
+        print(f"FAILED: nothing answered on port {args.port} ({why}).")
+        if shutil.which("journalctl"):
+            print(run(["journalctl", "-u", UNIT_NAME, "-n", "20", "--no-pager"]).stdout or "")
+        return 1
+    print(f"[4/4] port {args.port} answers ({why})")
+    how = f"detached process, log {dest_dir}/runner.log" if detached else f"service {UNIT_NAME}"
+    print(f"OK: local runner active on {args.host}:{args.port}/mcp/ ({how}); the engine can now run its read-only checks here.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="127.0.0.1"); ap.add_argument("--port", type=int, default=8790)
+    ap.add_argument("--host", default=None, help="bind address (default 127.0.0.1; --install defaults to 0.0.0.0 so the engine host can reach it)")
+    ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--token", default=None, help="shared secret the engine sends as X-Runner-Token")
     ap.add_argument("--stdio", action="store_true", help="speak MCP over stdio instead of HTTP")
     ap.add_argument("--sudo-allow", nargs="*", default=[], metavar="PREFIX",
                     help="command prefixes that may run as `sudo -n` (needs matching NOPASSWD sudoers lines); anything else drops its sudo")
+    ap.add_argument("--install", action="store_true",
+                    help="§17.1147 — as root: copy to --install-dir, make a venv, install deps, write+start the systemd unit, check the port")
+    ap.add_argument("--install-dir", default=INSTALL_DIR)
     args = ap.parse_args()
+    if args.host is None:
+        args.host = "0.0.0.0" if args.install else "127.0.0.1"
+    if args.install:
+        return install(args)
     mcp = build_server(args.token, sudo_allow=args.sudo_allow)
     if args.stdio:
         asyncio.run(mcp.run_stdio_async()); return 0
