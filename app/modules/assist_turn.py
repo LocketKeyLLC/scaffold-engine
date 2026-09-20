@@ -825,13 +825,14 @@ async def _run_turn_inner(
             res = await assist_agent.run_step_research(
                 session_id=session_id, node_key=nk,
                 question=text_, history=history, db=db,  # §17.886(#4)
+                capture_reply=False,  # §17.1136 — persisted once, below, under the resolved key
             )
             answer = (res or {}).get("answer") or ""
             if answer.strip():
                 yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": answer})
                 try:  # §17.873 — durable transcript capture (dedupe-safe)
                     await assist_agent.capture_assistant_reply(
-                        session_id=session_id, node_key=nk, kind="ask",
+                        session_id=session_id, node_key=(res or {}).get("node_key") or nk, kind="ask",
                         content=answer, db=db,
                     )
                 except Exception:  # noqa: BLE001
@@ -864,13 +865,14 @@ async def _run_turn_inner(
                 res = await assist_agent.run_step_research(
                     session_id=session_id, node_key=nk, question=text_,
                     history=history, db=db,
+                    capture_reply=False,  # §17.1136
                 )
                 answer = (res or {}).get("answer") or ""
                 if answer.strip():
                     yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": answer})
                     try:  # §17.873 — durable transcript capture (dedupe-safe)
                         await assist_agent.capture_assistant_reply(
-                            session_id=session_id, node_key=nk, kind="ask",
+                            session_id=session_id, node_key=(res or {}).get("node_key") or nk, kind="ask",
                             content=answer, db=db,
                         )
                     except Exception:  # noqa: BLE001
@@ -1017,10 +1019,12 @@ async def _answer(session_id: str, question: str, nk, history, db,
     returns is the shape that produced the silent dead end."""
     from app.modules import assist_agent
     yield _ev(ASSIST_TURN_STATUS, {"text": status_text})
+    res = None  # §17.1136 — the capture below reads the resolved key even when the helper raised
     try:
         res = await assist_agent.run_step_research(
             session_id=session_id, node_key=nk, question=question,
             history=history, db=db,
+            capture_reply=False,  # §17.1136 — persisted once, below, under the resolved key
         )
         answer = (res or {}).get("answer") or ""
     except Exception as exc:  # noqa: BLE001
@@ -1035,7 +1039,7 @@ async def _answer(session_id: str, question: str, nk, history, db,
     yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": answer})
     try:  # §17.873 — answers must outlive the run row
         await assist_agent.capture_assistant_reply(
-            session_id=session_id, node_key=nk, kind="ask", content=answer, db=db,
+            session_id=session_id, node_key=(res or {}).get("node_key") or nk, kind="ask", content=answer, db=db,
         )
     except Exception:  # noqa: BLE001 — capture is best-effort
         logger.warning("turn_loop_answer_capture_failed sid=%s", session_id)
@@ -1333,12 +1337,10 @@ async def _submit(session_id: str, d: dict, text_: str, nk, history, db) -> Asyn
         dm = (res or {}).get("decision_message") or ""
         if dm.strip() and (res or {}).get("status") == "deliberating":
             yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": dm})
-            try:
-                from app.modules import assist_agent as _aa
-                await _aa.capture_assistant_reply(
-                    session_id=session_id, node_key=nk, kind="ask", content=dm, db=db)
-            except Exception:  # noqa: BLE001
-                pass
+            # §17.1136 (ledger D-4) — NOT captured here: `decision_message` is the
+            # deliberation reply run_step_decision already persisted (kind
+            # "deliberation") on the way through the submit endpoint. A second
+            # capture under the turn's key was the helper-and-caller double persist.
     except Exception as exc:  # noqa: BLE001 — a refused submit must not kill the turn
         # §17.889(#11) — durable answer (status lines vanish at turn end) and an
         # actual continuation instead of a dangling "Continuing…".

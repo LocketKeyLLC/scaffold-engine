@@ -55,3 +55,46 @@ def test_fix_endpoint_relies_on_run_step_fix_default_capture():
     assert "run_step_fix(" in body
     assert "capture_reply=False" not in body, "the /fix endpoint would then never persist the reply"
     assert body.count("capture_assistant_reply(") == 0, "the /fix endpoint must not double-persist"
+
+
+# ── §17.1136 (ledger D-4) — the same rule for research and decision ────────
+
+def _turn_src() -> str:
+    return (ROOT / "app" / "modules" / "assist_turn.py").read_text(encoding="utf-8")
+
+
+def test_run_step_research_capture_is_gated():
+    body = _func_body(AGENT, "async def run_step_research(")
+    assert "capture_reply: bool = True" in body
+    assert "if capture_reply and" in body, "run_step_research's own capture is not gated on capture_reply"
+
+
+def test_every_turn_loop_research_call_persists_once_under_the_resolved_key():
+    """Each `run_step_research(` in the turn loop passes capture_reply=False and
+    the ONE capture that follows uses the helper's resolved node key — the
+    None-key-vs-resolved-cursor pair is how the dedupe let two rows through."""
+    import re
+    src = _turn_src()
+    calls = list(re.finditer(r"run_step_research\(", src))
+    assert len(calls) >= 3, "the turn loop's research call sites moved — re-check this gate"
+    for m in calls:
+        window = src[m.start(): m.start() + 900]
+        assert "capture_reply=False" in window.split(")", 3)[0] + ")" + window.split(")", 3)[1] if ")" in window else False, \
+            f"run_step_research at offset {m.start()} does not pass capture_reply=False"
+        after = src[m.end(): m.end() + 1400]
+        assert 'node_key=(res or {}).get("node_key") or nk' in after, \
+            f"the capture after run_step_research at offset {m.start()} must use the resolved node key"
+
+
+def test_research_endpoint_relies_on_the_helper_default_capture():
+    body = _func_body((ROOT / "app" / "routers" / "assist.py").read_text(encoding="utf-8"), "async def assist_research(")
+    assert "run_step_research(" in body
+    assert "capture_reply=False" not in body
+    assert body.count("capture_assistant_reply(") == 0
+
+
+def test_submit_path_does_not_recapture_the_deliberation_reply():
+    body = _func_body(_turn_src(), "async def _submit(")
+    dm_block = body[body.index('decision_message'):][:900]
+    assert "capture_assistant_reply(" not in dm_block, \
+        "the deliberation reply is persisted by run_step_decision through the submit endpoint — one persist per path"
