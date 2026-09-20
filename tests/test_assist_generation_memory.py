@@ -150,3 +150,49 @@ async def test_funnel_prepends_brief_essentials(monkeypatch):
     assert "HP V1910-24G switch" in mem.job_digest
     assert "on the laptops" in mem.job_digest
     assert mem.job_digest.startswith("── PROJECT BRIEF")
+
+
+# ── §17.1137 (ledger D-9 / D-10) — no side doors around the funnel or the writer ──
+
+def _app_sources():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "app"
+    return {p: p.read_text(encoding="utf-8") for p in root.rglob("*.py")}
+
+
+def test_the_legacy_environment_renderer_is_called_only_inside_assist_render():
+    """render_environment_block carries no system state / tool lacks / file
+    writes; those live only in render_session_memory (§17.751/913/1083). Any
+    prompt that asks the legacy renderer directly is memory-blind — the decision
+    suggestion was (ledger D-9). Only assist_render's own legacy branch may
+    call it."""
+    import re
+    bad = []
+    for p, src in _app_sources().items():
+        if p.name == "assist_render.py":
+            continue
+        for m in re.finditer(r"render_environment_block\(", src):
+            line = src[: m.start()].count("\n") + 1
+            bad.append(f"{p.name}:{line}")
+    assert not bad, f"use _render_memory_or_legacy / memory_prompt_parts instead: {bad}"
+
+
+def test_decision_suggestion_and_decide_turn_use_the_funnel_aware_renderer():
+    from app.modules import assist_decide, assist_guide
+    assert "_render_memory_or_legacy(" in inspect.getsource(assist_guide._generate_decision_suggestion)
+    assert "_render_memory_or_legacy(" in inspect.getsource(assist_decide.decide_turn)
+
+
+def test_no_assistant_row_is_written_outside_the_capture_helper():
+    """ingest_turn(role="assistant") skips capture_assistant_reply's bound,
+    dedupe and file-write ledger (ledger D-10: /step/goto and /step/back did)."""
+    import re
+    bad = []
+    for p, src in _app_sources().items():
+        if p.name == "assist_turns.py":
+            continue
+        for m in re.finditer(r"ingest_turn\(", src):
+            call = src[m.start(): m.start() + 400]
+            if re.search(r"""role\s*=\s*["']assistant["']""", call):
+                bad.append(f"{p.name}:{src[: m.start()].count(chr(10)) + 1}")
+    assert not bad, f"write assistant rows through capture_assistant_reply: {bad}"

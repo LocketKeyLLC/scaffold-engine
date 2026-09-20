@@ -177,3 +177,29 @@ async def test_stream_enforces_suggestion_on_miss():
     joined = "".join(deltas)
     assert "## My suggestion" in joined
     assert done and done["guidance_meta"]["suggestion_enforced"] is True
+
+
+# ── §17.1137 (ledger D-9) — the suggestion prompt carries the SAME memory the walkthrough saw ──
+
+async def test_suggestion_prompt_carries_system_state_under_umem():
+    from unittest.mock import AsyncMock, patch
+    from app.config import settings
+    from app.modules import assist_guide
+    seen = {}
+
+    async def fake_tool_call(messages, *a, **kw):
+        seen["user"] = messages[-1]["content"]
+        r = AsyncMock(); r.success = True; r.tool_calls = []; r.text = ""; return r
+    env = {"profile": "root@pve", "facts": ["Proxmox 8 on pve"],
+           "system_state": {"vm": {"106": {"name": "media", "status": "running"}}}}
+    with patch.object(settings, "assist_unified_memory_enabled", True), \
+         patch.object(settings, "assist_umem_inject", True), \
+         patch.object(assist_guide.model_router, "tool_call", new=AsyncMock(side_effect=fake_tool_call)):
+        await assist_guide._generate_decision_suggestion(
+            title="Pick a hypervisor", task_prompt="Choose", options_text="A or B",
+            environment=env, role="model_general", operator_notes=[{"text": "keep VM 106 as is"}],
+        )
+    user = seen.get("user", "")
+    assert "Proxmox 8 on pve" in user, "facts missing from the suggestion prompt"
+    assert "keep VM 106 as is" in user, "operator notes missing from the suggestion prompt"
+    assert "CONFIGURATION" in user or "106" in user, "system state missing — the legacy renderer never carried it"

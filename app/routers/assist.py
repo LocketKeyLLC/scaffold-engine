@@ -1644,11 +1644,13 @@ async def assist_goto_step(
     # jump that only rendered client-side left the chat tail showing the step
     # they came FROM, so a refresh read as "it moved me forward again". Lived
     # exactly that on the live session after a T21 reopen.
-    await assist_agent.ingest_turn(
-        session_id=session_id, role="assistant", kind="track",
+    # §17.1137 (ledger D-10) — through the ONE assistant-row writer (bound,
+    # deduped, file-write ledger), not a raw ingest_turn with role="assistant"
+    await assist_agent.capture_assistant_reply(
+        session_id=session_id, node_key=res["node_key"], kind="track",
         content=(f"↪ Moved to **{res['node_key']}: {res['title']}**. "
                  "Nothing else in the plan changed."),
-        node_key=res["node_key"], db=db,
+        db=db,
     )
     return res
 
@@ -1692,12 +1694,12 @@ async def assist_step_back(
     # appendBubble, which is client-only: after a reload the transcript tail
     # still showed the step the operator had been moved forward to, so the
     # reopen looked like it had not happened.
-    await assist_agent.ingest_turn(
-        session_id=session_id, role="assistant", kind="track",
+    await assist_agent.capture_assistant_reply(  # §17.1137 (ledger D-10)
+        session_id=session_id, node_key=res["node_key"], kind="track",
         content=(f"↩ Reopened **{res['node_key']}: {res.get('title') or ''}** — "
                  "back on it with the same walkthrough. Nothing else in the "
                  "plan moved."),
-        node_key=res["node_key"], db=db,
+        db=db,
     )
     return {"session_id": session_id, "reopened": res,
             "current_node_key": res["node_key"]}

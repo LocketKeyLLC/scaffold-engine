@@ -252,8 +252,14 @@ async def decide_turn(
             session_id=session_id, nk=nk, sess=dict(sess), db=db, ctx=ctx,
             history=history, title=ctx.title,
         )
-        env_block = assist_guide.render_environment_block(mem.environment)
-        notes_block = assist_guide.render_operator_notes_block(mem.operator_notes)
+        # §17.1137 (ledger D-9) — the funnel-aware renderer: under umem-inject the
+        # session-memory block (system state, tool lacks, file writes, notes) —
+        # the legacy env block carried none of it. Notes ride inside that block
+        # then; only the legacy path renders them separately.
+        env_block = "\n\n".join(assist_guide._render_memory_or_legacy(mem.environment, mem.operator_notes))
+        from app.config import settings as _settings
+        notes_block = ("" if (_settings.assist_unified_memory_enabled and _settings.assist_umem_inject)
+                       else assist_guide.render_operator_notes_block(mem.operator_notes))
         conversation = mem.conversation or ""
         digest = mem.job_digest or ""
     except Exception as exc:  # never let context assembly sink the decision

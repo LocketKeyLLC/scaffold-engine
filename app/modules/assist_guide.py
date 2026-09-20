@@ -183,12 +183,18 @@ _DECISION_SUGGESTION_TOOL = model_router.Tool(
 async def _generate_decision_suggestion(
     *, title: str, task_prompt: str, options_text: str,
     environment: Optional[dict], role: str,
+    operator_notes: Optional[list[dict]] = None,
 ) -> str:
     """Generate ONLY the ``## My suggestion`` block for a decision whose
     walkthrough omitted it, tailored to the options already produced + the
     operator's system. Returns the markdown block, or "" on any failure (the
     caller then ships the un-enforced walkthrough — fail-soft)."""
-    env = render_environment_block(environment)
+    # §17.1137 (ledger D-9) — the SAME memory the walkthrough saw: under
+    # ASSIST_UMEM_INJECT this is render_session_memory (system state, tool
+    # lacks, file writes, notes); the legacy env block carried none of them,
+    # so the enforced "My suggestion" was recommending against a system it
+    # had not been shown.
+    env = "\n\n".join(_render_memory_or_legacy(environment, operator_notes))
     user = (
         f"Decision: {title}\n\nWhat to decide:\n{(task_prompt or '')[:1000]}\n\n"
         + (f"{env.strip()}\n\n" if env.strip() else "")
@@ -2564,7 +2570,7 @@ async def generate_guidance(
             and not _has_decision_suggestion(text_out)):
         block = await _generate_decision_suggestion(
             title=ctx.title, task_prompt=ctx.base_prompt, options_text=text_out,
-            environment=environment, role=role,
+            environment=environment, role=role, operator_notes=operator_notes,  # §17.1137
         )
         if block:
             text_out = f"{text_out}\n\n{block}"
@@ -6617,7 +6623,7 @@ async def generate_guidance_stream(
             and not _has_decision_suggestion(text_out)):
         block = await _generate_decision_suggestion(
             title=ctx.title, task_prompt=ctx.base_prompt, options_text=text_out,
-            environment=environment, role=role,
+            environment=environment, role=role, operator_notes=operator_notes,  # §17.1137
         )
         if block:
             yield {"type": "delta", "text": f"\n\n{block}"}
