@@ -643,14 +643,17 @@ def capability_answer(recipe: Recipe, *, status: str, detail: str, in_plan: Opti
 async def retire_recipe_steps(db, session_id: str, recipe_id: str) -> list[str]:
     """§17.1146 — mark this recipe's still-open steps skipped (an older version
     is being replaced). Returns the node keys retired."""
+    from app.modules.assist_step_fsm import check as _fsm_check  # §17.1074 — the oracle runs before every status write
     rows = (await db.execute(text("""
-        SELECT s.node_key, s.job_id FROM assist_steps s JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+        SELECT s.node_key, s.job_id, s.status FROM assist_steps s JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
          WHERE s.session_id = :sid AND (d.description LIKE :mark_v OR d.description LIKE :mark_old)
            AND s.status NOT IN ('committed', 'skipped', 'handed_off')
     """), {"sid": session_id, "mark_v": f"%{RECIPE_STEP_MARK} {recipe_id} v%",
            "mark_old": f"%{RECIPE_STEP_MARK} {recipe_id}_%"})).mappings().all()
     keys = [r["node_key"] for r in rows]
     for r in rows:
+        _fsm_check("retire_recipe_step", src=r["status"], dst="skipped", node_status="skipped",
+                   node_key=r["node_key"], trigger="skip")
         await db.execute(text("UPDATE assist_steps SET status = 'skipped', updated_at = NOW() WHERE session_id = :sid AND node_key = :nk"),
                          {"sid": session_id, "nk": r["node_key"]})
         await db.execute(text("UPDATE dag_nodes SET status = 'skipped', updated_at = NOW() WHERE job_id = :jid AND node_key = :nk"),

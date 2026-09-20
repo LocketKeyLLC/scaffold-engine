@@ -418,7 +418,7 @@ async def test_stale_recipe_steps_are_detected_and_replaced(monkeypatch):
     # editing a recipe's steps changes its version → previously inserted steps become stale
     assert es.recipe_version(es.BY_ID["local_runner"]) != es.recipe_version(es.BY_ID["runner_sudo"])
     # retire marks both tables skipped for every open step of that recipe
-    rows2 = MagicMock(); rows2.mappings.return_value.all.return_value = [{"node_key": "ADD70", "job_id": "j"}, {"node_key": "ADD71", "job_id": "j"}]
+    rows2 = MagicMock(); rows2.mappings.return_value.all.return_value = [{"node_key": "ADD70", "job_id": "j", "status": "presented"}, {"node_key": "ADD71", "job_id": "j", "status": "pending"}]
     db.execute = AsyncMock(return_value=rows2)
     assert await es.retire_recipe_steps(db, "s1", "local_runner") == ["ADD70", "ADD71"]
     sqls = [" ".join(str(c[0][0]).split()) for c in db.execute.await_args_list[1:]]
