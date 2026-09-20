@@ -404,6 +404,12 @@ async def _run_turn_inner(
                     yield e
                 handled["v"] = "state_check_resolved"
                 return
+            if _pending_sc and _sc.STATE_CHECK_SKIP_RE.search(text_):
+                # §17.1138 — "skip the rest": finish with what was answered so far
+                async for e in _resolve_state_check(session_id, node_key, "", history, db, finish=True):
+                    yield e
+                handled["v"] = "state_check_finished"
+                return
             if _pending_sc:
                 await _sc.clear_pending_state_check(db=db, session_id=session_id)
         except Exception as exc:  # noqa: BLE001 — a state check never strands a turn
@@ -1176,11 +1182,14 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
         logger.warning("state_check_capture_failed sid=%s", session_id)
 
 
-async def _resolve_state_check(session_id: str, nk, pasted: str, history, db) -> AsyncIterator[_Event]:
-    """§17.1050 — judge phase: verdicts, retractions, staged repairs."""
+async def _resolve_state_check(session_id: str, nk, pasted: str, history, db,
+                               finish: bool = False) -> AsyncIterator[_Event]:
+    """§17.1050 — judge phase: verdicts, retractions, staged repairs.
+    §17.1138 — a partial paste keeps the check pending (the reply carries the
+    next script); ``finish`` closes it with what was answered."""
     from app.modules import assist_agent, assist_state_check as _sc
     yield _ev(ASSIST_TURN_STATUS, {"text": "🩺 Reading the checks against what the plan believes…"})
-    res = await _sc.resolve_state_check(db=db, session_id=session_id, pasted=pasted)
+    res = await _sc.resolve_state_check(db=db, session_id=session_id, pasted=pasted, finish=finish)
     if res.get("message"):
         yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": res["message"]})
         try:

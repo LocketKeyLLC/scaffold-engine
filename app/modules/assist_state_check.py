@@ -49,6 +49,10 @@ logger = logging.getLogger("scaffold")
 
 MARKER_RE = re.compile(r"^\s*==\s*([A-Z]:[A-Za-z0-9_.-]+)\s*==\s*$", re.M)
 _MARKER_ECHO_RE = re.compile(r"echo\s+[\"']?==\s*[A-Z]:[A-Za-z0-9_.-]+\s*==[\"']?\s*$")
+#: §17.1138 — "finish with what you have": the operator declines to paste the rest.
+STATE_CHECK_SKIP_RE = re.compile(   # never a bare "skip": that is the step command
+    r"(?i)^\s*(?:skip|finish|stop|end)\s+(?:the\s+)?(?:rest|remaining(?:\s+checks?)?|checks?|state\s*check)\b"
+    r"|^\s*(?:that'?s|thats)\s+(?:all|everything)(?:\s+i\s+have)?\s*[.!]?\s*$")
 STATE_CHECK_PHRASE_RE = re.compile(
     r"(?i)^\s*(?:/assist\s+)?(?:verify|check|confirm)\s+(?:the\s+)?(?:current\s+)?(?:state|build|system|where\s+we\s+are)\b"
     r"|^\s*state\s*check\b|^\s*🩺")
@@ -392,6 +396,27 @@ def _runner_offer(n: int) -> str:
     )
 
 
+def render_continuation_message(judged: list[dict], remaining: list[dict], *, missing_ids: list[str],
+                                deferred: int, total: int) -> str:
+    """§17.1138 — after a PARTIAL paste: what was judged so far, which ids the
+    paste did not cover, and the next script (the uncovered ids first, then the
+    probes deferred by the per-batch budget)."""
+    n = {"confirmed": 0, "contradicted": 0, "unknown": 0}
+    for v in judged:
+        n[v["verdict"]] = n.get(v["verdict"], 0) + 1
+    head = (f"🩺 **State check — {len(judged)} of {total} answered so far: "
+            f"✅ {n['confirmed']} confirmed · ❌ {n['contradicted']} contradicted · ❔ {n['unknown']} unclear.**")
+    miss = (f"\nThe paste did not cover: {', '.join(f'`{i}`' for i in missing_ids[:12])}"
+            f"{'…' if len(missing_ids) > 12 else ''} — "
+            "the markers for those were absent (a partial run, or the `== … ==` lines got dropped)."
+            if missing_ids else "")
+    nxt = (f"\n\nNext {len(remaining)} check{'s' if len(remaining) != 1 else ''}"
+           f"{f' ({deferred} of them were held back from the first script)' if deferred else ''} — "
+           "same rule, every command only reads. Paste the output back, or say **skip the rest** "
+           "to finish with what we have:\n\n```bash\n" + render_probe_script(remaining) + "\n```")
+    return head + miss + nxt
+
+
 def render_probe_message(probes: list[dict], *, checked: int, unchecked: int,
                          offer_runner: bool = False) -> str:
     if not probes:
@@ -583,11 +608,19 @@ async def start_state_check(*, db, session_id: str, node_key: Optional[str], on_
     message for the operator. Raises ValueError on a bad session."""
     built = await build_claims(db=db, session_id=session_id)
     claims = built["claims"]
-    probes, refused = await plan_probes(claims, built["environment"], on_progress=on_progress)
+    all_probes, refused = await plan_probes(claims, built["environment"], on_progress=on_progress)
+    # §17.1138 — a per-script budget: the operator gets a block they can run in
+    # one go; the rest queue behind it and come out after each paste.
+    from app.config import settings as _settings
+    cap = max(1, int(getattr(_settings, "assist_state_check_max_probes", 24) or 24))
+    probes, deferred = all_probes[:cap], all_probes[cap:]
     pending = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "node_key": node_key or built.get("current_node_key"),
         "probes": probes,
+        "deferred": deferred,
+        "verdicts": [],           # accumulated across partial pastes
+        "probes_total": len(all_probes),
         "claims_total": len(claims),
     }
     await db.execute(text("""
@@ -596,8 +629,8 @@ async def start_state_check(*, db, session_id: str, node_key: Optional[str], on_
          WHERE id = :sid
     """), {"sid": session_id, "patch": json.dumps({"pending_state_check": pending})})
     await db.commit()
-    logger.warning("state_check_started session_id=%s node_key=%s claims=%d probes=%d refused=%d",
-                   session_id, pending["node_key"], len(claims), len(probes), len(refused))
+    logger.warning("state_check_started session_id=%s node_key=%s claims=%d probes=%d deferred=%d refused=%d",
+                   session_id, pending["node_key"], len(claims), len(probes), len(deferred), len(refused))
     targets = sum(1 for c in claims if c.get("kind") != "pin")
     # §17.1105 — offer the local runner iff it isn't configured (when it is,
     # assist_turn runs the probes itself and this paste message is never shown).
@@ -607,11 +640,14 @@ async def start_state_check(*, db, session_id: str, node_key: Optional[str], on_
         _runner_off = (await _lr.runner_spec(db)) is None
     except Exception:  # noqa: BLE001 — the offer is a courtesy, never blocks
         _runner_off = True
-    return {"message": render_probe_message(probes, checked=len(probes),
-                                            unchecked=max(0, targets - len(probes)),
-                                            offer_runner=_runner_off),
-            "probes": probes, "claims_total": len(claims), "refused": refused,
-            "node_key": pending["node_key"]}
+    msg = render_probe_message(probes, checked=len(all_probes),
+                               unchecked=max(0, targets - len(all_probes)),
+                               offer_runner=_runner_off)
+    if deferred:
+        msg += (f"\n\n(This is the first {len(probes)} of {len(all_probes)} checks — "
+                f"after you paste, I hand you the next {len(deferred)}.)")
+    return {"message": msg, "probes": probes, "deferred": deferred, "claims_total": len(claims),
+            "refused": refused, "node_key": pending["node_key"]}
 
 
 async def get_pending_state_check(*, db, session_id: str) -> Optional[dict]:
@@ -640,7 +676,7 @@ def looks_like_probe_output(text_value: str) -> bool:
     return bool(MARKER_RE.search(text_value or ""))
 
 
-async def resolve_state_check(*, db, session_id: str, pasted: str) -> dict:
+async def resolve_state_check(*, db, session_id: str, pasted: str, finish: bool = False) -> dict:
     """Judge the pasted output, retract contradicted facts, stage the
     structural proposal, record the check on the session. Returns
     ``{message, verdicts, proposal, retracted}``."""
@@ -648,7 +684,41 @@ async def resolve_state_check(*, db, session_id: str, pasted: str) -> dict:
     if not pending:
         return {"message": "", "verdicts": [], "proposal": None, "retracted": []}
     probes = pending.get("probes") or []
-    verdicts = await judge_outputs(probes, pasted)
+    prior: list[dict] = [v for v in (pending.get("verdicts") or []) if isinstance(v, dict)]
+    deferred: list[dict] = [p for p in (pending.get("deferred") or []) if isinstance(p, dict)]
+    total = int(pending.get("probes_total") or (len(prior) + len(probes) + len(deferred)))
+    if finish:
+        # §17.1138 — "skip the rest": everything not pasted stays unknown, by the operator's choice
+        fresh = [{"id": p["id"], "verdict": "unknown", "reason": "skipped by the operator", "kind": p.get("kind"),
+                  "claim": p.get("claim"), "node_key": p.get("node_key")} for p in probes + deferred]
+        verdicts = prior + fresh
+        sections_present = 0
+    else:
+        fresh = await judge_outputs(probes, pasted)
+        present_ids = set(attribute_sections(pasted))
+        sections_present = sum(1 for p in probes if p["id"] in present_ids)
+        missing = [p for p in probes if p["id"] not in present_ids]
+        answered = [v for v in fresh if v["id"] in present_ids]
+        if sections_present and (missing or deferred):
+            # §17.1138 — a PARTIAL paste keeps the check open: judge what came
+            # back, queue the uncovered ids + the deferred probes as the next
+            # script. Before this, 47 probes → 4 pasted → 43 "unknown" and done.
+            remaining = missing + deferred
+            nxt = {**pending, "probes": remaining, "deferred": [], "verdicts": prior + answered,
+                   "partial_pastes": int(pending.get("partial_pastes") or 0) + 1}
+            await db.execute(text("""
+                UPDATE assist_sessions
+                   SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb), updated_at = NOW()
+                 WHERE id = :sid
+            """), {"sid": session_id, "patch": json.dumps({"pending_state_check": nxt})})
+            await db.commit()
+            logger.warning("state_check_partial session_id=%s node_key=%s answered=%d of=%d missing=%d deferred=%d",
+                           session_id, pending.get("node_key"), len(prior) + len(answered), total, len(missing), len(deferred))
+            return {"message": render_continuation_message(prior + answered, remaining,
+                                                           missing_ids=[p["id"] for p in missing],
+                                                           deferred=len(deferred), total=total),
+                    "verdicts": prior + answered, "proposal": None, "retracted": [], "pending": True}
+        verdicts = prior + fresh
     contradicted = [v for v in verdicts if v["verdict"] == "contradicted"]
     retracted: list[str] = []
     if contradicted:
@@ -675,11 +745,19 @@ async def resolve_state_check(*, db, session_id: str, pasted: str) -> dict:
         except Exception as exc:  # noqa: BLE001
             logger.warning("state_check_stage_failed sid=%s err=%r", session_id, exc)
     # record the check on the session (for the automatic-offer guard) and clear the pending
+    unknown_v = [v for v in verdicts if v["verdict"] == "unknown"]
     record = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "node_key": pending.get("node_key"),
               "confirmed": sum(1 for v in verdicts if v["verdict"] == "confirmed"),
               "contradicted": len(contradicted),
-              "unknown": sum(1 for v in verdicts if v["verdict"] == "unknown")}
+              "unknown": len(unknown_v),
+              # §17.1138 — WHY they stayed unknown (the 09-19 check recorded 43 and no reason)
+              "unknown_no_output": sum(1 for v in unknown_v if "no output pasted" in (v.get("reason") or "")),
+              "unknown_skipped": sum(1 for v in unknown_v if "skipped by the operator" in (v.get("reason") or "")),
+              "unknown_judge": sum(1 for v in unknown_v if "no output pasted" not in (v.get("reason") or "")
+                                   and "skipped by the operator" not in (v.get("reason") or "")),
+              "probes_total": total, "partial_pastes": int(pending.get("partial_pastes") or 0),
+              "sections_last_paste": sections_present}
     await db.execute(text("""
         UPDATE assist_sessions
            SET metadata = (COALESCE(metadata, '{}'::jsonb) - 'pending_state_check')
@@ -689,9 +767,11 @@ async def resolve_state_check(*, db, session_id: str, pasted: str) -> dict:
          WHERE id = :sid
     """), {"sid": session_id, "r": json.dumps(record)})
     await db.commit()
-    logger.warning("state_check_resolved session_id=%s node_key=%s confirmed=%d contradicted=%d unknown=%d retracted=%d proposal=%s",
-                   session_id, record["node_key"], record["confirmed"], record["contradicted"],
-                   record["unknown"], len(retracted), bool(proposal))
+    logger.warning("state_check_resolved session_id=%s node_key=%s confirmed=%d contradicted=%d unknown=%d "
+                   "(no_output=%d skipped=%d judge=%d) probes_total=%d partial_pastes=%d retracted=%d proposal=%s",
+                   session_id, record["node_key"], record["confirmed"], record["contradicted"], record["unknown"],
+                   record["unknown_no_output"], record["unknown_skipped"], record["unknown_judge"],
+                   record["probes_total"], record["partial_pastes"], len(retracted), bool(proposal))
     return {"message": render_verdicts(verdicts), "verdicts": verdicts, "proposal": proposal, "retracted": retracted}
 
 

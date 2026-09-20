@@ -1376,6 +1376,12 @@ class Settings(BaseSettings):
     # instead of asking for a paste. Empty = off (the default, and the tenet).
     assist_local_runner_server: str = ""
     assist_state_check_after_fixes: int = Field(default=3, ge=1, le=20)
+    # §17.1138 (ledger L-4) — probes per paste-back script. The 09-19 check
+    # handed the operator 47 commands in one block and came back 43 unknown;
+    # a partial paste no longer resolves everything unanswered as unknown —
+    # the check stays pending for the missing ids — and the rest of the
+    # probes are handed over as the next batch after each paste.
+    assist_state_check_max_probes: int = Field(default=24, ge=4, le=100)
     # §17.687 — recent-conversation recall. The §17.650 digest recovers only
     # COMMITTED node output; notes recover only what the OPERATOR captured. So a
     # program the engine SUGGESTED a turn ago (a decision node's "## My
