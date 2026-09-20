@@ -133,7 +133,7 @@ async def record_note(
 
 async def add_step(
     *, session_id: str, request: str, before_node_key: str | None = None,
-    proposal: str | None = None, db,
+    proposal: str | None = None, steps: list[dict] | None = None, db,
 ) -> dict:
     """§17.736 — insert new guided step(s) the plan doesn't cover, to run BEFORE
     the current blocked step, and point the session at the first of them.
@@ -158,6 +158,10 @@ async def add_step(
     placeholder. ``proposal`` lets a caller supply the text directly.
     Fail-soft only on the draft; the insert itself raises ValueError on a bad
     session / an empty draft so the router maps it to a 4xx.
+
+    §17.1145 — ``steps`` (``[{title, description}, …]``) inserts PRE-DRAFTED
+    steps through the same persist path with no model call: the engine's own
+    capability recipes add themselves to the operator's plan this way.
     """
     from app.modules.assist_agent import _environment_from_metadata  # §17.856 re-exports (patch-safe deferred)
     from app.modules import assist_policy
@@ -203,7 +207,7 @@ async def add_step(
     # §17.1053 — a bare "add a step for this" refers to the engine's previous
     # proposal. Resolve it from the durable transcript (the SPA/OWUI history is
     # optional and truncated; `assist_turns` is authoritative).
-    bare = assist_policy.is_bare_add_step_request(request)
+    bare = assist_policy.is_bare_add_step_request(request) and not steps
     if bare and not (proposal or "").strip():
         rows = (await db.execute(
             text("""
@@ -223,10 +227,14 @@ async def add_step(
                 "Say what the step should accomplish, e.g. 'add a step to set up "
                 "the VM's networking'"
             )
-    drafted = await assist_guide.draft_steps(
-        request=request, job_context="\n\n".join(ctx_parts) or None,
-        proposal=proposal,
-    )
+    if steps:
+        drafted = [{"title": str(st.get("title") or "").strip(), "description": str(st.get("description") or "").strip()}
+                   for st in steps if str(st.get("title") or "").strip()]
+    else:
+        drafted = await assist_guide.draft_steps(
+            request=request, job_context="\n\n".join(ctx_parts) or None,
+            proposal=proposal,
+        )
     if not drafted:
         raise ValueError(
             "couldn't draft a concrete step from that — say what it should "
