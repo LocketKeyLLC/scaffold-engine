@@ -49,6 +49,10 @@ class Recipe:
     brief: str              # the idea the engine refines into a plan
     requires: tuple[str, ...] = ()
     detect: Optional[Callable[..., Awaitable[tuple[str, str]]]] = field(default=None, compare=False)
+    # §17.1144 — phrases an operator uses when they ask the ASSIST about this capability
+    # (lower-case, matched as substrings of the message). Specific on purpose: a bare
+    # 'runner' is a CI runner to the world; 'local runner' is ours.
+    keywords: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +118,7 @@ _ENGINE_HOST = ("The engine host is this machine: the repo is at ~/scaffold-engi
 RECIPES: tuple[Recipe, ...] = (
     Recipe(
         id="local_runner",
+        keywords=("local runner", "local-runner", "scaffold runner", "the runner on", "run its own checks", "run its own commands", "state check run", "stop asking me to paste", "verify state paste", "local_runner_mcp"),
         title="Let the state check run its own commands",
         summary="Verify state runs its read-only checks through a small helper on the target machine instead of asking you to paste.",
         why_off="The engine's rule is that it never touches your machine; this is the one fenced exception, and only you can open it.",
@@ -145,6 +150,7 @@ RECIPES: tuple[Recipe, ...] = (
     ),
     Recipe(
         id="runner_sudo",
+        keywords=("runner sudo", "sudo for the runner", "runner administrator", "runner root", "sudo-allow", "runner as root"),
         title="Give the runner administrator rights for specific commands",
         summary="Checks that need root (nginx -t, pct config …) stop coming back as 'unknown'.",
         why_off="Root access is a decision for the machine's owner; the runner is unprivileged until you list exact commands.",
@@ -168,6 +174,7 @@ RECIPES: tuple[Recipe, ...] = (
     ),
     Recipe(
         id="queue_worker",
+        keywords=("queue worker", "procrastinate queue", "background chores", "queue_enabled"),
         title="Move background chores to the queue worker",
         summary="Cleanup, health evaluations, the weekly model self-evaluation and stuck-turn closing run in a separate container with retries and a record of every run.",
         why_off="A second container is a deployment decision; the in-process loops work and the queue path was proven but is new.",
@@ -193,6 +200,7 @@ RECIPES: tuple[Recipe, ...] = (
     ),
     Recipe(
         id="reranker_sidecar",
+        keywords=("reranker sidecar", "reranker container", "search step to its own container", "reranker_backend"),
         title="Move the slow search step to its own container",
         summary="The relevance re-sort (about 6 s a query, all the CPU it can get) stops stalling everything else.",
         why_off="It is a second container on the same host; the in-process reranker works, just slowly.",
@@ -215,6 +223,7 @@ RECIPES: tuple[Recipe, ...] = (
     ),
     Recipe(
         id="step_fsm_strict",
+        keywords=("step rulebook", "fsm strict", "strict step", "step_fsm_strict"),
         title="Make the step rulebook strict",
         summary="Illegal step-state moves are refused instead of logged and allowed.",
         why_off="Refusing is safer only once the warnings have stayed at zero for a week of real use.",
@@ -336,3 +345,111 @@ def runner_nudge() -> str:
         return ""
     return ("\n\n_The engine can run these checks itself through a small helper on your machine — "
             "**Capabilities → Let the state check run its own commands** in the console walks you through it._")
+
+
+# ---------------------------------------------------------------------------
+# §17.1144 — the assist knows the engine's own capabilities.
+# Live: "please assist me in setting up the local runner on the proxmox server"
+# went to the web ("SAX1V1K ES2251 node Proxmox local runner setup verified
+# pve-firewall…") and came back as a plan to build a CI-runner VM. The
+# recipes existed behind the Capabilities page; nothing in the turn loop
+# knew the words. This is the deterministic bridge: a message that names a
+# recipe is answered FROM the recipe (what it is, why it is off, its live
+# status) and the walkthrough is offered as a staged yes/no — the same scoped
+# affirmative the completion offer uses (§17.951).
+# ---------------------------------------------------------------------------
+
+SETUP_OFFER_KEY = "pending_setup_offer"
+
+
+def _paste_shaped(text: str) -> bool:
+    """A shell paste that merely contains a keyword is evidence, not a question."""
+    t = text or ""
+    if len(t) > 700:
+        return True
+    lines = [ln for ln in t.splitlines() if ln.strip()]
+    if len(lines) > 6:
+        return True
+    return any(ln.lstrip().startswith(("root@", "$ ", "# ", "PS ")) for ln in lines)
+
+
+def match_recipe(text: str) -> Optional[Recipe]:
+    """The recipe an operator message is about, or None. Deterministic, no model."""
+    t = " ".join((text or "").lower().split())
+    if not t or _paste_shaped(text or ""):
+        return None
+    for r in RECIPES:
+        for k in r.keywords:
+            if k in t:
+                return r
+    return None
+
+
+def capability_answer(recipe: Recipe, *, status: str, detail: str, job: Optional[dict] = None) -> str:
+    """The reply: what the capability is, in the recipe's own plain words, its
+    live state on this install, and the offer. Every line carries content."""
+    head = f"## {recipe.title}\n\n"
+    body = (f"That is one of the engine's own optional capabilities, not part of your homelab plan. "
+            f"{recipe.summary} {recipe.why_off}\n\n")
+    if status == "on":
+        state = f"**It is already on here:** {detail}\n\n"
+        offer = ("Nothing to set up — press **Verify state** on any step and the checks run through it. "
+                 "Everything it runs is recorded in this transcript, marked `[local-runner]`.")
+    elif status == "in_progress" or (job and job.get("job_id")):
+        jid = (job or {}).get("job_id") or ""
+        state = f"**A walkthrough for it is already open** (job {jid[:8]}…). \n\n"
+        offer = ("Open that job from the dashboard and continue there — it is its own job, separate from this one. "
+                 "If you want a fresh one instead, reply **yes** and I will open a new walkthrough.")
+    elif status == "blocked":
+        state = f"**Not available yet:** {detail}\n\n"
+        offer = "Reply **yes** and I will open the walkthrough for the prerequisite first."
+    else:
+        state = f"**On this install it is off** — {detail}\n\n"
+        offer = (f"Reply **yes** and I will open the walkthrough now (about {recipe.effort}); it becomes its own job "
+                 f"on the dashboard, separate from this one, and asks you for the target machine before anything else. "
+                 f"You can also start it yourself from **Capabilities → {recipe.title}** in the console.")
+    return head + body + state + offer
+
+
+async def stage_setup_offer(*, session_id: str, recipe_id: str, db) -> None:
+    from datetime import datetime, timezone
+    offer = {"recipe_id": recipe_id, "staged_at": datetime.now(timezone.utc).isoformat()}
+    await db.execute(text("""
+        UPDATE assist_sessions
+           SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb), updated_at = NOW()
+         WHERE id = :sid
+    """), {"sid": session_id, "patch": json.dumps({SETUP_OFFER_KEY: offer})})
+    await db.commit()
+    logger.info("setup_offer_staged session_id=%s recipe=%s", session_id, recipe_id)
+
+
+async def get_pending_setup_offer(*, session_id: str, db) -> Optional[dict]:
+    try:
+        row = (await db.execute(text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
+                                {"sid": session_id})).mappings().first()
+        meta = (row or {}).get("metadata")
+        offer = meta.get(SETUP_OFFER_KEY) if isinstance(meta, dict) else None
+        if isinstance(offer, dict) and offer.get("recipe_id") in BY_ID:
+            return offer
+    except Exception as exc:
+        logger.warning("setup_offer_read_failed sid=%s err=%r", session_id, exc)
+    return None
+
+
+async def clear_pending_setup_offer(*, session_id: str, db) -> None:
+    try:
+        await db.execute(text(
+            "UPDATE assist_sessions SET metadata = COALESCE(metadata, '{}'::jsonb) - "
+            f"'{SETUP_OFFER_KEY}', updated_at = NOW() WHERE id = :sid"), {"sid": session_id})
+        await db.commit()
+    except Exception as exc:
+        logger.warning("setup_offer_clear_failed sid=%s err=%r", session_id, exc)
+
+
+async def start_recipe_for_session(db, session_id: str, recipe_id: str) -> dict:
+    """Open the walkthrough on the operator's behalf, owned by the session's job owner."""
+    row = (await db.execute(text(
+        "SELECT j.owner FROM assist_sessions s JOIN jobs j ON j.id = s.job_id WHERE s.id = :sid"),
+        {"sid": session_id})).mappings().first()
+    owner = (row or {}).get("owner")
+    return await start_recipe(db, recipe_id, owner=owner)
