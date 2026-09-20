@@ -6326,6 +6326,27 @@ async def apply_post_generation_guards(
     return out, meta
 
 
+# §17.1147 — a plan step the ENGINE wrote (an engine-capability recipe step)
+# is guided from the recipe itself: no research pre-pass, no model draft, no
+# cache replay (the verify step re-checks the runner every time it is opened).
+# Live: the install step's guide took 42 s, two web searches and five model
+# calls, and opened with an `ls` check of its own invention ahead of the one
+# line the operator had to paste.
+async def _recipe_guidance(*, session_id: str, node_key: str, node_description: Optional[str], db) -> Optional[dict]:
+    from app.modules import engine_setup as _es
+    if not node_description or _es.RECIPE_STEP_MARK not in node_description:
+        return None
+    rendered = await _es.render_recipe_guide(node_description, db=db)
+    if not rendered:
+        return None   # an older version's step: the ordinary path guides it until it is replaced
+    meta = dict(rendered.get("meta") or {})
+    await persist_guidance(session_id=session_id, node_key=node_key, guidance=rendered["text"],
+                           guidance_meta=meta, status="ready", db=db)
+    logger.info("assist_guide_recipe_rendered node_key=%s recipe=%s probe=%s",
+                node_key, meta.get("recipe"), (meta.get("probe") or {}).get("ok"))
+    return {"guidance": rendered["text"], "guidance_meta": meta, "status": "ready", "cached": False}
+
+
 async def ensure_guidance(
     *,
     session_id: str,
@@ -6352,6 +6373,10 @@ async def ensure_guidance(
     row without spending an LLM call. ``force=True`` (``/assist guide``) always
     regenerates.
     """
+    _recipe = await _recipe_guidance(session_id=session_id, node_key=node_key,
+                                     node_description=node_description, db=db)  # §17.1147
+    if _recipe:
+        return _recipe
     if not force:
         cached = await read_cached_guidance(
             session_id=session_id, node_key=node_key, db=db,
@@ -6464,6 +6489,13 @@ async def generate_guidance_stream(
       before the ``done`` event — same record a non-streamed generate produces.
     """
     role = settings.assist_guide_model_role
+
+    _recipe = await _recipe_guidance(session_id=session_id, node_key=node_key,
+                                     node_description=node_description, db=db)  # §17.1147
+    if _recipe:
+        yield {"type": "delta", "text": _recipe["guidance"]}
+        yield {"type": "done", "status": "ready", "guidance_meta": _recipe["guidance_meta"], "cached": False}
+        return
 
     # (a) cache short-circuit — no stream. §17.877: a cached walkthrough that
     # predates operator work on the step is stale — regenerating (with a

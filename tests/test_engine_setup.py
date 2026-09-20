@@ -304,8 +304,9 @@ def test_every_recipe_carries_plan_steps_that_carry_the_facts():
         for _, what in r.steps:
             assert "Done when" in what, (r.id, what[:60])      # every step says what finishes it
     lr = " ".join(w for _, w in es.BY_ID["local_runner"].steps)
-    for fact in ("{runner_port}", "{runner_name}", "curl -fsSL -o /root/local_runner_mcp.py {script_url}",
-                 "{token}", "{target_ip}", "Verify state", "[local-runner]"):
+    for fact in ("{runner_port}", "{runner_name}", "curl -fsSL {script_url} -o /tmp/local_runner_mcp.py",
+                 "--install --port {runner_port} --token {token}", "{target_ip}", "Verify state", "[local-runner]",
+                 es.PROBE_MARK):
         assert fact in lr, fact
     assert "scp" not in lr and "ENGINE_USER" not in lr        # single shell on the target; nothing on the engine host
     # prerequisites chain first, and every inserted description carries the recipe marker
@@ -324,8 +325,8 @@ def test_steps_are_filled_in_from_what_the_engine_knows_and_placeholders_stay_ho
            "engine_url": "http://192.168.1.43:8000", "token": "abc123"}
     st = es.recipe_steps(es.BY_ID["local_runner"], ctx=ctx)
     d = st[0]["description"]
-    assert "curl -fsSL -o /root/local_runner_mcp.py http://192.168.1.43:8000/setup/runner/local_runner_mcp.py" in d
-    assert "--port 8790 --token abc123" in d and "pve-runner" in d and "192.168.1.156:8790" in d
+    assert "curl -fsSL http://192.168.1.43:8000/setup/runner/local_runner_mcp.py -o /tmp/local_runner_mcp.py" in d
+    assert "--install --port 8790 --token abc123" in d and "pve-runner" in d and "192.168.1.156:8790" in d
     assert st[0]["title"] == "Install the engine's local runner helper on pve"
     assert "{" not in d and "<" not in d
     # unknown values stay visible placeholders (the guide asks for that one thing), never invented
@@ -461,3 +462,151 @@ def test_every_recipe_has_keywords_and_none_is_a_bare_common_word():
         assert r.keywords, r.id
         for k in r.keywords:
             assert " " in k or "_" in k or "-" in k, (r.id, k)   # a phrase, never a bare word
+
+
+# ---------------------------------------------------------------------------
+# §17.1147 — one paste, guided by the recipe, checked by the engine.
+# ---------------------------------------------------------------------------
+
+async def test_replacing_stale_steps_anchors_on_their_successor_not_the_retired_step(monkeypatch):
+    """Live: 'yes' retired ADD70–73 and then anchored the new steps on ADD70
+    (the current step) — add_step reopens its anchor, so ADD70 came back as
+    pending with the placeholders in it."""
+    import inspect
+    src = inspect.getsource(es.add_recipe_to_plan)
+    assert src.index("retire_recipe_steps(") < src.index("successor_anchor(") < src.index("assist_notes.add_step(")
+    assert "before_node_key in retired" in src
+    # successor_anchor: the first open NON-recipe node depending on a retired key
+    db = MagicMock(); db.commit = AsyncMock()
+    rows = MagicMock(); rows.mappings.return_value.all.return_value = [{"node_key": "T6"}]
+    db.execute = AsyncMock(return_value=rows)
+    assert await es.successor_anchor(db, "s1", ["ADD70", "ADD71"]) == "T6"
+    q = " ".join(str(db.execute.await_args_list[0][0][0]).split())
+    assert "depends_on && CAST(:keys AS text[])" in q and "d.description NOT LIKE :mark" in q
+    assert "NOT IN ('committed', 'skipped', 'handed_off')" in q
+    assert db.execute.await_args_list[0][0][1]["mark"] == f"%{es.RECIPE_STEP_MARK}%"
+    empty = MagicMock(); empty.mappings.return_value.all.return_value = []
+    db.execute = AsyncMock(return_value=empty)
+    assert await es.successor_anchor(db, "s1", ["ADD70"]) is None
+    assert await es.successor_anchor(db, "s1", []) is None
+    # the functional shape: replace=True with the pointer on a retired step → add_step gets the successor
+    calls = {}
+    async def _ctx(db, sid): return {**es._UNKNOWN, "target_ip": "10.0.0.2", "token": "t"}
+    async def _retire(db, sid, rid): return ["ADD70", "ADD71"]
+    async def _succ(db, sid, retired): calls["succ"] = retired; return "T6"
+    async def _reg(db, ctx): return True
+    async def _add(**kw): calls["before"] = kw["before_node_key"]; return {"node_key": "ADD74", "steps": kw["steps"]}
+    monkeypatch.setattr(es, "recipe_context", _ctx); monkeypatch.setattr(es, "retire_recipe_steps", _retire)
+    monkeypatch.setattr(es, "successor_anchor", _succ); monkeypatch.setattr(es, "register_local_runner", _reg)
+    from app.modules import assist_notes
+    monkeypatch.setattr(assist_notes, "add_step", _add)
+    res = await es.add_recipe_to_plan(db, "s1", es.BY_ID["local_runner"], before_node_key="ADD70", replace=True)
+    assert calls == {"succ": ["ADD70", "ADD71"], "before": "T6"} and res["retired"] == ["ADD70", "ADD71"]
+    # not replacing, or the pointer already on a non-recipe step → the pointer stays the anchor
+    calls.clear()
+    await es.add_recipe_to_plan(db, "s1", es.BY_ID["local_runner"], before_node_key="T6", replace=True)
+    assert calls["before"] == "T6" and "succ" not in calls
+
+
+def test_capability_answer_never_says_right_before_a_stale_step():
+    ip = {"node_key": "ADD70", "title": "x", "status": "pending", "stale": True, "open_keys": ["ADD70", "ADD71"]}
+    ans = es.capability_answer(es.BY_ID["local_runner"], status="off", detail="d", in_plan=ip, current_step="ADD70")
+    assert "right before" not in ans and "in their place" in ans
+    ans2 = es.capability_answer(es.BY_ID["local_runner"], status="off", detail="d", in_plan=ip, current_step="T6")
+    assert "right before **T6**" in ans2
+
+
+async def test_recipe_steps_are_guided_from_the_recipe_one_paste_no_model():
+    """The install step renders as ONE fenced line the operator pastes, the
+    'Done when' sentence under its own heading, no placeholders, no stray
+    marker fragments; a step from an older recipe version is not rendered
+    (the ordinary path guides it until it is replaced)."""
+    ctx = {"target_ip": "192.168.1.156", "target_host": "pve", "target_user": "root", "token": "abc123"}
+    st = es.recipe_steps(es.BY_ID["local_runner"], ctx=ctx)
+    r = await es.render_recipe_guide(st[0]["description"], db=None)
+    txt = r["text"]
+    assert txt.startswith("## 👉 Do this next") and "## ✅ Done when" in txt
+    assert txt.count("```bash") == 1
+    line = txt.split("```bash\n", 1)[1].split("\n```", 1)[0]
+    assert "\n" not in line and line.startswith("curl -fsSL ") and "--install --port 8790 --token abc123" in line
+    assert "Done when Done when" not in txt and "\n_\n" not in txt and "{" not in txt and "<" not in txt
+    assert "The last line printed starts with OK: local runner active." in txt
+    assert txt.index("the line below already carries it") < txt.index("```bash")
+    assert r["meta"] == {"recipe": "local_runner", "deterministic": True, "status": "ready"}
+    assert es.recipe_of_node(st[0]["description"]) is es.BY_ID["local_runner"]
+    assert es.recipe_of_node("… _Engine capability recipe: local_runner v00000000_") is None   # older version
+    assert es.recipe_of_node("… _Engine capability recipe: local_runner_") is None            # unversioned first cut
+    assert es.recipe_of_node("plain step") is None
+    assert await es.render_recipe_guide("… _Engine capability recipe: local_runner v00000000_", db=None) is None
+
+
+async def test_the_verify_step_is_checked_by_the_engine_hit_and_miss(monkeypatch):
+    import dataclasses
+    ctx = {"target_ip": "192.168.1.156", "target_host": "pve", "target_user": "root", "token": "abc123"}
+    desc = es.recipe_steps(es.BY_ID["local_runner"], ctx=ctx)[1]["description"]
+    assert es.PROBE_MARK in desc
+    base = es.BY_ID["local_runner"]
+    try:
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value=(True, "reached http://192.168.1.156:8790/mcp/ as 'pve-runner' and found its run_readonly tool")))
+        hit = await es.render_recipe_guide(desc, db=None)
+        assert hit["text"].startswith("## ✅ The engine reached your runner") and "press **✓ Done" in hit["text"]
+        assert hit["meta"]["probe"] == {"ok": True, "detail": "reached http://192.168.1.156:8790/mcp/ as 'pve-runner' and found its run_readonly tool"}
+        assert "```" not in hit["text"] and "<" not in hit["text"]
+        es.BY_ID["local_runner"] = dataclasses.replace(base, probe=AsyncMock(return_value=(False, "http://192.168.1.156:8790/mcp/ did not answer within 8 s")))
+        miss = await es.render_recipe_guide(desc, db=None)
+        assert miss["text"].startswith("## ❌ The engine could not reach the runner yet")
+        assert "journalctl -u local-runner-mcp -n 20 --no-pager" in miss["text"] and "Guide me" in miss["text"]
+        assert miss["meta"]["probe"]["ok"] is False and "✓ Done" not in miss["text"]
+    finally:
+        es.BY_ID["local_runner"] = base
+
+
+async def test_probe_local_runner_reads_the_registry_and_is_time_bounded(monkeypatch):
+    import asyncio
+    from app.modules import assist_local_runner as lr, mcp_client
+    spec = MagicMock(); spec.name = "pve-runner"; spec.endpoint = "http://192.168.1.156:8790/mcp/"; spec.command = None
+    monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=None))
+    ok, why = await es.probe_local_runner(MagicMock())
+    assert ok is False and "no runner is registered" in why
+    monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "run_readonly"}]))
+    ok, why = await es.probe_local_runner(MagicMock())
+    assert ok is True and "run_readonly" in why and "pve-runner" in why
+    assert mcp_client.list_tools.await_args.kwargs == {"use_cache": False}     # never a cached answer
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "other"}]))
+    ok, why = await es.probe_local_runner(MagicMock())
+    assert ok is False and "not the local runner helper" in why
+    async def _hang(*a, **k): await asyncio.sleep(30)
+    monkeypatch.setattr(mcp_client, "list_tools", _hang); monkeypatch.setattr(es, "PROBE_TIMEOUT_S", 0.05)
+    ok, why = await es.probe_local_runner(MagicMock())
+    assert ok is False and "did not answer" in why
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("connection refused")))
+    ok, why = await es.probe_local_runner(MagicMock())
+    assert ok is False and "connection refused" in why
+
+
+async def test_both_guide_paths_short_circuit_on_a_recipe_step(monkeypatch):
+    """Stream and non-stream guide entry points render a recipe step before
+    the cache read and never reach research or the model."""
+    import inspect
+    from app.modules import assist_guide as ag
+    src = inspect.getsource(ag.ensure_guidance)
+    assert src.index("_recipe_guidance(") < src.index("read_cached_guidance(")
+    src2 = inspect.getsource(ag.generate_guidance_stream)
+    assert src2.index("_recipe_guidance(") < src2.index("read_cached_guidance(")
+    persisted = {}
+    async def _persist(**kw): persisted.update(kw)
+    monkeypatch.setattr(ag, "persist_guidance", _persist)
+    monkeypatch.setattr(ag, "generate_guidance", AsyncMock(side_effect=AssertionError("model path must not run")))
+    monkeypatch.setattr(ag, "read_cached_guidance", AsyncMock(side_effect=AssertionError("cache must not be read")))
+    ctx = {"target_ip": "192.168.1.156", "target_host": "pve", "target_user": "root", "token": "abc123"}
+    desc = es.recipe_steps(es.BY_ID["local_runner"], ctx=ctx)[0]["description"]
+    res = await ag.ensure_guidance(session_id="s1", node_key="ADD74", ctx=MagicMock(), node_description=desc,
+                                   research=True, force=True, db=MagicMock())
+    assert res["status"] == "ready" and "--install --port 8790 --token abc123" in res["guidance"]
+    assert persisted["node_key"] == "ADD74" and persisted["status"] == "ready" and persisted["guidance_meta"]["deterministic"]
+    events = [e async for e in ag.generate_guidance_stream(session_id="s1", node_key="ADD74", ctx=MagicMock(),
+                                                           node_description=desc, research=True, db=MagicMock())]
+    assert [e["type"] for e in events] == ["delta", "done"] and events[1]["cached"] is False
+    # a non-recipe step is untouched by the bypass
+    assert await ag._recipe_guidance(session_id="s1", node_key="T1", node_description="Install nginx", db=None) is None

@@ -120,3 +120,75 @@ def test_runner_sudo_never_widens_the_read_only_gate():
     assert body.index("read_only(command)") < body.index("apply_sudo_policy(command, allow)")
     assert mod.read_only("sudo systemctl restart nginx")[0] is False
     assert "--sudo-allow" in src and 'nargs="*"' in src
+
+
+# ---------------------------------------------------------------------------
+# §17.1147 — the one-paste installer.
+# ---------------------------------------------------------------------------
+
+def test_installer_unit_text_carries_the_exact_command_and_quotes_the_token():
+    mod = _load_runner_script()
+    u = mod.unit_text(python="/opt/scaffold-runner/venv/bin/python", script="/opt/scaffold-runner/local_runner_mcp.py",
+                      host="0.0.0.0", port=8790, token="ab c", sudo_allow=["pct config", "qm config"])
+    assert "ExecStart=/opt/scaffold-runner/venv/bin/python /opt/scaffold-runner/local_runner_mcp.py --host 0.0.0.0 --port 8790 --token 'ab c' --sudo-allow 'pct config' 'qm config'" in u
+    assert "Restart=on-failure" in u and "WantedBy=multi-user.target" in u and "After=network-online.target" in u
+    assert "--sudo-allow" not in mod.unit_text(python="p", script="s", host="0.0.0.0", port=1, token="t")
+
+
+def test_installer_venv_falls_back_to_apt_python3_venv(tmp_path, monkeypatch):
+    """Debian/Proxmox ships python3 without ensurepip: the first `python3 -m venv`
+    fails; the installer apt-installs python3-venv and tries once more."""
+    mod = _load_runner_script()
+    calls = []
+    def run(cmd, **kw):
+        calls.append(cmd)
+        r = MagicMock(); r.stdout = ""
+        if cmd[1:3] == ["-m", "venv"]:
+            r.returncode = 1 if len([c for c in calls if c[1:3] == ["-m", "venv"]]) == 1 else 0
+            r.stdout = "The virtual environment was not created successfully because ensurepip is not available."
+        else:
+            r.returncode = 0
+        return r
+    monkeypatch.setattr(mod.shutil, "which", lambda name: "/usr/bin/apt-get" if name == "apt-get" else None)
+    ok, why = mod.ensure_venv(str(tmp_path / "venv"), run=run)
+    assert ok and "after installing python3-venv" in why
+    assert [c[0] for c in calls][:3] == [mod.sys.executable, "apt-get", mod.sys.executable]
+    assert calls[1][:3] == ["apt-get", "install", "-y"] and calls[1][-1].endswith("-venv")
+    # no apt on the box → an honest failure, not a retry loop
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+    calls.clear()
+    ok, why = mod.ensure_venv(str(tmp_path / "venv2"), run=run)
+    assert not ok and "python3 -m venv failed" in why and len(calls) == 1
+
+
+def test_installer_port_check_treats_any_http_status_as_an_answer_but_401_as_a_token_mismatch(monkeypatch):
+    import urllib.error
+    mod = _load_runner_script()
+    class _Resp:
+        status = 405
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(mod.__dict__.setdefault("urllib", __import__("urllib")).request, "urlopen", lambda req, timeout: _Resp())
+    assert mod.port_answers("0.0.0.0", 8790, "t") == (True, "HTTP 405")
+    def _401(req, timeout): raise urllib.error.HTTPError(req.full_url, 401, "bad token", {}, None)
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _401)
+    ok, why = mod.port_answers("0.0.0.0", 8790, "t")
+    assert not ok and "different token" in why
+    def _refused(req, timeout): raise ConnectionRefusedError("refused")
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _refused)
+    assert mod.port_answers("0.0.0.0", 8790, "t")[0] is False
+
+
+def test_installer_refuses_without_root_or_token_and_install_binds_all_interfaces(monkeypatch, capsys):
+    mod = _load_runner_script()
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 1000)
+    args = MagicMock(token="t", install_dir="/tmp/x", host="0.0.0.0", port=8790, sudo_allow=[])
+    assert mod.install(args) == 2 and "FAILED: run the install as root" in capsys.readouterr().out
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 0)
+    args.token = None
+    assert mod.install(args) == 2 and "needs --token" in capsys.readouterr().out
+    # argparse: --install defaults the bind address to 0.0.0.0, plain serving stays loopback
+    monkeypatch.setattr(mod.sys, "argv", ["x", "--install", "--token", "t"])
+    seen = {}
+    monkeypatch.setattr(mod, "install", lambda a: seen.update(host=a.host, dir=a.install_dir) or 0)
+    assert mod.main() == 0 and seen == {"host": "0.0.0.0", "dir": "/opt/scaffold-runner"}
