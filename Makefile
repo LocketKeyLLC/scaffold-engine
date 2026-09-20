@@ -18,7 +18,7 @@ API_URL   ?= http://localhost:8000
 # §17.854 (audit H7) — completed the phony list: coverage/backup/restore/rebaseline/ci-smoke/
 # test-ui/lint-migrations/check-env-example/check-version/clean-pyc/bench-check-rag-* were real
 # targets missing here, so a same-named file at repo root would make them silently no-op.
-.PHONY: _ensure_dev _ensure_dev_image test-db test-db-reset test-integration test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain apply-preset model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
+.PHONY: audit-gate _ensure_dev _ensure_dev_image test-db test-db-reset test-integration test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain apply-preset model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -715,6 +715,19 @@ load-smoke: ## §17.1057 — locust, headless, model-free endpoints only: 5 user
 
 diff: ## §17.1057 — structural diff of the working tree (difftastic): make diff ARGS="HEAD~1"
 	GIT_EXTERNAL_DIFF=difft git diff $(ARGS)
+
+audit-gate: ## §17.1141 — the zero-state gate for the advisory tools: pyright (whole app, basic) 0 errors · vulture (100 %) clean · hadolint no warning/error (info allowed). CI job `tool-audit`; ~6 min (pyright).
+	@command -v pyright >/dev/null 2>&1 || { printf '\033[1;31m✗ pyright not installed (uv pip install --python ~/.local/share/scaffold-devtools/bin/python pyright)\033[0m\n'; exit 1; }
+	@command -v vulture >/dev/null 2>&1 || { printf '\033[1;31m✗ vulture not installed\033[0m\n'; exit 1; }
+	@command -v hadolint >/dev/null 2>&1 || { printf '\033[1;31m✗ hadolint not installed\033[0m\n'; exit 1; }
+	@printf '\033[1;36m-- audit-gate 1/3: pyright (basic, whole app) --\033[0m\n'
+	@out=$$(pyright app --level error 2>&1); n=$$(echo "$$out" | grep -oE '^[0-9]+ errors?' | grep -oE '^[0-9]+' || echo 1); \
+	  if [ "$$n" != "0" ]; then echo "$$out" | grep -E ' - error:' | head -20; printf '\033[1;31m✗ pyright: %s error(s) — fix them or record why in the sprint log\033[0m\n' "$$n"; exit 1; fi; printf '  ✓ pyright: 0 errors\n'
+	@printf '\033[1;36m-- audit-gate 2/3: vulture (100 %% confidence) --\033[0m\n'
+	@out=$$(vulture app scripts/vulture_whitelist.py --min-confidence 100 2>&1); if [ -n "$$out" ]; then echo "$$out"; printf '\033[1;31m✗ vulture: dead code at 100 %% confidence\033[0m\n'; exit 1; fi; printf '  ✓ vulture: clean\n'
+	@printf '\033[1;36m-- audit-gate 3/3: hadolint (warning+) --\033[0m\n'
+	@out=$$(hadolint --failure-threshold warning Dockerfile 2>&1); rc=$$?; if [ "$$rc" != "0" ]; then echo "$$out"; printf '\033[1;31m✗ hadolint: warnings/errors on Dockerfile\033[0m\n'; exit 1; fi; printf '  ✓ hadolint: no warning/error (info allowed)\n'
+	@printf '\033[1;32m✓ audit-gate passed\033[0m\n'
 
 audit-tools: ## §17.1058 — one read-only audit with every developer tool (ruff/pyright/ast-grep/import-linter/vulture/hadolint/oasdiff/mutmut-on-record/semgrep/trivy/dive) → .profiles/audit-<date>.md. QUICK=1 skips the network/image scans.
 	@python3 scripts/audit_tools.py $(if $(QUICK),--quick,) $(ARGS)

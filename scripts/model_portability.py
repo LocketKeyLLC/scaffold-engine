@@ -162,7 +162,7 @@ async def main() -> int:
         print(f"unknown roles: {bad}", file=sys.stderr)
         return 1
 
-    from scripts.model_ab import TASKS as _T  # noqa: F811 — goldens for the estimate
+    from scripts.model_ab import TASKS as _T
 
     if args.static:
         # §17.1003 — the live matrix needs models, so nothing ran it on a

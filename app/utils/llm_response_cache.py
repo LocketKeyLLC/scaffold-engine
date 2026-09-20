@@ -196,6 +196,6 @@ async def close_llm_response_cache() -> None:
     if _cache is not None and _cache._redis is not None:
         try:
             await _cache._redis.aclose()
-        except Exception:  # noqa: BLE001 — shutdown best-effort
+        except Exception:
             pass
         _cache._redis = None

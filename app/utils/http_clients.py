@@ -270,12 +270,12 @@ def rebuild_client(name: str) -> None:
         try:
             import asyncio
             asyncio.get_running_loop().create_task(old.aclose())
-        except Exception:  # noqa: BLE001 — no loop / already closing
+        except Exception:
             pass
     try:
         _clients[name] = factory()
         logger.info("http_client_rebuilt name=%s", name)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("http_client_rebuild_failed name=%s err=%r", name, exc)
 
 

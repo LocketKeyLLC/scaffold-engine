@@ -326,7 +326,7 @@ def topology_of(environment: dict | None) -> dict | None:
     try:
         sm = build_system_map(environment)
         return sm if (sm.get("machines") or sm.get("host", {}).get("ips")) else None
-    except Exception:  # noqa: BLE001 — derived; never breaks an answer
+    except Exception:
         return None
 
 

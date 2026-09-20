@@ -193,7 +193,7 @@ async def search_searxng(query: str, max_results: int = 10) -> list[dict]:
                     if results:
                         logger.info("gt_searxng_fallback_recovered: query=%r results=%d",
                                     query[:100], len(results))
-            except Exception as e:  # noqa: BLE001 — the fallback never blocks
+            except Exception as e:
                 logger.warning("gt_searxng_fallback_failed: query=%r err=%s",
                                query[:100], e)
         # §17.983 — an empty result with engines suspended is an OUTAGE, and the

@@ -397,7 +397,7 @@ async def _decision_trigger(*, db, session_id: str, job_id: str, node_key: str,
     from app.modules.assist_replan import downstream_node_keys
     try:
         downstream = set(await downstream_node_keys(db=db, job_id=job_id, root_node_key=node_key))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("plan_reconcile_downstream_failed session_id=%s err=%r", session_id, exc)
         downstream = set()
     changes = decision_changes(nodes, steps, source_node_key=node_key, downstream=downstream,
@@ -435,7 +435,7 @@ async def _decision_trigger(*, db, session_id: str, job_id: str, node_key: str,
         await set_environment(session_id=session_id, db=db, facts=[
             f"Decided at {node_key}: ({chosen['n']}) {chosen['label']}; not "
             + ("; ".join(f"({o['n']}) {o['label']}" for o in rejected) or "none")])
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("plan_reconcile_fact_failed session_id=%s err=%r", session_id, exc)
     # Structural impact → the existing surface-and-ask re-plan (model proposes,
     # operator confirms). Only when a pending step names a rejected option.
@@ -449,7 +449,7 @@ async def _decision_trigger(*, db, session_id: str, job_id: str, node_key: str,
                     + f". Steps {', '.join(named)} were written for a rejected option and must be revised or dropped.")
             changes["replan_proposal"] = await assess_note_impact(
                 session_id=session_id, note_kind="decision", note_text=note, db=db)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("plan_reconcile_decision_impact_failed session_id=%s err=%r", session_id, exc)
     logger.warning(
         "plan_reconcile_decision_applied session_id=%s node_key=%s chosen=%r rejected=%r nodes=%r "
@@ -580,7 +580,7 @@ async def reconcile_after_note(*, db, session_id: str, job_id: str, note_text: s
                        session_id, src, [(c["old"], c["new"]) for c in corrections], entry["nodes"],
                        entry["guidance_resets"])
         return changes
-    except Exception as exc:  # noqa: BLE001 — never break note-taking
+    except Exception as exc:
         logger.warning("plan_reconcile_note_failed session_id=%s err=%r", session_id, exc)
         return None
 
@@ -693,7 +693,7 @@ async def reconcile_after_substitution(*, db, session_id: str, job_id: str,
                        session_id, [(c["key"], c["old"], c["new"]) for c in corrections], new_keys,
                        entry["nodes"], entry["guidance_resets"])
         return changes
-    except Exception as exc:  # noqa: BLE001 — never break an environment update
+    except Exception as exc:
         logger.warning("plan_reconcile_substitution_failed session_id=%s err=%r", session_id, exc)
         return None
 
@@ -949,7 +949,7 @@ async def propose_corrections(*, nodes: list[dict], failing_pastes: list[str], f
             tools=[PROPOSE_CORRECTIONS_TOOL], role="model_general", overrides=model_overrides,
             temperature=0.0, tool_choice="auto", max_tokens=2048,
         )
-    except Exception as exc:  # noqa: BLE001 — a proposal must never block a commit
+    except Exception as exc:
         logger.warning("plan_reconcile_propose_failed: %r", exc)
         return [], []
     args = read_tool_args(resp)
@@ -1048,7 +1048,7 @@ async def _stage_model_proposals(*, db, session_id: str, node_key: str, nodes: l
                      + " ".join((closing or "").split())[:160])
         return await _stage_replan_proposal(
             session_id=session_id, note_text=note_text, note_kind="fix", affected=kept, db=db)
-    except Exception as exc:  # noqa: BLE001 — a proposal must never break a commit
+    except Exception as exc:
         logger.warning("plan_reconcile_stage_proposals_failed session_id=%s err=%r", session_id, exc)
         return None
 
@@ -1169,7 +1169,7 @@ async def reconcile_after_commit(*, db, session_id: str, job_id: str, node_key: 
                 session_id=session_id, db=db,
                 facts=[f"Corrected at {node_key}: {c['old']} → {c['new']} ({c['kind']}), confirmed by the operator"
                        for c in corrections])
-        except Exception as exc:  # noqa: BLE001 — the ledger fact is a courtesy
+        except Exception as exc:
             logger.warning("plan_reconcile_fact_failed session_id=%s err=%r", session_id, exc)
         logger.warning(
             "plan_reconcile_applied session_id=%s node_key=%s corrections=%r nodes=%r guidance_resets=%r",
@@ -1185,6 +1185,6 @@ async def reconcile_after_commit(*, db, session_id: str, job_id: str, node_key: 
             db=db, session_id=session_id, node_key=node_key, nodes=nodes, ctx=ctx,
             closing=closing, confirmed_facts=ledger_text(env))
         return changes
-    except Exception as exc:  # noqa: BLE001 — never break a commit
+    except Exception as exc:
         logger.warning("plan_reconcile_failed session_id=%s node_key=%s err=%r", session_id, node_key, exc)
         return None

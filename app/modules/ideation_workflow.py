@@ -461,7 +461,7 @@ def _diagnose_grounding(topic: str, all_results: list[dict],
                 have = {t for t in re.split(r"[^a-z0-9]+", hay) if len(t) >= 3}
                 if len(want & have) >= 2:
                     on_topic += 1
-    except Exception:  # noqa: BLE001 — advisory only, never breaks Phase 2
+    except Exception:
         return {"status": "ungrounded", "reason": "distiller_returned_nothing"}
     if want and on_topic == 0:
         return {

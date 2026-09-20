@@ -159,7 +159,7 @@ async def evaluate_thresholds(db, *, unresolved_count: int | None = None) -> dic
     rejections: list[dict] = []
     try:
         rejections = await provider_rejections(db, window_minutes=window)
-    except Exception as exc:  # noqa: BLE001 — a rule must never sink the tick
+    except Exception as exc:
         logger.debug("threshold_provider_rejections_failed: err=%s", exc)
     summary["provider_rejections"] = rejections
     thr = settings.alert_provider_rejections_threshold

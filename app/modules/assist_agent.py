@@ -897,7 +897,7 @@ async def assemble_generation_memory(
             _bt = _brief_text(_brief)
             if _bt:
                 environment = {**environment, "_brief_text": _bt}
-        except Exception:  # noqa: BLE001 — funnel sources are fail-soft (§17.751)
+        except Exception:
             logger.warning("assist_brief_block_failed job_id=%s", sess.get("job_id"))
             brief_block = ""
     job_digest = "\n\n".join(b for b in (brief_block, recap_block, raw_digest) if b).strip()
@@ -1150,7 +1150,7 @@ async def _record_sourced_values(*, session_id: str, node_key: str | None,
         await set_environment(session_id=session_id, sourced_values=items, db=db)
         logger.info("assist_sourced_values_recorded session_id=%s node_key=%s values=%r",
                     session_id, node_key, [i["value"] for i in items][:6])
-    except Exception as exc:  # noqa: BLE001 — a ledger write never breaks a turn
+    except Exception as exc:
         logger.warning("assist_sourced_values_record_failed: %s", exc)
 
 
@@ -1165,7 +1165,7 @@ def _focus_text(question: str, mem) -> str:
         parts.extend(p.get("open") or [])
         if p.get("next"):
             parts.append(p["next"])
-    except Exception:  # noqa: BLE001 — focus is a hint
+    except Exception:
         pass
     return "\n".join(str(x) for x in parts if x)
 
@@ -1278,7 +1278,7 @@ async def run_step_research(
                 {"sid": session_id, "nk": nk},
             )).mappings().first()
             _recap = ((_rr or {}).get("progress_recap") or "").strip()
-        except Exception as exc:  # noqa: BLE001 — a hint never breaks a turn
+        except Exception as exc:
             logger.warning("assist_recap_hint_failed: %s", exc)
 
     res = await assist_guide.research_one(
@@ -1455,7 +1455,7 @@ async def _fix_failure_streak(
             else:
                 try:
                     err = bool(_compute_signals(content, None)["shell_error"])
-                except Exception:  # noqa: BLE001 — signal is an enhancement
+                except Exception:
                     err = False
                 operator_turns.append(
                     (int(r["id"]), " ".join(content.split()), err))
@@ -1496,7 +1496,7 @@ async def _fix_failure_streak(
         # §17.906 — the caller truncates to [:3000] for the PROMPT; the gate
         # reads the full string, so a wide cap here costs no tokens.
         return streak, "\n\n".join(cmds[:40])
-    except Exception as e:  # noqa: BLE001 — escalation is an enhancement, never a blocker
+    except Exception as e:
         # §17.882b — WARNING, not debug: a swallowed error here silently
         # disables the whole no-repeat enforcement stack (lived it).
         logger.warning("assist_fix_streak_failed session_id=%s err=%r", session_id, e)
@@ -1618,10 +1618,10 @@ async def list_steps(*, session_id: str, db) -> list[dict]:
                     if st["node_key"] == key:
                         st.update(info)
                         break
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("assist_phase_annotate_failed session_id=%s err=%r", session_id, e)
         return steps
-    except Exception as e:  # noqa: BLE001 — a picker must never break the view
+    except Exception as e:
         logger.warning("assist_list_steps_failed session_id=%s err=%r", session_id, e)
         return []
 
@@ -1838,7 +1838,7 @@ async def step_back(*, session_id: str, node_key: str | None = None, db) -> dict
                     session_id, nk, was, bool(guidance))
         return {"node_key": nk, "title": (node or {}).get("title") or nk,
                 "was": was, "guidance": guidance or ""}
-    except Exception as e:  # noqa: BLE001 — §17.882b: log LOUD, never trap the turn
+    except Exception as e:
         logger.warning("assist_step_back_failed session_id=%s err=%r", session_id, e)
         return None
 
@@ -1938,7 +1938,7 @@ async def reopen_denied_step(*, session_id: str, message: str, db) -> dict | Non
             "title": (node or {}).get("title") or nk,
             "evidence": (node or {}).get("output_text") or "",
         }
-    except Exception as e:  # noqa: BLE001 — §17.882b: log LOUD, never trap the turn
+    except Exception as e:
         logger.warning("assist_denial_reopen_failed session_id=%s err=%r",
                        session_id, e)
         return None
@@ -2014,7 +2014,7 @@ async def _prescribed_commands(*, session_id: str, node_key: str, db) -> str:
                     seen.add(d)
                     directives.append(f"[{kind} · told the operator] {d}")
         return "\n\n".join(cmds[:14] + directives[:10])
-    except Exception as e:  # noqa: BLE001 — §17.882b: log LOUD, never swallow
+    except Exception as e:
         logger.warning("assist_prescribed_commands_failed session_id=%s err=%r",
                        session_id, e)
         return ""
@@ -2104,7 +2104,7 @@ async def run_step_fix(
                 {"sid": session_id, "nk": nk},
             )).mappings().all()
             recent_replies = [r.get("content") or "" for r in _rows]
-    except Exception as e:  # noqa: BLE001 — steering is never a blocker
+    except Exception as e:
         logger.warning("assist_recent_replies_failed session_id=%s err=%r",
                        session_id, e)
     # §17.973 — every cause this step has already tested and eliminated. Derived
@@ -2147,7 +2147,7 @@ async def run_step_fix(
             logger.info(
                 "assist_hypotheses node_key=%s eliminated=%d cross_step=%d",
                 nk, len(hypotheses["eliminated"]), len(hypotheses["cross_step"]))
-    except Exception as e:  # noqa: BLE001 — a ledger is never a blocker
+    except Exception as e:
         logger.warning("assist_hypotheses_failed session_id=%s err=%r", session_id, e)
     from app.modules.assist_evidence import operator_text as _operator_text  # §17.1028
     res = await assist_guide.generate_fix(
@@ -2396,7 +2396,7 @@ async def _job_digest_for(
             exclude_node_keys=exclude_node_keys,
             max_total_chars=settings.assist_job_context_max_chars,
         )
-    except Exception as exc:  # noqa: BLE001 — never block the turn on a digest fetch
+    except Exception as exc:
         logger.warning("assist_job_digest_failed job_id=%s: %s", job_id, exc)
         return ""
 
@@ -2493,7 +2493,7 @@ def _kb_hint_from(brief: dict, environment: dict,
 # app/modules/assist_environment.py; re-exported so assist_agent.<NAME>, the wide
 # internal use of _environment_from_metadata/_verbosity_from_metadata, and the
 # tests keep resolving.
-from app.modules.assist_environment import (  # noqa: F401,E402
+from app.modules.assist_environment import (
     _environment_from_metadata,
     _VERBOSITY_LEVELS,
     _verbosity_from_metadata,
@@ -2511,7 +2511,7 @@ from app.modules.assist_environment import (  # noqa: F401,E402
 
 # §17.856 — transcript helpers moved to app/modules/assist_turns.py;
 # re-exported so assist_agent.<NAME> keeps resolving.
-from app.modules.assist_turns import (  # noqa: F401,E402
+from app.modules.assist_turns import (
     _conversation_block_for,
     _with_step_recap,
     ingest_turn,
@@ -2523,7 +2523,7 @@ from app.modules.assist_turns import (  # noqa: F401,E402
 )
 
 # §17.856 — handoff moved to app/modules/assist_handoff.py; re-exported.
-from app.modules.assist_handoff import (  # noqa: F401,E402
+from app.modules.assist_handoff import (
     _sse,
     handoff_step,
     spawn_handoff_background,
@@ -2532,7 +2532,7 @@ from app.modules.assist_handoff import (  # noqa: F401,E402
 
 # §17.856 — memory/facts moved to app/modules/assist_memory.py; re-exported
 # (incl. _NOTE_KINDS, used by the staying record_note).
-from app.modules.assist_memory import (  # noqa: F401,E402
+from app.modules.assist_memory import (
     _norm_note,
     _derived_recently,
     derive_turn_memory,
@@ -2563,7 +2563,7 @@ from app.modules.assist_memory import (  # noqa: F401,E402
 )
 
 # §17.856 — notes/replan/friction moved to app/modules/assist_notes.py; re-exported.
-from app.modules.assist_notes import (  # noqa: F401,E402
+from app.modules.assist_notes import (
     record_friction,
     list_friction,
     record_note,
@@ -2754,7 +2754,7 @@ async def get_step_recap(
             session_id, node_key, n,
         )
         return recap
-    except Exception as e:  # noqa: BLE001 — recap must never break the turn
+    except Exception as e:
         logger.debug("get_step_recap_failed session_id=%s err=%r", session_id, e)
         return ""
 
@@ -2847,7 +2847,7 @@ async def get_project_recap(*, job_id: str, db) -> str:
             await cache_db.commit()
         logger.info("assist_project_recap_refreshed job_id=%s done_nodes=%d", job_id, done_n)
         return recap
-    except Exception as e:  # noqa: BLE001 — a recap must never break the turn
+    except Exception as e:
         logger.debug("get_project_recap_failed job_id=%s err=%r", job_id, e)
         return ""
 
@@ -2897,7 +2897,7 @@ async def build_reconnect_orientation(*, session_id: str, db) -> dict | None:
             "upcoming": upcoming,
             "project_recap": ((job or {}).get("project_recap") or "").strip() or None,
         }
-    except Exception as e:  # noqa: BLE001 — orientation must never break start
+    except Exception as e:
         logger.debug("build_reconnect_orientation_failed session_id=%s err=%r", session_id, e)
         return None
 
@@ -2939,7 +2939,7 @@ async def verify_submit_outcome(
             session_id=session_id, node_key=node_key, db=db)
         if cached:
             done_criteria = assist_guide.extract_done_criterion(cached.get("guidance") or "")
-    except Exception:  # noqa: BLE001 — the criterion is a bonus, never a blocker
+    except Exception:
         done_criteria = ""
     return await assist_guide.verify_step_success(
         title=row["title"] or node_key,
@@ -3565,7 +3565,7 @@ async def adapt_step_to_constraint(
             session_id=session_id, text_=constraint, kind="constraint",
             node_key=node_key, db=db,
         )
-    except Exception as e:  # noqa: BLE001 — adaptation must never break the commit
+    except Exception as e:
         logger.warning("adapt_constraint_note_failed session_id=%s err=%r", session_id, e)
     out = {"constraint": constraint, "affected": []}
     # (2) revise the PENDING steps that assumed the ruled-out method.
@@ -3579,7 +3579,7 @@ async def adapt_step_to_constraint(
             facts_block=_note_impact_facts_block(sess.get("metadata")),
             project_recap_block=await _note_impact_project_block(job_id, db),
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.warning("adapt_constraint_analyze_failed session_id=%s err=%r", session_id, e)
         return out
     affected = impact.get("affected") or []
@@ -3590,7 +3590,7 @@ async def adapt_step_to_constraint(
                 note_kind="constraint", affected=affected, db=db,
             )
             out["affected"] = affected
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("adapt_constraint_stage_failed session_id=%s err=%r", session_id, e)
     return out
 
@@ -3772,12 +3772,12 @@ async def _maybe_finalize_session(*, session_id: str, db) -> None:
                                 deliverable_kind=kind,
                                 grounding_score=_ASSIST_EXEMPLAR_GROUNDING, domain=_dom,
                             )
-                except Exception as e:  # noqa: BLE001 — ingest is best-effort
+                except Exception as e:
                     logger.warning(
                         "assist_exemplar_ingest_failed job_id=%s err=%s",
                         sess["job_id"], e,
                 )
-    except Exception as e:  # noqa: BLE001 — finalization must survive compile errors
+    except Exception as e:
         logger.warning(
             "assist_compile_failed session_id=%s job_id=%s err=%s",
             session_id, sess["job_id"], e,
@@ -3796,7 +3796,7 @@ async def _maybe_finalize_session(*, session_id: str, db) -> None:
         try:
             from app.modules.decomposition import _rollup_umbrella
             await _rollup_umbrella(db, str(parent_id))
-        except Exception as e:  # noqa: BLE001 — never block finalize on rollup
+        except Exception as e:
             logger.warning(
                 "assist_umbrella_rollup_failed job_id=%s parent=%s err=%s",
                 sess["job_id"], parent_id, e,

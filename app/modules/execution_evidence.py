@@ -117,7 +117,7 @@ async def fetch_upstream_flagged(db, job_id: str, depends_on: list[str]) -> set[
             for v in (ev or {}).get("unsupported") or []:
                 if isinstance(v, str) and v.strip():
                     out.add(v.strip())
-    except Exception as exc:  # noqa: BLE001 — a ledger miss must not fail a node
+    except Exception as exc:
         logger.warning("node_upstream_flagged_read_failed job=%s err=%r", job_id, exc)
     return out
 

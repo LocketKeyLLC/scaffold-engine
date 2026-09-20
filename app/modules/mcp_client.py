@@ -79,13 +79,13 @@ async def _open_session(spec: McpServerSpec) -> AsyncIterator[Any]:
     """Yield an initialized ``ClientSession`` for ``spec``. Imports of the MCP
     SDK are function-local so a repo without the dep (or a disabled feature)
     never pays the import at module load."""
-    from mcp import ClientSession  # noqa: PLC0415
+    from mcp import ClientSession
 
     spec.validate()
     timeout = settings.mcp_call_timeout
 
     if spec.transport == "stdio":
-        from mcp.client.stdio import (  # noqa: PLC0415
+        from mcp.client.stdio import (
             StdioServerParameters,
             get_default_environment,
             stdio_client,
@@ -106,10 +106,10 @@ async def _open_session(spec: McpServerSpec) -> AsyncIterator[Any]:
         return
 
     # streamable_http
-    from mcp.client.streamable_http import streamable_http_client  # noqa: PLC0415
+    from mcp.client.streamable_http import streamable_http_client
 
     if spec.headers:
-        import httpx2  # noqa: PLC0415 — mcp's own httpx (2.x), separate from our httpx 0.28
+        import httpx2
 
         async with httpx2.AsyncClient(headers=spec.headers) as http_client:
             async with streamable_http_client(spec.endpoint, http_client=http_client) as streams:
@@ -184,7 +184,7 @@ async def list_tools(spec: McpServerSpec, *, use_cache: bool = True) -> list[dic
         tools = await asyncio.wait_for(_do(), timeout=settings.mcp_call_timeout + 10.0)
     except asyncio.TimeoutError as exc:
         raise McpError(f"mcp server {spec.name!r}: list_tools timed out") from exc
-    except Exception as exc:  # noqa: BLE001 — normalize transport errors
+    except Exception as exc:
         raise McpError(
             f"mcp server {spec.name!r}: list_tools failed: {_describe_exc(exc)}"
         ) from exc
@@ -221,7 +221,7 @@ async def call_tool(
         ) from exc
     except McpError:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise McpError(
             f"mcp server {spec.name!r} tool {tool_name!r}: {_describe_exc(exc)}"
         ) from exc

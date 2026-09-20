@@ -64,7 +64,7 @@ async def _detect_local_runner(db) -> tuple[str, str]:
     try:
         from app.modules.mcp_registry import get_server
         spec = await get_server(db, name)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return "off", f"registry lookup failed: {exc}"
     if spec is None or not spec.enabled:
         return "off", f"ASSIST_LOCAL_RUNNER_SERVER={name} but no enabled MCP server of that name is registered."
@@ -253,7 +253,7 @@ async def _open_jobs_by_recipe(db) -> dict[str, dict]:
               FROM jobs WHERE metadata ? 'setup_recipe'
              ORDER BY metadata->>'setup_recipe', created_at DESC
         """))).mappings().all()
-    except Exception as exc:  # noqa: BLE001 — a listing must not fail on this
+    except Exception as exc:
         logger.warning("engine_setup_jobs_lookup_failed err=%r", exc)
         return {}
     return {r["rid"]: {"job_id": r["job_id"], "status": r["status"]} for r in rows if r["rid"]}
@@ -281,7 +281,10 @@ async def start_recipe(db, recipe_id: str, *, owner: Optional[str]) -> dict:
     a prerequisite recipe is not on."""
     r = BY_ID[recipe_id]
     for dep in r.requires:
-        st, _ = await BY_ID[dep].detect(db)
+        detect = BY_ID[dep].detect
+        if detect is None:  # §17.1141 — a prerequisite without a detector cannot be verified
+            raise ValueError(f"'{BY_ID[dep].title}' must be on first (no detector to confirm it)")
+        st, _ = await detect(db)
         if st != "on":
             raise ValueError(f"'{BY_ID[dep].title}' must be on first")
     from app.modules.idea_refinement import create_ideation_job
@@ -309,7 +312,7 @@ async def job_is_prescriptive(db, job_id: str) -> bool:
         if isinstance(meta, str):
             meta = json.loads(meta)
         return bool(isinstance(meta, dict) and meta.get("prescriptive"))
-    except Exception as exc:  # noqa: BLE001 — unknown reads as not prescriptive
+    except Exception as exc:
         logger.warning("prescriptive_lookup_failed job=%s err=%r", job_id, exc)
         return False
 

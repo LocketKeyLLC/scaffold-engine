@@ -60,7 +60,7 @@ def analyze(cmd: str, *, _depth: int = 0) -> ShellFacts:
         return facts
     try:
         tree = _get_parser().parse(src)
-    except Exception:  # noqa: BLE001 — a missing grammar is a parse error for the gate
+    except Exception:
         facts.parse_error = True
         return facts
     root = tree.root_node

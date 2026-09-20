@@ -160,7 +160,7 @@ def _redis():
 
         _redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
         return _redis_client
-    except Exception:  # noqa: BLE001
+    except Exception:
         _redis_failed = True
         return None
 
@@ -183,7 +183,7 @@ def _persist(job_id: str, frame: str) -> None:
             pipe.ltrim(key, -MAX_FRAMES, -1)
             pipe.expire(key, REPLAY_TTL_S)
             await pipe.execute()
-        except Exception:  # noqa: BLE001 — persistence is a nicety, not a duty
+        except Exception:
             pass
 
     try:
@@ -207,7 +207,7 @@ async def replay(job_id: str) -> list[str]:
         return []
     try:
         return await client.lrange(_REDIS_KEY.format(job_id=job_id), 0, -1)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return []
 
 
@@ -315,7 +315,7 @@ async def cancel(job_id: str) -> bool:
         logger.warning("run_broker_cancel_slow job=%s — unwinding in background", job_id)
     except asyncio.CancelledError:
         pass          # the expected outcome: the task honoured the cancel
-    except Exception:  # noqa: BLE001 — a failing run is still a stopped run
+    except Exception:
         pass
     run.finish()       # release subscribers even if the task is still unwinding
     logger.info("run_broker_cancel_requested job=%s", job_id)
@@ -392,7 +392,7 @@ async def reconcile_on_startup(*, exclude: Iterable[str] = ()) -> None:
                 "previous process settled to failed: %s",
                 len(job_ids), ", ".join(job_ids[:10]),
             )
-    except Exception:  # noqa: BLE001 — never block startup
+    except Exception:
         logger.exception("run_broker_reconcile_on_startup_failed")
 
 
@@ -407,6 +407,6 @@ async def shutdown_all() -> None:
     if _redis_client is not None:
         try:
             await _redis_client.aclose()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         _redis_client = None

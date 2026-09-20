@@ -136,7 +136,7 @@ def parse_config_seed() -> dict[str, McpServerSpec]:
             spec = _spec_from_dict(entry, source="config")
             spec.validate()
             out[spec.name] = spec
-        except Exception as exc:  # noqa: BLE001 — skip-and-log a bad entry
+        except Exception as exc:
             logger.error("skipping invalid mcp_servers_config entry: %s", exc)
     return out
 

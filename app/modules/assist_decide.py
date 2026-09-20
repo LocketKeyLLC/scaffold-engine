@@ -64,7 +64,7 @@ _NOTE_KINDS = ("addition", "constraint", "preference", "decision", "note")
 # assist_policy (the pure gate module) and are re-exported here: policy used
 # to lazy-import THIS module for them, which is the wrong direction for a
 # leaf and is what the import-linter contract caught first.
-from app.modules.assist_policy import (  # noqa: E402,F401 — re-exports (patch targets)
+from app.modules.assist_policy import (
     _SHELL_ERROR_RE, _SHELL_PROMPT_LINE_RE, _compute_signals,
 )
 
@@ -332,7 +332,7 @@ async def decide_turn(
                         session_id, _d.get("action"), _meta.get("latency_ms"))
             return _finalize({**_d, "node_key": nk, "title": ctx.title, "is_decision": is_decision,
                               "signals": signals, "backend": "instructor"})
-        except Exception as exc:  # noqa: BLE001 — the trial must never lose a turn
+        except Exception as exc:
             logger.warning("decide_turn_instructor_failed session=%s err=%r (router fallback)", session_id, exc)
 
     resp = None

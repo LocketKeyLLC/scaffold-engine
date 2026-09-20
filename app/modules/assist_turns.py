@@ -39,7 +39,7 @@ def _conversation_block_for(history: list[dict] | None) -> str:
         return assist_guide.render_conversation_block(
             recent, max_chars=settings.assist_conversation_context_max_chars,
         )
-    except Exception as exc:  # noqa: BLE001 — never block the turn on a render
+    except Exception as exc:
         logger.warning("assist_conversation_block_failed job_id_unknown: %s", exc)
         return ""
 
@@ -84,7 +84,7 @@ async def ingest_turn(
             if _kinds:
                 logger.warning("assist_secret_redacted session_id=%s node_key=%s kinds=%s",
                                session_id, node_key, sorted(set(_kinds)))
-        except Exception as _e:  # noqa: BLE001 — redaction must never lose the turn
+        except Exception as _e:
             logger.warning("assist_secret_redaction_failed session_id=%s err=%r", session_id, _e)
     if not (content or "").strip() and kind != "skip":
         return False
@@ -142,10 +142,10 @@ async def ingest_turn(
                 session_id=session_id, node_key=node_key, message=content or "",
             )
         return recorded
-    except Exception as e:  # noqa: BLE001 — capture must never break the turn
+    except Exception as e:
         try:  # §17.888(#14) — clear the poisoned tx so later writes survive
             await db.rollback()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         logger.debug("ingest_turn_failed session_id=%s err=%r", session_id, e)
         return False
@@ -183,7 +183,7 @@ async def capture_assistant_reply(
             logger.info("assist_file_write_recorded session_id=%s files=%r",
                         session_id,
                         {k: v["expected"] for k, v in _written.items()})
-    except Exception as _e:  # noqa: BLE001
+    except Exception as _e:
         logger.warning("assist_file_write_record_failed session_id=%s err=%r",
                        session_id, _e)
     if settings.assist_unified_memory_enabled and settings.assist_umem_capture:
@@ -199,7 +199,7 @@ async def capture_assistant_reply(
             )).scalar()
             if (last or "") == bounded:
                 return False
-        except Exception as e:  # noqa: BLE001 — dedupe is best-effort
+        except Exception as e:
             logger.debug("capture_dedupe_check_failed session_id=%s err=%r", session_id, e)
     return await ingest_turn(
         session_id=session_id, role="assistant", kind=kind,
@@ -226,7 +226,7 @@ async def history_from_turns(
             """),
             {"sid": session_id, "lim": int(limit)},
         )).mappings().all()
-    except Exception as e:  # noqa: BLE001 — a fallback must never break the turn
+    except Exception as e:
         logger.debug("history_from_turns_failed session_id=%s err=%r", session_id, e)
         return []
     out: list[dict] = []

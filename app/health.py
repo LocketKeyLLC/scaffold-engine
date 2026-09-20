@@ -219,7 +219,7 @@ async def _check_searxng() -> dict:
         out["latency_ms"] = int((_t.monotonic() - t0) * 1000)
         out["status"] = "down"
         out["error"] = f"timeout after {_SEARXNG_PROBE_BUDGET_S}s"
-    except Exception as e:  # noqa: BLE001 — health never raises
+    except Exception as e:
         out["latency_ms"] = int((_t.monotonic() - t0) * 1000)
         out["status"] = "down"
         # §17.985 — several httpx errors carry an empty str(), which rendered
@@ -506,7 +506,7 @@ async def build_health_response(app, migration_state) -> dict:
                       "most_recent_at": r["most_recent"].isoformat() if r["most_recent"] else None}
                      for r in records]
             return {"window_minutes": window_m, "total": sum(i["count"] for i in items), "models": items}
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("health_provider_rejections_probe_failed: %s", exc)
             return {"window_minutes": window_m, "total": 0, "models": []}
 
@@ -571,7 +571,7 @@ async def build_health_response(app, migration_state) -> dict:
         try:
             from app.modules.assist_gates import gate_health
             return gate_health()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return {"status": "unknown", "error": str(exc)[:120]}
 
     (pg, ollama, milvus, redis_pair, ngspice, verilator, symbiyosys, calibration,

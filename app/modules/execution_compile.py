@@ -370,7 +370,7 @@ async def _job_given(job_id: str, db=None) -> tuple[dict, str]:
             from app.database import async_session
             async with async_session() as mdb:
                 row = (await mdb.execute(q, {"jid": job_id})).mappings().first()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("compile_value_check_job_read_failed: job=%s err=%s", job_id, exc)
         return {}, ""
     brief = (row or {}).get("refined_brief") if row else None
@@ -408,7 +408,7 @@ async def _maybe_compile_value_check(
                     job_id, record["introduced"][:6], record["carried"][:6])
         if introduced or carried:
             return compile_value_banner(introduced, carried) + text_value
-    except Exception as exc:  # noqa: BLE001 — never break compile
+    except Exception as exc:
         logger.warning("compile_value_check_failed: job=%s err=%s", job_id, exc)
     return text_value
 
@@ -625,7 +625,7 @@ async def compute_deliverable_kind(
             {"jid": job_id},
         )
         shell_done = row.scalar() or 0
-    except Exception:  # noqa: BLE001 — never block finalize on this read
+    except Exception:
         shell_done = 0
     if shell_done and not settings.shell_tool_enabled:
         return "plan_only"

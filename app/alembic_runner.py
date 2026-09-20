@@ -48,6 +48,6 @@ async def run_alembic_upgrade() -> dict:
         else:
             logger.info("alembic_current: %s (heads=%s)", after, res["heads"])
         return res
-    except Exception as exc:  # noqa: BLE001 — visible, never fatal
+    except Exception as exc:
         logger.error("alembic_upgrade_failed_at_startup: %r", exc)
         return {"status": "error", "error": repr(exc)}

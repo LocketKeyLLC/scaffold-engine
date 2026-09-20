@@ -382,7 +382,7 @@ def rerank_http(
         logger.info("reranker_completed: backend=HTTP docs=%d elapsed_ms=%.0f top_score=%.4f",
                     len(docs), elapsed_ms, items[0].score if items else 0)
         return RerankResult(items=items, backend="HTTP", latency_ms=elapsed_ms)
-    except Exception as e:  # noqa: BLE001 — a sidecar hiccup must degrade, never raise
+    except Exception as e:
         logger.warning("http_rerank_failed: url=%s error=%s (falling back)", settings.reranker_url, e)
         return None
 

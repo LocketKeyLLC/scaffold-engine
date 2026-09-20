@@ -29,7 +29,7 @@ logger = logging.getLogger("scaffold")
 def host_of(url: str) -> str:
     try:
         return (urlsplit(url).hostname or "").lower()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return ""
 
 

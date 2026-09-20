@@ -63,7 +63,7 @@ async def run_probes(spec, probes: list[dict], *, on_progress=None) -> tuple[str
                 res = await call_tool(spec, "run_readonly", {"command": cmd, "timeout_s": 20})
                 out = _plain_output(res)
                 ok = not res.is_error
-            except Exception as exc:  # noqa: BLE001 — one probe failing must not sink the check
+            except Exception as exc:
                 out, ok = f"(runner error: {exc})", False
             seen[cmd] = (out, ok)
         chunks.append(f'== {p["id"]} ==\n{out.rstrip()}\n')
@@ -71,7 +71,7 @@ async def run_probes(spec, probes: list[dict], *, on_progress=None) -> tuple[str
         if on_progress is not None:
             try:
                 await on_progress(i, len(probes))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
     return "".join(chunks), executed
 

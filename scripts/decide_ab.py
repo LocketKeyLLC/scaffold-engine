@@ -48,7 +48,7 @@ async def main() -> int:
                 row[backend] = {"action": d.get("action"), "confidence": d.get("confidence"),
                                 "fallback": bool(d.get("unavailable")), "backend": d.get("backend", "router"),
                                 "ms": round((time.monotonic() - t0) * 1000)}
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 row[backend] = {"action": None, "error": repr(exc)[:80], "ms": round((time.monotonic() - t0) * 1000)}
         row["agree"] = row["router"].get("action") == row["instructor"].get("action")
         results.append(row)

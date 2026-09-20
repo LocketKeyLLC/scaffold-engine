@@ -384,7 +384,7 @@ async def restore_reopened_step(*, session_id: str, node_key: str, db) -> dict:
     if isinstance(meta, str):
         try:
             meta = json.loads(meta)
-        except Exception:  # noqa: BLE001
+        except Exception:
             meta = {}
     pres = [p for p in (meta.get("reopen_preimages") or []) if isinstance(p, dict)]
     mine = [p for p in pres if p.get("node_key") == node_key]
@@ -481,7 +481,7 @@ async def assess_note_impact(
             facts_block=_note_impact_facts_block(sess.get("metadata")),  # §17.752
             project_recap_block=await _note_impact_project_block(job_id, db),  # §17.753
         )
-    except Exception as e:  # noqa: BLE001 — never break the note on analysis
+    except Exception as e:
         logger.warning("assess_note_impact_failed session_id=%s err=%r", session_id, e)
         return None
     affected = impact.get("affected") or []
@@ -591,7 +591,7 @@ async def detect_reroute(
             facts_block=_note_impact_facts_block(sess.get("metadata")),  # §17.752
             project_recap_block=await _note_impact_project_block(job_id, db),  # §17.753
         )
-    except Exception as e:  # noqa: BLE001 — never trap the turn on analysis
+    except Exception as e:
         logger.warning("detect_reroute_failed session_id=%s err=%r", session_id, e)
         return None
     affected = impact.get("affected") or []
@@ -614,7 +614,7 @@ async def detect_reroute(
             await sweep_superseded_facts(
                 session_id=session_id, note_text=message, db=db,
             )
-    except Exception as e:  # noqa: BLE001 — the replan is what matters
+    except Exception as e:
         logger.warning("detect_reroute_note_failed session_id=%s err=%r", session_id, e)
     return await _stage_replan_proposal(
         session_id=session_id, note_text=message, note_kind="decision",
@@ -709,7 +709,7 @@ async def apply_pending_replan(
                               f"(preserved): {prior.strip()[:600]}"),
                         db=db,
                     )
-                except Exception as e:  # noqa: BLE001 — preservation is best-effort
+                except Exception as e:
                     logger.warning("reopen_friction_preserve_failed nk=%s err=%r", nk, e)
         summary = {"applied": True, **result}
         # §17.866 — never leave the session pointing at a step the apply just
@@ -848,7 +848,7 @@ async def get_pending_completion_confirm(*, session_id: str, db) -> dict | None:
         offer = meta.get("pending_completion_confirm") if isinstance(meta, dict) else None
         if isinstance(offer, dict) and (offer.get("node_key") or "").strip():
             return offer
-    except Exception as exc:  # noqa: BLE001 — an offer must never break a turn
+    except Exception as exc:
         logger.warning("completion_confirm_read_failed sid=%s err=%r", session_id, exc)
     return None
 
@@ -866,5 +866,5 @@ async def clear_pending_completion_confirm(*, session_id: str, db) -> None:
             {"sid": session_id},
         )
         await db.commit()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("completion_confirm_clear_failed sid=%s err=%r", session_id, exc)

@@ -35,10 +35,10 @@ from app.utils.progress import ProgressTracker
 from app.database import async_session
 from app.modules.rag_pipeline import ingest_entries
 from app.providers.base import ModelResponse, Tool
-# noqa: F401 — re-exported so research_extractors._fetch_url_bounded reaches it
+
 # via _ra().get_generic_http_client(); also the patch target for url-mode tests.
-from app.utils.http_clients import get_generic_http_client  # noqa: F401
-from app.utils.llm_parsing import parse_json_array, parse_json_object  # noqa: F401 — kept for back-compat re-exports
+from app.utils.http_clients import get_generic_http_client
+from app.utils.llm_parsing import parse_json_array, parse_json_object
 from app.utils.tool_call_args import read_tool_args
 
 # Re-exports for test patches and existing call sites — keeps
@@ -145,7 +145,7 @@ def _extract_text_and_date(html: str) -> tuple[str, str]:
         try:
             md = trafilatura.extract_metadata(html)
             date = str(getattr(md, "date", "") or "") if md else ""
-        except Exception:  # noqa: BLE001 — a date is a bonus, never a failure
+        except Exception:
             date = ""
     return text_out or "", date
 
@@ -822,7 +822,7 @@ async def _search_queries(
                                 continue
                             try:
                                 _dead = _r.json().get("unresponsive_engines") or []
-                            except Exception:  # noqa: BLE001
+                            except Exception:
                                 _dead = []
                             if _dead:
                                 break
@@ -2126,7 +2126,7 @@ async def _ingest_and_finalize_direct(
 # cleanly into a mode module. Future audit work can lift them
 # separately if it becomes valuable.
 
-from app.modules.research_modes import (  # noqa: E402
+from app.modules.research_modes import (
     forum as _forum_mode,
     github as _github_mode,
     hf as _hf_mode,

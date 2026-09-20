@@ -385,7 +385,7 @@ async def _run_once() -> None:
     try:
         async with async_session() as db:
             await sweep_llm_traces(db)
-    except Exception:  # noqa: BLE001 — retention must never abort the reaper cycle
+    except Exception:
         logger.warning("llm_traces_sweep_failed", exc_info=True)
     try:
         result = await sweep_expired()

@@ -67,7 +67,7 @@ async def _durable_facts_for_session(*, session_id: str, metadata, db) -> list[s
             {"df": json.dumps(durable), "n": json.dumps(len(facts)), "sid": session_id},
         )
         await db.commit()
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.debug("assist_durable_facts_cache_failed sid=%s err=%r", session_id, e)
     return durable
 
@@ -96,7 +96,7 @@ async def _sibling_facts(*, job_id: str, db) -> list[str]:
                  "WHERE j.parent_job_id = :p AND s.job_id <> :jid"),
             {"p": str(parent), "jid": job_id},
         )).mappings().all()
-    except Exception as e:  # noqa: BLE001 — sharing must never break the turn
+    except Exception as e:
         logger.debug("assist_sibling_facts_failed job_id=%s err=%r", job_id, e)
         return []
     durable_only = settings.assist_cross_component_durable_only
@@ -288,10 +288,10 @@ async def capture_session_facts(
             session_id=session_id, fact_count=_fact_count_of(env_after),
         )
         return facts
-    except Exception as e:  # noqa: BLE001 — fact capture must never break submit
+    except Exception as e:
         try:  # §17.888(#14)
             await db.rollback()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         logger.debug(
             "capture_session_facts_failed session_id=%s err=%r", session_id, e,
@@ -335,10 +335,10 @@ async def check_submit_grounding(
             )
             return {"reason": verdict.get("reason") or ""}
         return None
-    except Exception as e:  # noqa: BLE001 — never block a submit on the gate
+    except Exception as e:
         try:  # §17.888(#14)
             await db.rollback()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         logger.debug(
             "check_submit_grounding_failed session_id=%s err=%r", session_id, e,
@@ -438,7 +438,7 @@ async def flag_steps_for_destroyed_resources(
             logger.info(
                 "assist_destroyed_resource_flagged session_id=%s flagged=%r",
                 session_id, flagged)
-    except Exception as e:  # noqa: BLE001 — the scribe must never break the turn
+    except Exception as e:
         logger.warning(
             "assist_destroyed_resource_flag_failed session_id=%s err=%r",
             session_id, e)
@@ -506,7 +506,7 @@ async def derive_turn_memory(
                 else:
                     logger.warning("assist_surface_fact_missing session_id=%s node_key=%s (second pass recorded none)",
                                    session_id, node_key)
-            except Exception as exc:  # noqa: BLE001 — memory is fail-soft; the miss is logged
+            except Exception as exc:
                 logger.warning("assist_surface_fact_pass_failed session_id=%s err=%r", session_id, exc)
         # §17.716 — keep the execution context (user@host) fresh from EVERY
         # message, not just submits. (a) deterministic: a prompt line pasted in a
@@ -590,7 +590,7 @@ async def derive_turn_memory(
                         result["replan_proposal"] = _prop
                         logger.warning("assist_fact_plan_proposal_staged session_id=%s nodes=%r", session_id,
                                        [p.get("node_key") for p in (_prop.get("proposals") or [])])
-            except Exception as exc:  # noqa: BLE001 — memory is fail-soft; the miss is logged
+            except Exception as exc:
                 logger.warning("assist_fact_plan_trigger_failed session_id=%s err=%r", session_id, exc)
             # §17.727 — background consolidation when the ledger has grown big.
             schedule_consolidate_facts(
@@ -635,7 +635,7 @@ async def derive_turn_memory(
                 logger.info(
                     "assist_system_state_observed session_id=%s resources=%r",
                     session_id, sorted(observed))
-        except Exception as e:  # noqa: BLE001 — the scribe must never break the turn
+        except Exception as e:
             logger.warning("assist_system_state_failed session_id=%s err=%r",
                            session_id, e)
         # §17.913 — the shell's own verdict on what it does not have. Recorded
@@ -656,7 +656,7 @@ async def derive_turn_memory(
                 logger.info(
                     "assist_missing_tools_recorded session_id=%s tools=%r host=%r",
                     session_id, tools, host)
-        except Exception as e:  # noqa: BLE001 — the scribe must never break the turn
+        except Exception as e:
             logger.warning("assist_missing_tools_failed session_id=%s err=%r",
                            session_id, e)
         destroyed = await flag_steps_for_destroyed_resources(
@@ -670,7 +670,7 @@ async def derive_turn_memory(
                 session_id, result["notes_added"], result["facts_added"],
                 len(superseded),
             )
-    except Exception as e:  # noqa: BLE001 — the scribe must never break the turn
+    except Exception as e:
         logger.debug("derive_turn_memory_failed session_id=%s err=%r", session_id, e)
     return result
 
@@ -686,7 +686,7 @@ async def _derive_turn_memory_bg(
             await derive_turn_memory(
                 session_id=session_id, node_key=node_key, message=message, db=bg_db,
             )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.debug("derive_turn_memory_bg_failed session_id=%s err=%r", session_id, e)
 
 
@@ -881,7 +881,7 @@ async def consolidate_session_facts(*, session_id: str, db) -> dict:
              "patch": json.dumps({"facts_consolidated_n": len(facts)})},
         )
         await db.commit()
-    except Exception as e:  # noqa: BLE001 — tidying must never break the turn
+    except Exception as e:
         logger.debug("consolidate_session_facts_failed session_id=%s err=%r", session_id, e)
     return result
 
@@ -891,7 +891,7 @@ async def _consolidate_facts_bg(*, session_id: str) -> None:
     try:
         async with async_session() as bg_db:
             await consolidate_session_facts(session_id=session_id, db=bg_db)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.debug("consolidate_facts_bg_failed session_id=%s err=%r", session_id, e)
 
 
@@ -966,7 +966,7 @@ async def sweep_superseded_facts(*, session_id: str, note_text: str, db) -> dict
             session_id, len(retract), len(facts) - len(retract),
         )
         return {"retracted": retract}
-    except Exception as e:  # noqa: BLE001 — the sweep must never break note-taking
+    except Exception as e:
         logger.warning("assist_facts_sweep_failed session_id=%s err=%r", session_id, e)
         return {"retracted": []}
 
@@ -1130,10 +1130,10 @@ async def reconcile_on_commit(
                 await _propose_plan_correction(
                     session_id=session_id, ruled=ruled, proven=proven, db=db,
                 )
-            except Exception as e:  # noqa: BLE001 — proposal is an enhancement
+            except Exception as e:
                 logger.warning("assist_plan_correction_failed session_id=%s err=%r",
                                session_id, e)
-    except Exception as e:  # noqa: BLE001 — reconciliation must never break commit
+    except Exception as e:
         logger.warning("assist_reconcile_on_commit_failed session_id=%s err=%r", session_id, e)
     return result
 
@@ -1144,7 +1144,7 @@ async def _reconcile_bg(*, session_id: str, node_key: str, evidence: str) -> Non
             await reconcile_on_commit(
                 session_id=session_id, node_key=node_key, evidence=evidence, db=bg_db,
             )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.debug("assist_reconcile_bg_failed session_id=%s err=%r", session_id, e)
 
 

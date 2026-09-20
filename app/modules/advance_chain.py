@@ -88,7 +88,7 @@ async def _mark(job_id: str, **fields: Any) -> None:
                  WHERE id = :jid
             """), {"jid": job_id, "st": json.dumps(state)})
             await db.commit()
-    except Exception as exc:  # noqa: BLE001 — the marker is observability, not control flow
+    except Exception as exc:
         logger.warning("advance_chain_mark_failed job_id=%s err=%r", job_id, exc)
 
 
@@ -169,7 +169,7 @@ async def _run_chain(job_id: str, *, feedback: Optional[str], model_overrides: O
     except asyncio.CancelledError:
         await _mark(job_id, phase="error", error="cancelled (orchestrator shutdown)")
         raise
-    except Exception as exc:  # noqa: BLE001 — a chain failure is recorded, never raised into the loop
+    except Exception as exc:
         logger.exception("advance_chain_crashed job_id=%s", job_id)
         await _mark(job_id, phase="error", error=repr(exc)[:300])
 
@@ -273,7 +273,7 @@ async def _resume_loop() -> None:
             await resume_stranded_planning()
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("advance_resume_loop_error err=%r", exc)
         await asyncio.sleep(settings.advance_resume_interval_seconds)
 

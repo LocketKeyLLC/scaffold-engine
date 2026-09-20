@@ -138,3 +138,36 @@ def test_ci_unit_jobs_never_load_the_real_reranker():
     wf = _CI_WORKFLOW.read_text(encoding="utf-8")
     assert re.search(r'^\s+SCAFFOLD_PREWARM_RERANKER: "false"$', wf, re.M)
     assert re.search(r'^\s+HF_HUB_OFFLINE: "1"$', wf, re.M)
+
+
+# ── §17.1141 (ledger O-2) — the advisory-tool zero state is gated ────────────
+
+def test_the_audit_gate_exists_and_checks_all_three_tools():
+    src = (ROOT / "Makefile").read_text(encoding="utf-8")
+    block = _recipe("audit-gate")
+    for tool in ("pyright app --level error", "vulture app scripts/vulture_whitelist.py --min-confidence 100", "hadolint --failure-threshold warning Dockerfile"):
+        assert tool in block, f"audit-gate does not run: {tool}"
+
+
+_CI_MAIN = ROOT / ".github" / "workflows" / "ci.yml"
+
+
+@pytest.mark.skipif(not (ROOT / "docker-compose.dev.yml").exists() or not _CI_MAIN.exists(),
+                    reason="host-only static gate — runs in `make ci-tier-0`, not the container lane")
+def test_ci_runs_the_audit_gate_as_its_own_job():
+    wf = _CI_MAIN.read_text(encoding="utf-8")
+    assert "tool-audit:" in wf and "make audit-gate" in wf
+    assert "pyright==1.1.414" in wf and "vulture==2.16" in wf and "hadolint/releases/download/v2.15.1" in wf
+
+
+@pytest.mark.skipif(not (ROOT / "Dockerfile").exists(),
+                    reason="host-only static gate — the Dockerfile is not in the test image; runs in `make ci-tier-0`")
+def test_dockerfile_user_lines_carry_no_inline_comment():
+    """§17.1141 — Docker keeps `# …` on a USER line as PART of the value: the
+    image ran as user '10001:10001  # scaffold…' and `docker run` refused it
+    (CI unit-tests job, PR #559). Comments go on their own line."""
+    lines = (ROOT / "Dockerfile").read_text(encoding="utf-8").splitlines()
+    users = [ln for ln in lines if ln.startswith("USER ")]
+    assert users, "Dockerfile has no USER instruction"
+    for ln in users:
+        assert re.fullmatch(r"USER \S+", ln.rstrip()), f"inline comment on a USER line: {ln!r}"

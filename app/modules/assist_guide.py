@@ -97,7 +97,7 @@ def _build_guide_system(ctx, verbosity, *, is_decision: bool) -> str:
 
 # §17.855 — human-facing prompts moved to app/modules/assist_prompts.py;
 # re-exported here so assist_guide.<NAME> and the tests keep resolving.
-from app.modules.assist_prompts import (  # noqa: F401,E402
+from app.modules.assist_prompts import (
     _AUDIENCE_FRAMING,
     _PACING_FRAMING,
     _TARGET_SAFETY_FRAMING,
@@ -234,7 +234,7 @@ async def _generate_decision_suggestion(
 # the tests keep resolving. (Private *_DIRECTIVE/_FRAMING constants are re-exported
 # too — tests/test_assist_guide.py reads assist_guide._PROBLEM_SOLVING_FRAMING /
 # ._NEXT_CALLOUT_DIRECTIVE.)
-from app.modules.assist_directives import (  # noqa: F401,E402
+from app.modules.assist_directives import (
     VERBOSITY_LEVELS,
     apply_verbosity,
     guide_system_for_tool,
@@ -264,8 +264,8 @@ from app.modules.assist_directives import (  # noqa: F401,E402
 
 # §17.856 — the block renderers moved to app/modules/assist_render.py;
 # re-exported so assist_guide.<NAME> and the external callers keep resolving.
-from app.modules.assist_inventory import topology_of as _topology_of  # noqa: E402 — §17.1083b
-from app.modules.assist_render import (  # noqa: F401,E402
+from app.modules.assist_inventory import topology_of as _topology_of
+from app.modules.assist_render import (
     render_environment_block,
     render_research_grounding,  # §17.975
     render_facts_block,
@@ -285,7 +285,7 @@ from app.modules.assist_render import (  # noqa: F401,E402
 
 # §17.856 — placeholder resolution moved to app/modules/assist_placeholders.py;
 # re-exported so assist_guide.<NAME> keeps resolving.
-from app.modules.assist_placeholders import (  # noqa: F401,E402
+from app.modules.assist_placeholders import (
     resolve_placeholders,
     find_placeholders,
     extract_substitutions,
@@ -299,7 +299,7 @@ from app.modules.assist_placeholders import (  # noqa: F401,E402
 
 # §17.856 — the research subsystem moved to app/modules/assist_research_lib.py;
 # re-exported so assist_guide.<NAME> and external callers keep resolving.
-from app.modules.assist_research_lib import (  # noqa: F401,E402
+from app.modules.assist_research_lib import (
     _is_useful_grounding,
     _detect_unknowns,
     _searxng_structured,
@@ -417,7 +417,7 @@ async def classify_superseded_facts(
             # numbered-facts ledger needs a generous budget or it returns empty args.
             max_tokens=8192,
         )
-    except Exception as exc:  # noqa: BLE001 — a flaky sweep must never break note-taking
+    except Exception as exc:
         logger.warning("assist_facts_sweep_classify_failed: %s", exc)
         return []
     args = read_tool_args(resp)
@@ -498,7 +498,7 @@ async def classify_durable_facts(
             # EMPTY tool args (observed: 40 facts at 2048 → no args → None).
             max_tokens=8192,
         )
-    except Exception as exc:  # noqa: BLE001 — never break sharing on a flaky classifier
+    except Exception as exc:
         logger.warning("assist_durable_facts_classify_failed: %s", exc)
         return None
     args = read_tool_args(resp)
@@ -1267,7 +1267,7 @@ async def distill_facts(
                 tool_choice="auto",
                 max_tokens=8192,
             )
-        except Exception as exc:  # noqa: BLE001 — fact capture must never break submit
+        except Exception as exc:
             logger.warning("assist_distill_facts_failed: %s", exc)
             return empty
         args = read_tool_args(resp)
@@ -1372,7 +1372,7 @@ async def summarize_step_progress(
             label="assist_step_recap",
             think_off_rescue=True,  # §17.876
         )
-    except Exception as exc:  # noqa: BLE001 — a recap must never break the turn
+    except Exception as exc:
         logger.warning("assist_summarize_step_progress_failed: %s", exc)
         return ""
     if resp and resp.success:
@@ -1450,7 +1450,7 @@ async def summarize_project_progress(
             label="assist_project_recap",
             think_off_rescue=True,  # §17.876
         )
-    except Exception as exc:  # noqa: BLE001 — a recap must never break the turn
+    except Exception as exc:
         logger.warning("assist_summarize_project_progress_failed: %s", exc)
         return ""
     if resp and resp.success:
@@ -1735,7 +1735,7 @@ async def draft_steps(
             max_tokens=1536,
             require_nonempty="steps",
         )
-    except Exception as exc:  # noqa: BLE001 — never block the insert on the draft
+    except Exception as exc:
         logger.warning("assist_draft_step_failed: %s", exc)
         return _fallback()
     steps = _clean_drafted(read_tool_args(resp) or {}, request=req)
@@ -1857,7 +1857,7 @@ async def consolidate_facts(
             # rare (debounced, threshold-gated).
             max_tokens=8192,
         )
-    except Exception as exc:  # noqa: BLE001 — tidying must never break anything
+    except Exception as exc:
         logger.warning("assist_consolidate_facts_failed: %s", exc)
         return []
     args = read_tool_args(resp)
@@ -2066,7 +2066,7 @@ async def distill_turn_memory(
             tool_choice="auto",
             max_tokens=1024,
         )
-    except Exception as exc:  # noqa: BLE001 — a scribe must never break the turn
+    except Exception as exc:
         logger.warning("assist_distill_turn_memory_failed: %s", exc)
         return empty
     args = read_tool_args(resp)
@@ -2175,7 +2175,7 @@ async def check_grounding(
             tool_choice="auto",
             max_tokens=1024,
         )
-    except Exception as exc:  # noqa: BLE001 — a flaky gate must never block a submit
+    except Exception as exc:
         logger.warning("assist_grounding_check_failed: %s", exc)
         return {"contradicts": False}
     args = read_tool_args(resp)
@@ -2539,7 +2539,7 @@ async def generate_guidance(
                     label="assist_guide_presupposed_regen",
                     think_off_rescue=True,
                 )
-            except Exception as exc:  # noqa: BLE001 — never fail the guide on this
+            except Exception as exc:
                 logger.warning("assist_guide_presupposed_regen_failed: %s", exc)
                 break
             regen_text = (regen.text or "").strip() if (regen and regen.success) else ""
@@ -2735,7 +2735,7 @@ def _url_skeleton(url: str) -> tuple:
             for s in p.path.split("/") if s
         )
         return (p.netloc.lower(), segs)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return ("", frozenset([url]))
 
 
@@ -4098,7 +4098,7 @@ async def _add_blocker_research(
             ))
             logger.info("assist_guide_blocker_query node_key=%s q=%r",
                         node_key, bq[:120])
-    except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
+    except Exception as exc:
         logger.warning("assist_guide_blocker_query_failed: %s", exc)
 
 
@@ -4883,7 +4883,7 @@ async def enforce_resource_kinds(
             draws=2, label=f"{label}_reskind_regen", think_off_rescue=True,
         )
         new = (resp.text or "").strip() if (resp and resp.success) else ""
-    except Exception:  # noqa: BLE001 — enforcement must not sink generation
+    except Exception:
         new = ""
     if not new:
         return text_out, hits, False
@@ -4939,7 +4939,7 @@ async def enforce_banned_values(
             draws=2, label=f"{label}_banned_regen", think_off_rescue=True,
         )
         new = (resp.text or "").strip() if (resp and resp.success) else ""
-    except Exception:  # noqa: BLE001 — enforcement must not sink generation
+    except Exception:
         new = ""
     if not new:
         return text_out, hits, False
@@ -5000,7 +5000,7 @@ async def enforce_coherence(
             draws=2, label=f"{label}_coherence_regen", think_off_rescue=True,
         )
         new = (resp.text or "").strip() if (resp and resp.success) else ""
-    except Exception:  # noqa: BLE001 — enforcement must not sink generation
+    except Exception:
         new = ""
 
     if new:
@@ -5177,7 +5177,7 @@ async def generate_fix(
                     eq, node_key=node_key, domain=domain, deep=True,
                     operator_text=error_text,  # §17.1049 — a page quoting the paste is an echo
                 ))
-        except Exception as exc:  # noqa: BLE001 — extra grounding is fail-soft
+        except Exception as exc:
             logger.debug("assist_fix_error_query_failed: %s", exc)
         sources = rank_evidence(sources, need, node_key=node_key)  # §17.1027
         # §17.974b — a durable record of what this fix actually researched.
@@ -5227,7 +5227,7 @@ async def generate_fix(
                 + "\n\nThese values were read from the operator's own output. "
                   "Use them directly. Asking for them again is a failure of this "
                   "step, not a safe default.")
-    except Exception as exc:  # noqa: BLE001 — salience is an enhancement
+    except Exception as exc:
         logger.debug("assist_fix_state_salience_failed: %s", exc)
     # §17.923 — the console-typing contract applies to /fix as well. It was
     # added to the guide prompt only, and the very next live fix emitted
@@ -5976,7 +5976,7 @@ async def cached_guidance_is_stale(
             row["operator_turns"], row["advanced"], row["replanned"],
         )
         return True
-    except Exception as exc:  # noqa: BLE001 — staleness probe must not break guide
+    except Exception as exc:
         logger.warning("assist_guide_staleness_check_failed node_key=%s: %s", node_key, exc)
         return False
 
@@ -6089,7 +6089,7 @@ async def _next_claimable_step(*, db, job_id: str, exclude: str) -> Optional[dic
             {"jid": job_id, "nk": exclude},
         )).mappings().first()
         return dict(row) if row else None
-    except Exception as exc:  # noqa: BLE001 — the offer is an enhancement
+    except Exception as exc:
         logger.warning("assist_next_claimable_failed: %s", exc)
         return None
 
@@ -6119,7 +6119,7 @@ def _with_advance_footer(guidance: Optional[str], title: str) -> str:
         if not text_out.strip() or has_done_criterion(text_out):
             return text_out
         return text_out + advance_footer(title)
-    except Exception as exc:  # noqa: BLE001 — a footer never breaks a guide
+    except Exception as exc:
         logger.warning("assist_advance_footer_failed: %s", exc)
         return text_out
 
@@ -6203,7 +6203,7 @@ async def how_to_check_block(*, session_id: str, node_key: str, db) -> str:
                  "WHERE session_id = :sid AND node_key = :nk"),
             {"sid": session_id, "nk": node_key},
         )).mappings().first()
-    except Exception as exc:  # noqa: BLE001 — a hint never blocks a turn
+    except Exception as exc:
         logger.warning("assist_how_to_check_failed: %s", exc)
         return ""
     guidance = (row or {}).get("guidance") or ""
@@ -6295,7 +6295,7 @@ async def apply_post_generation_guards(
                     logger.warning(  # LOUD: the model asserted state it cannot set
                         "assist_false_plan_claim node_key=%s node_status=%s",
                         node_key, _node_status)
-    except Exception as exc:  # noqa: BLE001 — a correction must never fail a guide
+    except Exception as exc:
         logger.warning("assist_false_plan_claim_check_failed: %s", exc)
 
     # §17.927 — a "no action required" conclusion must carry the action that
@@ -6313,7 +6313,7 @@ async def apply_post_generation_guards(
             meta["no_action_offer"] = True
             logger.info("assist_no_action_offer node_key=%s next=%r",
                         node_key, (_nxt or {}).get("node_key"))
-    except Exception as exc:  # noqa: BLE001 — the offer must never fail a guide
+    except Exception as exc:
         logger.warning("assist_no_action_offer_failed: %s", exc)
 
     # §17.932 — state the finish line and the control that ends the step. Runs
@@ -6376,7 +6376,7 @@ async def ensure_guidance(
         from app.modules.assist_agent import _fix_failure_streak
         _stk, failed_cmds = await _fix_failure_streak(
             session_id=session_id, node_key=node_key, db=db)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     res = await generate_guidance(
         ctx=ctx,
@@ -6605,7 +6605,7 @@ async def generate_guidance_stream(
             from app.modules.assist_agent import _fix_failure_streak
             _stk, _failed_cmds = await _fix_failure_streak(
                 session_id=session_id, node_key=node_key, db=db)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         _warn = guide_integrity_warning(text_out, user, _failed_cmds)
         if _warn:

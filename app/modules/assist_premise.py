@@ -158,7 +158,7 @@ async def check_step_premise(*, session_id: str, step: dict, db) -> dict | None:
             session_id, node_key, verdict["staged"], verdict["reason"][:160],
         )
         return verdict
-    except Exception as exc:  # noqa: BLE001 — never block a step claim
+    except Exception as exc:
         logger.warning(
             "assist_step_premise_check_failed session_id=%s node_key=%s err=%r",
             session_id, node_key, exc,

@@ -16,6 +16,8 @@ commit steps. The right fix is to ASK, then honour the answer.
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import re
+
 import pytest
 
 from app.modules.assist_policy import looks_like_confirmation, looks_like_decline
@@ -116,6 +118,7 @@ async def test_clear_removes_only_that_key():
 
 def test_offer_is_staged_when_a_submit_is_blocked():
     import inspect
+    import re
 
     from app.modules import assist_turn
 
@@ -424,9 +427,9 @@ def test_the_offer_resolution_consults_it():
     src = inspect.getsource(assist_turn._run_turn_inner)
     # Both have to be branches of the SAME condition — a claim reaching the
     # resolution by any other route would not be scoped to the staged offer.
-    assert ("assist_policy.looks_like_confirmation(text_)\n"
-            "                    or assist_policy.claims_completion_in_prose(text_)"
-            ) in src
+    # §17.1141 dedented the ladder by one level; match modulo indentation.
+    assert re.search(r"assist_policy\.looks_like_confirmation\(text_\)\n"
+                     r" +or assist_policy\.claims_completion_in_prose\(text_\)", src)
 
 
 @pytest.mark.asyncio
