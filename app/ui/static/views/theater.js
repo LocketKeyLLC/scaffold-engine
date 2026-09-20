@@ -5,7 +5,7 @@
 // absent we simply show each node's full output on node_done.
 import * as api from "../api.js";
 import { jobStore } from "../store.js";
-import { el, mount, shortId, mdToHtml, fmtNum } from "../util.js";
+import { el, mount, shortId, mdToHtml, fmtNum, timeAgo } from "../util.js";
 import { statusBadge, loading, errorPanel, makeClickable, nextActionChips } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
 import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
@@ -175,6 +175,15 @@ export function renderTheater(container, jobId, ctx = {}) {
           { class: `theater-node st-${n.status}${key === currentKey ? " current" : ""}` },
           el("span", { class: "tn-key mono", text: key }),
           el("span", { class: "tn-title", text: n.title || "" }),
+          // §17.1135 — the fields /exec/status carries and nothing rendered (ledger D-7):
+          // a runnable pending node, and when a node started / finished
+          n.is_deliverable ? el("span", { class: "tag", title: "Deliverable node — its output is part of the result", text: "★" }) : null,
+          n.assigned_model ? el("span", { class: "tag mono", title: "Model assigned to this node", text: String(n.assigned_model).split(":")[0] }) : null,
+          n.actionable && n.status === "pending" ? el("span", { class: "tag", title: "Dependencies met — runs next", text: "ready" }) : null,
+          !n.actionable && n.status === "pending" && (n.depends_on || []).length
+            ? el("span", { class: "faint", title: "Waits on these nodes", text: `waits on ${(n.depends_on || []).slice(0, 3).join(", ")}${(n.depends_on || []).length > 3 ? "…" : ""}` }) : null,
+          n.started_at && !n.completed_at ? el("span", { class: "faint", text: `started ${timeAgo(n.started_at)}` }) : null,
+          n.completed_at ? el("span", { class: "faint", text: `done ${timeAgo(n.completed_at)}` }) : null,
           statusBadge(n.status)
         );
         if (n.status === "failed" && n.reason) row.title = n.reason; // §17.1007

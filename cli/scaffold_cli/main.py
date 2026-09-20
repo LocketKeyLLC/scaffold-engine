@@ -571,6 +571,10 @@ def jobs_status(ctx: click.Context, job_id: str, as_json: bool, show_costs: bool
     if counts:
         rendered = "  ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         click.echo(f"nodes:  {data.get('total_nodes', sum(counts.values()))} ({rendered})")
+        # §17.1135 — `actionable` was on the wire (per node) and printed nowhere on any surface
+        ready = [n.get("node_key") for n in (data.get("nodes") or []) if isinstance(n, dict) and n.get("actionable") and n.get("status") == "pending"]
+        if ready:
+            click.echo(f"ready:  {len(ready)} runnable now ({', '.join(str(k) for k in ready[:6])}{'…' if len(ready) > 6 else ''})")
 
     if (nxt := data.get("next_node")):
         click.echo(
@@ -908,7 +912,8 @@ def project_resume(ctx: click.Context, name_or_uuid: str, dry_run: bool) -> None
         sys.exit(1)
 
     status = data.get("job_status") or "unknown"
-    actions = [a for a in (data.get("next_actions") or []) if a.get("action") != "wait"]
+    from scaffold_client.next_actions import filter_renderable  # §17.1135 — the ONE noise filter
+    actions = filter_renderable(data.get("next_actions") or [])
 
     click.echo(f"job:    {nickname_label}  ({job_id})")
     click.echo(f"status: {status}")

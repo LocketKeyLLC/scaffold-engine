@@ -61,7 +61,7 @@ def test_no_inline_copy_of_the_noise_filter(path: str):
     if not p.is_file():
         pytest.skip(f"{path} not in this image")
     src = p.read_text(encoding="utf-8")
-    assert not re.search(r"""\.get\(\s*["']action["']\s*\)\s*==\s*["']wait["']""", src), f"{path}: inline `wait` filter — use filter_renderable / filterRenderable"
+    assert not re.search(r"""\.get\(\s*["']action["']\s*\)\s*[!=]=\s*["']wait["']""", src), f"{path}: inline `wait` filter — use filter_renderable / filterRenderable"
     assert not re.search(r"""\.action\s*===?\s*["']wait["']""", src), f"{path}: inline `wait` filter"
 
 

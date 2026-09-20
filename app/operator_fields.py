@@ -123,10 +123,13 @@ JOB_DETAIL_OPERATOR_FIELDS: dict[str, frozenset[str]] = {
     # existed; read by no surface until now.
     "parent_job_id":       frozenset({SPA}),
     "component_index":     frozenset({SPA}),
-    "metadata":            frozenset({SPA, OWUI}),
 }
 
-JOB_DETAIL_INTERNAL_FIELDS: dict[str, str] = {}
+JOB_DETAIL_INTERNAL_FIELDS: dict[str, str] = {
+    # §17.1135 — a structured blob (environment facts, grounding, …); every facet the
+    # operator sees is rendered from its own endpoint, never from this key
+    "metadata": "structured blob whose facets have their own endpoints and renderers",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -141,10 +144,9 @@ JOB_DETAIL_INTERNAL_FIELDS: dict[str, str] = {}
 ASSIST_NEXT_OPERATOR_FIELDS: dict[str, frozenset[str]] = {
     "node_key":               frozenset({SPA, CLI, OWUI}),
     "title":                  frozenset({SPA, CLI, OWUI}),
-    "description":            frozenset({SPA, OWUI}),
-    "tool":                   frozenset({SPA, OWUI}),
-    "domain":                 frozenset({SPA}),
-    "depends_on":             frozenset({SPA}),
+    "description":            frozenset({OWUI}),
+    "tool":                   frozenset({OWUI}),
+    "depends_on":             frozenset({OWUI}),
     "replan_notice":          frozenset({SPA, OWUI}),
     "guidance_status":        frozenset({SPA}),
     "upstream_truncated_keys": frozenset({SPA}),
@@ -159,14 +161,18 @@ ASSIST_NEXT_INTERNAL_FIELDS: dict[str, str] = {
     "job_id": "identifier the SPA already holds from the route",
     "session_id": "identifier the SPA already holds from the route",
     "re_presented": "§17.1103 cursor bookkeeping — the server's own invariant flag",
+    # §17.1135 — the SPA renders the step identity from /steps (assist_step spec),
+    # not from this payload; declaring SPA here passed only by word-coincidence.
+    "domain": "step identity the SPA renders from /steps, duplicated here for OWUI/CLI",
 }
 
 ASSIST_STEP_OPERATOR_FIELDS: dict[str, frozenset[str]] = {
     "node_key":        frozenset({SPA}),
     "title":           frozenset({SPA}),
     "step_status":     frozenset({SPA}),
+    # §17.1135 — shown in the step picker when it differs from step_status (a
+    # committed step whose node failed is exactly what the operator must see)
     "node_status":     frozenset({SPA}),
-    "execution_order": frozenset({SPA}),
     "has_guidance":    frozenset({SPA}),
     # §17.1007 — the phase chunking the walkthrough badge renders.
     "phase":           frozenset({SPA}),
@@ -176,6 +182,8 @@ ASSIST_STEP_OPERATOR_FIELDS: dict[str, frozenset[str]] = {
 }
 
 ASSIST_STEP_INTERNAL_FIELDS: dict[str, str] = {
+    # §17.1135 — the server returns steps in plan order; the SPA never re-sorts
+    "execution_order": "ordering key the server already applied; the picker keeps list order",
     "depends_on": (
         "Selected only to feed dag_phases.compute_phases() server-side; the "
         "client renders the derived phase numbers, never the raw edges."
@@ -212,6 +220,10 @@ JOB_SUMMARY_INTERNAL_FIELDS: dict[str, str] = {}
 #   "pydantic"     — read the model's declared fields
 PAYLOADS: dict[str, dict] = {
     "assist_next": {
+        # §17.1135 — API path fragments the CONSUMING code contains; a field read counts
+        # only inside code that talks to this payload (a file on the SPA, a function on
+        # the Python surfaces), never anywhere under the surface root (ledger D-7).
+        "paths": ["/next"],
         "kind": "dict_literal",
         "producer": "app/modules/assist_agent.py",
         "function": "get_next_step",
@@ -219,6 +231,10 @@ PAYLOADS: dict[str, dict] = {
         "internal_fields": ASSIST_NEXT_INTERNAL_FIELDS,
     },
     "exec_status_node": {
+        # §17.1135 — API path fragments the CONSUMING code contains; a field read counts
+        # only inside code that talks to this payload (a file on the SPA, a function on
+        # the Python surfaces), never anywhere under the surface root (ledger D-7).
+        "paths": ["/exec/status"],
         "kind": "dict_literal",
         "producer": "app/modules/execution_handler.py",
         "function": "execution_status",
@@ -226,18 +242,30 @@ PAYLOADS: dict[str, dict] = {
         "internal_fields": EXEC_STATUS_NODE_INTERNAL_FIELDS,
     },
     "job_detail": {
+        # §17.1135 — API path fragments the CONSUMING code contains; a field read counts
+        # only inside code that talks to this payload (a file on the SPA, a function on
+        # the Python surfaces), never anywhere under the surface root (ledger D-7).
+        "paths": ["/jobs/"],
         "kind": "pydantic",
         "model": "JobDetailResponse",
         "operator_fields": JOB_DETAIL_OPERATOR_FIELDS,
         "internal_fields": JOB_DETAIL_INTERNAL_FIELDS,
     },
     "job_summary": {
+        # §17.1135 — API path fragments the CONSUMING code contains; a field read counts
+        # only inside code that talks to this payload (a file on the SPA, a function on
+        # the Python surfaces), never anywhere under the surface root (ledger D-7).
+        "paths": ["/jobs", "/status", "/work"],
         "kind": "pydantic",
         "model": "JobSummary",
         "operator_fields": JOB_SUMMARY_OPERATOR_FIELDS,
         "internal_fields": JOB_SUMMARY_INTERNAL_FIELDS,
     },
     "assist_step": {
+        # §17.1135 — API path fragments the CONSUMING code contains; a field read counts
+        # only inside code that talks to this payload (a file on the SPA, a function on
+        # the Python surfaces), never anywhere under the surface root (ledger D-7).
+        "paths": ["/steps"],
         # `list_steps` projects SQL columns (`dict(r)` over a row mapping) and
         # then merges in the computed phase keys. §17.1008 left this
         # consumer-only, declining to parse SQL. §17.1009 reconsidered: a
