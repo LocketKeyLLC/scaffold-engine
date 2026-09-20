@@ -673,7 +673,7 @@ def test_submit_endpoint_and_turn_loop_let_the_recipe_verify_its_own_steps():
     assert src.index("verify_recipe_submit(") < src.index("verify_submit_outcome(")
     assert 'elif _recipe_verdict is not None:' in src and src.index("elif _recipe_verdict is not None:") < src.index("settings.assist_verify_on_submit:")
     blk = src.split("elif _recipe_verdict is not None:")[1].split("elif body.action")[0]
-    assert '"status": "step_incomplete" if verdict["outcome"] == "incomplete" else "verification_failed"' in blk
+    assert '{"incomplete": "step_incomplete", "failed": "verification_failed"}[verdict["outcome"]]' in blk
     assert "looks_like_completion_claim" not in blk and "operator_affirmed" not in blk
     vsrc = inspect.getsource(assist_agent.verify_submit_outcome)
     assert 'row["status"] == "pending" and row.get("current_node_key") == node_key' in vsrc and "ss.current_node_key" in vsrc

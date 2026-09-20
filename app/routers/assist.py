@@ -911,7 +911,7 @@ async def assist_submit(session_id: UuidPath, body: AssistSubmitInput, db=Depend
             return {
                 "session_id": session_id,
                 "node_key": body.node_key,
-                "status": "step_incomplete" if verdict["outcome"] == "incomplete" else "verification_failed",
+                "status": {"incomplete": "step_incomplete", "failed": "verification_failed"}[verdict["outcome"]],
                 "committed": False,
                 "no_op": False,
                 "next_node_key": None,
