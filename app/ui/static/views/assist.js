@@ -792,7 +792,11 @@ export function renderChat(container, sessionId, opts = {}) {
       // does this step already have a walkthrough waiting, or will landing on
       // it mean generating one? (§17.901 keeps a stored walkthrough rather than
       // regenerating, so the distinction is real.)
-      const label = `${icon} ${st.node_key} — ${(st.title || "").slice(0, 58)}`
+      // §17.1135 — the underlying node's status when it disagrees with the step
+      // (a committed step whose node failed, a skipped step whose node ran)
+      const nodeNote = st.node_status && st.node_status !== st.step_status
+        && !(st.step_status === "committed" && st.node_status === "done") ? ` [node: ${st.node_status}]` : "";
+      const label = `${icon} ${st.node_key} — ${(st.title || "").slice(0, 58)}${nodeNote}`
         + (st.has_guidance ? "  ✎" : "")
         + (running ? "  (engine is running this)" : "");
       const opt = el("option", { value: st.node_key, text: label });

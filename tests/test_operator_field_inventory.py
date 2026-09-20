@@ -94,15 +94,107 @@ def _surface_text(surface: str) -> dict[Path, str]:
     return _CONSUMER_TEXT[surface]
 
 
-def _consumers_of(field: str, surface: str) -> list[str]:
-    """Files under one surface that read this field by name. Word-bounded so
-    ``status`` does not match ``job_status`` and call the gate satisfied."""
-    pattern = re.compile(rf"\b{re.escape(field)}\b")
-    return [
-        str(p.relative_to(REPO_ROOT))
-        for p, text in _surface_text(surface).items()
-        if pattern.search(text)
-    ]
+# §17.1135 (ledger D-7) — what counts as READING a payload field.
+#
+# The §17.1009 scan matched ``\bfield\b`` anywhere under the surface root, so
+# ``created_at → CLI`` was satisfied by friction-note code and the gate could
+# pass on coincidence. Two tightenings:
+#   1. a read is an ACCESS — ``x.field`` / ``x?.field`` / ``x["field"]`` /
+#      ``{ field }`` destructuring on the SPA; ``x["field"]`` / ``x.get("field"``
+#      / ``x.field`` on the Python surfaces — with comments, docstrings and
+#      CSS/prose out of the text first;
+#   2. it must sit in code that TALKS TO THE PAYLOAD: a SPA file, or a Python
+#      function, that contains one of the spec's ``paths`` fragments.
+
+def _strip_js(src: str) -> str:
+    src = re.sub(r"/\*[\s\S]*?\*/", "", src)
+    return re.sub(r"(?m)^\s*//[^\n]*$|(?<=[;{}\s])//[^\n]*$", "", src)
+
+
+def _strip_py(src: str) -> str:
+    src = re.sub(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'', "", src)
+    return re.sub(r"(?m)#[^\n]*$", "", src)
+
+
+def _js_reads(field: str, src: str) -> bool:
+    f = re.escape(field)
+    return bool(
+        re.search(rf"[\w\)\]]\??\.{f}\b(?!\s*[:(=])", src)          # job.status / d?.status (not a key or call)
+        or re.search(rf"""\[\s*["']{f}["']\s*\]""", src)              # row["status"]
+        or re.search(rf"\{{[^{{}}]*\b{f}\b[^{{}}]*\}}\s*=\s*", src)   # const { status } = job
+    )
+
+
+def _py_reads(field: str, src: str) -> bool:
+    f = re.escape(field)
+    return bool(
+        re.search(rf"""\[\s*["']{f}["']\s*\]""", src)                 # data["status"]
+        or re.search(rf"""\.get\(\s*["']{f}["']""", src)               # data.get("status"
+        or re.search(rf"""\b(?:row|r|j|job|node|n|step|s|d|data|item|it|payload|resp|body)\.{f}\b""", src)  # row.status
+        or re.search(rf"""["']{f}["']\s+in\s+\w""", src)               # "status" in data
+    )
+
+
+def _py_functions_with_paths(src: str, paths: list[str]) -> list[str]:
+    """Source of every function (any depth) whose body mentions a path fragment."""
+    out: list[str] = []
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return [src] if any(p in src for p in paths) else []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            seg = ast.get_source_segment(src, node) or ""
+            if any(p in seg for p in paths):
+                out.append(seg)
+    return out
+
+
+def _js_scope(surface: str, paths: list[str]) -> set[Path]:
+    """SPA files that talk to the payload: those naming a path fragment, plus
+    one import hop each way — a fetcher module (store.js) feeds views, and a
+    view hands the rows to a pure renderer module (dag_render.js) that never
+    names the endpoint itself."""
+    texts = {p: _strip_js(t) for p, t in _surface_text(surface).items() if p.suffix == ".js"}
+    named = {p for p, src in texts.items() if any(fr in src for fr in paths)}
+    imports: dict[Path, set[Path]] = {}
+    for p, src in texts.items():
+        deps = set()
+        for m in re.finditer(r"""from\s+["'](\.{1,2}/[^"']+)["']""", src):
+            target = (p.parent / m.group(1)).resolve()
+            deps.add(target)
+        imports[p] = deps
+    scope = set(named)
+    for p, deps in imports.items():
+        if p in named:
+            scope |= {d for d in deps if d in texts}          # renderer modules a consumer imports
+        elif deps & named:
+            scope.add(p)                                       # views fed by a fetcher module
+    return scope
+
+
+def _consumers_of(field: str, surface: str, paths: list[str] | None = None) -> list[str]:
+    """Files under one surface that READ this field inside code that talks to
+    the payload (see the note above). ``paths`` empty → whole-file scope, kept
+    only for the self-tests."""
+    hits: list[str] = []
+    js_scope = _js_scope(surface, paths) if paths else None
+    for p, text in _surface_text(surface).items():
+        if p.suffix == ".js":
+            src = _strip_js(text)
+            if js_scope is not None and p.resolve() not in {q.resolve() for q in js_scope}:
+                continue
+            if _js_reads(field, src):
+                hits.append(str(p.relative_to(REPO_ROOT)))
+        elif p.suffix == ".py":
+            src = _strip_py(text)
+            scopes = _py_functions_with_paths(src, paths) if paths else [src]
+            if any(_py_reads(field, seg) for seg in scopes):
+                hits.append(str(p.relative_to(REPO_ROOT)))
+        else:  # .html
+            if (not paths or any(fr in text for fr in paths)) and _js_reads(field, _strip_js(text)):
+                hits.append(str(p.relative_to(REPO_ROOT)))
+    return hits
 
 
 # ── Guard 1: the producer cannot emit an undeclared field ────────────────
@@ -270,10 +362,11 @@ def test_every_declared_field_surface_pair_holds(payload, field, surface):
     through the entire life of the bug it was written for is worse than no
     gate: it converts an open question into a false assurance.
     """
-    consumers = _consumers_of(field, surface)
+    consumers = _consumers_of(field, surface, PAYLOADS[payload].get("paths") or [])
     assert consumers, (
         f"{payload}.{field} is declared as something '{surface}' must render, "
-        f"but no file under {surface}/ reads it.\n"
+        f"but no code under {surface}/ that talks to {PAYLOADS[payload].get('paths')} reads it "
+        f"(an access like x.{field} / x[\"{field}\"], not a word match — §17.1135).\n"
         f"Either wire that surface to it, or change the requirement in "
         f"app/operator_fields.py to say which surfaces genuinely need it.\n"
         f"(This is exactly the shape of the failure_reason gap: produced since "
@@ -306,3 +399,39 @@ def test_the_scan_actually_finds_files():
             f"only {len(files)} files found under {surface}/ — the scan root is "
             "wrong and every assertion about that surface is inert"
         )
+
+
+# ── §17.1135 (ledger D-7) — the scan itself ───────────────────────────────
+
+def test_every_payload_declares_the_paths_its_consumers_talk_to():
+    for name, spec in PAYLOADS.items():
+        assert spec.get("paths"), f"{name}: add `paths` (API path fragments the consuming code contains)"
+
+
+def test_a_word_in_prose_or_a_comment_is_not_a_read():
+    js = 'const x = job.title; // created_at is shown elsewhere\n/* status */ el("span", { text: "status" });'
+    assert _js_reads("title", _strip_js(js))
+    assert not _js_reads("created_at", _strip_js(js))
+    assert not _js_reads("status", _strip_js(js)), "a key or a string is not a read"
+    py = 'def f(data):\n    """created_at is documented here"""\n    # status: see below\n    return data.get("title")\n'
+    assert _py_reads("title", _strip_py(py))
+    assert not _py_reads("created_at", _strip_py(py))
+    assert not _py_reads("status", _strip_py(py))
+
+
+def test_a_read_outside_code_that_talks_to_the_payload_does_not_count(tmp_path):
+    (tmp_path / "cli").mkdir()
+    (tmp_path / "cli" / "main.py").write_text(
+        "def friction():\n    note = api.get('/assist/x/friction')\n    return note['created_at']\n"
+        "def show_job():\n    j = api.get('/jobs/' + jid)\n    return j['title']\n"
+    )
+    import tests.test_operator_field_inventory as m
+    m._CONSUMER_TEXT.clear()
+    old_root = m.REPO_ROOT
+    try:
+        m.REPO_ROOT = tmp_path
+        assert m._consumers_of("title", "cli", ["/jobs/"]) == ["cli/main.py"]
+        assert m._consumers_of("created_at", "cli", ["/jobs/"]) == [], "friction-note code must not satisfy a job field"
+    finally:
+        m.REPO_ROOT = old_root
+        m._CONSUMER_TEXT.clear()
