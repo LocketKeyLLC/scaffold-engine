@@ -59,7 +59,7 @@ class Recipe:
     # §17.1147 — the engine's own check for the step carrying PROBE_MARK:
     # ``async (db) -> (ok, detail)``. Time-bounded; never touches the target
     # beyond the registered endpoint.
-    probe: Optional[Callable[..., Awaitable[tuple[bool, str]]]] = field(default=None, compare=False)
+    probe: Optional[Callable[..., Awaitable[dict]]] = field(default=None, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1200,6 +1200,8 @@ async def _probe_cached(r: Recipe, db, node_description: Optional[str]) -> dict:
     hit = _PROBE_CACHE.get(key)
     if hit and hit[0] > _t.monotonic():
         return hit[1]
+    if r.probe is None:
+        return {"ok": False, "class": "unknown", "detail": "this recipe has no probe", "repair": ""}
     pr = await r.probe(db)
     _PROBE_CACHE[key] = (_t.monotonic() + PROBE_CACHE_S, pr)
     return pr
