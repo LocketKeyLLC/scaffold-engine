@@ -359,10 +359,34 @@ async def reap_stale_jobs(db: AsyncSession) -> dict:
     }
 
 
+async def sweep_llm_traces(db: AsyncSession) -> int:
+    """§17.1140 (ledger O-1) — delete `llm_traces` rows older than
+    ``settings.trace_retention_days`` (0 = keep forever). The capture valve
+    is on in the deployment now; without this the table would grow ~7.5 MB a
+    day on this box with nothing ever reading the old rows."""
+    days = int(getattr(settings, "trace_retention_days", 14) or 0)
+    if days <= 0:
+        return 0
+    res = await db.execute(
+        text("DELETE FROM llm_traces WHERE created_at < NOW() - make_interval(days => :d)"),
+        {"d": days},
+    )
+    await db.commit()
+    n = int(getattr(res, "rowcount", 0) or 0)
+    if n:
+        logger.info("llm_traces_swept deleted=%d older_than_days=%d", n, days)
+    return n
+
+
 async def _run_once() -> None:
     """One sweep: reap stale jobs + run TTL staleness sweep."""
     async with async_session() as db:
         await reap_stale_jobs(db)
+    try:
+        async with async_session() as db:
+            await sweep_llm_traces(db)
+    except Exception:  # noqa: BLE001 — retention must never abort the reaper cycle
+        logger.warning("llm_traces_sweep_failed", exc_info=True)
     try:
         result = await sweep_expired()
         if result.get("expired_count", 0) > 0:
