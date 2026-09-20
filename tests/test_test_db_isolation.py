@@ -160,6 +160,8 @@ def test_ci_runs_the_audit_gate_as_its_own_job():
     assert "pyright==1.1.414" in wf and "vulture==2.16" in wf and "hadolint/releases/download/v2.15.1" in wf
 
 
+@pytest.mark.skipif(not (ROOT / "Dockerfile").exists(),
+                    reason="host-only static gate — the Dockerfile is not in the test image; runs in `make ci-tier-0`")
 def test_dockerfile_user_lines_carry_no_inline_comment():
     """§17.1141 — Docker keeps `# …` on a USER line as PART of the value: the
     image ran as user '10001:10001  # scaffold…' and `docker run` refused it
