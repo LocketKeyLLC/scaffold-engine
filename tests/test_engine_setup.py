@@ -304,7 +304,7 @@ def test_every_recipe_carries_plan_steps_that_carry_the_facts():
         for _, what in r.steps:
             assert "Done when" in what, (r.id, what[:60])      # every step says what finishes it
     lr = " ".join(w for _, w in es.BY_ID["local_runner"].steps)
-    for fact in ("{runner_port}", "{runner_name}", "{engine_url}/setup/runner/local_runner_mcp.py",
+    for fact in ("{runner_port}", "{runner_name}", "curl -fsSL -o /root/local_runner_mcp.py {script_url}",
                  "{token}", "{target_ip}", "Verify state", "[local-runner]"):
         assert fact in lr, fact
     assert "scp" not in lr and "ENGINE_USER" not in lr        # single shell on the target; nothing on the engine host
@@ -330,7 +330,9 @@ def test_steps_are_filled_in_from_what_the_engine_knows_and_placeholders_stay_ho
     assert "{" not in d and "<" not in d
     # unknown values stay visible placeholders (the guide asks for that one thing), never invented
     raw = es.recipe_steps(es.BY_ID["local_runner"])[0]["description"]
-    assert "<the engine host's IP>" in raw and "<the target machine's IP>" in raw
+    assert "<the target machine's IP>" in raw
+    # the engine on this host binds to 127.0.0.1: unknown engine url → the public repo serves the script
+    assert es.RUNNER_SCRIPT_FALLBACK_URL in raw and "<the engine host's IP>" not in raw
     assert es.known(ctx, "target_ip") and not es.known(dict(es._UNKNOWN), "target_ip")
 
 
@@ -349,6 +351,7 @@ async def test_recipe_context_reads_the_system_map_profile_and_engine_url():
     row.mappings.return_value.first.return_value = {"metadata": {"environment": {"engine_url": "http://localhost:8000"}}}
     ctx2 = await es.recipe_context(db, "s1")
     assert not es.known(ctx2, "target_ip") and not es.known(ctx2, "engine_url")
+    assert ctx2["script_url"] == es.RUNNER_SCRIPT_FALLBACK_URL and ctx["script_url"].startswith("http://192.168.1.43:8000/")
 
 
 async def test_remember_engine_url_skips_loopback_and_writes_the_environment_key():
