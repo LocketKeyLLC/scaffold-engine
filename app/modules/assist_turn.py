@@ -538,42 +538,53 @@ async def _run_turn_inner(
         handled["v"] = "reopen"
         return
 
-    # 2a. §17.1144 — a question about the ENGINE's own capabilities is answered
-    # from the recipe registry, never from the web. Live: "please assist me in
-    # setting up the local runner on the proxmox server" was researched as
-    # "SAX1V1K ES2251 node Proxmox local runner setup…" and answered as a plan
-    # to build a CI-runner VM. Runs ahead of the decision layer because the
-    # classifier has no action for "about the engine"; and its yes/no is a
-    # STAGED offer (scoped, like the completion offer), so a bare "yes" here
-    # opens the walkthrough instead of being routed as a claim.
+    # 2a. §17.1144/§17.1145 — a question about the ENGINE's own capabilities
+    # is answered from the recipe registry, never from the web. Live: "please
+    # assist me in setting up the local runner on the proxmox server" was
+    # researched as "SAX1V1K ES2251 node Proxmox local runner setup…" and
+    # answered as a plan to build a CI-runner VM. Runs ahead of the decision
+    # layer because the classifier has no action for "about the engine"; its
+    # yes/no is a STAGED offer (scoped, like the completion offer), and a
+    # "yes" adds the recipe's steps to THIS plan and guides the first one —
+    # the operator is never sent to the dashboard or a separate job (§17.1145:
+    # the first cut opened a walkthrough job; "It should just assist within
+    # the plan").
     from app.modules import engine_setup as _es
     _setup_offer = await _es.get_pending_setup_offer(session_id=session_id, db=db)
     if _setup_offer:
         if assist_policy.looks_like_confirmation(text_):
             _rid = _setup_offer["recipe_id"]
+            _recipe = _es.BY_ID[_rid]
             await _es.clear_pending_setup_offer(session_id=session_id, db=db)
-            yield _ev(ASSIST_TURN_STATUS, {"text": "Opening the walkthrough as its own job…"})
+            yield _ev(ASSIST_TURN_STATUS, {"text": "➕ Adding its steps to this plan…"})
             try:
-                _started = await _es.start_recipe_for_session(db, session_id, _rid)
-                _jid = str(_started.get("job_id") or "")
-                _reply = (f"## Walkthrough opened\n\n**{_es.BY_ID[_rid].title}** is now its own job "
-                          f"(`{_jid[:8]}…`) on the dashboard — open it there, approve its plan, and it walks you "
-                          f"through the setup step by step. This session stays where it is — your current step here is unchanged.")
+                _added = await _es.add_recipe_to_plan(db, session_id, _recipe, before_node_key=node_key)
+                _steps = (_added or {}).get("steps") or []
+                _lines = "\n".join(f"- **{st.get('node_key')}**: {st.get('title')}" for st in _steps)
+                _anchor = f" before **{node_key}**" if node_key else ""
+                yield _ev(ASSIST_TURN_STATUS, {
+                    "text": (f"➕ Added {len(_steps)} steps{_anchor}, in order:\n{_lines}\n"
+                             f"Starting with the first; we return to your step after.")})
+                logger.info("engine_capability_steps_added sid=%s recipe=%s steps=%d first=%s",
+                            session_id, _rid, len(_steps), (_added or {}).get("node_key"))
+                async for e in _claim_and_guide(session_id, (_added or {}).get("node_key"), history, db, orient=False):
+                    yield e
+                handled["v"] = "setup_recipe_added"
+                return
             except Exception as exc:
-                logger.warning("setup_offer_start_failed sid=%s recipe=%s err=%r", session_id, _rid, exc)
-                _reply = (f"I could not open the walkthrough ({str(exc)[:160]}). You can start it from "
-                          f"**Capabilities → {_es.BY_ID[_rid].title}** in the console.")
-            yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _reply})
-            try:
-                await assist_agent.capture_assistant_reply(
-                    session_id=session_id, node_key=node_key, kind="ask", content=_reply, db=db)
-            except Exception:
-                logger.warning("setup_offer_capture_failed sid=%s", session_id)
-            handled["v"] = "setup_recipe_started"
-            return
+                logger.warning("setup_offer_add_failed sid=%s recipe=%s err=%r", session_id, _rid, exc)
+                _reply = (f"I could not add the steps ({str(exc)[:160]}). Tell me again and I will try once more.")
+                yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _reply})
+                try:
+                    await assist_agent.capture_assistant_reply(
+                        session_id=session_id, node_key=node_key, kind="ask", content=_reply, db=db)
+                except Exception:
+                    logger.warning("setup_offer_capture_failed sid=%s", session_id)
+                handled["v"] = "setup_recipe_add_failed"
+                return
         if assist_policy.looks_like_decline(text_):
             await _es.clear_pending_setup_offer(session_id=session_id, db=db)
-            _reply = "Understood — not opening it. It stays available under **Capabilities** whenever you want it."
+            _reply = "Understood — leaving it off. Ask again whenever you want it added to the plan."
             yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _reply})
             try:
                 await assist_agent.capture_assistant_reply(
@@ -587,18 +598,20 @@ async def _run_turn_inner(
     _recipe = _es.match_recipe(text_)
     if _recipe is not None:
         yield _ev(ASSIST_TURN_ROUTED, {"action": "ask", "override": "engine_capability"})
-        _status, _detail, _job = "off", "", None
+        _status, _detail = "off", ""
         try:
             for _r in await _es.list_recipes(db):
                 if _r["id"] == _recipe.id:
                     _status, _detail = _r["status"], _r["status_detail"]
-                    _job = {"job_id": _r["job_id"], "status": _r["job_status"]} if _r.get("job_id") else None
         except Exception as exc:
             logger.warning("engine_capability_status_failed recipe=%s err=%r", _recipe.id, exc)
-        _reply = _es.capability_answer(_recipe, status=_status, detail=_detail, job=_job)
-        if _status != "on":
+        _in_plan = await _es.plan_has_recipe(db, session_id, _recipe.id)
+        _reply = _es.capability_answer(_recipe, status=_status, detail=_detail, in_plan=_in_plan,
+                                       current_step=node_key)
+        if _status != "on" and not _in_plan:
             await _es.stage_setup_offer(session_id=session_id, recipe_id=_recipe.id, db=db)
-        logger.info("engine_capability_answered sid=%s recipe=%s status=%s", session_id, _recipe.id, _status)
+        logger.info("engine_capability_answered sid=%s recipe=%s status=%s in_plan=%s",
+                    session_id, _recipe.id, _status, bool(_in_plan))
         yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _reply})
         try:
             await assist_agent.capture_assistant_reply(

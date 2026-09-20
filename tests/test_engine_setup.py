@@ -277,59 +277,99 @@ def test_non_engine_messages_do_not_match(msg):
     assert es.match_recipe(msg) is None
 
 
-def test_capability_answer_carries_content_state_and_the_offer():
+def test_capability_answer_offers_the_steps_in_this_plan_never_a_dashboard():
+    """§17.1145 — the first cut opened a separate walkthrough job and sent the
+    operator to the dashboard: "It should just assist within the plan"."""
     r = es.BY_ID["local_runner"]
-    off = es.capability_answer(r, status="off", detail="ASSIST_LOCAL_RUNNER_SERVER is empty — the state check asks you to paste.")
-    for must in (r.title, r.summary, r.why_off, "ASSIST_LOCAL_RUNNER_SERVER is empty", "Reply **yes**", r.effort, "Capabilities →"):
+    off = es.capability_answer(r, status="off", detail="ASSIST_LOCAL_RUNNER_SERVER is empty — the state check asks you to paste.",
+                               current_step="T6")
+    for must in (r.title, r.summary, r.why_off, "ASSIST_LOCAL_RUNNER_SERVER is empty", "Reply **yes**",
+                 f"its {len(r.steps)} steps to this plan", "right before **T6**", "walk you through the first one now"):
         assert must in off, must
-    assert "not part of your homelab plan" in off
+    for never in ("dashboard", "separate", "Capabilities", "its own job"):
+        assert never not in off, never
     on = es.capability_answer(r, status="on", detail="probes run through 'pve-runner' at http://x:8790/mcp/.")
     assert "already on" in on and "pve-runner" in on and "Reply **yes**" not in on
-    prog = es.capability_answer(r, status="in_progress", detail="", job={"job_id": "abcdef12-3456", "status": "planning"})
-    assert "already open" in prog and "abcdef12" in prog
-    blocked = es.capability_answer(es.BY_ID["runner_sudo"], status="blocked", detail="Turn on the local runner first.")
-    assert "Not available yet" in blocked and "prerequisite" in blocked
+    inplan = es.capability_answer(r, status="off", detail="x", in_plan={"node_key": "ADD61", "title": r.steps[0][0], "status": "pending"})
+    assert "already in this plan" in inplan and "ADD61" in inplan and "Reply **yes**" not in inplan
+    blocked = es.capability_answer(es.BY_ID["runner_sudo"], status="blocked", detail="Turn on the local runner first.", current_step="T6")
+    assert "Not available yet" in blocked and es.BY_ID["local_runner"].title in blocked and "steps in all" in blocked
 
 
-async def test_setup_offer_round_trip_and_owner_lookup(monkeypatch):
+def test_every_recipe_carries_plan_steps_that_carry_the_facts():
+    for r in es.RECIPES:
+        assert r.steps, r.id
+        titles = [t for t, _ in r.steps]
+        assert len(set(titles)) == len(titles), r.id
+        for _, what in r.steps:
+            assert "Done when" in what, (r.id, what[:60])      # every step says what finishes it
+    lr = " ".join(w for _, w in es.BY_ID["local_runner"].steps)
+    for fact in ("8790", "X-Runner-Token", "run_readonly", "ASSIST_LOCAL_RUNNER_SERVER=pve-runner", "/mcp/servers", "Verify state"):
+        assert fact in lr, fact
+    # prerequisites chain first, and every inserted description carries the recipe marker
+    steps = es.recipe_steps(es.BY_ID["runner_sudo"])
+    assert len(steps) == len(es.BY_ID["local_runner"].steps) + len(es.BY_ID["runner_sudo"].steps)
+    assert steps[0]["title"] == es.BY_ID["local_runner"].steps[0][0]
+    assert all(f"{es.RECIPE_STEP_MARK} " in st["description"] for st in steps)
+    assert steps[-1]["description"].endswith("runner_sudo_")
+
+
+async def test_setup_offer_round_trip_and_in_plan_insertion(monkeypatch):
     db = MagicMock(); db.execute = AsyncMock(); db.commit = AsyncMock()
     await es.stage_setup_offer(session_id="s1", recipe_id="local_runner", db=db)
     sql = " ".join(str(db.execute.await_args[0][0]).split())
     assert "COALESCE(metadata, '{}'::jsonb) || CAST(:patch AS jsonb)" in sql
     assert es.SETUP_OFFER_KEY in db.execute.await_args[0][1]["patch"]
-    # read: a malformed / unknown-recipe offer is not actionable
     row = MagicMock(); row.mappings.return_value.first.return_value = {"metadata": {es.SETUP_OFFER_KEY: {"recipe_id": "nope"}}}
     db.execute = AsyncMock(return_value=row)
     assert await es.get_pending_setup_offer(session_id="s1", db=db) is None
     row.mappings.return_value.first.return_value = {"metadata": {es.SETUP_OFFER_KEY: {"recipe_id": "local_runner"}}}
     assert (await es.get_pending_setup_offer(session_id="s1", db=db))["recipe_id"] == "local_runner"
-    # clear removes only that key
     db.execute = AsyncMock()
     await es.clear_pending_setup_offer(session_id="s1", db=db)
-    sql = " ".join(str(db.execute.await_args[0][0]).split())
-    assert f"- '{es.SETUP_OFFER_KEY}'" in sql
-    # start on the session's behalf: owner comes from the parent job
+    assert f"- '{es.SETUP_OFFER_KEY}'" in " ".join(str(db.execute.await_args[0][0]).split())
+    # insertion goes through add_step with PRE-DRAFTED steps — no model draft, before the current step
+    from app.modules import assist_notes
     seen = {}
-    async def fake_start(db_, rid, owner=None):
-        seen.update(rid=rid, owner=owner); return {"job_id": "j-1", "status": "refining"}
-    monkeypatch.setattr(es, "start_recipe", fake_start)
-    row = MagicMock(); row.mappings.return_value.first.return_value = {"owner": "alice"}
-    db.execute = AsyncMock(return_value=row)
-    assert (await es.start_recipe_for_session(db, "s1", "local_runner"))["job_id"] == "j-1"
-    assert seen == {"rid": "local_runner", "owner": "alice"}
+    async def fake_add_step(*, session_id, request, before_node_key=None, proposal=None, steps=None, db):
+        seen.update(request=request, before=before_node_key, steps=steps)
+        return {"node_key": "ADD61", "steps": [{"node_key": "ADD61", "title": steps[0]["title"]}]}
+    monkeypatch.setattr(assist_notes, "add_step", fake_add_step)
+    res = await es.add_recipe_to_plan(db, "s1", es.BY_ID["local_runner"], before_node_key="T6")
+    assert res["node_key"] == "ADD61" and seen["before"] == "T6"
+    assert [st["title"] for st in seen["steps"]] == [t for t, _ in es.BY_ID["local_runner"].steps]
+    # plan_has_recipe: the first still-open recipe step, committed ones ignored
+    rows = MagicMock(); rows.mappings.return_value.all.return_value = [
+        {"node_key": "ADD61", "title": "a", "status": "committed"}, {"node_key": "ADD62", "title": "b", "status": "pending"}]
+    db.execute = AsyncMock(return_value=rows)
+    assert (await es.plan_has_recipe(db, "s1", "local_runner"))["node_key"] == "ADD62"
+    assert f"{es.RECIPE_STEP_MARK} local_runner_" in db.execute.await_args[0][1]["mark"]
+
+
+def test_add_step_inserts_pre_drafted_steps_without_a_model_draft():
+    import inspect
+    from app.modules import assist_notes
+    src = inspect.getsource(assist_notes.add_step)
+    assert "steps: list[dict] | None = None" in src
+    assert "if steps:" in src and src.index("if steps:") < src.index("drafted = await assist_guide.draft_steps(")
 
 
 def test_turn_loop_answers_engine_questions_before_the_decision_layer():
     """The classifier has no action for 'about the engine'; the bridge must run
-    before decide_turn, and a staged offer must resolve on yes / no / supersede."""
+    before decide_turn, and a staged offer must resolve on yes / no / supersede.
+    §17.1145 — a yes adds the steps to THIS plan and guides the first; nothing
+    opens a separate job or points at the dashboard."""
     import inspect
     from app.modules import assist_turn
     src = inspect.getsource(assist_turn._run_turn_inner)
     assert src.index("match_recipe(") < src.index("decide_turn(")
     assert src.index("get_pending_setup_offer") < src.index("match_recipe(")
     assert src.count("clear_pending_setup_offer") >= 3          # yes, no, supersede
-    assert "start_recipe_for_session" in src and "capability_answer" in src
-    assert 'handled["v"] = "engine_capability"' in src
+    assert "add_recipe_to_plan" in src and "capability_answer" in src and "plan_has_recipe" in src
+    assert src.index("add_recipe_to_plan") < src.index("_claim_and_guide(session_id, (_added or {}).get(\"node_key\")")
+    assert "start_recipe" not in src.replace("start_recipe_for_session", "") or "start_recipe_for_session" not in src
+    assert "dashboard" not in src.split("# 2a.")[1].split("# 2b.")[0].replace("never sent to the dashboard", "")
+    assert 'handled["v"] = "engine_capability"' in src and 'handled["v"] = "setup_recipe_added"' in src
 
 
 def test_every_recipe_has_keywords_and_none_is_a_bare_common_word():

@@ -53,6 +53,9 @@ class Recipe:
     # (lower-case, matched as substrings of the message). Specific on purpose: a bare
     # 'runner' is a CI runner to the world; 'local runner' is ours.
     keywords: tuple[str, ...] = ()
+    # §17.1145 — the recipe as PLAN STEPS (title, what to do), inserted into the
+    # operator's own plan when they ask the assist for it. No separate job.
+    steps: tuple[tuple[str, str], ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +121,28 @@ _ENGINE_HOST = ("The engine host is this machine: the repo is at ~/scaffold-engi
 RECIPES: tuple[Recipe, ...] = (
     Recipe(
         id="local_runner",
+        steps=(
+            ("Install the engine's local runner helper on the target machine",
+             "On the machine the plan is about (the Proxmox host): copy scripts/local_runner_mcp.py from the engine host "
+             "(scp ~/scaffold-engine/scripts/local_runner_mcp.py root@<target>:~/), create a venv (python3 -m venv ~/runner-venv), "
+             "install \"mcp>=2.0\" uvicorn starlette into it, choose a long random secret token (openssl rand -hex 24), and start "
+             "the helper: ~/runner-venv/bin/python ~/local_runner_mcp.py --host 0.0.0.0 --port 8790 --token <secret>. It must "
+             "keep running after logout (a systemd unit or nohup). Only the engine host needs to reach port 8790. Done when "
+             "curl -s http://<target-ip>:8790/mcp/ from the engine host answers (any HTTP status, not a connection refusal)."),
+            ("Register the runner with the engine",
+             "On the engine host: POST http://localhost:8000/mcp/servers with header X-API-Key: <SCAFFOLD_API_KEY from "
+             "~/scaffold-engine/.env> and JSON body {\"name\":\"pve-runner\",\"transport\":\"streamable_http\","
+             "\"endpoint\":\"http://<target-ip>:8790/mcp/\",\"headers\":{\"X-Runner-Token\":\"<secret>\"}}. "
+             "Done when GET http://localhost:8000/mcp/servers/pve-runner/tools (same header) lists a tool named run_readonly."),
+            ("Point the engine's state check at the runner",
+             "On the engine host: add the line ASSIST_LOCAL_RUNNER_SERVER=pve-runner to ~/scaffold-engine/.env, then restart "
+             "the engine with: cd ~/scaffold-engine && docker compose up -d scaffold-orchestrator. Done when "
+             "curl -s localhost:8000/health reports \"healthy\"."),
+            ("Verify the state check runs through the runner",
+             "In this assist session press Verify state on any step. Done when the reply says it is running the read-only "
+             "checks through your local runner (pve-runner) instead of asking you to paste; every command it runs is recorded "
+             "in this transcript marked [local-runner]."),
+        ),
         keywords=("local runner", "local-runner", "scaffold runner", "the runner on", "run its own checks", "run its own commands", "state check run", "stop asking me to paste", "verify state paste", "local_runner_mcp"),
         title="Let the state check run its own commands",
         summary="Verify state runs its read-only checks through a small helper on the target machine instead of asking you to paste.",
@@ -150,6 +175,21 @@ RECIPES: tuple[Recipe, ...] = (
     ),
     Recipe(
         id="runner_sudo",
+        steps=(
+            ("Decide which read-only commands the runner may run as root",
+             "List the exact commands the state check needs root for on the target machine (typical on Proxmox: pct config, "
+             "qm config, pvesm status, nginx -t). Find each one's full path with: which pct qm pvesm nginx. Done when you have "
+             "the list with full paths."),
+            ("Write the sudoers rule for the runner's user",
+             "On the target machine, as root: sudo visudo -f /etc/sudoers.d/scaffold-runner and add ONE line of the form "
+             "<runner-user> ALL=(root) NOPASSWD: /usr/sbin/pct config *, /usr/sbin/qm config *, /usr/sbin/pvesm status "
+             "— full paths, one entry per command, a trailing * only where arguments follow. Done when visudo saves without "
+             "a syntax error and sudo -n /usr/sbin/pvesm status (as the runner's user) prints output, not a password prompt."),
+            ("Restart the helper with the matching allow-list",
+             "On the target machine restart local_runner_mcp.py with the same --host/--port/--token plus "
+             "--sudo-allow \"pct config\" \"qm config\" \"pvesm status\" (the same commands as the sudoers line). "
+             "Done when a Verify state in this session shows those probes as confirmed or contradicted instead of unknown."),
+        ),
         keywords=("runner sudo", "sudo for the runner", "runner administrator", "runner root", "sudo-allow", "runner as root"),
         title="Give the runner administrator rights for specific commands",
         summary="Checks that need root (nginx -t, pct config …) stop coming back as 'unknown'.",
@@ -174,6 +214,17 @@ RECIPES: tuple[Recipe, ...] = (
     ),
     Recipe(
         id="queue_worker",
+        steps=(
+            ("Create the queue's tables and run one chore through it",
+             "On the engine host in ~/scaffold-engine: make queue-schema (safe to repeat), then make queue-once. Done when "
+             "every line of the one-shot worker ends with 'ended with status: Success' (the weekly model self-evaluation "
+             "can take over ten minutes if it decides it is due)."),
+            ("Switch the engine to the queue worker",
+             "Add QUEUE_ENABLED=true to ~/scaffold-engine/.env, then: docker compose --profile queue up -d queue and "
+             "docker compose up -d scaffold-orchestrator. Done when docker logs scaffold-orchestrator --since 2m 2>&1 | "
+             "grep -c delegated_to_queue prints 2 and docker logs scaffold-queue --since 5m shows the worker starting. "
+             "Rollback: QUEUE_ENABLED=false, restart the engine, docker compose --profile queue stop queue."),
+        ),
         keywords=("queue worker", "procrastinate queue", "background chores", "queue_enabled"),
         title="Move background chores to the queue worker",
         summary="Cleanup, health evaluations, the weekly model self-evaluation and stuck-turn closing run in a separate container with retries and a record of every run.",
@@ -200,6 +251,16 @@ RECIPES: tuple[Recipe, ...] = (
     ),
     Recipe(
         id="reranker_sidecar",
+        steps=(
+            ("Start the reranker sidecar container",
+             "On the engine host in ~/scaffold-engine: docker compose --profile reranker up -d scaffold-reranker (the first "
+             "start loads the model; allow a minute). Done when docker ps shows scaffold-reranker up."),
+            ("Point the engine at the sidecar",
+             "Add RERANKER_BACKEND=http and RERANKER_URL=http://scaffold-reranker:80 to ~/scaffold-engine/.env, then "
+             "docker compose up -d scaffold-orchestrator. Done when curl -s localhost:8000/health | grep -o "
+             "'\"reranker\":{[^}]*}' shows \"status\":\"up\" and a knowledge search still returns results. "
+             "Rollback: RERANKER_BACKEND=local, restart the engine, docker compose --profile reranker stop scaffold-reranker."),
+        ),
         keywords=("reranker sidecar", "reranker container", "search step to its own container", "reranker_backend"),
         title="Move the slow search step to its own container",
         summary="The relevance re-sort (about 6 s a query, all the CPU it can get) stops stalling everything else.",
@@ -223,6 +284,16 @@ RECIPES: tuple[Recipe, ...] = (
     ),
     Recipe(
         id="step_fsm_strict",
+        steps=(
+            ("Confirm a week of zero step-rule warnings",
+             "On the engine host: docker logs scaffold-orchestrator --since 168h 2>&1 | grep -c step_fsm_violation. Done when "
+             "it prints 0. If it does not, STOP and paste the lines (same command without -c): each one is a bug to fix "
+             "before going strict, not something to override."),
+            ("Switch the rulebook to strict",
+             "Add ASSIST_STEP_FSM_STRICT=true to ~/scaffold-engine/.env and restart the engine "
+             "(cd ~/scaffold-engine && docker compose up -d scaffold-orchestrator). Done when curl -s localhost:8000/health "
+             "reports \"healthy\" and one ordinary assist step (claim → paste → done) still commits normally."),
+        ),
         keywords=("step rulebook", "fsm strict", "strict step", "step_fsm_strict"),
         title="Make the step rulebook strict",
         summary="Illegal step-state moves are refused instead of logged and allowed.",
@@ -385,30 +456,79 @@ def match_recipe(text: str) -> Optional[Recipe]:
     return None
 
 
-def capability_answer(recipe: Recipe, *, status: str, detail: str, job: Optional[dict] = None) -> str:
+RECIPE_STEP_MARK = "Engine capability recipe:"
+
+
+def recipe_steps(recipe: Recipe, *, with_prerequisites: bool = True) -> list[dict]:
+    """The recipe (and, when asked, its missing prerequisites first) as
+    ``[{title, description}]`` ready for ``assist_notes.add_step(steps=…)``.
+    Each description ends with a marker line so the plan can be asked whether
+    it already carries this recipe."""
+    out: list[dict] = []
+    chain = list(recipe.requires) if with_prerequisites else []
+    for rid in chain + [recipe.id]:
+        r = BY_ID[rid]
+        for title, what in r.steps:
+            out.append({"title": title, "description": f"{what}\n\n_{RECIPE_STEP_MARK} {r.id}_"})
+    return out
+
+
+async def plan_has_recipe(db, session_id: str, recipe_id: str) -> Optional[dict]:
+    """The first still-open step of this recipe already in the session's plan
+    (``{node_key, title, status}``), or None. Fail-soft."""
+    try:
+        rows = (await db.execute(text("""
+            SELECT d.node_key, d.title, s.status
+              FROM assist_steps s JOIN dag_nodes d ON d.job_id = s.job_id AND d.node_key = s.node_key
+             WHERE s.session_id = :sid AND d.description LIKE :mark
+             ORDER BY d.node_key
+        """), {"sid": session_id, "mark": f"%{RECIPE_STEP_MARK} {recipe_id}_%"})).mappings().all()
+        opened = [dict(r) for r in rows if r["status"] not in ("committed", "skipped", "handed_off")]
+        return opened[0] if opened else None
+    except Exception as exc:
+        logger.warning("plan_has_recipe_failed sid=%s recipe=%s err=%r", session_id, recipe_id, exc)
+        return None
+
+
+def capability_answer(recipe: Recipe, *, status: str, detail: str, in_plan: Optional[dict] = None,
+                      current_step: Optional[str] = None) -> str:
     """The reply: what the capability is, in the recipe's own plain words, its
-    live state on this install, and the offer. Every line carries content."""
+    live state on this install, and the offer — to add its steps to THIS plan
+    and walk through them here. Every line carries content."""
     head = f"## {recipe.title}\n\n"
-    body = (f"That is one of the engine's own optional capabilities, not part of your homelab plan. "
+    body = (f"That is one of the engine's own optional capabilities, not part of your homelab plan itself. "
             f"{recipe.summary} {recipe.why_off}\n\n")
+    n_steps = len(recipe_steps(recipe))
+    where = f" right before **{current_step}**" if current_step else ""
     if status == "on":
         state = f"**It is already on here:** {detail}\n\n"
         offer = ("Nothing to set up — press **Verify state** on any step and the checks run through it. "
                  "Everything it runs is recorded in this transcript, marked `[local-runner]`.")
-    elif status == "in_progress" or (job and job.get("job_id")):
-        jid = (job or {}).get("job_id") or ""
-        state = f"**A walkthrough for it is already open** (job {jid[:8]}…). \n\n"
-        offer = ("Open that job from the dashboard and continue there — it is its own job, separate from this one. "
-                 "If you want a fresh one instead, reply **yes** and I will open a new walkthrough.")
+    elif in_plan:
+        state = (f"**Its steps are already in this plan** — the next open one is **{in_plan['node_key']}: "
+                 f"{in_plan['title']}**.\n\n")
+        offer = f"Say **guide me on {in_plan['node_key']}** (or press Guide me on that step) and we continue there."
     elif status == "blocked":
+        pre = ", ".join(BY_ID[x].title for x in recipe.requires) or "its prerequisite"
         state = f"**Not available yet:** {detail}\n\n"
-        offer = "Reply **yes** and I will open the walkthrough for the prerequisite first."
+        offer = (f"Reply **yes** and I will add the steps for {pre} first and then for this, {n_steps} steps in all, "
+                 f"to this plan{where}, and walk you through the first one now.")
     else:
         state = f"**On this install it is off** — {detail}\n\n"
-        offer = (f"Reply **yes** and I will open the walkthrough now (about {recipe.effort}); it becomes its own job "
-                 f"on the dashboard, separate from this one, and asks you for the target machine before anything else. "
-                 f"You can also start it yourself from **Capabilities → {recipe.title}** in the console.")
+        offer = (f"Reply **yes** and I will add its {n_steps} steps to this plan{where} (about {recipe.effort}) and walk "
+                 f"you through the first one now, the same way as any other step. Reply **no** to leave it off.")
     return head + body + state + offer
+
+
+async def add_recipe_to_plan(db, session_id: str, recipe: Recipe, *, before_node_key: Optional[str]) -> dict:
+    """Insert the recipe's steps (prerequisites first) into the session's plan
+    before the current step, through the ordinary add_step persist path (no
+    model call), and point the session at the first of them."""
+    from app.modules import assist_notes
+    return await assist_notes.add_step(
+        session_id=session_id, request=recipe.title, before_node_key=before_node_key,
+        steps=recipe_steps(recipe), db=db,
+    )
 
 
 async def stage_setup_offer(*, session_id: str, recipe_id: str, db) -> None:
@@ -444,12 +564,3 @@ async def clear_pending_setup_offer(*, session_id: str, db) -> None:
         await db.commit()
     except Exception as exc:
         logger.warning("setup_offer_clear_failed sid=%s err=%r", session_id, exc)
-
-
-async def start_recipe_for_session(db, session_id: str, recipe_id: str) -> dict:
-    """Open the walkthrough on the operator's behalf, owned by the session's job owner."""
-    row = (await db.execute(text(
-        "SELECT j.owner FROM assist_sessions s JOIN jobs j ON j.id = s.job_id WHERE s.id = :sid"),
-        {"sid": session_id})).mappings().first()
-    owner = (row or {}).get("owner")
-    return await start_recipe(db, recipe_id, owner=owner)
