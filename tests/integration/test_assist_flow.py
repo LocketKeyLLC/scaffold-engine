@@ -484,7 +484,7 @@ async def test_evidence_matches_and_commits_a_different_pending_step(insert_job,
 
     # verifier: N1 (cursor) is incomplete; the 40G step verifies succeeded.
     async def fake_verify(*, title, task_prompt, tool, evidence, environment=None,
-                          is_decision=False, done_criteria=""):
+                          is_decision=False, done_criteria="", **_kw):   # §17.1159 — paste_pairs / run_report
         if "40G" in title and "40G" in evidence:
             return {"outcome": "succeeded", "reason": "shows size=40G"}
         return {"outcome": "incomplete", "reason": "not this step"}
@@ -559,7 +559,7 @@ async def test_reconcile_plan_against_facts(insert_job, monkeypatch):
             "VM 106 scsi0 disk was deleted and recreated as a 40G volume, replacing the previous 100G disk",
         ])
     # verifier: the 40G step is satisfied by the 40G fact; nothing else
-    async def fake_verify(*, title, task_prompt, tool, evidence, environment=None, is_decision=False, done_criteria=""):
+    async def fake_verify(*, title, task_prompt, tool, evidence, environment=None, is_decision=False, done_criteria="", **_kw):
         return {"outcome": "succeeded" if ("40G" in title and "40G" in evidence) else "incomplete", "reason": "x"}
     monkeypatch.setattr(assist_guide, "verify_step_success", fake_verify)
     monkeypatch.setattr(assist_guide, "read_cached_guidance", AsyncMock(return_value=None))
