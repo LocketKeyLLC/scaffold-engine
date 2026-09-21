@@ -616,6 +616,8 @@ _VERIFY_DECISION_SYSTEM = (
 
 async def verify_step_success(
     *, title: str, task_prompt: str, tool: str, evidence: str,
+    paste_pairs: str = "",  # §17.1159 — the paste parsed into command → output pairs (deterministic)
+    run_report: str = "",   # §17.1159 — which issued commands ran / were skipped (deterministic)
     environment: Optional[dict] = None, is_decision: bool = False,
     done_criteria: str = "",  # §17.1100 — the walkthrough's own "Done when" bar
 ) -> dict:
@@ -694,11 +696,20 @@ async def verify_step_success(
             f"against THIS bar, and return 'succeeded' when the evidence meets it:\n{done_criteria.strip()}\n\n"
             if (done_criteria or "").strip() else ""
         )
+        # §17.1159 — the parsed pairs lead: each command with ITS output, so
+        # the judge never attributes an error to the wrong command or reads a
+        # heredoc body as a symptom. The raw tail stays as the reference copy.
+        pairs_block = (
+            "The paste, parsed into what was typed and what each command printed "
+            "(authoritative — judge outputs against the command that produced them):\n"
+            f"{paste_pairs}\n\n" if (paste_pairs or "").strip() else "")
+        report_block = (f"Which of the issued commands ran: {run_report}\n\n" if (run_report or "").strip() else "")
         user = (
             f"Task (this step's goal): {title}\n\n{task_prompt}\n\n"
             + (f"{env_block}\n\n" if env_block else "")
             + criteria_block
-            + f"Operator's pasted evidence / output for this step:\n{tail_keep(evidence)}\n\n"
+            + pairs_block + report_block
+            + f"Operator's pasted evidence / output for this step (raw):\n{tail_keep(evidence, 2500 if paste_pairs else 6000)}\n\n"
             "Does the evidence show THIS step's goal was achieved? Call judge_step_outcome."
         )
     try:
@@ -1219,6 +1230,21 @@ def _match_superseded(raw: object, known_facts: list[str] | None) -> list[str]:
     return out
 
 
+def _facts_evidence_view(evidence: str) -> str:
+    """§17.1159 — the scribe reads command → output PAIRS when the paste has
+    prompts (a typed command is not a fact about the system; its output is),
+    the raw tail otherwise."""
+    try:
+        from app.modules import assist_paste as _ap
+        p = _ap.parse_paste(evidence)
+        if p.entries:
+            return ("(parsed: each command, then what it printed — distil facts from the OUTPUTS)\n"
+                    + _ap.render_pairs(p, max_chars=5500))
+    except Exception:
+        pass
+    return tail_keep(evidence)
+
+
 async def distill_facts(
     *, evidence: str, title: str = "", task_prompt: str = "",
     known_facts: list[str] | None = None, role: str = "model_general",
@@ -1244,7 +1270,7 @@ async def distill_facts(
         (f"STEP: {title}\n" if title else "")
         + (f"TASK: {task_prompt}\n\n" if task_prompt else "\n")
         + known_block
-        + f"Operator output:\n{tail_keep(evidence)}\n\nCall record_facts."
+        + f"Operator output:\n{_facts_evidence_view(evidence)}\n\nCall record_facts."
     )
     # §17.749 — model_general (deepseek-v4-pro) is a THINKING model: at
     # max_tokens=1024 it spends the whole budget reasoning and returns an EMPTY
@@ -5278,6 +5304,17 @@ async def generate_fix(
                 "met from what the operator has reported, say so plainly and ask "
                 "them to confirm so the step can be closed.")
     parts.append(f"## Error the operator hit\n{error_text.strip()}")
+    # §17.1159 — the same paste, parsed: each command with ITS output and which
+    # ones errored, so the diagnosis names the right command.
+    try:
+        from app.modules import assist_paste as _ap
+        _pp = _ap.parse_paste(error_text)
+        if _pp.entries:
+            _failed = ", ".join(f"`{e.command[:70]}`" for e in _pp.failed[:4]) or "none by their output"
+            parts.append("## The same paste, parsed (authoritative for which command printed what)\n"
+                         f"Commands that errored: {_failed}\n{_ap.render_pairs(_pp, max_chars=4000)}")
+    except Exception:
+        pass
     research_block = _render_research_block(sources)
     if research_block:
         parts.append(research_block)
