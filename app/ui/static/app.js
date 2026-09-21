@@ -15,7 +15,7 @@ import { storage } from "./storage.js";
 // Visible build stamp (sidebar foot). Bump per UI change round — it exists so
 // "is my tab running the latest UI?" is answerable at a glance instead of by
 // diffing pixels (the §17.840/§17.842 stale-module debugging sink).
-const UI_BUILD = "r9";
+const UI_BUILD = "r10";   // §17.1161 — bumped so the footer shows the new build
 // §17.1055 — the sidebar retracts on wide screens (the operator asked for
 // the room: a walkthrough plus a terminal side by side). Per-browser, like
 // theme and density; the ≤820px drawer is unaffected.
@@ -109,8 +109,8 @@ let jobPinHandler = null; // §17.896 — replaced, not stacked, per chrome rebu
 // "Plan", because "where's the DAG" is the question that got asked.
 const JOB_PIN_LINKS = [
   ["plan", "⬡", "DAG"],
-  ["follow", "◎", "Follow"],   // §17.1160 — the rail + pane walkthrough
-  ["run", "▶", "Run"],
+  ["run", "◎", "Run"],       // §17.1161 — Run is the Follow layout (rail + pane)
+  ["full", "▶", "Full"],     // the classic walkthrough page
   ["output", "▤", "Output"],
 ];
 

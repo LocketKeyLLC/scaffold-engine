@@ -31,7 +31,6 @@ const TABS = [
   ["output", "Output"],
   ["traces", "Traces"],
   ["costs", "Costs"],
-  ["follow", "Follow"],   // §17.1160 — the rail + pane walkthrough (assist jobs)
 ];
 
 // §17.1011 — synonyms an operator (or an old link) may use for a real tab.
@@ -49,7 +48,7 @@ export function resolveTab(raw) {
 // §17.1114 (ledger U-1) — the tabs that exist. An unknown tab still renders
 // Overview (nothing else is sensible) but SAYS so, instead of silently
 // pretending the address was fine.
-export const KNOWN_TABS = ["overview", "plan", "run", "output", "traces", "costs", "follow"];
+export const KNOWN_TABS = ["overview", "plan", "run", "output", "traces", "costs", "follow", "full"];
 
 export function unknownTabNotice(raw) {
   if (!raw) return "";
@@ -221,7 +220,7 @@ export default function jobHub(container, params) {
 
   // §17.1160 — Follow: one header line, no tab strip, the sidebar folded to
   // icons while here (restored on leave; the operator's own preference is kept).
-  const isFollow = tab === "follow";
+  const isFollow = tab === "follow" || tab === "run";   // §17.1161 — Run is the Follow layout
   container.classList.toggle("follow-mode", isFollow);
   const shellEl = document.querySelector(".shell");
   const sidebarWas = shellEl ? shellEl.classList.contains("sidebar-collapsed") : false;
@@ -268,11 +267,12 @@ export default function jobHub(container, params) {
       case "plan":
         childDispose = renderPlan(outlet, jobId);
         break;
-      case "run":
-        childDispose = renderRun(outlet, jobId, job, ctx);
-        break;
-      case "follow":   // §17.1160
+      case "run":      // §17.1161 — the Follow layout IS the walkthrough (operator: "none of the changes are made" — it was hidden in a last tab)
+      case "follow":   // §17.1160 — kept as an alias so links keep working
         childDispose = renderRun(outlet, jobId, job, ctx, { follow: true });
+        break;
+      case "full":     // §17.1161 — the classic Run layout (step card, whole-session scroll, all verbs)
+        childDispose = renderRun(outlet, jobId, job, ctx);
         break;
       case "output":
         childDispose = renderOutput(outlet, jobId);
