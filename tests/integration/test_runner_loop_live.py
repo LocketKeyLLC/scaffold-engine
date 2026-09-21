@@ -181,7 +181,7 @@ async def session(engine, runner_row, tracked_jobs):
         prev = "ADD2"
         for k, t, _ev in COMMITTED:
             nodes.append((k, t, t, "done", [prev])); prev = k
-        nodes.append(("T11", "Configure the next thing", "The plain pending step after the checks.", "pending", [prev]))
+        nodes.append(("T11", "Make VM 110 (ai-vm) reachable on SSH port 22", "Done when ssh to VM 110 from the host works.", "pending", [prev]))
         for i, (k, t, d, st, deps) in enumerate(nodes):
             await db.execute(text("INSERT INTO dag_nodes (job_id,node_key,title,description,node_type,status,depends_on,execution_order,tool,prompt_template) VALUES (:j,:k,:t,:d,'task',:st,:deps,:o,'shell',:d)"),
                              {"j": jid, "k": k, "t": t, "d": d, "st": st, "deps": deps, "o": i})
@@ -193,7 +193,11 @@ async def session(engine, runner_row, tracked_jobs):
             await db.execute(text("INSERT INTO assist_steps (session_id, job_id, node_key, status, committed_at, submitted_at, presented_at, evidence, evidence_kind) VALUES (:s,:j,:k,'committed',NOW(),NOW(),NOW(),:e,'text') ON CONFLICT DO NOTHING"), {"s": sid, "j": jid, "k": k, "e": ev})
         await db.execute(text("UPDATE assist_sessions SET current_node_key='ADD2', metadata = COALESCE(metadata,'{}'::jsonb) || CAST(:m AS jsonb) WHERE id=:s"),
                          {"s": sid, "m": json.dumps({"environment": {"profile": "Operator runs commands as root@localhost in ONE interactive shell.",
-                                                                     "system_state": {"host": {"attrs": {"ip": "127.0.0.1"}}}}})})
+                                                                     "system_state": {"host": {"attrs": {"ip": "127.0.0.1"}},
+                                                                                      # §17.1154 — a guest the plan names, for the reachability check
+                                                                                      "110": {"kind": "vm", "attrs": {"name": "ai-vm", "boot": "order=scsi0;ide2", "status": "running"},
+                                                                                              "devices": {"net0": "virtio=BC:24:11:B4:AF:15,bridge=vmbr0",
+                                                                                                          "ide2": "local:iso/ubuntu-22.04.3-live-server-amd64.iso,media=cdrom"}}}}})})
         await db.commit()
     return {"job_id": jid, "session_id": sid}
 
@@ -342,6 +346,23 @@ async def test_runner_loop_end_to_end(session, helper):
     assert "refused by the local runner" in (out.structured or {}).get("result", out.text)
     tools = await mcp_client.list_tools(spec, use_cache=False)
     assert f"(helper v{es.expected_helper_version()})" in tools[0]["description"]
+
+    # ── 8. an ssh failure to a guest is answered FROM THE HOST through the runner, before any model fix (§17.1154) ──
+    #      (this box has no `qm`, so the honest verdict is `unknown` — the wiring and the probes are what is proven)
+    helper_log_before = Path(os.environ.get("ITEST_LOG_DIR", "/tmp") + "/itest_helper.log").read_text(errors="replace").count("RUN:")
+    paste = "root@localhost:~# ssh aedefruscio@192.168.1.127 nvidia-smi\nssh: connect to host 192.168.1.127 port 22: No route to host\nroot@localhost:~#"
+    async with httpx.AsyncClient(timeout=300) as client:
+        r = await client.post(f"{BASE}/assist/{sid}/fix", headers=AUTH, json={"error": paste, "node_key": "T11", "history": []})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["guidance_meta"].get("deterministic") is True, body.get("guidance_meta")
+    assert body["fix"].startswith("## 🔎 Can the host reach VM 110 (ai-vm)?") and "`qm status 110` →" in body["fix"]
+    assert body["guidance_meta"]["guest_check"]["class"] in ("unknown", "no_ip")
+    ran = Path(os.environ.get("ITEST_LOG_DIR", "/tmp") + "/itest_helper.log").read_text(errors="replace").count("RUN:") - helper_log_before
+    assert ran >= 5, ran                                                                      # status, agent, neigh, fdb, ping, port
+    async with async_session() as db:
+        n_rec = (await db.execute(text("SELECT count(*) FROM assist_turns WHERE session_id = :s AND content LIKE '[local-runner] the engine checked whether VM 110%'"), {"s": sid})).scalar()
+    assert n_rec >= 1
 
 
 async def test_lookup_skips_a_block_meant_for_another_machine(session, helper):
