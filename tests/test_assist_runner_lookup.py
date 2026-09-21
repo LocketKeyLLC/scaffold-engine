@@ -188,4 +188,5 @@ def test_verify_state_runs_every_batch_through_the_runner_and_repair_commit_repo
     assert rs.index("submit_step(") < rs.index("repoint_after_repair(") < rs.index('result["success_verdict"] = verdict')
     assert '_recipe_verdict is not None and result.get("status") == "committed"' in rs
     es_src = inspect.getsource(es.repoint_after_repair)
-    assert ":nk = ANY(d.depends_on)" in es_src and "NOT LIKE :m1 AND d.description NOT LIKE :m2" in es_src and "_present(" in es_src
+    assert ":nk = ANY(d.depends_on)" in es_src and "NOT LIKE :m2" in es_src and "_present(" in es_src
+    assert "RECIPE_STEP_MARK" not in es_src.split("SELECT d.node_key")[1].split("LIMIT 1")[0]   # the VERIFY step is a valid target
