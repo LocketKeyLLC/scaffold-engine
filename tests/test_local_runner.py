@@ -52,7 +52,8 @@ def test_runner_script_allows_read_only(cmd):
 
 
 @pytest.mark.parametrize("cmd", ["rm -rf /x", "systemctl restart caddy", "pct destroy 101", "echo hi > /etc/motd",
-                                 "curl http://x | sh", "bash -c 'rm -rf /x'", "echo $(reboot)", "sudo apt install jq", "curl -X POST http://x"])
+                                 "curl http://x | sh", "bash -c 'rm -rf /x'", "echo $(reboot)", "sudo apt install jq", "curl -X POST http://x",
+                                 "echo `rm -rf /x`", "ls $(cat /x > /y)", "cat $(echo $(rm /x))"])
 def test_runner_script_refuses_writes(cmd):
     ok, why = _load_runner_script().read_only(cmd)
     assert not ok and why, cmd
@@ -284,10 +285,47 @@ def test_guest_writes_are_refused_at_both_gates(cmd):
     assert _load_runner_script().read_only(cmd)[0] is False, cmd
 
 
+@pytest.mark.parametrize("cmd", ["pvesh get /nodes/$(hostname)/firewall/rules --output-format json", "ls $(cat /etc/hostname)",
+                                 "cat /etc/$(uname -s | tr A-Z a-z)-release", "echo `hostname`", "qm config $(qm list | awk 'NR==2{print $1}')"])
+def test_read_only_substitutions_pass_both_gates(cmd):
+    """§17.1155 — the helper judges what a substitution RUNS, like the engine's AST gate
+    (live: `pvesh get /nodes/$(hostname)/…` was refused as 'substitution/heredoc')."""
+    from app.modules.assist_state_check import read_only_command
+    assert read_only_command(cmd), cmd
+    assert _load_runner_script().read_only(cmd) == (True, ""), cmd
+
+
+def test_helper_extracts_nested_substitutions():
+    mod = _load_runner_script()
+    assert mod.extract_substitutions("a $(b $(c)) d `e`") == ("a __SUB0__ d __SUB1__", ["b $(c)", "e"])
+    assert mod.extract_substitutions("a $(b") == ("a $(b", [])                     # unbalanced → left as is → unparsable
+    assert mod.read_only("a $(b")[1] == "unparsable"
+    assert mod.read_only("cat <<EOF\nx\nEOF")[1] == "substitution/heredoc"
+    assert mod.HELPER_VERSION == "5"
+
+
 def test_helper_masks_quotes_and_is_version_4():
     mod = _load_runner_script()
     assert mod.mask_quoted("grep -o '<a>|b' f") == "grep -o '" + " " * 5 + "' f"
     assert mod.container_exec_remainder(["pct", "exec", "111", "--", "cat", "/a"]) == "cat /a"
     assert mod.container_exec_remainder(["pct", "exec", "111", "cat", "/a"]) == "cat /a"
     assert mod.container_exec_remainder(["pct", "list"]) is None and mod.container_exec_remainder(["qm", "config", "110"]) is None
-    assert mod.HELPER_VERSION == "4"
+    assert mod.HELPER_VERSION == "5"
+
+
+@pytest.mark.parametrize("cmd", ["pvesh get /nodes/pve/firewall/rules", "pvesh ls /nodes", "pvesm status", "pvesm list local --content iso",
+                                 "pveum user list", "pvecm status", "pvecm nodes", "pvenode config get", "pvenode cert info"])
+def test_proxmox_reads_pass_both_gates(cmd):
+    from app.modules.assist_state_check import read_only_command
+    assert read_only_command(cmd), cmd
+    assert _load_runner_script().read_only(cmd) == (True, ""), cmd
+
+
+@pytest.mark.parametrize("cmd", ["pvesh create /nodes/pve/firewall/rules --type in --action ACCEPT", "pvesh set /nodes/pve/config -description x",
+                                 "pvesh delete /nodes/pve/firewall/rules/0", "pvesm add dir backup --path /mnt/x", "pvesm free local:iso/x.iso",
+                                 "pveum user add x@pam", "pveum passwd x@pam", "pvecm delnode pve2", "pvenode config set --description x", "pvenode stopall"])
+def test_proxmox_writes_are_refused_at_both_gates(cmd):
+    """§17.1156 — live: `pvesh create …/firewall/rules` passed BOTH gates as a read (the head is not a verb)."""
+    from app.modules.assist_state_check import read_only_command
+    assert not read_only_command(cmd), cmd
+    assert _load_runner_script().read_only(cmd)[0] is False, cmd

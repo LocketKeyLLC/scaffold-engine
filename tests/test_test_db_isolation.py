@@ -185,5 +185,7 @@ def test_runner_loop_lane_is_throwaway_and_wired_into_tier_2():
     assert "docker exec $(CONTAINER)" not in block
     assert "-v $(RUNNER_LOOP_LOG_DIR):/itest" in block and "-e ITEST_LOG_DIR=/itest" in block
     assert "test-runner-loop: test-db" in src
+    # §17.1153 — lanes sharing the test DB are serialised (a unit test's app startup sweeps running turn rows)
+    assert "flock -w 7200 $(TEST_DB_LOCK)" in block and "flock -w 7200 $(TEST_DB_LOCK)" in _recipe("test")
     tier2 = _recipe("ci-tier-2")
     assert "step 6/6: local-runner loop end to end" in tier2 and "$(MAKE) test-runner-loop" in tier2

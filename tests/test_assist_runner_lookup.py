@@ -190,3 +190,24 @@ def test_verify_state_runs_every_batch_through_the_runner_and_repair_commit_repo
     es_src = inspect.getsource(es.repoint_after_repair)
     assert ":nk = ANY(d.depends_on)" in es_src and "NOT LIKE :m2" in es_src and "_present(" in es_src
     assert "RECIPE_STEP_MARK" not in es_src.split("SELECT d.node_key")[1].split("LIMIT 1")[0]   # the VERIFY step is a valid target
+
+
+# ---------------------------------------------------------------------------
+# §17.1156 — every leading read-only block runs, in order; a write ends the scan; rollback is never run.
+# ---------------------------------------------------------------------------
+
+def test_leading_read_only_blocks_all_run_and_a_write_ends_the_scan():
+    two = ("## 👉 Do this next\n\n**Run this now:**\n```bash\ncat /etc/os-release | head -1\n```\n\n## Run this\n"
+           "1. Reveal:\n```bash\ncat /etc/os-release | head -1\n```\n"            # the same block repeated → once
+           "2. Then look at the firewall:\n```bash\npve-firewall status\nss -tlnp | grep 8790\n```\n"
+           "3. Now change it:\n```bash\npvesh create /nodes/x/firewall/rules --type in --action ACCEPT\n```\n"
+           "4. And confirm:\n```bash\npve-firewall status\n```\n"                 # after the write → never run now
+           "## Rollback\n```bash\nls /etc/pve/firewall\n```\n")                    # read-only but under Rollback → skipped
+    assert rl.lookup_blocks(two) == ["cat /etc/os-release | head -1", "pve-firewall status\nss -tlnp | grep 8790"]
+    assert rl.is_lookup(two) == ["cat /etc/os-release | head -1", "pve-firewall status", "ss -tlnp | grep 8790"]
+    # a reply whose FIRST block writes is not a look-up at all
+    assert rl.is_lookup("**Run this now:**\n```bash\nsystemctl restart x\n```\n```bash\nls /\n```") is None
+    # all read-only → every block, bounded
+    many = "**Run this now:**\n" + "".join(f"```bash\ncat /f{i}\n```\n" for i in range(10))
+    assert len(rl.lookup_blocks(many)) == rl.MAX_LOOKUP_BLOCKS
+    assert rl.is_lookup(GUIDE) == ["cat /etc/pve/firewall/host.fw", "pve-firewall status", "iptables -S PVEFW-HOST-IN"]   # unchanged: its 2nd block writes

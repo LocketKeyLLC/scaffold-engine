@@ -68,6 +68,11 @@ _MUTATION_RE = re.compile(
     r"systemctl\s+(?:start|stop|restart|reload|enable|disable|mask|unmask|daemon-reload|edit|set-property)|"
     r"service\s+\S+\s+(?:start|stop|restart|reload)|"
     r"(?:pct|qm)\s+(?:start|stop|shutdown|reboot|create|destroy|set|resize|migrate|clone|template|snapshot|rollback|delsnapshot|unlock|restore|move\w*|resize)|"
+    # §17.1156 — the rest of the Proxmox management family (live: `pvesh create …/firewall/rules` passed as a read)
+    r"pvesh\s+(?:create|set|delete)|pvesm\s+(?:add|remove|set|alloc|free|import|export|prune-backups)|"
+    r"pveum\s+(?:add|modify|delete|passwd|useradd|usermod|userdel|groupadd|groupmod|groupdel|roleadd|rolemod|roledel|aclmod|acldel)|"
+    r"pveum\s+(?:user|group|role|acl|pool|realm|token)\s+(?:add|modify|delete|remove|generate)|pvecm\s+(?:add|addnode|delnode|create|expected|updatecerts)|"
+    r"pvenode\s+(?:startall|stopall|migrateall|wakeonlan)|pvenode\s+\S+\s+(?:set|delete)|"
     r"docker\s+(?:run|rm|rmi|stop|start|restart|kill|create|pull|push|build|exec\s+-it|compose\s+(?:up|down|restart|pull|rm))|"
     r"virsh\s+(?:start|destroy|shutdown|reboot|define|undefine|create)|"
     r"iptables|nft|ufw\s+(?:allow|deny|delete|enable|disable|reset)|firewall-cmd\s+--(?:add|remove|reload)|"
@@ -167,6 +172,7 @@ _SUBCOMMAND_HEADS = frozenset({
     "systemctl", "service", "pct", "qm", "docker", "podman", "virsh", "ufw", "firewall-cmd", "ip", "wg", "wg-quick",
     "nmcli", "zfs", "zpool", "git", "sed", "perl", "crontab", "apt", "apt-get", "curl", "wget", "snap", "pip", "pip3",
     "npm", "yarn", "cargo", "make", "kill", "pkill", "nft", "iptables", "update-alternatives", "update-grub", "update-initramfs",
+    "pvesh", "pvesm", "pveum", "pvecm", "pvenode",   # §17.1156
 })
 
 # §17.1150 — READ forms of tools whose HEAD is a mutation verb: `dpkg -l`,
