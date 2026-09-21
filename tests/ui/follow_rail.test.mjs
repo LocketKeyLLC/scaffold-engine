@@ -78,7 +78,8 @@ test("no current step: finished steps before, pending after; empty input is safe
 });
 
 test("the hub knows the follow tab", () => {
-  assert.ok(KNOWN_TABS.includes("follow"));
+  assert.ok(KNOWN_TABS.includes("follow") && KNOWN_TABS.includes("full"));   // §17.1161 — run IS follow; full is the classic page
   assert.equal(resolveTab("follow"), "follow");
+  assert.equal(resolveTab("run"), "run");
   assert.equal(TAB_ALIASES.assist, "run");                                 // the Run aliases are untouched
 });

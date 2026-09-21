@@ -815,7 +815,8 @@ export function renderChat(container, sessionId, opts = {}) {
   if (follow) {
     // §17.1160 — the rail IS the plan context: no step card, no contract card,
     // no folded details row under the chat. Details + help open from the rail.
-    mount(container, helpPanel, main);
+    // §17.1161 — the standalone route keeps its own one-line header.
+    mount(container, embedded ? null : header, helpPanel, main);
     rail.append(el("div", { class: "follow-rail-foot" },
       el("button", { class: "btn btn-sm btn-ghost", text: "? Help", onClick: () => toggleHelp() }),
       el("details", { class: "follow-details" }, el("summary", { class: "btn btn-sm btn-ghost", text: "Details" }), belowGrid, briefSlot)));
@@ -928,7 +929,7 @@ export function renderChat(container, sessionId, opts = {}) {
     const head = el("div", { class: "follow-rail-head" },
       el("span", { class: "follow-rail-count", text: `${m.doneCount} of ${m.total} done` }),
       el("span", { class: "spacer" }),
-      el("a", { class: "small dim", href: `#/job/${session.job_id}/run`, text: "Full view", title: "The full Run tab" }));
+      el("a", { class: "small dim", href: `#/job/${session.job_id}/full`, text: "Full view", title: "The classic walkthrough page: step card, whole-session transcript, every action, and the other tabs" }));
     const foot = rail.querySelector(".follow-rail-foot");
     const body = el("div", { class: "follow-rail-body" },
       m.doneHidden ? railFold(m.doneHidden, "done", () => { railExpandDone = true; renderRail(); }) : null,
@@ -1952,6 +1953,8 @@ export function renderChat(container, sessionId, opts = {}) {
 }
 
 export default function assist(container, params) {
-  if (params && params.sessionId) return renderChat(container, params.sessionId);
+  // §17.1161 — the standalone route is the Follow layout too (the page the
+  // operator was on when "none of the changes" were visible).
+  if (params && params.sessionId) return renderChat(container, params.sessionId, { follow: true });
   return renderPicker(container);
 }
