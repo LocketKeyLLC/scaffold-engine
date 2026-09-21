@@ -68,6 +68,9 @@ _ensure_dev:
 # The production runtime is never touched; nothing to "restore" afterwards.
 TEST_DB_NAME ?= scaffold_engine_test
 RUNNER_LOOP_LOG_DIR ?= /tmp/scaffold-runner-loop
+# §17.1153 — lanes that share $(TEST_DB_NAME) run one at a time: a unit test that starts the app lifespan
+# sweeps EVERY 'running' turn row in that DB (the §17.875 zombie sweep), which killed an end-to-end run in flight.
+TEST_DB_LOCK ?= /tmp/scaffold-test-db.lock
 # Same credentials/host as the composed engine, database name swapped — the
 # URL stays single-sourced in compose. Needs scaffold-orchestrator up (every
 # other DB-touching target here reads the URL the same way).
@@ -104,7 +107,7 @@ test-db-reset: ## §17.1108 — drop and recreate the TEST database (never touch
 	$(MAKE) test-db
 
 test: test-db ## Core suite in a THROWAWAY dev container against $(TEST_DB_NAME) (§17.1108), MINUS the pipeline lane (see test-pipelines) and MINUS integration-marked tests (see test-integration). Run test-all for both unit lanes.
-	$(_TEST_RUN) pytest tests/ --timeout=30 -v -m "not integration" --ignore-glob='*/test_scaffold_router_*'
+	flock -w 7200 $(TEST_DB_LOCK) $(_TEST_RUN) pytest tests/ --timeout=30 -v -m "not integration" --ignore-glob='*/test_scaffold_router_*'
 
 test-integration: _ensure_dev ## §17.1108 — the integration-marked lane. DELIBERATELY drives the LIVE engine (tests/integration + tests/test_integration.py post to localhost:8000 inside the orchestrator); swaps the live container to the dev image. Restore with `make build`.
 	@printf '\033[1;33m⚠ integration lane: runs INSIDE the live orchestrator and writes real jobs to scaffold_engine. Ctrl-C now if that is not intended.\033[0m\n'; sleep 3
@@ -112,7 +115,7 @@ test-integration: _ensure_dev ## §17.1108 — the integration-marked lane. DELI
 
 test-runner-loop: test-db ## §17.1153 — the local-runner loop END TO END (probe → repair step → re-point → look-ups → batched state check), in a THROWAWAY dev container against $(TEST_DB_NAME): starts its OWN engine (:8001) + helper (:8791); never touches the live engine or the operator's runner. ~4 min; needs Postgres + Ollama. Logs: $(RUNNER_LOOP_LOG_DIR)
 	@mkdir -p $(RUNNER_LOOP_LOG_DIR) && chmod 777 $(RUNNER_LOOP_LOG_DIR)
-	$(_TEST_RUN_PRE) -e ITEST_LOG_DIR=/itest -v $(RUNNER_LOOP_LOG_DIR):/itest scaffold-engine:dev pytest tests/integration/test_runner_loop_live.py --timeout=900 -q -p no:warnings
+	flock -w 7200 $(TEST_DB_LOCK) $(_TEST_RUN_PRE) -e ITEST_LOG_DIR=/itest -v $(RUNNER_LOOP_LOG_DIR):/itest scaffold-engine:dev pytest tests/integration/test_runner_loop_live.py --timeout=900 -q -p no:warnings
 
 test-pipelines: _ensure_dev_image ## §17.807 — OWUI pipeline tests (test_scaffold_router_*) with --noconftest (tests/conftest.py eager-loads app, shadowing the pipeline mocks); throwaway container (§17.1108)
 	$(_TEST_RUN) sh -c 'cd /code && pytest tests/test_scaffold_router_*.py --noconftest --timeout=30 -v'
