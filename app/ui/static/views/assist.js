@@ -1953,8 +1953,24 @@ export function renderChat(container, sessionId, opts = {}) {
 }
 
 export default function assist(container, params) {
-  // §17.1161 — the standalone route is the Follow layout too (the page the
-  // operator was on when "none of the changes" were visible).
-  if (params && params.sessionId) return renderChat(container, params.sessionId, { follow: true });
+  // §17.1162 — ONE walkthrough page. The standalone route (reached from the
+  // sidebar's Assistant entry and old links) forwards to the job's Run tab,
+  // which owns the compact chrome: folded sidebar, one-line header, no tab
+  // strip. Rendering the layout here too left the full sidebar and the old
+  // "Assistant" header around it — "in no way like the new one".
+  if (params && params.sessionId) {
+    mount(container, loading("Opening the walkthrough…"));
+    (async () => {
+      try {
+        const s = await api.get(`/assist/${params.sessionId}`);
+        if (s && s.job_id) { location.hash = `#/job/${s.job_id}/run`; return; }
+      } catch (e) {
+        mount(container, errorPanel(e));
+        return;
+      }
+      mount(container, errorPanel({ message: "This session has no job to open." }));
+    })();
+    return () => {};
+  }
   return renderPicker(container);
 }
