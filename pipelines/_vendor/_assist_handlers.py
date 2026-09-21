@@ -1428,6 +1428,9 @@ def assist_guide_stream_cmd(
     content live; the destructive banner + sources footnote are appended on
     `done` (trailing — we don't know them until generation completes). A cache
     hit arrives as one delta + done(cached) and renders instantly."""
+    if getattr(pipe.valves, "assist_server_turn_loop", False) and not refine:   # §17.1157 — claim-and-guide with recipe/repair diverts + look-ups
+        yield from assist_server_turn(pipe, session_id, None, command="guide", node_key=node_key, history=history)
+        return
     url = f"{pipe.valves.orchestrator_url}/assist/{session_id}/guide/stream"
     body = {"node_key": node_key, "refine": refine, "research": research,
             "force": force, "history": history or []}  # §17.687
@@ -1598,6 +1601,95 @@ def record_turn_bg(pipe, session_id: str, content: str, *,
 # operator typing a /assist subcommand. Obvious short verbs are matched here
 # with no LLM; substantive/ambiguous messages hit the /interpret classifier.
 # ---------------------------------------------------------------------------
+
+
+def assist_server_turn(
+    pipe, session_id: str, msg: str | None, *, command: str = "message",
+    node_key: str | None = None, history: list[dict] | None = None,
+) -> Generator[str, None, None]:
+    """§17.1157 — the SERVER-SIDE turn loop (`POST /assist/{sid}/message`,
+    §17.868) rendered for Open WebUI. Until this, the pipeline composed every
+    plain-language turn client-side (fast verbs → /interpret → its own
+    cascade) and nothing from the server loop reached OWUI operators: the
+    engine's own answers about its capabilities, repair steps, the local
+    runner's look-ups, the guest-reachability check, batched state checks.
+    Gated by the `assist_server_turn_loop` valve. The server ingests the
+    message itself — no `record_turn_bg` on this path (one capture per turn).
+
+    Frames → markdown, the way the SPA renders them: status lines as a quiet
+    italic trail, answers verbatim, the streamed walkthrough under its usual
+    heading, a step outcome as one line, a pulse as an elapsed notice."""
+    url = f"{pipe.valves.orchestrator_url}/assist/{session_id}/message"
+    body = {"message": msg, "command": command, "node_key": node_key, "history": history or []}
+    q: _q.Queue = _q.Queue()
+    stop_event = _th.Event()
+    r_holder: list = []
+    reader = _th.Thread(
+        target=pipe._stream_sse_to_queue, args=(url, body, q),
+        kwargs={"stop_event": stop_event, "r_holder": r_holder}, daemon=True,
+    )
+    reader.start()
+    sse = _sse_events_const(pipe)
+    guide_open = False
+    last_status = ""
+    try:
+        while True:
+            try:
+                msg_type, f1, f2 = q.get(timeout=pipe.valves.keepalive_interval)
+            except _q.Empty:
+                yield "\u200b"; continue
+            if msg_type in ("connected", "heartbeat"):
+                continue
+            if msg_type == "http_error":
+                yield f"❌ HTTP {f1}: {(f2 or '')[:200]}"; return
+            if msg_type == "error":
+                yield f"\n❌ Connection error: {f1}"; return
+            if msg_type == "done":
+                break
+            event_type, data = f1, f2
+            try:
+                payload = json.loads(data) if data else {}
+            except Exception:
+                continue
+            if event_type == sse.ASSIST_GUIDE_DELTA:
+                if not guide_open:
+                    yield "\n\n## 🧭 How to do this step\n\n"
+                    guide_open = True
+                yield payload.get("text", "")
+            elif event_type == sse.ASSIST_GUIDE_DONE:
+                guide_open = False
+                yield "\n"
+            elif event_type == sse.ASSIST_TURN_STATUS:
+                txt = (payload.get("text") or "").strip()
+                if txt and txt != last_status:
+                    last_status = txt
+                    yield f"\n_{txt}_\n"
+            elif event_type == sse.ASSIST_ANSWER:
+                txt = (payload.get("text") or "").rstrip()
+                if txt:
+                    yield f"\n\n{txt}\n"
+            elif event_type == sse.ASSIST_STEP_OUTCOME:
+                st, nk = payload.get("status") or "", payload.get("node_key") or ""
+                if st == "committed":
+                    yield f"\n✅ **Step {nk} committed.**\n"
+                elif st in ("step_incomplete", "verification_failed", "step_unverified") and payload.get("verify_reason"):
+                    yield f"\n⚠ Not committed — {payload['verify_reason']}\n"
+            elif event_type == sse.ASSIST_REPLAN_PROPOSAL:
+                yield "\n📝 _A plan-change proposal is waiting — reply **approve** or **dismiss**._\n"
+            elif event_type == sse.ASSIST_TURN_PULSE:
+                yield f"\n_…still working ({payload.get('running_s', 0)}s)…_\n"
+            elif event_type == "error":
+                yield f"\n❌ {payload.get('detail') or 'the turn failed'}\n"
+            elif event_type == sse.ASSIST_TURN_DONE:
+                break
+    finally:
+        stop_event.set()
+        try:
+            r = r_holder[0] if r_holder else None
+            if r is not None:
+                r.close()
+        except Exception:
+            pass
 
 _FAST_INTENT_PHRASES = {
     "advance": {
@@ -2498,6 +2590,9 @@ def assist_nl_turn(
     # The operator's device auto-curls "can't" → "can’t", which silently broke
     # pivot detection (§17.691) and re-rendered the stale step.
     msg = _normalize_punct(msg or "")
+    if getattr(pipe.valves, "assist_server_turn_loop", False):   # §17.1157 — the server loop owns the turn (it ingests the message itself)
+        yield from assist_server_turn(pipe, session_id, msg, node_key=node_key, history=history)
+        return
     # §17.710a — lossless capture: record the raw message BEFORE any classifier
     # or fast-verb routing, so the transcript never depends on the intent being
     # read correctly. Fire-and-forget; server no-ops unless the capture valve is
