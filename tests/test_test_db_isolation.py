@@ -93,7 +93,9 @@ def test_unit_lanes_never_exec_into_the_live_orchestrator(target):
 def test_core_lane_excludes_integration_and_uses_the_test_db():
     src = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "TEST_DB_NAME ?= scaffold_engine_test" in src
-    assert re.search(r'_TEST_RUN = docker run .*-e DATABASE_URL="\$\(TEST_DB_URL\)"', src)
+    # §17.1153 — the macro is split: _TEST_RUN_PRE (flags + mounts) + the image, so a lane can add flags before the image
+    assert re.search(r'_TEST_RUN_PRE = docker run .*-e DATABASE_URL="\$\(TEST_DB_URL\)"', src)
+    assert "_TEST_RUN = $(_TEST_RUN_PRE) scaffold-engine:dev" in src
     assert '-m "not integration"' in _recipe("test")
     assert "test: test-db" in src, "the core lane provisions the test DB first"
 
@@ -105,7 +107,7 @@ def test_unit_lane_never_loads_the_real_reranker():
     loader 'down' for 5 minutes and failed the health tests that ran after
     it. The lane disables the prewarm and Hub access outright."""
     src = (ROOT / "Makefile").read_text(encoding="utf-8")
-    m = re.search(r"_TEST_RUN = docker run(?:.*\\\n)*.*scaffold-engine:dev", src)
+    m = re.search(r"_TEST_RUN_PRE = docker run(?:.*\\\n)*.*-w /code\n_TEST_RUN = \$\(_TEST_RUN_PRE\) scaffold-engine:dev", src)
     assert m, "_TEST_RUN definition not found"
     assert "-e SCAFFOLD_PREWARM_RERANKER=false" in m.group(0)
     assert "-e HF_HUB_OFFLINE=1" in m.group(0)
@@ -171,3 +173,17 @@ def test_dockerfile_user_lines_carry_no_inline_comment():
     assert users, "Dockerfile has no USER instruction"
     for ln in users:
         assert re.fullmatch(r"USER \S+", ln.rstrip()), f"inline comment on a USER line: {ln!r}"
+
+
+def test_runner_loop_lane_is_throwaway_and_wired_into_tier_2():
+    """§17.1153 — the end-to-end runner test runs in the THROWAWAY lane (its
+    own engine + helper), never by swapping the live container, and tier 2
+    runs it as its last step."""
+    src = (ROOT / "Makefile").read_text(encoding="utf-8")
+    block = _recipe("test-runner-loop")
+    assert "$(_TEST_RUN_PRE)" in block and "scaffold-engine:dev pytest tests/integration/test_runner_loop_live.py" in block
+    assert "docker exec $(CONTAINER)" not in block
+    assert "-v $(RUNNER_LOOP_LOG_DIR):/itest" in block and "-e ITEST_LOG_DIR=/itest" in block
+    assert "test-runner-loop: test-db" in src
+    tier2 = _recipe("ci-tier-2")
+    assert "step 6/6: local-runner loop end to end" in tier2 and "$(MAKE) test-runner-loop" in tier2

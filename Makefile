@@ -18,7 +18,7 @@ API_URL   ?= http://localhost:8000
 # §17.854 (audit H7) — completed the phony list: coverage/backup/restore/rebaseline/ci-smoke/
 # test-ui/lint-migrations/check-env-example/check-version/clean-pyc/bench-check-rag-* were real
 # targets missing here, so a same-named file at repo root would make them silently no-op.
-.PHONY: audit-gate _ensure_dev _ensure_dev_image test-db test-db-reset test-integration test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain apply-preset model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
+.PHONY: audit-gate _ensure_dev _ensure_dev_image test-db test-db-reset test-integration test-runner-loop test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain apply-preset model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -67,6 +67,7 @@ _ensure_dev:
 # end in `_test` (SCAFFOLD_ALLOW_LIVE_TEST_WRITES=1 overrides, deliberately).
 # The production runtime is never touched; nothing to "restore" afterwards.
 TEST_DB_NAME ?= scaffold_engine_test
+RUNNER_LOOP_LOG_DIR ?= /tmp/scaffold-runner-loop
 # Same credentials/host as the composed engine, database name swapped — the
 # URL stays single-sourced in compose. Needs scaffold-orchestrator up (every
 # other DB-touching target here reads the URL the same way).
@@ -79,10 +80,11 @@ _TEST_MOUNTS = -v $(CURDIR)/app:/code/app:ro -v $(CURDIR)/tests:/code/tests:ro -
 	-v $(CURDIR)/docs:/code/docs:ro -v $(CURDIR)/pyproject.toml:/code/pyproject.toml:ro -v $(CURDIR)/presets:/code/presets:ro \
 	-v $(CURDIR)/rules:/code/rules:ro -v $(CURDIR)/sgconfig.yml:/code/sgconfig.yml:ro -v $(CURDIR)/.env.example:/code/.env.example:ro \
 	-v $(CURDIR)/Makefile:/code/Makefile:ro
-_TEST_RUN = docker run --rm --network ai-network --env-file .env -e LOG_FILE= -e DATABASE_URL="$(TEST_DB_URL)" \
+_TEST_RUN_PRE = docker run --rm --network ai-network --env-file .env -e LOG_FILE= -e DATABASE_URL="$(TEST_DB_URL)" \
 	-e SCAFFOLD_RUN_MIGRATIONS_ON_STARTUP=false -e HOME=/tmp -e COVERAGE_FILE=/tmp/.coverage \
 	-e SCAFFOLD_PREWARM_RERANKER=false -e HF_HUB_OFFLINE=1 \
-	--user $$(id -u):$$(id -g) $(_TEST_MOUNTS) -w /code scaffold-engine:dev
+	--user $$(id -u):$$(id -g) $(_TEST_MOUNTS) -w /code
+_TEST_RUN = $(_TEST_RUN_PRE) scaffold-engine:dev
 
 _ensure_dev_image:
 	@docker image inspect scaffold-engine:dev >/dev/null 2>&1 \
@@ -107,6 +109,10 @@ test: test-db ## Core suite in a THROWAWAY dev container against $(TEST_DB_NAME)
 test-integration: _ensure_dev ## §17.1108 — the integration-marked lane. DELIBERATELY drives the LIVE engine (tests/integration + tests/test_integration.py post to localhost:8000 inside the orchestrator); swaps the live container to the dev image. Restore with `make build`.
 	@printf '\033[1;33m⚠ integration lane: runs INSIDE the live orchestrator and writes real jobs to scaffold_engine. Ctrl-C now if that is not intended.\033[0m\n'; sleep 3
 	docker exec $(CONTAINER) pytest tests/ --timeout=900 -v -m integration --ignore-glob='*/test_scaffold_router_*'
+
+test-runner-loop: test-db ## §17.1153 — the local-runner loop END TO END (probe → repair step → re-point → look-ups → batched state check), in a THROWAWAY dev container against $(TEST_DB_NAME): starts its OWN engine (:8001) + helper (:8791); never touches the live engine or the operator's runner. ~4 min; needs Postgres + Ollama. Logs: $(RUNNER_LOOP_LOG_DIR)
+	@mkdir -p $(RUNNER_LOOP_LOG_DIR) && chmod 777 $(RUNNER_LOOP_LOG_DIR)
+	$(_TEST_RUN_PRE) -e ITEST_LOG_DIR=/itest -v $(RUNNER_LOOP_LOG_DIR):/itest scaffold-engine:dev pytest tests/integration/test_runner_loop_live.py --timeout=900 -q -p no:warnings
 
 test-pipelines: _ensure_dev_image ## §17.807 — OWUI pipeline tests (test_scaffold_router_*) with --noconftest (tests/conftest.py eager-loads app, shadowing the pipeline mocks); throwaway container (§17.1108)
 	$(_TEST_RUN) sh -c 'cd /code && pytest tests/test_scaffold_router_*.py --noconftest --timeout=30 -v'
@@ -467,17 +473,17 @@ check-next-actions: ## §17.195 — Verify pipelines/_vendor/_next_actions.py is
 ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + golden retrieval gate (§17.550 corpus set, floors cov5>=70%/mrr>=0.55) + bench regression gates (§17.352). Runs locally OR via self-hosted CI; requires the orchestrator + Milvus + Postgres + Redis + Ollama stack to be live.
 	@set -euo pipefail; \
 	printf '\033[1;36m== §17.247 tier 2 — full-stack integration ==\033[0m\n'; \
-	printf '\033[1;36m-- step 1/5: orchestrator /health --\033[0m\n'; \
+	printf '\033[1;36m-- step 1/6: orchestrator /health --\033[0m\n'; \
 	if ! curl -sf --max-time 5 http://localhost:8000/health >/dev/null; then \
 		printf '\033[1;31m✗ orchestrator /health unreachable\033[0m  Fix: docker compose up -d scaffold-orchestrator\n'; \
 		exit 1; \
 	fi; \
 	echo "  ✓ orchestrator healthy"; \
-	printf '\033[1;36m-- step 2/5: make doctor (whole-cloth) --\033[0m\n'; \
+	printf '\033[1;36m-- step 2/6: make doctor (whole-cloth) --\033[0m\n'; \
 	$(MAKE) doctor; \
-	printf '\033[1;36m-- step 3/5: make check-rerank-drift --\033[0m\n'; \
+	printf '\033[1;36m-- step 3/6: make check-rerank-drift --\033[0m\n'; \
 	$(MAKE) check-rerank-drift; \
-	printf '\033[1;36m-- step 4/5: golden retrieval sidecar --\033[0m\n'; \
+	printf '\033[1;36m-- step 4/6: golden retrieval sidecar --\033[0m\n'; \
 	mkdir -p /tmp/ci-tier-2; \
 	docker run --rm \
 		--network ai-network \
@@ -503,8 +509,10 @@ ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + g
 	print('  coverage_at_5=%.1f%%  coverage_at_10=%.1f%%  mean_mrr=%.3f  (§17.550 corpus set; floors cov5>=%.0f%% mrr>=%.2f)' % (c5*100,c10*100,mrr,min5*100,minmrr)); \
 	sys.exit(0 if (c5>=min5 and mrr>=minmrr) else 1)" \
 	|| { printf '\033[1;31m✗ retrieval quality below floor — corpus golden set §17.550 (override: RETRIEVAL_MIN_COV5 / RETRIEVAL_MIN_MRR)\033[0m\n'; exit 1; }; \
-	printf '\033[1;36m-- step 5/5: bench regression gates (§17.352) --\033[0m\n'; \
+	printf '\033[1;36m-- step 5/6: bench regression gates (§17.352) --\033[0m\n'; \
 	$(MAKE) bench-check; \
+	printf '\033[1;36m-- step 6/6: local-runner loop end to end (§17.1153) --\033[0m\n'; \
+	$(MAKE) test-runner-loop; \
 	printf '\033[1;32mAll tier 2 checks passed.\033[0m\n'
 
 check-rerank-drift: ## §17.245 — Verify MODEL_RERANKER default matches across Dockerfile ARG ↔ app/config.py ↔ .env.example (CI gate; mirrors doctor section 12)

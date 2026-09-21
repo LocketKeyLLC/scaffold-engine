@@ -110,6 +110,21 @@ async def _tcp(host: str, port: int) -> str:
         return f"error: {exc.strerror or exc}"[:80]
 
 
+async def _http_status(endpoint: str, headers: dict) -> Optional[int]:
+    """One bounded GET with the registered headers; the status code, or None
+    when nothing HTTP answered. (A GET is not a valid MCP request — any status
+    but 401 means "reachable"; 401 means the token is wrong.)"""
+    import asyncio
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=TCP_TIMEOUT_S) as c:
+            r = await asyncio.wait_for(c.get(endpoint, headers={**headers, "Accept": "application/json, text/event-stream"}),
+                                       timeout=TCP_TIMEOUT_S + 1)
+            return r.status_code
+    except Exception:
+        return None
+
+
 async def diagnose_runner_path(spec) -> dict:
     """§17.1148 — what stands between the engine and the runner, as facts the
     engine can establish on its own: ``{"class", "detail", "checks"}``.
@@ -139,6 +154,16 @@ async def diagnose_runner_path(spec) -> dict:
                                f"but port {port} times out — the port is being dropped by a firewall on that host.")}
         return {"class": "host_down", "checks": checks,
                 "detail": f"nothing on {host} answers from the engine host (ports {port}, {', '.join(str(p) for p in _SIBLING_PORTS)} all time out) — wrong address, or the host is down/unreachable."}
+    # §17.1153 — the MCP SDK hides the HTTP status ("Server returned an error
+    # response"), so a token mismatch was classed `unknown` and its repair was
+    # lost (the first run of the end-to-end test caught it). One plain HTTP
+    # request with the registered header settles it: the helper's guard answers
+    # 401 to a wrong token before any MCP framing.
+    status = await _http_status(spec.endpoint, spec.headers or {})
+    checks["http_status"] = status
+    if status == 401:
+        return {"class": "token", "checks": checks,
+                "detail": f"{host}:{port} answered but rejected the token — the helper that is running was started with a different --token."}
     try:
         from app.modules import mcp_client
         tools = await asyncio.wait_for(mcp_client.list_tools(spec, use_cache=False), timeout=PROBE_TIMEOUT_S)
@@ -1425,15 +1450,18 @@ async def repoint_after_repair(db, session_id: str, node_key: str) -> Optional[s
     """§17.1152 — after a recipe/repair step commits, the operator goes BACK to
     the step it was inserted before (the open non-recipe step that depends on
     it), not to the earliest claimable step in the plan. Live: ADD79's commit
-    sent the session to ADD17 (an NVIDIA step) instead of ADD49."""
+    sent the session to ADD17 (an NVIDIA step) instead of ADD49. The anchor
+    may itself be a recipe step (a repair sits before the VERIFY step); only
+    another repair is never the target (§17.1153 — the end-to-end test caught
+    the recipe exclusion)."""
     try:
         row = (await db.execute(text("""
             SELECT d.node_key FROM dag_nodes d JOIN assist_steps s ON s.job_id = d.job_id AND s.node_key = d.node_key
              WHERE s.session_id = :sid AND :nk = ANY(d.depends_on)
-               AND d.description NOT LIKE :m1 AND d.description NOT LIKE :m2
+               AND d.description NOT LIKE :m2
                AND s.status IN ('pending', 'presented')
              ORDER BY d.execution_order NULLS LAST, d.node_key LIMIT 1
-        """), {"sid": session_id, "nk": node_key, "m1": f"%{RECIPE_STEP_MARK}%", "m2": f"%{REPAIR_MARK}%"})).mappings().first()
+        """), {"sid": session_id, "nk": node_key, "m2": f"%{REPAIR_MARK}%"})).mappings().first()
     except Exception as exc:
         logger.warning("repoint_after_repair_lookup_failed sid=%s nk=%s err=%r", session_id, node_key, exc)
         return None

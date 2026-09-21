@@ -583,6 +583,9 @@ async def test_probe_local_runner_reads_the_registry_and_diagnoses_the_path(monk
     tcp = {}
     async def _tcp(host, port): return tcp.get(port, "open")
     monkeypatch.setattr(es, "_tcp", _tcp)
+    http = {"status": 400}
+    async def _http(endpoint, headers): return http["status"]
+    monkeypatch.setattr(es, "_http_status", _http)
     # hit (a current helper announces its version in the tool description — §17.1151)
     _cur = [{"name": "run_readonly", "description": f"Run ONE read-only… (helper v{es.expected_helper_version()})"}]
     monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=_cur))
@@ -604,11 +607,15 @@ async def test_probe_local_runner_reads_the_registry_and_diagnoses_the_path(monk
     tcp.update({8790: "timeout", 22: "timeout", 8006: "timeout"})
     pr = await es.probe_local_runner(db)
     assert pr["class"] == "host_down" and "ip -4 -brief addr" in pr["repair"] and "192.168.1.156" in pr["repair"]
-    # token mismatch
-    tcp.clear()
-    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("HTTP 401 Unauthorized")))
+    # token mismatch — §17.1153: settled by the plain HTTP status (the SDK hides it: "Server returned an error response")
+    tcp.clear(); http["status"] = 401
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("MCPError: Server returned an error response")))
     pr = await es.probe_local_runner(db)
     assert pr["class"] == "token" and "Re-run the install with the token" in pr["repair"] and "```bash" in pr["repair"]
+    assert mcp_client.list_tools.await_count == 0                      # never reached the SDK
+    http["status"] = 400
+    monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(side_effect=RuntimeError("HTTP 401 Unauthorized")))
+    assert (await es.probe_local_runner(db))["class"] == "token"       # the string path still works
     # not the runner
     monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "other"}]))
     pr = await es.probe_local_runner(db)
@@ -855,6 +862,8 @@ async def test_stale_helper_is_a_probe_class_with_a_one_paste_refresh(monkeypatc
     monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
     async def _tcp(host, port): return "open"
     monkeypatch.setattr(es, "_tcp", _tcp)
+    async def _http(endpoint, headers): return 400
+    monkeypatch.setattr(es, "_http_status", _http)
     monkeypatch.setattr(es, "_EXPECTED_HELPER_VERSION", "3")
     monkeypatch.setattr(mcp_client, "list_tools", AsyncMock(return_value=[{"name": "run_readonly", "description": "Run ONE read-only… Refuses anything that writes."}]))
     pr = await es.probe_local_runner(db)
