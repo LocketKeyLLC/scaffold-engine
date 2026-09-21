@@ -135,3 +135,39 @@ class ReplyTail:
 
     def text(self) -> str:
         return self._last
+
+
+_ON_RE = re.compile(r"📍\s*On:\s*(.+)")
+_NOT_RUNNER_WORDS = ("console", "novnc", "web ui", "browser", "inside", "guest", "container", "lxc", " ct ", " vm ",
+                     "vm's", "virtual machine", "the vm", "windows", "your laptop", "your pc", "your workstation")
+
+
+def block_location(text: str) -> Optional[str]:
+    """The `📍 On:` line that governs the reply's FIRST block (the nearest one
+    before it, else the first one anywhere), or None."""
+    t = text or ""
+    m = _RUN_NOW_RE.search(t)
+    start = m.end() if m else 0
+    f = _FENCE_RE.search(t, start) or (_FENCE_RE.search(t) if m else None)
+    before = t[:f.start()] if f else t
+    ons = _ON_RE.findall(before)
+    if ons:
+        return ons[-1].strip()
+    ons = _ON_RE.findall(t)
+    return ons[0].strip() if ons else None
+
+
+def location_is_runner_host(where: Optional[str], *, host: Optional[str], ip: Optional[str], user: Optional[str]) -> bool:
+    """§17.1152 — True when the block is meant for the machine the runner is
+    on. No location line → the shell (True). A console / a VM / a container /
+    another `user@host` → False."""
+    if not where:
+        return True
+    w = f" {where.lower()} "
+    if any(k in w for k in _NOT_RUNNER_WORDS):
+        return False
+    mm = re.findall(r"\b([a-z_][a-z0-9_-]*)@([a-z0-9][a-z0-9.-]*)", w)
+    if mm:
+        ok_hosts = {str(h).lower() for h in (host, ip) if h and not str(h).startswith("<")}
+        return any(h.lower() in ok_hosts or any(h.lower().startswith(o.split(".")[0]) for o in ok_hosts) for _u, h in mm)
+    return True

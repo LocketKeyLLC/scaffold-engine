@@ -221,6 +221,29 @@ def read_form(argv) -> bool:
 _SSH_FLAGS_WITH_ARG = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-W", "-b", "-c", "-e", "-I", "-m", "-O", "-Q", "-S", "-w", "-E", "-B"}
 
 
+_CONTAINER_EXEC = {"pct": ("exec",), "lxc-attach": (), "qm": ("guest", "exec")}
+
+
+def container_exec_remainder(argv: list) -> Optional[str]:
+    """``pct exec <ct> [--] <cmd…>`` / ``qm guest exec <vm> [--] <cmd…>`` /
+    ``lxc-attach -n <ct> -- <cmd…>``: the command that runs INSIDE the guest,
+    or None when argv is not such a shape. §17.1152 — live: `pct exec 111 --
+    sh -c 'rm -rf /x'` passed this gate (the wrapper head is a read)."""
+    head = argv[0].rsplit("/", 1)[-1] if argv else ""
+    if head not in _CONTAINER_EXEC:
+        return None
+    subs = _CONTAINER_EXEC[head]
+    if tuple(argv[1:1 + len(subs)]) != subs:
+        return None
+    rest = list(argv[1 + len(subs):])
+    if "--" in rest:
+        return " ".join(rest[rest.index("--") + 1:]).strip() or None
+    i = 0
+    while i < len(rest) and (rest[i].startswith("-") or rest[i].isdigit()):
+        i += 2 if rest[i] in ("-n", "--timeout") else 1
+    return " ".join(rest[i:]).strip() or None
+
+
 def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
     """``ssh [opts] [user@]host <remote command>``: the remote command must pass
     the same gate; no remote command (an interactive login) is refused."""
@@ -264,6 +287,11 @@ def read_only_command(cmd: str) -> bool:
         if argv[0].rsplit("/", 1)[-1] == "ssh":   # §17.1151 — the remote command is judged like a local one
             ok, _why = ssh_remote_read_only(argv, read_only_command)
             if not ok:
+                return False
+            continue
+        inner = container_exec_remainder(argv)   # §17.1152 — pct exec / qm guest exec / lxc-attach: judge what runs INSIDE
+        if inner is not None:
+            if not read_only_command(inner):
                 return False
             continue
         if read_form(argv):        # §17.1150 — `dpkg -l`, `iptables -S`, `pip list`…

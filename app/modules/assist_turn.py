@@ -347,6 +347,7 @@ async def run_turn(
     # turn continues — at most MAX_AUTO_ROUNDS times per operator turn.
     from app.modules import assist_runner_lookup as _rl
     msg, cmd, rounds = message, command, 0
+    ran: set = set()      # §17.1152 — a look-up already run this turn is not run again (the model repeating itself ends the loop)
     while True:
         tail = _rl.ReplyTail()
         async for e in _run_turn_inner(
@@ -359,7 +360,7 @@ async def run_turn(
             break
         record = None
         diverted = False
-        async for e in _auto_lookup(session_id, tail.text(), db):
+        async for e in _auto_lookup(session_id, tail.text(), db, ran):
             if e[0] == "_record":
                 record, diverted = e[1].get("text"), bool(e[1].get("diverted"))
             else:
@@ -376,7 +377,7 @@ async def run_turn(
     yield _ev(ASSIST_TURN_DONE, {"handled": handled["v"]})
 
 
-async def _auto_lookup(session_id: str, reply_text: str, db) -> AsyncIterator[_Event]:
+async def _auto_lookup(session_id: str, reply_text: str, db, ran: set | None = None) -> AsyncIterator[_Event]:
     """§17.1150 — run the reply's read-only look-up through the local runner.
     Yields status frames + an ephemeral note, then a private ``_record`` frame
     carrying the operator turn the output becomes. Yields nothing when there
@@ -388,6 +389,25 @@ async def _auto_lookup(session_id: str, reply_text: str, db) -> AsyncIterator[_E
     commands = _rl.is_lookup(reply_text)
     if not commands:
         return
+    # §17.1152 — the block must be meant for the RUNNER'S machine. Live: "Open
+    # the Proxmox web UI console for VM 110 and type `ip a`" ran `ip a` on
+    # the host, and the model then reasoned over the host's interfaces.
+    try:
+        from app.modules import engine_setup as _es
+        _ctx = await _es.recipe_context(db, session_id)
+        _where = _rl.block_location(reply_text)
+        if not _rl.location_is_runner_host(_where, host=_ctx.get("target_host"), ip=_ctx.get("target_ip"),
+                                           user=_ctx.get("target_user")):
+            logger.info("runner_lookup_skipped_location sid=%s where=%r", session_id, (_where or "")[:100])
+            return
+    except Exception as exc:
+        logger.warning("runner_lookup_location_check_failed sid=%s err=%r", session_id, exc)
+    if ran is not None:
+        key = tuple(commands)
+        if key in ran:
+            logger.info("runner_lookup_skipped_repeat sid=%s first=%r", session_id, commands[0][:80])
+            return
+        ran.add(key)
     try:
         from app.modules import assist_local_runner as _lr
         spec = await _lr.runner_spec(db)
@@ -1394,8 +1414,47 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
                 logger.warning("local_runner_record_failed sid=%s", session_id)
             logger.warning("local_runner_executed sid=%s node_key=%s probes=%d ok=%d",
                            session_id, _rnk, len(executed), sum(1 for e in executed if e["ok"]))
-            async for e in _resolve_state_check(session_id, nk, pasted, [], db):
-                yield e
+            # §17.1152 — EVERY batch runs through the runner. Live (23:04 UTC):
+            # the runner ran the first 23 of 48 probes and the engine handed the
+            # remaining 25 to the operator to paste, in three scripts, over
+            # twelve minutes. The per-script budget exists for a human's clipboard.
+            from app.modules import assist_state_check as _sc
+            _batches = 1
+            while True:
+                _res = await _sc.resolve_state_check(db=db, session_id=session_id, pasted=pasted)
+                _pend = await _sc.get_pending_state_check(db=db, session_id=session_id) if _res.get("pending") else None
+                if not _pend or not _pend.get("probes") or _batches >= 12:
+                    break
+                _batches += 1
+                yield _ev(ASSIST_TURN_STATUS, {"text": f"🩺 Batch {_batches}: running {len(_pend['probes'])} more read-only checks through your local runner…"})
+                _t2 = asyncio.create_task(_lr.run_probes(_spec, _pend["probes"], on_progress=_lp))
+                while not _t2.done():
+                    try:
+                        yield _ev(ASSIST_TURN_STATUS, {"text": await asyncio.wait_for(_pq.get(), timeout=1.0)})
+                    except asyncio.TimeoutError:
+                        continue
+                while not _pq.empty():
+                    yield _ev(ASSIST_TURN_STATUS, {"text": _pq.get_nowait()})
+                pasted, executed = _t2.result()
+                if not executed:
+                    break
+                try:
+                    await assist_agent.ingest_turn(session_id=session_id, role="operator", kind="message",
+                                                   content=_lr.transcript_record(executed, pasted), node_key=_rnk, db=db)
+                except Exception:
+                    logger.warning("local_runner_record_failed sid=%s", session_id)
+                logger.warning("local_runner_executed sid=%s node_key=%s probes=%d ok=%d batch=%d",
+                               session_id, _rnk, len(executed), sum(1 for e in executed if e["ok"]), _batches)
+            # the last resolve's message (final result, or the paste request for what the runner could not run)
+            if _res.get("message"):
+                yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _res["message"]})
+                try:
+                    await assist_agent.capture_assistant_reply(
+                        session_id=session_id, node_key=nk, kind="ask", content=_res["message"], db=db)
+                except Exception:
+                    logger.warning("state_check_result_capture_failed sid=%s", session_id)
+            if _res.get("proposal"):
+                yield _ev(ASSIST_REPLAN_PROPOSAL, {"proposal": _res["proposal"]})
             return
         yield _ev(ASSIST_TURN_STATUS, {"text": "🩺 The local runner executed nothing — falling back to the paste."})
     # §17.1081 — the paste request is where the operator feels the cost; say

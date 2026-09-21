@@ -91,16 +91,30 @@ async def test_run_turn_runs_the_lookup_and_reenters_with_the_output_bounded(mon
     spec = MagicMock(); spec.name = "pve-runner"
     monkeypatch.setattr(assist_turn, "_run_turn_inner", _inner)
     monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
+    from app.modules import engine_setup as es
+    monkeypatch.setattr(es, "ensure_helper_refresh_step", AsyncMock(return_value=None))
+    monkeypatch.setattr(es, "recipe_context", AsyncMock(return_value={"target_host": "pve", "target_ip": "192.168.1.156", "target_user": "root"}))
     monkeypatch.setattr(rl, "run_lookup", AsyncMock(return_value=("== L1 ==\npve\n", [{"id": "L1", "command": "cat /etc/hostname", "ok": True, "chars": 3}])))
     ev = [e async for e in assist_turn.run_turn(session_id="s", message=None, command="guide", node_key="T6", history=[], db=MagicMock())]
     names = [e[0] for e in ev]
-    assert names.count("assist_guide_done") == 1 + rl.MAX_AUTO_ROUNDS        # guide, then one re-entry per round
-    assert names[-1] == "assist_turn_done" and ev[-1][1]["handled"] == "guide+lookup+lookup"
+    # §17.1152 — the inner loop replays the SAME block every time, so the repeat guard ends
+    # the turn after ONE round (a model repeating itself must not spin the runner)
+    assert names.count("assist_guide_done") == 2                           # guide, then one re-entry
+    assert names[-1] == "assist_turn_done" and ev[-1][1]["handled"] == "guide+lookup"
     assert "_record" not in names                                          # the private frame never reaches the client
     notes = [e for e in ev if e[0] == "assist_answer" and e[1].get("kind") == "note"]
-    assert len(notes) == rl.MAX_AUTO_ROUNDS and notes[0][1]["text"].startswith("🔁 Your local runner is connected")
+    assert len(notes) == 1 and notes[0][1]["text"].startswith("🔁 Your local runner is connected")
     assert seen[0] == ("guide", "", "T6")
     assert seen[1][0] == "message" and seen[1][1].startswith("[local-runner] ran the walkthrough") and seen[1][2] is None
+    # a DIFFERENT block each round runs up to MAX_AUTO_ROUNDS
+    seen.clear(); n = {"i": 0}
+    async def _inner3(*, session_id, message, command, node_key, history, db, handled):
+        n["i"] += 1; seen.append(command); handled["v"] = "guide"
+        yield ("assist_guide_delta", {"text": f"**Run this now:**\n```bash\ncat /etc/file{n['i']}\n```"})
+        yield ("assist_guide_done", {"status": "ready", "node_key": "T6"})
+    monkeypatch.setattr(assist_turn, "_run_turn_inner", _inner3)
+    ev = [e async for e in assist_turn.run_turn(session_id="s", message=None, command="guide", node_key="T6", history=[], db=MagicMock())]
+    assert ev[-1][1]["handled"] == "guide+lookup+lookup" and len(seen) == 1 + rl.MAX_AUTO_ROUNDS
     # no runner → no round trip at all
     seen.clear(); monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=None))
     ev = [e async for e in assist_turn.run_turn(session_id="s", message=None, command="guide", node_key="T6", history=[], db=MagicMock())]
@@ -119,3 +133,59 @@ def test_run_turn_is_the_single_wiring_point():
     src = inspect.getsource(assist_turn.run_turn)
     assert "_auto_lookup(" in src and "MAX_AUTO_ROUNDS" in src and 'cmd, rounds = record, "message"' in src
     assert src.index("_run_turn_inner(") < src.index("_auto_lookup(")
+
+
+# ---------------------------------------------------------------------------
+# §17.1152 — the block must be for the runner's machine; a repeated look-up ends the loop.
+# ---------------------------------------------------------------------------
+
+def test_block_location_and_runner_host_rule():
+    console = "## 👉 Do this next\n\n**Open the Proxmox web UI console for VM 110 and type this:**\n\n```\nip a\n```\n\n📍 On: Proxmox web UI console for VM 110 (ai-vm) — you're leaving the root@pve shell"
+    assert rl.first_lookup_block(console) == "ip a"
+    where = rl.block_location(console)
+    assert "console" in where.lower()
+    assert rl.location_is_runner_host(where, host="pve", ip="192.168.1.156", user="root") is False
+    shell = "📍 On: the Proxmox host shell (root@pve)\n\n**Run this now:**\n```bash\nqm status 110\n```"
+    assert rl.location_is_runner_host(rl.block_location(shell), host="pve", ip="192.168.1.156", user="root") is True
+    assert rl.location_is_runner_host(None, host="pve", ip=None, user=None) is True                       # no line → the shell
+    assert rl.location_is_runner_host("aedefruscio@192.168.1.127 (inside VM 110)", host="pve", ip="192.168.1.156", user="root") is False
+    assert rl.location_is_runner_host("root@192.168.1.156", host="pve", ip="192.168.1.156", user="root") is True
+    assert rl.location_is_runner_host("the container (pct exec 111)", host="pve", ip=None, user=None) is False
+    # the governing line is the nearest one BEFORE the first block
+    two = "📍 On: root@pve\n```bash\nqm status 110\n```\n📍 On: VM 110 console\n```\nip a\n```"
+    assert rl.block_location(two) == "root@pve"
+
+
+@pytest.mark.asyncio
+async def test_lookup_skips_console_blocks_and_repeats(monkeypatch):
+    from app.modules import assist_turn, assist_local_runner as lr, engine_setup as es
+    spec = MagicMock(); spec.name = "pve-runner"
+    monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
+    monkeypatch.setattr(es, "ensure_helper_refresh_step", AsyncMock(return_value=None))
+    monkeypatch.setattr(es, "recipe_context", AsyncMock(return_value={"target_host": "pve", "target_ip": "192.168.1.156", "target_user": "root"}))
+    monkeypatch.setattr(rl, "run_lookup", AsyncMock(return_value=("== L1 ==\nx\n", [{"id": "L1", "command": "ip a", "ok": True, "chars": 1}])))
+    console = "📍 On: Proxmox web UI console for VM 110\n\n**Run this now:**\n```\nip a\n```"
+    ev = [e async for e in assist_turn._auto_lookup("s", console, MagicMock(), set())]
+    assert ev == []                                                     # not the runner's machine → nothing runs
+    shell = "📍 On: the Proxmox host shell (root@pve)\n\n**Run this now:**\n```bash\nip a\n```"
+    ran = set()
+    ev = [e async for e in assist_turn._auto_lookup("s", shell, MagicMock(), ran)]
+    assert any(e[0] == "_record" for e in ev) and ran == {("ip a",)}
+    ev = [e async for e in assist_turn._auto_lookup("s", shell, MagicMock(), ran)]
+    assert ev == []                                                     # the same look-up again this turn → the loop ends
+    src = inspect.getsource(assist_turn.run_turn)
+    assert "ran: set = set()" in src and "_auto_lookup(session_id, tail.text(), db, ran)" in src
+
+
+def test_verify_state_runs_every_batch_through_the_runner_and_repair_commit_repoints():
+    from app.modules import assist_turn, engine_setup as es
+    from app.routers import assist as r
+    src = inspect.getsource(assist_turn._start_state_check)
+    blk = src[src.index("§17.1152 — EVERY batch"):src.index("falling back to the paste")]
+    assert "while True:" in blk and "resolve_state_check(" in blk and "get_pending_state_check(" in blk and "run_probes(_spec, _pend[\"probes\"]" in blk
+    assert "_batches >= 12" in blk                                      # bounded
+    rs = inspect.getsource(r.assist_submit)
+    assert rs.index("submit_step(") < rs.index("repoint_after_repair(") < rs.index('result["success_verdict"] = verdict')
+    assert '_recipe_verdict is not None and result.get("status") == "committed"' in rs
+    es_src = inspect.getsource(es.repoint_after_repair)
+    assert ":nk = ANY(d.depends_on)" in es_src and "NOT LIKE :m1 AND d.description NOT LIKE :m2" in es_src and "_present(" in es_src
