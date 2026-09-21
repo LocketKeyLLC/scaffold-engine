@@ -1186,6 +1186,10 @@ async def verify_recipe_submit(*, db, session_id: str, node_key: str, evidence: 
         return None
     r = recipe_of_node(desc)
     if r is None:
+        from app.modules import assist_guest_reach as _gr
+        if _gr.guest_step_class(desc):      # §17.1154 — a guest-check step: re-run the reachability probes
+            return await _gr.verify_guest_step(db=db, session_id=session_id, node_key=node_key,
+                                               description=desc or "", evidence=evidence)
         rr = repair_of_node(desc)
         if rr is None or rr.probe is None:
             return None
@@ -1458,10 +1462,10 @@ async def repoint_after_repair(db, session_id: str, node_key: str) -> Optional[s
         row = (await db.execute(text("""
             SELECT d.node_key FROM dag_nodes d JOIN assist_steps s ON s.job_id = d.job_id AND s.node_key = d.node_key
              WHERE s.session_id = :sid AND :nk = ANY(d.depends_on)
-               AND d.description NOT LIKE :m2
+               AND d.description NOT LIKE :m2 AND d.description NOT LIKE :m3
                AND s.status IN ('pending', 'presented')
              ORDER BY d.execution_order NULLS LAST, d.node_key LIMIT 1
-        """), {"sid": session_id, "nk": node_key, "m2": f"%{REPAIR_MARK}%"})).mappings().first()
+        """), {"sid": session_id, "nk": node_key, "m2": f"%{REPAIR_MARK}%", "m3": "%Engine guest check:%"})).mappings().first()
     except Exception as exc:
         logger.warning("repoint_after_repair_lookup_failed sid=%s nk=%s err=%r", session_id, node_key, exc)
         return None

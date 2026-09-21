@@ -2065,6 +2065,19 @@ async def run_step_fix(
     real blockers are captured for the post-mortem.
     """
     from app.config import settings
+    # §17.1154 — the deterministic guest-reachability check runs ahead of the
+    # model here too (the SPA's 🔧 Fix button and the CLI reach this directly).
+    try:
+        from app.modules import assist_guest_reach as _gr
+        _reach = await _gr.check_and_act(db=db, session_id=session_id, node_key=node_key, error_text=error,
+                                         capture_reply=capture_reply)
+    except Exception as exc:
+        logger.warning("guest_reach_failed sid=%s err=%r", session_id, exc)
+        _reach = None
+    if _reach:
+        return {"session_id": session_id, "node_key": node_key, "fix": _reach["text"], "status": "ready",
+                "guidance_meta": {"deterministic": True, "guest_check": _reach.get("verdict"), "inserted_step": _reach.get("step")},
+                "inserted_step": _reach.get("step")}
     from app.modules import assist_guide
 
     if not (error or "").strip():

@@ -1522,6 +1522,23 @@ async def _fix_flow(session_id: str, nk, error_text: str, history, db,
     """§17.874/884 — the research-backed fix sequence, shared by the fix
     dispatch branch and the incomplete-submit continuation."""
     from app.modules import assist_agent
+    # §17.1154 — an ssh failure to a GUEST is answered from the host FIRST:
+    # the engine probes (status, guest agent, neighbour/FDB tables for the
+    # MAC, ping, the port) through the runner, states the finding, and turns
+    # it into the plan step it names (start it / install its OS / enable
+    # sshd). Deterministic; the model fix runs only when this has nothing to say.
+    try:
+        from app.modules import assist_guest_reach as _gr
+        _reach = await _gr.check_and_act(db=db, session_id=session_id, node_key=nk, error_text=error_text)
+    except Exception as exc:
+        logger.warning("guest_reach_failed sid=%s err=%r", session_id, exc)
+        _reach = None
+    if _reach:   # persisted by the check itself (§17.1099 — one persist per path)
+        yield _ev(ASSIST_ANSWER, {"kind": "fix", "text": _reach["text"]})
+        if _reach.get("step"):
+            async for e in _claim_and_guide(session_id, _reach["step"], history, db, orient=False):
+                yield e
+        return
     # §17.1050 — after several fixes on one step, offer the state check BEFORE
     # yet another fix (never forced: the fix still follows).
     try:
