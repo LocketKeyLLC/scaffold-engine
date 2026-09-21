@@ -365,6 +365,52 @@ async def test_runner_loop_end_to_end(session, helper):
     assert n_rec >= 1
 
 
+async def test_paste_shapes_are_judged_deterministically(session, helper):
+    """§17.1159 — a partial run of the issued block is refused with the skipped
+    commands named (no model); a hung `>` prompt is answered plainly (no model);
+    the sentinel-closed paste of an edited block still counts as complete."""
+    from app.modules import assist_paste as ap
+    sid = session["session_id"]
+    # a plain step with a deterministic two-command block as its cached guidance
+    block = "cat /etc/os-release | head -1\npve-firewall status"
+    guide = f"## 👉 Do this next\n\n**Run this now:**\n```bash\n{block}\n```\n\n## ✅ Done when\n\nBoth commands printed something."
+    async with async_session() as db:
+        await db.execute(text("UPDATE assist_steps SET status='presented', presented_at=NOW(), guidance=:g, guidance_status='ready', guidance_generated_at=NOW() WHERE session_id=:s AND node_key='T11'"), {"s": sid, "g": guide})
+        await db.execute(text("UPDATE assist_sessions SET current_node_key='T11' WHERE id=:s"), {"s": sid})
+        await db.execute(text("INSERT INTO assist_turns (session_id, job_id, node_key, role, kind, content) SELECT :s, job_id, 'T11', 'assistant', 'guide', :g FROM assist_sessions WHERE id = :s"), {"s": sid, "g": guide})
+        await db.commit()
+    # 1. partial run → incomplete, deterministic, the skipped command named
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(f"{BASE}/assist/{sid}/submit", headers=AUTH,
+                              json={"node_key": "T11", "output": "root@localhost:~# cat /etc/os-release | head -1\nPRETTY_NAME=x\nroot@localhost:~#", "action": "submit", "history": []})
+    body = r.json()
+    assert r.status_code == 200 and body["status"] == "step_incomplete", body
+    assert body["success_verdict"]["grounded_by"] == "paste_parser" and body["success_verdict"]["skipped_commands"] == ["pve-firewall status"]
+    assert "1 of 2 commands from the block ran" in body["success_verdict"]["reason"]
+    # 2. a hung continuation prompt → the shape guard answers, no model, nothing committed
+    frames = await _turn(sid, {"message": "root@localhost:~# echo 'oops\n> "})
+    routed = next((d for e, d in frames if e == "assist_turn_routed"), {})
+    assert routed.get("override") == "paste_shape", frames[:4]
+    assert any("waiting for more input" in d.get("text", "") for e, d in frames if e == "assist_answer")
+    assert next(d for e, d in frames if e == "assist_turn_done")["handled"] == "paste_shape"
+    # 3. the block copied back unrun → answered plainly
+    frames = await _turn(sid, {"message": block})
+    assert any("copied back without being run" in d.get("text", "") for e, d in frames if e == "assist_answer")
+    # 4. an edited block closed by the sentinel → complete; the model then judges the OUTPUTS with the parsed pairs
+    s_line = ap.sentinel_for("T11", block)
+    h = ap.block_hash(block)
+    full = (f"root@localhost:~# cat /etc/os-release | head -2\nPRETTY_NAME=x\nNAME=y\nroot@localhost:~# pve-firewall status\n"
+            f"Status: enabled/running\nroot@localhost:~# {s_line}\n== S:T11/{h} ==\nroot@localhost:~#")
+    async with httpx.AsyncClient(timeout=180) as client:
+        r = await client.post(f"{BASE}/assist/{sid}/submit", headers=AUTH, json={"node_key": "T11", "output": full, "action": "submit", "history": []})
+    body = r.json()
+    assert r.status_code == 200 and body["status"] in ("committed", "step_incomplete", "step_unverified"), body
+    assert (body.get("success_verdict") or {}).get("grounded_by") != "paste_parser"     # the parser let it through to the model
+    async with async_session() as db:
+        n = (await db.execute(text("SELECT count(*) FROM assist_turns WHERE session_id = :s AND role = 'assistant' AND content LIKE '%waiting for more input%'"), {"s": sid})).scalar()
+    assert n >= 1                                                                        # the guard's reply is durable
+
+
 async def test_lookup_skips_a_block_meant_for_another_machine(session, helper):
     """§17.1152 — a reply whose `📍 On:` line names a VM console never runs on
     the host through the runner (live: `ip a` ran on the host and the model

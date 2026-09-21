@@ -2989,6 +2989,7 @@ async def verify_submit_outcome(
     # §17.1100 — judge against the walkthrough's own "Done when" bar (the finish
     # line the operator was actually told), so a paste that meets it auto-commits.
     done_criteria = ""
+    cached = None
     try:
         cached = await assist_guide.read_cached_guidance(
             session_id=session_id, node_key=node_key, db=db)
@@ -2996,11 +2997,41 @@ async def verify_submit_outcome(
             done_criteria = assist_guide.extract_done_criterion(cached.get("guidance") or "")
     except Exception:
         done_criteria = ""
+    # §17.1159 — the paste is parsed ONCE here: the issued block (the cached
+    # walkthrough's fences, newest reply first) tells which commands ran; a
+    # partial run is an 'incomplete' verdict BEFORE the model sees anything;
+    # a full run hands the model the command → output pairs.
+    paste_pairs, run_report = "", ""
+    try:
+        from app.modules import assist_paste as _ap
+        _texts = []
+        if cached and cached.get("guidance"):
+            _texts.append(cached["guidance"])
+        _recent = (await db.execute(text("""
+            SELECT content FROM assist_turns WHERE session_id = :sid AND role = 'assistant'
+               AND kind IN ('guide', 'fix') ORDER BY created_at DESC LIMIT 3
+        """), {"sid": session_id})).scalars().all()
+        _texts.extend(_recent or [])
+        _pv = _ap.paste_verdict(evidence, _texts)
+        if _pv and _pv["outcome"] == "incomplete":
+            logger.info("paste_partial_run session_id=%s node_key=%s skipped=%d of=%d",
+                        session_id, node_key, len(_pv["match"]["skipped"]), len(_pv["match"]["issued"]))
+            return {"outcome": "incomplete", "reason": _pv["reason"], "summary": _pv["summary"],
+                    "confidence": "high", "grounded_by": "paste_parser", "skipped_commands": _pv["match"]["skipped"]}
+        _p = _pv["paste"] if _pv else _ap.parse_paste(evidence)
+        if _p.entries:
+            paste_pairs = _ap.render_pairs(_p)
+        if _pv:
+            run_report = _pv["summary"]
+    except Exception as exc:
+        logger.warning("paste_parse_failed session_id=%s err=%r", session_id, exc)
     return await assist_guide.verify_step_success(
         title=row["title"] or node_key,
         task_prompt=row["prompt_template"] or "",
         tool=row["tool"] or "LLM",
         evidence=evidence,
+        paste_pairs=paste_pairs,
+        run_report=run_report,
         environment=_environment_from_metadata(row["metadata"]),
         done_criteria=done_criteria,
         # §17.688 — a decision node is judged on the CHOICE, not the downstream

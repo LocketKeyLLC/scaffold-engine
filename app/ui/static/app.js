@@ -66,7 +66,18 @@ document.addEventListener("click", async (e) => {
     // trailing \n makes a terminal EXECUTE it on paste (operator report — every
     // pasted command "pressed enter by itself"). The operator should always be
     // the one who runs the command.
-    await navigator.clipboard.writeText(code.textContent.replace(/\s+$/, ""));
+    let text = code.textContent.replace(/\s+$/, "");
+    // §17.1159 — a walkthrough block copied for a step gets the step SENTINEL
+    // appended: the paste then names the step and the exact block it came
+    // from, and its presence at the end proves the block ran to completion.
+    // Only shell-shaped blocks under a step bubble (data-step on the bubble).
+    const stepEl = btn.closest("[data-step]");
+    const lang = btn.closest(".md-pre")?.querySelector(".md-lang")?.textContent || "";
+    if (stepEl?.dataset.step && (!lang || /^(bash|sh|shell)$/i.test(lang)) && !/== S:/.test(text)) {
+      const { sentinelFor } = await import("./util.js");
+      text = text + "\n" + sentinelFor(stepEl.dataset.step, text);
+    }
+    await navigator.clipboard.writeText(text);
     const old = btn.textContent;
     btn.textContent = "✓ copied";
     btn.classList.add("copied");

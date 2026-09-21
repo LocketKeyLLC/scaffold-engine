@@ -246,7 +246,26 @@ async def recent_lookups(db, session_id: str, *, minutes: int = 180, limit_turns
             if cmd in seen:
                 continue
             seen.add(cmd)
-            out.append({"command": cmd, "output": (m.group(2) or "").strip(), "at": r["created_at"]})
+            out.append({"command": cmd, "output": (m.group(2) or "").strip(), "at": r["created_at"], "by": "runner"})
+    # §17.1159 — what the OPERATOR ran and pasted counts too: the same command
+    # asked for again is redundant whether the runner or a person ran it.
+    try:
+        prows = (await db.execute(_t("""
+            SELECT content, created_at FROM assist_turns
+             WHERE session_id = :sid AND role = 'operator' AND kind IN ('submit', 'message')
+               AND content NOT LIKE '[local-runner]%' AND created_at > now() - make_interval(mins => :m)
+             ORDER BY created_at DESC LIMIT :n
+        """), {"sid": session_id, "m": int(minutes), "n": int(limit_turns)})).mappings().all()
+        from app.modules.assist_paste import parse_paste
+        for r in prows:
+            for e in parse_paste(r["content"] or "").entries:
+                cmd = " ".join(e.command.split())
+                if not cmd or cmd in seen or e.heredoc:
+                    continue
+                seen.add(cmd)
+                out.append({"command": cmd, "output": (e.output or "").strip(), "at": r["created_at"], "by": "operator"})
+    except Exception as exc:
+        logger.warning("recent_lookups_paste_failed sid=%s err=%r", session_id, exc)
     return out
 
 
@@ -269,6 +288,7 @@ def find_repeated_lookups(text_out: str, ledger: Optional[list[dict]]) -> list[d
             at = e.get("at")
             when = at.strftime("%H:%M UTC") if hasattr(at, "strftime") else str(at or "earlier")
             out = (e.get("output") or "(no output)").strip().replace("\n", " ⏎ ")
+            who = "the operator ran it and pasted the result" if e.get("by") == "operator" else "the engine ran it through your local runner"
             hits.append({"command": ln, "resource": "",
-                         "known": f"the engine ran it through your local runner at {when} and it printed: {out[:200]}"})
+                         "known": f"{who} at {when} and it printed: {out[:200]}"})
     return hits

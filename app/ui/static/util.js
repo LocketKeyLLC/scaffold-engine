@@ -265,3 +265,21 @@ export function moveItem(arr, i, delta) {
   [arr[i], arr[j]] = [arr[j], arr[i]];
   return true;
 }
+
+
+// §17.1159 — the block hash the paste SENTINEL carries: FNV-1a 32-bit over the
+// normalised block (lines trimmed, blanks + comments + any sentinel echo dropped).
+// The SAME function lives in app/modules/assist_paste.py (block_hash); the
+// Python test pins the fixture "qm status 110\nqm config 110" → "e958581d".
+export function blockHash(block) {
+  const lines = String(block || "").split("\n").map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#") && !/^echo\s+"== S:[^"]+ =="$/.test(l));
+  const bytes = new TextEncoder().encode(lines.join("\n"));
+  let h = 0x811c9dc5;
+  for (const b of bytes) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16).padStart(8, "0");
+}
+
+export function sentinelFor(step, block) {
+  return `echo "== S:${step}/${blockHash(block)} =="`;
+}

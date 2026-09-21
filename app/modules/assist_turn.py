@@ -543,6 +543,33 @@ async def _run_turn_inner(
             await _sc.clear_pending_state_check(db=db, session_id=session_id)
     except Exception as exc:
         logger.warning("state_check_route_failed sid=%s err=%r", session_id, exc)
+    # §17.1159 — a paste whose SHAPE cannot be judged is answered plainly, before
+    # any model call: a hung `>` continuation prompt, a command with no output and
+    # no returned prompt (still running), or the command block copied back unrun.
+    try:
+        from app.modules import assist_paste as _ap
+        _issued_texts = (await db.execute(_sqltext("""
+            SELECT content FROM assist_turns WHERE session_id = :sid AND role = 'assistant'
+               AND kind IN ('guide', 'fix') ORDER BY created_at DESC LIMIT 2
+        """), {"sid": session_id})).scalars().all() or []
+        _issued = _ap.find_issued_block(list(_issued_texts), _ap.parse_paste(text_)) if _ap.parse_paste(text_).entries else None
+        if _issued is None and _issued_texts:
+            _blocks = _ap.blocks_in(_issued_texts[0])
+            _issued = _blocks[0] if _blocks else None
+        _shape = _ap.shape_guard(text_, _issued)
+    except Exception as exc:
+        logger.warning("paste_shape_guard_failed sid=%s err=%r", session_id, exc)
+        _shape = None
+    if _shape:
+        yield _ev(ASSIST_TURN_ROUTED, {"action": "ask", "override": "paste_shape"})
+        yield _ev(ASSIST_ANSWER, {"kind": "ask", "text": _shape})
+        try:
+            await assist_agent.capture_assistant_reply(session_id=session_id, node_key=node_key, kind="ask", content=_shape, db=db)
+        except Exception:
+            logger.warning("paste_shape_capture_failed sid=%s", session_id)
+        logger.info("paste_shape_guard sid=%s node_key=%s", session_id, node_key)
+        handled["v"] = "paste_shape"
+        return
 
     # 1b. §17.951 — resolve a pending completion confirmation.
     #

@@ -984,11 +984,15 @@ export function renderChat(container, sessionId, opts = {}) {
     );
   }
 
-  function bubble(role, kind, content, ts) {
+  function bubble(role, kind, content, ts, nodeKey) {
     const cls = role === "operator" ? "op" : role === "assistant" ? "as" : "sys";
+    // §17.1159 — a walkthrough/fix bubble carries its step, so the copy button
+    // can append the step SENTINEL to a block copied from it.
+    const attrs = { class: `msg ${cls}` };
+    if (nodeKey && (kind === "guide" || kind === "fix")) attrs["data-step"] = nodeKey;
     return el(
       "div",
-      { class: `msg ${cls}` },
+      attrs,
       el("div", { class: "msg-meta" }, el("span", { class: "msg-role", text: role }), kind && kind !== "message" ? el("span", { class: "msg-kind", text: kind }) : null, el("span", { class: "msg-time faint", text: ts ? timeAgo(ts) : "" })),
       // §17.1011 — only walkthrough-shaped turns fold; an operator paste, a
       // committed notice or a one-line note has no sections and must not gain
@@ -1058,15 +1062,15 @@ export function renderChat(container, sessionId, opts = {}) {
       backlog.addEventListener("toggle", () => {
         if (!backlog.open || backlogFilled) return;
         backlogFilled = true;
-        for (const t of older) backlogBody.append(bubble(t.role, t.kind, t.content, t.created_at));
+        for (const t of older) backlogBody.append(bubble(t.role, t.kind, t.content, t.created_at, t.node_key));
       });
       mount(
         transcript,
         backlog,
-        ...recent.map((t) => bubble(t.role, t.kind, t.content, t.created_at))
+        ...recent.map((t) => bubble(t.role, t.kind, t.content, t.created_at, t.node_key))
       );
     } else {
-      mount(transcript, ...durable.map((t) => bubble(t.role, t.kind, t.content, t.created_at)));
+      mount(transcript, ...durable.map((t) => bubble(t.role, t.kind, t.content, t.created_at, t.node_key)));
     }
     // §17.870 — the ephemeral tail: output the CURRENT turn rendered live that
     // is not (yet, or ever) in the durable transcript. The live incident: a
@@ -1595,6 +1599,9 @@ export function renderChat(container, sessionId, opts = {}) {
           el("span", { class: "msg-role", text: "assistant" }),
           el("span", { class: "msg-kind", text: "guiding" })),
         liveBody);
+      // §17.1159 — the live walkthrough is for the session's current step until
+      // the done frame names the step actually guided (a repair may divert).
+      if (session?.current_node_key) live.dataset.step = session.current_node_key;
       transcript.append(live);
       stick();
     };
@@ -1653,6 +1660,7 @@ export function renderChat(container, sessionId, opts = {}) {
             break;
           case "assist_guide_done":
             if (live) live.classList.remove("streaming");
+            if (live && data?.node_key) live.dataset.step = data.node_key;   // §17.1159
             if (acc.trim()) ephemeralTail.push({ kind: "guide", content: acc, at: new Date().toISOString() });
             break;
           case "assist_turn_done":
