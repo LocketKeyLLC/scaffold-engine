@@ -5079,6 +5079,7 @@ async def generate_fix(
     hypotheses: Optional[dict] = None,  # §17.973
     step_recap: Optional[str] = None,  # §17.1027 — the OPEN item is the fallback subject
     operator_conversation: Optional[str] = None,  # §17.1028 — operator-authored dialogue only
+    runner_ledger: Optional[list[dict]] = None,  # §17.1158 — what the local runner already ran this session
 ) -> dict:
     """Diagnose an operator-reported error on a step and produce corrected steps.
 
@@ -5506,6 +5507,10 @@ async def generate_fix(
         # §17.914 — re-asking for state already on file is wrong at ANY streak.
         from app.modules.assist_state import find_redundant_discovery
         redundant_ = find_redundant_discovery(draft, _known_state)
+        # §17.1158 — a look-up the runner ALREADY ran this session is redundant
+        # discovery too: the directive names when it ran and what it printed.
+        from app.modules.assist_runner_lookup import find_repeated_lookups
+        redundant_ = redundant_ + find_repeated_lookups(draft, runner_ledger)
         return hits_, novel_, banned_, reskind_, shell_, look_, contra_, redundant_
 
     if text_out:
@@ -5535,12 +5540,14 @@ async def generate_fix(
                     "shape one program returns versus the shape another expects, "
                     "the port one listens on versus the one another calls, the "
                     "path one writes versus the one another reads.")
-            if redundant_hits:  # §17.914 — you already have this
+            if redundant_hits:  # §17.914 — you already have this; §17.1158 — or the runner already ran it
                 directive.append(
-                    "You asked the operator to re-run a DISCOVERY command whose "
-                    "answer is ALREADY on file, read from their own earlier "
-                    "output. Use the recorded values; do not ask again, and do "
-                    "not state anything that contradicts them:\n"
+                    "You asked for a DISCOVERY command whose answer is ALREADY on "
+                    "file — read from the operator's earlier output, or run by the "
+                    "engine itself through the local runner. Use the recorded "
+                    "values; do not ask again, and do not state anything that "
+                    "contradicts them. If they do not settle the question, ask for "
+                    "something DIFFERENT that would:\n"
                     + "\n".join(
                         f"- `{h['command']}` — already known: {h['known']}"
                         for h in redundant_hits[:3]))

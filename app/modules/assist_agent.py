@@ -2191,6 +2191,14 @@ async def run_step_fix(
     except Exception as e:
         logger.warning("assist_hypotheses_failed session_id=%s err=%r", session_id, e)
     from app.modules.assist_evidence import operator_text as _operator_text  # §17.1028
+    # §17.1158 — what the local runner already ran this session: a fix that asks
+    # for one of these again is regenerated with the answer, not re-requested.
+    try:
+        from app.modules.assist_runner_lookup import recent_lookups as _recent_lookups
+        _runner_ledger = await _recent_lookups(db, session_id)
+    except Exception as exc:
+        logger.warning("runner_ledger_failed sid=%s err=%r", session_id, exc)
+        _runner_ledger = []
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
@@ -2209,6 +2217,7 @@ async def run_step_fix(
         conversation=mem.conversation,  # §17.687 + §17.738 recap
         step_recap=mem.recap,  # §17.1027 — the OPEN item is the research fallback
         operator_conversation=_operator_text(mem.history),  # §17.1028
+        runner_ledger=_runner_ledger,  # §17.1158
     )
     await _record_sourced_values(  # §17.1030
         session_id=session_id, node_key=nk,
