@@ -64,18 +64,57 @@ def lookup_lines(block: str) -> tuple[list[str], list[str]]:
     return runnable, refused
 
 
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$", re.M)
+_SKIP_SECTION_RE = re.compile(r"rollback|undo|revert|if (?:something|anything) (?:went|goes) wrong", re.I)
+MAX_LOOKUP_BLOCKS = 6
+MAX_LOOKUP_COMMANDS = 24
+
+
+def lookup_blocks(text: str) -> list[str]:
+    """§17.1156 — the reply's LEADING read-only blocks, in reading order,
+    starting at the **Run this now** block: each block is included while it
+    is purely read-only; the first block that writes ends the scan (every
+    block after it depends on that change); blocks under a Rollback/Undo
+    heading are skipped; a block the guide repeats verbatim runs once."""
+    t = text or ""
+    m = _RUN_NOW_RE.search(t)
+    start = m.end() if m else 0
+    fences = list(_FENCE_RE.finditer(t, start)) or (list(_FENCE_RE.finditer(t)) if m else [])
+    headings = [(h.start(), h.group(1)) for h in _HEADING_RE.finditer(t)]
+    out: list[str] = []
+    seen: set[str] = set()
+    for f in fences:
+        head = next((title for pos, title in reversed(headings) if pos < f.start()), "")
+        if _SKIP_SECTION_RE.search(head or ""):
+            continue
+        block = f.group(1).strip()
+        if not block or block in seen:
+            continue
+        runnable, refused = lookup_lines(block)
+        if refused:
+            logger.info("runner_lookup_stop_at_write first=%r", refused[0][:80])
+            break
+        if not runnable:
+            continue
+        seen.add(block)
+        out.append(block)
+        if len(out) >= MAX_LOOKUP_BLOCKS:
+            break
+    return out
+
+
 def is_lookup(text: str) -> Optional[list[str]]:
     """The commands the engine can run itself for this reply, or None when
-    the reply's block is not purely read-only (or has no block)."""
-    block = first_lookup_block(text)
-    if not block:
+    the reply's first block is not purely read-only (or there is no block)."""
+    if not first_lookup_block(text):
         return None
-    runnable, refused = lookup_lines(block)
-    if refused or not runnable:
-        if refused:
-            logger.info("runner_lookup_refused n_refused=%d first=%r", len(refused), refused[0][:80])
+    blocks = lookup_blocks(text)
+    if not blocks:
         return None
-    return runnable
+    commands: list[str] = []
+    for b in blocks:
+        commands.extend(lookup_lines(b)[0])
+    return commands[:MAX_LOOKUP_COMMANDS] or None
 
 
 async def run_lookup(spec, commands: list[str], *, on_progress=None) -> tuple[str, list[dict]]:

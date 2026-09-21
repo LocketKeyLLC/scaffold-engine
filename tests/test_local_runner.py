@@ -311,3 +311,21 @@ def test_helper_masks_quotes_and_is_version_4():
     assert mod.container_exec_remainder(["pct", "exec", "111", "cat", "/a"]) == "cat /a"
     assert mod.container_exec_remainder(["pct", "list"]) is None and mod.container_exec_remainder(["qm", "config", "110"]) is None
     assert mod.HELPER_VERSION == "5"
+
+
+@pytest.mark.parametrize("cmd", ["pvesh get /nodes/pve/firewall/rules", "pvesh ls /nodes", "pvesm status", "pvesm list local --content iso",
+                                 "pveum user list", "pvecm status", "pvecm nodes", "pvenode config get", "pvenode cert info"])
+def test_proxmox_reads_pass_both_gates(cmd):
+    from app.modules.assist_state_check import read_only_command
+    assert read_only_command(cmd), cmd
+    assert _load_runner_script().read_only(cmd) == (True, ""), cmd
+
+
+@pytest.mark.parametrize("cmd", ["pvesh create /nodes/pve/firewall/rules --type in --action ACCEPT", "pvesh set /nodes/pve/config -description x",
+                                 "pvesh delete /nodes/pve/firewall/rules/0", "pvesm add dir backup --path /mnt/x", "pvesm free local:iso/x.iso",
+                                 "pveum user add x@pam", "pveum passwd x@pam", "pvecm delnode pve2", "pvenode config set --description x", "pvenode stopall"])
+def test_proxmox_writes_are_refused_at_both_gates(cmd):
+    """§17.1156 — live: `pvesh create …/firewall/rules` passed BOTH gates as a read (the head is not a verb)."""
+    from app.modules.assist_state_check import read_only_command
+    assert not read_only_command(cmd), cmd
+    assert _load_runner_script().read_only(cmd)[0] is False, cmd

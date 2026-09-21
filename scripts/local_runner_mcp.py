@@ -71,6 +71,10 @@ _SUB_MUT = {
     "service": None, "pct": {"start", "stop", "shutdown", "reboot", "create", "destroy", "set", "resize", "migrate", "clone", "template", "snapshot", "rollback", "delsnapshot", "unlock", "restore", "move", "move_volume"},
     "qm": {"start", "stop", "shutdown", "reboot", "create", "destroy", "set", "resize", "migrate", "clone", "template", "snapshot", "rollback", "delsnapshot", "unlock", "restore", "move_disk", "importdisk"},
     "docker": {"run", "rm", "rmi", "stop", "start", "restart", "kill", "create", "pull", "push", "build", "compose"},
+    # §17.1156 — the Proxmox management family beyond pct/qm
+    "pvesh": {"create", "set", "delete"}, "pvesm": {"add", "remove", "set", "alloc", "free", "import", "export", "prune-backups"},
+    "pveum": {"add", "modify", "delete", "passwd", "useradd", "usermod", "userdel", "groupadd", "groupmod", "groupdel", "roleadd", "rolemod", "roledel", "aclmod", "acldel"},
+    "pvecm": {"add", "addnode", "delnode", "create", "expected", "updatecerts"}, "pvenode": {"set", "delete", "startall", "stopall", "migrateall", "wakeonlan"},
     "virsh": {"start", "destroy", "shutdown", "reboot", "define", "undefine", "create"},
     "ufw": {"allow", "deny", "delete", "enable", "disable", "reset"}, "firewall-cmd": None,
     "ip": {"add", "del", "set", "change", "replace", "flush"}, "wg": {"set"}, "nmcli": None,
