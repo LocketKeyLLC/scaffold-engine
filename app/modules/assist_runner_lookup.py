@@ -210,3 +210,65 @@ def location_is_runner_host(where: Optional[str], *, host: Optional[str], ip: Op
         ok_hosts = {str(h).lower() for h in (host, ip) if h and not str(h).startswith("<")}
         return any(h.lower() in ok_hosts or any(h.lower().startswith(o.split(".")[0]) for o in ok_hosts) for _u, h in mm)
     return True
+
+
+# ---------------------------------------------------------------------------
+# §17.1158 — what the runner ALREADY ran this session, so a fix that asks for
+# it again is regenerated with the answer instead of re-requesting it. Live
+# (ADD49): `qm guest cmd 110 network-get-interfaces` requested three times in
+# ten minutes, `qm config 110` twice, the same ssh retried — each time the
+# engine had the output on record and the gate could only warn.
+# ---------------------------------------------------------------------------
+
+_LEDGER_LINE_RE = re.compile(r"^\$ (.+?)\n(.*?)(?=^\$ |\Z)", re.S | re.M)
+
+
+async def recent_lookups(db, session_id: str, *, minutes: int = 180, limit_turns: int = 40) -> list[dict]:
+    """``[{command, output, at}]`` from the session's ``[local-runner]``
+    operator turns (look-ups and guest checks carry ``$ cmd`` + output),
+    newest first; one entry per command (the newest wins)."""
+    from sqlalchemy import text as _t
+    try:
+        rows = (await db.execute(_t("""
+            SELECT content, created_at FROM assist_turns
+             WHERE session_id = :sid AND role = 'operator' AND content LIKE '[local-runner]%'
+               AND created_at > now() - make_interval(mins => :m)
+             ORDER BY created_at DESC LIMIT :n
+        """), {"sid": session_id, "m": int(minutes), "n": int(limit_turns)})).mappings().all()
+    except Exception as exc:
+        logger.warning("recent_lookups_failed sid=%s err=%r", session_id, exc)
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        for m in _LEDGER_LINE_RE.finditer(r["content"] or ""):
+            cmd = " ".join(m.group(1).split())
+            if cmd in seen:
+                continue
+            seen.add(cmd)
+            out.append({"command": cmd, "output": (m.group(2) or "").strip(), "at": r["created_at"]})
+    return out
+
+
+def find_repeated_lookups(text_out: str, ledger: Optional[list[dict]]) -> list[dict]:
+    """Commands in the draft's fenced blocks that the runner already ran (the
+    ledger), as redundancy hits ``[{command, known, resource}]`` the fix gate
+    understands: ``known`` names when it ran and what it printed."""
+    if not ledger or not (text_out or "").strip():
+        return []
+    by_cmd = {e["command"]: e for e in ledger}
+    hits: list[dict] = []
+    seen: set[str] = set()
+    for block in _FENCE_RE.findall(text_out or ""):
+        for raw in block.splitlines():
+            ln = " ".join(re.sub(r"^\$\s+", "", raw.strip()).split())
+            e = by_cmd.get(ln)
+            if not e or ln in seen:
+                continue
+            seen.add(ln)
+            at = e.get("at")
+            when = at.strftime("%H:%M UTC") if hasattr(at, "strftime") else str(at or "earlier")
+            out = (e.get("output") or "(no output)").strip().replace("\n", " ⏎ ")
+            hits.append({"command": ln, "resource": "",
+                         "known": f"the engine ran it through your local runner at {when} and it printed: {out[:200]}"})
+    return hits
