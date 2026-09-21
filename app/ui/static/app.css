@@ -1716,7 +1716,7 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
 .follow-focus.hidden { display: none; }
 /* the pane keeps only the composer + transcript: the verbs collapse to ✓ Done + ⋯ */
 .assist-main.follow .assist-verbs > .btn:not(:first-child):not(.verbs-more) { display: none; }
-@media (max-width: 900px) {
+@media (max-width: 720px) {
   .assist-main.follow { grid-template-columns: 1fr; }
   .follow-rail { position: static; max-height: 40vh; }
 }
