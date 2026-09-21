@@ -397,6 +397,7 @@ export function renderChat(container, sessionId, opts = {}) {
   const embedded = !!(opts && opts.embedded);
   const follow = !!(opts && opts.follow);   // §17.1160 — the rail + pane layout
   let railFocus = null;                     // §17.1160 — a finished step being READ (its history), or null
+  let allTurnsLoaded = false;               // §17.1160 — the full transcript fetched once for reading old steps
   let railExpandDone = false, railExpandAhead = false;
   let disposed = false;
   let guiding = false;
@@ -895,7 +896,19 @@ export function renderChat(container, sessionId, opts = {}) {
       el("span", { class: "follow-step-title", text: r.title }));
     btn.addEventListener("click", async () => {
       if (r.current) { railFocus = null; renderRail(); renderTranscript(); return; }
-      if (r.terminal) { railFocus = r.node_key; renderRail(); renderTranscript(); return; }
+      if (r.terminal) {
+        railFocus = r.node_key;
+        // §17.1160 — the view loads the last 200 turns; an old finished step's
+        // history may lie beyond them. Fetch the whole transcript once.
+        if (!allTurnsLoaded && !turns.some((t) => t && t.node_key === r.node_key)) {
+          try {
+            const t = await api.get(`/assist/${sessionId}/turns?limit=2000`);
+            if (t && Array.isArray(t.turns) && t.turns.length >= turns.length) turns = t.turns;
+            allTurnsLoaded = true;
+          } catch (e) { toast(`Couldn't load the full transcript: ${errText(e)} — showing what is loaded.`, "err"); }
+        }
+        renderRail(); renderTranscript(); return;
+      }
       // a pending step: move the pointer there (the server keeps the walkthrough it had)
       try {
         const res = await api.post(`/assist/${sessionId}/step/goto`, { node_key: r.node_key });
@@ -1129,10 +1142,13 @@ export function renderChat(container, sessionId, opts = {}) {
       if (key) {
         const first = turns.findIndex((t) => t && t.node_key === key);
         const mine = turns.filter((t, i) => t && (t.node_key === key || (!t.node_key && first >= 0 && i > first)));
-        const live = railFocus ? [] : ephemeralTail;
+        // the live tail is retired against durable turns exactly as the whole-session path does (§17.1082)
+        const live = railFocus ? [] : ephemeralTail.filter((e) => !ephemeralIsDurable(turns, e, turnStartMaxId) && (e.content || "").trim());
+        const pend = railFocus ? [] : transcriptPlan(turns, pendingOps).pending;
         mount(transcript,
-          mine.length || live.length
+          mine.length || live.length || pend.length
             ? el("div", {}, ...mine.map((t) => bubble(t.role, t.kind, t.content, t.created_at, t.node_key)),
+                            ...pend.map((o) => bubble("operator", o.kind, o.content, o.created_at)),
                             ...live.map((t) => bubble("assistant", t.kind, t.content, t.at, key)))
             : el("div", { class: "empty-state small" },
                 el("p", { text: railFocus ? `No transcript recorded for ${key}.` : "Nothing yet for this step — press ✦ Guide me." })));
