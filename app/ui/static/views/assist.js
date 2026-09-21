@@ -398,6 +398,10 @@ export function renderChat(container, sessionId, opts = {}) {
   const follow = !!(opts && opts.follow);   // §17.1160 — the rail + pane layout
   let railFocus = null;                     // §17.1160 — a finished step being READ (its history), or null
   let allTurnsLoaded = false;               // §17.1160 — the full transcript fetched once for reading old steps
+  // §17.1164 — the pane shows the WHOLE conversation by default ("no access to
+  // the chat" when it showed one step); "This step" narrows it, remembered.
+  const FOLLOW_SCOPE_KEY = "scaffold_follow_scope";
+  let followScope = storage.get(FOLLOW_SCOPE_KEY) === "step" ? "step" : "all";
   let railExpandDone = false, railExpandAhead = false;
   let disposed = false;
   let guiding = false;
@@ -798,8 +802,22 @@ export function renderChat(container, sessionId, opts = {}) {
 
   const rail = el("nav", { class: "follow-rail", "aria-label": "Plan" });
   const focusChip = el("div", { class: "follow-focus hidden" });
+  const scopeAll = el("button", { type: "button", text: "Whole conversation" });
+  const scopeStep = el("button", { type: "button", text: "This step" });
+  const paneHead = el("div", { class: "follow-pane-head" },
+    el("span", { text: "Conversation" }), el("span", { class: "spacer" }),
+    el("div", { class: "follow-scope", role: "group", "aria-label": "What the conversation shows" }, scopeAll, scopeStep));
+  function setScope(v) {
+    followScope = v;
+    storage.set(FOLLOW_SCOPE_KEY, v);   // the wrapper already swallows a blocked localStorage
+    scopeAll.classList.toggle("on", v === "all"); scopeStep.classList.toggle("on", v === "step");
+    renderTranscript();
+  }
+  scopeAll.addEventListener("click", () => setScope("all"));
+  scopeStep.addEventListener("click", () => setScope("step"));
+  scopeAll.classList.toggle("on", followScope === "all"); scopeStep.classList.toggle("on", followScope === "step");
   const main = follow
-    ? el("div", { class: "chat-main assist-main embedded follow" }, rail, el("div", { class: "follow-pane" }, focusChip, transcript, composer))
+    ? el("div", { class: "chat-main assist-main embedded follow" }, rail, el("div", { class: "follow-pane" }, paneHead, focusChip, transcript, composer))
     : el("div", { class: "chat-main assist-main" + (embedded ? " embedded" : "") }, transcript, composer);
   // §17.845 — the editable living brief rides with the session (mounted once
   // the session tells us its job).
@@ -1138,7 +1156,7 @@ export function renderChat(container, sessionId, opts = {}) {
     // finished step picked in the rail) or the current one. Its own turns,
     // plus session-level turns (no node) that arrived after its first turn.
     // The whole-session scroll stays one click away in the Full view.
-    if (follow) {
+    if (follow && (railFocus || followScope === "step")) {
       const key = railFocus || (session && session.current_node_key) || null;
       if (key) {
         const first = turns.findIndex((t) => t && t.node_key === key);
