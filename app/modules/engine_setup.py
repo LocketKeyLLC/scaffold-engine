@@ -1419,3 +1419,30 @@ async def ensure_helper_refresh_step(db, session_id: str, node_key: Optional[str
     return {"node_key": new_key, "title": step["title"], "existing": False, "class": "stale_helper",
             "note": (f"🔧 {pr.get('detail')}\n\nI added **{new_key}: {step['title']}** right before your current step — one "
                      f"paste, then we continue where we were:")}
+
+
+async def repoint_after_repair(db, session_id: str, node_key: str) -> Optional[str]:
+    """§17.1152 — after a recipe/repair step commits, the operator goes BACK to
+    the step it was inserted before (the open non-recipe step that depends on
+    it), not to the earliest claimable step in the plan. Live: ADD79's commit
+    sent the session to ADD17 (an NVIDIA step) instead of ADD49."""
+    try:
+        row = (await db.execute(text("""
+            SELECT d.node_key FROM dag_nodes d JOIN assist_steps s ON s.job_id = d.job_id AND s.node_key = d.node_key
+             WHERE s.session_id = :sid AND :nk = ANY(d.depends_on)
+               AND d.description NOT LIKE :m1 AND d.description NOT LIKE :m2
+               AND s.status IN ('pending', 'presented')
+             ORDER BY d.execution_order NULLS LAST, d.node_key LIMIT 1
+        """), {"sid": session_id, "nk": node_key, "m1": f"%{RECIPE_STEP_MARK}%", "m2": f"%{REPAIR_MARK}%"})).mappings().first()
+    except Exception as exc:
+        logger.warning("repoint_after_repair_lookup_failed sid=%s nk=%s err=%r", session_id, node_key, exc)
+        return None
+    if not row:
+        return None
+    try:
+        await _present(db, session_id, row["node_key"])
+    except Exception as exc:
+        logger.warning("repoint_after_repair_present_failed sid=%s nk=%s err=%r", session_id, row["node_key"], exc)
+        return None
+    logger.info("repoint_after_repair sid=%s from=%s to=%s", session_id, node_key, row["node_key"])
+    return row["node_key"]

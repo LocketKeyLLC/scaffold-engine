@@ -1062,6 +1062,15 @@ async def assist_submit(session_id: UuidPath, body: AssistSubmitInput, db=Depend
             skip_divergence_replan=_via_alt,
             db=db,
         )
+        # §17.1152 — a recipe/repair step commits → back to the step it ran before
+        if _recipe_verdict is not None and result.get("status") == "committed":
+            try:
+                from app.modules import engine_setup as _es2
+                _back = await _es2.repoint_after_repair(db, session_id, body.node_key)
+                if _back:
+                    result["next_node_key"] = _back
+            except Exception as exc:
+                logger.warning("repoint_after_repair_failed sid=%s err=%r", session_id, exc)
         if verdict is not None and isinstance(result, dict):
             result["success_verdict"] = verdict
         # §17.771 — ADAPT THE PLAN TO REALITY on a goal-met-via-alternative commit:

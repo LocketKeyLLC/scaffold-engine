@@ -58,7 +58,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "3"
+HELPER_VERSION = "4"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -179,10 +179,61 @@ def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
     return (True, "") if ok else (False, "ssh remote command writes")
 
 
+def mask_quoted(cmd: str) -> str:
+    """The command with the INSIDE of quoted strings blanked — so a `>` in a
+    quoted regex (`grep -o "<Name>[^<]*</Name>"`, live: refused as 'redirect')
+    or a `|` in a quoted pattern is not read as shell syntax."""
+    out: list[str] = []
+    q: str | None = None
+    i = 0
+    while i < len(cmd):
+        ch = cmd[i]
+        if q:
+            if ch == "\\" and q == '"' and i + 1 < len(cmd):
+                out.append("  "); i += 2; continue
+            if ch == q:
+                q = None; out.append(ch)
+            else:
+                out.append(" ")
+        elif ch in ("'", '"'):
+            q = ch; out.append(ch)
+        elif ch == "\\" and i + 1 < len(cmd):
+            out.append("  "); i += 2; continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+_CONTAINER_EXEC = {"pct": ("exec",), "lxc-attach": (), "qm": ("guest", "exec")}
+
+
+def container_exec_remainder(argv: list) -> str | None:
+    """``pct exec <ct> [--] <cmd…>`` / ``qm guest exec <vm> [--] <cmd…>`` /
+    ``lxc-attach -n <ct> -- <cmd…>``: the command that runs INSIDE the guest,
+    or None when argv is not such a shape. §17.1152 — the wrapper is a read
+    on the host; what matters is what runs inside."""
+    head = argv[0].rsplit("/", 1)[-1] if argv else ""
+    if head not in _CONTAINER_EXEC:
+        return None
+    subs = _CONTAINER_EXEC[head]
+    if tuple(argv[1:1 + len(subs)]) != subs:
+        return None
+    rest = argv[1 + len(subs):]
+    if "--" in rest:
+        return " ".join(rest[rest.index("--") + 1:]).strip() or None
+    # no `--`: skip the id / -n <name> and any flags, the rest is the command
+    i = 0
+    while i < len(rest) and (rest[i].startswith("-") or rest[i].isdigit()):
+        i += 2 if rest[i] in ("-n", "--timeout") else 1
+    return " ".join(rest[i:]).strip() or None
+
+
 def read_only(cmd: str) -> tuple[bool, str]:
     if not cmd.strip() or "$(" in cmd or "`" in cmd or "<<" in cmd:
         return False, "substitution/heredoc"
-    if re.search(r"(?<![<>])>(?!\s*/dev/null|&\d)", cmd) or re.search(r">>", cmd):
+    masked = mask_quoted(cmd)
+    if re.search(r"(?<![<>])>(?!\s*/dev/null|&\d)", masked) or re.search(r">>", masked):
         return False, "redirect"
     for segment in split_segments(cmd):
         try:
@@ -199,9 +250,20 @@ def read_only(cmd: str) -> tuple[bool, str]:
             if not ok:
                 return False, why
             continue
+        inner = container_exec_remainder(argv)      # §17.1152 — pct exec / qm guest exec / lxc-attach
+        if inner is not None:
+            ok, why = read_only(inner)
+            if not ok:
+                return False, f"inside the guest: {why}"
+            continue
+        if head in _INTERPRETERS and len(argv) >= 3 and argv[1] == "-c":   # §17.1152 — `sh -c '<script>'`: judge the script
+            ok, why = read_only(argv[2])
+            if not ok:
+                return False, f"in the -c script: {why}"
+            continue
         if read_form(argv):       # §17.1150 — the same READ shapes the engine allows
             continue
-        if head in _INTERPRETERS and segment is not None and cmd.find(segment) > 0 and "|" in cmd[:cmd.find(segment)]:
+        if head in _INTERPRETERS and segment is not None and cmd.find(segment) > 0 and "|" in masked[:cmd.find(segment)]:
             return False, "pipe to interpreter"
         if _MUTATION.match(head):
             return False, f"mutation verb {head}"
