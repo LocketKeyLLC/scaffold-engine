@@ -802,6 +802,13 @@ class Pipeline:
         # (next/skip/pause) are still matched deterministically and never pay the
         # decision call.
         assist_unified_decision_enabled: bool = False
+        # §17.1157 — route plain-language assist turns and Guide through the
+        # SERVER-SIDE turn loop (POST /assist/{sid}/message) instead of the
+        # client-side cascade, so OWUI gets what the SPA gets: the engine's
+        # capability answers, repair steps, local-runner look-ups, the
+        # guest-reachability check, batched state checks. Off by default (the
+        # cascade is the long-proven path); the live valves turn it on.
+        assist_server_turn_loop: bool = False
         assist_unified_decision_timeout: int = 60
 
         # §17.748 — when the operator pastes shell output while MID-FIX (the last
