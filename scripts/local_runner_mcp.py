@@ -58,7 +58,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "4"
+HELPER_VERSION = "5"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -229,9 +229,53 @@ def container_exec_remainder(argv: list) -> str | None:
     return " ".join(rest[i:]).strip() or None
 
 
-def read_only(cmd: str) -> tuple[bool, str]:
-    if not cmd.strip() or "$(" in cmd or "`" in cmd or "<<" in cmd:
-        return False, "substitution/heredoc"
+def extract_substitutions(cmd: str) -> tuple[str, list[str]]:
+    """§17.1155 — ``$(…)`` and backtick substitutions, pulled out: returns the
+    outer command with each replaced by ``__SUBn__`` and the inner commands.
+    Nested ``$(…)`` is balanced; an unbalanced one leaves the text as is (the
+    caller then refuses it as unparsable)."""
+    inners: list[str] = []
+    out: list[str] = []
+    i, n = 0, len(cmd)
+    while i < n:
+        if cmd.startswith("$(", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if cmd.startswith("$(", j):
+                    depth += 1; j += 2; continue
+                if cmd[j] == "(":
+                    depth += 1
+                elif cmd[j] == ")":
+                    depth -= 1
+                j += 1
+            if depth:
+                out.append(cmd[i:]); break
+            inners.append(cmd[i + 2:j - 1])
+            out.append(f"__SUB{len(inners) - 1}__"); i = j; continue
+        if cmd[i] == "`":
+            j = cmd.find("`", i + 1)
+            if j < 0:
+                out.append(cmd[i:]); break
+            inners.append(cmd[i + 1:j])
+            out.append(f"__SUB{len(inners) - 1}__"); i = j + 1; continue
+        out.append(cmd[i]); i += 1
+    return "".join(out), inners
+
+
+def read_only(cmd: str, _depth: int = 0) -> tuple[bool, str]:
+    if not cmd.strip() or "<<" in cmd:
+        return False, "substitution/heredoc" if "<<" in cmd else "empty"
+    if _depth > 3:
+        return False, "substitution too deep"
+    # §17.1155 — a substitution is judged by what it RUNS, like the engine's
+    # AST gate: `pvesh get /nodes/$(hostname)/…` reads; `echo $(rm -rf /x)` does not.
+    cmd, inners = extract_substitutions(cmd)
+    if "$(" in cmd or "`" in cmd:
+        return False, "unparsable"
+    for inner in inners:
+        ok, why = read_only(inner, _depth + 1)
+        if not ok:
+            return False, f"in $(…): {why}"
     masked = mask_quoted(cmd)
     if re.search(r"(?<![<>])>(?!\s*/dev/null|&\d)", masked) or re.search(r">>", masked):
         return False, "redirect"
