@@ -109,6 +109,7 @@ let jobPinHandler = null; // §17.896 — replaced, not stacked, per chrome rebu
 // "Plan", because "where's the DAG" is the question that got asked.
 const JOB_PIN_LINKS = [
   ["plan", "⬡", "DAG"],
+  ["follow", "◎", "Follow"],   // §17.1160 — the rail + pane walkthrough
   ["run", "▶", "Run"],
   ["output", "▤", "Output"],
 ];

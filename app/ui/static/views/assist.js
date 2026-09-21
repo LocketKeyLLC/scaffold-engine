@@ -348,12 +348,56 @@ export function planPosition(steps, currentKey) {
 const SIDEBAR_COLLAPSED_KEY = "scaffold_sidebar_collapsed";
 const ASSIST_MORE_KEY = "scaffold_assist_more_open";
 
+// §17.1160 — the Follow view's rail: the plan as ONE ordered list the operator
+// reads top to bottom. Finished steps fold to a count (the last `keepDone`
+// stay visible so the eye sees where it came from), the current step is the
+// anchor, the next `keepAhead` are visible, the rest fold to a count. Steps
+// inserted by the engine (ADDn) are marked so a repair reads as a repair.
+// Pure, so tests/ui/follow_rail.test.mjs can pin it without a DOM.
+export function railModel(steps, currentKey, { keepDone = 2, keepAhead = 4, focus = null, expandDone = false, expandAhead = false } = {}) {
+  const list = Array.isArray(steps) ? steps.filter(Boolean) : [];
+  const idx = list.findIndex((x) => x.node_key === currentKey);
+  const rows = list.map((x, i) => ({
+    node_key: x.node_key,
+    title: x.title || "",
+    status: x.step_status || "pending",
+    terminal: TERMINAL_STEP.has(x.step_status),
+    current: x.node_key === currentKey,
+    focused: !!focus && x.node_key === focus,
+    inserted: /^ADD\d+$/.test(x.node_key || ""),
+    index: i,
+  }));
+  // Partition by STATUS, not by position: a pending step that sits earlier in
+  // the plan's order than the current one is still ahead of the operator.
+  const before = rows.filter((r) => r.terminal && !r.current);
+  const after = rows.filter((r) => !r.terminal && !r.current);
+  const cur = idx >= 0 ? rows[idx] : null;
+  const doneHidden = expandDone ? [] : before.slice(0, Math.max(0, before.length - keepDone));
+  const doneShown = expandDone ? before : before.slice(Math.max(0, before.length - keepDone));
+  const aheadShown = expandAhead ? after : after.slice(0, keepAhead);
+  const aheadHidden = expandAhead ? [] : after.slice(keepAhead);
+  // a focused (viewed) step that would be folded is always shown
+  const show = (arr, hid) => {
+    const f = hid.find((r) => r.focused);
+    return f ? [f, ...arr] : arr;
+  };
+  return {
+    done: show(doneShown, doneHidden), doneHidden: doneHidden.filter((r) => !r.focused).length,
+    current: cur,
+    ahead: show(aheadShown, aheadHidden), aheadHidden: aheadHidden.filter((r) => !r.focused).length,
+    total: rows.length, doneCount: rows.filter((r) => r.terminal).length,
+  };
+}
+
 export function renderChat(container, sessionId, opts = {}) {
   // §17.1055 — inside the job hub the hub header already names the job and
   // owns the tabs, so the view's own "Assistant / <id> / ← Sessions / Refresh"
   // header was a second, redundant header above the step. Embedded mode drops
   // it; the refresh lives in the plan strip instead.
   const embedded = !!(opts && opts.embedded);
+  const follow = !!(opts && opts.follow);   // §17.1160 — the rail + pane layout
+  let railFocus = null;                     // §17.1160 — a finished step being READ (its history), or null
+  let railExpandDone = false, railExpandAhead = false;
   let disposed = false;
   let guiding = false;
   let abort = null;
@@ -751,7 +795,11 @@ export function renderChat(container, sessionId, opts = {}) {
     el("div", { class: "header-actions" }, helpBtn, el("a", { class: "btn btn-sm btn-ghost", href: "#/assist", text: "← Sessions" }), el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => load() }))
   );
 
-  const main = el("div", { class: "chat-main assist-main" + (embedded ? " embedded" : "") }, transcript, composer);
+  const rail = el("nav", { class: "follow-rail", "aria-label": "Plan" });
+  const focusChip = el("div", { class: "follow-focus hidden" });
+  const main = follow
+    ? el("div", { class: "chat-main assist-main embedded follow" }, rail, el("div", { class: "follow-pane" }, focusChip, transcript, composer))
+    : el("div", { class: "chat-main assist-main" + (embedded ? " embedded" : "") }, transcript, composer);
   // §17.845 — the editable living brief rides with the session (mounted once
   // the session tells us its job).
   const briefSlot = el("div", { class: "assist-brief-slot" });
@@ -763,7 +811,18 @@ export function renderChat(container, sessionId, opts = {}) {
     el("summary", { text: "Session details — environment, pinned values, notes, brief" }),
     belowGrid, briefSlot);
   moreRow.addEventListener("toggle", () => { try { storage.set(ASSIST_MORE_KEY, moreRow.open ? "1" : "0"); } catch { /* private mode */ } });
-  mount(container, embedded ? null : header, helpPanel, contractCard(null, session), stepHero, main, moreRow);
+  if (follow) {
+    // §17.1160 — the rail IS the plan context: no step card, no contract card,
+    // no folded details row under the chat. Details + help open from the rail.
+    mount(container, helpPanel, main);
+    rail.append(el("div", { class: "follow-rail-foot" },
+      el("button", { class: "btn btn-sm btn-ghost", text: "? Help", onClick: () => toggleHelp() }),
+      el("details", { class: "follow-details" }, el("summary", { class: "btn btn-sm btn-ghost", text: "Details" }), belowGrid, briefSlot)));
+    // every verb but ✓ Done goes behind the ⋯ menu — two things to press, the rest one click away
+    Array.from(verbsBar.children).forEach((c, i) => { if (i > 0 && c !== moreMenu) moreBody.prepend(c); });
+  } else {
+    mount(container, embedded ? null : header, helpPanel, contractCard(null, session), stepHero, main, moreRow);
+  }
   let briefMounted = false;
 
   // 📍 Current-step hero — where am I, what's the loop position (§17.738/741
@@ -825,7 +884,61 @@ export function renderChat(container, sessionId, opts = {}) {
     return sel;
   }
 
+  // §17.1160 — the Follow rail.
+  const RAIL_ICON = { committed: "✓", done: "✓", skipped: "⏭", handed_off: "🤖", presented: "📍", awaiting_input: "📍", pending: "○" };
+  function railRow(r) {
+    const isCur = r.current && !railFocus;
+    const cls = "follow-step" + (r.current ? " cur" : "") + (r.terminal ? " done" : "") + (r.focused ? " focused" : "") + (r.inserted ? " inserted" : "");
+    const btn = el("button", { class: cls, type: "button", title: r.title, "aria-current": isCur ? "step" : null },
+      el("span", { class: "follow-step-icon", text: r.current ? "📍" : (RAIL_ICON[r.status] || "○") }),
+      el("span", { class: "follow-step-key", text: r.node_key }),
+      el("span", { class: "follow-step-title", text: r.title }));
+    btn.addEventListener("click", async () => {
+      if (r.current) { railFocus = null; renderRail(); renderTranscript(); return; }
+      if (r.terminal) { railFocus = r.node_key; renderRail(); renderTranscript(); return; }
+      // a pending step: move the pointer there (the server keeps the walkthrough it had)
+      try {
+        const res = await api.post(`/assist/${sessionId}/step/goto`, { node_key: r.node_key });
+        railFocus = null;
+        await load();
+        if (res?.guidance) appendBubble("assistant", "guide", res.guidance);
+      } catch (e) { toast(errText(e), "err"); }
+    });
+    return btn;
+  }
+  function railFold(n, label, onOpen) {
+    return el("button", { class: "follow-fold", type: "button", text: `${n} ${label} ▸`, onClick: onOpen });
+  }
+  function renderRail() {
+    if (!follow || !session) return;
+    const m = railModel(steps, session.current_node_key, { focus: railFocus, expandDone: railExpandDone, expandAhead: railExpandAhead });
+    const head = el("div", { class: "follow-rail-head" },
+      el("span", { class: "follow-rail-count", text: `${m.doneCount} of ${m.total} done` }),
+      el("span", { class: "spacer" }),
+      el("a", { class: "small dim", href: `#/job/${session.job_id}/run`, text: "Full view", title: "The full Run tab" }));
+    const foot = rail.querySelector(".follow-rail-foot");
+    const body = el("div", { class: "follow-rail-body" },
+      m.doneHidden ? railFold(m.doneHidden, "done", () => { railExpandDone = true; renderRail(); }) : null,
+      ...m.done.map(railRow),
+      m.current ? railRow(m.current) : el("div", { class: "follow-step dim", text: "No current step" }),
+      ...m.ahead.map(railRow),
+      m.aheadHidden ? railFold(m.aheadHidden, "more", () => { railExpandAhead = true; renderRail(); }) : null);
+    mount(rail, head, body, foot);
+    // the focus chip above the pane: what is being read, and the way back
+    if (railFocus) {
+      const r = steps.find((x) => x.node_key === railFocus);
+      mount(focusChip,
+        el("span", { text: `Reading ${railFocus}${r ? " — " + r.title : ""} (finished)` }),
+        el("span", { class: "spacer" }),
+        el("button", { class: "btn btn-sm", text: "← Back to current step", onClick: () => { railFocus = null; renderRail(); renderTranscript(); } }));
+      focusChip.classList.remove("hidden");
+    } else {
+      focusChip.classList.add("hidden");
+    }
+  }
+
   function renderStepHero() {
+    if (follow) { renderRail(); return; }
     if (!session) return;
     const nk = session.current_node_key;
     const sc = session.step_counts || {};
@@ -1007,6 +1120,25 @@ export function renderChat(container, sessionId, opts = {}) {
     // §17.890 — never rebuild the DOM out from under an active selection.
     if (selectionWithin(transcript)) { transcriptRenderDeferred = true; return; }
     transcriptRenderDeferred = false;
+    // §17.1160 — the Follow pane is about ONE step: the one being read (a
+    // finished step picked in the rail) or the current one. Its own turns,
+    // plus session-level turns (no node) that arrived after its first turn.
+    // The whole-session scroll stays one click away in the Full view.
+    if (follow) {
+      const key = railFocus || (session && session.current_node_key) || null;
+      if (key) {
+        const first = turns.findIndex((t) => t && t.node_key === key);
+        const mine = turns.filter((t, i) => t && (t.node_key === key || (!t.node_key && first >= 0 && i > first)));
+        const live = railFocus ? [] : ephemeralTail;
+        mount(transcript,
+          mine.length || live.length
+            ? el("div", {}, ...mine.map((t) => bubble(t.role, t.kind, t.content, t.created_at, t.node_key)),
+                            ...live.map((t) => bubble("assistant", t.kind, t.content, t.at, key)))
+            : el("div", { class: "empty-state small" },
+                el("p", { text: railFocus ? `No transcript recorded for ${key}.` : "Nothing yet for this step — press ✦ Guide me." })));
+        return;
+      }
+    }
     if (!turns.length) {
       mount(
         transcript,
@@ -1765,7 +1897,21 @@ export function renderChat(container, sessionId, opts = {}) {
     await runTurnStream({ command: "guide" });
   }
 
-  load().then(maybeResumeActiveTurn);
+  load().then(maybeResumeActiveTurn).then(maybeAutoGuide);
+
+  // §17.1160 — Follow opens ON the current step. A step with nothing to show
+  // (freshly inserted by the engine, or never guided) is walked at once —
+  // the same as pressing ✦ Guide me, once per open, never while a turn runs.
+  let autoGuided = false;
+  async function maybeAutoGuide() {
+    if (!follow || autoGuided || guiding || disposed || !session) return;
+    const key = session.current_node_key;
+    if (!key || session.status !== "active") return;
+    const has = turns.some((t) => t && t.node_key === key && t.role === "assistant" && (t.kind === "guide" || t.kind === "fix"));
+    if (has) return;
+    autoGuided = true;
+    await runTurnStream({ command: "guide" });
+  }
 
   // §17.1090 — a re-plan proposal staged by a FACT (§17.1089) lands in the
   // background after the turn's reload; poll the session while idle so it

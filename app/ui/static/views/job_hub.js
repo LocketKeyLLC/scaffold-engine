@@ -31,6 +31,7 @@ const TABS = [
   ["output", "Output"],
   ["traces", "Traces"],
   ["costs", "Costs"],
+  ["follow", "Follow"],   // §17.1160 — the rail + pane walkthrough (assist jobs)
 ];
 
 // §17.1011 — synonyms an operator (or an old link) may use for a real tab.
@@ -48,7 +49,7 @@ export function resolveTab(raw) {
 // §17.1114 (ledger U-1) — the tabs that exist. An unknown tab still renders
 // Overview (nothing else is sensible) but SAYS so, instead of silently
 // pretending the address was fine.
-export const KNOWN_TABS = ["overview", "plan", "run", "output", "traces", "costs"];
+export const KNOWN_TABS = ["overview", "plan", "run", "output", "traces", "costs", "follow"];
 
 export function unknownTabNotice(raw) {
   if (!raw) return "";
@@ -130,7 +131,7 @@ function renderOverview(container, jobId, job) {
 }
 
 // ── Run tab ──────────────────────────────────────────────────────────
-function renderRun(container, jobId, job, ctx) {
+function renderRun(container, jobId, job, ctx, opts = {}) {
   if (!ASSIST_STATUSES.has(job.status)) return renderTheater(container, jobId, ctx);
   // Assist-driven job: resolve the (idempotent, unique-per-job) session and
   // embed the walkthrough.
@@ -146,7 +147,7 @@ function renderRun(container, jobId, job, ctx) {
         mount(container, errorPanel({ message: "No assist session for this job." }));
         return;
       }
-      childDispose = renderChat(container, String(sid), { embedded: true });  // §17.1055
+      childDispose = renderChat(container, String(sid), { embedded: true, follow: !!opts.follow });  // §17.1055 · §17.1160
     } catch (e) {
       if (!disposed) mount(container, errorPanel(e));
     }
@@ -218,17 +219,24 @@ export default function jobHub(container, params) {
     ? el("div", { class: "card warn-inline", text: "⚠ " + tabNoticeText })
     : el("span", { hidden: true });
 
+  // §17.1160 — Follow: one header line, no tab strip, the sidebar folded to
+  // icons while here (restored on leave; the operator's own preference is kept).
+  const isFollow = tab === "follow";
+  container.classList.toggle("follow-mode", isFollow);
+  const shellEl = document.querySelector(".shell");
+  const sidebarWas = shellEl ? shellEl.classList.contains("sidebar-collapsed") : false;
+  if (isFollow && shellEl) shellEl.classList.add("sidebar-collapsed");
   mount(
     container,
     el(
       "div",
-      { class: "view-header job-hub-head" },
+      { class: "view-header job-hub-head" + (isFollow ? " compact" : "") },
       el("div", { class: "row job-hub-title-row" },
         backLink,
-        el("div", {}, titleEl, subEl)),
-      el("div", { class: "header-actions" }, pillSlot, compareLink)
+        el("div", {}, titleEl, isFollow ? null : subEl)),
+      el("div", { class: "header-actions" }, pillSlot, isFollow ? null : compareLink)
     ),
-    tabRow,
+    isFollow ? null : tabRow,
     tabNotice,
     outlet
   );
@@ -263,6 +271,9 @@ export default function jobHub(container, params) {
       case "run":
         childDispose = renderRun(outlet, jobId, job, ctx);
         break;
+      case "follow":   // §17.1160
+        childDispose = renderRun(outlet, jobId, job, ctx, { follow: true });
+        break;
       case "output":
         childDispose = renderOutput(outlet, jobId);
         break;
@@ -279,6 +290,8 @@ export default function jobHub(container, params) {
 
   return () => {
     disposed = true;
+    if (isFollow && shellEl && !sidebarWas) shellEl.classList.remove("sidebar-collapsed");
+    container.classList.remove("follow-mode");
     if (statusListener) window.removeEventListener("scaffold:job-status", statusListener);
     if (childDispose) childDispose();
   };
