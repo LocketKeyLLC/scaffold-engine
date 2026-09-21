@@ -211,3 +211,46 @@ def test_leading_read_only_blocks_all_run_and_a_write_ends_the_scan():
     many = "**Run this now:**\n" + "".join(f"```bash\ncat /f{i}\n```\n" for i in range(10))
     assert len(rl.lookup_blocks(many)) == rl.MAX_LOOKUP_BLOCKS
     assert rl.is_lookup(GUIDE) == ["cat /etc/pve/firewall/host.fw", "pve-firewall status", "iptables -S PVEFW-HOST-IN"]   # unchanged: its 2nd block writes
+
+
+# ---------------------------------------------------------------------------
+# §17.1158 — a look-up the runner already ran is redundant discovery: the fix is regenerated with the answer.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_recent_lookups_parses_runner_records_newest_first_and_dedupes():
+    import datetime as dt
+    t1, t2 = dt.datetime(2026, 9, 20, 22, 59), dt.datetime(2026, 9, 20, 23, 12)
+    rows = [
+        {"content": "[local-runner] ran the walkthrough's read-only look-up through your local runner (pve-runner) — these commands ran ON THE TARGET MACHINE itself:\n$ qm guest cmd 110 network-get-interfaces\nNo QEMU guest agent configured\n$ qm status 110\nstatus: running", "created_at": t2},
+        {"content": "[local-runner] the engine checked whether VM 110 (ai-vm) is reachable (2 read-only commands on the host):\n$ qm status 110\nstatus: stopped\n$ ping -c 1 -W 2 192.168.1.127 2>&1 | tail -2\n1 packets transmitted, 0 received", "created_at": t1},
+    ]
+    db = MagicMock(); db.execute = AsyncMock(return_value=MagicMock(mappings=lambda: MagicMock(all=lambda: rows)))
+    led = await rl.recent_lookups(db, "s")
+    cmds = [e["command"] for e in led]
+    assert cmds == ["qm guest cmd 110 network-get-interfaces", "qm status 110", "ping -c 1 -W 2 192.168.1.127 2>&1 | tail -2"]
+    assert led[1]["output"] == "status: running" and led[1]["at"] == t2          # the newest record wins
+    db.execute = AsyncMock(side_effect=RuntimeError("db down"))
+    assert await rl.recent_lookups(db, "s") == []                                 # fail-soft
+
+
+def test_find_repeated_lookups_names_when_it_ran_and_what_it_printed():
+    import datetime as dt
+    ledger = [{"command": "qm guest cmd 110 network-get-interfaces", "output": "No QEMU guest agent configured", "at": dt.datetime(2026, 9, 20, 22, 59)}]
+    draft = "## 👉 Do this next\n\n**Run this now:**\n```bash\nqm guest cmd 110 network-get-interfaces\n```\nThen tell me what it prints."
+    hits = rl.find_repeated_lookups(draft, ledger)
+    assert len(hits) == 1 and hits[0]["command"] == "qm guest cmd 110 network-get-interfaces"
+    assert "22:59 UTC" in hits[0]["known"] and "No QEMU guest agent configured" in hits[0]["known"]
+    assert rl.find_repeated_lookups("```bash\nqm status 110\n```", ledger) == []          # not in the ledger
+    assert rl.find_repeated_lookups(draft, None) == [] and rl.find_repeated_lookups("", ledger) == []
+
+
+def test_fix_gate_folds_repeated_lookups_into_redundancy_and_the_ledger_is_threaded():
+    from app.modules import assist_guide, assist_agent
+    src = inspect.getsource(assist_guide.generate_fix)
+    assert "runner_ledger: Optional[list[dict]] = None" in src
+    assert "find_repeated_lookups(draft, runner_ledger)" in src
+    assert src.index("find_redundant_discovery(draft, _known_state)") < src.index("find_repeated_lookups(draft, runner_ledger)")
+    assert "engine itself through the local runner" in src                     # the directive says so
+    asrc = inspect.getsource(assist_agent.run_step_fix)
+    assert "_recent_lookups(db, session_id)" in asrc and "runner_ledger=_runner_ledger" in asrc
