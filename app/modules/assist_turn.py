@@ -31,6 +31,7 @@ from app.sse_events import (
     ASSIST_TURN_PULSE,
     ASSIST_GUIDE_DELTA,
     ASSIST_GUIDE_DONE,
+    ASSIST_GUIDE_REPLACE,
     ASSIST_NOTE_RECORDED,
     ASSIST_REPLAN_PROPOSAL,
     ASSIST_STEP_OUTCOME,
@@ -1829,6 +1830,8 @@ async def _claim_and_guide(
     ):
         if ev.get("type") == "delta":
             yield _ev(ASSIST_GUIDE_DELTA, {"text": ev.get("text") or ""})
+        elif ev.get("type") == "replace":   # §17.1165
+            yield _ev(ASSIST_GUIDE_REPLACE, {"text": ev.get("text") or "", "reason": ev.get("reason") or ""})
         else:
             if ev.get("status") not in ("ready", "presented", None):
                 # §17.889(#12) — a failed generation rendered NOTHING in the

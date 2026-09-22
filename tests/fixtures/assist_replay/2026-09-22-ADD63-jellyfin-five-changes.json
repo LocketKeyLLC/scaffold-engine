@@ -1,0 +1,6 @@
+{
+  "surface": "coherence",
+  "note": "ADD63 (real, 2026-09-22): ONE machine, no phases, but five numbered commands that each CHANGE something (install gnupg, fetch the key, write the repo file, refresh apt). The operator: 'a long list of commands without doing one at a time'. Old rule saw nothing; §17.1165 flags it on the change count.",
+  "text": "## 👉 Do this next\n📍 On: the Proxmox host shell (root@pve)\n\n**Run this now:**\n```bash\npct exec 101 -- ls /etc/apt/sources.list.d/ /etc/apt/keyrings/\n```\nthen tell me what it shows.\n\n## Steps\n1. Run the command above.\n2. Install gnupg:\n```bash\npct exec 101 -- apt-get install -y gnupg\n```\n3. Create the keyring directory and download the signing key:\n```bash\npct exec 101 -- mkdir -p /etc/apt/keyrings\npct exec 101 -- curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key | gpg --dearmor -o /etc/apt/keyrings/jellyfin.gpg\n```\n4. Create the repository file:\n```bash\npct exec 101 -- bash -c 'echo \"deb [signed-by=/etc/apt/keyrings/jellyfin.gpg] https://repo.jellyfin.org/debian bookworm main\" > /etc/apt/sources.list.d/jellyfin.list'\n```\n5. Refresh apt:\n```bash\npct exec 101 -- apt-get update\n```",
+  "expect": { "single_action": { "multi_action": true }, "no_self_contradiction": { "contradictions": 0 } }
+}

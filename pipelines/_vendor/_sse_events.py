@@ -62,6 +62,12 @@ ASSIST_HANDOFF_NOOP = "assist_handoff_noop"
 # chunk, then a single ASSIST_GUIDE_DONE carrying the final status +
 # guidance_meta (destructive scan, research sources, cached flag).
 ASSIST_GUIDE_DELTA = "assist_guide_delta"
+# §17.1165 — a corrected walkthrough REPLACES what was streamed. The operator
+# watched a draft that a gate then rewrote (single-action, banned values,
+# resource kinds); appending the correction left the rejected draft on screen
+# and they read THAT ("a long list of commands instead of one at a time").
+# Carries the full corrected text + a short `reason` line to show above it.
+ASSIST_GUIDE_REPLACE = "assist_guide_replace"
 ASSIST_GUIDE_DONE = "assist_guide_done"
 
 # §17.868 — the server-side turn loop (POST /assist/{sid}/message): ONE stream

@@ -72,14 +72,114 @@ def _trailing_section_at(text: str) -> int:
     return m.start() if m else len(text or "")
 
 
+# §17.1165 — a context line often carries a trailing clause ("— all commands
+# below run here", ", where you already are"). The SAME machine named twice
+# then read as TWO contexts and flagged a single-context walkthrough as
+# multi-action (live: the Jellyfin repo draft was rewritten for this wrong
+# reason, while the real multi-action shape below went undetected).
+_CTX_TAIL_RE = re.compile(r"\s*(?:—|–|--|,|;|\(|:)\s.*$")
+
+
+def _ctx_key(raw: str) -> str:
+    norm = re.sub(r"\s+", " ", raw or "").strip().rstrip(".").lower()
+    base = _CTX_TAIL_RE.sub("", norm).strip()
+    # keep a parenthesised user@host — it identifies the machine, not prose
+    m = re.search(r"\(([a-z_][\w.-]*@[\w.-]+)\)", norm)
+    if m and m.group(1) not in base:
+        base = f"{base} ({m.group(1)})"
+    return base or norm
+
+
 def execution_contexts(text: str) -> list[str]:
-    """Distinct normalised 'On:' targets, in order of first appearance."""
+    """Distinct normalised 'On:' targets, in order of first appearance. Two
+    spellings of the same machine are ONE context (§17.1165)."""
     seen, out = set(), []
     for m in _CONTEXT_RE.finditer(text or ""):
-        norm = re.sub(r"\s+", " ", m.group(1)).strip().rstrip(".").lower()
+        norm = _ctx_key(m.group(1))
         if norm and norm not in seen:
             seen.add(norm)
             out.append(norm)
+    return out
+
+
+# §17.1165 — the shape the operator reported: ONE machine, one heading, but a
+# numbered list where each step CHANGES something ("install gnupg", "download
+# the key", "write the repo file", "refresh apt"). Phases/contexts miss it.
+# A do-then-verify sequence on one resource (empty it, check it, stop it,
+# check it — two changes with their checks) is still ONE action, so the bar is
+# THREE distinct changes: past that, the operator is being handed a runbook.
+MAX_CHANGES_PER_STEP = 2
+_FENCE_RE = re.compile(r"```(?:bash|sh|shell)?\n(.*?)```", re.S)
+
+
+def _is_change(cmd: str) -> bool:
+    """Does this command CHANGE the system? Deterministic and self-contained:
+    the mutation-verb table plus a write redirect, after unwrapping `sudo`, a
+    guest exec (`pct exec`, `qm guest exec`, `lxc-attach`) and `sh -c`.
+
+    §17.1165 — deliberately NOT the AST read-only gate: that one fails CLOSED
+    (an unparsable command is refused), which is right for "may I run this?"
+    and wrong here — on a host without the shell parser every command looked
+    like a change and a do-then-verify step was flagged (the replay corpus
+    caught it). Unknown means NOT a change: this gate may only fire on
+    something it positively recognises as a write."""
+    import shlex
+    from app.modules.assist_state_check import _MUTATION_RE, _SUBCOMMAND_HEADS, container_exec_remainder, read_form
+    c = (cmd or "").strip()
+    if not c or c.startswith("#"):
+        return False
+    # a write redirect outside quotes (`> file`, `>> file`), /dev/null excepted
+    masked = re.sub(r"'[^']*'|\"[^\"]*\"", "", c)
+    if re.search(r">>|(?<![<>0-9&])>(?!\s*/dev/null)", masked):
+        return True
+    for segment in re.split(r"\|\||&&|;|\|", c):
+        seg = segment.strip()
+        if not seg:
+            continue
+        try:
+            argv = shlex.split(seg)
+        except ValueError:
+            continue                      # unparsable → unknown → not a change
+        if not argv:
+            continue
+        if argv[0].rsplit("/", 1)[-1] == "sudo" and len(argv) > 1:
+            argv = argv[1:]
+        inner = container_exec_remainder(argv)
+        if inner is not None:
+            if _is_change(inner):
+                return True
+            continue
+        head = argv[0].rsplit("/", 1)[-1]
+        if head in ("sh", "bash", "zsh") and len(argv) >= 3 and argv[1] == "-c":
+            if _is_change(argv[2]):
+                return True
+            continue
+        if read_form(argv):               # `dpkg -l`, `iptables -S`, `pip list`…
+            continue
+        probe = " ".join(argv[:4]) if head in _SUBCOMMAND_HEADS else head
+        if _MUTATION_RE.search(" " + probe + " "):
+            return True
+    return False
+
+
+def changing_commands(text: str) -> list[str]:
+    """Distinct commands in the walkthrough's fenced blocks that CHANGE the
+    system. Read-only look-ups do not count, and anything unrecognised counts
+    as a look-up (this gate never invents a violation)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for block in _FENCE_RE.findall(text or ""):
+        for raw in block.splitlines():
+            ln = " ".join(re.sub(r"^\s*\$\s+", "", raw.strip()).split())
+            if not ln or ln.startswith("#") or ln in seen:
+                continue
+            try:
+                if not _is_change(ln):
+                    continue
+            except Exception:
+                continue                  # a detector error must not invent a violation
+            seen.add(ln)
+            out.append(ln)
     return out
 
 
@@ -89,13 +189,16 @@ def count_phases(text: str) -> int:
 
 def multi_action_issue(text: str) -> Optional[dict]:
     """A step is multi-action when it sends the operator to two+ execution
-    contexts OR is split into two+ explicit phases. A single context with
-    several commands (empty a file, verify, stop) is ONE action and does not
-    flag — the §17.1011 max_steps prompt bound covers command count."""
+    contexts, is split into two+ explicit phases, or asks for more than
+    ``MAX_CHANGES_PER_STEP`` distinct CHANGES (§17.1165 — the live shape: one
+    machine, one heading, five numbered commands that each change something).
+    Read-only look-ups never count, and a do-then-verify pair on one resource
+    (empty a file, check it, stop it, check it) stays ONE action."""
     ctxs = execution_contexts(text)
     phases = count_phases(text)
-    if len(ctxs) >= 2 or phases >= 2:
-        return {"contexts": ctxs, "phases": phases}
+    changes = changing_commands(text)
+    if len(ctxs) >= 2 or phases >= 2 or len(changes) > MAX_CHANGES_PER_STEP:
+        return {"contexts": ctxs, "phases": phases, "changes": changes}
     return None
 
 
@@ -195,6 +298,12 @@ def coherence_directive(issues: dict) -> str:
         if len(ma["contexts"]) >= 2:
             bits.append(f"it sends the operator to {len(ma['contexts'])} different "
                         f"places to act ({'; '.join(ma['contexts'][:3])})")
+        _ch = ma.get("changes") or []
+        if len(_ch) > MAX_CHANGES_PER_STEP:   # §17.1165
+            bits.append(f"it asks for {len(_ch)} separate CHANGES in one step "
+                        + "; ".join(f"`{c[:60]}`" for c in _ch[:4])
+                        + " — the operator must be able to run ONE thing, see what it printed, "
+                          "and tell you before the next change is decided")
     for c in issues.get("contradictions", []):
         bits.append(f"it stops resource {c['resource']} and then tries to use that "
                     f"same resource's console/exec afterwards, which cannot work")
@@ -203,7 +312,8 @@ def coherence_directive(issues: dict) -> str:
         + "; ".join(bits) + ".\n"
         "Rewrite it as ONE action the operator does in ONE place. Keep only the "
         "FIRST thing they must do; do not include later phases, a second "
-        "execution context, or any step that uses a resource after stopping it. "
+        "execution context, later CHANGES that depend on this one's result, "
+        "or any step that uses a resource after stopping it. "
         "If more work remains, it becomes the NEXT step — end after the first "
         "action's verification. Output the corrected walkthrough in full."
     )

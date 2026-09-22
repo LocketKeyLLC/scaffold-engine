@@ -6645,13 +6645,21 @@ async def generate_guidance_stream(
 
     # §17.1098 — single-action + coherence enforcement FIRST, so a regenerated
     # or clipped walkthrough is what banned-values and every downstream guard
-    # (and the persisted/reloaded copy) operate on. The operator watched the
-    # multi-action draft stream, so the correction arrives as an appended block.
+    # (and the persisted/reloaded copy) operate on.
+    # §17.1165 — the correction REPLACES the streamed draft (it used to be
+    # appended below it, so the operator read the rejected multi-command draft
+    # and never noticed the one-action rewrite under it).
     coherence_meta: dict = {}
     if text_out:
+        _before = text_out
         text_out, coherence_meta, _coh_block = await enforce_coherence(
             text_out=text_out, messages=messages, role=role, label="assist_guide_stream")
-        if _coh_block:
+        if coherence_meta and text_out != _before:
+            yield {"type": "replace", "text": text_out,
+                   "reason": ("♻️ Rewritten as ONE action — the first draft asked for several commands at once."
+                              if (coherence_meta.get("issues") or {}).get("multi_action")
+                              else "♻️ Rewritten — the first draft contradicted itself.")}
+        elif _coh_block:
             yield {"type": "delta", "text": _coh_block}
 
     # §17.893 — banned-value enforcement on the stream path: the operator
@@ -6666,10 +6674,8 @@ async def generate_guidance_stream(
         )
         if _redrew and _new != text_out and not banned_meta:
             text_out = _new
-            yield {"type": "delta", "text":
-                   "\n\n---\n♻️ **Corrected walkthrough** (the draft above used a "
-                   "reserved value — this version replaces it; the corrected copy "
-                   "is what gets saved):\n\n" + _new}
+            yield {"type": "replace", "text": _new,   # §17.1165 — replace, don't append
+                   "reason": "♻️ Rewritten — the first draft used a value you ruled out."}
         elif banned_meta:
             _bwarn = banned_values_warning(banned_meta)
             text_out += _bwarn
