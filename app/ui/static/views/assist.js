@@ -1825,6 +1825,18 @@ export function renderChat(container, sessionId, opts = {}) {
             if (!selectionWithin(transcript)) liveBody.innerHTML = mdToHtml(acc);
             stick();
             break;
+          case "assist_guide_replace": {
+            // §17.1165 — a gate rewrote the draft (one action, a banned value):
+            // the corrected walkthrough REPLACES what streamed, so the operator
+            // never reads the rejected draft. The reason rides above it.
+            clearStatusLine();
+            ensureLive();
+            const why = (data && data.reason) || "♻️ Rewritten.";
+            acc = `_${why}_\n\n` + ((data && data.text) || "");
+            if (!selectionWithin(transcript)) liveBody.innerHTML = mdToHtml(acc);
+            stick();
+            break;
+          }
           case "assist_guide_done":
             if (live) live.classList.remove("streaming");
             if (live && data?.node_key) live.dataset.step = data.node_key;   // §17.1159

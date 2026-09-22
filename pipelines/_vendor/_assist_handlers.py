@@ -1656,6 +1656,11 @@ def assist_server_turn(
                     yield "\n\n## 🧭 How to do this step\n\n"
                     guide_open = True
                 yield payload.get("text", "")
+            elif event_type == sse.ASSIST_GUIDE_REPLACE:
+                # §17.1165 — a chat stream cannot un-print; say the draft was
+                # replaced and print the corrected walkthrough after it.
+                yield (f"\n\n---\n_{payload.get('reason') or '♻️ Rewritten.'} "
+                       f"Ignore the draft above — this is the walkthrough:_\n\n" + payload.get("text", ""))
             elif event_type == sse.ASSIST_GUIDE_DONE:
                 guide_open = False
                 yield "\n"

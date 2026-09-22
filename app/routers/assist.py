@@ -597,7 +597,7 @@ async def assist_guide_stream(
         raise HTTPException(status_code=409, detail="no node_key supplied and session has no current step")
 
     from app.utils.sse import _sse_with_disconnect_watch
-    from app.sse_events import ASSIST_GUIDE_DELTA, ASSIST_GUIDE_DONE
+    from app.sse_events import ASSIST_GUIDE_DELTA, ASSIST_GUIDE_DONE, ASSIST_GUIDE_REPLACE
 
     async def _gen():
         try:
@@ -607,6 +607,8 @@ async def assist_guide_stream(
             ):
                 if ev.get("type") == "delta":
                     yield assist_agent._sse(ASSIST_GUIDE_DELTA, {"text": ev["text"]})
+                elif ev.get("type") == "replace":   # §17.1165
+                    yield assist_agent._sse(ASSIST_GUIDE_REPLACE, {"text": ev.get("text") or "", "reason": ev.get("reason") or ""})
                 else:
                     yield assist_agent._sse(ASSIST_GUIDE_DONE, {
                         "status": ev.get("status"),

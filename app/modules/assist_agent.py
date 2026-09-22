@@ -1150,6 +1150,9 @@ async def generate_step_guidance_stream(
     ):
         if ev.get("type") == "delta":
             _buf.append(ev.get("text") or "")
+        elif ev.get("type") == "replace":   # §17.1165 — the correction IS the reply
+            _buf.clear()
+            _buf.append(ev.get("text") or "")
         elif ev.get("type") == "done":  # §17.1030
             await _record_sourced_values(
                 session_id=session_id, node_key=nk,
