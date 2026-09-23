@@ -906,7 +906,7 @@ async def test_ensure_helper_refresh_step_inserts_before_the_current_step_and_di
     rsrc = __import__("inspect").getsource(assist_turn.run_turn)
     assert 'handled["v"] + "+helper_refresh"' in rsrc
     seen = []
-    async def _inner(*, session_id, message, command, node_key, history, db, handled):
+    async def _inner(*, session_id, message, command, node_key, history, db, handled, capture_node_key=None):
         seen.append(command); handled["v"] = "guide"
         yield ("assist_guide_delta", {"text": "**Run this now:**\n```bash\ncat /etc/hostname\n```"}); yield ("assist_guide_done", {})
     spec = MagicMock(); spec.name = "pve-runner"

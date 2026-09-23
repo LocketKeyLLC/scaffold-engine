@@ -15,7 +15,7 @@ import { storage } from "./storage.js";
 // Visible build stamp (sidebar foot). Bump per UI change round — it exists so
 // "is my tab running the latest UI?" is answerable at a glance instead of by
 // diffing pixels (the §17.840/§17.842 stale-module debugging sink).
-const UI_BUILD = "r10";   // §17.1161 — bumped so the footer shows the new build
+const UI_BUILD = "r11";   // §17.1166 — superseded look-up asks are marked
 // §17.1055 — the sidebar retracts on wide screens (the operator asked for
 // the room: a walkthrough plus a terminal side by side). Per-browser, like
 // theme and density; the ≤820px drawer is unaffected.

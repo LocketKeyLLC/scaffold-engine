@@ -301,16 +301,14 @@ def test_helper_extracts_nested_substitutions():
     assert mod.extract_substitutions("a $(b") == ("a $(b", [])                     # unbalanced → left as is → unparsable
     assert mod.read_only("a $(b")[1] == "unparsable"
     assert mod.read_only("cat <<EOF\nx\nEOF")[1] == "substitution/heredoc"
-    assert mod.HELPER_VERSION == "5"
 
 
-def test_helper_masks_quotes_and_is_version_4():
+def test_helper_masks_quotes_and_judges_container_exec():
     mod = _load_runner_script()
     assert mod.mask_quoted("grep -o '<a>|b' f") == "grep -o '" + " " * 5 + "' f"
     assert mod.container_exec_remainder(["pct", "exec", "111", "--", "cat", "/a"]) == "cat /a"
     assert mod.container_exec_remainder(["pct", "exec", "111", "cat", "/a"]) == "cat /a"
     assert mod.container_exec_remainder(["pct", "list"]) is None and mod.container_exec_remainder(["qm", "config", "110"]) is None
-    assert mod.HELPER_VERSION == "5"
 
 
 @pytest.mark.parametrize("cmd", ["pvesh get /nodes/pve/firewall/rules", "pvesh ls /nodes", "pvesm status", "pvesm list local --content iso",
@@ -329,3 +327,80 @@ def test_proxmox_writes_are_refused_at_both_gates(cmd):
     from app.modules.assist_state_check import read_only_command
     assert not read_only_command(cmd), cmd
     assert _load_runner_script().read_only(cmd)[0] is False, cmd
+
+
+# ---------------------------------------------------------------------------
+# §17.1166 — privilege wrappers are judged on what they RUN, at BOTH ends.
+# ---------------------------------------------------------------------------
+
+# (command, read-only?) — the live ADD65 shapes first. `sudo apt install …`
+# PASSED the engine gate while the bare `apt install …` was refused, because
+# `argv[0]` was `sudo`. The engine sent the mutation to the runner; only the
+# helper's own gate stopped it ("refused by the local runner: mutation verb
+# apt"), and the block therefore never read as a WRITE, so §17.1156's
+# "the first writing block ends the scan" never fired.
+WRAPPER_CASES = [
+    ("sudo apt install -y qemu-guest-agent", False),          # live, 2026-09-22 23:02
+    ("sudo systemctl enable --now qemu-guest-agent", False),  # live
+    ("sudo -n apt-get install -y gnupg", False),              # the flagged form the OLD helper peel also missed
+    ("sudo -u root rm -rf /tmp/x", False),
+    ("sudo -i", False),                                       # an interactive shell is not a look-up
+    ("sudo", False),
+    ("env FOO=1 apt install x", False),
+    ("nohup rm -rf /x", False),
+    ("timeout 5s qm destroy 106", False),
+    ("sudo cat /etc/pve/firewall/host.fw", True),
+    ("sudo -u www-data ls /var/www", True),
+    ("sudo qm agent 106 ping", True),
+    ("env FOO=1 cat /etc/hosts", True),
+    ("timeout 5s qm config 106", True),                       # the DURATION is not the command
+]
+
+
+@pytest.mark.parametrize("cmd,ok", WRAPPER_CASES)
+def test_engine_gate_judges_what_the_wrapper_runs(cmd, ok):
+    from app.modules.assist_state_check import read_only_command
+    assert read_only_command(cmd) is ok, cmd
+
+
+@pytest.mark.parametrize("cmd,ok", WRAPPER_CASES)
+def test_helper_gate_agrees_with_the_engine(cmd, ok):
+    mod = _load_runner_script()
+    got, why = mod.read_only(cmd)
+    assert got is ok, f"{cmd} → {got} ({why})"
+
+
+def test_the_two_gates_cannot_drift_on_the_wrapper_table():
+    """The engine deciding a command is read-only while the helper refuses it
+    is the defect this pairing exists to catch: the engine spends a round trip
+    on a command that never runs, and the refusal lands in the transcript as
+    though it were output (§17.1166 — see test_assist_runner_lookup.py)."""
+    from app.modules import assist_state_check as sc
+    mod = _load_runner_script()
+    assert set(sc._PRIV_WRAPPERS) == set(mod._PRIV_WRAPPERS)
+    assert sc._WRAPPER_FLAG_WITH_ARG == mod._WRAPPER_FLAG_WITH_ARG
+    for cmd, _ in WRAPPER_CASES:
+        assert sc.read_only_command(cmd) is mod.read_only(cmd)[0], cmd
+
+
+def test_a_wrapper_with_no_command_is_refused_not_passed_through():
+    from app.modules.assist_state_check import privilege_wrapper_remainder
+    assert privilege_wrapper_remainder(["sudo", "apt", "install"]) == "apt install"
+    assert privilege_wrapper_remainder(["sudo", "-u", "root", "ls"]) == "ls"
+    assert privilege_wrapper_remainder(["timeout", "5s", "qm", "config", "106"]) == "qm config 106"
+    assert privilege_wrapper_remainder(["env", "A=1", "B=2", "cat", "/x"]) == "cat /x"
+    assert privilege_wrapper_remainder(["sudo", "-i"]) == ""      # fail closed
+    assert privilege_wrapper_remainder(["qm", "config", "106"]) is None   # not a wrapper
+
+
+def test_helper_version_bumped_so_a_stale_helper_is_refreshed():
+    """A live runner still on v5 judges `sudo` the old way. §17.1151's
+    stale-helper path turns the bump into a one-paste refresh step.
+
+    §17.1166 — this is the ONLY place the version is pinned. Two unrelated
+    tests (substitutions, quote masking) each carried their own
+    `HELPER_VERSION == "5"`, so every bump edited three assertions; one of them
+    was still NAMED `..._is_version_4` while asserting 5. Format and
+    engine/script parity live in test_runner_spec_and_helper_version above."""
+    mod = _load_runner_script()
+    assert int(mod.HELPER_VERSION) >= 6

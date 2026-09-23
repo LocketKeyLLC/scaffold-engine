@@ -58,7 +58,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "5"
+HELPER_VERSION = "6"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -165,6 +165,51 @@ def split_segments(cmd: str) -> list[str]:
 
 
 _SSH_FLAGS_WITH_ARG = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-W", "-b", "-c", "-e", "-I", "-m", "-O", "-Q", "-S", "-w", "-E", "-B"}
+
+
+# §17.1166 — privilege/environment WRAPPERS are judged on what they RUN.
+# The old peel dropped a bare leading `sudo` only: `sudo -n apt install x`
+# left `-n` as the head, which matches no mutation verb, so it passed. Mirrors
+# `privilege_wrapper_remainder` in app/modules/assist_state_check.py — the two
+# gates must agree or the engine sends what the helper then refuses.
+_PRIV_WRAPPERS = ("sudo", "doas", "env", "nohup", "nice", "ionice", "stdbuf",
+                  "command", "time", "timeout", "setsid")
+_WRAPPER_FLAG_WITH_ARG = {
+    "sudo": {"-u", "-g", "-p", "-C", "-D", "-h", "-R", "-T", "-U",
+             "--user", "--group", "--prompt", "--chdir", "--host",
+             "--close-from", "--command-timeout", "--other-user"},
+    "doas": {"-u", "-C"},
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-c", "-n", "-p", "-P", "-u"},
+    "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+}
+
+
+def privilege_wrapper_remainder(argv: list) -> str | None:
+    """The command a wrapper runs. None = not a wrapper; "" = no command
+    (an interactive shell — refused)."""
+    head = argv[0].rsplit("/", 1)[-1] if argv else ""
+    if head not in _PRIV_WRAPPERS:
+        return None
+    flags = _WRAPPER_FLAG_WITH_ARG.get(head, set())
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            i += 1
+            break
+        if a.startswith("-"):
+            i += 2 if a in flags else 1
+            continue
+        if head == "env" and "=" in a[1:]:
+            i += 1
+            continue
+        break
+    if head == "timeout" and i < len(argv):
+        i += 1
+    return " ".join(argv[i:]).strip()
 
 
 def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
@@ -291,8 +336,14 @@ def read_only(cmd: str, _depth: int = 0) -> tuple[bool, str]:
         if not argv:
             continue
         head = argv[0].rsplit("/", 1)[-1]
-        if head == "sudo" and len(argv) > 1:
-            argv = argv[1:]; head = argv[0].rsplit("/", 1)[-1]
+        wrapped = privilege_wrapper_remainder(argv)   # §17.1166
+        if wrapped is not None:
+            if not wrapped:
+                return False, f"{head} without a command"
+            ok, why = read_only(wrapped, _depth + 1)
+            if not ok:
+                return False, why
+            continue
         if head == "ssh":         # §17.1151 — a remote command is judged like a local one; interactive ssh is refused
             ok, why = ssh_remote_read_only(argv, read_only)
             if not ok:

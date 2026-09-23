@@ -1735,3 +1735,16 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
   .assist-main.follow { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); height: calc(100vh - 120px); }
   .follow-rail { max-height: 34vh; margin: 0 0 10px; }
 }
+
+/* §17.1166 — a command block the engine already ran through the local runner.
+   The ask stays readable (the operator may want to see what was run) but is
+   visibly retired, so it is not mistaken for work still to do. */
+.superseded-badge {
+  font-size: var(--fs-xs);
+  color: var(--ok);
+  margin: 6px 0 2px;
+}
+pre.superseded {
+  opacity: 0.55;
+  border-left: 2px solid var(--ok);
+}

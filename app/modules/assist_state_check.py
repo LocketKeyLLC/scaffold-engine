@@ -250,6 +250,57 @@ def container_exec_remainder(argv: list) -> Optional[str]:
     return " ".join(rest[i:]).strip() or None
 
 
+# §17.1166 — privilege/environment WRAPPERS. Live (ADD65, 2026-09-22 23:02):
+# `sudo apt install -y qemu-guest-agent` PASSED this gate while the bare
+# `apt install -y qemu-guest-agent` was refused — `argv[0]` is `sudo`, which is
+# no mutation verb, and the real command was never judged. The engine sent the
+# mutation to the runner (only the helper's own gate stopped it: "refused by
+# the local runner: mutation verb apt"), and because the block did not read as
+# a write, §17.1156's "the first writing block ends the scan" never fired.
+# Same shape as `container_exec_remainder` / `ssh_remote_read_only`: a wrapper
+# is judged on what it RUNS. Fail closed — a wrapper with nothing after it
+# (`sudo -i`, a bare `time`) is an interactive shell, not a look-up.
+_PRIV_WRAPPERS = ("sudo", "doas", "env", "nohup", "nice", "ionice", "stdbuf",
+                  "command", "time", "timeout", "setsid")
+_WRAPPER_FLAG_WITH_ARG = {
+    "sudo": {"-u", "-g", "-p", "-C", "-D", "-h", "-R", "-T", "-U",
+             "--user", "--group", "--prompt", "--chdir", "--host",
+             "--close-from", "--command-timeout", "--other-user"},
+    "doas": {"-u", "-C"},
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-c", "-n", "-p", "-P", "-u"},
+    "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+}
+
+
+def privilege_wrapper_remainder(argv: list) -> Optional[str]:
+    """``sudo`` / ``doas`` / ``env VAR=v`` / ``nohup`` / ``timeout 5s`` …: the
+    command the wrapper actually runs. ``None`` when argv is not a wrapper;
+    ``""`` when the wrapper carries no command (refuse — see above)."""
+    head = argv[0].rsplit("/", 1)[-1] if argv else ""
+    if head not in _PRIV_WRAPPERS:
+        return None
+    flags = _WRAPPER_FLAG_WITH_ARG.get(head, set())
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            i += 1
+            break
+        if a.startswith("-"):
+            i += 2 if a in flags else 1
+            continue
+        if head == "env" and "=" in a[1:]:   # env NAME=VALUE … cmd
+            i += 1
+            continue
+        break
+    if head == "timeout" and i < len(argv):
+        i += 1                               # the DURATION, not the command
+    return " ".join(argv[i:]).strip()
+
+
 def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
     """``ssh [opts] [user@]host <remote command>``: the remote command must pass
     the same gate; no remote command (an interactive login) is refused."""
@@ -293,6 +344,11 @@ def read_only_command(cmd: str) -> bool:
         if argv[0].rsplit("/", 1)[-1] == "ssh":   # §17.1151 — the remote command is judged like a local one
             ok, _why = ssh_remote_read_only(argv, read_only_command)
             if not ok:
+                return False
+            continue
+        wrapped = privilege_wrapper_remainder(argv)  # §17.1166 — sudo/env/nohup/timeout: judge what it RUNS
+        if wrapped is not None:
+            if not wrapped or not read_only_command(wrapped):
                 return False
             continue
         inner = container_exec_remainder(argv)   # §17.1152 — pct exec / qm guest exec / lxc-attach: judge what runs INSIDE

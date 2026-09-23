@@ -83,8 +83,8 @@ async def test_run_turn_runs_the_lookup_and_reenters_with_the_output_bounded(mon
     the output re-enters as the operator's paste → at most MAX_AUTO_ROUNDS."""
     from app.modules import assist_turn, assist_local_runner as lr
     seen = []
-    async def _inner(*, session_id, message, command, node_key, history, db, handled):
-        seen.append((command, (message or "")[:60], node_key))
+    async def _inner(*, session_id, message, command, node_key, history, db, handled, capture_node_key=None):
+        seen.append((command, (message or "")[:60], node_key, capture_node_key))
         handled["v"] = "guide"
         yield ("assist_guide_delta", {"text": "**Run this now:**\n```bash\ncat /etc/hostname\n```\nThen tell me what it shows."})
         yield ("assist_guide_done", {"status": "ready", "node_key": "T6"})
@@ -104,11 +104,16 @@ async def test_run_turn_runs_the_lookup_and_reenters_with_the_output_bounded(mon
     assert "_record" not in names                                          # the private frame never reaches the client
     notes = [e for e in ev if e[0] == "assist_answer" and e[1].get("kind") == "note"]
     assert len(notes) == 1 and notes[0][1]["text"].startswith("🔁 Your local runner is connected")
-    assert seen[0] == ("guide", "", "T6")
-    assert seen[1][0] == "message" and seen[1][1].startswith("[local-runner] ran the walkthrough") and seen[1][2] is None
+    assert seen[0] == ("guide", "", "T6", None)
+    # §17.1166 — routing still resolves from the pointer (node_key None), but the
+    # look-up turn is FILED against the step the reply was written for ("T6"),
+    # not with a NULL node_key as it was live.
+    assert seen[1][0] == "message" and seen[1][1].startswith("[local-runner] ran the walkthrough")
+    assert seen[1][2] is None          # routing still resolves from the pointer (a repair commit re-points, §17.1152)
+    assert seen[1][3] == "T6"          # §17.1166 — but the look-up turn is FILED against the step it answered
     # a DIFFERENT block each round runs up to MAX_AUTO_ROUNDS
     seen.clear(); n = {"i": 0}
-    async def _inner3(*, session_id, message, command, node_key, history, db, handled):
+    async def _inner3(*, session_id, message, command, node_key, history, db, handled, capture_node_key=None):
         n["i"] += 1; seen.append(command); handled["v"] = "guide"
         yield ("assist_guide_delta", {"text": f"**Run this now:**\n```bash\ncat /etc/file{n['i']}\n```"})
         yield ("assist_guide_done", {"status": "ready", "node_key": "T6"})
@@ -120,7 +125,7 @@ async def test_run_turn_runs_the_lookup_and_reenters_with_the_output_bounded(mon
     ev = [e async for e in assist_turn.run_turn(session_id="s", message=None, command="guide", node_key="T6", history=[], db=MagicMock())]
     assert len(seen) == 1 and ev[-1][1]["handled"] == "guide"
     # a mutating block → the operator's hands, no round trip
-    async def _inner2(*, session_id, message, command, node_key, history, db, handled):
+    async def _inner2(*, session_id, message, command, node_key, history, db, handled, capture_node_key=None):
         handled["v"] = "fix"
         yield ("assist_answer", {"kind": "fix", "text": "```bash\nsystemctl restart pve-firewall\n```"})
     monkeypatch.setattr(assist_turn, "_run_turn_inner", _inner2); monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
@@ -254,3 +259,159 @@ def test_fix_gate_folds_repeated_lookups_into_redundancy_and_the_ledger_is_threa
     assert "engine itself through the local runner" in src                     # the directive says so
     asrc = inspect.getsource(assist_agent.run_step_fix)
     assert "_recent_lookups(db, session_id)" in asrc and "runner_ledger=_runner_ledger" in asrc
+
+
+# ---------------------------------------------------------------------------
+# §17.1166 — a refusal is not an answer; a walkthrough gets the answers it has.
+# ---------------------------------------------------------------------------
+
+def test_a_refusal_or_transport_failure_is_not_an_answer():
+    assert rl.is_answer("status: stopped")
+    assert rl.is_answer("(no output)")            # it RAN and matched nothing
+    assert not rl.is_answer("(refused by the local runner: mutation verb apt)")
+    assert not rl.is_answer("(runner error: connection refused)")
+    assert not rl.is_answer("(timed out after 20s)")
+
+
+@pytest.mark.asyncio
+async def test_ledger_skips_refusals_so_the_gate_cannot_argue_against_the_right_fix():
+    """The live ADD65 shape (2026-09-22 23:02–23:04): the runner REFUSED
+    `sudo apt install -y qemu-guest-agent` (correctly — it mutates), the old
+    ledger filed it as known, and the redundancy gate then flagged the one
+    correct fix ("open the VM console and install the agent") as asking to
+    re-run something already answered."""
+    import datetime as dt
+    t = dt.datetime(2026, 9, 22, 23, 2)
+    rows = [{"content": ("[local-runner] ran the walkthrough's read-only look-up:\n"
+                         "$ qm config 106\nagent: 1\nboot: order=ide2\n"
+                         "$ sudo apt install -y qemu-guest-agent\n(refused by the local runner: mutation verb apt)\n"
+                         "$ qm agent 106 ping\nQEMU guest agent is not running\n"),
+             "created_at": t}]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(mappings=lambda: MagicMock(all=lambda: rows)))
+    led = await rl.recent_lookups(db, "s")
+    cmds = [e["command"] for e in led]
+    assert "qm config 106" in cmds and "qm agent 106 ping" in cmds
+    assert "sudo apt install -y qemu-guest-agent" not in cmds        # never ran → nothing known
+    fix = ("**Open the Proxmox web UI console for VM 106 and type this:**\n"
+           "```bash\nsudo apt install -y qemu-guest-agent\n```\n")
+    assert rl.find_repeated_lookups(fix, led) == []
+
+
+def test_runner_ledger_block_hands_the_walkthrough_the_answers():
+    import datetime as dt
+    led = [{"command": "qm status 106", "output": "status: stopped",
+            "at": dt.datetime(2026, 9, 22, 22, 53), "by": "runner"},
+           {"command": "qm agent 106 ping", "output": "QEMU guest agent is not running",
+            "at": dt.datetime(2026, 9, 22, 23, 2), "by": "operator"}]
+    block = rl.runner_ledger_block(led)
+    assert "ALREADY RUN THIS SESSION" in block
+    assert "Do NOT ask the operator to run any of them again" in block
+    assert "$ qm status 106" in block and "status: stopped" in block
+    assert "the engine ran it on the target machine, 22:53 UTC" in block
+    assert "the operator ran it, 23:02 UTC" in block
+    assert rl.runner_ledger_block([]) == "" and rl.runner_ledger_block(None) == ""
+    long = [{"command": "cat /x", "output": "y" * 5000, "at": None, "by": "runner"}]
+    assert len(rl.runner_ledger_block(long)) < 1200                  # per-output cap
+
+
+def test_the_guide_path_consults_the_ledger_at_both_ends():
+    """§17.1158 wired the ledger into generate_fix ONLY and recorded 'guides do
+    not consult the ledger'. Live ADD65: the runner printed `status: stopped`
+    at 22:53:19 and the guide asked for `qm status 106` 34 seconds later."""
+    from app.modules import assist_guide
+    builder = inspect.getsource(assist_guide._build_guide_user_prompt)
+    assert "runner_ledger" in builder and "runner_ledger_block(runner_ledger)" in builder
+    for fn in (assist_guide.generate_guidance, assist_guide.generate_guidance_stream,
+               assist_guide.ensure_guidance):
+        assert "runner_ledger" in inspect.signature(fn).parameters, fn.__name__
+    # the streaming path (the SPA's route) fetches it itself — no caller threading
+    stream = inspect.getsource(assist_guide.generate_guidance_stream)
+    assert "recent_lookups as _rlk" in stream and "runner_ledger = await _rlk(db, session_id)" in stream
+    assert "runner_ledger=runner_ledger" in stream
+    # and the visible backstop when a draft asks anyway
+    warn = inspect.getsource(assist_guide.guide_integrity_warning)
+    assert "find_repeated_lookups(text_out, runner_ledger)" in warn
+    assert "already on file" in warn
+
+
+def test_guide_integrity_warning_flags_an_ask_the_engine_already_answered():
+    import datetime as dt
+    from app.modules.assist_guide import guide_integrity_warning
+    led = [{"command": "qm status 106", "output": "status: stopped",
+            "at": dt.datetime(2026, 9, 22, 22, 53), "by": "runner"}]
+    draft = "## 👉 Do this next\n\n**Run this now:**\n```bash\nqm status 106\n```\nthen tell me what it shows."
+    warn = guide_integrity_warning(draft, "", "", led)
+    assert "already on file" in warn and "qm status 106" in warn
+    assert guide_integrity_warning(draft, "", "", []) == ""        # nothing on file → no flag
+
+
+@pytest.mark.asyncio
+async def test_a_runner_lookup_turn_is_filed_against_the_step_not_NULL():
+    """§17.1166 — the loop re-entered with `node_key = None`, so every
+    `[local-runner]` look-up turn was written with a NULL node_key (live
+    ADD65: turns 3100/3104/3112/3114/3119/3121). That put the engine's own
+    findings outside the step's history, outside the per-step 'already tried'
+    harvest (§17.973), and outside the Follow pane's step filter (§17.1160) —
+    the operator could not see, in the pane, the look-up their runner ran."""
+    from app.modules import assist_turn
+    src = inspect.getsource(assist_turn.run_turn)
+    assert "capture_nk = tail.node_key() or await _current_node_key(db, session_id)" in src
+    # routing still resolves from the pointer — a repair commit re-points (§17.1152)
+    assert "node_key = None" in src and "capture_node_key=capture_nk" in src
+    inner = inspect.getsource(assist_turn._run_turn_inner)
+    assert "content=text_, node_key=capture_node_key or node_key, db=db," in inner
+
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(
+        mappings=lambda: MagicMock(first=lambda: {"current_node_key": "ADD65"})))
+    assert await assist_turn._current_node_key(db, "s") == "ADD65"
+    db.execute = AsyncMock(return_value=MagicMock(
+        mappings=lambda: MagicMock(first=lambda: None)))
+    assert await assist_turn._current_node_key(db, "s") is None       # no session row
+    db.execute = AsyncMock(side_effect=RuntimeError("db down"))
+    assert await assist_turn._current_node_key(db, "s") is None       # fail-soft
+
+
+def test_the_lookup_is_filed_against_the_step_the_reply_was_written_for():
+    """Live 22:51:52: a walkthrough for ADD17 asked for `nvidia-smi`, the
+    runner ran it, the output re-entered the loop with NO step, and the next
+    reply landed on ADD65 — where it called the engine's own result 'a red
+    herring'. The reply's own step beats the session pointer."""
+    t = rl.ReplyTail()
+    t.feed("assist_guide_delta", {"text": "**Run this now:**\n```bash\nnvidia-smi\n```"})
+    t.feed("assist_guide_done", {"node_key": "ADD17"})
+    assert t.node_key() == "ADD17" and "nvidia-smi" in t.text()
+    # a fix answer stamps its step too
+    t2 = rl.ReplyTail()
+    t2.feed("assist_answer", {"kind": "fix", "text": "```bash\nqm status 106\n```", "node_key": "ADD65"})
+    assert t2.node_key() == "ADD65"
+    # an unstamped frame leaves it to the caller's fallback (the session pointer)
+    t3 = rl.ReplyTail()
+    t3.feed("assist_answer", {"kind": "fix", "text": "x"})
+    assert t3.node_key() is None
+    # a later stamped reply wins; an unstamped later one does not erase it
+    t.feed("assist_answer", {"kind": "fix", "text": "y"})
+    assert t.node_key() == "ADD17"
+
+
+@pytest.mark.asyncio
+async def test_the_ledger_is_one_list_newest_first_not_runner_then_operator():
+    """§17.1166 — the two queries used to append runner entries then operator
+    entries, so `ledger[:N]` (runner_ledger_block) never reached a paste."""
+    import datetime as dt
+    old_r = dt.datetime(2026, 9, 22, 20, 0)
+    new_op = dt.datetime(2026, 9, 22, 23, 0)
+    runner_rows = [{"content": "[local-runner] look-up:\n$ qm config 106\nagent: 1\n", "created_at": old_r}]
+    paste_rows = [{"content": "root@pve:~# qm status 106\nstatus: running\n", "created_at": new_op}]
+    calls = {"n": 0}
+
+    async def _exec(*a, **k):
+        calls["n"] += 1
+        rows = runner_rows if calls["n"] == 1 else paste_rows
+        return MagicMock(mappings=lambda: MagicMock(all=lambda: rows))
+
+    db = MagicMock(); db.execute = AsyncMock(side_effect=_exec)
+    led = await rl.recent_lookups(db, "s")
+    assert [e["command"] for e in led] == ["qm status 106", "qm config 106"]
+    assert led[0]["by"] == "operator" and led[1]["by"] == "runner"

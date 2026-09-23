@@ -161,6 +161,7 @@ class ReplyTail:
         self._guide: list[str] = []
         self._last: str = ""
         self._guide_open = False
+        self._node_key: str | None = None
 
     def feed(self, name: str, data: dict[str, Any]) -> None:
         if name == "assist_guide_delta":
@@ -169,11 +170,23 @@ class ReplyTail:
             self._guide.append(str(data.get("text") or ""))
         elif name == "assist_guide_done":
             self._last, self._guide_open = "".join(self._guide), False
+            # §17.1166 — the step this reply was written FOR (§17.1149 stamps
+            # it, since a repair step may have diverted the walkthrough).
+            self._node_key = data.get("node_key") or self._node_key
         elif name == "assist_answer" and (data.get("kind") in ("fix", "guide")):
             self._last = str(data.get("text") or "")
+            self._node_key = data.get("node_key") or self._node_key
 
     def text(self) -> str:
         return self._last
+
+    def node_key(self) -> str | None:
+        """§17.1166 — the step the look-up belongs to. Live (22:51:52): a
+        walkthrough for ADD17 asked for `nvidia-smi`, the runner ran it, and
+        the output re-entered the loop with NO step — the next reply landed on
+        ADD65 and called the engine's own result "a red herring". The reply's
+        own step beats the session pointer; the pointer is the fallback."""
+        return self._node_key
 
 
 _ON_RE = re.compile(r"📍\s*On:\s*(.+)")
@@ -222,6 +235,27 @@ def location_is_runner_host(where: Optional[str], *, host: Optional[str], ip: Op
 
 _LEDGER_LINE_RE = re.compile(r"^\$ (.+?)\n(.*?)(?=^\$ |\Z)", re.S | re.M)
 
+# §17.1166 — a REFUSAL is not an answer. The helper returns "(refused by the
+# local runner: …)" as an ordinary tool result (not an MCP error), so
+# `executed[].ok` is True and the text was the only tell — and `recent_lookups`
+# recorded it as though the command had run. Live (ADD65, 23:04 UTC): the
+# runner refused `sudo apt install -y qemu-guest-agent` (a mutation, correctly
+# — see §17.1166's gate fix), the ledger filed it as known, and the redundancy
+# gate then flagged the one CORRECT fix — "open the VM console and install the
+# agent" — as "asks you to re-run … whose answer the engine already has".
+# The gate argued against the only action that would have finished the step.
+_NOT_AN_ANSWER_RE = re.compile(
+    r"^\((?:refused by the local runner|runner error|timed out after)\b", re.I)
+
+
+def is_answer(output: str) -> bool:
+    """True when the recorded output is something the command actually
+    PRINTED. A refusal, a transport error or a timeout means it never ran —
+    the engine knows nothing more than before, so asking for it is not
+    redundant. ``(no output)`` IS an answer: the command ran and matched
+    nothing."""
+    return not _NOT_AN_ANSWER_RE.match((output or "").strip())
+
 
 async def recent_lookups(db, session_id: str, *, minutes: int = 180, limit_turns: int = 40) -> list[dict]:
     """``[{command, output, at}]`` from the session's ``[local-runner]``
@@ -245,8 +279,12 @@ async def recent_lookups(db, session_id: str, *, minutes: int = 180, limit_turns
             cmd = " ".join(m.group(1).split())
             if cmd in seen:
                 continue
+            body = (m.group(2) or "").strip()
+            if not is_answer(body):   # §17.1166 — refused/errored: never ran, nothing learned
+                logger.info("runner_ledger_skipped_non_answer cmd=%r out=%r", cmd[:60], body[:60])
+                continue
             seen.add(cmd)
-            out.append({"command": cmd, "output": (m.group(2) or "").strip(), "at": r["created_at"], "by": "runner"})
+            out.append({"command": cmd, "output": body, "at": r["created_at"], "by": "runner"})
     # §17.1159 — what the OPERATOR ran and pasted counts too: the same command
     # asked for again is redundant whether the runner or a person ran it.
     try:
@@ -256,16 +294,42 @@ async def recent_lookups(db, session_id: str, *, minutes: int = 180, limit_turns
                AND content NOT LIKE '[local-runner]%' AND created_at > now() - make_interval(mins => :m)
              ORDER BY created_at DESC LIMIT :n
         """), {"sid": session_id, "m": int(minutes), "n": int(limit_turns)})).mappings().all()
-        from app.modules.assist_paste import parse_paste
+        from app.modules.assist_paste import parse_with_context, SENTINEL_ECHO_RE
+        # §17.1167 — the walkthroughs/fixes this session issued, so a multi-line
+        # paste can be split on the block it came from. Without them a block
+        # paste files its LATER commands as the FIRST command's output.
+        try:
+            _grows = (await db.execute(_t("""
+                SELECT content FROM assist_turns
+                 WHERE session_id = :sid AND role = 'assistant' AND kind IN ('guide', 'fix')
+                   AND created_at > now() - make_interval(mins => :m)
+                 ORDER BY created_at DESC LIMIT 12
+            """), {"sid": session_id, "m": int(minutes)})).scalars().all() or []
+        except Exception as exc:
+            logger.warning("recent_lookups_guidance_failed sid=%s err=%r", session_id, exc)
+            _grows = []
         for r in prows:
-            for e in parse_paste(r["content"] or "").entries:
+            for e in parse_with_context(r["content"] or "", list(_grows)).entries:
                 cmd = " ".join(e.command.split())
                 if not cmd or cmd in seen or e.heredoc:
+                    continue
+                # §17.1167 — the copy button's own marker is not a look-up, and a
+                # command inside a pasted BLOCK has no separable output: filing
+                # either as "already answered" is how the gate learned to argue
+                # against commands from output they never produced.
+                if SENTINEL_ECHO_RE.match(cmd) or e.grouped:
+                    continue
+                if not is_answer(e.output or ""):   # §17.1166 — a refusal is not an answer on ANY path
                     continue
                 seen.add(cmd)
                 out.append({"command": cmd, "output": (e.output or "").strip(), "at": r["created_at"], "by": "operator"})
     except Exception as exc:
         logger.warning("recent_lookups_paste_failed sid=%s err=%r", session_id, exc)
+    # §17.1166 — the two queries append runner entries then operator entries,
+    # so an unsorted list buries every paste behind every look-up: a consumer
+    # that takes the newest N (runner_ledger_block) would never reach what the
+    # OPERATOR ran. One list, newest first.
+    out.sort(key=lambda e: (e.get("at") is not None, e.get("at")), reverse=True)
     return out
 
 
@@ -292,3 +356,33 @@ def find_repeated_lookups(text_out: str, ledger: Optional[list[dict]]) -> list[d
             hits.append({"command": ln, "resource": "",
                          "known": f"{who} at {when} and it printed: {out[:200]}"})
     return hits
+
+
+def runner_ledger_block(ledger: Optional[list[dict]], *, limit: int = 12,
+                        per_output: int = 400) -> str:
+    """§17.1166 — the prompt block that stops a WALKTHROUGH from asking for
+    what the engine already has.
+
+    §17.1158 folded the ledger into `generate_fix`'s gate only, and recorded
+    "Not done: guides do not consult the ledger". Live (ADD65, 2026-09-22):
+    the runner ran `qm status 106` at 22:53:19 and printed `status: stopped`;
+    the guide 34 seconds later opened with "Run this now: `qm status 106` —
+    then tell me what it shows". A guide is flag-don't-regen (§17.887), so the
+    fix has to land BEFORE the draw: give the walkthrough the answers, and it
+    has nothing to ask for."""
+    if not ledger:
+        return ""
+    lines: list[str] = []
+    for e in ledger[:limit]:
+        at = e.get("at")
+        when = at.strftime("%H:%M UTC") if hasattr(at, "strftime") else str(at or "earlier")
+        who = "the operator ran it" if e.get("by") == "operator" else "the engine ran it on the target machine"
+        out = (e.get("output") or "(no output)").strip()
+        if len(out) > per_output:
+            out = out[:per_output] + " …"
+        lines.append(f"$ {e['command']}   ({who}, {when})\n{out}")
+    return ("ALREADY RUN THIS SESSION — these commands and their real output are "
+            "on file. Do NOT ask the operator to run any of them again, and do not "
+            "ask for output you can read here. Use these values. If they do not "
+            "settle the question, ask for something DIFFERENT that would:\n\n"
+            + "\n\n".join(lines))
