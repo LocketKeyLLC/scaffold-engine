@@ -257,7 +257,23 @@ def is_answer(output: str) -> bool:
     return not _NOT_AN_ANSWER_RE.match((output or "").strip())
 
 
-async def recent_lookups(db, session_id: str, *, minutes: int = 180, limit_turns: int = 40) -> list[dict]:
+# §17.1168 — the row cap, not the time window, was the binding constraint.
+# MEASURED on the operator's real session (613dd1df, 1,454 turns over 626 h):
+#   runner turns in any 180-min window: max 19  → never reached the cap
+#   operator PASTES in any 180-min window: max 46, and 12 windows over 40
+# so `LIMIT 40` truncated pastes the time window still covered — during fast
+# iteration, which is exactly when a repeat is most likely. §17.1159 made the
+# operator's own pastes count as look-ups; those are the rows being dropped.
+# The WINDOW itself is right and deliberately unchanged: of 10 repeated
+# look-ups in that session, 8 fall inside 180 min (already caught) and the 2
+# outside are 25 h and 48 h apart (`ip a`, `nvidia-smi`) — re-running those is
+# CORRECT, and presenting a two-day-old reading as current would be worse than
+# asking again. Time bounds staleness; the row cap should not bound recall.
+_LEDGER_TURNS = 120
+
+
+async def recent_lookups(db, session_id: str, *, minutes: int = 180,
+                         limit_turns: int = _LEDGER_TURNS) -> list[dict]:
     """``[{command, output, at}]`` from the session's ``[local-runner]``
     operator turns (look-ups and guest checks carry ``$ cmd`` + output),
     newest first; one entry per command (the newest wins)."""
@@ -358,8 +374,8 @@ def find_repeated_lookups(text_out: str, ledger: Optional[list[dict]]) -> list[d
     return hits
 
 
-def runner_ledger_block(ledger: Optional[list[dict]], *, limit: int = 12,
-                        per_output: int = 400) -> str:
+def runner_ledger_block(ledger: Optional[list[dict]], *, limit: int = 20,
+                        per_output: int = 400, max_chars: int = 4000) -> str:
     """§17.1166 — the prompt block that stops a WALKTHROUGH from asking for
     what the engine already has.
 
@@ -373,14 +389,22 @@ def runner_ledger_block(ledger: Optional[list[dict]], *, limit: int = 12,
     if not ledger:
         return ""
     lines: list[str] = []
-    for e in ledger[:limit]:
+    budget = max_chars
+    for e in ledger[:limit]:          # newest first (recent_lookups sorts)
         at = e.get("at")
         when = at.strftime("%H:%M UTC") if hasattr(at, "strftime") else str(at or "earlier")
         who = "the operator ran it" if e.get("by") == "operator" else "the engine ran it on the target machine"
         out = (e.get("output") or "(no output)").strip()
         if len(out) > per_output:
             out = out[:per_output] + " …"
-        lines.append(f"$ {e['command']}   ({who}, {when})\n{out}")
+        entry = f"$ {e['command']}   ({who}, {when})\n{out}"
+        # §17.1168 — a wider ledger must not silently eat the guide prompt: the
+        # NEWEST entries are the ones worth spending the budget on, so stop
+        # rather than truncate the middle of one.
+        if len(entry) > budget and lines:
+            break
+        budget -= len(entry)
+        lines.append(entry)
     return ("ALREADY RUN THIS SESSION — these commands and their real output are "
             "on file. Do NOT ask the operator to run any of them again, and do not "
             "ask for output you can read here. Use these values. If they do not "

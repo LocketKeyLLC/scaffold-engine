@@ -415,3 +415,61 @@ async def test_the_ledger_is_one_list_newest_first_not_runner_then_operator():
     led = await rl.recent_lookups(db, "s")
     assert [e["command"] for e in led] == ["qm status 106", "qm config 106"]
     assert led[0]["by"] == "operator" and led[1]["by"] == "runner"
+
+
+# ---------------------------------------------------------------------------
+# §17.1168 — the row cap, not the time window, was the binding constraint.
+# ---------------------------------------------------------------------------
+
+def test_the_row_cap_does_not_bound_what_the_time_window_covers():
+    """MEASURED on the operator's real session: operator pastes reached 46 in a
+    180-minute window (12 such windows), so `LIMIT 40` dropped rows the window
+    still covered — during fast iteration, when a repeat is most likely. The
+    WINDOW is deliberately unchanged: 8 of 10 repeats fall inside it, and the 2
+    outside are 25 h and 48 h apart, where re-running is correct."""
+    import inspect as _i
+    sig = _i.signature(rl.recent_lookups).parameters
+    assert sig["minutes"].default == 180            # time still bounds staleness
+    assert sig["limit_turns"].default >= 120        # rows no longer bound recall
+    assert rl._LEDGER_TURNS >= 120
+
+
+@pytest.mark.asyncio
+async def test_a_busy_window_keeps_its_oldest_rows(monkeypatch):
+    """46 pastes in one window — the shape that was truncated at 40."""
+    import datetime as dt
+    base = dt.datetime(2026, 9, 22, 20, 0)
+    prows = [{"content": f"root@pve:~# qm config 1{i:02d}\nagent: 1\n",
+              "created_at": base + dt.timedelta(minutes=i)} for i in range(46)]
+    captured = {}
+
+    async def _exec(q, params=None):
+        sql = str(q)
+        # NOTE order matters: the paste query says `content NOT LIKE
+        # '[local-runner]%'`, which CONTAINS the runner query's predicate, so
+        # matching the runner branch first swallowed the paste query entirely.
+        if "kind IN ('guide', 'fix')" in sql:
+            return MagicMock(scalars=lambda: MagicMock(all=lambda: []))
+        if "NOT LIKE '[local-runner]%'" in sql:
+            captured["paste_n"] = (params or {}).get("n")
+            return MagicMock(mappings=lambda: MagicMock(all=lambda: prows))
+        captured["runner_n"] = (params or {}).get("n")
+        return MagicMock(mappings=lambda: MagicMock(all=lambda: []))
+
+    db = MagicMock(); db.execute = AsyncMock(side_effect=_exec)
+    led = await rl.recent_lookups(db, "s")
+    assert captured["paste_n"] >= 120 and captured["runner_n"] >= 120
+    assert len(led) == 46                      # all 46 distinct commands survive
+    assert led[0]["command"] == "qm config 145"   # newest first
+
+
+def test_the_prompt_block_is_budgeted_so_a_wide_ledger_cannot_eat_the_guide():
+    import datetime as dt
+    big = [{"command": f"cat /very/long/path/number/{i}", "output": "x" * 900,
+            "at": dt.datetime(2026, 9, 22, 22, 0), "by": "runner"} for i in range(40)]
+    block = rl.runner_ledger_block(big)
+    assert len(block) < 4600                      # budget + the header
+    assert "cat /very/long/path/number/0" in block    # the NEWEST are kept
+    # one entry alone is never dropped, however long
+    one = [{"command": "cat /x", "output": "y" * 9000, "at": None, "by": "runner"}]
+    assert "cat /x" in rl.runner_ledger_block(one)
