@@ -142,3 +142,110 @@ async def test_ledger_includes_pasted_commands_and_names_who_ran_them():
     assert [(e["command"], e["by"]) for e in led] == [("qm status 110", "runner"), ("pve-firewall status", "operator")]
     hits = rl.find_repeated_lookups("```bash\npve-firewall status\n```", led)
     assert hits and "the operator ran it and pasted the result" in hits[0]["known"] and "enabled/running" in hits[0]["known"]
+
+
+# ---------------------------------------------------------------------------
+# §17.1167 — a multi-line paste: one prompt, N commands, output at the end.
+# ---------------------------------------------------------------------------
+
+# The live paste, verbatim (session 613dd1df, T6, turn 3008, 2026-09-20 21:53).
+LIVE_BLOCK_PASTE = """root@pve:~# systemctl is-active pve-firewall
+iptables -L PVEFW-HOST-IN -n -v | grep 8790
+status_output=$(pve-firewall status)
+echo "$status_output"
+if echo "$status_output" | grep -q 'pending changes'; then
+    pve-firewall compile && pve-firewall restart
+    echo "Applied pending changes"
+fi
+active
+   36  2160 RETURN     tcp  --  *      *       192.168.1.0/24       0.0.0.0/0            tcp dpt:8790
+Status: enabled/running
+root@pve:~#
+"""
+
+LIVE_BLOCK = """systemctl is-active pve-firewall
+iptables -L PVEFW-HOST-IN -n -v | grep 8790
+status_output=$(pve-firewall status)
+echo "$status_output"
+if echo "$status_output" | grep -q 'pending changes'; then
+    pve-firewall compile && pve-firewall restart
+    echo "Applied pending changes"
+fi"""
+
+
+def test_a_block_paste_without_its_block_is_one_command_swallowing_the_rest():
+    """The shape the parser cannot resolve alone — kept as a test so the
+    fallback stays honest rather than guessing."""
+    p = ap.parse_paste(LIVE_BLOCK_PASTE)
+    assert len(p.entries) == 1
+    assert p.entries[0].command == "systemctl is-active pve-firewall"
+
+
+def test_the_issued_block_splits_commands_from_output_and_the_run_is_complete():
+    """Live: the operator ran all EIGHT commands; match_block reported ran=1,
+    skipped=7, complete=False, and §17.1159's deterministic path returned
+    `step_incomplete` — naming seven commands they had run — before the model
+    saw anything. The engine manufactured its own re-ask."""
+    p = ap.parse_paste(LIVE_BLOCK_PASTE, issued=LIVE_BLOCK)
+    assert [e.command for e in p.entries] == ap.issued_commands(LIVE_BLOCK)
+    assert len(p.groups) == 1 and len(p.groups[0]) == 8
+    m = ap.match_block(LIVE_BLOCK, p)
+    assert m["ran"] == ap.issued_commands(LIVE_BLOCK) and m["skipped"] == [] and m["complete"]
+    v = ap.paste_verdict(LIVE_BLOCK_PASTE, ["**Run this now:**\n```bash\n" + LIVE_BLOCK + "\n```"])
+    assert v["outcome"] == "complete" and "all 8 issued command(s) ran" in v["summary"]
+
+
+def test_the_block_output_is_rendered_as_the_group_s_not_as_the_last_command_s():
+    p = ap.parse_paste(LIVE_BLOCK_PASTE, issued=LIVE_BLOCK)
+    out = ap.render_pairs(p)
+    assert "[1-8]" in out and "pasted as ONE block and ALL ran" in out
+    assert "not recoverable" in out              # no false attribution
+    assert "1. systemctl is-active pve-firewall" in out and "8. fi" in out
+    assert "Status: enabled/running" in out
+    # and no member is blamed for the block's error output
+    assert p.failed == []
+
+
+def test_promotion_stops_at_the_first_line_that_is_not_an_issued_command():
+    """A paste whose output happens to start with something unrelated is left
+    exactly as it was — promotion is never a guess."""
+    text = "root@pve:~# qm config 110 | grep ide2\nboot: order=scsi0;ide2\nide2: none,media=cdrom\nroot@pve:~#\n"
+    p = ap.parse_paste(text, issued="qm config 110 | grep ide2\nqm status 110")
+    assert len(p.entries) == 1 and not p.entries[0].grouped
+    assert p.entries[0].output.startswith("boot: order=scsi0;ide2")
+    # NOTE the blank-line guard in _promote_pasted_block cannot fire on a
+    # LEADING blank: parse_paste drops it (an empty first output line leaves
+    # `output` falsy, so the next line simply becomes the output). A blank
+    # inside the output is moot — promotion has already stopped at the line
+    # before it. The guard stays as a cheap belt-and-braces; this is what the
+    # parser actually does, asserted so the next reader is not misled.
+    p2 = ap.parse_paste("root@pve:~# a\n\nb\n", issued="a\nb")
+    assert [e.command for e in p2.entries] == ["a", "b"]
+
+
+def test_the_copy_button_sentinel_is_a_command_and_its_split_is_exact():
+    """Live turn 3117: `echo \"== S:ADD65/f4d7d847 ==\"` was read as the OUTPUT
+    of `qm guest exec …`, and the ledger then filed the echo as a command that
+    had 'printed' the next command's text. The sentinel prints exactly its own
+    line, so the split needs no issued block and is not a group."""
+    text = ('root@pve:~# qm guest exec 106 -- systemctl is-active qemu-guest-agent\n'
+            'echo "== S:ADD65/3d084e8b =="\n'
+            'QEMU guest agent is not running\n'
+            '== S:ADD65/3d084e8b ==\n'
+            'root@pve:~#\n')
+    p = ap.parse_paste(text)                      # no issued block needed
+    assert [e.command for e in p.entries] == [
+        "qm guest exec 106 -- systemctl is-active qemu-guest-agent",
+        'echo "== S:ADD65/3d084e8b =="']
+    assert p.entries[0].output == "QEMU guest agent is not running"
+    assert p.entries[1].output == "== S:ADD65/3d084e8b =="
+    assert p.groups == []                         # attribution is exact → no group
+    assert p.sentinel_step == "ADD65" and p.sentinel_at_end
+
+
+def test_parse_with_context_finds_the_block_itself_and_falls_back_cleanly():
+    guidance = ["do this\n\n```bash\n" + LIVE_BLOCK + "\n```\n"]
+    p = ap.parse_with_context(LIVE_BLOCK_PASTE, guidance)
+    assert len(p.entries) == 8
+    assert len(ap.parse_with_context(LIVE_BLOCK_PASTE, []).entries) == 1    # no block → plain parse
+    assert ap.parse_with_context("", guidance).entries == []

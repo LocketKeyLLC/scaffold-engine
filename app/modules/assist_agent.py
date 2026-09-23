@@ -3021,7 +3021,10 @@ async def verify_submit_outcome(
                         session_id, node_key, len(_pv["match"]["skipped"]), len(_pv["match"]["issued"]))
             return {"outcome": "incomplete", "reason": _pv["reason"], "summary": _pv["summary"],
                     "confidence": "high", "grounded_by": "paste_parser", "skipped_commands": _pv["match"]["skipped"]}
-        _p = _pv["paste"] if _pv else _ap.parse_paste(evidence)
+        # §17.1167 — no verdict (no block matched) still gets the best parse the
+        # context allows; the plain parse reads a block paste's later commands
+        # as the first command's output.
+        _p = _pv["paste"] if _pv else _ap.parse_with_context(evidence, _texts)
         if _p.entries:
             paste_pairs = _ap.render_pairs(_p)
         if _pv:

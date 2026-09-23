@@ -38,6 +38,8 @@ _CONTINUATION_RE = re.compile(r"^\s*>\s?\S")
 _HEREDOC_RE = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?")
 _RC_RE = re.compile(r"^\s*rc=(\d+)\s*$")
 SENTINEL_RE = re.compile(r"^\s*==\s*S:(?P<step>[A-Za-z0-9_.-]+)/(?P<hash>[0-9a-f]{8})\s*==\s*$", re.M)
+# the copy button's own line — a COMMAND the operator ran, not output (§17.1167)
+SENTINEL_ECHO_RE = re.compile(r'^\s*echo\s+"== S:[^"]+ =="\s*$')
 _ERROR_RE = re.compile(r"(?i)\b(?:error|failed|failure|cannot|can't|could not|no such file|not found|permission denied|"
                        r"refused|unreachable|no route|timed out|timeout|denied|invalid|fatal|exception|traceback|E:|W:)\b")
 
@@ -50,6 +52,11 @@ class Entry:
     user: Optional[str] = None
     heredoc: bool = False
     exit_code: Optional[int] = None
+    group: int = 0          # §17.1167 — >0: ran inside ONE pasted block (see _promote_pasted_block)
+
+    @property
+    def grouped(self) -> bool:
+        return self.group > 0
 
     @property
     def errored(self) -> bool:
@@ -83,7 +90,19 @@ class Paste:
 
     @property
     def failed(self) -> list[Entry]:
-        return [e for e in self.entries if e.errored]
+        # §17.1167 — a grouped entry's output is the whole BLOCK's output; which
+        # command in it errored is not decidable, so naming one would be a guess.
+        # The group's output still reaches the model through render_pairs.
+        return [e for e in self.entries if e.errored and not e.grouped]
+
+    @property
+    def groups(self) -> list[list[Entry]]:
+        """The pasted blocks, each as its list of commands (in order)."""
+        out: dict[int, list[Entry]] = {}
+        for e in self.entries:
+            if e.group:
+                out.setdefault(e.group, []).append(e)
+        return [out[k] for k in sorted(out)]
 
 
 def _norm(cmd: str) -> str:
@@ -113,7 +132,12 @@ def strip_sentinel_lines(block: str) -> str:
     return "\n".join(ln for ln in (block or "").splitlines() if not re.match(r'^\s*echo\s+"== S:[^"]+ =="\s*$', ln))
 
 
-def parse_paste(text: str) -> Paste:
+def parse_paste(text: str, issued: Optional[str] = None) -> Paste:
+    """Parse a terminal paste into command → output pairs.
+
+    ``issued`` is the block the engine asked for, when the caller knows it
+    (`paste_verdict` finds it, then re-parses) — see `_promote_pasted_block`
+    for why a multi-line paste cannot be split without it."""
     p = Paste()
     cur: Optional[Entry] = None
     terminator: Optional[str] = None
@@ -172,7 +196,113 @@ def parse_paste(text: str) -> Paste:
     if p.sentinel_step:
         tail = [ln for ln in lines if ln.strip() and not _BARE_PROMPT_RE.match(ln)]
         p.sentinel_at_end = bool(tail) and bool(SENTINEL_RE.match(tail[-1]))
+    _promote_pasted_block(p, issued)
     return p
+
+
+def _promote_pasted_block(p: Paste, issued: Optional[str]) -> None:
+    """§17.1167 — a multi-line block pasted at ONE prompt.
+
+    The shell echoes a single prompt, the operator's remaining command lines
+    land on the lines after it, and ALL the output follows at the end:
+
+        root@pve:~# systemctl is-active pve-firewall
+        iptables -L PVEFW-HOST-IN -n -v | grep 8790
+        status_output=$(pve-firewall status)
+        ...
+        active                     <- output starts here
+        root@pve:~#
+
+    The line-by-line parse reads every line after the first as that command's
+    OUTPUT. Live (session 613dd1df, T6, turn 3008): the operator ran all eight
+    commands of the block; `match_block` reported ran=1, skipped=7,
+    complete=False, and §17.1159's deterministic path returned
+    `step_incomplete` — naming seven commands they HAD run — before the model
+    saw anything. The engine manufactured the re-ask.
+
+    Two signals separate command lines from output, neither a guess:
+      * the copy button's own `echo "== S:<step>/<hash> =="` (§17.1159) is a
+        command by construction — no context needed;
+      * the ISSUED block: a leading output line that is verbatim one of the
+        commands the engine asked for, at a position AFTER this entry's own,
+        is a command the operator pasted, not something the shell printed.
+
+    Promotion stops at the first line that is neither (and at a blank line),
+    so a paste whose output happens to start with something unrelated is left
+    exactly as it was. The block's combined output stays on the LAST command
+    of the group, and every member is marked ``group`` — which command printed
+    which line is NOT recoverable, and `render_pairs` says so rather than
+    implying an attribution.
+    """
+    issued_list = issued_commands(issued) if issued else []
+    out: list[Entry] = []
+    gid = 0
+    for e in p.entries:
+        lines = (e.output or "").splitlines()
+        try:
+            want = issued_list.index(_norm(e.command)) + 1
+        except ValueError:
+            want = 0 if issued_list else -1
+        promoted: list[Entry] = []
+        i = 0
+        while i < len(lines):
+            raw = lines[i]
+            if not raw.strip():
+                break                       # a blank line: the output has begun
+            n = _norm(raw)
+            if SENTINEL_ECHO_RE.match(raw):
+                promoted.append(Entry(command=n, host=e.host, user=e.user))
+                i += 1
+                continue
+            hit = -1
+            if want >= 0:
+                for j in range(want, len(issued_list)):
+                    if issued_list[j] == n:
+                        hit = j
+                        break
+            if hit < 0:
+                break
+            want = hit + 1
+            promoted.append(Entry(command=n, host=e.host, user=e.user))
+            i += 1
+        if not promoted:
+            out.append(e)
+            continue
+        rest_lines = lines[i:]
+        # The copy button's sentinel echo prints exactly ONE line — its own. So
+        # everything before that line was printed by the commands before it, and
+        # the split is exact, not a guess. For the common shape (one command +
+        # its sentinel) that means no group at all: the command keeps its own
+        # output. Live turn 3117 read `echo "== S:ADD65/f4d7d847 =="` as the
+        # output of `qm guest exec …`, and the ledger then filed the echo as a
+        # command that had "printed" the next command's text.
+        sent_at = next((k for k, ln in enumerate(rest_lines) if SENTINEL_RE.match(ln)), -1)
+        if sent_at >= 0 and SENTINEL_ECHO_RE.match(promoted[-1].command):
+            before = "\n".join(rest_lines[:sent_at]).strip("\n")
+            promoted[-1].output = "\n".join(rest_lines[sent_at:]).strip("\n")
+            owner = promoted[-2] if len(promoted) > 1 else e
+            owner.output = before
+            if len(promoted) == 1:            # [command, sentinel] — attribution is exact
+                e.output = before
+                out.append(e)
+                out.extend(promoted)
+                continue
+            gid += 1
+            e.group = gid
+            for q in promoted:
+                q.group = gid
+            out.append(e)
+            out.extend(promoted)
+            continue
+        gid += 1
+        rest = "\n".join(rest_lines).strip("\n")
+        e.output, e.group = "", gid
+        for q in promoted:
+            q.group = gid
+        promoted[-1].output = rest
+        out.append(e)
+        out.extend(promoted)
+    p.entries = out
 
 
 def render_pairs(p: Paste, *, max_chars: int = 6000, max_output_lines: int = 40) -> str:
@@ -181,7 +311,30 @@ def render_pairs(p: Paste, *, max_chars: int = 6000, max_output_lines: int = 40)
     parts: list[str] = []
     if p.leading_output:
         parts.append("(output before the first prompt)\n" + "\n".join(p.leading_output.splitlines()[-12:]))
-    for i, e in enumerate(p.entries, 1):
+    i, n = 0, 1
+    while i < len(p.entries):
+        e = p.entries[i]
+        # §17.1167 — a pasted BLOCK: render its commands together and its output
+        # once, saying plainly that the per-command split is not recoverable.
+        # Implying an attribution here is how a wrong command gets blamed.
+        if e.group:
+            j = i
+            while j < len(p.entries) and p.entries[j].group == e.group:
+                j += 1
+            grp = p.entries[i:j]
+            who = f"{e.user}@{e.host}" if e.host else "shell"
+            cmds = "\n".join(f"    {k}. {g.command}" for k, g in enumerate(grp, 1))
+            out_lines = (grp[-1].output or "").splitlines()
+            if len(out_lines) > max_output_lines:
+                out_lines = ["…(earlier output truncated)…"] + out_lines[-max_output_lines:]
+            body = "\n".join("    " + ln for ln in out_lines) if out_lines else "    (no output)"
+            parts.append(
+                f"[{n}-{n + len(grp) - 1}] {who}$ these {len(grp)} commands were pasted as ONE block and "
+                f"ALL ran; the shell printed the output below after the last of them, so which command "
+                f"printed which line is not recoverable:\n{cmds}\n  their combined output:\n{body}")
+            n += len(grp)
+            i = j
+            continue
         who = f"{e.user}@{e.host}" if e.host else "shell"
         out_lines = (e.output or "").splitlines()
         if len(out_lines) > max_output_lines:
@@ -192,7 +345,9 @@ def render_pairs(p: Paste, *, max_chars: int = 6000, max_output_lines: int = 40)
             tag = f"  [exit {e.exit_code}]"
         elif e.heredoc:
             tag = "  [wrote a file via heredoc — body omitted]"
-        parts.append(f"[{i}] {who}$ {e.command}{tag}\n{body}")
+        parts.append(f"[{n}] {who}$ {e.command}{tag}\n{body}")
+        n += 1
+        i += 1
     txt = "\n".join(parts)
     if len(txt) > max_chars:
         txt = "…(earlier commands truncated)…\n" + txt[-max_chars:]
@@ -261,7 +416,7 @@ def looks_like_block_copied_back(text: str, block: Optional[str]) -> bool:
 def shape_guard(text: str, block: Optional[str] = None) -> Optional[str]:
     """One plain sentence when the paste's SHAPE means it cannot be judged
     yet; None when it is judgeable. Deterministic; runs before any model."""
-    p = parse_paste(text)
+    p = parse_paste(text, issued=block)   # §17.1167 — the block separates commands from output
     if looks_like_block_copied_back(text, block):
         return ("That is the command block itself, not its output — it looks like it was copied back without being run. "
                 "Run it in the shell on the target, then paste what it prints (the lines after each command).")
@@ -305,6 +460,22 @@ def find_issued_block(guidance_texts: list[str], p: Paste) -> Optional[str]:
     return best
 
 
+def parse_with_context(text: str, guidance_texts: list[str]) -> Paste:
+    """§17.1167 — parse a paste the best way the context allows: find the block
+    the engine issued, then re-parse with it so a multi-line paste's later
+    command lines are read as COMMANDS, not as the first command's output.
+    Falls back to the plain parse (which still promotes the copy-button
+    sentinel) when no block can be tied to the paste."""
+    p = parse_paste(text)
+    if not p.entries:
+        return p
+    try:
+        block = find_issued_block(guidance_texts or [], p)
+    except Exception:
+        block = None
+    return parse_paste(text, issued=block) if block else p
+
+
 def paste_verdict(text: str, guidance_texts: list[str]) -> Optional[dict]:
     """§17.1159 — the deterministic part of judging a paste against the block
     the engine issued: ``{outcome, reason, summary, block, match, paste}``
@@ -317,6 +488,11 @@ def paste_verdict(text: str, guidance_texts: list[str]) -> Optional[dict]:
     block = find_issued_block(guidance_texts, p)
     if not block:
         return None
+    # §17.1167 — now that the block is known, re-parse with it: a multi-line
+    # paste's later commands are command lines, not the first command's output.
+    # Without this the verdict called a COMPLETE run incomplete (live turn 3008:
+    # ran=1 skipped=7 on a block the operator had run in full).
+    p = parse_paste(text, issued=block)
     m = match_block(block, p)
     if m["complete"] or not m["skipped"]:
         return {"outcome": "complete", "block": block, "match": m, "paste": p,

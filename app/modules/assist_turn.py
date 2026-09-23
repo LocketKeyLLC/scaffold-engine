@@ -348,12 +348,14 @@ async def run_turn(
     # turn continues — at most MAX_AUTO_ROUNDS times per operator turn.
     from app.modules import assist_runner_lookup as _rl
     msg, cmd, rounds = message, command, 0
+    capture_nk: str | None = None      # §17.1166 — set only on a runner re-entry
     ran: set = set()      # §17.1152 — a look-up already run this turn is not run again (the model repeating itself ends the loop)
     while True:
         tail = _rl.ReplyTail()
         async for e in _run_turn_inner(
             session_id=session_id, message=msg, command=cmd,
             node_key=node_key, history=history, db=db, handled=handled,
+            capture_node_key=capture_nk,
         ):
             tail.feed(e[0], e[1])
             yield e
@@ -372,10 +374,34 @@ async def run_turn(
         if not record:
             break
         msg, cmd, rounds = record, "message", rounds + 1
-        node_key = None    # the pointer may have moved; the loop resolves it
+        # §17.1166 — ROUTING still resolves from the pointer (a repair commit
+        # re-points, §17.1152), but the look-up turn must still be FILED
+        # somewhere: `node_key=None` wrote every `[local-runner]` turn with a
+        # NULL node_key (live ADD65: 3100/3104/3112/3114/3119/3121), putting
+        # the engine's own findings outside the step's history, outside the
+        # §17.973 per-step "already tried" harvest and outside the Follow
+        # pane's step filter (§17.1160). Attribution is the reply's own step
+        # (§17.1149 stamps it), else the session pointer.
+        capture_nk = tail.node_key() or await _current_node_key(db, session_id)
+        node_key = None
     if rounds:
         handled["v"] = handled["v"] + "+lookup" * rounds
     yield _ev(ASSIST_TURN_DONE, {"handled": handled["v"]})
+
+
+async def _current_node_key(db, session_id: str) -> str | None:
+    """§17.1166 — the session's pointer, so a turn the engine itself appends
+    is filed against the step it belongs to. Fail-soft: None keeps the old
+    behaviour rather than breaking the loop."""
+    from sqlalchemy import text as _t
+    try:
+        row = (await db.execute(
+            _t("SELECT current_node_key FROM assist_sessions WHERE id = :sid"),
+            {"sid": session_id})).mappings().first()
+        return (row or {}).get("current_node_key")
+    except Exception as exc:
+        logger.warning("current_node_key_failed sid=%s err=%r", session_id, exc)
+        return None
 
 
 async def _auto_lookup(session_id: str, reply_text: str, db, ran: set | None = None) -> AsyncIterator[_Event]:
@@ -465,6 +491,7 @@ async def _auto_lookup(session_id: str, reply_text: str, db, ran: set | None = N
 async def _run_turn_inner(
     *, session_id: str, message: str | None, command: str,
     node_key: str | None, history: list[dict], db, handled: dict,
+    capture_node_key: str | None = None,   # §17.1166 — attribution only, never routing
 ) -> AsyncIterator[_Event]:
     from app.modules import assist_agent
 
@@ -513,7 +540,7 @@ async def _run_turn_inner(
     try:
         await assist_agent.ingest_turn(
             session_id=session_id, role="operator", kind="message",
-            content=text_, node_key=node_key, db=db,
+            content=text_, node_key=capture_node_key or node_key, db=db,
         )
     except Exception as exc:
         logger.warning("turn_loop_capture_failed sid=%s err=%r", session_id, exc)

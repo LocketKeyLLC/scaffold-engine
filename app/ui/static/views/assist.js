@@ -228,6 +228,58 @@ function contractCard(onDismiss, session, force) {
 // restart is stale noise — reassure, don't alarm. If it was NOT answered,
 // hand its text back so "resend" is one click, not a retype of a 48-line
 // paste. Pure so a node test can pin it.
+// §17.1166 — a look-up the engine ran ITSELF is not work for the operator.
+// Live (ADD65, 2026-09-22 22:51:52): the walkthrough said "Run this now:
+// `nvidia-smi` — then tell me what it shows"; 0.2 s later the runner ran it
+// and printed the answer; at 22:53:00 the operator ran and pasted it anyway,
+// because the ask was still sitting there asking. The reply cannot know in
+// advance (§17.1150 reads the block OUT of the reply), so the transcript
+// marks the block once the engine has answered it.
+export const RUNNER_LOOKUP_NOTE_RE = /^(?:🔁 Your local runner is connected, so I ran that look-up myself|\[local-runner\] ran the walkthrough's read-only look-up)/;
+
+export function lookupCommandsFrom(text) {
+  const out = new Set();
+  String(text || "").split("\n").forEach((ln) => {
+    const m = /^\$ (.+)$/.exec(ln.trim());
+    if (m) out.add(m[1].trim().replace(/\s+/g, " "));
+  });
+  return out;
+}
+
+export function annotateSupersededLookups(root) {
+  if (!root) return;
+  const msgs = Array.from(root.querySelectorAll(".msg"));
+  msgs.forEach((m, i) => {
+    const body = m.querySelector(".msg-body");
+    const txt = (body ? body.textContent || "" : "").trim();
+    if (!RUNNER_LOOKUP_NOTE_RE.test(txt)) return;
+    const cmds = lookupCommandsFrom(txt);
+    if (!cmds.size) return;
+    // the reply that ASKED is the nearest assistant turn above the note
+    for (let j = i - 1; j >= 0 && j >= i - 3; j--) {
+      const prev = msgs[j];
+      if (!prev.classList.contains("as")) continue;
+      prev.querySelectorAll("pre").forEach((pre) => {
+        if (pre.dataset.superseded) return;
+        const lines = (pre.textContent || "")
+          .split("\n")
+          .map((t) => t.trim().replace(/\s+/g, " "))
+          .filter(Boolean)
+          .filter((t) => !t.startsWith("#") && !/^echo "== S:/.test(t));
+        // only when the engine answered EVERY line of the block
+        if (!lines.length || !lines.every((l) => cmds.has(l))) return;
+        pre.dataset.superseded = "1";
+        pre.classList.add("superseded");
+        pre.parentNode.insertBefore(
+          el("div", { class: "superseded-badge", text: "✓ the engine already ran this through your local runner — you don't need to" }),
+          pre
+        );
+      });
+      break;
+    }
+  });
+}
+
 export function restartRecovery(turns, detail) {
   const isRestart = /restarted mid-turn|stalled for more than/i.test(detail || "");
   if (!isRestart) return { kind: "generic", text: "" };
@@ -1152,6 +1204,9 @@ export function renderChat(container, sessionId, opts = {}) {
     // §17.890 — never rebuild the DOM out from under an active selection.
     if (selectionWithin(transcript)) { transcriptRenderDeferred = true; return; }
     transcriptRenderDeferred = false;
+    // §17.1166 — after whichever mount path below runs (they are synchronous,
+    // several of them return early), mark the asks the engine already answered.
+    queueMicrotask(() => annotateSupersededLookups(transcript));
     // §17.1160 — the Follow pane is about ONE step: the one being read (a
     // finished step picked in the rail) or the current one. Its own turns,
     // plus session-level turns (no node) that arrived after its first turn.
@@ -1811,6 +1866,7 @@ export function renderChat(container, sessionId, opts = {}) {
             clearStatusLine();
             appendBubble("assistant", data?.kind || "ask", data?.text || "");
             ephemeralTail.push({ kind: data?.kind || "ask", content: data?.text || "", at: new Date().toISOString() });
+            annotateSupersededLookups(transcript);   // §17.1166
             break;
           case "assist_step_outcome":
             toast(`Step ${data?.node_key || ""}: ${data?.status || "recorded"}.`,

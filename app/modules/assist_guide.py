@@ -2339,6 +2339,7 @@ def _build_guide_user_prompt(
     operator_notes: Optional[list[dict]] = None,
     is_decision: bool = False,
     conversation: Optional[str] = None,
+    runner_ledger: Optional[list[dict]] = None,  # §17.1166 — what is already on file
 ) -> str:
     """Compose the user message: the same upstream-last task the executor
     would see, plus the operator environment, a project-wide digest of work
@@ -2399,6 +2400,15 @@ def _build_guide_user_prompt(
     parts.extend(_render_memory_or_legacy(environment, operator_notes))
     if conversation and conversation.strip():  # §17.687 — recent back-and-forth
         parts.append(conversation.strip())
+    # §17.1166 — the look-ups the runner (or the operator) already ran, so the
+    # walkthrough has the answers instead of asking for them.
+    try:
+        from app.modules.assist_runner_lookup import runner_ledger_block
+        _led = runner_ledger_block(runner_ledger)
+        if _led:
+            parts.append(_led)
+    except Exception as exc:
+        logger.warning("runner_ledger_block_failed err=%r", exc)
     research_block = _render_research_block(sources)
     if research_block:
         parts.append(research_block)
@@ -2427,6 +2437,7 @@ async def generate_guidance(
     conversation: Optional[str] = None,
     operator_conversation: Optional[str] = None,  # §17.1029 — operator-authored dialogue only
     flagged: Optional[set] = None,  # §17.1029 — values earlier replies flagged
+    runner_ledger: Optional[list[dict]] = None,  # §17.1166 — already run this session
 ) -> dict:
     """Generate (do not persist) the human walkthrough for one step.
 
@@ -2465,7 +2476,7 @@ async def generate_guidance(
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
-        conversation=conversation,
+        conversation=conversation, runner_ledger=runner_ledger,
     )
 
     gen_messages = [
@@ -2586,7 +2597,7 @@ async def generate_guidance(
                 "not — treat its steps as unverified and tell me where you "
                 "actually are.\n\n" + text_out)
     if text_out:
-        warn = guide_integrity_warning(text_out, user, failed_commands)
+        warn = guide_integrity_warning(text_out, user, failed_commands, runner_ledger)
         if warn:
             logger.warning("assist_guide_integrity_flag node_key=%s", node_key)
             text_out += warn
@@ -5054,7 +5065,8 @@ async def enforce_coherence(
     return text_out + warn, {"action": "flagged", "issues": issues}, warn
 
 
-def guide_integrity_warning(text_out: str, user_prompt: str, failed_commands: str) -> str:
+def guide_integrity_warning(text_out: str, user_prompt: str, failed_commands: str,
+                            runner_ledger: Optional[list[dict]] = None) -> str:
     """§17.887 (audit #8) — the §17.882/883 gates for GUIDE output. Returns a
     warning block to append ("" when clean). Guides get flag-don't-regen: a
     visible warning beats doubled latency on every walkthrough, and the live
@@ -5075,6 +5087,17 @@ def guide_integrity_warning(text_out: str, user_prompt: str, failed_commands: st
         bits.append("contains a command the shell will SPLIT on an unquoted "
                     "separator — only the text before it reaches the program (" +
                     "; ".join(f"`{h['token'][:70]}`" for h in shell_unsafe[:2]) + ")")
+    # §17.1166 — the backstop behind runner_ledger_block: the walkthrough was
+    # handed these answers and asked for them anyway.
+    try:
+        from app.modules.assist_runner_lookup import find_repeated_lookups
+        _again = find_repeated_lookups(text_out, runner_ledger)
+    except Exception:
+        _again = []
+    if _again:
+        bits.append("asks you to run command(s) whose answer is already on file ("
+                    + "; ".join(f"`{h['command'][:60]}`" for h in _again[:2])
+                    + ") — " + _again[0]["known"])
     novel = find_novel_urls(text_out, (user_prompt or "") + "\n" + (failed_commands or ""))
     if novel:
         bits.append("contains download URL(s) not traceable to research, the "
@@ -5308,7 +5331,10 @@ async def generate_fix(
     # ones errored, so the diagnosis names the right command.
     try:
         from app.modules import assist_paste as _ap
-        _pp = _ap.parse_paste(error_text)
+        # §17.1167 — §17.925's recent replies ARE the issued blocks: parsed with
+        # them, a multi-line paste's later commands are commands, not the first
+        # command's output, and the diagnosis stops blaming the wrong one.
+        _pp = _ap.parse_with_context(error_text, list(recent_replies or []))
         if _pp.entries:
             _failed = ", ".join(f"`{e.command[:70]}`" for e in _pp.failed[:4]) or "none by their output"
             parts.append("## The same paste, parsed (authoritative for which command printed what)\n"
@@ -6410,6 +6436,7 @@ async def ensure_guidance(
     conversation: Optional[str] = None,
     operator_conversation: Optional[str] = None,  # §17.1029
     flagged: Optional[set] = None,  # §17.1029
+    runner_ledger: Optional[list[dict]] = None,  # §17.1166 — already run this session
     db,
 ) -> dict:
     """Return guidance, generating + persisting only when needed.
@@ -6448,6 +6475,16 @@ async def ensure_guidance(
             session_id=session_id, node_key=node_key, db=db)
     except Exception:
         pass
+    # §17.1166 — the look-ups already answered this session (runner + operator
+    # pastes). Fail-soft: an empty ledger renders no block.
+    _ledger = runner_ledger
+    if _ledger is None:
+        try:
+            from app.modules.assist_runner_lookup import recent_lookups as _rlk
+            _ledger = await _rlk(db, session_id)
+        except Exception as _exc:
+            logger.warning("runner_ledger_failed sid=%s err=%r", session_id, _exc)
+            _ledger = []
     res = await generate_guidance(
         ctx=ctx,
         failed_commands=failed_cmds,
@@ -6463,6 +6500,7 @@ async def ensure_guidance(
         is_decision=is_decision,
         conversation=conversation,
         operator_conversation=operator_conversation, flagged=flagged,  # §17.1029
+        runner_ledger=_ledger,  # §17.1166
     )
     # §17.851 — code-enforced placeholder resolution (see resolve_placeholders).
     from app.config import settings as _settings
@@ -6519,6 +6557,7 @@ async def generate_guidance_stream(
     conversation: Optional[str] = None,
     operator_conversation: Optional[str] = None,  # §17.1029
     flagged: Optional[set] = None,  # §17.1029
+    runner_ledger: Optional[list[dict]] = None,  # §17.1166 — already run this session
     db,
 ):
     """Stream a walkthrough as it generates. Yields event dicts:
@@ -6595,11 +6634,21 @@ async def generate_guidance_stream(
             ctx=ctx, node_key=node_key, domain=domain,
         )
 
+    # §17.1166 — a walkthrough must not ask for what the runner already ran.
+    # Fetched HERE (this path has db + session_id) so every caller of the
+    # streaming guide gets it without threading a new argument.
+    if runner_ledger is None:
+        try:
+            from app.modules.assist_runner_lookup import recent_lookups as _rlk
+            runner_ledger = await _rlk(db, session_id)
+        except Exception as _exc:
+            logger.warning("runner_ledger_failed sid=%s err=%r", session_id, _exc)
+            runner_ledger = []
     system = _build_guide_system(ctx, verbosity, is_decision=is_decision)
     user = _build_guide_user_prompt(
         ctx, node_description, sources, refine_hint, environment=environment,
         job_digest=job_digest, operator_notes=operator_notes, is_decision=is_decision,
-        conversation=conversation,
+        conversation=conversation, runner_ledger=runner_ledger,
     )
     messages = [
         {"role": "system", "content": system},
@@ -6690,7 +6739,7 @@ async def generate_guidance_stream(
                 session_id=session_id, node_key=node_key, db=db)
         except Exception:
             pass
-        _warn = guide_integrity_warning(text_out, user, _failed_cmds)
+        _warn = guide_integrity_warning(text_out, user, _failed_cmds, runner_ledger)
         if _warn:
             logger.warning("assist_guide_integrity_flag node_key=%s (stream)", node_key)
             text_out += _warn
