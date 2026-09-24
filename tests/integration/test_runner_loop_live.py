@@ -411,20 +411,43 @@ async def test_paste_shapes_are_judged_deterministically(session, helper):
     assert n >= 1                                                                        # the guard's reply is durable
 
 
+async def _lr_spec_present() -> bool:
+    """§17.1169 — the runner resolves IN THIS PROCESS. Without this the test's
+    real assertion (a look-up runs) is vacuous: `runner_spec` returns None and
+    `_auto_lookup` returns with no frames and no log line."""
+    from app.modules import assist_local_runner as _lr
+    async with async_session() as db:
+        return await _lr.runner_spec(db) is not None
+
+
 async def test_lookup_skips_a_block_meant_for_another_machine(session, helper):
     """§17.1152 — a reply whose `📍 On:` line names a VM console never runs on
     the host through the runner (live: `ip a` ran on the host and the model
     reasoned over the host's interfaces as the VM's)."""
     from app.modules import assist_turn
+    from app.config import settings
     sid = session["session_id"]
     console = ("## 👉 Do this next\n\n**Open the web console for VM 110 and type this:**\n\n```\nip a\n```\n\n"
                "📍 On: web UI console for VM 110 — you're leaving the root@localhost shell")
     shell = "📍 On: the host shell (root@localhost)\n\n**Run this now:**\n\n```bash\nhostname\n```"
-    async with async_session() as db:
-        ev = [e async for e in assist_turn._auto_lookup(sid, console, db, set())]
-        assert ev == []
-        ran: set = set()
-        ev = [e async for e in assist_turn._auto_lookup(sid, shell, db, ran)]
-        assert any(e[0] == "_record" for e in ev) and ran == {("hostname",)}
-        ev = [e async for e in assist_turn._auto_lookup(sid, shell, db, ran)]
-        assert ev == []                                                                      # the repeat guard
+    # §17.1169 — this test drives `_auto_lookup` IN-PROCESS, but the runner
+    # valve is pinned only in the ENGINE SUBPROCESS's env (see the `engine`
+    # fixture). In this process `assist_local_runner_server` is "" and the
+    # §17.1146 tagged fallback cannot help either, because `runner_row`
+    # registers an UNTAGGED row on purpose — so `runner_spec` returned None and
+    # `_auto_lookup` returned SILENTLY. The test asserted a `_record` that could
+    # never be produced, and had been red since it was written (§17.1153).
+    _prev = settings.assist_local_runner_server
+    settings.assist_local_runner_server = RUNNER_NAME
+    try:
+        assert await _lr_spec_present(), "the runner row must resolve in-process or this test proves nothing"
+        async with async_session() as db:
+            ev = [e async for e in assist_turn._auto_lookup(sid, console, db, set())]
+            assert ev == []
+            ran: set = set()
+            ev = [e async for e in assist_turn._auto_lookup(sid, shell, db, ran)]
+            assert any(e[0] == "_record" for e in ev) and ran == {("hostname",)}
+            ev = [e async for e in assist_turn._auto_lookup(sid, shell, db, ran)]
+            assert ev == []                                                                      # the repeat guard
+    finally:
+        settings.assist_local_runner_server = _prev
