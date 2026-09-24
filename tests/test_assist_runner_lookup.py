@@ -473,3 +473,48 @@ def test_the_prompt_block_is_budgeted_so_a_wide_ledger_cannot_eat_the_guide():
     # one entry alone is never dropped, however long
     one = [{"command": "cat /x", "output": "y" * 9000, "at": None, "by": "runner"}]
     assert "cat /x" in rl.runner_ledger_block(one)
+
+
+def test_every_decision_branch_in_auto_lookup_is_legible():
+    """§17.1170 — a feature that declines to act must say why.
+
+    §17.1169 fixed ONE silent early return (`spec is None`) and I asserted in
+    that commit it was the only one. It was not: `if not commands:` and
+    `if not executed:` were silent too — and the first is exactly the branch
+    that could not be ruled out from logs during the hour it took to find the
+    other. This pins the CLASS: every `return` in `_auto_lookup` must either
+    log, or hand the caller something it can see (a yielded frame), or be a
+    genuine no-op on empty input. A new silent branch fails here."""
+    import inspect as _i
+    from app.modules import assist_turn
+    src = _i.getsource(assist_turn._auto_lookup).splitlines()
+    silent: list[str] = []
+    for i, line in enumerate(src):
+        if line.strip() != "return":
+            continue
+        # the preceding 6 non-blank, non-comment lines — a multi-line
+        # logger.info(...) call reads as silent if only one line is inspected,
+        # which is what hid these two from my first enumeration.
+        ctx, j = [], i - 1
+        while j >= 0 and len(ctx) < 6:
+            t = src[j].strip()
+            if t and not t.startswith("#"):
+                ctx.append(t)
+            j -= 1
+        window = " ".join(ctx)
+        if "logger." in window or "yield" in window:
+            continue
+        if 'not (reply_text or "").strip()' in window:   # no input, no decision
+            continue
+        silent.append(f"line {i}: {ctx[0][:70] if ctx else '?'}")
+    assert not silent, "silent early return(s) in _auto_lookup — say why it declined:\n" + "\n".join(silent)
+
+
+def test_the_two_reasons_a_reply_is_not_a_lookup_are_distinguished():
+    """`no_block` (nothing runnable was asked for) and `not_read_only` (the
+    engine WON'T run it, so the operator must) are different decisions."""
+    from app.modules import assist_runner_lookup as _rl
+    assert _rl.first_lookup_block("just prose, no block at all") is None
+    writing = "**Run this now:**\n\n```bash\napt-get install -y nginx\n```"
+    assert _rl.first_lookup_block(writing) is not None      # there IS a block …
+    assert _rl.is_lookup(writing) is None                   # … the engine just won't run it

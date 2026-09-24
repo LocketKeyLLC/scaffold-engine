@@ -412,9 +412,18 @@ async def _auto_lookup(session_id: str, reply_text: str, db, ran: set | None = N
     import asyncio
     from app.modules import assist_runner_lookup as _rl
     if not (reply_text or "").strip():
-        return
+        return                    # nothing was said; no decision was taken, so nothing to report
     commands = _rl.is_lookup(reply_text)
     if not commands:
+        # §17.1170 — the sibling of §17.1169's silent return, and the branch I
+        # could not rule out from the logs during that hour-long hunt. Two very
+        # different decisions hide here: the reply asked for nothing runnable,
+        # or it asked for a block the engine WON'T run because something in it
+        # writes — the latter is a real choice to hand the work to the operator.
+        # (`lookup_blocks` logs runner_lookup_stop_at_write with the offending
+        # command when the scan stops at a write; this says which case it was.)
+        logger.info("runner_lookup_not_a_lookup sid=%s reason=%s", session_id,
+                    "no_block" if not _rl.first_lookup_block(reply_text) else "not_read_only")
         return
     # §17.1152 — the block must be meant for the RUNNER'S machine. Live: "Open
     # the Proxmox web UI console for VM 110 and type `ip a`" ran `ip a` on
@@ -487,6 +496,11 @@ async def _auto_lookup(session_id: str, reply_text: str, db, ran: set | None = N
         yield _ev(ASSIST_TURN_STATUS, {"text": f"🔁 The local runner could not run that ({str(exc)[:120]}) — run it yourself and paste what it shows."})
         return
     if not executed:
+        # §17.1170 — the runner was reached and ran nothing: every command was
+        # re-gated away by `run_probes`' belt-and-braces `read_only_command`
+        # check. Silent, this is indistinguishable from "no runner".
+        logger.info("runner_lookup_nothing_executed sid=%s commands=%d (all re-gated away)",
+                    session_id, len(commands))
         return
     logger.warning("runner_lookup_executed sid=%s commands=%d ok=%d", session_id, len(executed),
                    sum(1 for e in executed if e.get("ok")))
