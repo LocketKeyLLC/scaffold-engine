@@ -442,6 +442,12 @@ async def _auto_lookup(session_id: str, reply_text: str, db, ran: set | None = N
         logger.warning("runner_lookup_spec_failed sid=%s err=%r", session_id, exc)
         return
     if spec is None:
+        # §17.1169 — say so. This was the ONLY early return in _auto_lookup with
+        # no log line, and it cost an hour of log archaeology on a red E2E: the
+        # engine simply produced nothing, with no trace of why. A feature that
+        # is off should still be legible when it declines to act.
+        logger.info("runner_lookup_no_runner sid=%s commands=%d (no configured or tagged runner)",
+                    session_id, len(commands))
         return
     # §17.1151 — an older helper refuses forms the engine allows; a look-up
     # through it feeds the model refusals. The refresh is a plan step: insert
