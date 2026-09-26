@@ -1,23 +1,77 @@
 # §17.1073 — the golden runs (routing + verifier) on the pinned models.
-# The GitHub runners have no Ollama, so this job only runs on a self-hosted
-# runner when one is registered (same gate as Tier 2) or by hand via
-# workflow_dispatch; until then `make goldens` on the operator's box is the
+# The GitHub runners have no Ollama, so the real run only happens on a
+# self-hosted runner when one is registered (same gate as Tier 2) or by hand
+# via workflow_dispatch; until then `make goldens` on the operator's box is the
 # golden run, and the JSONL under .profiles/ is the record.
+#
+# §17.1180b (audit I5) — the job used to carry
+# `if: ${{ vars.SCAFFOLD_SELF_HOSTED == '1' }}`, so with no runner registered
+# every nightly completed as **skipped** in 6–9 s and said nothing. Measured:
+# 8 of 8 scheduled runs, 19–26 Sep, all skipped. An absent quality signal that
+# looks identical to a quiet one is the §17.1170 silent-branch shape — nobody
+# was going to notice that the engine had no automated quality gate, because
+# the nightly kept "completing".
+#
+# It now ALWAYS runs and always reports. On a self-hosted runner it does the
+# real goldens; on a GitHub runner it states, in the run's own summary and as a
+# warning annotation, that no golden run happened and what the operator has to
+# do instead. It does NOT fail: a permanently-red nightly is the §17.1169
+# lesson (the E2E lane was red from the day it shipped and everyone learned to
+# ignore it), and "not measured" is not "regressed". The job NAME carries the
+# distinction so a green tick cannot be misread as "goldens passed".
 name: Goldens
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 4 * * *"   # nightly 04:17 UTC — no-op without a self-hosted runner
+    - cron: "17 4 * * *"   # nightly 04:17 UTC
 jobs:
   goldens:
-    if: ${{ vars.SCAFFOLD_SELF_HOSTED == '1' }}
-    runs-on: self-hosted
+    name: ${{ vars.SCAFFOLD_SELF_HOSTED == '1' && 'Goldens' || 'Goldens — NOT RUN (no self-hosted runner)' }}
+    # NB: setting SCAFFOLD_SELF_HOSTED=1 with no runner registered does not make
+    # this run — it makes it QUEUE FOREVER and leaves the run permanently
+    # in-progress (the failure mode ci.yml's Tier 2 comment records). Register
+    # the runner first, then set the variable.
+    runs-on: ${{ vars.SCAFFOLD_SELF_HOSTED == '1' && 'self-hosted' || 'ubuntu-latest' }}
     timeout-minutes: 40
     steps:
+      - name: Report that no golden run happened
+        if: ${{ vars.SCAFFOLD_SELF_HOSTED != '1' }}
+        run: |
+          echo "::warning title=No golden run::The quality gate did not run — no self-hosted runner is registered. Run 'make goldens' on the engine host."
+          {
+            echo "## ⚠️ No golden run — the quality signal is ABSENT, not green"
+            echo
+            echo "This nightly completed without measuring anything."
+            echo
+            echo "**Why:** the goldens need Ollama and the pinned models, which"
+            echo "GitHub-hosted runners do not have. The real run is gated on"
+            echo "\`vars.SCAFFOLD_SELF_HOSTED == '1'\` plus a registered"
+            echo "self-hosted runner; neither is set on this repository."
+            echo
+            echo "**What to do instead**, on the engine host:"
+            echo
+            echo '```bash'
+            echo "make goldens                       # routing + verifier"
+            echo 'make goldens TASKS="routing verifier codegen"'
+            echo '```'
+            echo
+            echo "The record is the JSONL under \`.profiles/ab_<task>.jsonl\`."
+            echo
+            echo "**To make this automatic:** register a self-hosted runner on"
+            echo "the engine host, *then* set the repository variable"
+            echo "\`SCAFFOLD_SELF_HOSTED=1\`. Setting the variable first makes"
+            echo "this job queue forever instead of running."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/checkout@v7
+        if: ${{ vars.SCAFFOLD_SELF_HOSTED == '1' }}
+
       - name: Routing + verifier goldens through the engine's own harness
+        if: ${{ vars.SCAFFOLD_SELF_HOSTED == '1' }}
         run: make goldens
+
       - uses: actions/upload-artifact@v4
+        if: ${{ vars.SCAFFOLD_SELF_HOSTED == '1' }}
         with:
           name: goldens-${{ github.run_id }}
           path: .profiles/ab_*.jsonl

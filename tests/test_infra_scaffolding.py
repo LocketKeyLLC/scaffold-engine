@@ -356,6 +356,59 @@ class TestCIWorkflow:
                 f"{mine.get(event)!r} vs {theirs.get(event)!r}"
             )
 
+    def test_the_goldens_nightly_always_reports(self):
+        """§17.1180b (audit I5) — an absent quality signal must not look like a
+        quiet one.
+
+        The job carried `if: vars.SCAFFOLD_SELF_HOSTED == '1'`, so with no
+        self-hosted runner registered every nightly completed as **skipped** in
+        6-9 s and said nothing. Measured: 8 of 8 scheduled runs over 19-26 Sep.
+        That is §17.1170's silent-branch shape applied to the only automated
+        quality gate this engine has.
+
+        The job must therefore run unconditionally and explain itself when it
+        cannot measure. It must NOT fail — a permanently red nightly is the
+        §17.1169 lesson, and "not measured" is not "regressed".
+        """
+        import yaml
+        wf = self._wf_path.parent / "goldens.yml"
+        if not wf.exists():
+            pytest.skip("goldens.yml not available inside container")
+        doc = yaml.safe_load(wf.read_text())
+        job = (doc.get("jobs") or {}).get("goldens")
+        assert job, "the goldens job is gone"
+        assert "if" not in job, (
+            "a job-level `if:` makes the nightly complete as 'skipped' with no "
+            "output — the absence of the signal becomes invisible"
+        )
+        steps = job.get("steps") or []
+        assert all("if" in st for st in steps), (
+            "every step must be guarded, or `make goldens` runs on a GitHub "
+            "runner that has no Ollama"
+        )
+        report = [st for st in steps
+                  if "GITHUB_STEP_SUMMARY" in str(st.get("run", ""))]
+        assert len(report) == 1, "exactly one step must report the missing run"
+        body = str(report[0].get("run"))
+        assert "::warning" in body, "the skip needs an annotation, not only a summary"
+        assert "make goldens" in body, "the report must name the manual fallback"
+        assert report[0].get("if", "").find("!=") != -1, (
+            "the report step must run on the NO-runner path"
+        )
+
+    def test_the_goldens_job_name_distinguishes_measured_from_not_measured(self):
+        """A green tick on a run that measured nothing is worse than a skip.
+        The job name carries the distinction into the checks list."""
+        import yaml
+        wf = self._wf_path.parent / "goldens.yml"
+        if not wf.exists():
+            pytest.skip("goldens.yml not available inside container")
+        name = str(((yaml.safe_load(wf.read_text()).get("jobs") or {})
+                    .get("goldens") or {}).get("name", ""))
+        assert "SCAFFOLD_SELF_HOSTED" in name and "NOT RUN" in name.upper(), (
+            f"the job name must say when nothing was measured: {name!r}"
+        )
+
     def test_the_self_hosted_tier_stays_pinned_to_main(self):
         """Widening the push trigger must NOT put the heavy Docker stack on the
         self-hosted runner for every feature branch. Tier 2 carries its own
