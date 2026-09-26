@@ -36,7 +36,12 @@ logger = logging.getLogger("scaffold")
 STATUSES = ("on", "off", "blocked", "in_progress", "manual")
 
 # (name is historical — these are the statuses a job is NOT open in)
-_OPEN_JOB_STATUSES = tuple(sorted(TERMINAL_JOB_STATUSES))  # §17.1107 — one vocabulary
+#: §17.1107 — one vocabulary. §17.1180 — RENAMED: this held the TERMINAL
+#: statuses while being called `_OPEN_…`, and the only reader spells
+#: "still open" as `status not in _OPEN_JOB_STATUSES` — a double negative
+#: on an inverted name, in the one place the console's recipe status is
+#: decided. Same tuple, a name that says what is in it.
+_CLOSED_JOB_STATUSES = tuple(sorted(TERMINAL_JOB_STATUSES))
 
 
 @dataclass(frozen=True)
@@ -212,8 +217,15 @@ def expected_helper_version() -> Optional[str]:
             src = (Path(__file__).resolve().parents[2] / "scripts" / "local_runner_mcp.py").read_text()
             m = _re.search(r'^HELPER_VERSION\s*=\s*"([^"]+)"', src, _re.M)
             _EXPECTED_HELPER_VERSION = m.group(1) if m else ""
-        except Exception:
-            _EXPECTED_HELPER_VERSION = ""
+        except Exception as exc:
+            # §17.1180 — this memoized "" on ANY exception, and the sentinel for
+            # "not looked up yet" is also None, so one transient read error (or
+            # a slimmer image without scripts/) permanently disabled the
+            # `stale_helper` diagnosis for the life of the process — silently,
+            # because "" reads the same as "no script shipped". Leave the cache
+            # UNSET so a later call retries, and say so once.
+            logger.warning("expected_helper_version_read_failed err=%r", exc)
+            return None
     return _EXPECTED_HELPER_VERSION or None
 
 
@@ -605,7 +617,7 @@ async def list_recipes(db) -> list[dict]:
     for r in RECIPES:
         status, detail = await r.detect(db) if r.detect else ("manual", "")
         job = jobs.get(r.id)
-        if status != "on" and job and job["status"] not in _OPEN_JOB_STATUSES:
+        if status != "on" and job and job["status"] not in _CLOSED_JOB_STATUSES:
             status, detail = "in_progress", f"a walkthrough is open (job {job['job_id'][:8]}…, {job['status']})."
         out.append({
             "id": r.id, "title": r.title, "summary": r.summary, "why_off": r.why_off, "effort": r.effort,
@@ -625,7 +637,19 @@ async def start_recipe(db, recipe_id: str, *, owner: Optional[str]) -> dict:
         if detect is None:  # §17.1141 — a prerequisite without a detector cannot be verified
             raise ValueError(f"'{BY_ID[dep].title}' must be on first (no detector to confirm it)")
         st, _ = await detect(db)
-        if st != "on":
+        # §17.1180 — `manual` means "the engine CANNOT observe this", not "it is
+        # off". `_detect_runner_sudo` returns `manual` by design (the sudoers
+        # rule lives on the runner's machine), so this `!= "on"` test made any
+        # future recipe that requires `runner_sudo` impossible to start — the
+        # dependency could never report `on` no matter what the operator did.
+        # An unobservable prerequisite is the operator's call, so it passes with
+        # a log line rather than blocking on a check that cannot succeed.
+        if st == "manual":
+            logger.info(
+                "recipe_dep_unverifiable recipe=%s dep=%s — 'manual' detectors "
+                "cannot report 'on'; proceeding on the operator's word",
+                recipe_id, dep)
+        elif st != "on":
             raise ValueError(f"'{BY_ID[dep].title}' must be on first")
     from app.modules.idea_refinement import create_ideation_job
     from app.modules.ideation_workflow import spawn_phase1_background

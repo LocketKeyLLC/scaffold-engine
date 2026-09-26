@@ -5,7 +5,7 @@
 // / assist_guide_done). Message composer persists via /assist/{id}/turn.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, fmtDate, mdToHtml, stickyScroll, selectionWithin } from "../util.js";
-import { statusBadge, loading, errorPanel, toast, emptyState, openDialog } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, emptyState, openDialog, askChoice } from "../components.js";
 import { briefPanel } from "./brief_panel.js";
 
 import { storage } from "../storage.js";
@@ -210,6 +210,17 @@ export function runnerNote(state = runnerState) {
         step2: "Run the commands in your own terminal (or click through the UI it names). Copy-paste is expected.",
       };
 }
+// §17.1180 (audit U8) — ONE retirement rule. It lived in two places: this
+// predicate inside `contractCard`, which could never fire because the only
+// automatic call site ran during the synchronous mount when `session` was
+// still null, and a DOM-removal copy in `load()` that did the real work. Two
+// copies of one rule, one unreachable — and the card painted for a frame
+// before `load()` resolved and tore it back out.
+function contractRetired(session) {
+  const sc = (session && session.step_counts) || {};
+  return ((sc.committed || 0) + (sc.done || 0)) > 0;
+}
+
 function contractCard(onDismiss, session, force) {
   if (!force && storage.get(ASSIST_ONBOARD_KEY)) return null;
   // §17.1011 — retire it once the operator has DONE the loop. Measured on the
@@ -220,8 +231,7 @@ function contractCard(onDismiss, session, force) {
   // only, so any new browser, profile or cleared storage re-taught the loop to
   // someone two-thirds through a 41-step build. Committed steps are proof they
   // know it; the ? in the step header brings it back on demand.
-  const sc = (session && session.step_counts) || {};
-  if (!force && ((sc.committed || 0) + (sc.done || 0)) > 0) return null;
+  if (!force && contractRetired(session)) return null;
   const step = (n, t, b) =>
     el("div", { class: "welcome-step" },
       el("div", { class: "welcome-step-n", text: String(n) }),
@@ -558,7 +568,7 @@ export function renderChat(container, sessionId, opts = {}) {
     return "🎉 **Every step in this plan is done — the project is complete.** The deliverable has been compiled: open the Output tab to read it, or the Plan tab to review what changed along the way.";
   }
   function renderCompletionCard() {
-    if (!stepHero || stepHero.querySelector(".assist-complete")) return;
+    if (!completeSlot || completeSlot.querySelector(".assist-complete")) return;
     const jid = session?.job_id;
     const card = el("div", { class: "assist-complete row row-wrap" },
       el("strong", { text: "🎉 Job complete" }),
@@ -566,8 +576,7 @@ export function renderChat(container, sessionId, opts = {}) {
       el("span", { class: "spacer" }),
       jid ? el("a", { class: "btn btn-primary btn-sm", href: `#/job/${jid}/output`, text: "View output →" }) : null,
       jid ? el("a", { class: "btn btn-ghost btn-sm", href: `#/job/${jid}/plan`, text: "Review the plan" }) : null);
-    stepHero.append(card);
-    stepHero.classList.remove("hidden");
+    completeSlot.append(card);
     // the hub's status pill was rendered once from the job row — tell it.
     if (jid) window.dispatchEvent(new CustomEvent("scaffold:job-status", { detail: { jobId: jid, status: "completed" } }));
   }
@@ -802,7 +811,25 @@ export function renderChat(container, sessionId, opts = {}) {
     // §17.1056 — undo a reopen from its pre-image (the engine keeps one for
     // every step a confirmed re-plan or state check reopens).
     verb("↶ Restore a reopened step", "Put a step that a re-plan or state check reopened back to done, with the evidence it had (refused once you've worked on it since)", async () => {
-      const nk = (window.prompt("Which reopened step should go back to done? (step key, e.g. T3)") || "").trim();
+      // §17.1180 (audit U6) — this used `window.prompt` to ask the operator to
+      // RECALL AND TYPE a step key ("e.g. T3"). The engine already holds every
+      // one of them: a confirmed re-plan or state check writes a pre-image per
+      // reopened step, and the session payload now names them
+      // (`restorable_steps`). Asking a person to remember an identifier the
+      // machine is holding is the defect; a typo'd key produced "no reopen
+      // pre-image for X" and told them nothing about what WAS restorable.
+      const opts = (session?.restorable_steps || []).map((r) => ({
+        value: r.node_key,
+        label: r.node_key,
+        hint: r.evidence_chars ? `${r.evidence_chars} chars of evidence` : "",
+      }));
+      if (!opts.length) {
+        toast("No reopened step has a saved pre-image to restore.", "err");
+        return;
+      }
+      const nk = await askChoice(
+        "Put a step that a re-plan or state check reopened back to done, with the evidence it had.",
+        opts, { title: "Restore a reopened step" });
       if (!nk) return;
       try {
         const res = await api.post(`/assist/${sessionId}/step/restore`, { node_key: nk });
@@ -897,9 +924,19 @@ export function renderChat(container, sessionId, opts = {}) {
   scopeAll.addEventListener("click", () => setScope("all"));
   scopeStep.addEventListener("click", () => setScope("step"));
   scopeAll.classList.toggle("on", followScope === "all"); scopeStep.classList.toggle("on", followScope === "step");
+  // §17.1180 (audit U2) — the completion card used to be appended to
+  // `stepHero`, which the FOLLOW branch never mounts (§17.1160 deliberately
+  // dropped the step card: the rail is the plan context). Follow is the
+  // default — job_hub routes both `run` and `follow` to it and `#/assist/:id`
+  // forwards there — so "🎉 Job complete" and its two navigation buttons were
+  // appended to a detached node and never shown to anyone. The step card stays
+  // out of follow mode as designed; the completion hand-off is not the step
+  // card, so it gets a host that exists in BOTH layouts.
+  const completeSlot = el("div", { class: "assist-complete-slot" });
+  const contractSlot = el("div", { class: "assist-contract-slot" });
   const main = follow
-    ? el("div", { class: "chat-main assist-main embedded follow" }, rail, el("div", { class: "follow-pane" }, paneHead, focusChip, transcript, composer))
-    : el("div", { class: "chat-main assist-main" + (embedded ? " embedded" : "") }, transcript, composer);
+    ? el("div", { class: "chat-main assist-main embedded follow" }, rail, el("div", { class: "follow-pane" }, completeSlot, paneHead, focusChip, transcript, composer))
+    : el("div", { class: "chat-main assist-main" + (embedded ? " embedded" : "") }, completeSlot, transcript, composer);
   // §17.845 — the editable living brief rides with the session (mounted once
   // the session tells us its job).
   const briefSlot = el("div", { class: "assist-brief-slot" });
@@ -922,7 +959,9 @@ export function renderChat(container, sessionId, opts = {}) {
     // every verb but ✓ Done goes behind the ⋯ menu — two things to press, the rest one click away
     Array.from(verbsBar.children).forEach((c, i) => { if (i > 0 && c !== moreMenu) moreBody.prepend(c); });
   } else {
-    mount(container, embedded ? null : header, helpPanel, contractCard(null, session), stepHero, main, moreRow);
+    // §17.1180 — the card is rendered from `load()`, once the session is known.
+    // Building it here passed `session === null` by construction.
+    mount(container, embedded ? null : header, helpPanel, contractSlot, stepHero, main, moreRow);
   }
   let briefMounted = false;
 
@@ -1558,9 +1597,13 @@ export function renderChat(container, sessionId, opts = {}) {
       // `session` is still null when the shell is first mounted (it is only
       // assigned here), which is why a four-step "how assist mode works"
       // explainer was still on screen at step 37 of 41 on the live job.
-      const _sc = s.step_counts || {};
-      if (((_sc.committed || 0) + (_sc.done || 0)) > 0) {
+      // §17.1180 — one rule, one render. This used to re-implement the
+      // retirement test and REMOVE a card the mount had already painted.
+      if (contractRetired(s)) {
         container.querySelector(".assist-contract")?.remove();
+      } else if (!follow && !contractSlot.firstChild) {
+        const card = contractCard(null, s);
+        if (card) contractSlot.append(card);
       }
       // Transient checklist/env fetch failures keep the last known value —
       // a blip must not blank the needs-from-you panel mid-session.

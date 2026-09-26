@@ -157,7 +157,7 @@ async def _synthesize_compiled_output(
     # §17.619 (audit #12) — release the pooled DB connection BEFORE the
     # multi-minute synthesis LLM call (and the faithfulness/CoVe grounding gate
     # that follows in _maybe_synthesize, which uses its own session). This
-    # refined_brief SELECT is the LAST DB read in the compile path — the node
+    # refined_brief SELECT is the LAST DB read in the compile path — §17.1180: NO LONGER TRUE. `_maybe_grounding_gate` and `_maybe_compile_value_check` both UPDATE on this same session after the commit below. It works (the session is reusable, not closed), but the claim misleads: a caller that rolls back after this point silently discards the grounding record rather than the nothing this promises — the node
     # read (_compile_output), the synthesis-override read
     # (_resolve_synthesis_enabled), and this one are all SELECT-only, and every
     # caller commits its writes before invoking _compile_output. Committing here
@@ -551,7 +551,12 @@ def _prepend_plan_only_banner(
         f"{total} {plural} that {verb} of actions to perform on real systems; "
         f"the engine generated them but did **not** run them, so nothing has "
         f"been built or changed. To carry them out with the engine guiding and "
-        f"verifying each step, run `/assist {job_id}`."
+        # §17.1180 — `/assist <id>` is OWUI chat syntax. This banner is
+        # prepended to the DELIVERABLE, which is also served to the SPA, the
+        # CLI and the MCP surface, none of which accept that command. Name the
+        # action and give the one address that works everywhere.
+        f"verifying each step, open the job's Assist tab "
+        f"(`/job/{job_id}/assist`) — in OWUI chat, `/assist {job_id}`."
         f"\n\n---\n\n"
     )
     return banner + text
@@ -681,6 +686,8 @@ _DOMINANT_LEAF_FACTOR = 2
 # protecting LLM makes the heuristic err toward keeping, eliminating the
 # false-drops while still collapsing Shell/FS dead-end branches.
 _PROTECTED_LEAF_TOOLS = frozenset({"CodeGen", "LLM"})
+#: §17.1180 — the comparison form. Kept derived so the two cannot drift.
+_PROTECTED_LEAF_TOOLS_LC = frozenset(t.lower() for t in _PROTECTED_LEAF_TOOLS)
 
 
 def _dependency_closure(key: str, deps_by_key: dict[str, list[str]]) -> set[str]:
@@ -755,7 +762,14 @@ def _select_dominant_leaves(explicit: list, all_nodes: list) -> tuple[list, list
         # Shell runbooks (Proxmox's dead-end "configure Tailscale exit node"),
         # FS writes, raw retrieval dumps — where a dead-end side-branch is the
         # case the rule actually targets.
-        if n.get("tool") in _PROTECTED_LEAF_TOOLS:
+        # §17.1180 — case-INSENSITIVE, like its two siblings in this file
+        # (`runbook_count` and `compute_deliverable_kind` both lowercase before
+        # comparing). `_PROTECTED_LEAF_TOOLS` holds "CodeGen"/"LLM" in display
+        # case, so a node stored as `codegen` failed this exact-match test,
+        # lost its protection, and became droppable from the deliverable —
+        # which is the precise outcome the block above says it exists to
+        # prevent. Three comparisons of one value, two of them normalising.
+        if (n.get("tool") or "").lower() in _PROTECTED_LEAF_TOOLS_LC:
             continue
         nclosure = closures[nkey]
         deps_only = nclosure - {nkey}
@@ -794,7 +808,15 @@ async def _compile_output(
             "SELECT node_key, title, tool, status, output_text, depends_on, evidence, "
             "       COALESCE(is_output_node, FALSE) AS is_output_node, "
             "       COALESCE(is_deliverable, FALSE) AS is_deliverable "
-            "FROM dag_nodes WHERE job_id = :jid ORDER BY execution_order"
+            # §17.1180 — `NULLS LAST, node_key`, matching `render_plan_preview`
+            # two functions above and every other ordered read of this
+            # table. Postgres sorts NULLs LAST in ASC by default, so a
+            # node with no execution_order already drifted to the end —
+            # and with no tiebreaker, ties came back in whatever order
+            # the scan produced, which is what picks the Strategy-2
+            # deliverable. Explicit and deterministic now.
+            "FROM dag_nodes WHERE job_id = :jid "
+            "ORDER BY execution_order NULLS LAST, node_key"
         ),
         {"jid": job_id},
     )

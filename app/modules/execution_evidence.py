@@ -141,6 +141,15 @@ def evidence_summary(report: dict) -> dict:
         "citation_score": cite.get("score") if isinstance(cite, dict) else None,
         "regenerated": bool(report.get("regenerated")),
         "sourced_now": [it["value"] for it in report.get("sourced_now") or []],
+        # §17.1180 — the audit listed this as a dead field ("empty by
+        # construction on that path"). IT IS NOT, and the existing test proves
+        # it: `annotate=False` stops the footer being APPLIED to `output_text`
+        # (§17.1037d — a footer inside the text would be parroted by the next
+        # node), but `verify_answer` still RETURNS the rendered footer, and
+        # `test_execution_evidence` asserts "Unverified specifics" is in it
+        # after a `verify_node_output` call. Persisting it on
+        # `dag_nodes.evidence` is how the operator-facing reason survives
+        # without contaminating the node output. Finding withdrawn, not fixed.
         "footer": report.get("footer") or "",
     }
 

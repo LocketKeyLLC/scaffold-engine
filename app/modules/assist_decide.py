@@ -35,7 +35,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 
 from sqlalchemy import text
 
@@ -61,12 +60,14 @@ _NOTE_KINDS = ("addition", "constraint", "preference", "decision", "note")
 # `_assist_handlers._SHELL_PROMPT_LINE_RE` / `_SHELL_ERROR_RE` and the §17.748
 # fix marker, kept here so the server can compute them from (message, history).
 # §17.1057 — the shell-signal regexes and `_compute_signals` live in
-# assist_policy (the pure gate module) and are re-exported here: policy used
-# to lazy-import THIS module for them, which is the wrong direction for a
-# leaf and is what the import-linter contract caught first.
-from app.modules.assist_policy import (
-    _SHELL_ERROR_RE, _SHELL_PROMPT_LINE_RE, _compute_signals,
-)
+# assist_policy (the pure gate module): policy used to lazy-import THIS module
+# for them, which is the wrong direction for a leaf and is what the
+# import-linter contract caught first.
+# §17.1180 — the two regexes were re-exported here and never used, purely so
+# `assist_agent` could reach `_compute_signals` through this module instead of
+# through assist_policy where it is defined. That caller now imports it
+# directly, so the re-export is gone and the hop with it.
+from app.modules.assist_policy import _compute_signals
 
 
 # ── The decision prompt (built FROM the classifier prompt to avoid drift) ─────
@@ -122,10 +123,25 @@ _DECIDE_EXTRA = (
 )
 
 
+#: §17.1180 — the sentence `_decide_system` strips out of another module's
+#: prompt. Named here so the operation can be ASSERTED: the replace used to be
+#: written inline, and `tests/test_assist_decide.py` only checked that the old
+#: wording was ABSENT from the result — which is also true when the replace
+#: silently matches nothing. Reword `assist_guide._CLASSIFY_SYSTEM` and the
+#: strip becomes a no-op while every test stays green.
+_CLASSIFY_TOOL_SENTENCE = "Call classify_turn exactly once."
+
+
 def _decide_system(is_decision: bool) -> str:
-    base = assist_guide._CLASSIFY_SYSTEM.replace(
-        "Call classify_turn exactly once.", ""
-    ).rstrip()
+    src = assist_guide._CLASSIFY_SYSTEM
+    if _CLASSIFY_TOOL_SENTENCE not in src:
+        # Fail loud rather than shipping a decide prompt that still tells the
+        # model to call the CLASSIFIER's tool.
+        raise RuntimeError(
+            "assist_decide._decide_system: the sentence it strips is no longer in "
+            f"assist_guide._CLASSIFY_SYSTEM ({_CLASSIFY_TOOL_SENTENCE!r}). "
+            "Update _CLASSIFY_TOOL_SENTENCE to match the reworded prompt.")
+    base = src.replace(_CLASSIFY_TOOL_SENTENCE, "").rstrip()
     hint = assist_guide._CLASSIFY_DECISION_HINT if is_decision else ""
     return base + hint + _DECIDE_EXTRA
 
@@ -455,7 +471,6 @@ async def _shadow_decide_and_log(
 ) -> None:
     """Own AsyncSession — the request session is gone by the time this runs."""
     from app.database import async_session
-    from app.modules import assist_agent
     try:
         async with async_session() as bg_db:
             decision = await decide_turn(
@@ -470,26 +485,25 @@ async def _shadow_decide_and_log(
                 return
             agree = decision["action"] == classifier_intent
             nk = decision.get("node_key")
+            # §17.1180 (audit M16) — this used to ALSO call `record_friction`,
+            # which UPDATEs `assist_steps.friction_note` and is surfaced to the
+            # operator by `list_friction`. So the shadow wrote `[shadow §17.771]
+            # …` diagnostics, including a JSON dump of the operator's own
+            # message, into their real step records — the exact thing
+            # `fire_shadow_decision`'s docstring gives as the REASON this
+            # feature has a separate valve ("must not write diagnostic friction
+            # notes into real operator sessions"). The log line already carried
+            # every field but two; those two moved here and the write is gone.
+            # Not redirected into session metadata either: that would be a
+            # fourth unbounded appended jsonb array (audit M11).
             logger.info(
                 "assist_shadow_decision session=%s node=%s agree=%s "
-                "classifier=%s decide=%s conf=%s impact=%s: %s",
+                "classifier=%s decide=%s conf=%s impact=%s suggest=%s: %s | msg=%s",
                 session_id, nk, agree, classifier_intent, decision["action"],
                 decision["confidence"], decision["plan_impact"],
+                (decision.get("suggestion") or {}).get("leaning"),
                 decision.get("rationale"),
+                json.dumps(message[:160]),
             )
-            # Durable record on the step's friction log, tagged for later review.
-            if nk:
-                note = (
-                    f"[shadow §17.771] {'AGREE' if agree else 'DIFFER'} "
-                    f"classifier={classifier_intent} decide={decision['action']} "
-                    f"conf={decision['confidence']} impact={decision['plan_impact']}"
-                    + (f" suggest={decision['suggestion']['leaning']}"
-                       if decision.get("suggestion") else "")
-                    + f" — {decision.get('rationale', '')}"
-                    + f" | msg={json.dumps(message[:160])}"
-                )
-                await assist_agent.record_friction(
-                    session_id=session_id, node_key=nk, note=note, db=bg_db,
-                )
     except Exception as exc:  # shadow must never surface
         logger.warning("assist_shadow_decision_failed session=%s err=%r", session_id, exc)

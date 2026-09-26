@@ -6,7 +6,7 @@ import * as api from "../api.js";
 import { jobStore } from "../store.js";
 import * as router from "../router.js";
 import { el, mount, shortId, timeAgo, mdToHtml } from "../util.js";
-import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, emptyState, askConfirm } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
 import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
 
@@ -17,6 +17,25 @@ export const CHAIN_TIMEOUT_MS = 60 * 60 * 1000;
 export const CHAIN_UNREACHABLE_AFTER = 12;   // ~30 s of consecutive failed polls
 
 /** The chain state → a terminal outcome, or null while it is still running. */
+// §17.1180 (audit U5/U4) — `pollStatus` used to run on its OWN 2.5 s
+// setInterval for the whole approve chain, alongside `waitForChain`'s 2.5 s
+// loop: two pollers, up to CHAIN_TIMEOUT_MS (1 hour) = ~2,880 requests per
+// open tab per hour against a single-worker uvicorn, for one approval. They
+// also both wrote `.progress-msg`, so the line the operator read was
+// whichever poller happened to tick last.
+//
+// `GET /jobs/{id}/approve` (advance_chain.chain_state) already returns
+// `status` and `node_count` next to `phase`, so one poll carries everything
+// both lines were built from. `progressLine` is now the single writer.
+export function progressLine(st) {
+  const phaseText = { research: "Researching & compiling…", planning: "Generating plan (DAG)…",
+    assist: "Starting the guided walkthrough…", execute: "Starting execution…" }[st.phase];
+  const nc = st.node_count || 0;
+  const base = phaseText || (st.status ? `${st.status}…` : "");
+  return nc > 0 ? `${base} · ${nc} nodes planned` : base;
+}
+
+
 export function chainOutcome(st) {
   if (!st || typeof st !== "object") return null;
   if (st.chain === "done") return { chain: "done", phase: st.phase };
@@ -107,7 +126,23 @@ function listOrNull(arr) {
 // routinely restate the same question in different words — exact-match dedupe
 // isn't enough. Token-overlap Jaccard: ≥0.5 shared distinctive tokens → same
 // question; keep the longer (usually more specific) phrasing.
-function dedupeQuestions(qs) {
+// §17.1180 (audit U3) — this used the OVERLAP COEFFICIENT
+// (`inter / min(|a|,|b|)`) at 0.5, which merges questions that differ in the
+// only word that matters. Measured: "Which storage backend should it use?" vs
+// "Which network backend should it use?" share {which, backend, should} out of
+// four tokens each = 0.75, so the second was dropped and the operator was never
+// asked about the network. The min() denominator is the specific fault — it
+// makes a short question a subset-match of a longer one, so the more specific
+// question loses.
+//
+// Jaccard (inter / union) counts the DISTINGUISHING tokens against the pair:
+// those two score 3/5 = 0.6 and both survive. The threshold is deliberately
+// high and the failure deliberately asymmetric — this is the approval gate, and
+// silently dropping one of the engine's explicit `clarifications_needed` is
+// worse than showing the operator a near-duplicate they can answer once.
+export const QUESTION_DUPLICATE_JACCARD = 0.85;
+
+export function dedupeQuestions(qs) {
   const toks = (s) => new Set(s.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 3));
   const kept = [];
   for (const q of qs) {
@@ -115,7 +150,8 @@ function dedupeQuestions(qs) {
     const dup = kept.findIndex((k) => {
       const kt = toks(k);
       const inter = [...qt].filter((t) => kt.has(t)).length;
-      return inter / Math.max(1, Math.min(qt.size, kt.size)) >= 0.5;
+      const union = new Set([...qt, ...kt]).size;
+      return union > 0 && inter / union >= QUESTION_DUPLICATE_JACCARD;
     });
     if (dup === -1) kept.push(q);
     else if (q.length > kept[dup].length) kept[dup] = q;
@@ -566,19 +602,6 @@ export function renderApprovalDetail(container, jobId) {
     mount(progress, el("span", { class: "spin" }), el("span", { class: "progress-msg", text: msg }));
   }
 
-  async function pollStatus() {
-    try {
-      const job = await jobStore.get(jobId, { fresh: true });   // waiting for it to change
-      if (disposed) return;
-      const nc = job.node_count || 0;
-      const msg = nc > 0 ? `${job.status} · ${nc} nodes planned…` : `${job.status}…`;
-      const line = progress.querySelector(".progress-msg");
-      if (line) line.textContent = msg;
-    } catch {
-      /* transient — keep the last line */
-    }
-  }
-
   // §17.1036 — poll the server-owned chain until it is done (or errors).
   // Reloading this page mid-chain is fine: the chain keeps running and the
   // job page's own flow guide picks it up from status.
@@ -598,10 +621,9 @@ export function renderApprovalDetail(container, jobId) {
       try {
         const st = await api.get(`/jobs/${jobId}/approve`);
         failures = 0;
-        const phaseText = { research: "Researching & compiling…", planning: "Generating plan (DAG)…",
-          assist: "Starting the guided walkthrough…", execute: "Starting execution…" }[st.phase];
         const line = progress.querySelector(".progress-msg");
-        if (line && phaseText) line.textContent = phaseText;
+        const text = progressLine(st);
+        if (line && text) line.textContent = text;
         const out = chainOutcome(st);
         if (out) return out;
       } catch (e) {
@@ -627,7 +649,12 @@ export function renderApprovalDetail(container, jobId) {
         ? `✓ ${nAns} answer${nAns === 1 ? "" : "s"} received — researching with your input… (a few minutes)`
         : "Researching & compiling… (this can take a few minutes)"
     );
-    pollTimer = setInterval(pollStatus, 2500);
+    // §17.1180 — this used to `setInterval(pollStatus, 2500)` onto `pollTimer`
+    // WITHOUT clearing it first, so an in-flight 4 s wait poll was orphaned:
+    // its interval kept firing with nothing holding a reference to cancel it.
+    // One variable served two different polls. There is now one poller —
+    // `waitForChain` — and `pollTimer` belongs solely to the wait poll.
+    stopWaitPoll();
     try {
       // §17.1036 — the chain is the SERVER's: research → plan → (assist |
       // execute) runs detached and survives this page closing. Before this,
@@ -701,10 +728,9 @@ export function renderApprovalDetail(container, jobId) {
         if (advanced) load();
       }
     } finally {
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-      }
+      // §17.1180 — approve() starts no interval of its own now; this clears any
+      // wait poll `load()` restarted underneath it, so the two cannot overlap.
+      stopWaitPoll();
     }
   }
 
@@ -742,7 +768,14 @@ export function renderApprovalDetail(container, jobId) {
 
   async function reject() {
     if (busy) return;
-    if (!confirm("Cancel this job? Its brief is preserved and it can be inspected later.")) return;
+    // §17.1180 (audit U6) — this file already imports the project's accessible
+    // dialog and used the browser's `confirm()` anyway: focus leaves the SPA,
+    // it cannot be themed, and some embedded contexts block it outright.
+    const yes = await askConfirm(
+      "Its brief is preserved and the job can be inspected later.",
+      { title: "Cancel this job?", confirmText: "Cancel the job",
+        cancelText: "Keep it", danger: true });
+    if (!yes) return;
     setBusy(true);
     try {
       await api.post(`/jobs/${jobId}/cancel`, {});

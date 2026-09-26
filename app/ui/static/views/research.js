@@ -35,7 +35,16 @@ export function feedText(event, d) {
       return { text: `Resumed · ${d.topic || ""} (${shortId(d.session_id)}) — reply: ${d.reply || ""}` };
     case "decomposition_complete": {
       const facets = Array.isArray(d.facets) ? d.facets.length : "?";
-      return { text: `Decomposed into ${facets} facets, ${n(d.query_count)} queries${d.complexity ? ` (${d.complexity})` : ""}` };
+      // §17.1180 — a degraded decomposition means the planner failed and the
+      // queries are the topic plus three generic suffixes. The operator reads
+      // the findings; they have to know the search was not planned.
+      const degraded = d.degraded
+        ? ` — ⚠️ degraded: ${d.degraded_reason || "the planner failed; queries were generated mechanically"}`
+        : "";
+      return {
+        text: `Decomposed into ${facets} facets, ${n(d.query_count)} queries${d.complexity ? ` (${d.complexity})` : ""}${degraded}`,
+        kind: d.degraded ? "warn" : undefined,
+      };
     }
     case "iteration_started":
       return { text: `Iteration ${n(d.iteration)} started${d.query_count != null ? ` — ${d.query_count} queries` : ""}` };
@@ -90,7 +99,7 @@ export function feedText(event, d) {
 }
 
 import { el, mount, shortId, timeAgo, fmtNum, mdToHtml } from "../util.js";
-import { statusBadge, loading, errorPanel, toast, emptyState, makeClickable } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, emptyState, makeClickable, askConfirm } from "../components.js";
 
 const RESEARCH_ICON = {
   research_started: "◎",
@@ -183,10 +192,14 @@ export default function research(container, params) {
   let activeRun = null;
   let framesSeen = 0;
 
-  function toggleRun() {
+  // §17.1180 (audit U6) — async so the confirmation can be the project's own
+  // dialog instead of the browser's. The only caller is the button's onClick,
+  // which ignores the return value.
+  async function toggleRun() {
     if (running) {
       if (!activeRun) { if (abort) abort.abort(); return; }
-      if (!confirm("Stop this research run? What has been ingested so far is kept.")) return;
+      if (!await askConfirm("What has been ingested so far is kept.",
+          { title: "Stop this research run?", confirmText: "Stop it", danger: true })) return;
       runBtn.disabled = true;
       api.post(`/research/runs/${activeRun}/cancel`, {})
         .then(() => { feedLine("warning", "Stopped by operator.", "warn"); })

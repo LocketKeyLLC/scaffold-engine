@@ -1312,6 +1312,11 @@ async def drain_background_tasks() -> None:
     await asyncio.gather(*pending, return_exceptions=True)
 
 
+#: §17.1180 — the values migration 023's CHECK constraint allows. Named so
+#: the guard at the top of `maybe_replan` and the dispatch below agree.
+_REPLAN_POLICIES = ("context_only", "selective", "full", "disabled")
+
+
 async def maybe_replan(
     *,
     db,
@@ -1339,6 +1344,13 @@ async def maybe_replan(
     """
     if policy == "disabled":
         return None
+    # §17.1180 — validate FIRST. An unknown policy raised ValueError at the
+    # bottom of this function, after `detect_divergence` had already made its
+    # model call — so a bad policy value cost a full inference before failing.
+    # The CHECK constraint (migration 023) makes this unreachable from the DB,
+    # which is exactly why it should be free when it does happen.
+    if policy not in _REPLAN_POLICIES:
+        raise ValueError(f"unknown replan_policy: {policy!r}")
     if policy == "context_only":
         # Fire-and-forget. Submit returns within milliseconds; the
         # verifier runs in the background. Strong ref via _BACKGROUND_TASKS

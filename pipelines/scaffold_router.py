@@ -3951,7 +3951,12 @@ class Pipeline:
                 elif event_type == "decomposition_complete":
                     facets = payload.get("facets", [])
                     yield f"🧩 Decomposed into {len(facets)} facets: {', '.join(facets)}\n"
-                    yield f"   Complexity: {payload.get('complexity','?')} | Queries: {payload.get('query_count','?')}\n\n"
+                    yield f"   Complexity: {payload.get('complexity','?')} | Queries: {payload.get('query_count','?')}\n"
+                    # §17.1180 — surface a degraded decomposition here too; the
+                    # OWUI reader gets the same warning as the SPA.
+                    if payload.get("degraded"):
+                        yield (f"   ⚠️ Degraded: {payload.get('degraded_reason') or 'the planner failed; queries were generated mechanically'}\n")
+                    yield "\n"
                 elif event_type == "iteration_started":
                     yield f"--- **Iteration {payload.get('iteration','?')}** ---\n"
                 elif event_type == "search_complete":

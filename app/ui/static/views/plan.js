@@ -6,7 +6,7 @@
 import * as api from "../api.js";
 import { jobStore } from "../store.js";
 import { el, mount, moveItem } from "../util.js";
-import { statusBadge, loading, errorPanel, toast, openDialog } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, openDialog, askConfirm } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
 import { briefPanel } from "./brief_panel.js";
 import { flowGuide } from "./flow_guide.js";
@@ -330,7 +330,8 @@ export function renderPlan(container, jobId) {
   }
 
   async function resetNode(key) {
-    if (!confirm(`Reset ${key} to pending? This cascades to all downstream nodes.`)) return;
+    if (!await askConfirm("Every downstream node is reset too, and their outputs are cleared.",
+      { title: `Reset ${key} to pending?`, confirmText: "Reset it", danger: true })) return;
     try {
       const res = await api.post(`/nodes/${jobId}/${key}/reset`, {});
       if (disposed) return;
@@ -342,7 +343,8 @@ export function renderPlan(container, jobId) {
   }
 
   async function deleteNode(key) {
-    if (!confirm(`Delete ${key}? Dependents are rewired and cascade-reset.`)) return;
+    if (!await askConfirm("Dependents are rewired around it and cascade-reset.",
+      { title: `Delete ${key}?`, confirmText: "Delete it", danger: true })) return;
     try {
       const res = await api.del(`/nodes/${jobId}/${key}`);
       if (disposed) return;

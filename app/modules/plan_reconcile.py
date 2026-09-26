@@ -728,8 +728,16 @@ def node_diffs(nodes: list[dict], node_updates: list[dict]) -> list[dict]:
 
 
 def revertable(entry: dict, nodes: list[dict]) -> list[dict]:
-    """The entry's node changes that can still be put back: node pending or
-    blocked, and its current text still exactly the entry's `after`."""
+    """The entry's node changes that can still be put back: node PENDING, and
+    its current text still exactly the entry's `after`.
+
+    §17.1180 — this said "pending or blocked". There is no `blocked` node
+    status: the CHECK constraint on `dag_nodes.status` is
+    ('pending','running','done','failed','skipped'). `blocked` is a JOB status,
+    and the two vocabularies were crossed here and in one live query predicate
+    (`assist_memory`'s pending-node read, whose second arm could never match).
+    The code below has always tested `== "pending"`; only the prose was wrong,
+    which is the worse way round — it describes a guard that does not exist."""
     if not entry or entry.get("reverted_at"):
         return []
     cur = {n.get("node_key"): n for n in nodes or []}
@@ -768,7 +776,19 @@ async def list_reconciliation(*, db, job_id: str) -> list[dict]:
 
 
 async def revert_reconciliation(*, db, job_id: str, index: int) -> dict:
-    """Put back the entry's node texts where still possible; stamp the entry."""
+    """Put back the entry's node texts where still possible; stamp the entry.
+
+    §17.1180 (audit M11) — NOTE FOR ANYONE CAPPING `metadata->'reconciliation'`:
+    do not trim it from the front. Entries are addressed BY POSITION — this
+    function takes an `index` the operator chose from a listing and writes
+    `jsonb_set(metadata, ['reconciliation', str(index)], …)`. Dropping the
+    oldest entries renumbers every survivor, so a revert issued against a
+    listing made before the trim would put back a DIFFERENT change. The other
+    two unbounded arrays in this codebase were capped in §17.1180
+    (`state_checks`, joining `reopen_preimages`); this one deliberately was
+    not, because the cheap fix here is the dangerous one. Measured on this
+    database: max 2 entries, 7.7 KB — growth is not yet harm. Capping it safely
+    means giving entries stable ids and addressing them by id first."""
     raw = (await db.execute(text("SELECT metadata->'reconciliation' FROM jobs WHERE id = :jid"),
                             {"jid": job_id})).scalar()
     if isinstance(raw, str):

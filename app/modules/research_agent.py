@@ -732,9 +732,22 @@ async def _decompose_topic(
         if retry_parsed and "queries" in retry_parsed:
             return retry_parsed
 
+    # §17.1180 — these four queries are CONCATENATION, not decomposition: the
+    # model failed twice and this fabricates "<topic> best practices" and
+    # friends. That is a reasonable last resort, but nothing downstream could
+    # tell it apart from a real decomposition, so a run that had already lost
+    # its planner reported its results with the same confidence as one that had
+    # not. `degraded` says which, and the reason says why — the same discipline
+    # the evidence layer applies to values it cannot source.
+    logger.warning(
+        "research_decompose_fallback topic=%r — the planner returned no usable "
+        "queries twice; using %d concatenated queries and marking the run degraded",
+        topic[:120], 4)
     return {
         "topic_complexity": "medium",
         "facets": [topic],
+        "degraded": True,
+        "degraded_reason": "query decomposition failed; searched the topic verbatim plus three generic variants",
         "queries": [
             {"query": topic, "facet": topic, "priority": "high", "search_category": "general"},
             {"query": f"{topic} best practices", "facet": topic, "priority": "medium", "search_category": "general"},
@@ -2496,7 +2509,14 @@ async def _run_research_url_mode(
     # Audit Finding C — unload extract model before embed loads. See
     # _unload_ollama_model docstring for context. §17.89 — resolve the model
     # name for the unload helper from the same role+overrides used above.
-    await _unload_ollama_model(get_model("model_verifier", overrides))
+    # §17.1180 — "the same role used above" is `model_research_extract`; this
+    # read `model_verifier`. Those were ONE role until §17.348 split them, and
+    # the split never reached here. Live: verifier=glm-5.3-flash:cloud,
+    # extract=deepseek-v4-flash:cloud — so the guard freed a model the extract
+    # loop had not loaded and left the one it had. `ollama_model_unload*`
+    # appears ZERO times in this host's logs: neither the success nor the
+    # failure of this guard has ever been observed since §17.348.
+    await _unload_ollama_model(get_model("model_research_extract", overrides))
 
     async for evt in _ingest_and_finalize_direct(
         state=state,
@@ -2664,7 +2684,9 @@ async def _run_research_pdf_mode(
     # Audit Finding C — unload extract model before embed loads. See
     # _unload_ollama_model docstring for context. §17.89 — resolve the
     # model name for unload from the same role+overrides used above.
-    await _unload_ollama_model(get_model("model_verifier", overrides))
+    # §17.1180 — see the identical fix in the URL-mode path: this named
+    # `model_verifier`, which the extract loop above never loaded.
+    await _unload_ollama_model(get_model("model_research_extract", overrides))
 
     async for evt in _ingest_and_finalize_direct(
         state=state,
@@ -2825,6 +2847,12 @@ async def run_research(
             "complexity": decomposition.get("topic_complexity", "medium"),
             "facets": state.outline_facets,
             "query_count": len(queries),
+            # §17.1180 — when the planner failed twice and the queries are
+            # concatenated from the topic, say so on the operator's surface.
+            # A degraded run that looks identical to a good one is the shape
+            # the evidence layer exists to prevent, one component over.
+            "degraded": bool(decomposition.get("degraded")),
+            "degraded_reason": decomposition.get("degraded_reason") or "",
         })
 
         async for evt in _execute_iteration_loop(

@@ -385,6 +385,38 @@ async def start_assist_session(
 _ASSIST_STEP_TERMINAL = frozenset({"committed", "skipped", "handed_off", "escalated"})
 
 
+def _restorable_steps(metadata) -> list[dict]:
+    """§17.1180 — the steps that have a reopen pre-image, latest per key.
+
+    Shaped for a picker: `{node_key, ts, evidence_chars}`. Fail-soft — a
+    malformed metadata blob yields an empty list, and the verb then says there
+    is nothing to restore rather than opening an empty prompt."""
+    import json as _json
+    meta = metadata
+    if isinstance(meta, str):
+        try:
+            meta = _json.loads(meta)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(meta, dict):
+        return []
+    latest: dict[str, dict] = {}
+    for p in meta.get("reopen_preimages") or []:
+        if not isinstance(p, dict):
+            continue
+        nk = str(p.get("node_key") or "").strip()
+        if not nk:
+            continue
+        prev = latest.get(nk)
+        if prev is None or str(p.get("ts") or "") >= str(prev.get("ts") or ""):
+            latest[nk] = {
+                "node_key": nk,
+                "ts": p.get("ts"),
+                "evidence_chars": len(str(p.get("evidence") or "")),
+            }
+    return [latest[k] for k in sorted(latest)]
+
+
 def _assist_step_progress(step_counts: dict) -> Optional[dict]:
     """Derive a count/pct progress block from an assist step roll-up.
 
@@ -450,7 +482,8 @@ async def get_session(*, session_id: str, db) -> Optional[dict]:
     # §17.710d — surface the session memory facts in the roll-up (drop the raw
     # metadata blob from the response; expose only the distilled facts).
     sess_dict = dict(sess)
-    env = _environment_from_metadata(sess_dict.pop("metadata", None))
+    raw_meta = sess_dict.pop("metadata", None)
+    env = _environment_from_metadata(raw_meta)
     step_counts = {r["status"]: r["cnt"] for r in rollup}
     return {
         **{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in sess_dict.items()},
@@ -460,6 +493,15 @@ async def get_session(*, session_id: str, db) -> Optional[dict]:
         "progress": _assist_step_progress(step_counts),
         "divergence_count": int(divergence_count),
         "memory_facts": env.get("facts") or [],
+        # §17.1180 (audit U6) — the ↶ Restore verb asked the operator, through a
+        # native `window.prompt`, to RECALL AND TYPE a step key ("e.g. T3") that
+        # the engine already holds: `metadata.reopen_preimages` names every step
+        # a confirmed re-plan or state check reopened. Metadata itself stays out
+        # of this payload (§17.710d), so the keys are surfaced on their own.
+        # Restorability is still decided by `restore_reopened_step` — it also
+        # refuses once the operator has worked on the step — so this is the
+        # candidate list, not a promise.
+        "restorable_steps": _restorable_steps(raw_meta),
     }
 
 
@@ -1466,7 +1508,13 @@ async def _fix_failure_streak(
         #       echoing it back.
         # A prescription with neither is not a repeat; the streak still counts
         # it, because burning fixes is itself the escalation signal.
-        from app.modules.assist_decide import _compute_signals
+        # §17.1180 — import from where it LIVES. This went through
+        # assist_decide, which only re-exports it, and that hop is the
+        # sole reason assist_decide had to keep `_SHELL_ERROR_RE` and
+        # `_SHELL_PROMPT_LINE_RE` imported-but-unused (pyflakes flagged
+        # both). §17.1057's contract wanted the leaf direction; this is
+        # the last caller that took the long way round.
+        from app.modules.assist_policy import _compute_signals
 
         prescriptions: list[tuple[int, list[str]]] = []
         operator_turns: list[tuple[int, str, bool]] = []
