@@ -4,10 +4,22 @@ Manages the ``mcp_servers`` DB registry (the runtime-editable override over the
 ``settings.mcp_servers_config`` seed) and provides live tool discovery / a
 debug call surface for servers the engine consumes as DAG nodes (tool='MCP').
 
-Registry CRUD is always available (it only writes DB rows). The two endpoints
-that actually *connect out* — ``/tools`` and ``/call`` — are gated on
-``settings.mcp_tool_enabled`` so the whole outbound surface sits behind one
-flag, matching the tool-executor gate in ``execute_next_node``.
+§17.1172 — the WHOLE router is admin-only. It used to carry no dependency at
+all, with the docstring reasoning "Registry CRUD is always available (it only
+writes DB rows)". That premise was false: a row with ``transport="stdio"`` is a
+command line, and ``mcp_client._open_session`` turns it into
+``StdioServerParameters(command=…, args=…, env=…)`` → ``stdio_client(params)``
+— a subprocess INSIDE the orchestrator container, which holds DATABASE_URL,
+SCAFFOLD_API_KEY, GITHUB_TOKEN and the Fernet secret. Under
+``multi_user_enabled`` any issued key, role ``user`` included, could register
+one; entering a session (``GET /servers/{name}/tools``) spawned it. Audit
+2026-09-25.
+
+The two endpoints that actually *connect out* — ``/tools`` and ``/call`` — stay
+additionally gated on ``settings.mcp_tool_enabled`` so the whole outbound
+surface sits behind one flag, matching the tool-executor gate in
+``execute_next_node``. ``/call`` additionally re-applies the read-only gate
+(§17.1172) — it is the one door to a registered runner that did not have one.
 """
 from __future__ import annotations
 
@@ -17,12 +29,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.authz import require_admin
 from app.config import settings
 from app.database import get_db
 from app.modules import mcp_client, mcp_registry
 from app.modules.mcp_registry import McpServerSpec
 
-router = APIRouter(prefix="/mcp", tags=["MCP"])
+# §17.1172 — admin-only, router-wide. Registry writes spawn processes and the
+# call surface reaches the operator's own machines; neither is a user-role act.
+router = APIRouter(prefix="/mcp", tags=["MCP"], dependencies=[Depends(require_admin)])
 
 
 class McpServerInput(BaseModel):
@@ -47,6 +62,33 @@ def _require_consumer_enabled() -> None:
         raise HTTPException(
             status_code=403,
             detail="MCP consumer disabled (set mcp_tool_enabled=true to connect out)",
+        )
+
+
+#: §17.1172 — tools whose argument IS a shell command. Invoking one of these
+#: through this debug surface bypassed every gate the assist paths apply:
+#: `assist_state_check.read_only_command` lives on the assist side, and this
+#: handler called `mcp_client.call_tool` straight through. The helper's own gate
+#: was the only check left, and the audit measured it accepting
+#: `bash -lc '<anything>'`. Re-gate here so the engine never SENDS what it would
+#: not send from a walkthrough.
+_SHELL_TOOL_ARGS = {"run_readonly": "command"}
+
+
+def _require_read_only(body: "McpToolCallInput") -> None:
+    arg = _SHELL_TOOL_ARGS.get(body.tool)
+    if arg is None:
+        return
+    from app.modules.assist_state_check import read_only_command
+
+    cmd = str(body.arguments.get(arg) or "")
+    if not read_only_command(cmd):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"refused: {body.tool!r} only runs read-only commands, and "
+                f"{cmd[:120]!r} did not pass the engine's read-only gate"
+            ),
         )
 
 
@@ -124,6 +166,7 @@ async def call_mcp_server_tool(
     """Debug/manual invocation of one tool on a registered server."""
     _require_consumer_enabled()
     spec = await _resolve_enabled(db, name)
+    _require_read_only(body)
     try:
         result = await mcp_client.call_tool(spec, body.tool, body.arguments)
     except mcp_client.McpToolError as exc:

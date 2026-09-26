@@ -21,6 +21,14 @@ from app.modules.mcp_registry import (
 pytestmark = pytest.mark.smoke
 
 
+@pytest.fixture
+def stdio_allowed(monkeypatch):
+    """§17.1172 — `stdio` is refused unless the operator opted in. These tests
+    are about spec SHAPE, seed parsing and merge order, not about the opt-in, so
+    they run with it on; `TestStdioOptIn` below owns the gate itself."""
+    monkeypatch.setattr(mcp_registry.settings, "mcp_allow_stdio", True)
+
+
 def _row(name, **over):
     base = {
         "name": name,
@@ -58,11 +66,45 @@ class TestSpecValidation:
         with pytest.raises(ValueError):
             McpServerSpec(name="x", transport="carrier-pigeon").validate()
 
-    def test_valid_stdio(self):
+    def test_valid_stdio(self, stdio_allowed):
         McpServerSpec(name="x", transport="stdio", command="python").validate()
 
     def test_valid_http(self):
         McpServerSpec(name="x", transport="streamable_http", endpoint="http://h/mcp").validate()
+
+
+class TestStdioOptIn:
+    """§17.1172 — a `stdio` row is a command line the orchestrator execs in its
+    OWN container (DATABASE_URL, SCAFFOLD_API_KEY, GITHUB_TOKEN, the Fernet
+    secret, ai-network). Audit 2026-09-25: `POST /mcp/servers` carried no
+    `require_admin`, so under multi-user ANY key could register one, and
+    entering a session (`GET /servers/{name}/tools`) spawned it. The router is
+    admin-only now; this is the second lock — the transport itself is off until
+    the operator turns it on."""
+
+    def test_stdio_is_refused_by_default(self, monkeypatch):
+        monkeypatch.setattr(mcp_registry.settings, "mcp_allow_stdio", False)
+        with pytest.raises(ValueError, match="stdio transport is disabled"):
+            McpServerSpec(name="x", transport="stdio", command="/bin/sh").validate()
+
+    def test_the_refusal_names_the_setting_that_lifts_it(self, monkeypatch):
+        monkeypatch.setattr(mcp_registry.settings, "mcp_allow_stdio", False)
+        with pytest.raises(ValueError, match="MCP_ALLOW_STDIO"):
+            McpServerSpec(name="x", transport="stdio", command="/bin/sh").validate()
+
+    def test_http_is_unaffected(self, monkeypatch):
+        monkeypatch.setattr(mcp_registry.settings, "mcp_allow_stdio", False)
+        McpServerSpec(name="x", transport="streamable_http", endpoint="http://h/mcp").validate()
+
+    def test_a_stdio_seed_entry_is_skipped_not_fatal(self, monkeypatch):
+        """The seed loader must never raise into startup — a refused entry is
+        dropped with a log line, like any other invalid one."""
+        monkeypatch.setattr(mcp_registry.settings, "mcp_allow_stdio", False)
+        monkeypatch.setattr(mcp_registry.settings, "mcp_servers_config", json.dumps([
+            {"name": "shell", "transport": "stdio", "command": "/bin/sh"},
+            {"name": "http", "transport": "streamable_http", "endpoint": "http://h/mcp"},
+        ]))
+        assert set(parse_config_seed()) == {"http"}
 
 
 class TestRedaction:
@@ -95,7 +137,7 @@ class TestConfigSeed:
         monkeypatch.setattr(mcp_registry.settings, "mcp_servers_config", '{"name":"x"}')
         assert parse_config_seed() == {}
 
-    def test_skips_invalid_keeps_valid(self, monkeypatch):
+    def test_skips_invalid_keeps_valid(self, monkeypatch, stdio_allowed):
         cfg = json.dumps(
             [
                 {"name": "good", "transport": "stdio", "command": "python"},
@@ -124,7 +166,7 @@ class TestCoerceJson:
 
 
 class TestMerge:
-    async def test_db_overrides_config_by_name(self, monkeypatch):
+    async def test_db_overrides_config_by_name(self, monkeypatch, stdio_allowed):
         cfg = json.dumps(
             [
                 {"name": "dup", "transport": "stdio", "command": "config-cmd"},

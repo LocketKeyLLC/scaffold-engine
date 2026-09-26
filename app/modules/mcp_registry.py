@@ -56,8 +56,18 @@ class McpServerSpec:
             raise ValueError(
                 f"mcp server {self.name!r}: unknown transport {self.transport!r}"
             )
-        if self.transport == "stdio" and not self.command:
-            raise ValueError(f"mcp server {self.name!r}: stdio requires 'command'")
+        if self.transport == "stdio":
+            if not self.command:
+                raise ValueError(f"mcp server {self.name!r}: stdio requires 'command'")
+            # §17.1172 — a stdio row is a command the orchestrator execs in its
+            # OWN container. Refuse it unless the operator opted in, whatever
+            # the caller's role.
+            if not settings.mcp_allow_stdio:
+                raise ValueError(
+                    f"mcp server {self.name!r}: stdio transport is disabled "
+                    "(it runs a command inside the orchestrator container). "
+                    "Set MCP_ALLOW_STDIO=true to enable it."
+                )
         if self.transport == "streamable_http" and not self.endpoint:
             raise ValueError(
                 f"mcp server {self.name!r}: streamable_http requires 'endpoint'"

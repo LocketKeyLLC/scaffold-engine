@@ -1963,6 +1963,15 @@ class Settings(BaseSettings):
     # execution (execute_next_node). When False, an MCP node is classified
     # non-executable (parked by the hands-on-assist gate), never fabricated.
     mcp_tool_enabled: bool = Field(default=False)
+    # §17.1172 — a `stdio` MCP server is a COMMAND LINE the orchestrator runs as
+    # a subprocess in its own container (DATABASE_URL, SCAFFOLD_API_KEY,
+    # GITHUB_TOKEN, the Fernet secret, ai-network). `POST /mcp/servers` is
+    # admin-only now, but "an admin may register one" and "an admin may execute
+    # arbitrary code inside the engine" are different grants, and only the
+    # operator can make the second. Default OFF: a stdio row is REFUSED at
+    # validate() unless this is set, which is where the `db`-sourced rows the
+    # API writes and the `config`-sourced seed both pass.
+    mcp_allow_stdio: bool = Field(default=False)
     # PRODUCER side — when True, the orchestrator exposes its own capabilities
     # as MCP tools over a streamable-HTTP transport mounted at /mcp (X-API-Key
     # gated). The `python -m app.mcp_server` stdio entrypoint is always
