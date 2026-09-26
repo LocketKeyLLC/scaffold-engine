@@ -464,6 +464,54 @@ class TestCIWorkflow:
                     bare.append(f"{wf.name}::{job}")
         assert not bare, f"these target any self-hosted runner, not ours: {bare}"
 
+    def test_every_remote_fetch_in_ci_retries(self):
+        """§17.1180f — a gate must not go red because someone else's CDN hiccuped.
+
+        `main` went RED on 2026-09-26 with `curl: (35) Recv failure: Connection
+        reset by peer` fetching a release tarball. The code was fine; a re-run
+        passed. A lane that fails on transient network teaches people to re-run
+        without reading the failure, which is how a real one gets waved through.
+
+        Localhost polls are exempt: those are readiness loops with their own
+        retry, and `--retry` there would fight the loop.
+        """
+        wfdir = self._wf_path.parent
+        if not wfdir.exists():
+            pytest.skip("workflows not available inside container")
+        offenders = []
+        for wf in sorted(wfdir.glob("*.yml")):
+            text = wf.read_text()
+            # join continuation lines so a multi-line curl is one command
+            joined = text.replace("\\\n", " ")
+            for n, line in enumerate(joined.split("\n"), 1):
+                stripped = line.strip()
+                if stripped.startswith("#") or not re.search(r"\bcurl\b", stripped):
+                    continue
+                if "localhost" in stripped or "127.0.0.1" in stripped:
+                    continue
+                if "--retry" not in stripped:
+                    offenders.append(f"{wf.name}: {stripped[:80]}")
+        assert not offenders, (
+            "these CI fetches have no --retry, so a transient reset fails the "
+            "whole gate:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_the_retry_covers_a_connection_reset_not_just_http_errors(self):
+        """`--retry` alone does NOT retry a connection reset mid-transfer —
+        that needs `--retry-all-errors`. The failure that started this was
+        exactly a reset (curl exit 35), so the weaker flag would have left the
+        defect in place while looking like a fix."""
+        ci = self._wf_path.parent / "ci.yml"
+        if not ci.exists():
+            pytest.skip("ci.yml not available inside container")
+        text = ci.read_text().replace("\\\n", " ")
+        fetches = [l.strip() for l in text.split("\n")
+                   if re.search(r"\bcurl\b", l) and "localhost" not in l
+                   and not l.strip().startswith("#")]
+        assert fetches, "no remote fetches found — did they move?"
+        weak = [f[:80] for f in fetches if "--retry-all-errors" not in f]
+        assert not weak, f"--retry without --retry-all-errors will not survive a reset: {weak}"
+
     def test_the_self_hosted_tier_only_runs_on_the_trunk(self):
         """Widening the push trigger must NOT put the heavy Docker stack on the
         self-hosted runner for every feature branch.
