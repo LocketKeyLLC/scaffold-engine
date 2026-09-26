@@ -1,0 +1,61 @@
+# §17.1180c — Tier 2 lives in its own workflow so a FORK PULL REQUEST CANNOT
+# REACH IT.
+#
+# It used to be a job inside ci.yml, which triggers on `pull_request`. The only
+# thing keeping a fork's code off the self-hosted runner was that job's own
+# `if:` clause — one expression, in a file that gets edited (it was edited twice
+# on 2026-09-26 alone). GitHub's guidance is not to attach self-hosted runners
+# to public repositories at all, precisely because a fork PR can then execute
+# arbitrary code on the runner host; this repo went public at v1.2.0, and the
+# runner host is the engine box — .env with the DB password and provider keys,
+# the Docker socket, and LAN reach to the Proxmox host.
+#
+# A workflow with no `pull_request` trigger cannot be started by a fork PR no
+# matter what any `if:` says. That is a structural guarantee rather than a
+# conditional one, and `tests/test_infra_scaffolding.py` asserts it.
+#
+# The `if:` is kept as well — belt and braces — and the runner is targeted by
+# an explicit label so a stray `runs-on: self-hosted` elsewhere does not land
+# on this machine by accident.
+#
+# ONE THING WAS LOST IN THE SPLIT, deliberately: as a job inside ci.yml this
+# carried `needs: smoke`, so Tier 2 only ran after the unit lane passed.
+# `needs:` cannot cross workflows. The alternative is a `workflow_run`
+# trigger, which fires for FORK PRs' workflow runs too and would hand the
+# fork-reachability straight back — the known escalation this split exists to
+# close. So Tier 2 now runs on a trunk push regardless of the unit lane's
+# result. Both report independently; a red smoke plus a red Tier 2 is two
+# signals rather than one, which is a fair trade for the property above.
+name: Tier 2 Integration
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+jobs:
+  integration:
+    name: "Tier 2 · Full-stack integration (§17.247)"
+    runs-on: [self-hosted, scaffold-engine-host]
+    if: ${{ vars.RUN_TIER2_INTEGRATION == 'true' }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rebuild orchestrator with PR code
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build scaffold-orchestrator
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/health > /dev/null && exit 0
+            sleep 2
+          done
+          echo "::error::orchestrator failed to become healthy within 60 s"
+          exit 1
+
+      - name: Run tier 2 integration suite
+        env:
+          SCAFFOLD_API_KEY: ${{ secrets.SCAFFOLD_API_KEY }}
+        run: make ci-tier-2

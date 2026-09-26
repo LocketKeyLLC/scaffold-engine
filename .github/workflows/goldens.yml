@@ -31,7 +31,7 @@ jobs:
     # this run — it makes it QUEUE FOREVER and leaves the run permanently
     # in-progress (the failure mode ci.yml's Tier 2 comment records). Register
     # the runner first, then set the variable.
-    runs-on: ${{ vars.SCAFFOLD_SELF_HOSTED == '1' && 'self-hosted' || 'ubuntu-latest' }}
+    runs-on: ${{ vars.SCAFFOLD_SELF_HOSTED == '1' && 'scaffold-engine-host' || 'ubuntu-latest' }}
     timeout-minutes: 40
     steps:
       - name: Report that no golden run happened
