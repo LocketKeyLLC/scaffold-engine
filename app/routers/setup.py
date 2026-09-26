@@ -12,8 +12,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.authz import Principal, get_principal, require_admin
+import logging
+
 from app.database import get_db
 from app.modules import engine_setup
+
+logger = logging.getLogger("scaffold")
 
 router = APIRouter(tags=["Setup"])
 
@@ -24,6 +28,41 @@ async def list_setup_recipes(db: AsyncSession = Depends(get_db)) -> dict:
     in_progress / manual), the plain-words reason it ships off, and the job
     carrying its walkthrough when one is open."""
     return {"recipes": await engine_setup.list_recipes(db)}
+
+
+@router.get("/setup/runner")
+async def runner_status(db: AsyncSession = Depends(get_db)) -> dict:
+    """§17.1176 — is a local runner wired to the operator's machine?
+
+    The audit of 2026-09-25 found the console asserting, in three places, that
+    "the engine never touches your machine — it has no terminal access, by
+    design", while an enabled `pve-runner` row and `mcp_tool_enabled` meant
+    `assist_turn._auto_lookup` ran model-authored commands on their Proxmox
+    host automatically, twice per turn, without confirmation. No surface said
+    so and none offered a way to stop it.
+
+    Cheap and read-only: the registry row and the settings flags, no outbound
+    connection (that is `POST /setup/runner/probe`'s job, which costs seconds).
+    """
+    from app.config import settings
+    from app.modules import assist_local_runner as _lr
+    spec = None
+    try:
+        spec = await _lr.runner_spec(db)
+    except Exception as exc:
+        logger.warning("runner_status_lookup_failed err=%r", exc)
+    return {
+        "connected": spec is not None and settings.mcp_tool_enabled,
+        "name": getattr(spec, "name", None),
+        "endpoint": getattr(spec, "endpoint", None),
+        # what it MAY do, so the console can say it rather than imply it
+        "runs": "read-only shell commands, gated before they are sent" if spec else None,
+        "auto_lookup": bool(spec is not None and settings.mcp_tool_enabled),
+        "mcp_tool_enabled": settings.mcp_tool_enabled,
+        # how to stop it, named where the operator can act on it
+        "disable_hint": ("Capabilities → “Let the state check run its own commands”, "
+                         "or DELETE /mcp/servers/{name}") if spec else None,
+    }
 
 
 @router.post("/setup/recipes/{recipe_id}/start", dependencies=[Depends(require_admin)])

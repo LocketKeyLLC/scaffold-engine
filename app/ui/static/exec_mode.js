@@ -6,7 +6,10 @@ import { storage } from "./storage.js";
 // distinction matters enormously for infrastructure jobs:
 //   ✦ Assist — you execute each step on your machines with the engine
 //     guiding, verifying, and adapting (the engine NEVER touches your
-//     hardware; it has no terminal access by design).
+//     hardware; the engine does not execute on your machines by default.
+//     §17.1176 — the one exception is the optional local runner, which runs
+//     READ-ONLY checks when the operator has wired one; views/assist.js
+//     states that conditionally rather than asserting the absolute.
 //   ▶ Auto  — the engine works every step itself: it writes the runbooks,
 //     configs, code, and documents autonomously. It still never connects to
 //     your machines — an Auto run PRODUCES artifacts; it does not apply them.

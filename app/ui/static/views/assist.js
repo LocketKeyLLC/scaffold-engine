@@ -188,6 +188,28 @@ export function sectionCount(body) {
 // + the reply visible without re-mounting the whole session.
 const ASSIST_RECENT_TURNS = 6;
 const ASSIST_ONBOARD_KEY = "scaffold_assist_onboarded";
+
+// §17.1176 — what is TRUE about the engine's reach, which depends on whether a
+// local runner is wired. Filled by `GET /setup/runner` on load; until it
+// answers we state the conservative default (no runner), never the reverse.
+let runnerState = { connected: false };
+export function runnerNote(state = runnerState) {
+  return state && state.connected
+    ? {
+        lede: "You are the engine's hands: it guides, you act on your computer, it tracks and adapts. "
+            + "One exception is switched on — the local runner"
+            + (state.name ? ` (${state.name})` : "")
+            + " — so the engine also runs READ-ONLY checks on that machine itself, "
+            + "automatically, instead of asking you to paste. It can never run anything that writes.",
+        step2: "Run the commands in your own terminal (or click through the UI it names). Copy-paste is expected — "
+             + "except for read-only checks, which the local runner does for you.",
+      }
+    : {
+        lede: "The engine never touches your machine — it has no terminal access. You are its hands: "
+            + "it guides, you act on your computer, it tracks and adapts.",
+        step2: "Run the commands in your own terminal (or click through the UI it names). Copy-paste is expected.",
+      };
+}
 function contractCard(onDismiss, session, force) {
   if (!force && storage.get(ASSIST_ONBOARD_KEY)) return null;
   // §17.1011 — retire it once the operator has DONE the loop. Measured on the
@@ -211,10 +233,16 @@ function contractCard(onDismiss, session, force) {
       el("h3", { class: "brief-heading", text: "How assist mode works" }),
       el("span", { class: "spacer" }),
       el("button", { class: "btn btn-ghost btn-sm", text: "Got it", onClick: (e) => { storage.set(ASSIST_ONBOARD_KEY, "1"); e.target.closest(".assist-contract")?.remove(); onDismiss?.(); } })),
-    el("p", { class: "assist-contract-lede", text: "The engine never touches your machine — it has no terminal access, by design. You are its hands: it guides, you act on your computer, it tracks and adapts." }),
+    // §17.1176 — this said "The engine never touches your machine — it has no
+    // terminal access, by design." That is true ONLY while no local runner is
+    // wired; with one registered, `_auto_lookup` runs model-authored read-only
+    // commands on the operator's machine automatically, twice per turn, with no
+    // confirmation. The claim is now conditional on the fact, and the runner
+    // state is fetched rather than assumed.
+    el("p", { class: "assist-contract-lede", text: runnerNote().lede }),
     el("div", { class: "welcome-steps" },
       step(1, "Guide", "Press ✦ Guide me — the assistant walks you through the current step with exact commands or clicks for YOUR environment."),
-      step(2, "Do it", "Run the commands in your own terminal (or click through the UI it names). Copy-paste is expected."),
+      step(2, "Do it", runnerNote().step2),
       step(3, "Report back", "Paste what happened — output, errors, screenshots described in words. Errors? Use Fix error for a diagnosis."),
       step(4, "Advance", "✓ Submit records the result and moves to the next step. The engine verifies, remembers, and re-plans around what you tell it."))
   );
@@ -319,7 +347,7 @@ export const ASSIST_HELP = {
     "🩺 Verify state": "Checks what is actually running on your machines against what the plan believes, using one read-only script. Where they disagree, it walks you through the repairs one at a time. Reach for this when a step keeps failing or you're not sure the plan is still accurate.",
     "🔧 Fix error": "Paste the error into the box first, then press this. You get a diagnosis for YOUR environment — the engine reads it against what it already knows about your machines, not a generic answer.",
     "⏩ Skip": "Skips the current step for now. It's recorded and you can come back to it later.",
-    "🤝 Engine does it": "Hands the step to the engine to finish on its own — but only work the engine itself can do (thinking, writing, planning). It never touches your machine for you.",
+    "🤝 Engine does it": "Hands the step to the engine to finish on its own — but only work the engine itself can do (thinking, writing, planning). It will not run anything on your machine for this: the one exception anywhere in the engine is the optional local runner, which only ever runs read-only checks and is listed under Session details when it is connected.",
     "↶ Restore a reopened step": "If a re-plan or a state check reopened a step you'd already finished, this puts it back to done with the evidence it had. It's refused once you've done more work on that step, so it can't erase real progress.",
     "⏸": "Pauses the session so nothing runs while you step away; press it again to resume right where you left off.",
   },
@@ -331,6 +359,7 @@ export const ASSIST_HELP = {
     { title: "When the plan and reality disagree", plain: "The engine keeps a picture of your machines from what you've pasted. If a step assumes something that isn't true anymore, it says so and offers to fix the plan rather than pushing you through a step that can't work. 🩺 Verify state is how you ask it to check on purpose." },
     { title: "A plan-change proposal", plain: "When something you've told the engine changes what the plan should be, a card opens once showing the change as before → after — what the step says now and what it would say instead. Apply it, Keep the plan as-is, or Decide later. After that it collapses to a small 'Review' chip by the box and won't pop up again." },
     { title: "Why it won't invent values", plain: "The engine refuses to put an IP address, port, version or URL into an instruction unless it came from something you actually showed it. If it doesn't know a value yet, it asks you to run a command that prints it — that's deliberate, so it never sends you to the wrong place." },
+    { title: "When the engine can run its own checks", plain: "By default the engine has no way to touch your machines — you run every command. The one exception is the optional local runner: if you set it up (Capabilities → “Let the state check run its own commands”), the engine runs READ-ONLY checks on that machine itself instead of asking you to paste — automatically, up to twice per reply. Every command it runs is refused unless it can only read, and is recorded in this transcript marked [local-runner]. Session details below says whether one is connected right now, and how to disconnect it." },
     { title: "What the engine knows about your setup", plain: "As you paste command output, the engine builds a map of your machines — names, addresses, and how traffic reaches them — and shows it in Session details below. That map is what keeps every step pointed at the right machine." },
   ],
 };
@@ -1426,6 +1455,20 @@ export function renderChat(container, sessionId, opts = {}) {
     ].filter(Boolean).slice(0, 5);
     mount(
       belowGrid,
+      // §17.1176 — the runner, named where the operator looks for what the
+      // engine knows about their setup, with the way to switch it off.
+      runnerState.connected
+        ? el("div", { class: "card card-pad side-block runner-on" },
+            el("div", { class: "side-title", text: "⚡ Local runner — connected" }),
+            el("div", { class: "side-fact", text:
+              `The engine runs READ-ONLY checks on ${runnerState.endpoint || "your machine"} itself`
+              + (runnerState.name ? ` through “${runnerState.name}”` : "")
+              + ", instead of asking you to paste. It can never run a command that writes." }),
+            el("div", { class: "side-fact dim", text:
+              runnerState.disable_hint || "Disconnect it from the Capabilities page." }),
+            el("a", { class: "btn btn-ghost btn-sm", href: "#/capabilities",
+                      text: "Manage the runner →" }))
+        : null,
       el("div", { class: "card card-pad side-block" },
         el("div", { class: "side-title", text: "Session" }),
         el("div", { class: "row row-wrap side-badges" }, statusBadge(session.status), session.current_node_key ? el("span", { class: "tag", text: "node " + session.current_node_key } ) : null),
@@ -1482,6 +1525,21 @@ export function renderChat(container, sessionId, opts = {}) {
     }
     return nx;
   }
+
+  // §17.1176 — ask ONCE per mount whether a runner is wired. Cheap (registry
+  // row + two flags, no outbound connection) and fail-soft to "not connected",
+  // because the claim we must never make by accident is the reassuring one.
+  (async () => {
+    try {
+      const r = await api.get("/setup/runner");
+      if (!disposed && r) { runnerState = r; renderBelow(); }
+    } catch (e) {
+      // the conservative default (no runner) stands — but SAY that we could not
+      // tell, because "we don't know" and "there is no runner" must not look
+      // the same in the console's own logs.
+      console.debug("assist: /setup/runner unavailable; assuming no local runner", e);
+    }
+  })();
 
   async function load() {
     try {
