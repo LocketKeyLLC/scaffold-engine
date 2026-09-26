@@ -147,7 +147,16 @@ jobs:
       - name: Install ci-tier-0 tools (ast-grep, import-linter, oasdiff)
         run: |
           pip install ast-grep-cli==0.45.3 import-linter==2.15
-          curl -sSL https://github.com/oasdiff/oasdiff/releases/download/v1.32.0/oasdiff_1.32.0_linux_amd64.tar.gz \
+          # §17.1180f — retry. A bare `curl` here turned main RED on 2026-09-26
+          # with `curl: (35) Recv failure: Connection reset by peer` fetching a
+          # release tarball; the code was fine and a re-run passed. A gate that
+          # goes red on someone else's TLS hiccup teaches people to re-run
+          # without reading, which is how a real failure gets waved through.
+          # --retry-all-errors is what makes --retry cover a reset mid-transfer
+          # (plain --retry only covers transient HTTP codes and connect errors).
+          # -f so an HTML error page is never piped into tar.
+          curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 --max-time 300 \
+            https://github.com/oasdiff/oasdiff/releases/download/v1.32.0/oasdiff_1.32.0_linux_amd64.tar.gz \
             | tar xz -C /usr/local/bin oasdiff
           git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main || true
       # app.sse_events is dep-free, so the pytest guards need no app deps.
@@ -297,7 +306,11 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install pyright==1.1.414 vulture==2.16
-          curl -sSL -o /usr/local/bin/hadolint \
+          # §17.1180f — this is the exact fetch that failed on main; see the
+          # oasdiff step above for why --retry-all-errors is the flag that
+          # matters for a connection reset.
+          curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 15 --max-time 300 \
+            -o /usr/local/bin/hadolint \
             https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-Linux-x86_64
           chmod +x /usr/local/bin/hadolint
           hadolint --version
