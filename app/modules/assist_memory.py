@@ -26,6 +26,8 @@ from app.config import settings
 from app.database import async_session
 from app.modules import assist_guide
 
+from app.utils.cost_tracking import tagged_calls
+
 logger = logging.getLogger("scaffold.assist")
 
 
@@ -1045,6 +1047,7 @@ def _update_memory_tool():
     return _UPDATE_MEMORY_TOOL
 
 
+@tagged_calls("assist.reconcile.on_commit")
 async def reconcile_on_commit(
     *, session_id: str, node_key: str, evidence: str, db,
 ) -> dict:

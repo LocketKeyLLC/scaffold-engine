@@ -733,3 +733,70 @@ def test_requote_preserves_what_the_quotes_were_doing():
     # ssh is the exception: it JOINS its remaining args into one remote command
     # line, so a plain join is what actually runs there.
     assert read_only_command("ssh h 'hostname; uname -a'")
+
+
+# ---------------------------------------------------------------------------
+# §17.1179 (audit I6) — a serve launch with no token mounted the app with NO
+# guard. `--install` has refused without a token since it was written; the
+# manual form the recipe's own troubleshooting text shows —
+# `python3 local_runner_mcp.py --host 0.0.0.0 --port 8790` — did not, and that
+# is unauthenticated command execution reachable from the LAN.
+# ---------------------------------------------------------------------------
+
+#: (host, token, kwargs, must_refuse, why this row exists)
+_AUTH_CASES = [
+    ("0.0.0.0",       None,     {},                          True,
+     "the exact command the troubleshooting text prints"),
+    ("192.168.1.156", None,     {},                          True,
+     "a concrete routable address"),
+    ("0.0.0.0",       None,     {"allow_no_token": True},    True,
+     "the opt-out must NOT waive a routable bind — that is what it would be misused for"),
+    ("127.0.0.1",     None,     {},                          True,
+     "loopback still has to ask; silence is not consent"),
+    ("",              None,     {},                          True,
+     "an empty host is treated as loopback, and still has to ask"),
+    ("127.0.0.1",     None,     {"allow_no_token": True},    False,
+     "a dev shell on the box itself, asked for explicitly"),
+    ("0.0.0.0",       "s3cret", {},                          False,
+     "the normal case"),
+    ("0.0.0.0",       None,     {"stdio": True},             False,
+     "stdio has no listening socket, so no token requirement"),
+]
+
+
+@pytest.mark.parametrize("host,token,kwargs,must_refuse,why", _AUTH_CASES,
+                         ids=[f"{h or 'empty'}-{'tok' if t else 'notok'}-{sorted(k)}"
+                              for h, t, k, _, _ in _AUTH_CASES])
+def test_an_unauthenticated_serve_is_refused(host, token, kwargs, must_refuse, why):
+    runner = _load_runner_script()
+    reason = runner.refuse_unauthenticated(host, token, **kwargs)
+    if must_refuse:
+        assert reason, f"should refuse — {why}"
+        assert "token" in reason.lower(), f"the refusal must say what is missing: {reason!r}"
+    else:
+        assert reason is None, f"should serve — {why} (got {reason!r})"
+
+
+def test_the_guard_is_actually_wired_into_the_serve_path():
+    """A pure predicate nothing calls is not a fix. `main()` must consult it
+    BEFORE the server is built, and only on the serve path (install has its own
+    refusal, and reaching this one would be a second, different message)."""
+    src = (ROOT / "scripts" / "local_runner_mcp.py").read_text()
+    assert src.count("def refuse_unauthenticated") == 1
+    call = src.index("refuse_unauthenticated(args.host")
+    assert call < src.index("mcp = build_server("), "the guard must run before the server is built"
+    assert src.index("return install(args)") < call, "install keeps its own earlier refusal"
+
+
+def test_install_still_refuses_without_a_token():
+    """The half that was already right stays right."""
+    src = (ROOT / "scripts" / "local_runner_mcp.py").read_text()
+    assert "FAILED: --install needs --token" in src
+
+
+def test_the_helper_version_was_bumped_for_the_startup_change():
+    """§17.1151 — the engine diagnoses a stale helper by comparing versions. A
+    launch that used to start and now refuses is exactly the kind of change the
+    operator must be walked through, so it has to move the number."""
+    runner = _load_runner_script()
+    assert int(runner.HELPER_VERSION) >= 10
