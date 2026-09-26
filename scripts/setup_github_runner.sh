@@ -34,8 +34,14 @@ REPO="${REPO:-LocketKeyLLC/scaffold-engine}"
 RUNNER_USER="${RUNNER_USER:-gh-runner}"
 RUNNER_HOME="${RUNNER_HOME:-/opt/gh-runner}"
 RUNNER_LABEL="${RUNNER_LABEL:-scaffold-engine-host}"
-RUNNER_VERSION="${RUNNER_VERSION:-2.330.0}"
-RUNNER_SHA256="${RUNNER_SHA256:-}"   # set to pin; empty = verify against GitHub's published digest
+# §17.1180d — pinned to a version that EXISTS and a digest verified two ways.
+# The first cut named 2.330.0 from memory (real, but three releases stale) and
+# left the checksum empty with a warning, which is the shape where a root
+# script silently installs whatever the CDN hands it. Both values below were
+# checked against `gh api repos/actions/runner/releases/tags/v2.337.0` AND an
+# independent download; they agree.
+RUNNER_VERSION="${RUNNER_VERSION:-2.337.0}"
+RUNNER_SHA256="${RUNNER_SHA256:-70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613}"
 
 die() { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 say() { printf '\033[1;36m→ %s\033[0m\n' "$*"; }
@@ -98,13 +104,13 @@ if [ ! -x "$RUNNER_HOME/config.sh" ]; then
   say "downloading runner $RUNNER_VERSION"
   curl -fsSL -o "/tmp/$TARBALL" \
     "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${TARBALL}"
-  if [ -n "$RUNNER_SHA256" ]; then
-    echo "$RUNNER_SHA256  /tmp/$TARBALL" | sha256sum -c - || die "checksum mismatch"
-    ok "checksum verified"
-  else
-    printf '\033[1;33m⚠ RUNNER_SHA256 not set — skipping checksum verification.\033[0m\n'
-    printf '  Pin it: RUNNER_SHA256=<digest from the release page> sudo -E bash %s\n' "$0"
-  fi
+  # §17.1180d — a missing digest is a HARD FAILURE, not a warning. This script
+  # runs as root and unpacks the archive into a service account's home; "we
+  # could not verify it, proceeding anyway" is not a thing to print there.
+  [ -n "$RUNNER_SHA256" ] || die "RUNNER_SHA256 is empty — refusing to install an unverified archive"
+  echo "$RUNNER_SHA256  /tmp/$TARBALL" | sha256sum -c - >/dev/null \
+    || die "checksum mismatch for $TARBALL — do NOT proceed"
+  ok "archive checksum verified ($RUNNER_VERSION)"
   tar xzf "/tmp/$TARBALL" -C "$RUNNER_HOME"
   chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_HOME"
   rm -f "/tmp/$TARBALL"
@@ -117,8 +123,22 @@ say "minting a registration token (valid ~1 h)"
 REG_TOKEN=$(gh api -X POST "repos/$REPO/actions/runners/registration-token" --jq .token)
 [ -n "$REG_TOKEN" ] || die "could not mint a registration token (needs repo admin)"
 
+# §17.1180d — the runner is a .NET application and needs libicu. It is present
+# on this host (checked), but say so plainly if it ever is not: the failure
+# without it is a .NET globalization stack trace out of config.sh that reads
+# like a bug in the runner.
+if ! ldconfig -p 2>/dev/null | grep -q libicu; then
+  printf '\033[1;33m⚠ libicu not found — the .NET runner will not start.\033[0m\n'
+  printf '  Run: %s/bin/installdependencies.sh\n' "$RUNNER_HOME"
+  die "install the runner dependencies first"
+fi
+
 say "configuring: label=$RUNNER_LABEL, no default labels beyond the platform ones"
-sudo -u "$RUNNER_USER" env -i HOME="$RUNNER_HOME" PATH=/usr/bin:/bin \
+# NB: a plain `sudo -u` here, NOT `env -i`. config.sh execs the bundled .NET
+# listener, which wants a normal environment (locale, HOME, a real PATH); a
+# scrubbed one is the kind of over-hardening that fails at 2am on a path nobody
+# exercised. HOME is set explicitly because the account's shell is nologin.
+sudo -u "$RUNNER_USER" HOME="$RUNNER_HOME" \
   "$RUNNER_HOME/config.sh" \
     --unattended --replace \
     --url "https://github.com/$REPO" \
