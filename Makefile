@@ -271,6 +271,7 @@ ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift 
 			tests/test_spa_status_pill_wiring.py \
 			tests/test_spa_job_store_wiring.py \
 			tests/test_spa_silent_catch_ratchet.py \
+			tests/test_shell_backtick_substitution.py \
 			tests/test_spa_a11y_wiring.py \
 			tests/test_research_feed_wiring.py \
 			--noconftest -o addopts="" -p no:cacheprovider -q || exit 1; \
@@ -580,6 +581,30 @@ build: ## Rebuild scaffold-engine:${SCAFFOLD_IMAGE_TAG:-local} (prod) and restar
 		exit 1; \
 	fi
 	$(COMPOSE) up -d --build $(CONTAINER)
+	@$(MAKE) --no-print-directory prune-images
+
+#: §17.1180e — every `make build` and every dev-image rebuild leaves the
+#: PREVIOUS image untagged. Nothing removed them, so they accumulated: 96
+#: dangling images had piled up before anyone looked, and removing them
+#: together returned 33 GB — three times what `UniqueSize` predicted, because
+#: layers shared between siblings stop being shared once the siblings go.
+#: `until=` is the safety: only dangling images OLDER than the window go, so a
+#: build running concurrently in another shell cannot have its just-written
+#: layers pulled out from under it. Today's builds are cleaned by tomorrow's.
+#: Tagged images are NEVER touched, and neither is anything backing a container
+#: (even a stopped one) — `docker image prune` refuses both by design.
+PRUNE_UNTIL ?= 24h
+
+prune-images: ## Remove DANGLING images older than $(PRUNE_UNTIL) (never tagged ones). Runs automatically after `make build`; SKIP_PRUNE=1 to opt out.
+	@if [ -n "$$SKIP_PRUNE" ]; then \
+		printf '  (image prune skipped: SKIP_PRUNE set)\n'; \
+	else \
+		out=$$(docker image prune -f --filter "until=$(PRUNE_UNTIL)" 2>/dev/null | tail -1); \
+		case "$$out" in \
+			*"0B"|"") printf '  no dangling images older than $(PRUNE_UNTIL)\n' ;; \
+			*) printf '\033[1;32m  ✓ pruned dangling images — %s\033[0m\n' "$$out" ;; \
+		esac; \
+	fi
 
 build-dev: ## Rebuild scaffold-engine:dev and restart orchestrator under the dev overlay.
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml up -d --build $(CONTAINER)
