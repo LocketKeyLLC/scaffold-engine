@@ -198,11 +198,17 @@ def _lines_about(text: str, block: Optional[str]) -> list[str]:
     for ws in per_line:
         for w in ws:
             freq[w] = freq.get(w, 0) + 1
+    # §17.1174 — `<` made this return NOTHING for a block of exactly two lines:
+    # half == 1.0, a word in one line has freq == 1, and 1 < 1.0 is False. So
+    # the §17.1022/1086 "aim the search at the step's open item" behaviour was
+    # silently off for every step whose recap had two OPEN bullets — the
+    # commonest count after one. The `len(lines) == 1` escape hatch below is
+    # the same boundary, patched at the wrong end.
     half = max(1, len(lines) / 2)
     out = []
     for ln, ws in zip(lines, per_line, strict=True):
         shared = qwords & ws
-        if any(freq[w] < half or len(lines) == 1 for w in shared):
+        if any(freq[w] <= half or len(lines) == 1 for w in shared):
             out.append(ln)
     return out
 

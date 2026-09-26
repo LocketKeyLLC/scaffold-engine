@@ -10,18 +10,22 @@ import { errorPanel, loading, toast } from "../components.js";
 
 import { storage } from "../storage.js";
 
-// The operator-tuned cloud picks (§17.632 general A/B, §17.567 verifier A/B,
-// §17.498 coder, §17.631 research_extract). Applied only for tags actually
-// pulled on the target daemon; missing tags keep the current value.
+// The operator-tuned cloud picks. §17.1174 — presets/tuned-cloud.env is the
+// CANON (it is what `make apply-preset` writes); this table and the
+// docker-compose.yml comment are copies, and `make check-tuned-picks` fails
+// the build when they drift. They HAD drifted, on 4 of 9 roles — pressing
+// "Ollama Cloud (tuned)" in the wizard would have regressed four measured A/B
+// picks. Applied only for tags actually pulled on the target daemon; missing
+// tags keep the current value.
 const CLOUD_PICKS = {
   model_general: "deepseek-v4-pro:cloud",
   model_coder: "kimi-k2.7-code:cloud",
-  model_verifier: "kimi-k2.7-code:cloud",
-  model_router: "qwen3.5:397b-cloud",
-  model_research_extract: "glm-5.1:cloud",
+  model_verifier: "glm-5.3-flash:cloud",
+  model_router: "gemma4:cloud",
+  model_research_extract: "deepseek-v4-flash:cloud",
   model_cloud_heavy: "qwen3.5:397b-cloud",
   model_cloud_alt: "qwen3.5:397b-cloud",
-  model_triage: "qwen3.5:397b-cloud",
+  model_triage: "gemma4:cloud",
   model_fallback: "qwen3.5:latest",
 };
 

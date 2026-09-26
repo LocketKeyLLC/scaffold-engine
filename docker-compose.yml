@@ -388,10 +388,17 @@ services:
       # config.py Settings defaults: a deploy with no .env pins makes zero
       # cloud calls. The A/B-tuned cloud picks (§17.498/567/632/631) are the
       # wizard's "Ollama Cloud (tuned)" preset; pin them in .env to opt in:
-      #   MODEL_ROUTER=qwen3.5:397b-cloud   MODEL_CODER=kimi-k2.7-code:cloud
-      #   MODEL_VERIFIER=kimi-k2.7-code:cloud MODEL_GENERAL=deepseek-v4-pro:cloud
-      #   MODEL_RESEARCH_EXTRACT=glm-5.1:cloud MODEL_TRIAGE=qwen3.5:397b-cloud
-      #   MODEL_CLOUD_HEAVY=qwen3.5:397b-cloud MODEL_CLOUD_ALT=qwen3.5:397b-cloud
+      #   (canon: presets/tuned-cloud.env — `make apply-preset PRESET=tuned-cloud`;
+      #    `make check-tuned-picks` fails the build if this list drifts from it)
+      #   MODEL_GENERAL=deepseek-v4-pro:cloud
+      #   MODEL_CODER=kimi-k2.7-code:cloud
+      #   MODEL_VERIFIER=glm-5.3-flash:cloud
+      #   MODEL_ROUTER=gemma4:cloud
+      #   MODEL_RESEARCH_EXTRACT=deepseek-v4-flash:cloud
+      #   MODEL_CLOUD_HEAVY=qwen3.5:397b-cloud
+      #   MODEL_CLOUD_ALT=qwen3.5:397b-cloud
+      #   MODEL_TRIAGE=gemma4:cloud
+      #   MODEL_FALLBACK=qwen3.5:latest
       MODEL_ROUTER: ${MODEL_ROUTER:-qwen3:4b}
       MODEL_CODER: ${MODEL_CODER:-qwen2.5-coder:7b}
       MODEL_VERIFIER: ${MODEL_VERIFIER:-qwen2.5:7b}
