@@ -388,10 +388,17 @@ services:
       # config.py Settings defaults: a deploy with no .env pins makes zero
       # cloud calls. The A/B-tuned cloud picks (§17.498/567/632/631) are the
       # wizard's "Ollama Cloud (tuned)" preset; pin them in .env to opt in:
-      #   MODEL_ROUTER=qwen3.5:397b-cloud   MODEL_CODER=kimi-k2.7-code:cloud
-      #   MODEL_VERIFIER=kimi-k2.7-code:cloud MODEL_GENERAL=deepseek-v4-pro:cloud
-      #   MODEL_RESEARCH_EXTRACT=glm-5.1:cloud MODEL_TRIAGE=qwen3.5:397b-cloud
-      #   MODEL_CLOUD_HEAVY=qwen3.5:397b-cloud MODEL_CLOUD_ALT=qwen3.5:397b-cloud
+      #   (canon: presets/tuned-cloud.env — `make apply-preset PRESET=tuned-cloud`;
+      #    `make check-tuned-picks` fails the build if this list drifts from it)
+      #   MODEL_GENERAL=deepseek-v4-pro:cloud
+      #   MODEL_CODER=kimi-k2.7-code:cloud
+      #   MODEL_VERIFIER=glm-5.3-flash:cloud
+      #   MODEL_ROUTER=gemma4:cloud
+      #   MODEL_RESEARCH_EXTRACT=deepseek-v4-flash:cloud
+      #   MODEL_CLOUD_HEAVY=qwen3.5:397b-cloud
+      #   MODEL_CLOUD_ALT=qwen3.5:397b-cloud
+      #   MODEL_TRIAGE=gemma4:cloud
+      #   MODEL_FALLBACK=qwen3.5:latest
       MODEL_ROUTER: ${MODEL_ROUTER:-qwen3:4b}
       MODEL_CODER: ${MODEL_CODER:-qwen2.5-coder:7b}
       MODEL_VERIFIER: ${MODEL_VERIFIER:-qwen2.5:7b}
@@ -532,7 +539,13 @@ services:
       # high-precision vetoes the cascade only gets on fall-through. Code default
       # off (fresh installs conservative); live here after the §17.855 A/B (which
       # corrected real confident-path misroutes + closed the ask-framed-pivot gap).
-      ASSIST_DECIDE_DETERMINISTIC_OVERRIDES: "${ASSIST_DECIDE_DETERMINISTIC_OVERRIDES:-false}"
+      # §17.1177 — was `:-false` under a comment that says "live here after the
+      # §17.855 A/B". I scanned every `VAR: "${VAR:-true|false}"` in this file
+      # against its preceding comment: it was the ONLY mismatch. On this host it
+      # is true only because .env:105 sets it, so a fresh clone got the §17.855
+      # deterministic post-filter OFF — `apply_deterministic_overrides` never
+      # ran and the /decide model's confident route went unchecked.
+      ASSIST_DECIDE_DETERMINISTIC_OVERRIDES: "${ASSIST_DECIDE_DETERMINISTIC_OVERRIDES:-true}"
       # §17.771 (deferred, now done) — guarantee a "## My suggestion" lean on a
       # decision step's first view; on a miss, generate + append it. Code default
       # off (tests/fresh installs); live here. Fires only on a decision + miss.
@@ -920,7 +933,14 @@ volumes:
   open-webui:
     external: true
     name: open-webui
+  # §17.1177 — EXTERNAL, like milvus-data-v2. §17.855 made the Milvus volume
+  # external precisely so `docker compose down -v` could not destroy the corpus;
+  # the identical exposure on Postgres — every job, DAG, assist session,
+  # transcript, API key, reconciliation ledger and pre-image — was never closed.
+  # `make backup` exists; nothing prevented the command. An external volume is
+  # not removed by `down -v`, and `make bootstrap` creates it.
   postgres-data:
+    external: true
     name: scaffold-postgres-data
   hf-cache:
   scaffold-logs:

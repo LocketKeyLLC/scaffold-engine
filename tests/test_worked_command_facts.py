@@ -7,6 +7,8 @@ fix loop chased `index.js` from the package file.
 """
 from __future__ import annotations
 
+import pytest
+
 import app.modules.execution_agent  # noqa: F401 — load-bearing (real app.database)
 from app.modules.assist_memory import worked_command_facts
 
@@ -47,3 +49,32 @@ def test_both_distillers_fold_in_the_worked_facts():
     assert "worked_command_facts(msg, node_key=node_key)" in turn
     sub = src[src.index("async def capture_session_facts("):src.index("async def derive_turn_memory(")] if src.index("async def capture_session_facts(") < src.index("async def derive_turn_memory(") else src[src.index("async def capture_session_facts("):]
     assert "worked_command_facts(evidence, node_key=node_key)" in sub
+
+
+# ── §17.1174 — "ls" had no trailing space, so every ls* command was dropped ──
+
+@pytest.mark.parametrize("cmd,out", [
+    ("lsof -i :3001", "node 1234 root 20u IPv4 TCP *:3001 (LISTEN)"),
+    ("lsblk -f /dev/sda", "sda1 ext4 rootfs active"),
+    ("lspci -nn | grep -i nvidia", "02:00.0 NVIDIA Tesla P40 - device is up 1"),
+])
+def test_ls_prefixed_discovery_commands_are_remembered(cmd, out):
+    """The skip list read `("echo ", "cat ", "ls", "cd ", "grep ", …)` — every
+    entry but `ls` carried a trailing space, so `lsblk`, `lspci` and `lsof`
+    matched `startswith` and were thrown away. Those are exactly the discovery
+    commands §17.1052 added this function to remember: "a command the operator
+    ran that visibly WORKED is the most durable fact a paste can carry"."""
+    facts = worked_command_facts(f"root@pve:~# {cmd}\n{out}")
+    assert facts and cmd in facts[0], (cmd, facts)
+
+
+@pytest.mark.parametrize("cmd,out", [
+    ("ls -la /etc", "total 48"),
+    ("ls /opt", "app  data"),
+    ("cat /etc/hostname", "pve is up 1"),
+    ("echo hello", "hello is running"),
+])
+def test_the_genuinely_uninteresting_commands_are_still_skipped(cmd, out):
+    """The skip list exists for a reason — a bare listing is not a durable
+    fact. Widening `ls` to `ls ` must not widen it to `ls`-anything."""
+    assert worked_command_facts(f"root@pve:~# {cmd}\n{out}") == []

@@ -183,6 +183,10 @@ ensure_volume() {
 
 ensure_network "ai-network" "172.18.0.0/16" "172.18.0.1"
 ensure_volume "milvus-data-v2"
+# §17.1177 — external, so `docker compose down -v` cannot delete the database
+# (§17.855 did this for the Milvus corpus and the same exposure on Postgres was
+# left open). An external volume must exist before `compose up`.
+ensure_volume "scaffold-postgres-data"
 
 # §17.824 (plan 6.1) — OWUI is an optional compose profile (§17.821,
 # operator decision 2). Ask once; the answer lands in .env as

@@ -264,6 +264,10 @@ class TestApplyNoteReplan:
         # and returns the prior for the caller to preserve.
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[
+            # §17.1176 — the reopen closure: one full-DAG SELECT, so a node whose
+            # result DERIVES from the output being deleted is reopened too. Here
+            # T13 has no dependents, so the closure adds nothing.
+            _result(all_=[{"node_key": "T13", "depends_on": []}]),
             _result(all_=[{"node_key": "T13", "output_text": "logged into VM"}]),  # prior SELECT
             _result(all_=[{"node_key": "T13", "status": "committed", "evidence": "ssh ok",  # §17.1056 pre-image
                            "evidence_kind": "text", "committed_at": None,

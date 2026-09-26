@@ -1,0 +1,245 @@
+{
+  "_": "§17.1174 — every message is the live operator turn its own §-entry quotes verbatim in app/modules/assist_policy.py. Those comments recorded what each gate should say; nothing asserted it, so the measurements rotted in prose. `fires` must be a SUBSET of the gates that actually fire (other gates may legitimately also match); `not` must not fire at all.",
+  "cases": [
+    {
+      "§": "17.903",
+      "msg": "i hit the reboot now and its still hung up, perhaps we should start over. Delete this VM and start over?",
+      "fires": [
+        "blocked",
+        "pivot",
+        "recommend"
+      ],
+      "not": [
+        "claim",
+        "evidence"
+      ]
+    },
+    {
+      "§": "17.891",
+      "msg": "I want to build a markdown linter",
+      "fires": [],
+      "not": [
+        "advance",
+        "claim",
+        "evidence"
+      ]
+    },
+    {
+      "§": "17.950",
+      "msg": "i am connected via SSH! whats next?",
+      "fires": [
+        "advance"
+      ],
+      "not": [
+        "blocked"
+      ]
+    },
+    {
+      "§": "17.899a",
+      "msg": "It worked Ubuntu Server is now downloading!",
+      "fires": [
+        "claim",
+        "evidence",
+        "advance"
+      ],
+      "not": [
+        "denial"
+      ]
+    },
+    {
+      "§": "17.899b",
+      "msg": "But we have ONLY installed the ubuntu server and have not installed anything else.",
+      "fires": [
+        "denial"
+      ],
+      "not": [
+        "claim",
+        "evidence"
+      ]
+    },
+    {
+      "§": "17.1014",
+      "msg": "i believe it is done but am unsure.",
+      "fires": [
+        "hedged",
+        "uncertain"
+      ],
+      "not": [
+        "claim"
+      ]
+    },
+    {
+      "§": "17.971",
+      "msg": "it appears to be done",
+      "fires": [
+        "claim",
+        "evidence",
+        "advance"
+      ],
+      "not": [
+        "uncertain"
+      ]
+    },
+    {
+      "§": "17.1017",
+      "msg": "it did not work and i am not sure why",
+      "fires": [
+        "uncertain"
+      ],
+      "not": [
+        "claim",
+        "hedged"
+      ]
+    },
+    {
+      "§": "17.867",
+      "msg": "whats next??",
+      "fires": [
+        "whats_next",
+        "advance"
+      ],
+      "not": [
+        "claim"
+      ]
+    },
+    {
+      "§": "17.867b",
+      "msg": "what’s next?",
+      "fires": [
+        "whats_next"
+      ],
+      "not": []
+    },
+    {
+      "§": "17.1053",
+      "msg": "add a step for this",
+      "fires": [
+        "add_step"
+      ],
+      "not": [
+        "claim"
+      ]
+    },
+    {
+      "§": "17.890",
+      "msg": "I did that already",
+      "fires": [
+        "claim",
+        "evidence",
+        "advance"
+      ],
+      "not": []
+    },
+    {
+      "§": "17.951",
+      "msg": "yes",
+      "fires": [
+        "confirm"
+      ],
+      "not": [
+        "claim"
+      ]
+    },
+    {
+      "§": "17.951b",
+      "msg": "not yet",
+      "fires": [
+        "decline"
+      ],
+      "not": [
+        "confirm",
+        "claim"
+      ]
+    },
+    {
+      "§": "17.959",
+      "msg": "I need a better explanation on implementing the firewall in the web browser. There are far more options then what you are telling me to add with not enough context.",
+      "fires": [
+        "gui"
+      ],
+      "not": [
+        "claim"
+      ]
+    },
+    {
+      "§": "17.679",
+      "msg": "actually, use ZFS instead",
+      "fires": [
+        "pivot"
+      ],
+      "not": [
+        "claim"
+      ]
+    },
+    {
+      "§": "17.691",
+      "msg": "can't I just wipe it and start again?",
+      "fires": [
+        "pivot",
+        "recommend"
+      ],
+      "not": [
+        "claim"
+      ]
+    },
+    {
+      "§": "17.733",
+      "msg": "how do I configure the bridge?",
+      "fires": [
+        "howto"
+      ],
+      "not": [
+        "pivot",
+        "claim"
+      ]
+    },
+    {
+      "§": "17.763",
+      "msg": "help me get the bridge up",
+      "fires": [
+        "help"
+      ],
+      "not": [
+        "claim"
+      ]
+    },
+    {
+      "§": "17.903b",
+      "msg": "still not working",
+      "fires": [
+        "blocked"
+      ],
+      "not": [
+        "claim",
+        "advance"
+      ]
+    },
+    {
+      "§": "17.903c",
+      "msg": "still downloading",
+      "fires": [],
+      "not": [
+        "blocked"
+      ]
+    },
+    {
+      "§": "17.891b",
+      "msg": "next",
+      "fires": [
+        "advance"
+      ],
+      "not": [
+        "claim",
+        "evidence"
+      ]
+    },
+    {
+      "§": "17.915",
+      "msg": "skip",
+      "fires": [],
+      "not": [
+        "evidence"
+      ]
+    }
+  ]
+}

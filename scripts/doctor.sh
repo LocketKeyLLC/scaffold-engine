@@ -59,7 +59,7 @@ explain() {
 # below; needs a manual update when sections are added or renamed,
 # but the cost is one line per change and the operator-facing clarity
 # is worth it.
-printf '%s┌── make doctor ──%s pre-flight diagnostic, 11 sections, read-only.%s\n' \
+printf '%s┌── make doctor ──%s pre-flight diagnostic, 12 sections, read-only.%s\n' \
     "$C_INFO" "$C_RST" "$C_RST"
 printf '%s│%s   1. .env                          (required secrets present)\n' \
     "$C_INFO" "$C_RST"
@@ -538,6 +538,39 @@ else
         pass "all 3 sites agree on '$reranker_config'"
     else
         fail "MODEL_RERANKER default drift across 3 sites — see values above. Fix: pick the canonical value and update the other 2."
+    fi
+fi
+
+# ---- §17.1177: memory headroom ---------------------------------------
+# The §17.160 header's cap math was corrected twice in place (§17.1010) and the
+# conclusion — "do not run a full suite and heavy host-side Ollama inference at
+# once" — became operating advice nothing measured. mem_limit is a LIMIT, not a
+# reservation, so oversubscription is normal and fine; what makes it dangerous
+# here is that the premise the math leans on ("swap stays as the last-resort
+# overflow") can be false, and a host-level overcommit with nowhere to spill is
+# not contained to one cgroup. This states the three numbers so the operator can
+# decide, rather than leaving it to a comment.
+hdr "Memory headroom"
+
+caps_mb=$(grep -oE '^[[:space:]]*mem_limit:[[:space:]]*[0-9.]+[gGmM]' docker-compose.yml 2>/dev/null \
+    | grep -oE '[0-9.]+[gGmM]' \
+    | awk 'BEGIN{t=0} /[gG]$/{t+=substr($0,1,length($0)-1)*1024; next} {t+=substr($0,1,length($0)-1)} END{printf "%d", t}')
+ram_mb=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)
+swap_free_mb=$(awk '/SwapFree/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)
+swap_total_mb=$(awk '/SwapTotal/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)
+
+if [[ -z "$caps_mb" || -z "$ram_mb" || "$ram_mb" -eq 0 ]]; then
+    warn "could not read compose caps or /proc/meminfo — skipping"
+else
+    info "compose mem_limit total: $((caps_mb / 1024)) GiB across all services"
+    info "host RAM:                $((ram_mb / 1024)) GiB"
+    info "swap free:               $((swap_free_mb)) MiB of $((swap_total_mb)) MiB"
+    if [[ "$caps_mb" -le "$ram_mb" ]]; then
+        pass "caps fit in RAM with $(( (ram_mb - caps_mb) / 1024 )) GiB to spare"
+    elif [[ "$swap_total_mb" -gt 0 && "$swap_free_mb" -lt $(( swap_total_mb / 10 )) ]]; then
+        fail "caps exceed RAM by $(( (caps_mb - ram_mb) / 1024 )) GiB AND swap is $(( swap_free_mb * 100 / (swap_total_mb > 0 ? swap_total_mb : 1) ))% free — an overcommit has nowhere to spill and the kernel OOM killer picks the victim, which is NOT contained to one container. Free swap, or lower a cap (the orchestrator's 8g is the largest)."
+    else
+        warn "caps exceed RAM by $(( (caps_mb - ram_mb) / 1024 )) GiB — fine while real usage stays below cap (it normally does), but the margin is swap. Watch this line if the host starts swapping."
     fi
 fi
 

@@ -8,9 +8,14 @@ authoritative, the pipeline copy is the /decide-unavailable fallback).
 """
 from __future__ import annotations
 
+import json
+import pathlib
+
 import pytest
 
 from app.modules import assist_policy as P
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 # ── the ported phrase gates ───────────────────────────────────────────────────
@@ -170,22 +175,83 @@ def test_override_fill_if_empty_preserves_llm_value():
 
 # ── drift parity with the pipeline copy ───────────────────────────────────────
 
+def _compiled_patterns(path):
+    """Every module-level ``NAME_RE = re.compile(<literal>, …)`` in a file, as
+    {name: pattern}. Parsed from SOURCE with `ast`, deliberately: the pipeline
+    module runs in another container and importing it here used to raise, which
+    the old test turned into `pytest.skip` — a parity gate that reported green
+    while pinning nothing. Reading the file cannot skip.
+    """
+    import ast
+    out = {}
+    for node in ast.walk(ast.parse(pathlib.Path(path).read_text(encoding="utf-8"))):
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+            continue
+        fn = node.value.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == "compile" and node.value.args):
+            continue
+        for t in node.targets:
+            if isinstance(t, ast.Name) and t.id.endswith("_RE"):
+                try:
+                    out[t.id] = ast.literal_eval(node.value.args[0])
+                except ValueError:      # a computed pattern — nothing to pin
+                    pass
+    return out
+
+
 def test_regex_parity_with_pipeline_copy():
-    """The pipeline's `_assist_handlers` holds the fallback copy of these gates.
-    The two MUST stay byte-identical or routing diverges by path. Skips if the
-    vendored pipeline module can't import in this lane (it runs in its own
-    container); the server copy is still fully covered above."""
-    try:
-        import importlib
-        h = importlib.import_module("pipelines._vendor._assist_handlers")
-    except Exception:  # pragma: no cover - pipeline deps absent in the core lane
-        pytest.skip("pipelines._vendor._assist_handlers not importable in this lane")
-    assert P._PIVOT_RE.pattern == h._PIVOT_RE.pattern
-    assert P._GLOBAL_CHANGE_RE.pattern == h._GLOBAL_CHANGE_RE.pattern
-    assert P._QUESTION_PIVOT_RE.pattern == h._QUESTION_PIVOT_RE.pattern
-    assert P._HOWTO_QUESTION_RE.pattern == h._HOWTO_QUESTION_RE.pattern
-    assert P._HELP_REQUEST_RE.pattern == h._HELP_REQUEST_RE.pattern
-    assert P._ADD_STEP_RE.pattern == h._ADD_STEP_RE.pattern  # §17.1053
+    """§17.1174 — the INTERSECTION, not a hand-listed six.
+
+    The old version asserted six names and skipped on any import error. It
+    therefore did not cover `_SHELL_ERROR_RE`, which had drifted: the pipeline
+    carried two `error:`/`fatal:`/`panic:`-at-line-start alternations the engine
+    did not, so a failed `git push` or a Go panic scored shell_error=False on
+    the SERVER path — the authoritative one since §17.855 — and `_override`
+    gate 1 routed it to **submit**, committing the step. Measured on 5 error
+    shapes, the two copies disagreed on 4.
+
+    Comparing the intersection means a regex added to both files in future is
+    pinned the day it lands, with nobody remembering to add it here.
+    """
+    engine = _compiled_patterns(ROOT / "app" / "modules" / "assist_policy.py")
+    pipeline = _compiled_patterns(ROOT / "pipelines" / "_vendor" / "_assist_handlers.py")
+    shared = sorted(set(engine) & set(pipeline))
+    assert len(shared) >= 8, f"expected the vendored gates to share ≥8 regexes, found {shared}"
+    drifted = {n: (engine[n], pipeline[n]) for n in shared if engine[n] != pipeline[n]}
+    assert not drifted, (
+        "these regexes exist in BOTH assist_policy.py and _assist_handlers.py and "
+        f"have diverged — the two routing paths will disagree: {sorted(drifted)}"
+    )
+
+
+@pytest.mark.parametrize("line,is_error", [
+    ("error: no such target", True),
+    ("fatal: not a git repository", True),
+    ("Error response from daemon: pull access denied", True),
+    ("panic: runtime error: index out of range", True),
+    ("E: Unable to locate package foo", True),
+    ("Cloning into 'repo'...", False),
+    ("total 48", False),
+    ("Active: active (running) since Mon", False),
+])
+def test_the_shell_error_gate_sees_the_line_shapes_that_used_to_commit_a_step(line, is_error):
+    """§17.1174 — each of these was measured False on the engine side and True
+    on the pipeline side. A False here means `_override` gate 1 takes the clean
+    path and SUBMITS the step on a paste that shows a failure."""
+    paste = "root@pve:~# make\n" + line
+    assert bool(P._SHELL_ERROR_RE.search(paste)) is is_error, line
+    assert P._compute_signals(paste, None)["shell_error"] is is_error, line
+
+
+def test_an_error_paste_routes_to_fix_not_submit():
+    """The consequence, end to end through the post-filter."""
+    for line in ("fatal: not a git repository", "panic: runtime error", "error: no such target"):
+        paste = "root@pve:~# make\n" + line
+        d = P.apply_deterministic_overrides(
+            {"action": "question", "signals": P._compute_signals(paste, None)}, paste)
+        assert d["action"] == "fix", line
+        assert d["override"] == "shell_error"
+
 
 
 # ── §17.867 — whats-next orientation gate ─────────────────────────────────────
@@ -233,3 +299,81 @@ def test_shell_paste_still_beats_whats_next():
          "signals": {"shell_paste": True, "shell_error": True}}
     out = P.apply_deterministic_overrides(d, "whats next??")
     assert out["action"] == "fix"
+
+
+# ── §17.1174 — the only gate that did not normalize smart punctuation ────────
+
+@pytest.mark.parametrize("msg", [
+    "what's next?", "what’s next?",          # U+2019 is what a phone keyboard sends
+    "what’s next", "so, what’s next!",
+])
+def test_whats_next_survives_a_curly_apostrophe(msg):
+    """Every sibling gate calls `normalize_punct` first; this one did not, so
+    §17.867's orientation override missed a large share of real messages and
+    the turn fell through to whatever /decide said — the routing §17.867 exists
+    because it got wrong."""
+    assert P.looks_like_whats_next(msg), msg
+
+
+def test_whats_next_still_ignores_a_longer_question():
+    assert not P.looks_like_whats_next("what’s next after I configure the bridge?")
+
+
+# ── §17.1174 — the corpus the comments described but nothing asserted ────────
+#
+# This file is a 1,214-line regex policy engine with ~36 named patterns, each
+# justified by a dated live incident quoted in its comment. Those comments carry
+# real measurements ("matched 3 of 83 messages", "fires on 34 of them") that were
+# done by hand, once, and are not reproducible — so every gate's evidence rotted
+# into prose the moment it shipped. The project's own rule is "measure a detector
+# on the real corpus"; this is that corpus, made re-runnable.
+#
+# The messages are not invented: each is the live turn its own §-entry already
+# quotes verbatim in assist_policy.py, so nothing here is new to a public repo.
+# A replay over the operator's OWN assist_turns lives in
+# scripts/replay_assist_policy.py — that one cannot be committed (their words,
+# their topology) and is the local instrument.
+
+_POLICY_CORPUS = json.loads(
+    (ROOT / "tests" / "fixtures" / "assist_policy_corpus.json").read_text(encoding="utf-8"))
+
+_GATES = {
+    "pivot": P.looks_like_pivot, "howto": P.looks_like_howto_question,
+    "help": P.looks_like_help_request, "blocked": P.looks_like_blocked,
+    "claim": P.looks_like_completion_claim, "hedged": P.hedged_completion_report,
+    "denial": P.looks_like_completion_denial, "advance": P.has_advancement_signal,
+    "evidence": P.is_completion_evidence, "whats_next": P.looks_like_whats_next,
+    "add_step": P.looks_like_add_step_request, "confirm": P.looks_like_confirmation,
+    "decline": P.looks_like_decline, "uncertain": P.expresses_uncertainty,
+    "recommend": P.wants_a_recommendation, "gui": P.looks_like_gui_question,
+}
+
+
+@pytest.mark.parametrize("case", _POLICY_CORPUS["cases"],
+                         ids=[c["§"] for c in _POLICY_CORPUS["cases"]])
+def test_each_documented_live_turn_still_routes_the_way_its_entry_says(case):
+    fired = {g for g, fn in _GATES.items() if fn(case["msg"])}
+    missing = set(case["fires"]) - fired
+    wrong = set(case["not"]) & fired
+    assert not missing, f"§{case['§']} expected {sorted(missing)} to fire on {case['msg']!r}"
+    assert not wrong, f"§{case['§']} expected {sorted(wrong)} NOT to fire on {case['msg']!r}"
+
+
+@pytest.mark.parametrize("case", _POLICY_CORPUS["cases"],
+                         ids=[c["§"] for c in _POLICY_CORPUS["cases"]])
+def test_the_gate_invariants_hold_on_every_corpus_message(case):
+    """Properties, not examples — these outlive any individual phrasing, and
+    they are what a replay over 251 real operator turns confirmed:
+
+      claim ⊆ evidence ⊆ advance   — §17.915 is strictly narrower than §17.891,
+                                     which is strictly narrower than nothing.
+      claim ∩ hedged = ∅           — §17.1017 split one shape by certainty.
+      claim ∩ denial = ∅           — §17.899 is the mirror of §17.890.
+    """
+    m = case["msg"]
+    if P.looks_like_completion_claim(m):
+        assert P.is_completion_evidence(m), m
+        assert not P.hedged_completion_report(m), m
+        assert not P.looks_like_completion_denial(m), m
+    if P.is_completion_evidence(m):
+        assert P.has_advancement_signal(m), m

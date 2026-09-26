@@ -29,6 +29,11 @@ QUERY_MODULES = [
     "app/modules/assist_research_lib.py",
     "app/modules/assist_render.py",
     "app/modules/assist_guide.py",
+    # §17.1178 — the pure draft checks moved to assist_draft.py. WITHOUT this
+    # line the gate went blind: `_CONSUMING_MARKERS` left the scanned set and
+    # `test_the_structural_gate_is_not_vacuous` said so immediately, which is
+    # the whole reason that assertion exists. A refactor must carry its gates.
+    "app/modules/assist_draft.py",
     "app/modules/assist_agent.py",
     "app/modules/assist_policy.py",
     "app/modules/assist_evidence.py",  # §17.1027 — need / evidence / verification
@@ -45,7 +50,7 @@ QUERY_MODULES = [
 # one-line import above it moved the line and broke ci-tier-0 for an edit
 # that had nothing to do with the list.
 EXEMPT_PHRASE_LISTS = {
-    ("assist_guide.py", "_CONSUMING_MARKERS"): (
+    ("assist_draft.py", "_CONSUMING_MARKERS"): (
         "destructive-command patterns (`| sh`, `dpkg -i`). A security scanner is "
         "inherently a list of known-dangerous shapes; it encodes no operator's "
         "problem, and deriving it from operator text would be strictly worse."
@@ -115,7 +120,8 @@ def test_the_gate_can_see_code():
 DOMAIN_VOCAB_BASELINE = {
     "assist_research_lib.py": 0,
     "assist_render.py": 0,
-    "assist_guide.py": 17,
+    "assist_guide.py": 14,     # §17.1178 — 3 moved to assist_draft.py
+    "assist_draft.py": 3,
     "assist_agent.py": 0,
     "assist_policy.py": 1,
     "assist_evidence.py": 0,
@@ -205,9 +211,24 @@ def test_no_unregistered_phrase_lookup_tables(rel):
 
 def test_the_structural_gate_is_not_vacuous():
     """It must find the one registered collection; a detector that finds
-    nothing would pass every module for the wrong reason."""
-    found = _phrase_collections(ROOT / "app/modules/assist_guide.py")
-    assert any(name == "_CONSUMING_MARKERS" for _, _, name in found), "the detector has gone blind"
+    nothing would pass every module for the wrong reason.
+
+    §17.1178 — this assertion earned its keep. Extracting the pure draft checks
+    into `assist_draft.py` moved `_CONSUMING_MARKERS` out of the file this
+    looked in, and the gate said "the detector has gone blind" on the first run
+    — which is exactly the failure mode a refactor introduces silently. It now
+    searches wherever the registry says the collection lives, so the next move
+    cannot blind it either.
+    """
+    found = []
+    for rel in QUERY_MODULES:
+        path = ROOT / rel
+        found += [(path.name, name) for _, _, name in _phrase_collections(path)]
+    for (fname, name) in EXEMPT_PHRASE_LISTS:
+        assert (fname, name) in found, (
+            f"the detector no longer finds {name} in {fname} — either it has gone "
+            f"blind, or the collection moved and QUERY_MODULES / EXEMPT_PHRASE_LISTS "
+            f"did not follow it")
 
 
 def test_every_exemption_states_a_reason():

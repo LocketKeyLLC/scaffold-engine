@@ -143,7 +143,12 @@ def worked_command_facts(paste: str, *, node_key: str | None = None) -> list[str
         if not m:
             continue
         cmd = m.group(1).strip()
-        if len(cmd) < 6 or cmd.startswith(("echo ", "cat ", "ls", "cd ", "grep ", "history", "clear")):
+        # §17.1174 — "ls" carried no trailing space while every neighbour did, so
+        # `lsblk`, `lspci -nn | grep -i nvidia` and `lsof -i :3001` were all
+        # dropped — exactly the discovery commands §17.1052 added this function
+        # to remember ("a command the operator ran that visibly WORKED is the
+        # most durable fact a paste can carry").
+        if len(cmd) < 6 or cmd.startswith(("echo ", "cat ", "ls ", "cd ", "grep ", "history", "clear")):
             continue
         nxt = ""
         for j in range(i + 1, min(i + 4, len(lines))):

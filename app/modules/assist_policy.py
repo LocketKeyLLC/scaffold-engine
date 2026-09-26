@@ -45,6 +45,15 @@ _SHELL_PROMPT_LINE_RE = re.compile(r"(?m)^\s*[A-Za-z_][\w.-]*@[\w.-]+:[^\n#$]*[#
 _SHELL_ERROR_RE = re.compile(
     r"command not found|no such file or directory|permission denied"
     r"|operation not permitted|traceback \(most recent call last\)"
+    # §17.1174 — these two alternations existed ONLY in the pipeline copy. The
+    # parity test pinned 6 of the 8 shared regexes and this was one of the two
+    # it did not, so the two routing paths disagreed on `error:`/`fatal:`/
+    # `panic:` for as long as both have existed. On THIS side that meant
+    # shell_error=False, which `_override` gate 1 routes to **submit** — a
+    # failed `git push` or a Go panic COMMITTED the step (the §17.748/749
+    # failure the gate exists to prevent).
+    r"|(?:^|\n)\s*(?:error|fatal|panic|e)[:!]"
+    r"|(?:^|\n)\s*error\b"
     r"|cannot (?:open|access|stat|create|remove|find|execute|connect|locate)"
     r"|could not (?:open|find|resolve|connect|create|load)|unable to |failed to "
     r"|\bnot recognized\b|unknown (?:option|command|argument|flag)"
@@ -671,7 +680,13 @@ _WHATS_NEXT_RE = re.compile(
 
 
 def looks_like_whats_next(message: str) -> bool:
-    return bool(_WHATS_NEXT_RE.match(message or ""))
+    # §17.1174 — every sibling gate normalizes first; this one did not, so
+    # `what's next?` matched and `what’s next?` (U+2019 — what a phone
+    # keyboard, macOS and OWUI's own input produce) did NOT. The §17.867
+    # orientation override therefore missed a large share of real messages and
+    # the turn fell through to whatever /decide said — which is the routing
+    # §17.867 exists because it got wrong.
+    return bool(_WHATS_NEXT_RE.match(normalize_punct(message or "")))
 
 
 # ── §17.1053 — "add a step for this" (the §17.736 route) ─────────────────────

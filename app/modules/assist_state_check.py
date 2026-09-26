@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -63,7 +64,7 @@ STATE_CHECK_PHRASE_RE = re.compile(
 _MUTATION_RE = re.compile(
     r"(?<![\w-])(?:rm|rmdir|mv|cp|dd|mkfs\w*|fdisk|parted|truncate|chmod|chown|chattr|ln|tee|touch|mkdir|"
     r"kill|pkill|killall|reboot|shutdown|poweroff|halt|init|useradd|userdel|passwd|"
-    r"apt(?:-get)?|dpkg|yum|dnf|pacman|zypper|snap|pip3?|npm|yarn|cargo|make|"
+    r"apt(?:-get)?(?![\w-])|dpkg(?![\w-])|yum|dnf|pacman|zypper|snap|pip3?|npm|yarn|cargo|make|"
     r"git\s+(?:clone|pull|checkout|reset|push)|sed\s+-i|perl\s+-i|"
     r"systemctl\s+(?:start|stop|restart|reload|enable|disable|mask|unmask|daemon-reload|edit|set-property)|"
     r"service\s+\S+\s+(?:start|stop|restart|reload)|"
@@ -202,6 +203,11 @@ _READ_FORMS: dict = {
     "firewall-cmd": {"flag_prefix": ("--list-", "--get-", "--state", "--query-", "--info-", "--version")},
     "update-alternatives": {"flags": {"--display", "--list", "--query", "--get-selections"}},
     "make": {"flags": {"-n", "--dry-run", "-q", "--question", "-p", "--print-data-base", "--version"}},
+    "nginx": {"flags": {"-t", "-T", "-v", "-V"}, "deny": {"-s", "-g"}},
+    "apache2ctl": {"flags": {"-t", "-S", "-v", "-V", "-M", "configtest"}},
+    "httpd": {"flags": {"-t", "-S", "-v", "-V", "-M"}},
+    "sshd": {"flags": {"-t", "-T"}},
+    "named-checkconf": {"flags": {"-z", "-p"}},
 }
 
 
@@ -224,6 +230,260 @@ def read_form(argv) -> bool:
     return False
 
 
+# §17.1171 — an INTERPRETER is never a read on its own; what it RUNS is the
+# command, and when the gate cannot see that, it refuses. Audit 2026-09-25
+# measured all of these passing BOTH gates: `bash -lc 'rm -rf /'`,
+# `sudo bash -lc 'rm -rf /etc'`, `sh -ec 'shutdown -h now'`,
+# `perl -le 'unlink "/etc/passwd"'`, `bash /tmp/x.sh`, `source /tmp/x.sh`, and
+# a bare `bash` (an interactive shell). The head `bash -lc` matched no mutation
+# verb and `shell_ast._SCRIPT_FLAGS` matched `-c` as an exact token, so the
+# payload was never judged. Same shape as §17.1166 (`sudo`) and §17.1152
+# (`pct exec … -- sh -c`): the wrapper is judged on what it runs.
+#
+# THE SAME TABLE + HELPER live in scripts/local_runner_mcp.py (the runner
+# re-gates on its side); tests/test_local_runner.py pins them byte-equal.
+_SHELL_INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash"})
+# Languages this gate cannot judge. An inline script here is refused outright:
+# "read-only Python" is not a question a shell-command gate can answer, and
+# recursing the payload through the SHELL gate is unsound in both directions
+# (live: `python3 -Ic "import os"` passed because no fragment looked like a
+# shell mutation; `python3 -c "import os;os.system('rm -rf /x')"` was refused
+# only because tree-sitter happened to surface `rm` as a head).
+# NOT awk/sed: both are read-only in the idioms probes actually use
+# (`… | awk 'NR==2{print $1}'` is pinned by an existing parity test) and their
+# write forms (`awk '…system("rm")…'`, `sed -i`) are the denylist's business.
+_OPAQUE_INTERPRETERS = frozenset({
+    "python", "python2", "python3", "pypy", "pypy3", "perl", "ruby", "node",
+    "nodejs", "php", "lua", "tclsh", "Rscript",
+})
+# A `source`d / `.`-ed file is an unseen script, exactly like `bash file.sh`.
+_SOURCE_BUILTINS = frozenset({"source", "."})
+# `-c` in any short-flag bundle: -c, -lc, -ec, -xc, -uc, -Ic …
+_SHELL_SCRIPT_FLAG_RE = re.compile(r"^-[A-Za-z]*c$")
+
+
+def interpreter_script(argv: list) -> str | None:
+    """What an interpreter invocation RUNS, or ``None`` when ``argv`` is not one.
+
+    Returns the INLINE script for a shell interpreter given ``-c`` in any
+    short-flag bundle (``-c``, ``-lc``, ``-ec``, ``-xc``) or ``--command``.
+    Returns ``""`` — meaning REFUSE — for every other interpreter shape: a
+    script file, stdin, ``-s``, ``-m``, a bare interactive shell, a ``source``d
+    file, or any opaque-language interpreter. ``""`` says the gate cannot see
+    what runs, and a command it cannot see is not a read.
+    """
+    head = argv[0].rsplit("/", 1)[-1] if argv else ""
+    if head in _SOURCE_BUILTINS or head in _OPAQUE_INTERPRETERS:
+        return ""
+    if head not in _SHELL_INTERPRETERS:
+        return None
+    args = list(argv[1:])
+    for i, a in enumerate(args):
+        if a == "--":
+            break
+        if a == "--command" or _SHELL_SCRIPT_FLAG_RE.match(a):
+            return " ".join(args[i + 1:i + 2]).strip()
+    return ""
+
+# §17.1173 — the head must be a KNOWN READER. `_MUTATION_RE` is a ~90-verb
+# DENYLIST, and the audit of 2026-09-25 measured what a denylist always
+# measures: everything it does not name. All of these passed BOTH gates —
+#   find -delete / -exec rm, tar -C /, rsync, shred, install, xargs rm,
+#   awk 'BEGIN{system("rm -rf /x")}', systemd-run, nsenter, busybox rm,
+#   lvremove, mount -o remount,rw /, git clean -fdx, psql -c 'DROP TABLE',
+#   chsh, unlink, setfacl, wipefs, blkdiscard, sgdisk, mknod, chroot, …
+# — because none of their verbs was on the list. The denylist stays as the
+# first gate (it is battle-tested and encodes every §-numbered incident); this
+# is the second, and it decides the other way round: a head the engine does
+# not KNOW to be a reader is not a read.
+#
+# The tables were built against the operator's own probe history — 318 real
+# commands replayed out of `assist_turns` — so they cover what the engine
+# actually generates rather than what a list-writer imagines. That replay is
+# also the acceptance test: 318/318 still allowed, 63/63 leak shapes refused.
+#
+# THE SAME TABLES + HELPER live in scripts/local_runner_mcp.py (the runner
+# re-gates on its side); tests/test_local_runner.py pins them byte-equal.
+# §17.1173 — shell KEYWORDS. The helper splits on `;`/`|`, so a loop arrives as
+# the segments `for ip in A B`, `do <cmd>`, `done`. A loop HEADER runs nothing;
+# `do`/`then`/`else` are followed by the real command and must be stripped, not
+# trusted — `do rm -rf /` has to reach the verb.
+_SHELL_HEADERS = frozenset({"for", "while", "until", "case", "select", "if", "elif"})
+_SHELL_PREFIXES = frozenset({"do", "then", "else"})
+_SHELL_CLOSERS = frozenset({"done", "fi", "esac", "}", "{", ";;"})
+
+_READ_ONLY_HEADS = frozenset({
+    # text and files
+    "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "zgrep", "zcat",
+    "cut", "tr", "sort", "uniq", "nl", "od", "xxd", "strings", "rev", "fold",
+    "join", "comm", "diff", "cmp", "column", "md5sum", "sha1sum", "sha256sum",
+    "b2sum", "cksum", "ls", "stat", "file", "readlink", "realpath", "basename",
+    "dirname", "du", "df", "findmnt", "mountpoint", "lsattr", "getfacl",
+    "namei", "tree",
+    # shell meta with no effect
+    "echo", "printf", "true", "false", "test", "[", "[[", ":", "seq", "expr",
+    "date", "sleep", "which", "type", "pwd", "id", "groups", "whoami",
+    "logname", "getent", "locale", "tty", "printenv",
+    # system state
+    "uname", "hostname", "arch", "nproc", "uptime", "free", "vmstat", "iostat",
+    "mpstat", "lscpu", "lsmem", "lsblk", "lsusb", "lspci", "lsmod", "lsof",
+    "dmidecode", "sensors", "smartctl", "nvidia-smi", "dmesg", "last", "w",
+    "who", "ps", "pgrep", "pidof", "top", "htop",
+    # network reads
+    "ss", "netstat", "ping", "ping6", "traceroute", "tracepath", "mtr", "arp",
+    "dig", "nslookup", "host", "whois", "getconf", "ethtool", "iw", "iwconfig",
+    # package and module queries (binaries that cannot install)
+    "dpkg-query", "apt-cache", "rpm", "modinfo", "ldconfig", "ldd",
+    # LVM / storage display
+    "lvs", "vgs", "pvs", "lvdisplay", "vgdisplay", "pvdisplay", "blkid",
+    # nc/ncat SCAN (`nc -z host port`) is a read — the engine's own
+    # assist_guest_reach.probe_commands emits it. Its LISTENER and EXEC forms
+    # are a backdoor, denied below.
+    "nc", "ncat", "netcat",
+    # data shaping
+    "jq", "yq", "base64", "numfmt",
+    # find READS; its write ACTIONS are denied below. Dropping it entirely cost
+    # 8 real probes (`pct exec 101 -- find /var/lib/jellyfin -iname '*.xml'`).
+    "find",
+    # curl: its WRITE shapes (-X/-d/--upload-file, -o to anything but /dev/null)
+    # are refused twice over above — by `_MUTATION_RE` and by the dedicated
+    # curl/wget branch. `wget` is deliberately ABSENT: `_MUTATION_RE` denies it
+    # unconditionally and nothing should quietly re-open it here.
+    "curl",
+})
+
+# Mixed programs: the first NON-FLAG argument must name a read subcommand.
+# `_MUTATION_RE`'s write-subcommand patterns still run first, so these two
+# tables disagree only in the direction they fail — which is the point.
+_READ_SUBCOMMANDS = {
+    "systemctl": {"status", "show", "cat", "is-active", "is-enabled", "is-failed",
+                  "is-system-running", "list-units", "list-unit-files",
+                  "list-timers", "list-sockets", "list-dependencies", "list-jobs",
+                  "get-default", "show-environment"},
+    "journalctl": set(),        # flag-only: no subcommand vocabulary to gate on
+    "firewall-cmd": set(),      # ditto; its write flags are denied above
+    "pct":   {"config", "status", "list", "df", "listsnapshot", "pending",
+              "cpusets", "exec", "enter"},
+    "qm":    {"config", "status", "list", "listsnapshot", "pending", "showcmd",
+              "cloudinit", "agent", "guest", "monitor", "terminal"},
+    "pvesh": {"get", "ls", "usage"},
+    "pvesm": {"status", "list", "path", "scan", "apiinfo"},
+    "pveum": {"user", "group", "role", "acl", "pool", "realm", "token"},
+    "pvecm": {"status", "nodes", "keygen", "apiver"},
+    "pvenode": {"config", "cert", "task"},
+    "pveam": {"available", "list", "update"},
+    "pve-firewall": {"status", "compile", "localnet", "simulate"},
+    "zfs":   {"list", "get", "holds", "version"},
+    "zpool": {"list", "status", "get", "history", "iostat", "version"},
+    "ip":    {"addr", "address", "a", "link", "l", "route", "r", "neigh", "n",
+              "rule", "netns", "maddr", "mroute", "tunnel", "monitor"},
+    "bridge": {"link", "fdb", "vlan", "mdb", "monitor"},
+    "docker": {"ps", "inspect", "logs", "images", "image", "version", "info",
+               "stats", "top", "port", "history", "events", "diff", "context"},
+    "podman": {"ps", "inspect", "logs", "images", "version", "info", "stats", "top"},
+    "virsh": {"list", "dominfo", "domstate", "dumpxml", "domblklist",
+              "domiflist", "nodeinfo", "version", "capabilities", "pool-list",
+              "net-list"},
+    "git":   {"status", "log", "diff", "show", "branch", "remote", "rev-parse",
+              "describe", "ls-files", "ls-remote", "blame", "tag", "cat-file",
+              "config", "shortlog", "reflog"},
+    "tailscale": {"status", "ip", "netcheck", "version", "whois", "ping", "dns",
+                  "licenses"},
+    "caddy": {"version", "validate", "fmt", "environ", "list-modules", "adapt"},
+    "nmcli": {"device", "dev", "connection", "con", "general", "networking",
+              "radio", "monitor"},
+    "wg":    {"show", "showconf"},
+    "ufw":   {"status", "version", "show", "app"},
+    "apt":   {"list", "show", "policy", "search", "depends", "rdepends"},
+    "apt-get": {"check"},
+    "snap":  {"list", "info", "find", "version", "changes", "connections"},
+    "pip":   {"list", "show", "freeze", "check", "debug", "config"},
+    "pip3":  {"list", "show", "freeze", "check", "debug", "config"},
+    "npm":   {"ls", "list", "view", "outdated", "version", "config", "root", "prefix"},
+    "timedatectl": {"status", "show", "list-timezones"},
+    "hostnamectl": {"status", "show"},
+    "loginctl": {"list-sessions", "list-users", "show-session", "show-user",
+                 "session-status"},
+    "resolvectl": {"status", "query", "statistics", "dns", "domain"},
+    "networkctl": {"status", "list", "lldp"},
+    "pm2": {"list", "ls", "status", "show", "describe", "logs", "info", "jlist",
+            "prettylist", "env", "report"},
+}
+
+# A few allowlisted readers carry ONE write flag. The same shape as the
+# _READ_FORMS deny sets, applied from the read side.
+# find's write ACTIONS — the C1 leak (`find /tmp -delete`,
+# `find / -name '*.log' -exec rm -f {} \;`). Prefix-matched: -exec/-execdir/-ok
+# /-okdir/-fprint/-fprintf/-fls all run or write.
+_FIND_WRITE_PREFIXES = ("-delete", "-exec", "-ok", "-fprint", "-fls")
+
+_READ_HEAD_DENY_FLAGS = {
+    "dmesg": {"-C", "--clear", "-c", "--read-clear"},   # clears the kernel ring buffer
+    "ss":    {"-K", "--kill"},                          # kills sockets
+    "nc":    {"-l", "-L", "-k", "-e", "-c", "--exec", "--sh-exec", "--lua-exec"},
+    "ncat":  {"-l", "-L", "-k", "-e", "-c", "--exec", "--sh-exec", "--lua-exec"},
+    "netcat": {"-l", "-L", "-k", "-e", "-c", "--exec", "--sh-exec"},
+    "yq":    {"-i", "--inplace", "--in-place"},         # edits in place
+    "jq":    {"-i", "--in-place"},
+}
+
+# awk reads in every idiom the corpus uses (`… | awk 'NR==2{print $1}'`) and
+# WRITES the moment its program calls out: `awk 'BEGIN{system("rm -rf /x")}'`
+# was a measured leak. Judge the program text, not the head. Same for sed's
+# in-place and `w` forms.
+_AWK_WRITE_RE = re.compile(r"\bsystem\s*\(|\bclose\s*\(|>\s*[\"']|\|\s*[\"']|\bENVIRON\b")
+_SED_WRITE_RE = re.compile(r"--in-place|(?<![\w-])-i(?![\w-])|(?:^|;)\s*w\s|\bw\s+/")
+
+
+def head_reads(argv: list) -> bool:
+    """True when this command's HEAD is a program that can only read.
+
+    The complement of `_READ_FORMS` (which admits read SHAPES of write-headed
+    tools): this admits read HEADS, and refuses everything it does not know.
+    """
+    if not argv:
+        return False
+    name = argv[0].rsplit("/", 1)[-1]
+    if name == "command":
+        return any(a in ("-v", "-V") for a in argv[1:])   # a lookup, not an invocation
+    if name in _SHELL_HEADERS or name in _SHELL_CLOSERS:
+        return True                   # shell syntax, not a command: nothing runs
+    if name in _SHELL_PREFIXES:
+        return head_reads(argv[1:])   # judge the command the keyword introduces
+    if name == "find":
+        return not any(a.startswith(_FIND_WRITE_PREFIXES) for a in argv[1:])
+    if name in ("awk", "gawk", "mawk", "nawk"):
+        return not any(_AWK_WRITE_RE.search(a) for a in argv[1:])
+    if name == "sed":
+        return not any(_SED_WRITE_RE.search(a) for a in argv[1:])
+    if name in _READ_ONLY_HEADS:
+        deny = _READ_HEAD_DENY_FLAGS.get(name)
+        return not (deny and any(a in deny for a in argv[1:]))
+    subs = _READ_SUBCOMMANDS.get(name)
+    if subs is None:
+        return False
+    if not subs:                      # flag-only tool; its writes are denied above
+        return True
+    sub = next((a for a in argv[1:] if not a.startswith("-")), "")
+    return sub in subs
+
+
+def _requote(parts: list) -> str:
+    """§17.1173 — rebuild a command STRING from an already-split argv without
+    losing what the quotes were doing.
+
+    `" ".join(argv)` was the old reconstruction and it re-parses differently:
+    `pct exec 111 -- sh -c 'command -v curl; command -v gpg'` arrives as
+    `[..., 'sh', '-c', 'command -v curl; command -v gpg']`, re-joins to
+    `sh -c command -v curl; command -v gpg`, and re-splits as `sh -c command`
+    + `-v curl` + `command -v gpg` — so the gate judged the bare word
+    `command`. Measured on 318 real probes: 11 were refused for exactly that,
+    and the §17.1173 allowlist turned the rest into hard refusals because the
+    mangling invents heads like `-lc`. shlex.quote puts the quoting back.
+    """
+    return " ".join(shlex.quote(p) for p in parts).strip()
+
+
 _SSH_FLAGS_WITH_ARG = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-W", "-b", "-c", "-e", "-I", "-m", "-O", "-Q", "-S", "-w", "-E", "-B"}
 
 
@@ -243,11 +503,11 @@ def container_exec_remainder(argv: list) -> Optional[str]:
         return None
     rest = list(argv[1 + len(subs):])
     if "--" in rest:
-        return " ".join(rest[rest.index("--") + 1:]).strip() or None
+        return _requote(rest[rest.index("--") + 1:]) or None
     i = 0
     while i < len(rest) and (rest[i].startswith("-") or rest[i].isdigit()):
         i += 2 if rest[i] in ("-n", "--timeout") else 1
-    return " ".join(rest[i:]).strip() or None
+    return _requote(rest[i:]) or None
 
 
 # §17.1166 — privilege/environment WRAPPERS. Live (ADD65, 2026-09-22 23:02):
@@ -282,6 +542,13 @@ def privilege_wrapper_remainder(argv: list) -> Optional[str]:
     head = argv[0].rsplit("/", 1)[-1] if argv else ""
     if head not in _PRIV_WRAPPERS:
         return None
+    # §17.1173 — `command -v X` / `-V X` ASKS whether X exists; it does not run
+    # it. Unwrapping it to X made `command -v gpg` a refusal the moment the
+    # allowlist landed (gpg is not a reader — but nothing ran it). `which` and
+    # `type` are plain readers already; `command` needs the carve-out because it
+    # is also a genuine wrapper (`command rm -rf /` DOES run rm).
+    if head == "command" and any(a in ("-v", "-V") for a in argv[1:]):
+        return None
     flags = _WRAPPER_FLAG_WITH_ARG.get(head, set())
     i = 1
     while i < len(argv):
@@ -298,7 +565,7 @@ def privilege_wrapper_remainder(argv: list) -> Optional[str]:
         break
     if head == "timeout" and i < len(argv):
         i += 1                               # the DURATION, not the command
-    return " ".join(argv[i:]).strip()
+    return _requote(argv[i:])
 
 
 def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
@@ -309,6 +576,9 @@ def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
         i += 2 if argv[i] in _SSH_FLAGS_WITH_ARG else 1
     if i >= len(argv):
         return False, "ssh without a host"
+    # NOT _requote: ssh JOINS its remaining arguments into one command line and
+    # hands that to the remote shell, so a plain join is what actually runs.
+    # (`pct exec` / the wrappers exec an argv instead — those keep _requote.)
     remote = " ".join(argv[i + 1:]).strip()
     if not remote:
         return False, "interactive ssh"
@@ -356,6 +626,11 @@ def read_only_command(cmd: str) -> bool:
             if not read_only_command(inner):
                 return False
             continue
+        script = interpreter_script(argv)   # §17.1171 — an interpreter is judged on what it RUNS
+        if script is not None:
+            if not script or not read_only_command(script):
+                return False
+            continue
         if read_form(argv):        # §17.1150 — `dpkg -l`, `iptables -S`, `pip list`…
             continue
         # argv[0] alone decides for most commands; the joined unquoted head
@@ -363,6 +638,8 @@ def read_only_command(cmd: str) -> bool:
         # for the families whose verb is a subcommand or a flag.
         probe = head if argv[0] in _SUBCOMMAND_HEADS else argv[0]
         if _MUTATION_RE.search(" " + probe + " "):
+            return False
+        if not head_reads(argv):   # §17.1173 — and the head must be a KNOWN reader
             return False
         if argv[0] in ("curl", "wget") and any(a in ("-X", "--request", "-d", "--data", "--data-raw", "--upload-file", "-T", "-o", "-O") for a in argv[1:]):
             # curl/wget that WRITE (a method override, a body, or a download to disk)

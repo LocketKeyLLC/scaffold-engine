@@ -439,13 +439,46 @@ def test_the_synthesis_prompt_ends_with_the_question():
 # ── §17.1032: a URL on the operator's own host is not a product claim ────
 
 def test_owned_hosts_come_from_the_operators_ledger_only():
+    """§17.1175 — the IP is now OWNED too, and that is a change of scope, not a
+    relaxation of §17.1032's rule.
+
+    §17.1032 says "extracts hostnames from the operator's OWN ledger", and the
+    address fell outside that wording rather than being excluded for a reason:
+    `_HOST_RE` requires an alpha TLD, so `192.168.1.20` could never match
+    however many times the operator's own facts named it. On a homelab whose
+    machines ARE addressed by IP, that made every `http://192.168.1.20:8096` in
+    a reply unverified by construction.
+
+    The rule §17.1032 actually defends is untouched and pinned below: a host
+    that appears only in a SOURCE is not owned (the §17.883 invented-download-URL
+    class). `owned_hosts` reads the ledger and nothing else, so widening it to
+    addresses the ledger names cannot reach a source's host.
+    """
     env = {"facts": ["Caddy serves defrusciohomelab.duckdns.org on 192.168.1.20"],
            "substitutions": {"PVE": "pve.home.arpa", "N": "5"}, "profile": "root@pve"}
     notes = [{"text": "the router admin page is at router.local"}]
     hosts = ev.owned_hosts(env, notes)
     assert {"defrusciohomelab.duckdns.org", "pve.home.arpa", "router.local"} <= hosts
-    assert "192.168.1.20" not in hosts
+    assert "192.168.1.20" in hosts          # §17.1175 — the operator's own machine
+    assert "5" not in hosts                 # a substitution VALUE is not an address
     assert ev.owned_hosts({}, None) == set()
+
+
+def test_a_documentation_address_is_never_owned():
+    """RFC 5737 / wildcard addresses are examples by definition — the same
+    reason `_EXAMPLE_IP_RE` excludes them when extracting specifics. An example
+    must not credit a URL."""
+    for ip in ("192.0.2.5", "198.51.100.7", "203.0.113.9", "0.0.0.0"):
+        assert ip not in ev.owned_hosts({"facts": [f"the doc example is {ip}"]}), ip
+
+
+def test_a_host_named_only_by_a_source_is_still_not_owned():
+    """The rule §17.1032 exists for, unchanged: `owned_hosts` reads the
+    operator's ledger, never the retrieved corpus, so a source citing
+    github.com cannot make an invented GitHub URL credited."""
+    assert ev.owned_hosts({"facts": ["nothing here"]}) == set()
+    src_only = ev.owned_hosts({}, [{"text": ""}])
+    assert src_only == set()
 
 
 def test_a_url_on_an_owned_host_is_credited_but_a_public_one_is_not():

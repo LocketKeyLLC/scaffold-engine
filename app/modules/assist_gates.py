@@ -63,6 +63,19 @@ GATES: tuple[Gate, ...] = (
          "commands are copy-pasteable and of the right shape"),
     Gate("ingress_target", "answer", "assist_inventory", "topology=", (GUIDE, FIX, RESEARCH, STREAM), "§17.1083b",
          "a port forward / reservation targets the map's entry point, never a management port"),
+    # §17.1175 — three checks inside verify_answer that ran OUTSIDE the runner,
+    # so a crash in them escaped into the operator's turn instead of being
+    # counted and shown on /health. They answer different questions from
+    # `unsourced_values`, so they are catalogued separately rather than
+    # inflating its call count.
+    Gate("plan_only_values", "answer", "assist_evidence", "verify_answer", (GUIDE, FIX, RESEARCH, STREAM, EXECUTOR), "§17.1034",
+         "a value the plan states but nothing the operator confirmed is named, not silently trusted"),
+    Gate("interface_specifics", "answer", "assist_evidence", "verify_answer", (GUIDE, FIX, RESEARCH, STREAM), "§17.1036",
+         "screen labels and menu paths stated with no documentation retrieved are marked as general knowledge"),
+    Gate("source_authority", "answer", "assist_evidence", "verify_answer", (GUIDE, FIX, RESEARCH, STREAM), "§17.1036",
+         "how authoritative the best retrieved source is, so an unsourced interface answer can say so"),
+    Gate("sourced_now", "answer", "assist_evidence", "verify_answer", (GUIDE, FIX, RESEARCH, STREAM, EXECUTOR), "§17.1030",
+         "what THIS turn's sources confirmed, so the next turn need not refetch to credit it"),
     Gate("problem_class_query", "retrieval", "assist_evidence", "class_query", (RESEARCH,), "§17.1086",
          "a second web query with the operator's specifics removed and the vendor kept — the threads by everyone who hit this before"),
     Gate("ingress_prerequisite", "answer", "assist_inventory", "prerequisite_issues", (GUIDE, FIX, RESEARCH, STREAM), "§17.1091",

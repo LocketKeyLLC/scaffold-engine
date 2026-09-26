@@ -526,6 +526,69 @@ async def analyze_note_impact(
     return {"affected": out}
 
 
+# §17.1176 — §17.1056 gave the REOPEN path a pre-image ("a reopen nulls the
+# step's evidence and the node's output with no copy kept, so a wrong reopen
+# could not be undone"). `apply_selective_replan` performs the SAME two
+# destructive writes over the whole downstream subgraph — and under
+# `policy='full'` over every non-done node — and kept nothing. Committed steps
+# are not excluded there, so an operator's submitted evidence was nulled with no
+# way back. One capture, used by both.
+async def capture_preimages(*, db, session_id: str, node_keys: list[str]) -> list[dict]:
+    """The rows a reset is about to destroy, as plain dicts. Fail-soft: a
+    pre-image is insurance, and insurance must never be what breaks the write."""
+    if not node_keys:
+        return []
+    try:
+        rows = (await db.execute(
+            text("""
+                SELECT s.node_key, s.status, s.evidence, s.evidence_kind, s.committed_at,
+                       n.output_text, n.completed_at
+                  FROM assist_steps s
+                  JOIN dag_nodes n ON n.job_id = s.job_id AND n.node_key = s.node_key
+                 WHERE s.session_id = :sid AND s.node_key = ANY(:keys)
+            """),
+            {"sid": session_id, "keys": list(node_keys)},
+        )).mappings().all()
+    except Exception as exc:
+        logger.warning("preimage_capture_failed sid=%s err=%r", session_id, exc)
+        return []
+
+    def _iso(v):
+        return v.isoformat() if hasattr(v, "isoformat") else (v or None)
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return [{
+        "node_key": d.get("node_key"), "step_status": d.get("status"),
+        "evidence": d.get("evidence"), "evidence_kind": d.get("evidence_kind"),
+        "committed_at": _iso(d.get("committed_at")),
+        "output_text": d.get("output_text"), "completed_at": _iso(d.get("completed_at")),
+        "ts": now,
+    } for d in (dict(r) for r in rows)]
+
+
+async def store_preimages(*, db, session_id: str, preimages: list[dict]) -> None:
+    """Keep the newest 30 on the session, newest first. Fail-soft."""
+    if not preimages:
+        return
+    try:
+        await db.execute(
+            text("""
+                UPDATE assist_sessions
+                   SET metadata = COALESCE(metadata, '{}'::jsonb)
+                         || jsonb_build_object('reopen_preimages',
+                              (SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM (
+                                  SELECT e FROM jsonb_array_elements(
+                                      COALESCE(metadata->'reopen_preimages', '[]'::jsonb) || CAST(:pre AS jsonb)) e
+                                  ORDER BY (e->>'ts') DESC LIMIT 30) t)),
+                       updated_at = NOW()
+                 WHERE id = :sid
+            """),
+            {"sid": session_id, "pre": json.dumps(preimages)},
+        )
+    except Exception as exc:
+        logger.warning("preimage_store_failed sid=%s err=%r", session_id, exc)
+
+
 async def apply_note_replan(
     *, db, session_id: str, job_id: str, proposals: list[dict],
 ) -> dict:
@@ -556,6 +619,35 @@ async def apply_note_replan(
     # (done-only), so its now-false result stops being injected as MANDATORY
     # upstream context — the structural fix the §17.746 recap-authority header
     # only mitigated at the prompt level.
+    # §17.1176 — a reopen is TRANSITIVE. Resetting a done node leaves every node
+    # downstream of it `done` on output derived from the result just deleted —
+    # and §17.747's own rationale is the transitive case ("deleting and
+    # recreating a machine destroys everything that was installed or configured
+    # on the OLD machine"). Until now the closure depended entirely on the model
+    # enumerating each affected done node out of a `done_block[:6000]` that is
+    # truncated. `downstream_node_keys` — the BFS that closes it — already lived
+    # two functions away and was never called from here.
+    if reopen_keys:
+        try:
+            _closure = await downstream_node_keys_many(
+                db=db, job_id=job_id, roots=list(reopen_keys))
+            if _closure:
+                # only the DONE ones: a pending downstream node has nothing to undo
+                done_rows = (await db.execute(
+                    text("SELECT node_key FROM dag_nodes WHERE job_id = :jid "
+                         "AND node_key = ANY(:keys) AND status = 'done'"),
+                    {"jid": job_id, "keys": _closure},
+                )).mappings().all()
+                extra = [r["node_key"] for r in done_rows]
+                if extra:
+                    logger.info(
+                        "assist_reopen_transitive session_id=%s roots=%r also_reopening=%r "
+                        "(their result derives from output being deleted)",
+                        session_id, reopen_keys, extra)
+                    reopen_keys = list(reopen_keys) + extra
+        except Exception as exc:   # fail-soft: a closure miss must not block the reopen
+            logger.warning("reopen_closure_failed session_id=%s err=%r", session_id, exc)
+
     preimages: list[dict] = []
     if reopen_keys:
         prior = (await db.execute(
@@ -572,28 +664,7 @@ async def apply_note_replan(
         # check) could not be undone — [[a-ledger-needs-the-pre-image]].
         # Captured here, before the reset, and stored on the session
         # (`metadata.reopen_preimages`, capped) for `restore_reopened_step`.
-        pre_rows = (await db.execute(
-            text("""
-                SELECT s.node_key, s.status, s.evidence, s.evidence_kind, s.committed_at,
-                       n.output_text, n.completed_at
-                  FROM assist_steps s
-                  JOIN dag_nodes n ON n.job_id = s.job_id AND n.node_key = s.node_key
-                 WHERE s.session_id = :sid AND s.node_key = ANY(:keys)
-            """),
-            {"sid": session_id, "keys": reopen_keys},
-        )).mappings().all()
-        def _iso(v):
-            return v.isoformat() if hasattr(v, "isoformat") else (v or None)
-        preimages = []
-        for r in pre_rows:
-            d = dict(r)
-            preimages.append({
-                "node_key": d.get("node_key"), "step_status": d.get("status"),
-                "evidence": d.get("evidence"), "evidence_kind": d.get("evidence_kind"),
-                "committed_at": _iso(d.get("committed_at")),
-                "output_text": d.get("output_text"), "completed_at": _iso(d.get("completed_at")),
-                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            })
+        preimages = await capture_preimages(db=db, session_id=session_id, node_keys=reopen_keys)
         res = (await db.execute(
             text("""
                 UPDATE dag_nodes
@@ -636,22 +707,8 @@ async def apply_note_replan(
                 """),
                 {"sid": session_id, "keys": reopened},
             )
-            if preimages:
-                kept = [pi for pi in preimages if pi["node_key"] in reopened]
-                await db.execute(
-                    text("""
-                        UPDATE assist_sessions
-                           SET metadata = COALESCE(metadata, '{}'::jsonb)
-                                 || jsonb_build_object('reopen_preimages',
-                                      (SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM (
-                                          SELECT e FROM jsonb_array_elements(
-                                              COALESCE(metadata->'reopen_preimages', '[]'::jsonb) || CAST(:pre AS jsonb)) e
-                                          ORDER BY (e->>'ts') DESC LIMIT 30) t)),
-                               updated_at = NOW()
-                         WHERE id = :sid
-                    """),
-                    {"sid": session_id, "pre": json.dumps(kept)},
-                )
+            await store_preimages(db=db, session_id=session_id,
+                                  preimages=[pi for pi in preimages if pi["node_key"] in reopened])
 
     if drop_keys:
         res = (await db.execute(
@@ -788,12 +845,16 @@ async def apply_note_replan(
 # ── Subgraph helpers ───────────────────────────────────────────────────────
 
 
-async def downstream_node_keys(*, db, job_id: str, root_node_key: str) -> list[str]:
-    """BFS the dependents of a node within a job's DAG.
+async def downstream_node_keys_many(*, db, job_id: str, roots: list[str]) -> list[str]:
+    """§17.1176 — BFS the dependents of SEVERAL roots in ONE query.
 
-    Returns node_keys that transitively depend on `root_node_key`,
-    excluding the root itself. Empty list if no dependents.
+    The reopen closure needs the union over every reopened node, and calling
+    the single-root helper per key issued one full-DAG SELECT each. One query,
+    one BFS; `downstream_node_keys` delegates here so there is a single
+    traversal in this module rather than two that can disagree.
     """
+    if not roots:
+        return []
     rows = (await db.execute(
         text("""
             SELECT node_key, depends_on FROM dag_nodes WHERE job_id = :jid
@@ -805,14 +866,23 @@ async def downstream_node_keys(*, db, job_id: str, root_node_key: str) -> list[s
         for dep in (r["depends_on"] or []):
             succ.setdefault(dep, []).append(r["node_key"])
     seen: set[str] = set()
-    queue = list(succ.get(root_node_key, []))
+    queue = [nk for root in roots for nk in succ.get(root, [])]
     while queue:
         nk = queue.pop(0)
         if nk in seen:
             continue
         seen.add(nk)
         queue.extend(succ.get(nk, []))
-    return sorted(seen)
+    return sorted(seen - set(roots))
+
+
+async def downstream_node_keys(*, db, job_id: str, root_node_key: str) -> list[str]:
+    """BFS the dependents of a node within a job's DAG.
+
+    Returns node_keys that transitively depend on `root_node_key`,
+    excluding the root itself. Empty list if no dependents.
+    """
+    return await downstream_node_keys_many(db=db, job_id=job_id, roots=[root_node_key])
 
 
 async def all_pending_node_keys(
@@ -901,6 +971,13 @@ async def apply_selective_replan(
         model_overrides=model_overrides,
     )
 
+    # §17.1176 — capture BEFORE the reset. This path nulls `evidence`,
+    # `evidence_kind`, `submitted_at`, `committed_at` and `output_text` across
+    # the whole affected subgraph WITHOUT excluding `committed` steps, so it
+    # destroys operator-submitted evidence — the exact loss §17.1056 closed for
+    # the reopen path and left open here. [[feedback_ledger_needs_the_pre_image]]
+    _pre = await capture_preimages(db=db, session_id=session_id, node_keys=affected)
+
     # Reset only nodes that are NOT already terminal-by-skip.
     await db.execute(
         text("""
@@ -940,13 +1017,15 @@ async def apply_selective_replan(
         """),
         {"sid": session_id, "keys": affected},
     )
+    await store_preimages(db=db, session_id=session_id, preimages=_pre)
     await db.commit()
     logger.info(
-        "assist_replan scope=%s session_id=%s root=%s affected=%d severity=%s",
-        scope, session_id, root_node_key, len(affected), divergence.get("severity"),
+        "assist_replan scope=%s session_id=%s root=%s affected=%d severity=%s preimages=%d",
+        scope, session_id, root_node_key, len(affected), divergence.get("severity"), len(_pre),
     )
     return {
         "affected_nodes": affected,
+        "preimages": _pre,
         "scope": scope,
         "severity": divergence.get("severity"),
         "reason": divergence.get("reason"),

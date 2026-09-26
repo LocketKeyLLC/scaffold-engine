@@ -198,11 +198,17 @@ def _lines_about(text: str, block: Optional[str]) -> list[str]:
     for ws in per_line:
         for w in ws:
             freq[w] = freq.get(w, 0) + 1
+    # §17.1174 — `<` made this return NOTHING for a block of exactly two lines:
+    # half == 1.0, a word in one line has freq == 1, and 1 < 1.0 is False. So
+    # the §17.1022/1086 "aim the search at the step's open item" behaviour was
+    # silently off for every step whose recap had two OPEN bullets — the
+    # commonest count after one. The `len(lines) == 1` escape hatch below is
+    # the same boundary, patched at the wrong end.
     half = max(1, len(lines) / 2)
     out = []
     for ln, ws in zip(lines, per_line, strict=True):
         shared = qwords & ws
-        if any(freq[w] < half or len(lines) == 1 for w in shared):
+        if any(freq[w] <= half or len(lines) == 1 for w in shared):
             out.append(ln)
     return out
 
@@ -610,7 +616,18 @@ _URL_RE = re.compile(r"https?://[^\s\"'`<>\)\]]+")
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 # Two-or-more dots (1.2.3), or a two-digit minor (22.04) — the shapes a release
 # number takes. A single-dot decimal like 8.2 is too ambiguous to police.
-_VERSION_RE = re.compile(r"\b\d{1,4}(?:\.\d{1,4}){2,}\b|\b\d{1,2}\.\d{2}\b")
+# §17.1175 — the two-digit-minor arm also matched MONEY and PERCENTAGES.
+# Measured: "the plan costs $49.99 per month" -> ['49.99'], "95.50 percent" ->
+# ['95.50']. Those became {"kind": "version"} and were reported to the operator
+# as "⚠️ Unverified specifics"; worse, `plan_reconcile.values_in` reuses this
+# extractor, so a failing paste and a fix reply containing different NN.NN
+# numbers yielded a correction that was regex-substituted into EVERY pending
+# step's task text. This module is deliberately domain-general ("a business job
+# names its SaaS in six facts") and pricing is exactly what such a job states.
+# So the two-digit-minor arm now requires that it NOT be money or a percentage.
+_VERSION_RE = re.compile(
+    r"\b\d{1,4}(?:\.\d{1,4}){2,}\b"
+    r"|(?<![$£€%\d.])\b\d{1,2}\.\d{2}\b(?!\s*(?:%|percent|per\s+cent|/|per\b))")
 # `port 8096` or `host:8096`. Ports below 1024 are protocol constants that any
 # answer may state; registered/ephemeral ports are instance-specific.
 _PORT_RE = re.compile(r"(?i)\bport\s*(\d{4,5})\b|(?<=[A-Za-z0-9\]}]):(\d{4,5})\b")
@@ -708,6 +725,12 @@ def _in_word(v: str, hay: str) -> bool:
 
 
 _HOST_RE = re.compile(r"\b(?=[a-z0-9-]{1,63}\.)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,24}\b")
+# §17.1175 — an IPv4 the operator's OWN ledger names. Documentation and
+# wildcard addresses are excluded for the same reason `_EXAMPLE_IP_RE` excludes
+# them: they are examples, and an example cannot make a URL credited.
+_LEDGER_IPV4_RE = re.compile(
+    r"(?<![\w.])(?!192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|0\.0\.0\.0\b)"
+    r"(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 
 
 def _url_host(url: str) -> str:
@@ -759,7 +782,15 @@ def owned_hosts(environment: Optional[dict], operator_notes: Optional[list] = No
     # §17.1037 — the brief is the operator's own statement of the project.
     parts.append(str(env.get("_brief_text") or ""))
     text = "\n".join(parts).lower()
-    return {h for h in _HOST_RE.findall(text) if not re.fullmatch(r"[\d.]+", h)}
+    owned = {h for h in _HOST_RE.findall(text) if not re.fullmatch(r"[\d.]+", h)}
+    # §17.1175 — and the IP-ADDRESSED machines. `_HOST_RE` requires an alpha
+    # TLD, so `192.168.1.20` could never be owned however many times the
+    # operator's own ledger named it — and on a homelab whose machines ARE
+    # addressed by IP, every `http://192.168.1.20:8096` in a reply was
+    # "unverified" by construction. An address the operator's own facts, pins,
+    # notes or profile state is theirs, exactly like a hostname.
+    owned |= set(_LEDGER_IPV4_RE.findall(text))
+    return owned
 
 
 def _credited(item: dict, hay: str, owned: Optional[set] = None) -> bool:
@@ -1198,11 +1229,19 @@ async def verify_answer(
             c_shape = run_gate("command_shape", command_shape_issues, candidate, default=[])
             c_ingress = run_gate("ingress_target", ingress_issues, candidate, topology, focus=focus, default=[])
             c_prereq = run_gate("ingress_prerequisite", prerequisite_issues, candidate, prerequisite_env, focus=focus, default=[])
+            # §17.1175 — clauses 2-5 fire when the candidate cleared a STRUCTURAL
+            # failure (prereq / ingress / off-question / command-shape) and none
+            # of them looked at `c_uns`, so a draft with 0 unsupported values
+            # could be replaced by one with 5 fabricated IPs and
+            # report["regenerated"] would read True. The docstring already said
+            # the candidate wins only when it is "clean, or strictly better
+            # (fewer unsupported values)"; `no_new_values` is that sentence.
+            no_new_values = len(c_uns) <= len(unsupported)
             better = (not _fails(c_uns, c_cite, c_off, c_shape, c_ingress, c_prereq)) or (
-                not c_prereq and prereq and not c_off and not c_shape and not c_ingress) or (
-                not c_ingress and ingress and not c_off and not c_shape and not c_prereq) or (
-                not c_off and off and not c_shape and not c_ingress and not c_prereq) or (
-                not c_shape and shape and not c_off and not c_ingress and not c_prereq) or (
+                no_new_values and not c_prereq and prereq and not c_off and not c_shape and not c_ingress) or (
+                no_new_values and not c_ingress and ingress and not c_off and not c_shape and not c_prereq) or (
+                no_new_values and not c_off and off and not c_shape and not c_ingress and not c_prereq) or (
+                no_new_values and not c_shape and shape and not c_off and not c_ingress and not c_prereq) or (
                 not c_off and not c_shape and not c_ingress and not c_prereq and len(c_uns) < len(unsupported) and not (
                     _citation_weak(c_cite) and not _citation_weak(cite)))
             if better:
@@ -1212,18 +1251,25 @@ async def verify_answer(
     # §17.1034 — the plan-only tier: credited by the corpus (task text, digest,
     # recaps) but by NOTHING the operator has confirmed — not the sources, not
     # their message, not their ledger. Not wrong, so no regeneration; noted.
-    _unconfirmed = unsupported_specifics(answer, confirmed or "", trusted=trusted,
-                                         flagged=flagged, sourced=sourced, owned=owned_hosts)
+    # §17.1175 — through the registry like its six siblings. These four were
+    # bare, so a crash in the plan-only tier, the interface check or the
+    # sourced-now scan propagated into the operator's turn instead of being
+    # logged as assist_gate_crashed, counted, and shown on /health — which is
+    # the entire point of [[feedback_failsafes_are_a_registry]].
+    _unconfirmed = run_gate("plan_only_values", unsupported_specifics, answer, confirmed or "",
+                            trusted=trusted, flagged=flagged, sourced=sourced,
+                            owned=owned_hosts, default=[])
     _uns_vals = {u["value"].lower() for u in unsupported}
     plan_only = [u for u in _unconfirmed if u["value"].lower() not in _uns_vals]
     # §17.1036 — interface specifics with no documentation behind them.
+    _authority = run_gate("source_authority", max_source_authority, sources, default=0.0)
     unsourced_iface = bool(
         need is not None and need.kind == "question"
-        and interface_specifics_present(answer)
-        and max_source_authority(sources) < _DOC_AUTHORITY)
+        and run_gate("interface_specifics", interface_specifics_present, answer, default=False)
+        and _authority < _DOC_AUTHORITY)
     if unsourced_iface:
         logger.info("assist_answer_unsourced_interface node_key=%s label=%s max_authority=%.2f",
-                    node_key, label, max_source_authority(sources))
+                    node_key, label, _authority)
     if _fails(unsupported, cite, off, shape, ingress, prereq) or plan_only or unsourced_iface:
         footer = grounding_footer(
             unsupported, cite, off_question=_q if off else None, shape=shape,
@@ -1231,7 +1277,10 @@ async def verify_answer(
         report["footer"] = footer
         if annotate:
             answer = answer.rstrip() + footer
-        report["annotated"] = bool(_fails(unsupported, cite, off, shape, ingress, prereq))
+        # §17.1175 — `annotated` means the TEXT was annotated. On the executor
+        # path (annotate=False, §17.1039) it used to read True while the footer
+        # was returned in report["footer"] and the text left alone.
+        report["annotated"] = bool(annotate and _fails(unsupported, cite, off, shape, ingress, prereq))
     report["ingress"] = ingress
     report["prerequisite"] = prereq
     report["unsourced_interface"] = unsourced_iface
@@ -1243,7 +1292,7 @@ async def verify_answer(
     # §17.1030 — what THIS turn's sources confirmed, for the session ledger.
     # Computed on the final text, excluding anything still flagged.
     _still = {u["value"].lower() for u in unsupported}
-    report["sourced_now"] = [it for it in sourced_now(answer, sources)
+    report["sourced_now"] = [it for it in run_gate("sourced_now", sourced_now, answer, sources, default=[])
                              if it["value"].lower() not in _still]
     logger.info(
         "assist_answer_grounding node_key=%s label=%s kind=%s unsupported=%d "

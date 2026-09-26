@@ -56,8 +56,18 @@ class McpServerSpec:
             raise ValueError(
                 f"mcp server {self.name!r}: unknown transport {self.transport!r}"
             )
-        if self.transport == "stdio" and not self.command:
-            raise ValueError(f"mcp server {self.name!r}: stdio requires 'command'")
+        if self.transport == "stdio":
+            if not self.command:
+                raise ValueError(f"mcp server {self.name!r}: stdio requires 'command'")
+            # §17.1172 — a stdio row is a command the orchestrator execs in its
+            # OWN container. Refuse it unless the operator opted in, whatever
+            # the caller's role.
+            if not settings.mcp_allow_stdio:
+                raise ValueError(
+                    f"mcp server {self.name!r}: stdio transport is disabled "
+                    "(it runs a command inside the orchestrator container). "
+                    "Set MCP_ALLOW_STDIO=true to enable it."
+                )
         if self.transport == "streamable_http" and not self.endpoint:
             raise ValueError(
                 f"mcp server {self.name!r}: streamable_http requires 'endpoint'"
@@ -78,6 +88,53 @@ class McpServerSpec:
             "description": self.description,
             "source": self.source,
         }
+
+
+# §17.1177 — header values are CREDENTIALS. `mcp_servers.headers` was written
+# as plain jsonb, so the runner's `X-Runner-Token` — the only thing standing
+# between the LAN and command execution on the operator's Proxmox host — sat in
+# the clear in Postgres, in every `pg_dump` and in every backup tarball. The
+# §17.900 provider keys are Fernet-encrypted and this was not.
+#
+# No schema migration: the ciphertext carries a marker prefix, so a row written
+# before this reads back unchanged and is encrypted on its next upsert. A value
+# that cannot be decrypted (rotated `SCAFFOLD_SECRET_KEY`) returns as-is rather
+# than as None — a header the engine cannot read is better surfaced as a 401
+# from the target than as a silently header-less request.
+_ENC_PREFIX = "enc:v1:"
+
+
+def _encrypt_headers(headers: dict | None) -> dict | None:
+    if not headers:
+        return headers
+    from app.utils.secrets import encrypt
+    out = {}
+    for k, v in headers.items():
+        sv = str(v)
+        if sv.startswith(_ENC_PREFIX):
+            out[k] = sv
+            continue
+        try:
+            out[k] = _ENC_PREFIX + encrypt(sv)
+        except Exception as exc:      # no derivation secret — do not silently downgrade
+            logger.error("mcp header encryption failed for %r: %s (storing plaintext)", k, exc)
+            out[k] = sv
+    return out
+
+
+def _decrypt_headers(headers: dict | None) -> dict | None:
+    if not headers:
+        return headers
+    from app.utils.secrets import decrypt
+    out = {}
+    for k, v in headers.items():
+        sv = str(v)
+        if not sv.startswith(_ENC_PREFIX):
+            out[k] = sv                        # written before §17.1177
+            continue
+        plain = decrypt(sv[len(_ENC_PREFIX):])
+        out[k] = plain if plain is not None else sv
+    return out
 
 
 def _coerce_json(value: Any, default: Any) -> Any:
@@ -152,7 +209,7 @@ async def _db_servers(db: AsyncSession) -> dict[str, McpServerSpec]:
             command=r["command"],
             args=list(_coerce_json(r["args"], []) or []),
             env=_coerce_json(r["env"], None),
-            headers=_coerce_json(r["headers"], None),
+            headers=_decrypt_headers(_coerce_json(r["headers"], None)),
             enabled=bool(r["enabled"]),
             description=r["description"],
             source="db",
@@ -211,7 +268,8 @@ async def upsert_server(db: AsyncSession, spec: McpServerSpec) -> McpServerSpec:
             "command": spec.command,
             "args": json.dumps(list(spec.args or [])),
             "env": json.dumps(spec.env) if spec.env is not None else None,
-            "headers": json.dumps(spec.headers) if spec.headers is not None else None,
+            "headers": (json.dumps(_encrypt_headers(spec.headers))
+                        if spec.headers is not None else None),
             "enabled": spec.enabled,
             "description": spec.description,
         },

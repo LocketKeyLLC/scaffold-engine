@@ -18,7 +18,13 @@ import re
 from dataclasses import dataclass, field
 
 _INTERPRETERS = {"sh", "bash", "zsh", "dash", "ksh", "python", "python3", "python2", "perl", "ruby", "node"}
-_SCRIPT_FLAGS = {"-c", "-e"}
+# §17.1171 — a script flag may ride in a SHORT-FLAG BUNDLE. `_SCRIPT_FLAGS` was
+# an exact-token set, so `bash -lc '…'`, `sh -ec '…'`, `bash -xc '…'` and
+# `perl -le '…'` never reached the recursion below: the payload stayed a quoted
+# argument, `heads` read `['bash -lc']`, and `read_only_command` saw no mutation
+# verb. Measured on the live gate before the fix — `bash -lc 'rm -rf /'` was
+# ALLOWED while the control `bash -c 'rm -rf /'` was refused.
+_SCRIPT_FLAG_RE = re.compile(r"^-[A-Za-z]*[ce]$|^--(?:command|eval)$")
 _QUOTE_RE = re.compile(r"""^(['"])(.*)\1$""", re.S)
 
 
@@ -87,9 +93,9 @@ def analyze(cmd: str, *, _depth: int = 0) -> ShellFacts:
             if argv:
                 facts.commands.append(argv)
                 facts.heads.append(" ".join(head) if head else argv[0])
-                if argv[0] in _INTERPRETERS:
+                if argv[0].rsplit("/", 1)[-1] in _INTERPRETERS:
                     for i, a in enumerate(argv[1:], 1):
-                        if a in _SCRIPT_FLAGS and i + 1 < len(argv):
+                        if _SCRIPT_FLAG_RE.match(a) and i + 1 < len(argv):
                             facts.nested_scripts.append(argv[i + 1])
         elif t == "redirected_statement":
             for ch in node.children:

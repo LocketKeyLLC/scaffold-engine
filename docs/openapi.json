@@ -12967,6 +12967,35 @@
         ]
       }
     },
+    "/setup/runner": {
+      "get": {
+        "description": "§17.1176 — is a local runner wired to the operator's machine?\n\nThe audit of 2026-09-25 found the console asserting, in three places, that\n\"the engine never touches your machine — it has no terminal access, by\ndesign\", while an enabled `pve-runner` row and `mcp_tool_enabled` meant\n`assist_turn._auto_lookup` ran model-authored commands on their Proxmox\nhost automatically, twice per turn, without confirmation. No surface said\nso and none offered a way to stop it.\n\nCheap and read-only: the registry row and the settings flags, no outbound\nconnection (that is `POST /setup/runner/probe`'s job, which costs seconds).",
+        "operationId": "runner_status_setup_runner_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Runner Status Setup Runner Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Runner Status",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
     "/skip": {
       "post": {
         "description": "Step 15: Skip a specific DAG node.",

@@ -78,7 +78,12 @@ export function renderPlan(container, jobId) {
     "div",
     { class: "card card-pad plan-guidance" },
     el("p", {
-      text: "Research is done and this plan was drawn from your brief plus what it found. Nothing has run yet — every node is a proposed step, executed in dependency order only when you start it: ✦ Assist mode walks YOU through each step; ▶ Auto mode has the engine work them itself (it produces runbooks and files — it never touches your machines). Switch modes in the sidebar.",
+      // §17.1176 — "it never touches your machines" was stated flatly here too.
+      // Auto mode genuinely produces runbooks and files rather than executing
+      // them (shell_tool_enabled is off), but the engine as a whole has one
+      // exception — the optional local runner — and three surfaces asserting
+      // the absolute made it the thing an operator would believe.
+      text: "Research is done and this plan was drawn from your brief plus what it found. Nothing has run yet — every node is a proposed step, executed in dependency order only when you start it: ✦ Assist mode walks YOU through each step; ▶ Auto mode has the engine work them itself, producing runbooks and files rather than running them on your machines. Switch modes in the sidebar.",
     }),
     el("p", {
       class: "dim",

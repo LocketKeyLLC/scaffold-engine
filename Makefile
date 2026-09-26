@@ -18,7 +18,7 @@ API_URL   ?= http://localhost:8000
 # §17.854 (audit H7) — completed the phony list: coverage/backup/restore/rebaseline/ci-smoke/
 # test-ui/lint-migrations/check-env-example/check-version/clean-pyc/bench-check-rag-* were real
 # targets missing here, so a same-named file at repo root would make them silently no-op.
-.PHONY: audit-gate _ensure_dev _ensure_dev_image test-db test-db-reset test-integration test-runner-loop test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain apply-preset model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
+.PHONY: audit-gate _ensure_dev _ensure_dev_image test-db test-db-reset test-integration test-runner-loop test test-pipelines test-all test-cli test-sdk agent eval bench bench-rag bench-embed bench-check bench-check-rag bench-check-rag-embed bench-check-rag-search bench-check-rag-rerank bench-check-embed bench-check-pipeline coverage backup restore rebaseline ci-smoke test-ui lint-migrations check-env-example check-version build build-dev logs logs-follow logs-errors logs-jobs logs-research logs-since restart dev-up migrate clean clean-pyc status status-raw health ci help bootstrap bootstrap-host bootstrap-host-check doctor doctor-explain apply-preset model-portability init sync-valves sync-api-key signin-link costs reindex openapi-snapshot openapi-check sync-schemas check-schemas sync-sse-events check-sse-events sync-next-actions check-next-actions check-rerank-drift check-tuned-picks ci-tier-0 ci-tier-2 hooks-install idea resume explain whatnow confirm retry skip node-logs config audit key-add key-list key-revoke
 
 ## ──────────────────────────────────────────────
 ## Testing
@@ -247,7 +247,7 @@ test-ui: ## §17.814 — SPA JS unit tests (node --test; dev-only, zero runtime 
 check-env-example: ## §17.823 (M15) — every compose ${VAR} must be documented in .env.example. Static, no docker. Part of ci-tier-0.
 	@python3 scripts/check_env_example.py
 
-ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift check-version lint-migrations check-env-example check-ast-grep lint-imports check-openapi-breaking ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
+ci-tier-0: check-schemas check-sse-events check-next-actions check-rerank-drift check-tuned-picks check-version lint-migrations check-env-example check-ast-grep lint-imports check-openapi-breaking ## §17.393 — Fast static-parity gates (NO docker, NO live services, ~2s). Pre-push hook target. The prereqs are byte-equal/grep/lint gates; the recipe adds the host static-scan inventory tests. Bypass a one-off push with `git push --no-verify`.
 	@printf '\033[1m▶ static-scan inventory tests (host pytest, --noconftest)\033[0m\n'
 	@if command -v pytest >/dev/null 2>&1; then \
 		SCAFFOLD_REQUIRE_AST_GREP=1 PYTHONPATH=$(CURDIR):$(CURDIR)/sdk pytest \
@@ -517,6 +517,9 @@ ci-tier-2: ## §17.247 — Integration check: full-stack doctor + drift gate + g
 	printf '\033[1;36m-- step 6/6: local-runner loop end to end (§17.1153) --\033[0m\n'; \
 	$(MAKE) test-runner-loop; \
 	printf '\033[1;32mAll tier 2 checks passed.\033[0m\n'
+
+check-tuned-picks: ## §17.1174 — Verify the tuned cloud picks agree across presets/tuned-cloud.env ↔ the SPA wizard's CLOUD_PICKS ↔ the docker-compose opt-in comment (CI gate; they had drifted on 4 of 9 roles)
+	@python3 scripts/check_tuned_picks.py
 
 check-rerank-drift: ## §17.245 — Verify MODEL_RERANKER default matches across Dockerfile ARG ↔ app/config.py ↔ .env.example (CI gate; mirrors doctor section 12)
 	@DKR=$$(grep -E '^ARG MODEL_RERANKER=' Dockerfile | head -1 | sed 's/^ARG MODEL_RERANKER=//'); \
