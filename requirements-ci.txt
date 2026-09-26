@@ -4,9 +4,9 @@
 # Pinned to match requirements.txt / requirements-dev.txt production versions
 # (#82) so CI never drifts from what the container actually runs.
 fastapi==0.141.1
-starlette==1.6.0  # §17.584 — CVE-2026-48710 + PYSEC-2026-248/249 (see requirements.txt)
-uvicorn[standard]==0.52.4
-sqlalchemy[asyncio]==2.0.52
+starlette==1.7.0  # §17.584 — CVE-2026-48710 + PYSEC-2026-248/249 (see requirements.txt)
+uvicorn[standard]==0.53.0
+sqlalchemy[asyncio]==2.0.54
 asyncpg==0.31.0
 pydantic==2.13.5
 pydantic-settings==2.15.0
@@ -17,19 +17,19 @@ httpx==0.28.1
 mcp==2.2.0
 mcp-types==2.2.0
 sse-starlette==3.4.11
-httpx2==2.12.0
-httpcore2==2.12.0
-PyJWT==2.13.0
+httpx2==2.13.1
+httpcore2==2.13.1
+PyJWT==2.15.0
 truststore==0.10.4
-pymilvus==3.0.1
+pymilvus==3.0.2
 setuptools==84.0.0  # §17.585
-json_repair==0.63.4
+json_repair==0.63.5
 requests==2.34.2
 structlog==26.1.0
 prometheus-client==0.26.0
 redis==8.1.0
 trafilatura==2.1.0  # HELD at 2.1.x (mirror requirements.txt) — 2.2.0 heading-loss regression, audit M12
-pypdf==6.18.1  # §17.585, §17.724 GHSA bump
+pypdf==6.19.0  # §17.585, §17.724 GHSA bump
 pdfplumber==0.11.10  # §17.585 — pulls pdfminer.six 20260107 (CVE-2025-64512/70559)
 apscheduler==3.11.3
 tzlocal==5.4.4
@@ -53,7 +53,7 @@ tree-sitter==0.26.0
 tree-sitter-bash==0.25.1
 # §17.1066 — browser-fingerprint retry on 403/429 for research fetches
 curl_cffi==0.16.3
-hypothesis==6.168.0  # §17.1068 — property tests in the smoke lane
+hypothesis==6.168.1  # §17.1068 — property tests in the smoke lane
 # §17.1072 — instructor-backed decide path (trial, default off)
 instructor==1.17.0
 # §17.1074 — the assist step state machine (declaration + oracle)
@@ -62,4 +62,4 @@ transitions==0.9.3
 alembic==1.20.0
 # §17.1076 — procrastinate trial (Postgres task queue; psycopg 3 is its connector)
 procrastinate==3.9.0
-psycopg[binary,pool]==3.3.5
+psycopg[binary,pool]==3.3.6
