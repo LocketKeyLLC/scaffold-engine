@@ -409,23 +409,87 @@ class TestCIWorkflow:
             f"the job name must say when nothing was measured: {name!r}"
         )
 
-    def test_the_self_hosted_tier_stays_pinned_to_main(self):
-        """Widening the push trigger must NOT put the heavy Docker stack on the
-        self-hosted runner for every feature branch. Tier 2 carries its own
-        `if:`; this asserts that guard is what keeps it off."""
+    def test_no_self_hosted_job_is_reachable_from_a_fork_pull_request(self):
+        """§17.1180c — THE security property, asserted structurally.
+
+        This repo is PUBLIC. A self-hosted runner on a public repo means a fork
+        can open a PR whose workflow executes on the runner host — and that host
+        is the engine box: `.env` with the database password and provider keys,
+        the Docker socket, and LAN reach to the Proxmox machine. GitHub's own
+        guidance is not to do this.
+
+        Tier 2 used to be a job inside `ci.yml`, which triggers on
+        `pull_request`, and the ONLY thing keeping a fork's code off the runner
+        was that job's `if:` clause. One expression, in a file that gets edited
+        — twice on 2026-09-26 alone. A workflow with no `pull_request` trigger
+        cannot be started by a fork PR whatever any `if:` says, so the property
+        is now structural. This test is what keeps it that way.
+        """
         import yaml
-        ci = self._wf_path.parent / "ci.yml"
-        if not ci.exists():
-            pytest.skip("ci.yml not available inside container")
-        jobs = (yaml.safe_load(ci.read_text()) or {}).get("jobs", {})
+        wfdir = self._wf_path.parent
+        if not wfdir.exists():
+            pytest.skip("workflows not available inside container")
+        offenders = []
+        for wf in sorted(wfdir.glob("*.yml")):
+            doc = yaml.safe_load(wf.read_text()) or {}
+            trig = doc.get("on") or doc.get(True) or {}
+            names = set(trig) if isinstance(trig, dict) else {trig}
+            if "pull_request" not in names and "pull_request_target" not in names:
+                continue
+            for job, spec in (doc.get("jobs") or {}).items():
+                ro = str(spec.get("runs-on", ""))
+                if "self-hosted" in ro or "scaffold-engine-host" in ro:
+                    offenders.append(f"{wf.name}::{job} (runs-on: {ro})")
+        assert not offenders, (
+            "these jobs can run on the self-hosted runner from a workflow a FORK "
+            "PULL REQUEST can trigger, which is arbitrary code execution on the "
+            f"engine host: {offenders}. Move the job to a workflow with no "
+            "pull_request trigger — an `if:` guard is not sufficient."
+        )
+
+    def test_the_self_hosted_runner_is_targeted_by_an_explicit_label(self):
+        """A bare `runs-on: self-hosted` matches ANY self-hosted runner the org
+        or repo ever registers. Targeting a specific label means a future runner
+        added elsewhere does not silently inherit these jobs."""
+        import yaml
+        wfdir = self._wf_path.parent
+        if not wfdir.exists():
+            pytest.skip("workflows not available inside container")
+        bare = []
+        for wf in sorted(wfdir.glob("*.yml")):
+            for job, spec in ((yaml.safe_load(wf.read_text()) or {}).get("jobs") or {}).items():
+                ro = spec.get("runs-on")
+                flat = ro if isinstance(ro, list) else [ro]
+                if "self-hosted" in [str(x) for x in flat] and "scaffold-engine-host" not in str(ro):
+                    bare.append(f"{wf.name}::{job}")
+        assert not bare, f"these target any self-hosted runner, not ours: {bare}"
+
+    def test_the_self_hosted_tier_only_runs_on_the_trunk(self):
+        """Widening the push trigger must NOT put the heavy Docker stack on the
+        self-hosted runner for every feature branch.
+
+        §17.1180c — Tier 2 moved out of `ci.yml` into its own workflow so a fork
+        PR cannot reach it at all (see the test above). The trunk restriction is
+        now carried by that workflow's TRIGGER (`push: branches: [main]`) rather
+        than by a `github.ref` check inside an `if:`, which is the stronger
+        place for it; the valve `if:` stays, so the job is off until the
+        operator opts in."""
+        import yaml
+        wf = self._wf_path.parent / "integration.yml"
+        if not wf.exists():
+            pytest.skip("integration.yml not available inside container")
+        doc = yaml.safe_load(wf.read_text()) or {}
+        trig = doc.get("on") or doc.get(True) or {}
+        push = (trig.get("push") or {}) if isinstance(trig, dict) else {}
+        assert push.get("branches") == ["main"], (
+            f"Tier 2 must only run on trunk pushes: {push!r}")
+        jobs = doc.get("jobs") or {}
         selfhosted = {k: v for k, v in jobs.items()
                       if "self-hosted" in str(v.get("runs-on", ""))}
-        assert selfhosted, "no self-hosted job found — has Tier 2 moved?"
+        assert selfhosted, "no self-hosted job found — has Tier 2 moved again?"
         for name, job in selfhosted.items():
-            cond = str(job.get("if", ""))
-            assert "refs/heads/main" in cond and "push" in cond, (
-                f"self-hosted job {name!r} is not pinned to main+push: {cond!r}"
-            )
+            assert "RUN_TIER2_INTEGRATION" in str(job.get("if", "")), (
+                f"{name!r} lost its opt-in valve")
 
     def test_has_postgres_service(self, workflow):
         """Some job should declare a postgres:16 service container."""
