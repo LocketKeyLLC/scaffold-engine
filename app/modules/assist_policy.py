@@ -244,12 +244,16 @@ _DECISION_QUESTION_RE = re.compile(
 def wants_a_recommendation(msg: str) -> bool:
     """§17.903 — True when the operator asked something that deserves a LEAN,
     not a menu. "Delete this VM and start over?" is answerable; laying out
-    options without a recommendation is what left them stuck."""
+    options without a recommendation is what left them stuck.
+
+    §17.1180 — a dead guard was removed: `if "?" not in m and not RE.search(m):
+    return False` preceded this return and could never change the result (when
+    the regex matches, the guard falls through to a True; when it does not, both
+    paths are False). It read as a conjunction — "a question mark OR a decision
+    shape" — which is not what it did."""
     if not msg:
         return False
     m = normalize_punct(msg).strip()
-    if "?" not in m and not _DECISION_QUESTION_RE.search(m):
-        return False
     return bool(_DECISION_QUESTION_RE.search(m))
 
 
@@ -308,7 +312,18 @@ _CLAIM_SHELL_PROMPT_RE = re.compile(  # same shape as _assist_handlers'
 _CLAIM_DISQUALIFY_RE = re.compile(
     r"\b(?:not|never|haven'?t|hasn'?t|isn'?t|wasn'?t|aren'?t|didn'?t|don'?t|"
     r"doesn'?t|can'?t|cannot|couldn'?t|won'?t|wouldn'?t|unable|"
-    r"fail(?:ed|s|ing)?|error(?:s|ed)?|broke(?:n)?|stuck|trouble|issue|problem|"
+    r"fail(?:ed|s|ing)?|error(?:s|ed)?|broke(?:n)?|stuck|trouble|"
+    # §17.1180 — `issue` and `problem` were bare alternatives, so the NOUN
+    # disqualified a genuine completion claim: measured on the live gate,
+    # "i've set up the issue tracker" and "i installed the issue templates"
+    # were both rejected. They only mean trouble in the PREDICATE sense —
+    # standing alone, or followed by a preposition/copula ("a problem with
+    # the install", "the issue is the port"). Followed by another word they
+    # are an attributive modifier naming a thing the operator built
+    # ("issue tracker", "problem-reporting page"), which is a claim, not a
+    # complaint.
+    r"(?:issue|problem)s?\b(?=\s*(?:$|[.,;!?)]|\b(?:with|in|on|during|about|"
+    r"when|is|was|were|here|there|remain(?:s|ed)?|persist(?:s|ed)?)\b))|"
     r"no\s+luck|except|but\s+(?:it|the|when|now)|"
     # §17.891b — partial/none wording means the work is NOT complete.
     r"nothing|none|partial(?:ly)?|partly|half(?:way)?|almost|nearly|mostly)\b",

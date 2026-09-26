@@ -16,7 +16,7 @@ from pathlib import Path
 _STATIC = Path(__file__).resolve().parents[1] / "app" / "ui" / "static"
 _CATCH = re.compile(r"\bcatch\s*(\([^)]*\))?\s*\{")
 # 2026-09-19 §17.1117: 25 → 21 (plan ledger, run replay, palette search, compare search fixed).
-CEILING = 21
+CEILING = 20   # §17.1180 — 21 → 20: converting the native dialogs (audit U6) removed a swallowed failure with them.
 
 
 def empty_catches(src: str) -> list[tuple[int, str]]:

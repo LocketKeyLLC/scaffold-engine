@@ -11,6 +11,15 @@ refused this way) and it cannot see structure a shell will act on
 argv (nested scripts and substitutions included), every redirect target, and
 which commands are fed to an interpreter. Callers judge the HEAD of each
 command, not its arguments. A parse error fails closed.
+
+§17.1180 — the paragraph above used to say this serves "the state-check probe
+gate … and the fix-draft scanners". It has exactly ONE importer
+(`assist_state_check`); the fix-draft scanners still run regexes over raw text,
+which is the very thing this module exists to replace. Stated as the intent it
+is, so nobody reads the gap as already closed. Wiring them up is worth doing —
+the AST sees `$(…)`, `bash -lc` and heredocs that a text scan cannot (§17.1171
+was exactly that class) — but it is a behaviour change to the draft scanners,
+not a docstring fix.
 """
 from __future__ import annotations
 

@@ -150,7 +150,13 @@ export function nextActionChips(actions, { jobId, limit = 3, onDone } = {}) {
       class: "btn btn-sm btn-ghost next-action", text: label, title: a.description || "",
       onClick: async (ev) => {
         ev.preventDefault();
-        if (t.confirm && !window.confirm(t.confirm)) return;
+        // §17.1180 (audit U6) — these are the destructive next-actions
+        // ("Delete this job and everything under it?", "Abandon this assist
+        // session?"), so this is the confirmation that most needs to be a real
+        // dialog. `askConfirm` is a hoisted function declaration below.
+        if (t.confirm && !await askConfirm(t.confirm, {
+          title: "Are you sure?", confirmText: label, danger: true,
+        })) return;
         try { await api.req(t.endpoint, { method: t.method }); toast(`${label}: done`, "ok"); onDone?.(); }
         catch (e) { toast(String(e?.message || e), "err"); }
       },
@@ -228,3 +234,77 @@ export function openDialog(node, { label, onClose, trap = true, initialFocus } =
   };
 }
 
+
+
+// §17.1180 (audit U6) — an accessible replacement for native `confirm()` and
+// `prompt()`.
+//
+// Two views reached for the browser's own dialogs while importing this
+// module's `openDialog` a few lines above: `approvals.js::reject()` used
+// `confirm()`, and assist's "↶ Restore a reopened step" used `prompt()` to ask
+// the operator to RECALL AND TYPE a step key the engine already knows. Native
+// dialogs take focus out of the SPA, cannot be styled or themed, are blocked
+// outright in some embedded contexts, and — for the prompt — put the burden of
+// remembering an identifier on the person instead of the machine.
+//
+// `askConfirm` resolves true/false. `askChoice` resolves the chosen value or
+// null. Both are real dialogs: role, focus moved in, Tab trapped, Escape
+// cancels, focus returned to the opener — the §17.1118 contract `openDialog`
+// already implements.
+function _modalShell(title, body, actions, label) {
+  const card = el("div", { class: "modal-card" },
+    el("h3", { class: "modal-title", text: title }),
+    body,
+    el("div", { class: "modal-actions" }, ...actions));
+  const overlay = el("div", { class: "modal-overlay" }, card);
+  document.body.append(overlay);
+  let dialog = null;
+  const close = () => {
+    if (dialog) dialog.close();
+    overlay.remove();
+  };
+  return { overlay, card, close, arm(onCancel) {
+    overlay.addEventListener("click", (ev) => { if (ev.target === overlay) onCancel(); });
+    dialog = openDialog(card, { label: label || title, onClose: onCancel });
+  } };
+}
+
+export function askConfirm(message, { title = "Are you sure?", confirmText = "Confirm",
+                                      cancelText = "Cancel", danger = false } = {}) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; shell.close(); resolve(v); };
+    const ok = el("button", {
+      class: "btn btn-sm " + (danger ? "btn-danger" : "btn-primary"),
+      text: confirmText, onClick: () => finish(true),
+    });
+    const no = el("button", { class: "btn btn-sm btn-ghost", text: cancelText,
+                              onClick: () => finish(false) });
+    const shell = _modalShell(title, el("p", { class: "modal-body", text: message }),
+                              [ok, el("span", { class: "spacer" }), no], title);
+    shell.arm(() => finish(false));
+  });
+}
+
+export function askChoice(message, options, { title = "Choose one", cancelText = "Cancel",
+                                              empty = "Nothing to choose." } = {}) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; shell.close(); resolve(v); };
+    const list = (options || []).map((o) =>
+      el("button", {
+        class: "btn btn-sm btn-ghost modal-choice",
+        text: o.label,
+        title: o.hint || "",
+        onClick: () => finish(o.value),
+      }));
+    const body = el("div", { class: "modal-body" },
+      el("p", { text: message }),
+      list.length ? el("div", { class: "modal-choices" }, ...list)
+                  : el("p", { class: "dim", text: empty }));
+    const no = el("button", { class: "btn btn-sm btn-ghost", text: cancelText,
+                              onClick: () => finish(null) });
+    const shell = _modalShell(title, body, [el("span", { class: "spacer" }), no], title);
+    shell.arm(() => finish(null));
+  });
+}

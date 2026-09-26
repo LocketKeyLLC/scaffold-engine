@@ -3,7 +3,7 @@
 // guard-refused runs 'skipped' instead of blanket success). List / add / delete.
 import * as api from "../api.js";
 import { el, fmtDate, mount, timeAgo } from "../util.js";
-import { emptyState, errorPanel, loading, toast } from "../components.js";
+import { emptyState, errorPanel, loading, toast, askConfirm } from "../components.js";
 
 const DEPTHS = ["shallow", "medium", "deep"];
 
@@ -63,7 +63,8 @@ export default function schedules(container) {
   }
 
   async function remove(id, label) {
-    if (!confirm(`Delete schedule "${label}"?`)) return;
+    if (!await askConfirm("It stops running and is removed from this list.",
+      { title: `Delete schedule "${label}"?`, confirmText: "Delete it", danger: true })) return;
     try {
       await api.del(`/schedule/${id}`);
       toast("Schedule deleted.", "ok");

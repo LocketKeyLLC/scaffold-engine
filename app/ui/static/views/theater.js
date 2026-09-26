@@ -6,7 +6,7 @@
 import * as api from "../api.js";
 import { jobStore } from "../store.js";
 import { el, mount, shortId, mdToHtml, fmtNum, timeAgo } from "../util.js";
-import { statusBadge, loading, errorPanel, makeClickable, nextActionChips } from "../components.js";
+import { statusBadge, loading, errorPanel, makeClickable, nextActionChips, askConfirm } from "../components.js";
 import { flowGuide } from "./flow_guide.js";
 import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
 import { toast } from "../components.js";
@@ -254,10 +254,20 @@ export function renderTheater(container, jobId, ctx = {}) {
       log("queued", `Replaying ${frames.length} event(s) from this run — it is not live.`, "warn");
       for (const frame of frames) {
         const ev = /^event:\s*(\S+)/m.exec(frame);
-        const dm = /^data:\s*(.*)$/m.exec(frame);
         if (!ev) continue;
+        // §17.1180 — `/^data:\s*(.*)$/m` stops at the first newline, and `.`
+        // does not match one. An SSE frame may carry SEVERAL `data:` lines
+        // whose values concatenate (that is how the protocol sends a
+        // multi-line payload), so any JSON long enough to be wrapped was
+        // truncated to its first line, `JSON.parse` threw, the catch kept `{}`
+        // and the replayed line showed only the bare event name — for exactly
+        // the biggest, most informative frames. Join every data line, per spec.
+        const data = frame.split("\n")
+          .filter((ln) => /^data:/.test(ln))
+          .map((ln) => ln.replace(/^data:\s?/, ""))
+          .join("\n");
         let payload = {};
-        try { payload = dm ? JSON.parse(dm[1]) : {}; } catch { /* keep {} */ }
+        try { payload = data ? JSON.parse(data) : {}; } catch { /* keep {} */ }
         const key = payload.node_key ? `${payload.node_key} · ` : "";
         log(ev[1], `${key}${payload.title || payload.message || payload.error || ev[1]}`,
             ev[1].includes("fail") || ev[1] === "error" ? "err" : "");
@@ -338,7 +348,8 @@ export function renderTheater(container, jobId, ctx = {}) {
     if (running) {
       // §17.1007 — stopping used to mean "disconnect and let the server infer
       // it". Now that a disconnect is just a detach, stopping has to say so.
-      if (!confirm("Stop this run? Completed steps are kept; the rest stay pending.")) return;
+      if (!await askConfirm("Completed steps are kept; the rest stay pending.",
+        { title: "Stop this run?", confirmText: "Stop it", danger: true })) return;
       runBtn.disabled = true;
       runBtn.textContent = "Stopping…";
       try {

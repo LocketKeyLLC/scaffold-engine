@@ -1204,10 +1204,20 @@ async def resolve_state_check(*, db, session_id: str, pasted: str, finish: bool 
               "probes_total": total, "partial_pastes": int(pending.get("partial_pastes") or 0),
               "sections_last_paste": sections_present}
     await db.execute(text("""
+        -- §17.1180 (audit M11) — CAPPED at 30, the same bound and the same
+        -- idiom `reopen_preimages` already uses. This array was appended to on
+        -- every resolved state check and never pruned: one of three unbounded
+        -- jsonb arrays, of which exactly one was bounded. Measured on this
+        -- database before the cap: max 11 entries / 1.7 KB, so this is not yet
+        -- harm — but §17.1168 was the same shape arriving as a real problem,
+        -- and the row that grows without limit is the one nobody is watching.
         UPDATE assist_sessions
            SET metadata = (COALESCE(metadata, '{}'::jsonb) - 'pending_state_check')
                           || jsonb_build_object('state_checks',
-                               COALESCE(metadata->'state_checks', '[]'::jsonb) || CAST(:r AS jsonb)),
+                               (SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM (
+                                   SELECT e FROM jsonb_array_elements(
+                                       COALESCE(metadata->'state_checks', '[]'::jsonb) || CAST(:r AS jsonb)) e
+                                   ORDER BY (e->>'ts') DESC NULLS LAST LIMIT 30) t)),
                updated_at = NOW()
          WHERE id = :sid
     """), {"sid": session_id, "r": json.dumps(record)})

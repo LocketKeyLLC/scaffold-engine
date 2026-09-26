@@ -581,7 +581,14 @@ async def derive_turn_memory(
                                          {"sid": session_id})).scalar()
                 _pending = [dict(r) for r in (await db.execute(text("""
                     SELECT node_key, title, prompt_template FROM dag_nodes
-                     WHERE job_id = :jid AND status IN ('pending', 'blocked') ORDER BY execution_order
+                     -- §17.1180 — this read `status IN ('pending','blocked')`.
+                     -- There is no 'blocked' NODE status: the CHECK constraint
+                     -- on dag_nodes.status is
+                     -- ('pending','running','done','failed','skipped'), so the
+                     -- second arm could never match. 'blocked' is a JOB status;
+                     -- the two vocabularies were crossed here (and in
+                     -- `revertable`'s docstring, corrected with it).
+                     WHERE job_id = :jid AND status = 'pending' ORDER BY execution_order NULLS LAST, node_key
                 """), {"jid": _jid})).mappings().all()] if _jid else []
                 _cands = run_gate("fact_plan_trigger", blocking_candidates, new_facts, _pending, default=[])
                 for c in _cands[:2]:
@@ -615,6 +622,14 @@ async def derive_turn_memory(
                 await set_environment(
                     session_id=session_id, system_state=observed, db=db)
                 result["system_state_observed"] = sorted(observed)
+                # §17.1180 — this line was indented into the FILE-WRITES branch
+                # below (`if _known:`), so §17.914's capture logged nothing for
+                # a session that had never recorded a file write, and logged
+                # `resources=[]` for one that had while observing no state. It
+                # belongs to the capture it reports on.
+                logger.info(
+                    "assist_system_state_observed session_id=%s resources=%r",
+                    session_id, sorted(observed))
             # §17.965 — a byte count in their paste is the answer to a question
             # the engine already knows the expected value for. Record it; the
             # comparison happens in code, not in the model's head.
@@ -639,9 +654,6 @@ async def derive_turn_memory(
                     logger.info(
                         "assist_file_content_observed session_id=%s paths=%r",
                         session_id, sorted(bodies))
-                logger.info(
-                    "assist_system_state_observed session_id=%s resources=%r",
-                    session_id, sorted(observed))
         except Exception as e:
             logger.warning("assist_system_state_failed session_id=%s err=%r",
                            session_id, e)
@@ -698,6 +710,8 @@ async def _derive_turn_memory_bg(
 
 
 _RECENT_DERIVES: dict[tuple[str, int], float] = {}
+#: §17.1180 — the bound, named so the prune and the test agree.
+_RECENT_DERIVES_MAX = 256
 
 
 _RECENT_DERIVE_TTL = 300.0  # seconds
@@ -711,9 +725,21 @@ def _derived_recently(session_id: str, message: str) -> bool:
     concurrently and can double-insert before either's notes land."""
     now = time.monotonic()
     key = (session_id, hash((message or "").strip()))
-    if len(_RECENT_DERIVES) > 256:  # bound the map; entries age out lazily
+    # §17.1180 — the prune removed ONLY expired entries and only once the map
+    # was already over 256. Under the load that makes the cap matter — more
+    # than 256 distinct (session, message) keys LIVE inside the 300 s TTL —
+    # nothing is expired, so the sweep freed nothing and the map grew without
+    # bound while running a full scan on every call. Sweeping expired entries
+    # is now unconditional and cheap-gated; if that still leaves the map over
+    # the cap, the oldest entries go, because an over-cap map of live keys is
+    # the case the bound exists for.
+    if len(_RECENT_DERIVES) > _RECENT_DERIVES_MAX:
         for k, ts in list(_RECENT_DERIVES.items()):
             if now - ts > _RECENT_DERIVE_TTL:
+                _RECENT_DERIVES.pop(k, None)
+        if len(_RECENT_DERIVES) > _RECENT_DERIVES_MAX:
+            for k, _ in sorted(_RECENT_DERIVES.items(), key=lambda kv: kv[1])[
+                    :len(_RECENT_DERIVES) - _RECENT_DERIVES_MAX]:
                 _RECENT_DERIVES.pop(k, None)
     seen = _RECENT_DERIVES.get(key)
     _RECENT_DERIVES[key] = now
@@ -1179,18 +1205,42 @@ def schedule_reconcile_on_commit(
 _DOMAIN_RE = None
 
 
+#: §17.1180 (audit M7) — final labels that make a dotted token a FILENAME, not
+#: a host. The domain pattern is `(?:[a-z0-9-]+\.)+[a-z]{2,}`, which matches
+#: `server.js`, `config.yaml` and `App.jsx` as readily as `apt.servarr.com`.
+#: That was documented as harmless ("they simply won't match step prose") and
+#: is not: `_propose_plan_correction` SUBSTRING-matches these tokens against
+#: `dag_nodes.prompt_template`, and a Node or React plan names `server.js` in
+#: step after step. One ruled-out lesson quoting `node server.js` would stage a
+#: replan proposal against every pending step that mentions the file.
+#: Ambiguous entries (`sh`, `go`, `io`, `me`) are deliberately treated as
+#: EXTENSIONS: a missed lesson match costs one un-flagged step, while a false
+#: one puts a wrong proposal in front of the operator on their whole plan.
+_FILE_EXTENSIONS = frozenset({
+    "bak", "cfg", "conf", "config", "crt", "csv", "dist", "env", "example",
+    "gz", "html", "ini", "js", "json", "jsx", "key", "lock", "log", "map",
+    "md", "min", "old", "pem", "php", "pdf", "png", "jpg", "jpeg", "svg",
+    "py", "rb", "rs", "sample", "service", "sh", "so", "socket", "sql",
+    "svc", "tar", "timer", "tmpl", "tmp", "toml", "ts", "tsx", "txt", "xml",
+    "yaml", "yml", "zip", "go", "java", "cpp", "css", "lua", "pl",
+})
+
+
 def _lesson_tokens(entry: str) -> list[str]:
     """§17.882 — matchable tokens from a ruled-out entry: domains/hosts (the
     strongest deterministic signal — 'apt.servarr.com' naming a dead repo) and
-    backtick-quoted literals. Prose words are NOT tokens (too noisy)."""
+    backtick-quoted literals. Prose words are NOT tokens (too noisy).
+
+    §17.1180 — filenames are excluded; see `_FILE_EXTENSIONS`. Backtick
+    literals are NOT filtered: those are quoted by the operator or the engine
+    on purpose, so `` `node server.js` `` stays a token as written."""
     global _DOMAIN_RE
     import re as _re
     if _DOMAIN_RE is None:
         _DOMAIN_RE = _re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", _re.I)
-    toks = set(m.group(0).lower() for m in _DOMAIN_RE.finditer(entry or ""))
+    toks = {m.group(0).lower() for m in _DOMAIN_RE.finditer(entry or "")
+            if m.group(0).rsplit(".", 1)[-1].lower() not in _FILE_EXTENSIONS}
     toks |= {q.strip().lower() for q in _re.findall(r"`([^`]{4,60})`", entry or "")}
-    # File-extension false positives (e.g. 'x.tar.gz' inside a lesson) stay —
-    # they simply won't match step prose; domains are the real hits.
     return [t for t in toks if t]
 
 

@@ -15,7 +15,7 @@
 // switching a role's provider re-scopes its picker without a page reload.
 import * as api from "../api.js";
 import { el, mount } from "../util.js";
-import { errorPanel, loading, toast } from "../components.js";
+import { errorPanel, loading, toast, askConfirm } from "../components.js";
 
 function sourceBadge(source) {
   const cls = { override: "warn", env: "ok", default: "" }[source] || "";
@@ -173,7 +173,8 @@ export default function models(container) {
 
     forgetBtn.addEventListener("click", () =>
       act(forgetBtn, async () => {
-        if (!confirm(`Forget the stored ${c.provider} connection?`)) return;
+        if (!await askConfirm(`The stored credentials for ${c.provider} are removed from this engine.`,
+            { title: `Forget the ${c.provider} connection?`, confirmText: "Forget it", danger: true })) return;
         await api.del(`/models/connections/${c.provider}`);
         toast(`${c.provider} connection removed.`, "ok");
         load();
