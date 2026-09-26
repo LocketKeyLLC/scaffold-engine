@@ -8,11 +8,16 @@ on:
   # runs the PR's checked-out code mounted over it — a fast pull, not a build.
   # Dep-change PRs (requirements*/Dockerfile) fall back to a local build so
   # they never test against stale deps. §17.404 — skip docs-only changes.
+  # §17.1179 — this is the sibling §17.902 did not reach. That entry fixed
+  # ci.yml's `pull_request: branches: [main]` because filtering on the PR's
+  # BASE gives a stacked PR no checks at all (live: #343 sat with "no checks
+  # reported" until it was retargeted) — and left the byte-identical filter
+  # here. So every stacked PR in this repo has had ci.yml's gates and NOT
+  # test.yml's. Both triggers now match ci.yml: PRs regardless of base, and
+  # push on every branch (public repo, cloud runners, free).
   push:
-    branches: [main]
     paths-ignore: ['**.md']
   pull_request:
-    branches: [main]
     paths-ignore: ['**.md']
   workflow_dispatch:
 

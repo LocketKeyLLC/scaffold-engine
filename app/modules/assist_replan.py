@@ -287,6 +287,13 @@ resource the change does not touch (e.g. host-level setup when only a guest VM i
 being rebuilt) stays DONE — do NOT reopen it. When unsure, leave it done."""
 
 
+#: §17.1179 — every action `apply_note_replan` acts on. A SUPERSET of
+#: RECORD_PLAN_IMPACT_TOOL's enum: that tool is only one of three producers
+#: (state-check repairs §17.1050 and reconciliation rewrites §17.1048 arrive
+#: from code, not from the model). Kept beside the tool so the two are read
+#: together and the difference stays deliberate.
+_KNOWN_ACTIONS = frozenset({"revise", "drop", "reopen", "repair", "rewrite"})
+
 RECORD_PLAN_IMPACT_TOOL = Tool(
     name="record_plan_impact",
     description=(
@@ -601,9 +608,39 @@ async def apply_note_replan(
     reset an already-DONE node (its result destroyed by a pivot) back to pending,
     returning its prior output so the caller can preserve it. drop/revise are
     guarded on ``status='pending'`` and reopen on ``status='done'`` so the wrong
-    node is never touched. Single transaction. Returns ``{"revised", "dropped",
-    "reopened", "reopened_prior"}``.
+    node is never touched. Returns ``{"revised", "dropped", "reopened",
+    "reopened_prior"}``.
+
+    §17.1179 (audit M10) — this said "Single transaction" and was not one: the
+    body commits the plan mutation, then `add_step` commits per repair, then the
+    pointer, then `apply_rewrite_proposals` commits internally — two to four
+    boundaries. Folding them into one means `add_step` and
+    `apply_rewrite_proposals` must stop committing, which is a change to their
+    other callers; until that happens the docstring says what the code does.
+    What IS fixed here is the window that broke the §17.1103 cursor invariant:
+    the reopen pointer-clear now rides the SAME commit as the reopen itself, so
+    a failure between them can no longer leave reopened steps with the session
+    still pointing at the old one. The repair path cannot be folded the same way
+    — `add_step` has to create the node before the pointer can name it — but its
+    partial state is benign (the pointer stays where it was and the repairs are
+    ordinary pending steps).
+
+    ACTIONS accepted here are a superset of `RECORD_PLAN_IMPACT_TOOL`'s enum,
+    because this is the shared sink for proposals from three producers: the
+    note-impact model tool (revise/drop/reopen), the state check (§17.1050
+    `repair`) and plan reconciliation (§17.1048 `rewrite`). Anything else is a
+    producer bug and is refused loudly rather than filtered into silence.
     """
+    unknown = sorted({str(p.get("action")) for p in proposals} - _KNOWN_ACTIONS)
+    if unknown:
+        # §17.1170's class: every branch here is `[p for p in proposals if
+        # p.get("action") == X]`, so a typo'd or new action matched NOTHING and
+        # the call returned an all-empty result that reads exactly like "the
+        # note changed nothing".
+        raise ValueError(
+            f"apply_note_replan: unknown proposal action(s) {unknown}; "
+            f"expected one of {sorted(_KNOWN_ACTIONS)}"
+        )
     revise_keys = [p["node_key"] for p in proposals if p.get("action") == "revise"]
     drop_keys = [p["node_key"] for p in proposals if p.get("action") == "drop"]
     reopen_keys = [p["node_key"] for p in proposals if p.get("action") == "reopen"]
@@ -771,6 +808,17 @@ async def apply_note_replan(
                 {"sid": session_id, "nk": nk},
             )
 
+    # §17.1179 — the reopen pointer-clear belongs to the reopen's OWN
+    # transaction. It used to sit after this commit (and after the repair loop),
+    # so a failure in between left reopened steps with `current_node_key` still
+    # on the old step — the §17.1103 violation this function is otherwise
+    # careful about. The repaired case still runs later: `add_step` has to
+    # create the node before the pointer can name it.
+    if reopened and not any(p.get("action") == "repair" for p in proposals):
+        await db.execute(
+            text("UPDATE assist_sessions SET current_node_key = NULL, updated_at = NOW() WHERE id = :sid"),
+            {"sid": session_id},
+        )
     await db.commit()
     # §17.1048 — confirmed model-proposed REWRITES go through the reconciliation
     # machinery (exact phrase, provenance line, ledger entry, revertable).
@@ -812,7 +860,10 @@ async def apply_note_replan(
             {"sid": session_id, "nk": repaired[0]},
         )
         await db.commit()
-    elif reopened:
+    elif reopened and any(p.get("action") == "repair" for p in proposals):
+        # repairs were proposed but none could be added (add_step failed and was
+        # logged); the reopen still happened, so the pointer still has to clear.
+        # The no-repair case already cleared it inside the reopen's transaction.
         await db.execute(
             text("UPDATE assist_sessions SET current_node_key = NULL, updated_at = NOW() WHERE id = :sid"),
             {"sid": session_id},
@@ -890,16 +941,27 @@ async def all_pending_node_keys(
 ) -> list[str]:
     """§17.424 — every non-terminal node_key for a job (for policy='full').
 
-    "Pending" here means not yet completed: ``status NOT IN ('done','skipped')``.
-    Excludes ``exclude_node_key`` (the just-submitted root, which submit_step
-    already flipped to 'done' — so it's naturally excluded too; the explicit
-    skip is belt-and-suspenders). Empty list when nothing is left to do.
+    "Pending" here means not yet completed AND not in flight:
+    ``status NOT IN ('done','skipped','running')``. Excludes
+    ``exclude_node_key`` (the just-submitted root, which submit_step already
+    flipped to 'done' — so it's naturally excluded too; the explicit skip is
+    belt-and-suspenders). Empty list when nothing is left to do.
+
+    §17.1179 (audit M-family) — ``running`` was in this set. Everything this
+    returns is handed to ``apply_selective_replan`` as ``affected_override``,
+    which UPDATEs ``status='pending', output_text=NULL`` across it — so a node
+    an executor was writing at that moment lost its output and was left
+    claimable by a second executor while the first still held it. That is the
+    identical lost-write §17.854 (audit A6) hardened ``execution_retry``'s root
+    reset against, on the path that was not hardened. In-flight work is not
+    "pending"; the write site re-asserts this too, because a status can change
+    between this SELECT and that UPDATE.
     """
     rows = (await db.execute(
         text("""
             SELECT node_key FROM dag_nodes
              WHERE job_id = :jid
-               AND status NOT IN ('done', 'skipped')
+               AND status NOT IN ('done', 'skipped', 'running')
         """),
         {"jid": job_id},
     )).mappings().all()
@@ -978,8 +1040,14 @@ async def apply_selective_replan(
     # the reopen path and left open here. [[feedback_ledger_needs_the_pre_image]]
     _pre = await capture_preimages(db=db, session_id=session_id, node_keys=affected)
 
-    # Reset only nodes that are NOT already terminal-by-skip.
-    await db.execute(
+    # Reset only nodes that are NOT already terminal-by-skip, and NOT in flight.
+    # §17.1179 — `running` was reset here. `affected` is computed well before
+    # this statement (divergence detection makes LLM calls in between), so a
+    # node can be claimed by an executor in the gap; re-asserting status in the
+    # WHERE is the only thing that makes the write safe, exactly as
+    # execution_retry's root reset does. RETURNING tells us what actually moved
+    # so the caller can report the difference instead of assuming.
+    reset_keys = [r[0] for r in (await db.execute(
         text("""
             UPDATE dag_nodes
                SET status = 'pending',
@@ -988,10 +1056,31 @@ async def apply_selective_replan(
                    updated_at = NOW()
              WHERE job_id = :jid
                AND node_key = ANY(:keys)
-               AND status NOT IN ('skipped', 'pending')
+               AND status NOT IN ('skipped', 'pending', 'running')
+            RETURNING node_key
         """),
         {"jid": job_id, "keys": affected},
-    )
+    )).fetchall()]
+    # What did NOT move, and why. Only the in-flight ones are interesting: a
+    # 'skipped' or already-'pending' node not moving is the statement working
+    # as intended, while a 'running' one means the operator's replan quietly
+    # did less than it said. Reported, never silent.
+    not_reset = sorted(set(affected) - set(reset_keys))
+    skipped_in_flight: list[str] = []
+    if not_reset:
+        skipped_in_flight = sorted(r[0] for r in (await db.execute(
+            text("""
+                SELECT node_key FROM dag_nodes
+                 WHERE job_id = :jid AND node_key = ANY(:keys) AND status = 'running'
+            """),
+            {"jid": job_id, "keys": not_reset},
+        )).fetchall())
+        if skipped_in_flight:
+            logger.warning(
+                "replan_skipped_in_flight session_id=%s job_id=%s nodes=%r — "
+                "these were executing when the replan applied and were left alone",
+                session_id, job_id, skipped_in_flight,
+            )
     await db.execute(
         text("""
             UPDATE assist_steps
@@ -1031,6 +1120,9 @@ async def apply_selective_replan(
         "reason": divergence.get("reason"),
         "regenerated_count": regen_result.get("regenerated", 0),
         "regen_errors": regen_result.get("errors", []),
+        # §17.1179 — empty in the normal case; non-empty means the replan
+        # deliberately left an executing node's work intact.
+        "skipped_in_flight": skipped_in_flight,
     }
 
 

@@ -197,7 +197,16 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
         }
 
     if downstream_to_reset:
-        await db.execute(
+        # §17.1179 (audit M8) — the SAME re-assert the root reset above has
+        # carried since §17.854 (audit A6), which this statement never got.
+        # `downstream_to_reset` is filtered to ('pending','failed') back at
+        # Stage 4, but Stages 4 and 5 are not one statement: a node can be
+        # claimed to 'running' in between (auto-retry racing an operator retry,
+        # or the frontier advancing). Without the predicate this flips a
+        # RUNNING node to pending with output_text=NULL — the first executor
+        # keeps writing while a second claims it. The root was hardened against
+        # exactly this and its downstream sibling was left open.
+        reset = (await db.execute(
             text("""
                 UPDATE dag_nodes
                 SET status   = 'pending',
@@ -206,15 +215,35 @@ async def retry_failed_node(job_id: str, node_key: str, db: AsyncSession) -> dic
                     completed_at = NULL,
                     updated_at   = now()
                 WHERE job_id = :jid AND node_key = ANY(:keys)
+                  AND status IN ('pending', 'failed')
+                RETURNING node_key
             """),
             {"jid": job_id, "keys": downstream_to_reset},
-        )
+        )).fetchall()
+        missed = sorted(set(downstream_to_reset) - {r[0] for r in reset})
+        if missed:
+            logger.warning(
+                "retry_downstream_reset_skipped job_id=%s node_key=%s nodes=%r — "
+                "status changed between the BFS and the reset; left as-is",
+                job_id, node_key, missed,
+            )
 
     await db.execute(
         text("""
             UPDATE jobs
             SET status = 'executing',
                 compiled_output = NULL,
+                -- §17.1179 (audit M9) — clearing the TEXT and keeping every
+                -- other compile artifact left the job advertising a
+                -- `deliverable_kind` and a grounding score for a deliverable
+                -- that no longer exists. `metadata->'grounding'` is not
+                -- cosmetic: observability_rollups AVG/MIN it into the quality
+                -- metrics, so a retried job kept contributing a score for
+                -- output it had just discarded. All four are one fact — "this
+                -- job has a compiled deliverable" — and they retract together.
+                compiled_output_synthesized = FALSE,
+                deliverable_kind = NULL,
+                metadata = (COALESCE(metadata, '{}'::jsonb) - 'grounding' - 'compile_evidence'),
                 updated_at = now()
             WHERE id = :jid AND status IN ('failed', 'blocked')
         """),

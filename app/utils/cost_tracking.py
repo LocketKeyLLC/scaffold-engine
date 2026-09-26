@@ -26,6 +26,7 @@ the migration); production paths run with telemetry on by default.
 from __future__ import annotations
 
 import logging
+import functools
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Iterator, Optional
@@ -70,6 +71,33 @@ def call_kind(kind: str) -> Iterator[None]:
         yield
     finally:
         current_call_kind.reset(token)
+
+
+def tagged_calls(kind: str):
+    """Tag every LLM call made inside an async function with ``kind``.
+
+    §17.1179 (audit M17/M18) — `call_kind` had exactly ONE call site in the
+    codebase (`execution_compile`'s "synthesis"); everything else fell through
+    to `turn_timing.default_call_kind()`, which slugifies the OPERATOR-FACING
+    STATUS LINE. Measured on this database: 34.7 hours of inference across
+    19,171 calls carried `call_kind IS NULL` (every background pass, because
+    they run outside a turn timer), and the 668 calls that were labelled split
+    one call site across 30 buckets — `assist:preparing_the_walkthrough_for_t6`
+    and `…_for_add49` are the same code. So the cost of the six-pass submit
+    fan-out (M17) and the ~15-call state check (M18) could not be attributed at
+    all, and nothing could be bounded that could not first be measured.
+
+    A decorator rather than eight `with` blocks at eight call sites: the tag
+    belongs to the pass, and sibling call sites drift.
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            with call_kind(kind):
+                return await fn(*args, **kwargs)
+        wrapper.__scaffold_call_kind__ = kind
+        return wrapper
+    return decorate
 
 
 async def _lookup_rate(db, provider: str, model: str) -> tuple[float, float]:

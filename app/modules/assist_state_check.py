@@ -46,6 +46,8 @@ from sqlalchemy import text
 from app.config import settings
 from app.providers.base import Tool
 
+from app.utils.cost_tracking import tagged_calls
+
 logger = logging.getLogger("scaffold")
 
 MARKER_RE = re.compile(r"^\s*==\s*([A-Z]:[A-Za-z0-9_.-]+)\s*==\s*$", re.M)
@@ -753,6 +755,7 @@ _PROBE_BATCH = 10
 _MAX_PROBES = 48
 
 
+@tagged_calls("assist.state_check.plan_probes")
 async def plan_probes(claims: list[dict], environment: Optional[dict], *,
                       model_overrides: Optional[dict] = None, on_progress=None) -> tuple[list[dict], list[dict]]:
     """``(probes, refused)`` — probes the read-only gate accepted, and the
@@ -949,6 +952,7 @@ _JUDGE_OPENING = (
 )
 
 
+@tagged_calls("assist.state_check.judge_outputs")
 async def judge_outputs(probes: list[dict], pasted: str, *,
                         model_overrides: Optional[dict] = None) -> list[dict]:
     """Per-claim verdicts. A verdict is kept only for a probed claim whose

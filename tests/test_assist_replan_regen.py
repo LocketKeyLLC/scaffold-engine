@@ -299,7 +299,11 @@ class TestApplySelectiveReplanCallsRegen:
 
         # Mock DB so the UPDATEs in the reset block don't matter.
         db = AsyncMock()
-        db.execute = AsyncMock()
+        # §17.1179 — the dag_nodes reset now consumes its own RETURNING (it
+        # re-asserts status so it cannot clobber a node an executor holds), so
+        # a bare AsyncMock hands `.fetchall()` back a coroutine. Give every
+        # statement an empty result-shaped mock.
+        db.execute = AsyncMock(return_value=_result())
         db.commit = AsyncMock()
 
         with patch.object(assist_replan, "downstream_node_keys", fake_downstream), \
@@ -587,7 +591,8 @@ async def test_replan_reset_clears_cached_guidance():
         return {"regenerated": 2, "errors": []}
 
     db = AsyncMock()
-    db.execute = AsyncMock()
+    # §17.1179 — see above: the reset reads its RETURNING now.
+    db.execute = AsyncMock(return_value=_result())
     db.commit = AsyncMock()
 
     with patch.object(assist_replan, "downstream_node_keys", fake_downstream), \

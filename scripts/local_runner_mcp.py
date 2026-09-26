@@ -62,7 +62,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "9"
+HELPER_VERSION = "10"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -763,6 +763,37 @@ def ensure_user(user: str = RUNNER_USER, *, run=None) -> tuple[bool, str]:
 ENV_FILE = "/etc/scaffold-runner.env"
 
 
+#: §17.1179 — a serve launch with no token binds the app with NO guard at all.
+#: `--install` has always refused without one, but the manual form the recipe's
+#: troubleshooting text shows — `python3 local_runner_mcp.py --host 0.0.0.0
+#: --port 8790` — was unauthenticated command execution on the LAN. Loopback is
+#: the one case where "no token" is defensible (a dev shell on the box itself),
+#: and it still has to be asked for.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", ""})
+
+
+def refuse_unauthenticated(host: str, token: str | None, *, stdio: bool = False,
+                           allow_no_token: bool = False) -> str | None:
+    """Why this launch must not start, or None if it may. Pure: tested directly.
+
+    stdio has no listening socket, so it carries no token requirement. A
+    non-loopback bind ALWAYS needs one — `--allow-no-token` cannot waive it,
+    because that is precisely the configuration the flag would be misused for.
+    """
+    if stdio or token:
+        return None
+    if host not in LOOPBACK_HOSTS:
+        return (f"refusing to serve on {host} with no token. This would be an "
+                f"unauthenticated command endpoint reachable from the network. "
+                f"Pass --token <secret> (the engine generated one for this runner), "
+                f"or set SCAFFOLD_RUNNER_TOKEN in the environment.")
+    if not allow_no_token:
+        return ("refusing to serve without a token. On loopback you may pass "
+                "--allow-no-token to accept that, but nothing else on this machine "
+                "will be authenticated either.")
+    return None
+
+
 def env_file_text(token: str) -> str:
     return f"SCAFFOLD_RUNNER_TOKEN={token}\n"
 
@@ -960,6 +991,8 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--token", default=None, help="shared secret the engine sends as X-Runner-Token")
     ap.add_argument("--stdio", action="store_true", help="speak MCP over stdio instead of HTTP")
+    ap.add_argument("--allow-no-token", action="store_true",
+                    help="§17.1179 — serve WITHOUT authentication; loopback binds only, never a routable address")
     ap.add_argument("--sudo-allow", nargs="*", default=[], metavar="PREFIX",
                     help="command prefixes that may run as `sudo -n` (needs matching NOPASSWD sudoers lines); anything else drops its sudo")
     ap.add_argument("--install", action="store_true",
@@ -977,6 +1010,11 @@ def main() -> int:
         args.token = os.environ.get("SCAFFOLD_RUNNER_TOKEN") or None
     if args.install:
         return install(args)
+    why = refuse_unauthenticated(args.host, args.token, stdio=args.stdio,
+                                 allow_no_token=args.allow_no_token)
+    if why:
+        print(f"FAILED: {why}", file=sys.stderr)
+        return 2
     mcp = build_server(args.token, sudo_allow=args.sudo_allow)
     if args.stdio:
         asyncio.run(mcp.run_stdio_async()); return 0

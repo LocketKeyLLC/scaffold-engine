@@ -46,6 +46,8 @@ from app.modules.prompt_assembly import (
 from app.utils.llm_retry import chat_until_nonempty
 from app.utils.tool_call_args import read_tool_args
 
+from app.utils.cost_tracking import tagged_calls
+
 logger = logging.getLogger("scaffold.assist_guide")
 
 # §17.1178 — the pure draft checks now live in `assist_draft`; re-exported
@@ -483,6 +485,7 @@ _REPORT_SUPERSEDED_TOOL = model_router.Tool(
 )
 
 
+@tagged_calls("assist.memory.classify_superseded_facts")
 async def classify_superseded_facts(
     *, note_text: str, facts: list[str], role: str = "model_general",
 ) -> list[int]:
@@ -1342,6 +1345,7 @@ def _facts_evidence_view(evidence: str) -> str:
     return tail_keep(evidence)
 
 
+@tagged_calls("assist.memory.distill_facts")
 async def distill_facts(
     *, evidence: str, title: str = "", task_prompt: str = "",
     known_facts: list[str] | None = None, role: str = "model_general",
@@ -1949,6 +1953,7 @@ _CONSOLIDATE_SYSTEM = (
 )
 
 
+@tagged_calls("assist.memory.consolidate_facts")
 async def consolidate_facts(
     facts: list[str], *, role: str = "model_general",
 ) -> list[dict]:
@@ -2147,6 +2152,7 @@ _SURFACE_PASS_SUFFIX = (
 )
 
 
+@tagged_calls("assist.memory.distill_turn_memory")
 async def distill_turn_memory(
     *, message: str, known_notes: list[str] | None = None,
     known_facts: list[str] | None = None, role: str = "model_general",
@@ -2271,6 +2277,7 @@ _GROUNDING_SYSTEM = (
 )
 
 
+@tagged_calls("assist.verify.check_grounding")
 async def check_grounding(
     *, evidence: str, environment: dict | None,
     operator_notes: list[dict] | None = None, role: str = "model_general",

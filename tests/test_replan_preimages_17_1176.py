@@ -16,6 +16,7 @@ downstream of it `done` on output derived from the result just deleted, while
 from __future__ import annotations
 
 import inspect
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -79,3 +80,49 @@ class TestAReopenIsTransitivelyClosed:
         src = inspect.getsource(ar.apply_note_replan)
         closure = src[src.index("_closure = await"):src.index("preimages: list[dict]")]
         assert "AND status = 'done'" in closure
+
+
+# ---------------------------------------------------------------------------
+# §17.1179 (audit M10) — apply_note_replan is the shared sink for proposals
+# from three producers, and every branch in it is
+# `[p for p in proposals if p.get("action") == X]`. An action none of those
+# match produced an all-empty result indistinguishable from "the note changed
+# nothing" — §17.1170's silent-branch class, one module over.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["revize", "REOPEN", "delete", "", None])
+async def test_an_unknown_proposal_action_is_refused_not_ignored(action):
+    from app.modules import assist_replan
+    db = AsyncMock()
+    with pytest.raises(ValueError, match="unknown proposal action"):
+        await assist_replan.apply_note_replan(
+            db=db, session_id="sid", job_id="jid",
+            proposals=[{"node_key": "T1", "action": action}],
+        )
+    db.commit.assert_not_awaited(), "a refused call must not have written anything"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["revise", "drop", "reopen", "repair", "rewrite"])
+async def test_every_producers_action_is_accepted(action):
+    """The refusal must not be over-tight: the state check (§17.1050 `repair`)
+    and reconciliation (§17.1048 `rewrite`) are legitimate producers whose
+    actions are NOT in RECORD_PLAN_IMPACT_TOOL's model-facing enum."""
+    from app.modules import assist_replan
+    assert action in assist_replan._KNOWN_ACTIONS
+
+
+def test_the_accepted_set_covers_every_action_the_body_branches_on():
+    """Keeps the declared set honest: if a new `action == "..."` branch is
+    added and the constant is not, this fails rather than the new action being
+    rejected at the door."""
+    import pathlib
+    import re
+    from app.modules import assist_replan
+    src = (pathlib.Path(assist_replan.__file__)).read_text()
+    body = src[src.index("async def apply_note_replan"):]
+    branched = set(re.findall(r'\.get\("action"\)\s*==\s*"([a-z_]+)"', body))
+    assert branched, "found no action branches — has the dispatch shape changed?"
+    missing = sorted(branched - assist_replan._KNOWN_ACTIONS)
+    assert not missing, f"the body acts on {missing} but the guard would refuse them"

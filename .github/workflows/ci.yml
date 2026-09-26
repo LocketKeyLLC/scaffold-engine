@@ -26,11 +26,21 @@ on:
   #     retargeted to main.
   #
   # Now: PRs are gated regardless of base (which is what actually protects
-  # merges, stacked or not), and push covers the trunk after a merge. That is
-  # one run per change — no push/PR double-billing on a metered private repo —
-  # and matches test.yml's trigger shape.
+  # merges, stacked or not), and push covers every branch.
+  #
+  # §17.1179 — `push: branches: [main]` was the other half of §17.902, and its
+  # stated reason was "no push/PR double-billing on a metered private repo".
+  # This repo went PUBLIC at v1.2.0, so GitHub-hosted runner minutes are free
+  # and that reason no longer holds — while the cost it was paying was real:
+  # a pushed branch ran NOTHING until someone opened a PR. Measured on the
+  # §17.1171–1178 arc: six branches were pushed and `gh run list` reported
+  # zero runs for every one of them; only the tip ever got a PR, so five
+  # branches were merged to main having never been built as units.
+  # Tier 2 stays off this: its own `if:` pins it to main + push, so widening
+  # the trigger cannot put the heavy stack on the self-hosted runner.
+  # A branch with an open PR now runs twice; on a public repo that is free,
+  # and the concurrency group below still collapses rapid re-pushes.
   push:
-    branches: [main]
     paths-ignore: ['**.md']
   pull_request:
     paths-ignore: ['**.md']

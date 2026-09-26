@@ -306,14 +306,73 @@ class TestCIWorkflow:
         import yaml
         return yaml.safe_load(self._wf_path.read_text())
 
-    def test_triggers_on_push_to_main(self, workflow):
-        # YAML 'on:' key is parsed by pyyaml as boolean True for bare 'on'.
-        # Handle both stringified and bool key.
-        triggers = workflow.get("on") or workflow.get(True)
-        assert triggers is not None, "workflow has no 'on:' section"
-        push = triggers.get("push", {}) if isinstance(triggers, dict) else {}
-        branches = push.get("branches", []) if isinstance(push, dict) else []
-        assert "main" in branches, f"push.branches doesn't include main: {branches}"
+    @staticmethod
+    def _triggers(wf):
+        # YAML 'on:' is parsed by pyyaml as boolean True for the bare key.
+        t = wf.get("on") or wf.get(True)
+        assert isinstance(t, dict), "workflow has no 'on:' section"
+        return t
+
+    def test_push_is_not_pinned_to_main(self, workflow):
+        """§17.1179 — a pushed branch must run its gates BEFORE a PR exists.
+
+        This asserted `"main" in push.branches`, which is exactly the shape that
+        left six branches of the §17.1171–1178 arc with zero runs each: work sat
+        unverified until someone opened a PR, and five of those six were merged
+        having never been built as units. The billing reason §17.902 gave for the
+        pin ("a metered private repo") stopped being true when this repo went
+        public at v1.2.0. `push:` must therefore carry no `branches` filter.
+        """
+        push = self._triggers(workflow).get("push") or {}
+        assert "branches" not in push, (
+            "push is pinned to specific branches, so a feature-branch push runs "
+            f"nothing until a PR exists: {push.get('branches')}"
+        )
+
+    def test_pull_request_is_not_filtered_by_base(self, workflow):
+        """§17.902 + §17.1179 — `pull_request: branches: [main]` filters on the
+        PR's BASE, so a STACKED PR (opened against another feature branch) gets
+        no checks at all. §17.902 found this, fixed ci.yml, and left the
+        byte-identical filter in test.yml — so every stacked PR in this repo has
+        had one workflow's gates and not the other's."""
+        pr = self._triggers(workflow).get("pull_request") or {}
+        assert "branches" not in pr, (
+            f"pull_request is filtered by base branch: {pr.get('branches')}"
+        )
+
+    def test_both_workflows_declare_the_same_triggers(self):
+        """The two gating workflows must arm on the same events. They drifted
+        once already (§17.902 fixed one copy of two); this is the assertion that
+        makes the next divergence fail instead of going unnoticed for months."""
+        import yaml
+        ci = self._wf_path.parent / "ci.yml"
+        if not ci.exists():
+            pytest.skip("ci.yml not available inside container")
+        mine = self._triggers(yaml.safe_load(self._wf_path.read_text()))
+        theirs = self._triggers(yaml.safe_load(ci.read_text()))
+        for event in ("push", "pull_request"):
+            assert (mine.get(event) or {}) == (theirs.get(event) or {}), (
+                f"test.yml and ci.yml disagree on the '{event}' trigger: "
+                f"{mine.get(event)!r} vs {theirs.get(event)!r}"
+            )
+
+    def test_the_self_hosted_tier_stays_pinned_to_main(self):
+        """Widening the push trigger must NOT put the heavy Docker stack on the
+        self-hosted runner for every feature branch. Tier 2 carries its own
+        `if:`; this asserts that guard is what keeps it off."""
+        import yaml
+        ci = self._wf_path.parent / "ci.yml"
+        if not ci.exists():
+            pytest.skip("ci.yml not available inside container")
+        jobs = (yaml.safe_load(ci.read_text()) or {}).get("jobs", {})
+        selfhosted = {k: v for k, v in jobs.items()
+                      if "self-hosted" in str(v.get("runs-on", ""))}
+        assert selfhosted, "no self-hosted job found — has Tier 2 moved?"
+        for name, job in selfhosted.items():
+            cond = str(job.get("if", ""))
+            assert "refs/heads/main" in cond and "push" in cond, (
+                f"self-hosted job {name!r} is not pinned to main+push: {cond!r}"
+            )
 
     def test_has_postgres_service(self, workflow):
         """Some job should declare a postgres:16 service container."""
