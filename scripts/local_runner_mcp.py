@@ -24,7 +24,10 @@ line starting with ``OK:`` or ``FAILED:``. Re-running it re-installs cleanly
 Every executed command is echoed to this process's log and recorded by the
 engine in the session transcript.
 
-sudo (§17.1078): the runner is unprivileged. A probe that starts with `sudo`
+sudo (§17.1078): the runner is unprivileged — §17.1171 made that true. It runs
+as the system account `scaffold-runner` (override with `--run-as`), which
+`--install` creates; before that the unit carried no `User=` and systemd ran it
+as root, so the note below about dropping sudo was false. A probe that starts with `sudo`
 is rewritten in one of two ways — if its command matches a prefix in
 ``--sudo-allow`` (e.g. ``--sudo-allow "nginx -t" "pct config"``) it runs as
 ``sudo -n …`` (non-interactive: it fails fast instead of waiting for a
@@ -58,7 +61,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "6"
+HELPER_VERSION = "8"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -82,7 +85,6 @@ _SUB_MUT = {
     "git": {"clone", "pull", "checkout", "reset", "push"}, "sed": {"-i"}, "curl": {"-X", "--request", "-d", "--data", "-o", "-O", "-T", "--upload-file"},
     "bash": {"-c"}, "sh": {"-c"}, "zsh": {"-c"}, "python": {"-c"}, "python3": {"-c"}, "perl": {"-e", "-i"},
 }
-_INTERPRETERS = {"sh", "bash", "zsh", "dash", "python", "python3", "perl", "ruby", "node"}
 
 # §17.1150 — READ forms of tools whose HEAD is a mutation verb: `dpkg -l`,
 # `iptables -S`, `pip list`, `crontab -l`… The head table stays conservative
@@ -111,6 +113,11 @@ _READ_FORMS: dict = {
     "firewall-cmd": {"flag_prefix": ("--list-", "--get-", "--state", "--query-", "--info-", "--version")},
     "update-alternatives": {"flags": {"--display", "--list", "--query", "--get-selections"}},
     "make": {"flags": {"-n", "--dry-run", "-q", "--question", "-p", "--print-data-base", "--version"}},
+    "nginx": {"flags": {"-t", "-T", "-v", "-V"}, "deny": {"-s", "-g"}},
+    "apache2ctl": {"flags": {"-t", "-S", "-v", "-V", "-M", "configtest"}},
+    "httpd": {"flags": {"-t", "-S", "-v", "-V", "-M"}},
+    "sshd": {"flags": {"-t", "-T"}},
+    "named-checkconf": {"flags": {"-z", "-p"}},
 }
 
 
@@ -164,6 +171,261 @@ def split_segments(cmd: str) -> list[str]:
     return [o for o in out if o.strip()]
 
 
+# §17.1171 — an INTERPRETER is never a read on its own; what it RUNS is the
+# command, and when the gate cannot see that, it refuses. Audit 2026-09-25
+# measured all of these passing BOTH gates: `bash -lc 'rm -rf /'`,
+# `sudo bash -lc 'rm -rf /etc'`, `sh -ec 'shutdown -h now'`,
+# `perl -le 'unlink "/etc/passwd"'`, `bash /tmp/x.sh`, `source /tmp/x.sh`, and
+# a bare `bash` (an interactive shell). The head `bash -lc` matched no mutation
+# verb and `shell_ast._SCRIPT_FLAGS` matched `-c` as an exact token, so the
+# payload was never judged. Same shape as §17.1166 (`sudo`) and §17.1152
+# (`pct exec … -- sh -c`): the wrapper is judged on what it runs.
+#
+# THE SAME TABLE + HELPER live in scripts/local_runner_mcp.py (the runner
+# re-gates on its side); tests/test_local_runner.py pins them byte-equal.
+_SHELL_INTERPRETERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash"})
+# Languages this gate cannot judge. An inline script here is refused outright:
+# "read-only Python" is not a question a shell-command gate can answer, and
+# recursing the payload through the SHELL gate is unsound in both directions
+# (live: `python3 -Ic "import os"` passed because no fragment looked like a
+# shell mutation; `python3 -c "import os;os.system('rm -rf /x')"` was refused
+# only because tree-sitter happened to surface `rm` as a head).
+# NOT awk/sed: both are read-only in the idioms probes actually use
+# (`… | awk 'NR==2{print $1}'` is pinned by an existing parity test) and their
+# write forms (`awk '…system("rm")…'`, `sed -i`) are the denylist's business.
+_OPAQUE_INTERPRETERS = frozenset({
+    "python", "python2", "python3", "pypy", "pypy3", "perl", "ruby", "node",
+    "nodejs", "php", "lua", "tclsh", "Rscript",
+})
+# A `source`d / `.`-ed file is an unseen script, exactly like `bash file.sh`.
+_SOURCE_BUILTINS = frozenset({"source", "."})
+# `-c` in any short-flag bundle: -c, -lc, -ec, -xc, -uc, -Ic …
+_SHELL_SCRIPT_FLAG_RE = re.compile(r"^-[A-Za-z]*c$")
+
+
+def interpreter_script(argv: list) -> str | None:
+    """What an interpreter invocation RUNS, or ``None`` when ``argv`` is not one.
+
+    Returns the INLINE script for a shell interpreter given ``-c`` in any
+    short-flag bundle (``-c``, ``-lc``, ``-ec``, ``-xc``) or ``--command``.
+    Returns ``""`` — meaning REFUSE — for every other interpreter shape: a
+    script file, stdin, ``-s``, ``-m``, a bare interactive shell, a ``source``d
+    file, or any opaque-language interpreter. ``""`` says the gate cannot see
+    what runs, and a command it cannot see is not a read.
+    """
+    head = argv[0].rsplit("/", 1)[-1] if argv else ""
+    if head in _SOURCE_BUILTINS or head in _OPAQUE_INTERPRETERS:
+        return ""
+    if head not in _SHELL_INTERPRETERS:
+        return None
+    args = list(argv[1:])
+    for i, a in enumerate(args):
+        if a == "--":
+            break
+        if a == "--command" or _SHELL_SCRIPT_FLAG_RE.match(a):
+            return " ".join(args[i + 1:i + 2]).strip()
+    return ""
+
+
+# §17.1173 — the head must be a KNOWN READER. `_MUTATION_RE` is a ~90-verb
+# DENYLIST, and the audit of 2026-09-25 measured what a denylist always
+# measures: everything it does not name. All of these passed BOTH gates —
+#   find -delete / -exec rm, tar -C /, rsync, shred, install, xargs rm,
+#   awk 'BEGIN{system("rm -rf /x")}', systemd-run, nsenter, busybox rm,
+#   lvremove, mount -o remount,rw /, git clean -fdx, psql -c 'DROP TABLE',
+#   chsh, unlink, setfacl, wipefs, blkdiscard, sgdisk, mknod, chroot, …
+# — because none of their verbs was on the list. The denylist stays as the
+# first gate (it is battle-tested and encodes every §-numbered incident); this
+# is the second, and it decides the other way round: a head the engine does
+# not KNOW to be a reader is not a read.
+#
+# The tables were built against the operator's own probe history — 318 real
+# commands replayed out of `assist_turns` — so they cover what the engine
+# actually generates rather than what a list-writer imagines. That replay is
+# also the acceptance test: 318/318 still allowed, 63/63 leak shapes refused.
+#
+# THE SAME TABLES + HELPER live in scripts/local_runner_mcp.py (the runner
+# re-gates on its side); tests/test_local_runner.py pins them byte-equal.
+# §17.1173 — shell KEYWORDS. The helper splits on `;`/`|`, so a loop arrives as
+# the segments `for ip in A B`, `do <cmd>`, `done`. A loop HEADER runs nothing;
+# `do`/`then`/`else` are followed by the real command and must be stripped, not
+# trusted — `do rm -rf /` has to reach the verb.
+_SHELL_HEADERS = frozenset({"for", "while", "until", "case", "select", "if", "elif"})
+_SHELL_PREFIXES = frozenset({"do", "then", "else"})
+_SHELL_CLOSERS = frozenset({"done", "fi", "esac", "}", "{", ";;"})
+
+_READ_ONLY_HEADS = frozenset({
+    # text and files
+    "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "zgrep", "zcat",
+    "cut", "tr", "sort", "uniq", "nl", "od", "xxd", "strings", "rev", "fold",
+    "join", "comm", "diff", "cmp", "column", "md5sum", "sha1sum", "sha256sum",
+    "b2sum", "cksum", "ls", "stat", "file", "readlink", "realpath", "basename",
+    "dirname", "du", "df", "findmnt", "mountpoint", "lsattr", "getfacl",
+    "namei", "tree",
+    # shell meta with no effect
+    "echo", "printf", "true", "false", "test", "[", "[[", ":", "seq", "expr",
+    "date", "sleep", "which", "type", "pwd", "id", "groups", "whoami",
+    "logname", "getent", "locale", "tty", "printenv",
+    # system state
+    "uname", "hostname", "arch", "nproc", "uptime", "free", "vmstat", "iostat",
+    "mpstat", "lscpu", "lsmem", "lsblk", "lsusb", "lspci", "lsmod", "lsof",
+    "dmidecode", "sensors", "smartctl", "nvidia-smi", "dmesg", "last", "w",
+    "who", "ps", "pgrep", "pidof", "top", "htop",
+    # network reads
+    "ss", "netstat", "ping", "ping6", "traceroute", "tracepath", "mtr", "arp",
+    "dig", "nslookup", "host", "whois", "getconf", "ethtool", "iw", "iwconfig",
+    # package and module queries (binaries that cannot install)
+    "dpkg-query", "apt-cache", "rpm", "modinfo", "ldconfig", "ldd",
+    # LVM / storage display
+    "lvs", "vgs", "pvs", "lvdisplay", "vgdisplay", "pvdisplay", "blkid",
+    # nc/ncat SCAN (`nc -z host port`) is a read — the engine's own
+    # assist_guest_reach.probe_commands emits it. Its LISTENER and EXEC forms
+    # are a backdoor, denied below.
+    "nc", "ncat", "netcat",
+    # data shaping
+    "jq", "yq", "base64", "numfmt",
+    # find READS; its write ACTIONS are denied below. Dropping it entirely cost
+    # 8 real probes (`pct exec 101 -- find /var/lib/jellyfin -iname '*.xml'`).
+    "find",
+    # curl: its WRITE shapes (-X/-d/--upload-file, -o to anything but /dev/null)
+    # are refused twice over above — by `_MUTATION_RE` and by the dedicated
+    # curl/wget branch. `wget` is deliberately ABSENT: `_MUTATION_RE` denies it
+    # unconditionally and nothing should quietly re-open it here.
+    "curl",
+})
+
+# Mixed programs: the first NON-FLAG argument must name a read subcommand.
+# `_MUTATION_RE`'s write-subcommand patterns still run first, so these two
+# tables disagree only in the direction they fail — which is the point.
+_READ_SUBCOMMANDS = {
+    "systemctl": {"status", "show", "cat", "is-active", "is-enabled", "is-failed",
+                  "is-system-running", "list-units", "list-unit-files",
+                  "list-timers", "list-sockets", "list-dependencies", "list-jobs",
+                  "get-default", "show-environment"},
+    "journalctl": set(),        # flag-only: no subcommand vocabulary to gate on
+    "firewall-cmd": set(),      # ditto; its write flags are denied above
+    "pct":   {"config", "status", "list", "df", "listsnapshot", "pending",
+              "cpusets", "exec", "enter"},
+    "qm":    {"config", "status", "list", "listsnapshot", "pending", "showcmd",
+              "cloudinit", "agent", "guest", "monitor", "terminal"},
+    "pvesh": {"get", "ls", "usage"},
+    "pvesm": {"status", "list", "path", "scan", "apiinfo"},
+    "pveum": {"user", "group", "role", "acl", "pool", "realm", "token"},
+    "pvecm": {"status", "nodes", "keygen", "apiver"},
+    "pvenode": {"config", "cert", "task"},
+    "pveam": {"available", "list", "update"},
+    "pve-firewall": {"status", "compile", "localnet", "simulate"},
+    "zfs":   {"list", "get", "holds", "version"},
+    "zpool": {"list", "status", "get", "history", "iostat", "version"},
+    "ip":    {"addr", "address", "a", "link", "l", "route", "r", "neigh", "n",
+              "rule", "netns", "maddr", "mroute", "tunnel", "monitor"},
+    "bridge": {"link", "fdb", "vlan", "mdb", "monitor"},
+    "docker": {"ps", "inspect", "logs", "images", "image", "version", "info",
+               "stats", "top", "port", "history", "events", "diff", "context"},
+    "podman": {"ps", "inspect", "logs", "images", "version", "info", "stats", "top"},
+    "virsh": {"list", "dominfo", "domstate", "dumpxml", "domblklist",
+              "domiflist", "nodeinfo", "version", "capabilities", "pool-list",
+              "net-list"},
+    "git":   {"status", "log", "diff", "show", "branch", "remote", "rev-parse",
+              "describe", "ls-files", "ls-remote", "blame", "tag", "cat-file",
+              "config", "shortlog", "reflog"},
+    "tailscale": {"status", "ip", "netcheck", "version", "whois", "ping", "dns",
+                  "licenses"},
+    "caddy": {"version", "validate", "fmt", "environ", "list-modules", "adapt"},
+    "nmcli": {"device", "dev", "connection", "con", "general", "networking",
+              "radio", "monitor"},
+    "wg":    {"show", "showconf"},
+    "ufw":   {"status", "version", "show", "app"},
+    "apt":   {"list", "show", "policy", "search", "depends", "rdepends"},
+    "apt-get": {"check"},
+    "snap":  {"list", "info", "find", "version", "changes", "connections"},
+    "pip":   {"list", "show", "freeze", "check", "debug", "config"},
+    "pip3":  {"list", "show", "freeze", "check", "debug", "config"},
+    "npm":   {"ls", "list", "view", "outdated", "version", "config", "root", "prefix"},
+    "timedatectl": {"status", "show", "list-timezones"},
+    "hostnamectl": {"status", "show"},
+    "loginctl": {"list-sessions", "list-users", "show-session", "show-user",
+                 "session-status"},
+    "resolvectl": {"status", "query", "statistics", "dns", "domain"},
+    "networkctl": {"status", "list", "lldp"},
+    "pm2": {"list", "ls", "status", "show", "describe", "logs", "info", "jlist",
+            "prettylist", "env", "report"},
+}
+
+# A few allowlisted readers carry ONE write flag. The same shape as the
+# _READ_FORMS deny sets, applied from the read side.
+# find's write ACTIONS — the C1 leak (`find /tmp -delete`,
+# `find / -name '*.log' -exec rm -f {} \;`). Prefix-matched: -exec/-execdir/-ok
+# /-okdir/-fprint/-fprintf/-fls all run or write.
+_FIND_WRITE_PREFIXES = ("-delete", "-exec", "-ok", "-fprint", "-fls")
+
+_READ_HEAD_DENY_FLAGS = {
+    "dmesg": {"-C", "--clear", "-c", "--read-clear"},   # clears the kernel ring buffer
+    "ss":    {"-K", "--kill"},                          # kills sockets
+    "nc":    {"-l", "-L", "-k", "-e", "-c", "--exec", "--sh-exec", "--lua-exec"},
+    "ncat":  {"-l", "-L", "-k", "-e", "-c", "--exec", "--sh-exec", "--lua-exec"},
+    "netcat": {"-l", "-L", "-k", "-e", "-c", "--exec", "--sh-exec"},
+    "yq":    {"-i", "--inplace", "--in-place"},         # edits in place
+    "jq":    {"-i", "--in-place"},
+}
+
+# awk reads in every idiom the corpus uses (`… | awk 'NR==2{print $1}'`) and
+# WRITES the moment its program calls out: `awk 'BEGIN{system("rm -rf /x")}'`
+# was a measured leak. Judge the program text, not the head. Same for sed's
+# in-place and `w` forms.
+_AWK_WRITE_RE = re.compile(r"\bsystem\s*\(|\bclose\s*\(|>\s*[\"']|\|\s*[\"']|\bENVIRON\b")
+_SED_WRITE_RE = re.compile(r"--in-place|(?<![\w-])-i(?![\w-])|(?:^|;)\s*w\s|\bw\s+/")
+
+
+def head_reads(argv: list) -> bool:
+    """True when this command's HEAD is a program that can only read.
+
+    The complement of `_READ_FORMS` (which admits read SHAPES of write-headed
+    tools): this admits read HEADS, and refuses everything it does not know.
+    """
+    if not argv:
+        return False
+    name = argv[0].rsplit("/", 1)[-1]
+    if name == "command":
+        return any(a in ("-v", "-V") for a in argv[1:])   # a lookup, not an invocation
+    if name in _SHELL_HEADERS or name in _SHELL_CLOSERS:
+        return True                   # shell syntax, not a command: nothing runs
+    if name in _SHELL_PREFIXES:
+        return head_reads(argv[1:])   # judge the command the keyword introduces
+    if name == "find":
+        return not any(a.startswith(_FIND_WRITE_PREFIXES) for a in argv[1:])
+    if name in ("awk", "gawk", "mawk", "nawk"):
+        return not any(_AWK_WRITE_RE.search(a) for a in argv[1:])
+    if name == "sed":
+        return not any(_SED_WRITE_RE.search(a) for a in argv[1:])
+    if name in _READ_ONLY_HEADS:
+        deny = _READ_HEAD_DENY_FLAGS.get(name)
+        return not (deny and any(a in deny for a in argv[1:]))
+    subs = _READ_SUBCOMMANDS.get(name)
+    if subs is None:
+        return False
+    if not subs:                      # flag-only tool; its writes are denied above
+        return True
+    sub = next((a for a in argv[1:] if not a.startswith("-")), "")
+    return sub in subs
+
+
+def _requote(parts: list) -> str:
+    """§17.1173 — rebuild a command STRING from an already-split argv without
+    losing what the quotes were doing.
+
+    `" ".join(argv)` was the old reconstruction and it re-parses differently:
+    `pct exec 111 -- sh -c 'command -v curl; command -v gpg'` arrives as
+    `[..., 'sh', '-c', 'command -v curl; command -v gpg']`, re-joins to
+    `sh -c command -v curl; command -v gpg`, and re-splits as `sh -c command`
+    + `-v curl` + `command -v gpg` — so the gate judged the bare word
+    `command`. Measured on 318 real probes: 11 were refused for exactly that,
+    and the §17.1173 allowlist turned the rest into hard refusals because the
+    mangling invents heads like `-lc`. shlex.quote puts the quoting back.
+    """
+    return " ".join(shlex.quote(p) for p in parts).strip()
+
+
 _SSH_FLAGS_WITH_ARG = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-W", "-b", "-c", "-e", "-I", "-m", "-O", "-Q", "-S", "-w", "-E", "-B"}
 
 
@@ -193,6 +455,13 @@ def privilege_wrapper_remainder(argv: list) -> str | None:
     head = argv[0].rsplit("/", 1)[-1] if argv else ""
     if head not in _PRIV_WRAPPERS:
         return None
+    # §17.1173 — `command -v X` / `-V X` ASKS whether X exists; it does not run
+    # it. Unwrapping it to X made `command -v gpg` a refusal the moment the
+    # allowlist landed (gpg is not a reader — but nothing ran it). `which` and
+    # `type` are plain readers already; `command` needs the carve-out because it
+    # is also a genuine wrapper (`command rm -rf /` DOES run rm).
+    if head == "command" and any(a in ("-v", "-V") for a in argv[1:]):
+        return None
     flags = _WRAPPER_FLAG_WITH_ARG.get(head, set())
     i = 1
     while i < len(argv):
@@ -209,7 +478,7 @@ def privilege_wrapper_remainder(argv: list) -> str | None:
         break
     if head == "timeout" and i < len(argv):
         i += 1
-    return " ".join(argv[i:]).strip()
+    return _requote(argv[i:])
 
 
 def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
@@ -220,6 +489,9 @@ def ssh_remote_read_only(argv: list, judge) -> tuple[bool, str]:
         i += 2 if argv[i] in _SSH_FLAGS_WITH_ARG else 1
     if i >= len(argv):
         return False, "ssh without a host"
+    # NOT _requote: ssh JOINS its remaining arguments into one command line and
+    # hands that to the remote shell, so a plain join is what actually runs.
+    # (`pct exec` / the wrappers exec an argv instead — those keep _requote.)
     remote = " ".join(argv[i + 1:]).strip()
     if not remote:
         return False, "interactive ssh"
@@ -270,12 +542,12 @@ def container_exec_remainder(argv: list) -> str | None:
         return None
     rest = argv[1 + len(subs):]
     if "--" in rest:
-        return " ".join(rest[rest.index("--") + 1:]).strip() or None
+        return _requote(rest[rest.index("--") + 1:]) or None
     # no `--`: skip the id / -n <name> and any flags, the rest is the command
     i = 0
     while i < len(rest) and (rest[i].startswith("-") or rest[i].isdigit()):
         i += 2 if rest[i] in ("-n", "--timeout") else 1
-    return " ".join(rest[i:]).strip() or None
+    return _requote(rest[i:]) or None
 
 
 def extract_substitutions(cmd: str) -> tuple[str, list[str]]:
@@ -355,15 +627,16 @@ def read_only(cmd: str, _depth: int = 0) -> tuple[bool, str]:
             if not ok:
                 return False, f"inside the guest: {why}"
             continue
-        if head in _INTERPRETERS and len(argv) >= 3 and argv[1] == "-c":   # §17.1152 — `sh -c '<script>'`: judge the script
-            ok, why = read_only(argv[2])
+        script = interpreter_script(argv)   # §17.1171 — an interpreter is judged on what it RUNS
+        if script is not None:
+            if not script:
+                return False, f"{head} without an inline script the gate can read"
+            ok, why = read_only(script, _depth + 1)
             if not ok:
-                return False, f"in the -c script: {why}"
+                return False, f"in the {head} script: {why}"
             continue
         if read_form(argv):       # §17.1150 — the same READ shapes the engine allows
             continue
-        if head in _INTERPRETERS and segment is not None and cmd.find(segment) > 0 and "|" in masked[:cmd.find(segment)]:
-            return False, "pipe to interpreter"
         if _MUTATION.match(head):
             return False, f"mutation verb {head}"
         rule = _SUB_MUT.get(head)
@@ -377,6 +650,8 @@ def read_only(cmd: str, _depth: int = 0) -> tuple[bool, str]:
             continue
         if rule and any(a in rule for a in argv[1:4]):
             return False, f"{head} subcommand/flag"
+        if not head_reads(argv):   # §17.1173 — and the head must be a KNOWN reader
+            return False, f"{head} is not a known read-only command"
     return True, ""
 
 
@@ -399,6 +674,26 @@ def apply_sudo_policy(cmd: str, allow: list[str]) -> tuple[str, str]:
     return rest, "(ran WITHOUT sudo — not in the runner's --sudo-allow list; output may be partial)\n"
 
 
+# §17.1171 — the runner became unprivileged in this change, so a probe that
+# reads a root-only path now FAILS where it used to succeed (the service was
+# running as root). Say which it is: a permission refusal from an unprivileged
+# service is a CONFIGURATION answer, not a finding about the system, and the
+# judge must not read "Permission denied" as "the thing is not there".
+_DENIED_RE = re.compile(
+    r"(?i)\b(?:permission denied|operation not permitted|are you root|"
+    r"must be (?:run as |the )?root|requires? root|need(?:s|ed)? to be root|"
+    r"insufficient privileges|not authorized|EACCES)\b")
+
+
+def _privilege_note(output: str, returncode: int | None) -> str:
+    if returncode == 0 or not _DENIED_RE.search(output or ""):
+        return ""
+    return ("(the runner is UNPRIVILEGED and this command needs root — the output below is a "
+            "permission refusal, not a statement about your system. To let this one through, "
+            "add it to the runner's --sudo-allow list and the matching sudoers rule: "
+            "Capabilities \u2192 \"Give the runner administrator rights for specific commands\".)\n")
+
+
 def build_server(token: str | None, sudo_allow: list[str] | None = None):
     from mcp.server import MCPServer
     mcp = MCPServer("scaffold-local-runner")
@@ -419,7 +714,8 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None):
         except asyncio.TimeoutError:
             proc.kill()
             return f"(timed out after {timeout_s}s)"
-        return note + out.decode("utf-8", errors="replace")[:20000]
+        text = out.decode("utf-8", errors="replace")[:20000]
+        return note + _privilege_note(text, proc.returncode) + text
 
     return mcp
 
@@ -434,23 +730,57 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None):
 INSTALL_DIR = "/opt/scaffold-runner"
 UNIT_NAME = "local-runner-mcp"
 DEPS = ('"mcp>=2.0"', "uvicorn", "starlette")
+# §17.1171 — the service account. The unit carried NO `User=`, so systemd ran
+# the helper as **root** — while this module's own docstring said "the runner
+# is unprivileged" and engine_setup's `runner_sudo` recipe walked the operator
+# through a sudoers rule for a capability the service already had. Audit
+# 2026-09-25 found that, and `apply_sudo_policy`'s "(ran WITHOUT sudo — output
+# may be partial)" note was false under the shipped installer.
+RUNNER_USER = "scaffold-runner"
+
+
+def ensure_user(user: str = RUNNER_USER, *, run=None) -> tuple[bool, str]:
+    """Create the unprivileged system account the unit runs as, if missing.
+
+    No home, no login shell, no supplementary groups — it only needs to exec
+    read-only commands and bind a port above 1024. Idempotent.
+    """
+    run = run or _run
+    if run(["getent", "passwd", user]).returncode == 0:
+        return True, f"user {user} already present"
+    r = run(["useradd", "--system", "--no-create-home",
+             "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", user])
+    if r.returncode != 0:
+        return False, f"useradd {user} failed:\n{(r.stdout or '').strip()[-400:]}"
+    return True, f"user {user} created"
 
 
 def unit_text(*, python: str, script: str, host: str, port: int, token: str | None,
-              sudo_allow: list[str] | None = None) -> str:
-    """The systemd unit, as text. Pure: tests read it without a root shell."""
+              sudo_allow: list[str] | None = None, user: str = RUNNER_USER) -> str:
+    """The systemd unit, as text. Pure: tests read it without a root shell.
+
+    §17.1171 — `User=`/`Group=` are REQUIRED, not decoration: without them
+    systemd defaults a system unit to root and every accepted command runs as
+    root through `create_subprocess_shell`. `NoNewPrivileges=yes` is added only
+    when there is no `--sudo-allow` list, because it would block sudo's setuid
+    transition and silently break the one feature that needs it.
+    """
     cmd = [python, script, "--host", host, "--port", str(port)]
     if token:
         cmd += ["--token", token]
     if sudo_allow:
         cmd += ["--sudo-allow", *sudo_allow]
     exec_start = " ".join(shlex.quote(c) for c in cmd)
+    hardening = "" if sudo_allow else "NoNewPrivileges=yes\n"
     return (
         "[Unit]\n"
         "Description=scaffold-engine local runner (read-only MCP helper)\n"
         "After=network-online.target\n"
         "Wants=network-online.target\n\n"
         "[Service]\n"
+        f"User={user}\n"
+        f"Group={user}\n"
+        f"{hardening}"
         f"ExecStart={exec_start}\n"
         "Restart=on-failure\n"
         "RestartSec=3\n\n"
@@ -528,13 +858,17 @@ def install(args, *, run=_run) -> int:
     if not ok:
         print(f"FAILED: {why}")
         return 1
-    print(f"[2/4] {why}; installing dependencies (10–60 s)…")
+    ok, why_user = ensure_user(args.run_as, run=run)
+    if not ok:
+        print(f"FAILED: {why_user}")
+        return 1
+    print(f"[2/4] {why_user}; {why}; installing dependencies (10–60 s)…")
     r = run([os.path.join(venv, "bin", "pip"), "install", "-q", "--disable-pip-version-check", *[d.strip('"') for d in DEPS]])
     if r.returncode != 0:
         print(f"FAILED: pip install did not finish:\n{(r.stdout or '')[-600:]}")
         return 1
     unit = unit_text(python=os.path.join(venv, "bin", "python"), script=script, host=args.host, port=args.port,
-                     token=args.token, sudo_allow=args.sudo_allow)
+                     token=args.token, sudo_allow=args.sudo_allow, user=args.run_as)
     detached = not shutil.which("systemctl")
     if detached:
         # no systemd (a container, a BSD): start it detached and say so plainly.
@@ -577,7 +911,8 @@ def install(args, *, run=_run) -> int:
         return 1
     print(f"[4/4] port {args.port} answers ({why})")
     how = f"detached process, log {dest_dir}/runner.log" if detached else f"service {UNIT_NAME}"
-    print(f"OK: local runner active on {args.host}:{args.port}/mcp/ ({how}); the engine can now run its read-only checks here.")
+    print(f"OK: local runner active on {args.host}:{args.port}/mcp/ ({how}) as the unprivileged user "
+          f"{args.run_as}; the engine can now run its read-only checks here.")
     return 0
 
 
@@ -592,6 +927,9 @@ def main() -> int:
     ap.add_argument("--install", action="store_true",
                     help="§17.1147 — as root: copy to --install-dir, make a venv, install deps, write+start the systemd unit, check the port")
     ap.add_argument("--install-dir", default=INSTALL_DIR)
+    ap.add_argument("--run-as", default=RUNNER_USER,
+                    help=f"§17.1171 — the unprivileged system account the service runs as (default {RUNNER_USER}); "
+                         "created by --install if missing, and the account any --sudo-allow sudoers rule must name")
     args = ap.parse_args()
     if args.host is None:
         args.host = "0.0.0.0" if args.install else "127.0.0.1"

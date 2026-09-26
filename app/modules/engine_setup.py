@@ -436,12 +436,13 @@ RECIPES: tuple[Recipe, ...] = (
              "List the exact commands the state check needs root for on {target_host} (typical on Proxmox: pct config, "
              "qm config, pvesm status, nginx -t). Find each one's full path with: which pct qm pvesm nginx. Done when you have "
              "the list with full paths."),
-            ("Write the sudoers rule for the runner's user",
+            ("Write the sudoers rule for the runner's service account",
              "On the target machine, as root: sudo visudo -f /etc/sudoers.d/scaffold-runner and add ONE line of the form "
-             "{target_user} ALL=(root) NOPASSWD: /usr/sbin/pct config *, /usr/sbin/qm config *, /usr/sbin/pvesm status "
-             "— full paths, one entry per command, a trailing * only where arguments follow. Done when visudo saves without "
-             "a syntax error and sudo -n /usr/sbin/pvesm status (as {target_user}) prints output, not a password prompt. "
-             "If the helper already runs as root, nothing here is needed — say so and skip this step."),
+             "{runner_user} ALL=(root) NOPASSWD: /usr/sbin/pct config *, /usr/sbin/qm config *, /usr/sbin/pvesm status "
+             "— full paths, one entry per command, a trailing * only where arguments follow. The account is "
+             "{runner_user} (the unprivileged system user the helper's systemd unit runs as, §17.1171) — NOT your login "
+             "user. Done when visudo saves without a syntax error and "
+             "sudo -u {runner_user} sudo -n /usr/sbin/pvesm status prints output, not a password prompt."),
             ("Restart the helper with the matching allow-list",
              "On the target machine restart local_runner_mcp.py with the same --host/--port/--token plus "
              "--sudo-allow \"pct config\" \"qm config\" \"pvesm status\" (the same commands as the sudoers line). "
@@ -458,15 +459,17 @@ RECIPES: tuple[Recipe, ...] = (
             "Allow the scaffold-engine local runner (already running on my target machine on port 8790 as an "
             "unprivileged user) to run a short list of READ-ONLY commands as root, so state-check probes like "
             "'nginx -t' and 'pct config <id>' return real output instead of 'a password is required'.\n\n"
-            "Two things must agree on the target machine: (a) a sudoers rule for the user that runs the helper, "
-            "written with sudo visudo -f /etc/sudoers.d/scaffold-runner, one line of the form "
-            "<user> ALL=(root) NOPASSWD: /usr/sbin/nginx -t, /usr/sbin/pct config * — full paths (find them with "
-            "which nginx), one entry per command, a trailing * only where arguments follow; and (b) the helper "
-            "restarted with the matching allow-list: ~/runner-venv/bin/python local_runner_mcp.py --host 0.0.0.0 "
-            "--port 8790 --token <secret> --sudo-allow \"nginx -t\" \"pct config\". Ask me which commands I want "
+            "Two things must agree on the target machine: (a) a sudoers rule for the SERVICE ACCOUNT the helper "
+            "runs as — that is scaffold-runner, the unprivileged system user its systemd unit names (§17.1171), not "
+            "my login user — written with sudo visudo -f /etc/sudoers.d/scaffold-runner, one line of the form "
+            "scaffold-runner ALL=(root) NOPASSWD: /usr/sbin/nginx -t, /usr/sbin/pct config * — full paths (find them "
+            "with which nginx), one entry per command, a trailing * only where arguments follow; and (b) the helper "
+            "restarted with the matching allow-list, by re-running the one-paste install with "
+            "--sudo-allow \"nginx -t\" \"pct config\" appended. Ask me which commands I want "
             "before writing the rule.\n"
-            "Verify on the target machine that sudo -n nginx -t prints nginx's 'syntax is ok' lines and not a "
-            "password prompt. Anything not on the list still runs unprivileged and the helper says so in its output."
+            "Verify on the target machine that sudo -u scaffold-runner sudo -n nginx -t prints nginx's 'syntax is ok' "
+            "lines and not a password prompt. Anything not on the list still runs unprivileged and the helper says so "
+            "in its output."
         ),
     ),
     Recipe(
@@ -724,13 +727,16 @@ def recipe_version(recipe: "Recipe") -> str:
 LOCAL_RUNNER_MARK = "[scaffold local runner]"   # description tag on the mcp_servers row the assist registers
 RUNNER_NAME = "pve-runner"
 RUNNER_PORT = 8790
+# §17.1171 — the unprivileged account scripts/local_runner_mcp.py installs the
+# service under. Kept in step with that module's RUNNER_USER by a ci-tier-0 gate.
+RUNNER_USER = "scaffold-runner"
 
 # Placeholders shown when a value is not known yet — the guide then asks for
 # that ONE thing instead of inventing it.
 _UNKNOWN = {
     "target_ip": "<the target machine's IP>", "target_host": "the target machine", "target_user": "<the login user>",
     "engine_url": "http://<the engine host's IP>:8000", "token": "<the token the engine generated>",
-    "runner_name": RUNNER_NAME, "runner_port": str(RUNNER_PORT),
+    "runner_name": RUNNER_NAME, "runner_port": str(RUNNER_PORT), "runner_user": RUNNER_USER,
     "script_url": "",   # filled by recipe_context: the engine's own route when it is LAN-reachable, else the public repo
 }
 # Where the target fetches the helper when the engine is not reachable from it (this
