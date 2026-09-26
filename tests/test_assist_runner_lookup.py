@@ -473,3 +473,80 @@ def test_the_prompt_block_is_budgeted_so_a_wide_ledger_cannot_eat_the_guide():
     # one entry alone is never dropped, however long
     one = [{"command": "cat /x", "output": "y" * 9000, "at": None, "by": "runner"}]
     assert "cat /x" in rl.runner_ledger_block(one)
+
+
+def test_every_decision_branch_in_auto_lookup_is_legible():
+    """§17.1170 — a feature that declines to act must say why.
+
+    §17.1169 fixed ONE silent early return (`spec is None`) and that commit
+    asserted it was the only one. It was not: `if not commands:` and
+    `if not executed:` were silent too — and the first is exactly the branch
+    that could not be ruled out from logs during the hour it took to find the
+    other. This pins the CLASS: every bare `return` in `_auto_lookup` must be
+    preceded, IN ITS OWN BRANCH, by something the operator or the logs can
+    see.
+
+    §17.1180g — rewritten to walk the AST. The first version scanned a
+    six-line text window and skipped comment lines, so with the log removed
+    the window reached back past seven comment lines to an EARLIER branch's
+    `if not (reply_text or "").strip():` and matched the exemption meant for
+    that one. Mutation-tested and vacuous: deleting the very log line this
+    test exists to require left it green. A lookback window cannot tell which
+    `if` governs a statement; the parse tree can.
+    """
+    import ast
+    import inspect as _i
+    import textwrap
+    from app.modules import assist_turn
+
+    tree = ast.parse(textwrap.dedent(_i.getsource(assist_turn._auto_lookup)))
+    fn = tree.body[0]
+
+    def speaks(node) -> bool:
+        """A statement the operator or the logs can see."""
+        for sub in ast.walk(node):
+            if isinstance(sub, (ast.Yield, ast.YieldFrom)):
+                return True
+            if isinstance(sub, ast.Call):
+                f = sub.func
+                if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) \
+                        and f.value.id == "logger":
+                    return True
+        return False
+
+    def guard_is_empty_input(test) -> bool:
+        """`if not (reply_text or "").strip():` — no input, so no decision was
+        taken and there is nothing to report. The ONLY exempt branch."""
+        return "reply_text" in ast.dump(test) and "strip" in ast.dump(test)
+
+    silent = []
+
+    def visit(body, guard=None):
+        for i, stmt in enumerate(body):
+            if isinstance(stmt, ast.Return) and stmt.value is None:
+                if guard is not None and guard_is_empty_input(guard):
+                    continue
+                # anything earlier IN THIS BRANCH that speaks
+                if any(speaks(s) for s in body[:i]):
+                    continue
+                silent.append(f"line {stmt.lineno}")
+            for attr in ("body", "orelse", "finalbody"):
+                inner = getattr(stmt, attr, None)
+                if inner:
+                    visit(inner, getattr(stmt, "test", None) if attr == "body" else None)
+
+    visit(fn.body)
+    assert not silent, (
+        "silent bare return(s) in _auto_lookup — the branch declines to act and "
+        f"says nothing: {silent}"
+    )
+
+
+def test_the_two_reasons_a_reply_is_not_a_lookup_are_distinguished():
+    """`no_block` (nothing runnable was asked for) and `not_read_only` (the
+    engine WON'T run it, so the operator must) are different decisions."""
+    from app.modules import assist_runner_lookup as _rl
+    assert _rl.first_lookup_block("just prose, no block at all") is None
+    writing = "**Run this now:**\n\n```bash\napt-get install -y nginx\n```"
+    assert _rl.first_lookup_block(writing) is not None      # there IS a block …
+    assert _rl.is_lookup(writing) is None                   # … the engine just won't run it
