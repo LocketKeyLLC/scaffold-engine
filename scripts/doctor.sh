@@ -574,6 +574,43 @@ else
     fi
 fi
 
+# ---- 13. Docker disk ---------------------------------------------------
+# §17.1180e — dangling images accumulate one per build and nothing removed
+# them: 96 had piled up (33 GB) before anyone counted. `make build` now prunes
+# those older than 24h, but the count is reported here too, because a machine
+# that stops building stops pruning — and this filesystem has hit 100% from
+# Docker before (§project_docker_build_cache_disk_full).
+#
+# NB on the numbers: `docker system df` reports images as 81% "reclaimable",
+# which is not what you get back. Layers shared between near-identical builds
+# only free when the siblings go together, so the true figure sits between the
+# per-image unique sizes and that headline. Neither predicts it; report the
+# COUNT and the free space, which are facts.
+hdr "Docker disk"
+
+if ! command -v docker >/dev/null 2>&1; then
+    warn "docker not on PATH — skipping"
+else
+    dangling=$(docker images -qf dangling=true 2>/dev/null | wc -l | tr -d ' ')
+    cache=$(docker system df --format '{{.Type}}\t{{.Size}}' 2>/dev/null | awk -F'\t' '/Build Cache/{print $2}')
+    root_avail_g=$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')
+    root_pct=$(df --output=pcent / 2>/dev/null | tail -1 | tr -dc '0-9')
+
+    info "dangling images: ${dangling:-?}"
+    info "build cache:     ${cache:-?} (regrows to ~10 GB on the next build; pruning it is recurring, not a fix)"
+    info "/ free:          ${root_avail_g:-?} GiB (${root_pct:-?}% used)"
+
+    if [[ -n "$root_pct" && "$root_pct" -ge 90 ]]; then
+        fail "/ is ${root_pct}% full. Reclaim now: make prune-images; docker builder prune -f"
+    elif [[ -n "$dangling" && "$dangling" -ge 40 ]]; then
+        warn "${dangling} dangling images — 'make build' prunes those over 24h, so this many means builds have outpaced it or SKIP_PRUNE is set. Run: make prune-images PRUNE_UNTIL=1h"
+    elif [[ -n "$root_pct" && "$root_pct" -ge 80 ]]; then
+        warn "/ is ${root_pct}% full — not urgent, but this host has filled it from Docker before."
+    else
+        pass "disk and image count are healthy"
+    fi
+fi
+
 # ---- summary ---------------------------------------------------------
 hdr "Summary"
 
