@@ -241,7 +241,16 @@ def render_note(result: dict) -> str:
 DECISION_PREFIX = "🔁 Decision at step"
 _OPTION_PAREN_RE = re.compile(r"\((\d{1,2})\)\s*(.+?)(?=\s*(?:;\s*)?\(\d{1,2}\)\s|\s*$)", re.S)
 _OPTION_LINE_RE = re.compile(r"(?m)^\s*(\d{1,2})[.)]\s+(.+?)\s*$")
-_CHOICE_NUM_RE = re.compile(r"(?i)\b(?:option|choice|go with|pick|choose|chose|selected?)\s*\(?#?(\d{1,2})\)?|^\s*\(?(\d{1,2})\)?[.)]?\s*(?:—|-|:)")
+# §17.1175 — the verb list was eight words wide and the NUMBER did not have to
+# be an option number, so "I'll go with 2 NICs" resolved to option 2 and
+# `_decision_trigger` appended a `🔁 Decision at step Tn: chosen (2) …`
+# directive to every pending downstream node and staged a re-plan. The
+# term-overlap fallback below requires ≥2 hits AND a strict margin; the numeric
+# path required nothing. Now: only the verbs that actually introduce an option
+# number, and `choose()` additionally bounds the result to a real option.
+_CHOICE_NUM_RE = re.compile(r"(?i)\b(?:option|choice|alternative)\s*\(?#?(\d{1,2})\)?"
+                            r"|\b(?:go with|pick|choose|chose|select(?:ed)?)\s+(?:option|choice)\s*\(?#?(\d{1,2})\)?"
+                            r"|^\s*\(?(\d{1,2})\)?[.)]?\s*(?:—|-|:)")
 _TERM_RE = re.compile(r"(?<![a-z0-9-])(?:--?)?[a-z0-9][a-z0-9_.+-]{2,}")  # keeps `--nginx` distinct from `nginx`
 _TERM_STOP = frozenset({
     "the", "and", "for", "with", "that", "this", "from", "into", "than", "then",
@@ -301,10 +310,13 @@ def choose(options: list[dict], record: str) -> Optional[dict]:
     head = rec[:400]
     m = _CHOICE_NUM_RE.search(head)
     if m:
-        n = int(m.group(1) or m.group(2))
-        for o in options:
-            if o["n"] == n:
-                return o
+        n = int(next(g for g in m.groups() if g))
+        # §17.1175 — a number outside the option set is not a choice. `2` in
+        # "2 NICs" is not option 2 of a two-option decision by coincidence.
+        if 1 <= n <= len(options):
+            for o in options:
+                if o["n"] == n:
+                    return o
     scores = []
     low = head.lower()
     for o in options:

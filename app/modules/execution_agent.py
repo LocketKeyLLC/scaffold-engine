@@ -358,11 +358,26 @@ async def drain_cleanup_tasks(timeout: float = 5.0) -> None:
 
 async def _get_job(db: AsyncSession, job_id: str) -> dict | None:
     row = await db.execute(
-        text("SELECT id, status, refined_brief, input_text FROM jobs WHERE id = :id"),
+        text("SELECT id, status, refined_brief, input_text, metadata FROM jobs WHERE id = :id"),
         {"id": job_id},
     )
     r = row.mappings().first()
     return dict(r) if r else None
+
+def _job_environment(job: dict | None) -> dict:
+    """§17.1175 — `jobs.metadata.environment`, the operator's own ledger
+    (facts, profile, substitutions). Fail-soft to {}: the evidence layer is an
+    enhancement and must never sink a node."""
+    import json as _json
+    md = (job or {}).get("metadata")
+    if isinstance(md, str):
+        try:
+            md = _json.loads(md)
+        except (ValueError, TypeError):
+            md = {}
+    env = (md or {}).get("environment") if isinstance(md, dict) else None
+    return env if isinstance(env, dict) else {}
+
 
 async def _orphan_diagnostic(db: AsyncSession, job_id: str) -> dict:
     """Build the diagnostic payload for an "already executing" 409.
@@ -1827,6 +1842,7 @@ async def execute_next_node(
         output, _evidence_report = await verify_node_output(
             output, need=_node_need, sources=_node_sources, brief=brief,
             input_text=job.get("input_text"), task_text=node_task_text_for(node_snapshot),
+            environment=_job_environment(job),   # §17.1175 — the real ledger
             upstream_text="\n".join(
                 (v[0] if isinstance(v, tuple) else str(v)) for v in upstream_outputs.values()),
             upstream_flagged=_upstream_flagged, tool=tool, node_key=node_key,

@@ -152,6 +152,7 @@ async def verify_node_output(
     sources: list[dict],
     brief: Optional[dict],
     input_text: Optional[str],
+    environment: Optional[dict] = None,
     task_text: str,
     upstream_text: str,
     upstream_flagged: set[str],
@@ -178,7 +179,15 @@ async def verify_node_output(
         output, sources=sources, corpus=corpus, need=need, node_key=node_key,
         label=f"node_{tool_l or 'llm'}", regenerate=_regen, trusted="",
         flagged=set(upstream_flagged or ()), sourced=set(),
-        owned_hosts=owned_hosts({"_brief_text": given}), confirmed=given,
+        # §17.1175 — the REAL ledger, not a synthetic one. Both this and the
+        # assist paths call the same `owned_hosts`, but assist handed it
+        # `facts` / `profile` / `substitutions` / notes while this handed it
+        # only `{"_brief_text": …}`. So a host the operator established as a
+        # session fact (§17.709) was NOT owned during autonomous execution, and
+        # a URL on their own machine was reported as an unsupported value and
+        # bannered onto the deliverable by `compile_value_check`.
+        owned_hosts=owned_hosts({**(environment or {}), "_brief_text": given}),
+        confirmed=given,
         annotate=False,
     )
     if report.get("unsupported"):

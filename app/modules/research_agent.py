@@ -109,26 +109,87 @@ logger = logging.getLogger("scaffold.research.agent")
 # Contradiction check (sync — no await needed)
 # =============================================================================
 
+# §17.1175 — what a contradiction actually needs. The previous version flagged
+# any two entry TITLES sharing ≥2 words, with no stopword filter and no look at
+# the content, so on six realistic titles every pair "contradicted":
+#
+#   ['how','on','to']   "How to install Docker on Ubuntu"
+#                     ↔ "How to configure Nginx on Debian"
+#   ['getting','started','with']
+#                       "Getting started with the Proxmox web UI"
+#                     ↔ "Getting started with Kubernetes"
+#
+# With a 5-pair cap and the loop breaking at the first five hits, a real run
+# showed the operator five fabricated contradictions and no real one — emitted
+# as `contradictions_detected` and rendered with a ⚡ by views/research.js.
+#
+# A contradiction is two entries about the SAME subject making OPPOSITE claims.
+# Both halves are now required, deterministically: the subjects must overlap on
+# distinctive (non-stopword) terms, AND the two contents must disagree on a
+# concrete value or carry opposed polarity about the same thing.
+_CONTRADICTION_STOPWORDS = frozenset({
+    "a", "an", "and", "the", "to", "of", "in", "on", "for", "with", "by", "is",
+    "are", "was", "were", "be", "how", "what", "why", "when", "where", "which",
+    "using", "use", "guide", "tutorial", "intro", "introduction", "overview",
+    "getting", "started", "setup", "set", "up", "best", "practices", "your",
+    "from", "into", "about", "vs", "versus", "at", "it", "its", "this", "that",
+})
+#: Opposed claims about the same thing: "X supports Y" vs "X does not support Y".
+_NEGATION_RE = re.compile(
+    r"\b(?:not|no|never|cannot|can't|won't|doesn'?t|does not|isn'?t|is not|"
+    r"unsupported|unavailable|deprecated|removed|dropped)\b", re.I)
+
+
+def _subject_terms(title: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9][a-z0-9.+-]{2,}", (title or "").lower())
+            if w not in _CONTRADICTION_STOPWORDS}
+
+
 def _check_contradictions(entries: list[dict]) -> list[dict]:
-    """Flag entry pairs whose titles share ≥2 words. Capped at 5."""
+    """Entry pairs that are about the same subject and claim opposite things.
+
+    Requires BOTH halves — a shared distinctive subject AND a concrete
+    disagreement — because either alone is the false-positive machine the
+    previous version was. Capped at 5.
+    """
     contradictions: list[dict] = []
     for i, e1 in enumerate(entries):
+        s1, c1 = _subject_terms(e1.get("title", "")), str(e1.get("content") or "")
+        if len(s1) < 2 or not c1:
+            continue
         for e2 in entries[i + 1:]:
-            t1 = e1.get("title", "")
-            t2 = e2.get("title", "")
-            if not t1 or not t2:
+            s2, c2 = _subject_terms(e2.get("title", "")), str(e2.get("content") or "")
+            if len(s2) < 2 or not c2:
                 continue
-            shared = set(t1.lower().split()) & set(t2.lower().split())
-            if len(shared) < 2:
+            shared = s1 & s2
+            if len(shared) < 2:          # same subject, judged on distinctive terms
+                continue
+            # …and an actual disagreement: one negates where the other does not,
+            # or they state different values for the same version/port/address.
+            neg1, neg2 = bool(_NEGATION_RE.search(c1)), bool(_NEGATION_RE.search(c2))
+            v1 = {f["value"] for f in _specifics_for_contradiction(c1)}
+            v2 = {f["value"] for f in _specifics_for_contradiction(c2)}
+            opposed = (neg1 != neg2) or bool(v1 and v2 and v1.isdisjoint(v2))
+            if not opposed:
                 continue
             contradictions.append({
-                "entry_a": t1,
-                "entry_b": t2,
+                "entry_a": e1.get("title", ""),
+                "entry_b": e2.get("title", ""),
                 "shared_concepts": sorted(shared),
+                "why": ("one states the negative and the other does not"
+                        if neg1 != neg2 else
+                        f"different concrete values: {sorted(v1)[:3]} vs {sorted(v2)[:3]}"),
             })
             if len(contradictions) >= 5:
                 return contradictions[:5]
     return contradictions[:5]
+
+
+def _specifics_for_contradiction(content: str) -> list[dict]:
+    """The concrete values a claim states — versions, ports, addresses. Shared
+    with the evidence layer so "a value" means one thing in this codebase."""
+    from app.modules.assist_evidence import extract_specifics
+    return [f for f in extract_specifics(content) if f["kind"] in ("version", "port", "ip")]
 
 
 # =============================================================================
