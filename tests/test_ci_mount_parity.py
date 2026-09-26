@@ -99,3 +99,42 @@ def test_the_parsers_actually_found_something():
         assert required in _compose_dev_paths(), required
         assert required in _ci_workflow_paths(), required
         assert required in _dockerfile_dev_paths(), required
+
+
+# §17.1180b — the mount that makes the workflow gates real.
+#
+# `tests/test_infra_scaffolding.py::TestCIWorkflow` asserts things ABOUT these
+# workflows (push is not pinned to main, PRs are not base-filtered, the two
+# gating workflows agree, Tier 2 stays pinned, the goldens nightly reports when
+# it cannot measure). `.github` was not mounted into either test lane, so its
+# fixture skipped and every one of those assertions was INERT — in the one
+# place they have to hold. Measured: 8 of 8 skipped in the full suite, and the
+# CI job mounted no `.github` either. §17.906's lesson, again: a gate behind a
+# skip is not a gate.
+def test_dot_github_is_mounted_into_both_test_lanes():
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+
+    mk = root / "Makefile"
+    block = re.search(r"^_TEST_MOUNTS\s*=(.*?)(?=^_TEST_RUN_PRE)", mk.read_text(), re.M | re.S)
+    assert block, "_TEST_MOUNTS not found"
+    assert "/.github:/code/.github" in block.group(1), (
+        "make test does not mount .github, so the workflow-parity gates skip"
+    )
+
+    wf = root / ".github" / "workflows" / "test.yml"
+    if not wf.exists():
+        return
+    src = wf.read_text()
+    # The lanes that matter are the docker runs that mount the SUITE — a bare
+    # `pytest tests/...` in a comment or a --noconftest one-off is not one.
+    # Each such lane needs .github or TestCIWorkflow skips inside it.
+    suite_lanes = src.count('"$PWD/tests:/code/tests:ro"')
+    mounts = src.count('"$PWD/.github:/code/.github:ro"')
+    assert mounts >= 1, "the CI test job does not mount .github"
+    assert mounts >= suite_lanes - 1, (
+        f"{suite_lanes} lanes mount the suite but only {mounts} mount .github — "
+        "a lane that runs tests/test_infra_scaffolding.py without .github skips "
+        "every assertion about these workflows"
+    )
