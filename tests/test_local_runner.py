@@ -128,13 +128,46 @@ def test_runner_sudo_never_widens_the_read_only_gate():
 # §17.1147 — the one-paste installer.
 # ---------------------------------------------------------------------------
 
-def test_installer_unit_text_carries_the_exact_command_and_quotes_the_token():
+def test_installer_unit_text_carries_the_exact_command_and_keeps_the_token_off_it():
+    """§17.1177 — the token used to ride ExecStart, so it was in `ps aux` for
+    every local user on the target and in a unit file written with the default
+    umask. It now comes from an EnvironmentFile (0600, owned by the service
+    account); the command line carries everything else verbatim."""
     mod = _load_runner_script()
     u = mod.unit_text(python="/opt/scaffold-runner/venv/bin/python", script="/opt/scaffold-runner/local_runner_mcp.py",
                       host="0.0.0.0", port=8790, token="ab c", sudo_allow=["pct config", "qm config"])
-    assert "ExecStart=/opt/scaffold-runner/venv/bin/python /opt/scaffold-runner/local_runner_mcp.py --host 0.0.0.0 --port 8790 --token 'ab c' --sudo-allow 'pct config' 'qm config'" in u
+    assert ("ExecStart=/opt/scaffold-runner/venv/bin/python /opt/scaffold-runner/local_runner_mcp.py "
+            "--host 0.0.0.0 --port 8790 --sudo-allow 'pct config' 'qm config'") in u
+    assert "ab c" not in u, "the token must not appear anywhere in the unit"
+    assert f"EnvironmentFile={mod.ENV_FILE}" in u
     assert "Restart=on-failure" in u and "WantedBy=multi-user.target" in u and "After=network-online.target" in u
     assert "--sudo-allow" not in mod.unit_text(python="p", script="s", host="0.0.0.0", port=1, token="t")
+
+
+def test_the_env_file_is_the_only_place_the_token_is_written():
+    mod = _load_runner_script()
+    assert mod.env_file_text("s3cret") == "SCAFFOLD_RUNNER_TOKEN=s3cret\n"
+    # and the helper reads it when --token is absent, so the unit need not pass one
+    src = (ROOT / "scripts" / "local_runner_mcp.py").read_text(encoding="utf-8")
+    assert 'os.environ.get("SCAFFOLD_RUNNER_TOKEN")' in src
+
+
+def test_the_token_is_compared_in_constant_time():
+    """A plain `!=` leaks the shared secret's prefix to a patient caller on the
+    LAN — and that secret is the only thing between the LAN and command
+    execution on the operator's host."""
+    src = (ROOT / "scripts" / "local_runner_mcp.py").read_text(encoding="utf-8")
+    assert "hmac.compare_digest(" in src
+    assert 'hdrs.get("x-runner-token") != args.token' not in src
+
+
+def test_the_detached_path_still_gets_a_token():
+    """No systemd means no EnvironmentFile, so the token must reach the child
+    through its environment — otherwise the helper comes up UNAUTHENTICATED,
+    which is the one outcome worse than the plaintext it replaced."""
+    src = (ROOT / "scripts" / "local_runner_mcp.py").read_text(encoding="utf-8")
+    detached = src[src.index("pidfile = os.path.join"):src.index("[3/4] no systemd here")]
+    assert '"SCAFFOLD_RUNNER_TOKEN": args.token' in detached and "env=_env" in detached
 
 
 def test_installer_venv_falls_back_to_apt_python3_venv(tmp_path, monkeypatch):

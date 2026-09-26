@@ -12,6 +12,8 @@ from __future__ import annotations
 import pathlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.config import settings
@@ -920,3 +922,73 @@ async def test_ensure_helper_refresh_step_inserts_before_the_current_step_and_di
     ev = [e async for e in assist_turn.run_turn(session_id="s", message=None, command="guide", node_key="ADD49", history=[], db=MagicMock())]
     assert seen == ["guide"] and ev[-1][1]["handled"] == "guide+helper_refresh"
     assert any(e[0] == "assist_guide_done" and e[1].get("node_key") == "ADD80" for e in ev)
+
+
+# ── §17.1177 — the runner token is minted ONCE ──────────────────────────────
+
+@pytest.mark.asyncio
+async def test_recipe_context_reuses_the_registered_token():
+    """`recipe_context` minted a fresh `secrets.token_hex(24)` on every call,
+    and both `recipe_steps` (into the step text the operator pastes) and
+    `register_local_runner` (into `mcp_servers`) consume it — so re-offering the
+    recipe replaced both while steps ALREADY in the plan kept the old one.
+
+    Verified live before the fix: ADD74 carried one token, the registry and
+    ADD76/79/80/93 another. Running ADD74 produced a 401 that
+    `diagnose_runner_path` reports as "the helper that is running was started
+    with a different --token" — the engine blaming the operator for its own
+    drift."""
+    from unittest.mock import AsyncMock, patch
+    from app.modules import engine_setup as es
+
+    spec = SimpleNamespace(name="pve-runner", headers={"X-Runner-Token": "already-registered"})
+    with patch("app.modules.assist_local_runner.runner_spec", AsyncMock(return_value=spec)):
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_MappingsResult(first_=None))
+        a = await es.recipe_context(db, "11111111-1111-1111-1111-111111111111")
+        b = await es.recipe_context(db, "11111111-1111-1111-1111-111111111111")
+    assert a["token"] == b["token"] == "already-registered", "the registered token must be reused"
+
+
+@pytest.mark.asyncio
+async def test_a_first_run_with_no_registered_runner_still_mints_one():
+    from unittest.mock import AsyncMock, patch
+    from app.modules import engine_setup as es
+
+    with patch("app.modules.assist_local_runner.runner_spec", AsyncMock(return_value=None)):
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_MappingsResult(first_=None))
+        ctx = await es.recipe_context(db, "11111111-1111-1111-1111-111111111111")
+    assert ctx["token"] and ctx["token"] != es._UNKNOWN["token"] and len(ctx["token"]) >= 32
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_failure_does_not_block_the_recipe():
+    from unittest.mock import AsyncMock, patch
+    from app.modules import engine_setup as es
+
+    with patch("app.modules.assist_local_runner.runner_spec",
+               AsyncMock(side_effect=RuntimeError("registry down"))):
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_MappingsResult(first_=None))
+        ctx = await es.recipe_context(db, "11111111-1111-1111-1111-111111111111")
+    assert ctx["token"], "a registry hiccup must not leave the recipe tokenless"
+
+
+class _MappingsResult:
+    """A minimal SQLAlchemy-ish result for the token tests."""
+
+    def __init__(self, first_=None, all_=None):
+        self._first, self._all = first_, all_ or []
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self._first
+
+    def all(self):
+        return self._all
+
+    def scalar(self):
+        return None

@@ -539,7 +539,13 @@ services:
       # high-precision vetoes the cascade only gets on fall-through. Code default
       # off (fresh installs conservative); live here after the §17.855 A/B (which
       # corrected real confident-path misroutes + closed the ask-framed-pivot gap).
-      ASSIST_DECIDE_DETERMINISTIC_OVERRIDES: "${ASSIST_DECIDE_DETERMINISTIC_OVERRIDES:-false}"
+      # §17.1177 — was `:-false` under a comment that says "live here after the
+      # §17.855 A/B". I scanned every `VAR: "${VAR:-true|false}"` in this file
+      # against its preceding comment: it was the ONLY mismatch. On this host it
+      # is true only because .env:105 sets it, so a fresh clone got the §17.855
+      # deterministic post-filter OFF — `apply_deterministic_overrides` never
+      # ran and the /decide model's confident route went unchecked.
+      ASSIST_DECIDE_DETERMINISTIC_OVERRIDES: "${ASSIST_DECIDE_DETERMINISTIC_OVERRIDES:-true}"
       # §17.771 (deferred, now done) — guarantee a "## My suggestion" lean on a
       # decision step's first view; on a miss, generate + append it. Code default
       # off (tests/fresh installs); live here. Fires only on a decision + miss.
@@ -927,7 +933,14 @@ volumes:
   open-webui:
     external: true
     name: open-webui
+  # §17.1177 — EXTERNAL, like milvus-data-v2. §17.855 made the Milvus volume
+  # external precisely so `docker compose down -v` could not destroy the corpus;
+  # the identical exposure on Postgres — every job, DAG, assist session,
+  # transcript, API key, reconciliation ledger and pre-image — was never closed.
+  # `make backup` exists; nothing prevented the command. An external volume is
+  # not removed by `down -v`, and `make bootstrap` creates it.
   postgres-data:
+    external: true
     name: scaffold-postgres-data
   hf-cache:
   scaffold-logs:

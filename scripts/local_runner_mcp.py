@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import logging
 import os
 import re
@@ -61,7 +62,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "8"
+HELPER_VERSION = "9"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -755,8 +756,20 @@ def ensure_user(user: str = RUNNER_USER, *, run=None) -> tuple[bool, str]:
     return True, f"user {user} created"
 
 
+#: §17.1177 — the token used to ride ExecStart, so it was in `ps aux` for every
+#: local user and in a unit file written with the default umask (0644). It now
+#: lives in an EnvironmentFile mode 0600 owned by the service account, and the
+#: helper reads SCAFFOLD_RUNNER_TOKEN when --token is absent.
+ENV_FILE = "/etc/scaffold-runner.env"
+
+
+def env_file_text(token: str) -> str:
+    return f"SCAFFOLD_RUNNER_TOKEN={token}\n"
+
+
 def unit_text(*, python: str, script: str, host: str, port: int, token: str | None,
-              sudo_allow: list[str] | None = None, user: str = RUNNER_USER) -> str:
+              sudo_allow: list[str] | None = None, user: str = RUNNER_USER,
+              env_file: str | None = ENV_FILE) -> str:
     """The systemd unit, as text. Pure: tests read it without a root shell.
 
     §17.1171 — `User=`/`Group=` are REQUIRED, not decoration: without them
@@ -766,12 +779,14 @@ def unit_text(*, python: str, script: str, host: str, port: int, token: str | No
     transition and silently break the one feature that needs it.
     """
     cmd = [python, script, "--host", host, "--port", str(port)]
-    if token:
+    if token and not env_file:          # legacy shape, kept for a caller that asks
         cmd += ["--token", token]
     if sudo_allow:
         cmd += ["--sudo-allow", *sudo_allow]
     exec_start = " ".join(shlex.quote(c) for c in cmd)
     hardening = "" if sudo_allow else "NoNewPrivileges=yes\n"
+    if token and env_file:
+        hardening += f"EnvironmentFile={env_file}\n"
     return (
         "[Unit]\n"
         "Description=scaffold-engine local runner (read-only MCP helper)\n"
@@ -837,6 +852,24 @@ def port_answers(host: str, port: int, token: str | None, *, timeout: float = 2.
         return False, str(exc)
 
 
+def _write_env_file(token: str, user: str, *, path: str = ENV_FILE) -> None:
+    """§17.1177 — 0600, owned by the service account, created before the unit
+    references it. Written with os.open so the secret is never briefly
+    world-readable between create and chmod."""
+    import pwd
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, env_file_text(token).encode())
+    finally:
+        os.close(fd)
+    try:
+        ent = pwd.getpwnam(user)
+        os.chown(path, ent.pw_uid, ent.pw_gid)
+    except (KeyError, PermissionError, OSError) as exc:
+        log.warning("could not chown %s to %s: %s (root-owned 0600 still readable by the unit)",
+                    path, user, exc)
+
+
 def install(args, *, run=_run) -> int:
     """Everything the install step used to ask the operator to type. Prints
     progress lines and ONE verdict line (``OK: …`` / ``FAILED: …``)."""
@@ -882,12 +915,17 @@ def install(args, *, run=_run) -> int:
         except (OSError, ValueError):
             pass
         cmd = shlex.split(unit.split("ExecStart=", 1)[1].splitlines()[0])
+        # §17.1177 — ExecStart no longer carries --token (it is an
+        # EnvironmentFile for the systemd path), so the detached path must pass
+        # it in the environment or the helper comes up UNAUTHENTICATED.
+        _env = {**os.environ, "SCAFFOLD_RUNNER_TOKEN": args.token or ""}
         proc = subprocess.Popen(cmd, stdout=open(os.path.join(dest_dir, "runner.log"), "ab"), stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, start_new_session=True)
+                                stdin=subprocess.DEVNULL, start_new_session=True, env=_env)
         with open(pidfile, "w") as fh:
             fh.write(str(proc.pid))
         print(f"[3/4] no systemd here — started the helper detached (pid {proc.pid}, log: {dest_dir}/runner.log); it will NOT survive a reboot")
     else:
+        _write_env_file(args.token, args.run_as, path=ENV_FILE)
         unit_path = f"/etc/systemd/system/{UNIT_NAME}.service"
         with open(unit_path, "w") as fh:
             fh.write(unit)
@@ -933,6 +971,10 @@ def main() -> int:
     args = ap.parse_args()
     if args.host is None:
         args.host = "0.0.0.0" if args.install else "127.0.0.1"
+    # §17.1177 — the systemd unit supplies the token through EnvironmentFile
+    # rather than the command line, so it is not in `ps aux`.
+    if not args.token:
+        args.token = os.environ.get("SCAFFOLD_RUNNER_TOKEN") or None
     if args.install:
         return install(args)
     mcp = build_server(args.token, sudo_allow=args.sudo_allow)
@@ -961,7 +1003,9 @@ def main() -> int:
         async def guard(scope, receive, send):
             if scope["type"] == "http":
                 hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
-                if hdrs.get("x-runner-token") != args.token:
+                # §17.1177 — constant-time: a plain `!=` leaks the shared
+                # secret's prefix to a patient caller on the LAN.
+                if not hmac.compare_digest(hdrs.get("x-runner-token", ""), args.token):
                     await JSONResponse({"error": "bad token"}, status_code=401)(scope, receive, send); return
             await sub(scope, receive, send)
         app = Starlette(routes=[Mount("/mcp", app=guard)], lifespan=lifespan)

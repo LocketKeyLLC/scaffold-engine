@@ -771,6 +771,20 @@ async def remember_engine_url(db, session_id: str, base_url: str) -> None:
         logger.warning("engine_url_remember_failed sid=%s err=%r", session_id, exc)
 
 
+async def _registered_runner_token(db) -> str:
+    """§17.1177 — the token the engine has ALREADY registered for the runner,
+    so the plan and the registry cannot drift apart. "" when none is registered
+    (the first run) or the lookup fails."""
+    try:
+        from app.modules import assist_local_runner as _lr
+        spec = await _lr.runner_spec(db)
+    except Exception as exc:
+        logger.warning("runner_token_lookup_failed err=%r", exc)
+        return ""
+    headers = getattr(spec, "headers", None) or {}
+    return str(headers.get("X-Runner-Token") or "") if isinstance(headers, dict) else ""
+
+
 async def recipe_context(db, session_id: str) -> dict:
     """What the engine already knows that a recipe step needs: the target
     machine (system map host + the profile's `user@host`), its own reachable
@@ -778,7 +792,17 @@ async def recipe_context(db, session_id: str) -> dict:
     import re as _re
     import secrets
     ctx = dict(_UNKNOWN)
-    ctx["token"] = secrets.token_hex(24)
+    # §17.1177 — REUSE the registered token. This minted a fresh
+    # `secrets.token_hex(24)` on EVERY call, and `recipe_steps` bakes it into
+    # the step text the operator pastes while `register_local_runner` upserts it
+    # into `mcp_servers` — so re-offering the recipe replaced both while steps
+    # already in the plan kept the old one. Verified live on this database:
+    # ADD74 carried `dbf237d2…` while the registry and ADD76/79/80/93 carried
+    # `29aa43f2…`. Running ADD74 produced a 401 that `diagnose_runner_path`
+    # reports as "the helper that is running was started with a different
+    # --token" — attributing to the operator a mismatch the engine created.
+    # A new token is now minted ONLY when none is registered.
+    ctx["token"] = await _registered_runner_token(db) or secrets.token_hex(24)
     try:
         row = (await db.execute(text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
                                 {"sid": session_id})).mappings().first()
