@@ -361,3 +361,31 @@ def test_the_live_add65_ledger_reads_as_causes_and_a_new_cause_is_not_a_retest()
     again = _reply("📍 On: the Proxmox host shell (root@pve)\n\nThe guest agent is enabled on the VM but nothing is listening inside it — the package is not installed.")
     assert find_retested_hypothesis(again, harvest(_ADD65[:4]))
     assert find_retested_hypothesis(again, harvest(_ADD65[:3])) == []   # still the open hypothesis, not a retest
+
+
+def test_the_steps_own_subject_words_are_not_evidence_of_the_same_cause():
+    # Live: "not installed inside VM 106" scored 0.42 against "no serial interface …
+    # and the guest agent …" on {guest, agent, vm, 106} alone.
+    subject = "Verify QEMU Guest Agent responds on VM 106"
+    led = {"eliminated": ["VM 106 has no serial interface configured (`qm terminal 106` → \"unable to find a serial "
+                          "interface\"), and the guest agent inside VM 106 is still not answering."], "subject": subject}
+    draft = _reply("The guest agent is not installed or not running **inside** VM 106.")
+    assert find_retested_hypothesis(draft, led) == []
+    assert find_retested_hypothesis(draft, {**led, "subject": ""}), "without the subject it was a (false) hit"
+    # …and a genuine re-diagnosis of the same cause on the same step is still caught
+    same = {"eliminated": ["The guest agent package was never installed inside the guest OS, so nothing answers "
+                           "on the virtio channel."], "subject": subject}
+    again = _reply("The agent package is not installed inside the guest OS, so the virtio channel has nothing answering.")
+    assert find_retested_hypothesis(again, same)
+
+
+def test_a_fix_whose_method_could_not_work_does_not_eliminate_its_cause():
+    """§17.1182 — wiring: the runner ledger is read BEFORE the harvest; replies
+    routed through a dead guest channel or the wrong resource verb are left
+    out; the step title is the subject."""
+    from app.modules import assist_agent
+    src = inspect.getsource(assist_agent.run_step_fix)
+    assert src.index("_runner_ledger = await _recent_lookups(db, session_id)") < src.index("hypotheses = harvest(_testable)")
+    assert "not _dead_cmds(c, _runner_ledger) and not _wrong_kind(c, _kinds_h)" in src
+    assert 'hypotheses["subject"] = ctx.title' in src
+    assert "assist_hypotheses_untestable" in src        # legible when it skips

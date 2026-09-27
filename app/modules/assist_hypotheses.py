@@ -166,12 +166,19 @@ def find_retested_hypothesis(draft: str, ledger: dict | None) -> list[dict]:
     d = extract_diagnosis(draft)
     if not d or not elim:
         return []
-    new = _keywords(d)
+    # §17.1182 — the step's SUBJECT words are in every diagnosis on that step
+    # and say nothing about whether two of them name the same cause. Live
+    # (ADD65 "Verify QEMU Guest Agent responds on VM 106"): "not installed
+    # inside VM 106" scored 0.42 against "no serial interface … and the guest
+    # agent …" on {guest, agent, vm, 106} alone — and the correct fix was
+    # captioned as a repeat of a cause it had nothing to do with.
+    subject = _keywords((ledger or {}).get("subject") or "")
+    new = _keywords(d) - subject
     if len(new) < 4:
         return []
     hits: list[dict] = []
     for prev in elim:
-        old = _keywords(prev)
+        old = _keywords(prev) - subject
         if len(old) < 4:
             continue
         overlap = len(new & old) / max(1, len(new | old))

@@ -2204,9 +2204,19 @@ async def run_step_fix(
     # engine states each hypothesis under `## Diagnosis` and then forgets it:
     # T34 spent 11 fix turns re-diagnosing "App.jsx is corrupted" four separate
     # times, twice AFTER concluding the file was complete and correct.
+
+    try:
+        from app.modules.assist_runner_lookup import recent_lookups as _recent_lookups
+        _runner_ledger = await _recent_lookups(db, session_id)
+    except Exception as exc:
+        logger.warning("runner_ledger_failed sid=%s err=%r", session_id, exc)
+        _runner_ledger = []
     hypotheses: dict = {"eliminated": [], "current": ""}
     try:
         from app.modules.assist_hypotheses import harvest
+        from app.modules.assist_runner_lookup import find_dead_channel_commands as _dead_cmds
+        from app.modules.assist_draft import resource_kinds_from_facts as _kinds_of, find_resource_kind_violations as _wrong_kind
+        _kinds_h = _kinds_of(mem.environment)
         _hrows = (await db.execute(
             text("""
                 SELECT content FROM assist_turns
@@ -2216,7 +2226,18 @@ async def run_step_fix(
             """),
             {"sid": session_id, "nk": nk},
         )).mappings().all()
-        hypotheses = harvest([r.get("content") or "" for r in _hrows])
+        # §17.1182 — a fix whose METHOD could not have worked did not test its
+        # cause: one routed through a guest agent the record said was dead, or
+        # addressing a VM with `pct`, proves nothing about the diagnosis it
+        # stated. Live (ADD65): three such fixes "eliminated" the cause that
+        # was RIGHT, and the gate then captioned the correct fix as a repeat.
+        _all = [r.get("content") or "" for r in _hrows]
+        _testable = [c for c in _all if not _dead_cmds(c, _runner_ledger) and not _wrong_kind(c, _kinds_h)]
+        if len(_testable) != len(_all):
+            logger.info("assist_hypotheses_untestable node_key=%s skipped=%d of %d",
+                        nk, len(_all) - len(_testable), len(_all))
+        hypotheses = harvest(_testable)
+        hypotheses["subject"] = ctx.title or ""   # §17.1182 — the step's own words carry no signal
         # §17.977 — and what the REST of the project has already disproved.
         # Derived on read like the per-step ledger, so every existing session
         # recovers its whole history the moment this ships: 124 causes across 19
@@ -2244,12 +2265,6 @@ async def run_step_fix(
     from app.modules.assist_evidence import operator_text as _operator_text  # §17.1028
     # §17.1158 — what the local runner already ran this session: a fix that asks
     # for one of these again is regenerated with the answer, not re-requested.
-    try:
-        from app.modules.assist_runner_lookup import recent_lookups as _recent_lookups
-        _runner_ledger = await _recent_lookups(db, session_id)
-    except Exception as exc:
-        logger.warning("runner_ledger_failed sid=%s err=%r", session_id, exc)
-        _runner_ledger = []
     res = await assist_guide.generate_fix(
         ctx=ctx,
         error_text=error,
