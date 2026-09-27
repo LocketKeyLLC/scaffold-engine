@@ -283,8 +283,17 @@ async def _classify_dag_executability(db: AsyncSession, job_id: str) -> dict:
     total = len(rows)
     flags: list[bool] = []
     by_text = 0
+    # §17.1186 — with a runner whose write channel is open, a hands-on step is
+    # executable (one approval each): only `human` steps still count.
+    from app.modules import supervised_runs
+    _ch = await supervised_runs.channel(db)
+    if _ch is not None:
+        logger.info("hands_on_gate_supervised job=%s runner=%s allowed=%d", job_id,
+                    getattr(_ch[0], "name", "?"), len(_ch[1].get("allow") or []))
     for r in rows:
         on, why = step_is_hands_on(dict(r))
+        if on and _ch is not None and not why.startswith("tool:human"):
+            on, why = False, ""
         if on and not why.startswith("tool:"):
             by_text += 1
             logger.info("hands_on_by_text job=%s node=%s reason=%s", job_id, r.get("node_key"), why)
@@ -522,7 +531,7 @@ async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
             UPDATE dag_nodes
             SET status = 'running', started_at = NOW()
             WHERE id = :id AND status = 'pending'
-            RETURNING id, node_key, title, node_type, depends_on,
+            RETURNING id, node_key, title, node_type, depends_on, description,
                       assigned_model, prompt_template, execution_order, tool, domain,
                       tool_config, retry_count, last_verification_reason
         """),
@@ -534,19 +543,21 @@ async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
 
 
 async def _claim_ready_nodes(
-    db: AsyncSession, job_id: str, limit: int,
+    db: AsyncSession, job_id: str, limit: int, exclude: set[str] | None = None,
 ) -> list[dict]:
     """§17.1184 — a decision node the operator has not delegated is never
     claimed here: the frontier runs everything else, then the drained loop
-    asks (``_pause_for_decision``)."""
+    asks (``_pause_for_decision``). §17.1186 — ``exclude``: hands-on nodes a
+    worker handed back for approval this run (held until the loop drains)."""
     from app.modules import decision_pause
     ask = decision_pause.enabled()
     delegated = await decision_pause.delegated_decisions(db, job_id) if ask else []
-    return await _claim_ready_nodes_sql(db, job_id, limit, ask=ask, delegated=delegated)
+    return await _claim_ready_nodes_sql(db, job_id, limit, ask=ask, delegated=delegated, exclude=sorted(exclude or ()))
 
 
 async def _claim_ready_nodes_sql(
     db: AsyncSession, job_id: str, limit: int, *, ask: bool = False, delegated: list[str] | None = None,
+    exclude: list[str] | None = None,
 ) -> list[dict]:
     """§17.568 — atomically claim up to ``limit`` dep-satisfied pending nodes
     for parallel-frontier execution. This is the atomic claim the
@@ -567,6 +578,7 @@ async def _claim_ready_nodes_sql(
                 WHERE n.job_id = :jid AND n.status = 'pending'
                   AND (NOT :ask OR n.node_type IS DISTINCT FROM 'decision'
                        OR n.node_key = ANY(:delegated))
+                  AND NOT (n.node_key = ANY(:exclude))
                   AND NOT EXISTS (
                       SELECT 1
                       FROM unnest(COALESCE(n.depends_on, ARRAY[]::text[])) AS dep(k)
@@ -580,11 +592,11 @@ async def _claim_ready_nodes_sql(
                 FOR UPDATE SKIP LOCKED
                 LIMIT :lim
             )
-            RETURNING id, node_key, title, node_type, depends_on,
+            RETURNING id, node_key, title, node_type, depends_on, description,
                       assigned_model, prompt_template, execution_order, tool, domain,
                       tool_config, retry_count, last_verification_reason
         """),
-        {"jid": job_id, "lim": limit, "ask": ask, "delegated": delegated},
+        {"jid": job_id, "lim": limit, "ask": ask, "delegated": delegated, "exclude": list(exclude or [])},
     )
     rows = [dict(r) for r in claimed.mappings()]
     await db.commit()
@@ -1423,6 +1435,13 @@ async def execute_next_node(
             if _on:
                 logger.info("hands_on_step_as_runbook job=%s node=%s reason=%s", job_id, node_key, _why)
                 tool, tool_lower = "Shell", "shell"
+        # §17.1186 — a hands-on step reached with a runner whose write channel
+        # is open is NOT written up as a runbook: it is handed back (pending)
+        # for the operator's approval, which the loop collects once drained.
+        if tool_lower == "shell" and not settings.shell_tool_enabled and settings.execution_supervised_runs_enabled:
+            _held = await _hand_back_for_approval(db, job_id, node, tool)
+            if _held is not None:
+                return _held
         if tool_lower == "shell" and settings.shell_tool_enabled:
             raise NotImplementedError(
                 "Shell tool execution requested but no backend wired. "
@@ -2279,7 +2298,8 @@ async def _peek_next_node(job_id: str) -> dict | None:
     async with async_session() as db:
         rows = await db.execute(
             text("""
-                SELECT node_key, title, tool, node_type, depends_on, execution_order
+                SELECT node_key, title, tool, node_type, depends_on, execution_order,
+                       description, prompt_template
                 FROM dag_nodes
                 WHERE job_id = :jid AND status = 'pending'
                 ORDER BY execution_order ASC
@@ -2308,27 +2328,77 @@ async def _pause_for_decision(job_id: str) -> dict | None:
     decision node is never handed to the model unasked. The job leaves
     'running' here, which makes the outer finally's cleanup a no-op (same
     mechanism as the §17.624 park)."""
-    from app.modules import decision_pause
-    if not decision_pause.enabled():
-        return None
+    from app.modules import decision_pause, supervised_runs
+    node = run_node = None
     try:
         async with async_session() as db:
-            node = await decision_pause.pending_decision(db, job_id)
+            if decision_pause.enabled():
+                node = await decision_pause.pending_decision(db, job_id)
             if node is None:
-                return None
+                # §17.1186 — no decision waiting: is the next step one that
+                # changes a machine, with a runner able to carry it out?
+                ch = await supervised_runs.channel(db)
+                if ch is not None:
+                    run_node = await supervised_runs.pending_hands_on(db, job_id)
+                if run_node is None:
+                    return None
+            target = node or run_node
             job = await _get_job(db, job_id)
             brief = _brief_text(job)
-            upstream = await _fetch_upstream_outputs(db, job_id, node.get("depends_on") or [])
+            brief_full = (job or {}).get("refined_brief") or {}
+            upstream = await _fetch_upstream_outputs(db, job_id, target.get("depends_on") or [])
     except Exception as exc:
         # The LOOK-UP failing must not sink the run — but it is logged as an
         # error, not a debug line: a silent miss here means the model decides
         # for the operator (feedback: fail-soft hides the first-run defect).
         logger.error("decision_pause_check_failed job=%s err=%s", job_id, exc)
         return None
-    up_block = _format_upstream_block(upstream, node.get("node_key") or "") if upstream else ""
-    frame = await decision_pause.frame_decision(node, brief=brief, upstream=up_block)
+    up_block = _format_upstream_block(upstream, target.get("node_key") or "") if upstream else ""
+    if node is not None:
+        frame = await decision_pause.frame_decision(node, brief=brief, upstream=up_block)
+    else:
+        spec, policy = ch
+        runbook = await supervised_runs.draft_runbook(run_node, brief_full if isinstance(brief_full, dict) else brief, up_block)
+        frame = supervised_runs.frame_run(run_node, runbook, spec, policy)
+        logger.warning("supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
+                       job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame["commands"]),
+                       len(frame["refused"]), frame["runner"])
     async with async_session() as db:
-        return await decision_pause.park_awaiting_decision(db, job_id, node, frame)
+        return await decision_pause.park_awaiting_decision(db, job_id, target, frame)
+
+
+async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, tool: str) -> dict | None:
+    """§17.1186 — a claimed hands-on step, with a runner whose write channel is
+    open and no decision recorded for it, goes back to ``pending`` (``started_at``
+    cleared) and the worker reports ``needs_approval``; the loop holds it out of
+    the refill and the drained loop asks the operator. None when the step
+    should run the old way (no channel, or already decided)."""
+    from app.modules import supervised_runs as _sr
+    node_key = node.get("node_key")
+    try:
+        _ch = await _sr.channel(db)
+        if _ch is None:
+            return None
+        decided = _sr._as_dict((await db.execute(
+            text("SELECT metadata->'decisions' FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar())
+        if node_key in decided:
+            return None
+    except Exception as exc:
+        logger.error("supervised_run_seam_failed job=%s node=%s err=%s", job_id, node_key, exc)
+        return None
+    await db.execute(
+        text("UPDATE dag_nodes SET status = 'pending', started_at = NULL, updated_at = NOW() "
+             "WHERE id = :id AND status = 'running'"), {"id": str(node.get("id"))})
+    await db.commit()
+    logger.info("supervised_run_needs_approval job=%s node=%s", job_id, node_key)
+    return {"status": "needs_approval", "node_key": node_key, "title": node.get("title"), "tool": tool}
+
+
+def _hands_on_peek(node: dict) -> bool:
+    """§17.1186 — the peeked node does host work (never a `human` node, which
+    the executor skips on its own)."""
+    from app.modules import supervised_runs
+    return supervised_runs.is_hands_on_node(node)
 
 
 def _brief_text(job: dict | None) -> str:
@@ -2369,6 +2439,7 @@ async def _run_parallel_frontier(
     sem = asyncio.Semaphore(cap)
     results_q: asyncio.Queue = asyncio.Queue()
     inflight: set[asyncio.Task] = set()
+    held: set[str] = set()     # §17.1186 — hands-on nodes handed back for approval this run
     node_results: list[dict] = []
     # §17.811 — progress + ETA (parallel path). Emitted ONLY from the drain loop
     # body below, never from `_worker` — the loop owns all SSE ordering, and one
@@ -2402,7 +2473,7 @@ async def _run_parallel_frontier(
             free = cap - len(inflight)
             if free > 0:
                 async with async_session() as db:
-                    claimed = await _claim_ready_nodes(db, job_id, free)
+                    claimed = await _claim_ready_nodes(db, job_id, free, exclude=held)
                     if claimed:                                   # §17.1119 — heartbeat
                         await touch(db, job_id, reason="node_claim")
                         await db.commit()
@@ -2473,6 +2544,11 @@ async def _run_parallel_frontier(
             # 4. Emit + auto-retry. A retried node resets to 'pending' and is
             #    re-claimed on the next refill (no pop/continue needed).
             status = res.get("status", "unknown")
+            if status == "needs_approval":
+                # §17.1186 — the worker handed the step back (pending); hold it
+                # out of the refill so the drained loop can ask the operator.
+                held.add(str(res.get("node_key") or ""))
+                continue
             if status == "stale":
                 # §17.854 (audit A1) — the node changed status under the worker
                 # (reset/cancel); its result was discarded server-side. Drop it
@@ -2784,8 +2860,10 @@ async def execute_all_nodes(
         while True:
             # ---- Session 4 (short peek only; execute_next_node owns its own sessions) ----
             node = await _peek_next_node(job_id)
-            if node is not None and str(node.get("node_type") or "") == "decision":
+            if node is not None and (str(node.get("node_type") or "") == "decision"
+                                     or (settings.execution_supervised_runs_enabled and _hands_on_peek(node))):
                 # §17.1184 — the operator's call, not the model's: ask and stop.
+                # §17.1186 — or a step that changes a machine: ask for approval.
                 _asked = await _pause_for_decision(job_id)
                 if _asked is not None:
                     yield _sse("awaiting_decision", _asked)
@@ -2925,7 +3003,7 @@ async def execute_all_nodes(
             # this executor (its 'running' write was rejected). Don't append it
             # to node_results or emit a frame; re-loop to claim whatever is next
             # (or fall through to the terminal blocked/complete path).
-            if status == "stale":
+            if status in ("stale", "needs_approval"):
                 continue
 
             # -- node executed --

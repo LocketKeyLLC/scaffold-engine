@@ -176,6 +176,15 @@ async def decide_endpoint(
             "waiting_on": outcome.get("waiting_on"),
             "node_key": body.node_key,
         })
+    if outcome["outcome"] == "bad_choice":                     # §17.1186 — a run pause takes run | myself | skip
+        raise HTTPException(status_code=422, detail={"error": "choice must be one of run, myself, skip",
+                                                     "choices": outcome.get("choices")})
+    if outcome["outcome"] in ("not_runnable", "no_channel"):
+        raise HTTPException(status_code=409, detail={
+            "error": ("the engine cannot run this block" if outcome["outcome"] == "not_runnable"
+                      else "no runner with an open write channel is registered"),
+            "refused": outcome.get("refused") or [], "node_key": body.node_key,
+        })
     # Restart the detached run (§17.1007): the response returns at once and the
     # Run stage attaches to the run via /execute/all, which is idempotent.
     run_started = False
@@ -189,6 +198,7 @@ async def decide_endpoint(
         job_id=str(parsed_id), node_key=body.node_key,
         resolved="engine" if outcome["outcome"] == "delegated" else "operator",
         status="executing", run_started=run_started,
+        outcome=outcome["outcome"], node_status=(outcome.get("record") or {}).get("node_status"),
     )
 
 

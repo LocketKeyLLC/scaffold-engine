@@ -231,7 +231,17 @@ async def resolve_decision(
     if job["status"] != STATUS or waiting.get("node_key") != node_key:
         return {"outcome": "not_waiting", "current_status": job["status"], "waiting_on": waiting.get("node_key")}
     now = datetime.now(timezone.utc).isoformat()
-    if delegate:
+    if waiting.get("kind") == "run":
+        # §17.1186 — a hands-on step parked with its commands: run / myself / skip
+        from app.modules import supervised_runs
+        res = await supervised_runs.resolve_run(db, job_id, node_key, ("myself" if delegate else (choice or "")), waiting)
+        if res["outcome"] in ("bad_choice", "not_runnable", "no_channel", "node_gone"):
+            await db.rollback()
+            return {"outcome": res["outcome"], "current_status": job["status"], "waiting_on": node_key, **{k: v for k, v in res.items() if k != "outcome"}}
+        entry = {"by": "operator", "choice": ("myself" if delegate else choice), "note": (note or "").strip(),
+                 "at": now, "result": res["outcome"], "node_status": res.get("node_status")}
+        outcome = res["outcome"]
+    elif delegate:
         entry = {"by": "engine", "at": now}
         outcome = "delegated"
     else:

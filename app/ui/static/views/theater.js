@@ -694,10 +694,74 @@ export function renderTheater(container, jobId, ctx = {}) {
     );
   }
 
+  // §17.1186 — the run reached a step that changes a machine and a runner
+  // can carry it out: the exact commands, the checks, and three verbs. The
+  // decide call with "run" IS the operator's approval of that block.
+  function showRunApproval(d) {
+    const nodeKey = d.node_key;
+    const cmds = Array.isArray(d.commands) ? d.commands : [];
+    const verify = Array.isArray(d.verify) ? d.verify : [];
+    const refused = Array.isArray(d.refused) ? d.refused : [];
+    const canRun = cmds.length > 0 && refused.length === 0;
+    const note = el("textarea", { class: "input decision-note", placeholder: "Anything the engine should know (optional)" });
+    const runBtn = el("button", { class: "btn btn-primary", text: `Run it through ${d.runner || "the runner"}` });
+    const selfBtn = el("button", { class: "btn", text: "I'll do it myself (keep the runbook)" });
+    const skipBtn = el("button", { class: "btn btn-ghost", text: "Skip this step" });
+    if (!canRun) runBtn.disabled = true;
+    async function send(choice, label) {
+      runBtn.disabled = selfBtn.disabled = skipBtn.disabled = true;
+      const prev = runBtn.textContent; runBtn.textContent = label;
+      try {
+        const res = await api.post(`/jobs/${jobId}/decide`, { node_key: nodeKey, choice, note: note.value.trim() || null });
+        summaryEl.classList.add("hidden");
+        const st = res.node_status || (choice === "skip" ? "skipped" : "done");
+        ensureNode(nodeKey, { status: st });
+        renderNodes();
+        toast(res.outcome === "ran" ? `${nodeKey} ran on ${d.runner || "the runner"} — continuing.`
+            : res.outcome === "failed" ? `${nodeKey} stopped at a failed command — see the node's output.`
+            : res.outcome === "runbook" ? `${nodeKey} kept as a runbook for you — continuing.`
+            : `${nodeKey} ${st} — continuing.`, res.outcome === "failed" ? "warn" : "ok");
+        if (res.run_started && !running) attachRun();
+        else await loadInitial();
+      } catch (e) {
+        const dt = e.detail || {};
+        toast(`Could not record it: ${dt.error || e.detail || e.message}`, "err");
+        runBtn.disabled = !canRun; selfBtn.disabled = skipBtn.disabled = false; runBtn.textContent = prev;
+      }
+    }
+    runBtn.addEventListener("click", () => send("run", "Running…"));
+    selfBtn.addEventListener("click", () => send("myself", "Recording…"));
+    skipBtn.addEventListener("click", () => send("skip", "Skipping…"));
+    summaryEl.classList.remove("hidden");
+    mount(
+      summaryEl,
+      el("div", { class: "card card-pad summary-card decision-card" },
+        el("div", { class: "summary-title", text: "This step changes a machine — the run stopped for your approval" }),
+        el("div", { class: "summary-where" }, el("span", { class: "mono", text: nodeKey }), el("span", { text: ` · ${d.title || ""}` })),
+        el("div", { class: "decision-q", text: d.question || "" }),
+        cmds.length ? el("div", { class: "decision-run-label", text: `Would run on ${d.runner || "the runner"}${d.sudo ? " (as root for the allowed commands)" : ""}, in order, stopping at the first failure:` }) : null,
+        cmds.length ? el("pre", { class: "decision-run-block" }, el("code", { text: cmds.join("\n") })) : null,
+        verify.length ? el("div", { class: "decision-run-label", text: "Then checks (read-only):" }) : null,
+        verify.length ? el("pre", { class: "decision-run-block" }, el("code", { text: verify.join("\n") })) : null,
+        refused.length ? el("div", { class: "decision-refused" },
+          el("div", { class: "decision-run-label", text: "The engine cannot run this block — refused before anything was sent:" }),
+          ...refused.map((r) => el("div", { class: "mono faint", text: `${r.command} — ${r.why}` }))) : null,
+        d.why ? el("div", { class: "decision-why dim", text: `${d.why} — your call.` }) : null,
+        el("details", { class: "decision-runbook" }, el("summary", { text: "The full runbook the engine drafted" }),
+          el("div", { class: "md", html: mdToHtml(d.runbook || "") })),
+        note,
+        el("div", { class: "row row-wrap summary-actions" }, runBtn, selfBtn, skipBtn,
+          el("a", { class: "btn btn-sm", href: `#/job/${jobId}/plan`, text: "See the plan" }))
+      )
+    );
+    summaryEl.scrollIntoView({ block: "nearest" });
+  }
+
   // §17.1184 — the run stopped to ask. One question, the options the plan
   // names (a suggestion marked as such — the choice stays the operator's), a
   // line for their own answer, and "let the engine decide" as an explicit act.
   function showDecision(d) {
+    if (d && d.kind === "run") return showRunApproval(d);   // §17.1186
     const nodeKey = d.node_key;
     const opts = Array.isArray(d.options) ? d.options : [];
     const name = `decision-${nodeKey}`;
