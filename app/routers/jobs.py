@@ -166,6 +166,7 @@ async def decide_endpoint(
     await assert_visible(db, principal, str(parsed_id), detail=f"Job {job_id} not found")
     outcome = await decision_pause.resolve_decision(
         db, str(parsed_id), body.node_key, choice=body.choice, note=body.note or "", delegate=body.delegate,
+        inputs=body.inputs,
     )
     if outcome["outcome"] == "not_found":
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
@@ -176,6 +177,9 @@ async def decide_endpoint(
             "waiting_on": outcome.get("waiting_on"),
             "node_key": body.node_key,
         })
+    if outcome["outcome"] == "inputs_missing":                 # §17.1187 — the runbook's values, checked
+        raise HTTPException(status_code=422, detail={"error": "the runbook needs values the request did not supply",
+                                                     "problems": outcome.get("problems"), "inputs": outcome.get("inputs")})
     if outcome["outcome"] == "bad_choice":                     # §17.1186 — a run pause takes run | myself | skip
         raise HTTPException(status_code=422, detail={"error": "choice must be one of run, myself, skip",
                                                      "choices": outcome.get("choices")})

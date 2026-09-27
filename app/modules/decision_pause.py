@@ -216,6 +216,7 @@ def decision_record(choice: str, note: str, frame: dict | None) -> str:
 
 async def resolve_decision(
     db: AsyncSession, job_id: str, node_key: str, *, choice: str | None, note: str = "", delegate: bool = False,
+    inputs: dict | None = None,
 ) -> dict:
     """Record the operator's answer (or their delegation) and put the job back
     to ``executing`` so the run can be restarted. Returns ``{"outcome": …}``:
@@ -234,12 +235,14 @@ async def resolve_decision(
     if waiting.get("kind") == "run":
         # §17.1186 — a hands-on step parked with its commands: run / myself / skip
         from app.modules import supervised_runs
-        res = await supervised_runs.resolve_run(db, job_id, node_key, ("myself" if delegate else (choice or "")), waiting)
-        if res["outcome"] in ("bad_choice", "not_runnable", "no_channel", "node_gone"):
+        res = await supervised_runs.resolve_run(db, job_id, node_key, ("myself" if delegate else (choice or "")), waiting,
+                                                inputs=inputs)
+        if res["outcome"] in ("bad_choice", "not_runnable", "no_channel", "node_gone", "inputs_missing"):
             await db.rollback()
             return {"outcome": res["outcome"], "current_status": job["status"], "waiting_on": node_key, **{k: v for k, v in res.items() if k != "outcome"}}
         entry = {"by": "operator", "choice": ("myself" if delegate else choice), "note": (note or "").strip(),
-                 "at": now, "result": res["outcome"], "node_status": res.get("node_status")}
+                 "at": now, "result": res["outcome"], "node_status": res.get("node_status"),
+                 "inputs": sorted((inputs or {}).keys())}       # names only — a value may be a secret
         outcome = res["outcome"]
     elif delegate:
         entry = {"by": "engine", "at": now}

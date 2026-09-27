@@ -437,6 +437,9 @@ class DecideInput(BaseModel):
     choice: str | None = Field(default=None, max_length=2000)
     note: str | None = Field(default=None, max_length=4000)
     delegate: bool = False
+    # §17.1187 — the values a run pause asked for (<NAME> placeholders in the
+    # runbook's commands), keyed by name. Never stored on the job.
+    inputs: dict[str, str] | None = None
 
     @model_validator(mode="after")
     def _choice_or_delegate(self):
