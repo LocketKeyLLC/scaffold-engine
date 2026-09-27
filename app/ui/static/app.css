@@ -589,6 +589,12 @@ select.input:focus-visible,
   border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px;
 }
 .md-copy:hover { color: var(--text); border-color: var(--border-strong); }
+/* §17.1185 — the ▶ run button beside copy, only when the write channel is open */
+.md-run { font-size: 11px; font-family: var(--sans); cursor: pointer; background: var(--bg-elev-2); color: var(--accent); border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px; }
+.md-run:hover { border-color: var(--accent); }
+.run-approve { max-width: 720px; }
+.run-approve-title { font-weight: 600; margin-bottom: 0.4rem; }
+.run-approve-block { max-height: 40vh; overflow: auto; white-space: pre; }
 .md-copy.copied { color: var(--ok, #3fb950); border-color: currentColor; }
 
 /* §17.850 — pinned-values (substitutions) editor */

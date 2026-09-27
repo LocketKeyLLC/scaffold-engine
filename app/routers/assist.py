@@ -515,6 +515,72 @@ async def assist_message(
     )
 
 
+class AssistRunInput(BaseModel):
+    """§17.1185 — the operator's APPROVAL of one block: run it through the
+    local runner's supervised channel. ``block`` is the exact fenced text
+    (the sentinel echo may be included; it is kept and run)."""
+    block: str = Field(min_length=1, max_length=8000)
+    node_key: Optional[str] = Field(default=None, description="The step the block belongs to (attribution).")
+    history: list[dict] = Field(default_factory=list)
+
+
+@router.post("/assist/{session_id}/run")
+async def assist_run_block(session_id: UuidPath, body: AssistRunInput, request: Request, db=Depends(get_db)):
+    """§17.1185 — run an approved block on the operator's machine.
+
+    This call IS the approval: it names the exact block and is authenticated
+    as the operator. The engine gates every command first (the runner's own
+    denylist and ``--write-allow`` list, byte-equal) and refuses the whole
+    block with the reasons when anything fails — nothing runs. Otherwise each
+    command is signed (single-use, short-lived) and sent to ``run_supervised``
+    in order, stopping at the first failure; the output becomes an operator
+    turn marked ``[local-runner]`` and re-enters the turn loop exactly as a
+    paste would (``run_id`` tails it, like ``/message``).
+
+    409: no runner, or one without the supervised channel; 422: the block has
+    no commands; 200 ``{refused:[…], executed:[]}`` when the gate refused.
+    """
+    from app.modules import assist_local_runner as _lr
+    from app.modules import assist_supervised as _sw
+    from app.modules import assist_turn
+    sess = await assist_agent.get_session(session_id=session_id, db=db)
+    if not sess:
+        raise HTTPException(status_code=404, detail=f"assist session not found: {session_id}")
+    if sess["status"] not in ("active", "paused"):
+        raise HTTPException(status_code=409, detail=f"session status {sess['status']!r} cannot take a turn")
+    spec = await _lr.runner_spec(db)
+    if spec is None or not settings.mcp_tool_enabled:
+        raise HTTPException(status_code=409, detail={"error": "no local runner is connected",
+                                                     "hint": "Capabilities → Let the state check run its own commands"})
+    policy = await _sw.write_policy(spec)
+    if policy is None:
+        raise HTTPException(status_code=409, detail={
+            "error": "the runner has no supervised write channel",
+            "hint": "re-run the runner install with --write-allow \"<prefix>\" … (Capabilities → Let the engine run approved commands)"})
+    commands = _sw.block_commands(body.block)
+    if not commands:
+        raise HTTPException(status_code=422, detail="the block has no commands")
+    runnable, refused = _sw.gate_block(commands, policy["allow"])
+    if refused:
+        logger.warning("supervised_block_refused sid=%s refused=%d first=%r why=%r",
+                       session_id, len(refused), refused[0]["command"][:80], refused[0]["why"])
+        return {"session_id": session_id, "executed": [], "refused": refused, "run_id": None,
+                "allow": policy["allow"]}
+    node_key = body.node_key or sess.get("current_node_key")
+    logger.warning("supervised_block_approved sid=%s node=%s commands=%d runner=%s", session_id, node_key,
+                   len(runnable), spec.name)
+    executed = await _sw.run_block(spec, runnable)
+    record = _sw.record_text(spec.name, executed)
+    # the transcript record + the turn loop: the same path a paste takes
+    run_id = await assist_turn.start_turn_run(
+        session_id=session_id, message=record, command="message",
+        node_key=node_key, history=body.history,
+    )
+    return {"session_id": session_id, "node_key": node_key, "run_id": run_id, "refused": [],
+            "executed": [{k: e[k] for k in ("command", "exit", "ok", "approval_id", "refused")} for e in executed],
+            "note": _sw.render_note(spec.name, executed, [])}
+
+
 @router.get("/assist/{session_id}/message/active")
 async def assist_message_active(session_id: UuidPath, db=Depends(get_db)):
     """§17.869 — the session's still-running turn (if any), for resume-on-load."""

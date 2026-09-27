@@ -654,6 +654,42 @@
         "title": "AssistRestoreStepInput",
         "type": "object"
       },
+      "AssistRunInput": {
+        "description": "§17.1185 — the operator's APPROVAL of one block: run it through the\nlocal runner's supervised channel. ``block`` is the exact fenced text\n(the sentinel echo may be included; it is kept and run).",
+        "properties": {
+          "block": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Block",
+            "type": "string"
+          },
+          "history": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "node_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The step the block belongs to (attribution).",
+            "title": "Node Key"
+          }
+        },
+        "required": [
+          "block"
+        ],
+        "title": "AssistRunInput",
+        "type": "object"
+      },
       "AssistStartInput": {
         "properties": {
           "handoff_policy": {
@@ -6683,6 +6719,66 @@
           }
         ],
         "summary": "Assist Resume",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/run": {
+      "post": {
+        "description": "§17.1185 — run an approved block on the operator's machine.\n\nThis call IS the approval: it names the exact block and is authenticated\nas the operator. The engine gates every command first (the runner's own\ndenylist and ``--write-allow`` list, byte-equal) and refuses the whole\nblock with the reasons when anything fails — nothing runs. Otherwise each\ncommand is signed (single-use, short-lived) and sent to ``run_supervised``\nin order, stopping at the first failure; the output becomes an operator\nturn marked ``[local-runner]`` and re-enters the turn loop exactly as a\npaste would (``run_id`` tails it, like ``/message``).\n\n409: no runner, or one without the supervised channel; 422: the block has\nno commands; 200 ``{refused:[…], executed:[]}`` when the gate refused.",
+        "operationId": "assist_run_block_assist__session_id__run_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistRunInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Run Block",
         "tags": [
           "Assist"
         ]

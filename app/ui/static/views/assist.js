@@ -4,7 +4,7 @@
 // step-guidance driver via /assist/{id}/guide/stream (SSE: assist_guide_delta
 // / assist_guide_done). Message composer persists via /assist/{id}/turn.
 import * as api from "../api.js";
-import { el, mount, shortId, timeAgo, fmtDate, mdToHtml, stickyScroll, selectionWithin } from "../util.js";
+import { el, mount, shortId, timeAgo, fmtDate, mdToHtml, stickyScroll, selectionWithin, sentinelFor } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState, openDialog, askChoice } from "../components.js";
 import { briefPanel } from "./brief_panel.js";
 
@@ -194,15 +194,27 @@ const ASSIST_ONBOARD_KEY = "scaffold_assist_onboarded";
 // local runner is wired. Filled by `GET /setup/runner` on load; until it
 // answers we state the conservative default (no runner), never the reverse.
 let runnerState = { connected: false };
+export function writesOn(state = runnerState) {
+  return !!(state && state.connected && state.writes && state.writes.enabled);
+}
 export function runnerNote(state = runnerState) {
+  // §17.1185 — with the supervised write channel open, the runner also carries
+  // out a block the operator APPROVES; the wording says exactly that, and lists
+  // the prefixes, instead of claiming it can never write.
+  const allow = (state && state.writes && state.writes.allow) || [];
   return state && state.connected
     ? {
         lede: "You are the engine's hands: it guides, you act on your computer, it tracks and adapts. "
             + "One exception is switched on — the local runner"
             + (state.name ? ` (${state.name})` : "")
             + " — so the engine also runs READ-ONLY checks on that machine itself, "
-            + "automatically, instead of asking you to paste. It can never run anything that writes.",
-        step2: "Run the commands in your own terminal (or click through the UI it names). Copy-paste is expected — "
+            + "automatically, instead of asking you to paste."
+            + (writesOn(state)
+                ? ` And because you allowed it, it can carry out a step's commands there when you press ▶ Run and approve the block — only commands starting with ${allow.slice(0, 6).map((a) => `“${a}”`).join(", ")}${allow.length > 6 ? "…" : ""}.`
+                : " It can never run anything that writes."),
+        step2: writesOn(state)
+          ? "Run the commands yourself, or press ▶ Run on a block to have the local runner do it after you approve the exact commands. Read-only checks it does on its own."
+          : "Run the commands in your own terminal (or click through the UI it names). Copy-paste is expected — "
              + "except for read-only checks, which the local runner does for you.",
       }
     : {
@@ -319,6 +331,34 @@ export function annotateSupersededLookups(root) {
   });
 }
 
+// §17.1185 — a ▶ Run button on every shell block of a step's walkthrough when
+// the runner's supervised write channel is open. The button is the operator's
+// verb; the dialog it opens is the approval of the exact commands.
+export function runnableBlocks(root, state = runnerState) {
+  if (!root || !writesOn(state)) return [];
+  const out = [];
+  root.querySelectorAll(".msg.as[data-step] pre.md-pre").forEach((pre) => {
+    if (pre.dataset.superseded || pre.dataset.runnable) return;
+    const lang = pre.querySelector(".md-lang")?.textContent || "";
+    if (lang && !/^(bash|sh|shell)$/i.test(lang)) return;
+    const lines = (pre.querySelector("code")?.textContent || "").split("\n").map((t) => t.trim()).filter((t) => t && !t.startsWith("#"));
+    if (!lines.length) return;
+    out.push(pre);
+  });
+  return out;
+}
+
+export function decorateRunnable(root, state = runnerState) {
+  for (const pre of runnableBlocks(root, state)) {
+    pre.dataset.runnable = "1";
+    const bar = pre.querySelector(".md-pre-bar");
+    if (!bar) continue;
+    bar.insertBefore(el("button", { class: "md-run", type: "button",
+      title: `Run these commands through ${state.name || "the local runner"} after you approve them`,
+      text: "▶ run" }), bar.firstChild);
+  }
+}
+
 export function restartRecovery(turns, detail) {
   const isRestart = /restarted mid-turn|stalled for more than/i.test(detail || "");
   if (!isRestart) return { kind: "generic", text: "" };
@@ -358,7 +398,7 @@ export const ASSIST_HELP = {
     "🩺 Verify state": "Checks what is actually running on your machines against what the plan believes, using one read-only script. Where they disagree, it walks you through the repairs one at a time. Reach for this when a step keeps failing or you're not sure the plan is still accurate.",
     "🔧 Fix error": "Paste the error into the box first, then press this. You get a diagnosis for YOUR environment — the engine reads it against what it already knows about your machines, not a generic answer.",
     "⏩ Skip": "Skips the current step for now. It's recorded and you can come back to it later.",
-    "🤝 Engine does it": "Hands the step to the engine to finish on its own — but only work the engine itself can do (thinking, writing, planning). It will not run anything on your machine for this: the one exception anywhere in the engine is the optional local runner, which only ever runs read-only checks and is listed under Session details when it is connected.",
+    "🤝 Engine does it": "Hands the step to the engine to finish on its own — but only work the engine itself can do (thinking, writing, planning). It will not run anything on your machine for this: the one exception anywhere in the engine is the optional local runner — read-only checks on its own, and (only if you opened the write channel) the commands of a block you approve with ▶ Run — listed under Session details when it is connected.",
     "↶ Restore a reopened step": "If a re-plan or a state check reopened a step you'd already finished, this puts it back to done with the evidence it had. It's refused once you've done more work on that step, so it can't erase real progress.",
     "⏸": "Pauses the session so nothing runs while you step away; press it again to resume right where you left off.",
   },
@@ -371,6 +411,7 @@ export const ASSIST_HELP = {
     { title: "A plan-change proposal", plain: "When something you've told the engine changes what the plan should be, a card opens once showing the change as before → after — what the step says now and what it would say instead. Apply it, Keep the plan as-is, or Decide later. After that it collapses to a small 'Review' chip by the box and won't pop up again." },
     { title: "Why it won't invent values", plain: "The engine refuses to put an IP address, port, version or URL into an instruction unless it came from something you actually showed it. If it doesn't know a value yet, it asks you to run a command that prints it — that's deliberate, so it never sends you to the wrong place." },
     { title: "When the engine can run its own checks", plain: "By default the engine has no way to touch your machines — you run every command. The one exception is the optional local runner: if you set it up (Capabilities → “Let the state check run its own commands”), the engine runs READ-ONLY checks on that machine itself instead of asking you to paste — automatically, up to twice per reply. Every command it runs is refused unless it can only read, and is recorded in this transcript marked [local-runner]. Session details below says whether one is connected right now, and how to disconnect it." },
+    { title: "When the engine can run a step for you", plain: "Only if you opened it: Capabilities → “Let the engine run approved commands” re-installs the local runner with a list of command prefixes you wrote (apt-get install, pct set, …). From then on each command block in the walkthrough has a ▶ Run button. Pressing it shows the exact commands and asks you to approve them; the engine then runs them on that machine, one at a time, stopping at the first failure, and the output lands in this transcript marked [local-runner] as if you had pasted it. Anything not on your list — or anything destructive — is refused before it is sent, and the refusal is shown to you." },
     { title: "What the engine knows about your setup", plain: "As you paste command output, the engine builds a map of your machines — names, addresses, and how traffic reaches them — and shows it in Session details below. That map is what keeps every step pointed at the right machine." },
   ],
 };
@@ -519,6 +560,61 @@ export function renderChat(container, sessionId, opts = {}) {
   let pendingOps = [];
 
   const transcript = el("div", { class: "chat-transcript" }, loading("Loading conversation…"));
+  // §17.1185 — ▶ run on a block: the approval dialog shows the exact commands
+  // (with the step sentinel the copy button would have added), the operator
+  // approves, the engine runs them through the runner and the output comes
+  // back as a turn this view tails like any other.
+  transcript.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".md-run");
+    if (!btn) return;
+    const pre = btn.closest(".md-pre");
+    const code = pre?.querySelector("code");
+    const stepEl = btn.closest("[data-step]");
+    if (!code || !stepEl?.dataset.step) return;
+    let block = code.textContent.replace(/\s+$/, "");
+    if (!/== S:/.test(block)) block = block + "\n" + sentinelFor(stepEl.dataset.step, block);
+    const step = stepEl.dataset.step;
+    const allow = (runnerState.writes && runnerState.writes.allow) || [];
+    await new Promise((resolve) => {
+      let shell, overlay;
+      const finish = () => { shell && shell.close(); overlay && overlay.remove(); resolve(); };
+      const approve = el("button", { class: "btn btn-sm btn-primary", text: `Approve and run on ${runnerState.name || "the runner"}` });
+      const cancel = el("button", { class: "btn btn-sm btn-ghost", text: "Cancel", onClick: finish });
+      const node = el("div", { class: "card card-pad run-approve" },
+        el("div", { class: "run-approve-title", text: `Run step ${step}'s block on ${String(runnerState.endpoint || "your machine").replace(/^https?:\/\//, "").replace(/\/mcp\/?$/, "")}?` }),
+        el("p", { class: "dim", text: "These exact commands run there, in order, as the runner's account"
+          + (runnerState.writes && runnerState.writes.sudo ? " (as root for the allowed ones)" : "")
+          + ", stopping at the first failure. The output lands in this conversation as if you had pasted it." }),
+        el("pre", { class: "run-approve-block" }, el("code", { text: block })),
+        el("p", { class: "dim faint", text: `Allowed prefixes on this runner: ${allow.join("; ") || "(none)"}. Anything else — and anything destructive — is refused before it is sent.` }),
+        el("div", { class: "row row-wrap" }, approve, cancel));
+      approve.addEventListener("click", async () => {
+        approve.disabled = cancel.disabled = true;
+        approve.textContent = "Running…";
+        try {
+          const res = await api.post(`/assist/${sessionId}/run`, { block, node_key: step, history: historyForGuide() });
+          finish();
+          if (res.refused && res.refused.length) {
+            appendBubble("assistant", "note", "⛔ Not run — the engine's gate refused this block before anything was sent:\n\n"
+              + res.refused.map((r) => `- \`${r.command}\` — ${r.why}`).join("\n")
+              + `\n\nAllowed prefixes: ${(res.allow || []).join("; ") || "(none)"}. Run it yourself, or widen the runner's --write-allow list.`);
+            return;
+          }
+          if (res.note) appendBubble("assistant", "note", res.note);
+          if (res.run_id) await runTurnStream(null, res.run_id);
+        } catch (err) {
+          const d = err && err.detail;
+          toast(`Could not run it: ${(d && (d.error || d)) || err.message}${d && d.hint ? ` — ${d.hint}` : ""}`, "err");
+          approve.disabled = cancel.disabled = false;
+          approve.textContent = `Approve and run on ${runnerState.name || "the runner"}`;
+        }
+      });
+      overlay = el("div", { class: "modal-overlay" }, node);
+      overlay.addEventListener("click", (ev) => { if (ev.target === overlay) finish(); });
+      document.body.append(overlay);
+      shell = openDialog(node, { label: "Approve the commands to run", onClose: finish, initialFocus: cancel });
+    });
+  });
   // §17.890 — scroll only while pinned to the bottom; defer transcript
   // re-renders while the operator holds a text selection in it (right-click
   // copy needs the selected nodes to survive until the menu's Copy runs).
@@ -1319,7 +1415,7 @@ export function renderChat(container, sessionId, opts = {}) {
     transcriptRenderDeferred = false;
     // §17.1166 — after whichever mount path below runs (they are synchronous,
     // several of them return early), mark the asks the engine already answered.
-    queueMicrotask(() => annotateSupersededLookups(transcript));
+    queueMicrotask(() => { annotateSupersededLookups(transcript); decorateRunnable(transcript); });
     // §17.1160 — the Follow pane is about ONE step: the one being read (a
     // finished step picked in the rail) or the current one. Its own turns,
     // plus session-level turns (no node) that arrived after its first turn.
@@ -1547,7 +1643,10 @@ export function renderChat(container, sessionId, opts = {}) {
             el("div", { class: "side-fact", text:
               `The engine runs READ-ONLY checks on ${runnerState.endpoint || "your machine"} itself`
               + (runnerState.name ? ` through “${runnerState.name}”` : "")
-              + ", instead of asking you to paste. It can never run a command that writes." }),
+              + ", instead of asking you to paste."
+              + (writesOn()
+                  ? ` With your approval it also runs a block's commands there (▶ Run on a block) — only ones starting with ${(runnerState.writes.allow || []).slice(0, 6).join("; ")}${runnerState.writes.sudo ? ", as root" : ""}.`
+                  : " It can never run a command that writes.") }),
             el("div", { class: "side-fact dim", text:
               runnerState.disable_hint || "Disconnect it from the Capabilities page." }),
             el("a", { class: "btn btn-ghost btn-sm", href: "#/capabilities",
@@ -2014,6 +2113,7 @@ export function renderChat(container, sessionId, opts = {}) {
             appendBubble("assistant", data?.kind || "ask", data?.text || "");
             ephemeralTail.push({ kind: data?.kind || "ask", content: data?.text || "", at: new Date().toISOString() });
             annotateSupersededLookups(transcript);   // §17.1166
+            decorateRunnable(transcript);            // §17.1185
             break;
           case "assist_step_outcome":
             toast(`Step ${data?.node_key || ""}: ${data?.status || "recorded"}.`,
@@ -2043,6 +2143,7 @@ export function renderChat(container, sessionId, opts = {}) {
           case "assist_guide_done":
             if (live) live.classList.remove("streaming");
             if (live && data?.node_key) live.dataset.step = data.node_key;   // §17.1159
+            decorateRunnable(transcript);                                    // §17.1185
             if (acc.trim()) ephemeralTail.push({ kind: "guide", content: acc, at: new Date().toISOString() });
             break;
           case "assist_turn_done":
