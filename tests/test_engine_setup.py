@@ -172,10 +172,14 @@ def test_nudge_only_without_a_runner_and_only_on_a_paste_request(monkeypatch):
 
 
 def test_console_route_nav_and_view_are_wired():
+    # §17.1181 — Capabilities is a Settings tab: the old route still resolves
+    # (into the hub), the hub lazy-loads the view, and the palette page is admin-only.
     app_js = (ROOT / "app" / "ui" / "static" / "app.js").read_text(encoding="utf-8")
+    hub = (ROOT / "app" / "ui" / "static" / "views" / "settings.js").read_text(encoding="utf-8")
     nav = (ROOT / "app" / "ui" / "static" / "nav.js").read_text(encoding="utf-8")
-    assert 'router.route("/capabilities"' in app_js and 'capabilities: lazy("capabilities"' in app_js
-    assert 'path: "/capabilities"' in nav and "adminOnly: true" in nav.split('path: "/capabilities"')[1].split("\n")[0]
+    assert 'router.route("/capabilities"' in app_js and 'router.route("/settings/:tab"' in app_js
+    assert 'capabilities: () => import("./capabilities.js")' in hub and '["capabilities", "Capabilities", true]' in hub
+    assert 'path: "/settings/capabilities"' in nav and "adminOnly: true" in nav.split('path: "/settings/capabilities"')[1].split("\n")[0]
     js = (ROOT / "app" / "ui" / "static" / "views" / "capabilities.js").read_text(encoding="utf-8")
     assert 'api.get("/setup/recipes")' in js and "/setup/recipes/${r.id}/start" in js and "router.navigate(" in js
 
@@ -212,14 +216,15 @@ def test_planner_and_research_honour_the_flag():
 def test_env_endpoint_carries_the_system_map_and_the_console_renders_it():
     """§17.1007c's rule: a field the server emits for the operator must be read by
     the surface that declares it. `system_map` on GET /assist/{sid}/env → the
-    environment card; `assist_gates.crashed` on /health → the dashboard dot's title;
+    environment card; `assist_gates.crashed` on /health → the Status tab's dot title;
     a background-staged `pending_replan` → the idle poll."""
     router = (ROOT / "app" / "routers" / "assist.py").read_text(encoding="utf-8")
     assert '"system_map": system_map' in router and "render_system_map(env)" in router
     js = (ROOT / "app" / "ui" / "static" / "views" / "assist.js").read_text(encoding="utf-8")
     assert "r.system_map" in js and 'class: "side-map"' in js and "conflicts to settle" in js
     assert "idlePoll = setInterval" in js and "renderReplanProposal(s.pending_replan, { open: true" in js and "clearInterval(idlePoll)" in js
-    dash = (ROOT / "app" / "ui" / "static" / "views" / "dashboard.js").read_text(encoding="utf-8")
+    # §17.1181 — the services dots moved from the Dashboard to Settings › Status.
+    dash = (ROOT / "app" / "ui" / "static" / "views" / "status.js").read_text(encoding="utf-8")
     assert "crashed gates:" in dash and "c.crashed" in dash
     css = (ROOT / "app" / "ui" / "static" / "app.css").read_text(encoding="utf-8")
     assert ".side-map-pre" in css

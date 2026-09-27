@@ -75,11 +75,17 @@ export function getCurrent() {
   return current;
 }
 
+/** Re-run the current route's handler (a chrome rebuild after re-auth). */
+export function redispatch() {
+  if (typeof _dispatch === "function") _dispatch({ force: true });
+}
+let _dispatch = null;
+
 export function start() {
-  const dispatch = () => {
+  const dispatch = ({ force = false } = {}) => {
     if (suppressNext) { suppressNext = false; return; }   // the hash restore below
     const path = currentPath();
-    if (current && !navAllowed(navGuard, current.path, path, (msg) => window.confirm(msg))) {
+    if (!force && current && !navAllowed(navGuard, current.path, path, (msg) => window.confirm(msg))) {
       suppressNext = true;
       location.hash = "#" + current.path;
       return;
@@ -93,6 +99,7 @@ export function start() {
       notFound(path);
     }
   };
-  window.addEventListener("hashchange", dispatch);
+  _dispatch = dispatch;
+  window.addEventListener("hashchange", () => dispatch());
   dispatch();
 }

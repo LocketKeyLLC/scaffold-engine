@@ -536,7 +536,7 @@ export function renderChat(container, sessionId, opts = {}) {
     placeholder: "Paste terminal output or describe what happened — or ask anything…",
     rows: "2",
   });
-  const guideBtn = el("button", { class: "btn btn-sm", text: "✦ Guide me", onClick: () => guideCurrent() });
+  const guideBtn = el("button", { class: "btn btn-sm guide-btn", text: "✦ Guide me", onClick: () => guideCurrent() });
   const sendBtn = el("button", { class: "btn btn-sm btn-primary", text: "Send", onClick: () => sendMessage() });
   // Current-step hero — the persistent status layer over the conversation.
   const stepHero = el("div", { class: "card card-pad step-hero hidden" });
@@ -565,7 +565,7 @@ export function renderChat(container, sessionId, opts = {}) {
   // §17.1052 — completion hand-off (the ✓ path and a reload of a finished
   // session both land here; the turn-loop path says the same in its own words).
   function completionText() {
-    return "🎉 **Every step in this plan is done — the project is complete.** The deliverable has been compiled: open the Output tab to read it, or the Plan tab to review what changed along the way.";
+    return "🎉 **Every step in this plan is done — the project is complete.** The deliverable has been compiled: open the Output stage to read it, or the Plan stage to review what changed along the way.";
   }
   function renderCompletionCard() {
     if (!completeSlot || completeSlot.querySelector(".assist-complete")) return;
@@ -574,7 +574,7 @@ export function renderChat(container, sessionId, opts = {}) {
       el("strong", { text: "🎉 Job complete" }),
       el("span", { class: "dim", text: " — every step is done and the deliverable is compiled." }),
       el("span", { class: "spacer" }),
-      jid ? el("a", { class: "btn btn-primary btn-sm", href: `#/job/${jid}/output`, text: "View output →" }) : null,
+      jid ? el("a", { class: "btn btn-primary btn-sm", href: `#/job/${jid}/output`, text: "Read the output →" }) : null,
       jid ? el("a", { class: "btn btn-ghost btn-sm", href: `#/job/${jid}/plan`, text: "Review the plan" }) : null);
     completeSlot.append(card);
     // the hub's status pill was rendered once from the job row — tell it.
@@ -912,8 +912,13 @@ export function renderChat(container, sessionId, opts = {}) {
   const focusChip = el("div", { class: "follow-focus hidden" });
   const scopeAll = el("button", { type: "button", text: "Whole conversation" });
   const scopeStep = el("button", { type: "button", text: "This step" });
+  // On a phone the rail would eat the screen (the conversation got ~150 px):
+  // there the rail is a SHEET, closed by default, opened from this button,
+  // which names where you are. Desktop never shows the button (CSS).
+  const sheetBtn = el("button", { class: "btn btn-sm btn-ghost follow-sheet-btn", type: "button", "aria-expanded": "false", text: "Plan ▾",
+    onClick: () => { const on = main.classList.toggle("rail-open"); sheetBtn.setAttribute("aria-expanded", on ? "true" : "false"); } });
   const paneHead = el("div", { class: "follow-pane-head" },
-    el("span", { text: "Conversation" }), el("span", { class: "spacer" }),
+    sheetBtn, el("span", { class: "follow-pane-title", text: "Conversation" }), el("span", { class: "spacer" }),
     el("div", { class: "follow-scope", role: "group", "aria-label": "What the conversation shows" }, scopeAll, scopeStep));
   function setScope(v) {
     followScope = v;
@@ -1067,7 +1072,11 @@ export function renderChat(container, sessionId, opts = {}) {
     const head = el("div", { class: "follow-rail-head" },
       el("span", { class: "follow-rail-count", text: `${m.doneCount} of ${m.total} done` }),
       el("span", { class: "spacer" }),
-      el("a", { class: "small dim", href: `#/job/${session.job_id}/full`, text: "Full view", title: "The classic walkthrough page: step card, whole-session transcript, every action, and the other tabs" }));
+      el("button", { class: "btn btn-sm btn-ghost follow-sheet-close", type: "button", text: "✕", "aria-label": "Close the plan",
+        onClick: () => { main.classList.remove("rail-open"); sheetBtn.setAttribute("aria-expanded", "false"); } }));
+    sheetBtn.textContent = m.current ? `Step ${m.doneCount + 1} of ${m.total} ▾` : `${m.doneCount} of ${m.total} done ▾`;
+    // a tap on a step in the sheet closes it — the conversation is the point
+    if (main.classList.contains("rail-open")) rail.addEventListener("click", (e) => { if (e.target.closest(".follow-step")) { main.classList.remove("rail-open"); sheetBtn.setAttribute("aria-expanded", "false"); } }, { once: true });
     const foot = rail.querySelector(".follow-rail-foot");
     const body = el("div", { class: "follow-rail-body" },
       m.doneHidden ? railFold(m.doneHidden, "done", () => { railExpandDone = true; renderRail(); }) : null,
@@ -1161,8 +1170,8 @@ export function renderChat(container, sessionId, opts = {}) {
             },
           }) : null,
         embedded ? el("button", { class: "btn btn-ghost btn-sm", title: "Reload the conversation and step state", "aria-label": "Reload the conversation and step state", text: "↻", onClick: () => load() }) : null),
-      el("div", { class: "plan-bar", title: `${done} of ${total} steps finished` },
-        el("div", { class: "plan-bar-fill", style: `width:${pct}%` })),
+      el("div", { class: "plan-bar", title: `${done} of ${total} steps finished` },   // width set below via CSSOM (CSP forbids a style attribute)
+        Object.assign(el("div", { class: "plan-bar-fill" }), { _w: pct })),
       el("div", { class: "plan-strip-now" },
         pos.prev
           ? el("div", { class: "plan-step plan-prev", title: pos.prev.title || "" },
@@ -1189,6 +1198,8 @@ export function renderChat(container, sessionId, opts = {}) {
             renderStepPicker(nk))
         : null
     );
+    const fill = stepHero.querySelector(".plan-bar-fill");
+    if (fill) fill.style.width = `${fill._w || 0}%`;
   }
 
   composerText.addEventListener("keydown", (e) => {
@@ -1419,7 +1430,7 @@ export function renderChat(container, sessionId, opts = {}) {
     // one muted line, the list behind a click.
     if (!openN) {
       const doneList = el("details", { class: "checklist-done" },
-        el("summary", { class: "side-title", text: `Nothing needed from you right now · ${checkItems.length} provided` }),
+        el("summary", { class: "side-title checklist-quiet", text: `Nothing needed from you right now · ${checkItems.length} answered` }),
         ...checkItems.map((it) => el("div", { class: "side-check" },
           el("span", { class: "check-dot done", text: "✓" }),
           el("span", { class: "check-text dim" }, `${it.title || it.node_key}`,
@@ -1854,6 +1865,7 @@ export function renderChat(container, sessionId, opts = {}) {
     }
     guiding = true;
     guideBtn.textContent = "■ Stop";
+    guideBtn.classList.add("guiding");
     sendBtn.disabled = true;
     let sawDone = false, stoppedByUser = false;   // §17.1082
     abort = new AbortController();
@@ -1893,7 +1905,7 @@ export function renderChat(container, sessionId, opts = {}) {
         statusEl = el("div", { class: "msg sys" },
           el("div", { class: "msg-body dim" },
             el("span", { class: "assist-pulse", dataset: { state: "live" }, title: "Blinks each time the engine reports progress" }),
-            el("span", { class: "spin", style: "vertical-align:middle;margin-right:8px" }), el("span", { class: "status-text" })));
+            el("span", { class: "spin status-spin" }), el("span", { class: "status-text" })));
         transcript.append(statusEl);
         statusTimer = setInterval(paintStatus, 1000);
       }
@@ -2033,6 +2045,7 @@ export function renderChat(container, sessionId, opts = {}) {
       abort = null;
       sendBtn.disabled = false;
       guideBtn.textContent = "✦ Guide me";
+      guideBtn.classList.remove("guiding");
       clearStatusLine();
       if (live) live.classList.remove("streaming");
       // §17.1082 — the stream closed without a terminal frame and nobody

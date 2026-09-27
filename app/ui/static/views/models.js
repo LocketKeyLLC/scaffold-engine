@@ -35,7 +35,8 @@ const PROVIDER_HELP = {
     "inference. To run a HF model locally instead, pull its GGUF into Ollama.",
 };
 
-export default function models(container) {
+export default function models(container, params, opts = {}) {
+  const embedded = !!(opts && opts.embedded);
   const isAdmin = api.principal()?.is_admin !== false;
   let disposed = false;
   // provider name → string[] of model ids. Populated lazily; null = failed.
@@ -72,6 +73,7 @@ export default function models(container) {
   }
 
   function header() {
+    if (embedded) return el("p", { class: "dim hub-lede", text: "Connect a backend, then choose which model serves each engine role. Persisted engine-wide; survives a restart. New install? The setup wizard walks you through it." });
     return el(
       "div",
       { class: "view-header" },

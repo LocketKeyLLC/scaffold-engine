@@ -77,7 +77,7 @@ test("no current step: finished steps before, pending after; empty input is safe
   assert.deepEqual([e.done, e.ahead, e.current, e.total], [[], [], null, 0]);
 });
 
-test("the hub knows the follow tab", () => {
+test("the job page knows the follow pane", () => {
   assert.ok(KNOWN_TABS.includes("follow") && KNOWN_TABS.includes("full"));   // §17.1161 — run IS follow; full is the classic page
   assert.equal(resolveTab("follow"), "follow");
   assert.equal(resolveTab("run"), "run");

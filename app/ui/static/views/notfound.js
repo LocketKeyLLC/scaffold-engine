@@ -23,8 +23,7 @@ export default function render(container, params) {
       el("p", { text: notFoundMessage(path) }),
       el("p", { class: "muted", text: "If you followed a link inside a chat reply or a notification, that link is out of date — the job pages live under #/job/<id>." }),
       el("div", { class: "row gap" },
-        el("a", { href: "#/", class: "btn btn-primary", text: "Dashboard" }),
-        el("a", { href: "#/jobs", class: "btn", text: "Jobs" })
+        el("a", { href: "#/", class: "btn btn-primary", text: "Home" })
       )
     )
   );

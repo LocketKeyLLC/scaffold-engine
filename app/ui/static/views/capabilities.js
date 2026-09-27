@@ -18,13 +18,16 @@ const STATUS_LABEL = {
 // running (blue), blocked/manual → awaiting (amber), off → plain.
 const STATUS_CLASS = { on: "st-completed", in_progress: "st-running", blocked: "st-blocked", manual: "st-awaiting_reply", off: "plain" };
 
-export default function capabilities(container) {
+export default function capabilities(container, params, opts = {}) {
+  const embedded = !!(opts && opts.embedded);
   let disposed = false;
   const body = el("div", {});
   mount(container,
-    el("div", { class: "view-header" },
-      el("h1", { text: "Capabilities" }),
-      el("div", { class: "sub", text: "Optional parts of the engine that ship switched off. Each one can walk you through turning it on, step by step, checking your output as you go." })),
+    embedded
+      ? el("p", { class: "dim hub-lede", text: "Optional parts of the engine that ship switched off. Each one can walk you through turning it on, step by step, checking your output as you go." })
+      : el("div", { class: "view-header" },
+          el("h1", { text: "Capabilities" }),
+          el("div", { class: "sub", text: "Optional parts of the engine that ship switched off. Each one can walk you through turning it on, step by step, checking your output as you go." })),
     body);
 
   async function load() {
@@ -43,18 +46,20 @@ export default function capabilities(container) {
 
   function card(r, byId) {
     const badge = el("span", { class: `badge ${STATUS_CLASS[r.status] || "plain"}`, text: STATUS_LABEL[r.status] || r.status });
-    const head = el("div", { style: "display:flex;justify-content:space-between;gap:12px;align-items:flex-start" },
-      el("h3", { style: "margin:0;font-size:var(--fs-md)", text: r.title }), badge);
+    // No inline style attributes: the strict CSP (style-src 'self') blocks them
+    // (it logged a violation on every open) — classes in app.css instead.
+    const head = el("div", { class: "cap-head" },
+      el("h3", { class: "cap-title", text: r.title }), badge);
     const parts = [head,
-      el("p", { style: "margin:8px 0 4px", text: r.summary }),
-      el("p", { class: "sub", style: "margin:0 0 6px", text: "Why it is off: " + r.why_off }),
-      el("p", { class: "sub", style: "margin:0 0 6px", text: r.status_detail || "" }),
+      el("p", { class: "cap-summary", text: r.summary }),
+      el("p", { class: "sub cap-line", text: "Why it is off: " + r.why_off }),
+      el("p", { class: "sub cap-line", text: r.status_detail || "" }),
     ];
     if (r.requires && r.requires.length) {
-      parts.push(el("p", { class: "sub", style: "margin:0 0 6px",
+      parts.push(el("p", { class: "sub cap-line",
         text: "Needs first: " + r.requires.map((id) => (byId[id] && byId[id].title) || id).join(", ") }));
     }
-    const actions = el("div", { style: "display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap" });
+    const actions = el("div", { class: "row row-wrap cap-actions" });
     if (r.status === "in_progress" && r.job_id) {
       actions.append(el("a", { class: "btn btn-primary", href: `#/job/${r.job_id}`, text: "Continue the walkthrough" }));
     } else if (r.status === "on") {
@@ -81,7 +86,7 @@ export default function capabilities(container) {
       toast("Walkthrough opened — the engine is reading the brief. Approve it with Assist on when it is ready.", "ok");
       // Same landing as a submitted idea: the job hub's Overview embeds the
       // approval gate while the brief refines.
-      router.navigate(res && res.job_id ? `/job/${res.job_id}` : "/capabilities");
+      router.navigate(res && res.job_id ? `/job/${res.job_id}` : "/settings/capabilities");
     } catch (e) {
       btn.disabled = false;
       btn.textContent = label;

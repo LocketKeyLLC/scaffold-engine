@@ -7,8 +7,8 @@ import { jobStore } from "../store.js";
 import * as router from "../router.js";
 import { el, mount, shortId, timeAgo, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState, askConfirm } from "../components.js";
-import { flowGuide } from "./flow_guide.js";
-import { isAssist, startAssistFor, onExecModeChange } from "../exec_mode.js";
+import { deliverableLabel } from "../vocab.js";
+import { isAssist, startAssistFor, onExecModeChange, setExecMode } from "../exec_mode.js";
 
 // §17.1113 (ledger U-2) — the approve chain's outcome, typed. Exported for the
 // node tests: the bug this replaces was a null outcome read as success.
@@ -343,7 +343,24 @@ export function renderApprovalDetail(container, jobId) {
   // label now states the WHOLE destination, so the button never under-promises.
   const approveTail = () =>
     isAssist() ? " — research, plan & start the walkthrough" : " — research & plan";
+  // §17.853 / UX overhaul — the Auto/Assist choice is made HERE, where it is
+  // taken, as two labelled options; it used to be a sidebar toggle the gate
+  // silently read. Both write the same per-browser mode.
+  const modeBtn = (value, label, title) => {
+    const b = el("button", { class: "btn btn-sm mode-choice", text: label, title, "aria-pressed": "false" });
+    b.addEventListener("click", () => { setExecMode(value); refreshApproveLabel(); });
+    return b;
+  };
+  const modeAssist = modeBtn("assist", "✦ Walk me through it", "You run each step on your machines with the engine guiding, verifying and adapting. It never touches your hardware.");
+  const modeAuto = modeBtn("auto", "▶ Let the engine run it", "The engine works every step itself and produces runbooks, configs and code. It still never connects to your machines.");
+  const modeRow = el("div", { class: "row row-wrap mode-row" },
+    el("span", { class: "dim", text: "After approval:" }), modeAssist, modeAuto);
+  const refreshModeRow = () => {
+    modeAssist.classList.toggle("btn-primary", isAssist()); modeAssist.setAttribute("aria-pressed", isAssist() ? "true" : "false");
+    modeAuto.classList.toggle("btn-primary", !isAssist()); modeAuto.setAttribute("aria-pressed", !isAssist() ? "true" : "false");
+  };
   const refreshApproveLabel = () => {
+    refreshModeRow();
     approveBtn.textContent =
       (qa && qa.collect() ? "✓ Approve with answers" : "✓ Approve") + approveTail();
     // Auto-run is an AUTO-mode concept: in Assist mode the walkthrough IS the
@@ -452,7 +469,6 @@ export function renderApprovalDetail(container, jobId) {
         stopWaitPoll();
         waitingShown = false;
         refreshApproveLabel(); // §17.895 — mode-correct label on every render
-        const fg = flowGuide(job, { here: `#/job/${jobId}` });
         const brief = job.refined_brief || {};
         const feas = job.feasibility || {};
         // Verdict chips: the go/no-go signal belongs at the top, not inside
@@ -473,15 +489,12 @@ export function renderApprovalDetail(container, jobId) {
         const advice = confidenceAdvice(feas.confidence);
         mount(
           outlet,
-          fg,
           el(
             "div",
             { class: "row row-wrap" },
-            statusBadge(st),
-            el("h2", { class: "approval-title", text: job.title || "(untitled)" }),
             verdict,
-            brief.complexity ? el("span", { class: "tag", text: `complexity: ${brief.complexity}` }) : null,
-            job.deliverable_kind ? el("span", { class: "tag", text: job.deliverable_kind }) : null
+            brief.complexity ? el("span", { class: "tag", text: `${brief.complexity} complexity` }) : null,
+            job.deliverable_kind ? el("span", { class: "tag", text: deliverableLabel(job.deliverable_kind) }) : null
           ),
           advice, // §17.1007 — what this confidence means for what you do next
           // 1. What the engine understood + its assessment — prose first.
@@ -501,6 +514,7 @@ export function renderApprovalDetail(container, jobId) {
           progress,
           // §17.1007 — three ways forward, weighted: approve leads, "send back"
           // is the ordinary second answer, cancel is the quiet last resort.
+          modeRow,
           el("div", { class: "drawer-actions approval-actions" }, approveBtn, reviseBtn, autoRunLabel, el("span", { class: "spacer" }), rejectBtn),
           reviseBox,
           // 4. Reference material last, collapsed with counts.
@@ -529,7 +543,6 @@ export function renderApprovalDetail(container, jobId) {
         if (!waitingShown) {
           mount(
             outlet,
-            el("div", { class: "row" }, statusBadge(st), el("h2", { class: "approval-title", text: job.title || "(untitled)" })),
             el(
               "div",
               { class: "approval-progress" },
@@ -546,7 +559,7 @@ export function renderApprovalDetail(container, jobId) {
             // the console never said which was which, so operators learned to
             // sit and stare at both.
             waitMeta,
-            el("p", { class: "dim wait-leave" }, "Safe to close this tab — the job keeps going, and it'll be here when you come back."),
+            el("p", { class: "dim wait-leave" }, "Safe to leave — the job keeps going, and Home will say when it needs you."),
             job.input_text ? el("div", { class: "card card-pad brief-block" }, el("h3", { class: "brief-heading", text: "Original request" }), el("div", { class: "md", html: mdToHtml(job.input_text) })) : null,
             el("div", { class: "drawer-actions" }, rejectBtn)
           );
@@ -562,12 +575,10 @@ export function renderApprovalDetail(container, jobId) {
       waitingShown = false;
       mount(
         outlet,
-        flowGuide(job),
         el(
           "div",
           { class: "card card-pad" },
-          el("div", { class: "row" }, statusBadge(st), el("h2", { class: "approval-title", text: job.title || "(untitled)" })),
-          el("p", { class: "dim", text: `This job has moved past the approval gate (status: ${st}).` }),
+          el("p", { class: "dim", text: "This job is past the approval gate." }),
           // §17.843 — receipt: the answers as the SERVER received them.
           job.user_feedback
             ? el(
@@ -580,7 +591,7 @@ export function renderApprovalDetail(container, jobId) {
           el(
             "div",
             { class: "drawer-actions" },
-            (job.node_count || 0) > 0 ? el("a", { class: "btn btn-sm btn-primary", href: `#/job/${jobId}/plan`, text: "Open plan editor" }) : null,
+            (job.node_count || 0) > 0 ? el("a", { class: "btn btn-sm btn-primary", href: `#/job/${jobId}/plan`, text: "Open the plan" }) : null,
             job.has_compiled_output ? el("a", { class: "btn btn-sm", href: `#/job/${jobId}/output`, text: "View output" }) : null
           )
         )
@@ -693,7 +704,7 @@ export function renderApprovalDetail(container, jobId) {
         toast("Approved — plan generated. Starting execution…", "ok");
         router.navigate(`/job/${jobId}/run`);
       } else {
-        toast("Approved — plan generated. Edit before executing.", "ok");
+        toast("Approved — the plan is drawn. Review it, then start.", "ok");
         router.navigate(`/job/${jobId}/plan`);
       }
     } catch (e) {
@@ -781,7 +792,7 @@ export function renderApprovalDetail(container, jobId) {
       await api.post(`/jobs/${jobId}/cancel`, {});
       if (disposed) return;
       toast("Job cancelled.", "ok");
-      router.navigate("/approvals");
+      router.navigate("/");
     } catch (e) {
       if (!disposed) {
         toast(`Cancel failed: ${e.detail || e.message}`, "err");

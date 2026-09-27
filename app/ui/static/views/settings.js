@@ -1,113 +1,68 @@
-// §17.816 (plan 5.4c) — Settings view: READ-ONLY effective config inventory
-// over GET /config (name, live value w/ server-side secret redaction, type,
-// default, overridden-vs-default, description). Editing stays with env/compose
-// per the plan ("read-only effective config first, editable knobs later").
+// Settings — everything that is not a job, behind one gear. Models,
+// Capabilities, Status (services + model roles, once the Dashboard's bottom
+// half), Costs, Traces, Alerts, Config (the read-only effective config) and
+// Preferences (theme, density, alerts, sign-out — once the sidebar footer).
+// Each tab is the existing view rendered in embedded mode.
 import * as api from "../api.js";
 import { el, mount } from "../util.js";
-import { errorPanel, loading } from "../components.js";
+import { loading, errorPanel } from "../components.js";
+import { hubTabs } from "./knowledge.js";
 
-export default function settings(container) {
+// [key, label, adminOnly]
+export const TABS = [
+  ["models", "Models", true],
+  ["capabilities", "Capabilities", true],
+  ["status", "Status", false],
+  ["costs", "Costs", false],
+  ["traces", "Traces", true],
+  ["alerts", "Alerts", true],
+  ["config", "Config", true],
+  ["preferences", "Preferences", false],
+];
+export const TAB_ALIASES = { model: "models", roles: "models", connections: "models", health: "status", services: "status", cost: "costs", trace: "traces", alert: "alerts", settings: "config", prefs: "preferences", theme: "preferences" };
+
+export function visibleTabs(isAdmin) {
+  return TABS.filter(([, , admin]) => !admin || isAdmin).map(([k, l]) => [k, l]);
+}
+export function resolveTab(raw, isAdmin = true) {
+  const t = TAB_ALIASES[raw] || raw;
+  const vis = visibleTabs(isAdmin);
+  if (vis.some(([k]) => k === t)) return t;
+  return vis[0][0];
+}
+
+const LOADERS = {
+  models: () => import("./models.js"),
+  capabilities: () => import("./capabilities.js"),
+  status: () => import("./status.js"),
+  costs: () => import("./costs.js"),
+  traces: () => import("./traces.js"),
+  alerts: () => import("./alerts.js"),
+  config: () => import("./config.js"),
+  preferences: () => import("./preferences.js"),
+};
+
+export default function settings(container, params) {
+  // §17.815 — unknown principal (pre-§17.815 server) fails open to admin; the
+  // server still enforces authz on every write.
+  const isAdmin = api.principal()?.is_admin !== false;
+  const tab = resolveTab(params && params.tab, isAdmin);
   let disposed = false;
-  let all = [];
-
-  const filter = el("input", {
-    class: "input settings-filter",
-    placeholder: "Filter by name / description… (e.g. assist_, research_, model_)",
-  });
-  const onlyOverridden = el("input", { type: "checkbox" });
-  const countEl = el("span", { class: "faint" });
-  const tableBox = el("div", {});
-
-  function render() {
-    if (disposed) return;
-    const q = filter.value.trim().toLowerCase();
-    const rows = all.filter((f) => {
-      if (onlyOverridden.checked && f.is_default) return false;
-      if (!q) return true;
-      return f.name.toLowerCase().includes(q) || (f.description || "").toLowerCase().includes(q);
-    });
-    countEl.textContent = ` ${rows.length} / ${all.length} settings`;
-    mount(
-      tableBox,
-      el(
-        "table",
-        { class: "table settings-table" },
-        el(
-          "thead",
-          {},
-          el(
-            "tr",
-            {},
-            el("th", { text: "Setting" }),
-            el("th", { text: "Value" }),
-            el("th", { text: "Default" }),
-            el("th", { text: "" })
-          )
-        ),
-        el(
-          "tbody",
-          {},
-          ...rows.slice(0, 400).map((f) =>
-            el(
-              "tr",
-              { title: f.description || "" },
-              el("td", {}, el("code", { text: f.name })),
-              el("td", { class: "settings-val" }, el("code", { text: String(f.value) })),
-              el("td", { class: "settings-val faint" }, el("code", { text: String(f.default) })),
-              el("td", {}, f.is_default ? null : el("span", { class: "badge warn", text: "overridden" }))
-            )
-          )
-        )
-      )
-    );
-  }
-
-  async function load() {
-    mount(tableBox, loading("Loading effective config…"));
-    try {
-      const res = await api.get("/config");
-      all = res.fields || res.settings || [];
-      render();
-    } catch (e) {
-      mount(tableBox, errorPanel(e, load));
-    }
-  }
-
-  filter.addEventListener("input", render);
-  onlyOverridden.addEventListener("change", render);
-
+  let childDispose = null;
+  const outlet = el("div", { class: "hub-outlet" }, loading("Loading…"));
   mount(
     container,
-    el(
-      "div",
-      { class: "view-header" },
-      el(
-        "div",
-        {},
-        el("h1", { text: "Settings" }),
-        el("div", {
-          class: "sub",
-          text: "Read-only effective configuration (secrets redacted server-side). Hover a row for its description; change values via .env / compose and restart.",
-        })
-      )
-    ),
-    el(
-      "div",
-      { class: "card card-pad" },
-      el(
-        "div",
-        { class: "row settings-controls" },
-        filter,
-        el("label", { class: "row faint settings-check" }, onlyOverridden, " only overridden"),
-        countEl
-      )
-    ),
-    tableBox
+    el("div", { class: "view-header" },
+      el("div", {}, el("h1", { text: "Settings" }), el("div", { class: "sub", text: "Models, optional capabilities, the engine's health, spend, and this browser's preferences." }))),
+    hubTabs(visibleTabs(isAdmin), tab, (k) => `#/settings/${k}`),
+    outlet
   );
-  load();
-  filter.focus();
-
-  return () => {
-    disposed = true;
-  };
+  LOADERS[tab]().then((mod) => {
+    if (disposed) return;
+    childDispose = mod.default(outlet, params || {}, { embedded: true });
+  }).catch((e) => {
+    console.error(`[ui] failed to load settings tab "${tab}":`, e);
+    if (!disposed) mount(outlet, errorPanel(e));
+  });
+  return () => { disposed = true; if (typeof childDispose === "function") childDispose(); };
 }

@@ -35,7 +35,7 @@ SPA = ROOT / "app" / "ui" / "static"
 # The audited timers. Adding a setInterval to the SPA without adding it here
 # fails test_every_timer_is_registered — which is the point.
 POLL_REGISTRY: dict[tuple[str, str], dict] = {
-    ("dashboard.js", "setInterval(() => { if (!document.hidden) load(); }, 10000)"): {"guard": "document.hidden", "renders": True, "opens_modal": False},
+    ("home.js", "setInterval(() => { if (!document.hidden) load(); }, 10000)"): {"guard": "document.hidden", "renders": True, "opens_modal": False},
     ("approvals.js", "setInterval(() => { if (!document.hidden) load(); }, 10000)"): {"guard": "document.hidden", "renders": True, "opens_modal": False},
     ("approvals.js", "setInterval(() => { if (!document.hidden) load(); }, 4000)"): {"guard": "stopWaitPoll", "renders": True, "opens_modal": False},
     ("approvals.js", "setInterval(pollStatus, 2500)"): {"guard": "no-remount", "renders": False, "opens_modal": False},

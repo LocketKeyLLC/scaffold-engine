@@ -2,6 +2,7 @@
 import { el } from "./util.js";
 import * as api from "./api.js";
 import { filterRenderable, actionLabel, actionTarget } from "./next_actions.js";
+import { statusLabel } from "./vocab.js";
 
 /**
  * §17.854 (audit G6) — make a non-button element behave like a button for
@@ -24,10 +25,13 @@ export function makeClickable(node, handler, { role = "button", label } = {}) {
   return node;
 }
 
-/** Status pill. Adds `st-<status>` for the color mapping in app.css. */
+/** Status pill. Adds `st-<status>` for the color mapping in app.css; the
+ *  words come from the operator vocabulary (vocab.js), never the raw enum
+ *  (`assisted_running` read as "assisted running" on every surface). The
+ *  enum stays on the title for anyone who needs it. */
 export function statusBadge(status) {
   const s = status || "unknown";
-  return el("span", { class: `badge st-${s}`, text: s.replace(/_/g, " ") });
+  return el("span", { class: `badge st-${s}`, text: statusLabel(s), title: s });
 }
 
 /** A labelled stat tile. `opts.accent` sets a color class; `opts.onClick` makes it clickable. */
@@ -139,8 +143,12 @@ export function toast(msg, kind = "", opts = {}) {
 /** §17.1134 (ledger D-6) — render a job's `next_actions` as chips: navigation
  *  to the hub tab where the verb lives, or the id-in-path call the registry
  *  spells out (destructive ones confirm first). Noise ("wait") is filtered. */
-export function nextActionChips(actions, { jobId, limit = 3, onDone } = {}) {
-  const list = filterRenderable(actions).slice(0, limit);
+export function nextActionChips(actions, { jobId, limit = 3, onDone, kinds = null } = {}) {
+  // `kinds`: restrict to ["call"] where a row already has its own navigation
+  // button (Home) — a "Next step" chip beside "Continue →" is the same door twice.
+  const list = filterRenderable(actions)
+    .filter((a) => !kinds || kinds.includes(actionTarget(a, jobId).kind))
+    .slice(0, limit);
   if (!list.length) return null;
   return el("div", { class: "row row-wrap next-actions" }, ...list.map((a) => {
     const t = actionTarget(a, jobId);

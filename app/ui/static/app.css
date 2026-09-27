@@ -65,7 +65,7 @@
   /* Keyboard focus ring (applied via :focus-visible only, never on mouse). */
   --focus-outline: 2px solid var(--accent);
 
-  --sidebar-w: 220px;
+  --sidebar-w: 64px;   /* the rail (UX overhaul) */
 
   /* Density — component paddings driven by [data-density] on <html>
      (persisted toggle, sidebar foot). Comfortable is the default; the
@@ -190,126 +190,56 @@ a:hover { text-decoration: underline; }
 .gate-hint { margin-top: 16px; color: var(--text-faint); font-size: 12px; }
 .gate-alt { margin-top: 12px; }
 
-/* ── Shell layout ─────────────────────────────────────────────────── */
+/* ── Shell layout: the rail ───────────────────────────────────────
+   UX overhaul (2026-09-27). One 64 px rail — three places, the current job,
+   the theme, a small menu — instead of a 220 px sidebar with 19 destinations.
+   On phones (≤820px) the same rail is a bottom bar. */
 .shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
   height: 100%;
 }
-/* Mobile-only chrome — revealed by the ≤820px block near the end of the sheet. */
-.mobile-topbar, .scrim, .hamburger, .mobile-note { display: none; }
-.sidebar {
+.mobile-note { display: none; }
+.rail {
   background: var(--bg-elev);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  padding: 16px 12px;
-  gap: 8px;
+  align-items: stretch;
+  padding: 10px 6px;
+  gap: 6px;
 }
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px 14px;
-  font-weight: 600;
-  font-size: 16px;
+.rail-brand { display: flex; justify-content: center; padding: 4px 0 10px; }
+.rail-brand .brand-logo { width: 24px; height: 24px; display: block; }
+.rail-nav { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.rail-link {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 8px 2px; border-radius: var(--radius-sm);
+  color: var(--text-dim); text-decoration: none; font-size: 10.5px; font-weight: var(--fw-semi);
+  letter-spacing: 0.02em;
 }
-.brand-logo { width: 22px; height: 22px; display: block; }
-/* §17.896 — pinned Current-job block: the DAG's front door. Sits between the
-   brand and the nav so a job's three working surfaces are reachable from every
-   screen without going back through Jobs. Hidden when nothing is pinned. */
-.job-pin {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 9px 10px 10px;
-  margin-bottom: 4px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev-2);
+.rail-link:hover { background: var(--bg-elev-2); color: var(--text); text-decoration: none; }
+.rail-link.active { background: var(--accent-soft); color: var(--accent); }
+.rail-icon { font-size: 18px; line-height: 1; }
+.rail-job-slot[hidden] { display: none; }
+.rail-job { margin-top: 6px; border-top: 1px solid var(--border); border-radius: 0 0 var(--radius-sm) var(--radius-sm); padding-top: 10px; }
+.rail-foot { display: flex; flex-direction: column; align-items: center; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); }
+.rail-btn {
+  width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center;
+  font: inherit; font-size: 15px; line-height: 1; cursor: pointer;
+  background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--text-dim);
 }
-.job-pin.hidden { display: none; }
-.job-pin-label {
-  font-size: 10.5px;
-  font-weight: var(--fw-semi);
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--text-faint);
+.rail-btn:hover { background: var(--bg-elev-2); color: var(--text); }
+.rail-menu { position: relative; }
+.rail-menu > summary { list-style: none; }
+.rail-menu > summary::-webkit-details-marker { display: none; }
+.rail-menu-body {
+  position: absolute; left: 44px; bottom: 0; z-index: 45; min-width: 220px;
+  display: flex; flex-direction: column; gap: 8px; padding: 12px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow);
 }
-.job-pin-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text);
-  line-height: 1.3;
-  /* Long titles must not blow out the sidebar's fixed column. */
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.job-pin-title:hover { color: var(--accent); text-decoration: none; }
-.job-pin-links { display: flex; gap: 3px; }
-.job-pin-link {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 1;
-  justify-content: center;
-  padding: 4px 2px;
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-.job-pin-link:hover { background: var(--bg-elev); color: var(--text); text-decoration: none; }
-.job-pin-link.active { background: var(--accent-soft); color: var(--accent); }
-.job-pin-icon { font-size: 12px; }
-
-.nav { display: flex; flex-direction: column; gap: 2px; flex: 1; overflow-y: auto; min-height: 0; }
-/* Grouped nav (UI design phase): section label + its links. */
-.nav-group { display: flex; flex-direction: column; gap: 1px; }
-.nav-group + .nav-group { margin-top: 10px; }
-.nav-group-label {
-  padding: 0 12px 3px;
-  font-size: 10.5px;
-  font-weight: var(--fw-semi);
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--text-faint);
-}
-/* Collapsible groups — the label is a toggle button; collapsed hides the
-   group's links. Chevron rotates when open. */
-.nav-group-toggle {
-  display: flex; align-items: center; gap: 6px;
-  background: none; border: none; cursor: pointer; text-align: left;
-  width: 100%;
-}
-.nav-group-toggle:hover { color: var(--text); }
-.nav-group-chevron { display: inline-block; transition: transform 0.12s ease; font-size: 9px; }
-.nav-group:not(.collapsed) .nav-group-chevron { transform: rotate(90deg); }
-.nav-group.collapsed .nav-link { display: none; }
-.nav-link {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: var(--nav-pad-y) 12px;
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  font-weight: 500;
-}
-.nav-link:hover { background: var(--bg-elev-2); color: var(--text); text-decoration: none; }
-.nav-link.active { background: var(--accent-soft); color: var(--accent); }
-.nav-icon { width: 18px; text-align: center; font-size: 15px; }
-.sidebar-foot {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-/* Theme + density toggles (persisted; theme_boot.js applies them pre-paint). */
-.foot-controls { display: flex; gap: 6px; }
-.foot-controls .btn { flex: 1; padding: 3px 6px; font-size: var(--fs-2xs); white-space: nowrap; }
+.rail-menu-body .btn { justify-content: flex-start; text-align: left; }
+.rail-collapse { font-size: 13px; color: var(--text-faint); }
 .health { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
 .health-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-faint); }
 .health-dot[data-state="up"] { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
@@ -320,6 +250,56 @@ a:hover { text-decoration: underline; }
   overflow-y: auto;
   padding: var(--content-pad-y) var(--content-pad-x);
 }
+
+/* ── Hubs (Knowledge, Settings): a page header, a tab strip, the tab ── */
+.hub-outlet { min-height: 200px; }
+.hub-lede { margin: 0 0 14px; font-size: var(--fs-sm); max-width: 78ch; }
+.hub-lede-row { margin-bottom: 14px; }
+.hub-lede-row .hub-lede { margin: 0; }
+
+/* ── Home: jobs as next actions ───────────────────────────────────── */
+.home-head { margin-bottom: 14px; }
+.home-notices { display: flex; flex-direction: column; gap: 8px; }
+.home-notices:empty { display: none; }
+.home-notice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px; font-size: var(--fs-sm); color: var(--text-dim); margin-bottom: 10px; }
+.home-notice.warn { border-color: rgba(210, 153, 34, 0.45); }
+.home-notice > span { flex: 1; min-width: 200px; }
+.home-toolbar { margin: 4px 0 14px; gap: 8px; }
+.home-chips { gap: 6px; }
+.home-chip { border-radius: 999px; }
+.home-search { max-width: 240px; margin-top: 0; }
+.home-list { display: flex; flex-direction: column; gap: 10px; }
+.home-row {
+  display: flex; align-items: center; gap: 14px; padding: 14px 16px; cursor: pointer;
+  transition: border-color var(--dur-fast);
+}
+.home-row:hover { border-color: var(--accent); }
+.home-row:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
+.home-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.home-row-title { font-weight: var(--fw-semi); font-size: var(--fs-md); line-height: 1.35; }
+.home-row-meta { gap: 6px 8px; font-size: var(--fs-sm); }
+.home-row-hint { min-width: 0; }
+.home-row-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.home-row-actions .next-actions { margin: 0; }
+.home-row.bucket-needs_you { border-left: 3px solid var(--warn); }
+.home-row.bucket-in_progress { border-left: 3px solid var(--run); }
+.home-row.bucket-done { border-left: 3px solid var(--border-strong); opacity: 0.85; }
+
+/* ── Settings › Preferences ───────────────────────────────────────── */
+.pref-card { display: flex; flex-direction: column; gap: 0; padding: 4px 18px; }
+.pref-row { display: flex; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.pref-row:last-child { border-bottom: none; }
+.pref-text { flex: 1; min-width: 220px; }
+.pref-title { font-weight: var(--fw-semi); }
+.pref-body { font-size: var(--fs-sm); margin-top: 2px; max-width: 64ch; }
+.pref-controls { gap: 6px; }
+
+/* ── Settings › Capabilities (no inline styles — CSP) ─────────────── */
+.cap-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.cap-title { margin: 0; font-size: var(--fs-md); }
+.cap-summary { margin: 8px 0 4px; }
+.cap-line { margin: 0 0 6px; }
+.cap-actions { margin-top: 8px; gap: 8px; }
 
 /* ── View header ──────────────────────────────────────────────────── */
 .view-header {
@@ -394,7 +374,8 @@ a:hover { text-decoration: underline; }
    don't get an outline. Applied to every interactive surface; layout-safe
    because outline doesn't participate in box sizing. */
 .btn:focus-visible,
-.nav-link:focus-visible,
+.rail-link:focus-visible,
+.rail-btn:focus-visible,
 .input:focus-visible,
 select.input:focus-visible,
 .chat-input:focus-visible,
@@ -514,7 +495,12 @@ select.input:focus-visible,
 .md-pre code { background: none; padding: 0; }
 
 /* ── Compose (New idea) ───────────────────────────────────────────── */
-.compose-card { max-width: 720px; display: flex; flex-direction: column; gap: var(--sp-1); }
+.compose-card { max-width: 760px; display: flex; flex-direction: column; gap: var(--sp-2); }
+.compose-actions .input { width: auto; margin-top: 0; }
+.compose-convo { max-width: 760px; margin-top: 16px; display: flex; flex-direction: column; max-height: 60vh; }
+.compose-convo[hidden] { display: none; }
+.compose-convo-head { padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
+.compose-transcript { min-height: 120px; }
 .compose-label { font-size: var(--fs-2xs); text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-faint); margin-top: var(--sp-3); }
 .compose-idea { resize: vertical; min-height: 180px; font-family: var(--sans); line-height: 1.5; }
 .compose-hint { font-size: var(--fs-xs); margin-top: var(--sp-1); }
@@ -522,11 +508,6 @@ select.input:focus-visible,
 .compose-status { color: var(--warn); font-size: var(--fs-sm); }
 
 /* ── Dashboard ────────────────────────────────────────────────────── */
-/* Quick actions — the "what do I do next" entry points, first thing on the
-   dashboard. */
-.quick-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: var(--grid-gap); }
-.quick-actions .btn { display: inline-flex; align-items: center; gap: 7px; }
-
 /* Setup checklist — persistent while /health carries warnings; disappears
    when the board is green. */
 .setup-checklist { margin-bottom: var(--grid-gap); border-color: rgba(210, 153, 34, 0.45); }
@@ -556,12 +537,6 @@ select.input:focus-visible,
 .accent-warn { color: var(--warn); }
 .accent-err { color: var(--err); }
 
-.status-strip { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 16px; align-items: center; }
-.strip-item { display: inline-flex; align-items: center; gap: 6px; }
-/* Terminal buckets (completed/cancelled/failed) trail the strip, dimmed —
-   historical noise must not outshout the actionable statuses. */
-.strip-dim { opacity: 0.55; }
-
 /* Plan editor guidance banner */
 .plan-guidance { margin-bottom: 12px; }
 .plan-guidance p { margin: 0 0 6px; }
@@ -590,34 +565,9 @@ select.input:focus-visible,
 .check-dot.done { color: var(--ok, #34d399); }
 .check-text { font-size: 12.5px; }
 
-/* §17.853 — exec-mode toggle: assist renders accent (the default, guided
-   mode); auto renders warn-tinted as the "engine runs it" signal. */
+/* §17.853 — exec-mode: the switch now lives on the job page (approve / plan start). */
 .exec-mode-toggle { color: var(--accent); font-weight: var(--fw-semi); }
 .exec-mode-toggle.mode-auto { color: var(--warn, #d29922); }
-
-/* §17.854 (audit G7) — the promoted, labeled exec-mode block. Readable size,
-   its own section under the nav — signals "mode", not "cosmetic preference". */
-.exec-mode-block {
-  padding: 10px 12px;
-  margin: 4px 8px 0;
-  border-top: 1px solid var(--border, #21262d);
-}
-.exec-mode-heading {
-  font-size: var(--fs-2xs);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-faint);
-  margin-bottom: 6px;
-}
-.exec-mode-block .exec-mode-toggle {
-  width: 100%;
-  font-size: var(--fs-sm, 13px);
-  padding: 7px 10px;
-  text-align: left;
-}
-.exec-mode-block .exec-mode-toggle.mode-auto {
-  background: color-mix(in srgb, var(--warn, #d29922) 12%, transparent);
-}
 
 /* §17.847 — flow guide stepper */
 .flow-guide { padding: 10px 16px; margin-bottom: 12px; }
@@ -1010,7 +960,7 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
 .approval-actions { margin-top: 4px; }
 
 /* ── Plan editor ──────────────────────────────────────────────────── */
-.plan-warning { display: flex; align-items: center; gap: 10px; padding: 10px 14px; margin-bottom: 12px; background: rgba(210,153,34,0.1); border: 1px solid rgba(210,153,34,0.4); border-radius: var(--radius-sm); font-size: 13px; color: var(--warn); }
+.plan-warning { display: flex; align-items: center; gap: 10px; padding: 10px 14px; margin: 12px 0; background: rgba(210,153,34,0.1); border: 1px solid rgba(210,153,34,0.4); border-radius: var(--radius-sm); font-size: 13px; color: var(--warn); }
 .plan-warning.hidden { display: none; }
 .warn-icon { font-size: 15px; }
 .node-form { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; overflow-y: auto; }
@@ -1092,47 +1042,22 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
    Editing-heavy surfaces (plan editor, DAG canvas) stay usable but are
    flagged as desktop-first via .mobile-note. */
 @media (max-width: 820px) {
-  .shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .shell { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
 
-  .mobile-topbar {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    grid-row: 1;
-    padding: 10px 14px;
-    background: var(--bg-elev);
-    border-bottom: 1px solid var(--border);
-    font-weight: var(--fw-semi);
+  /* The rail becomes a bottom bar: the three places (+ current job) side by
+     side, thumb-reachable. The theme + menu live in Settings › Preferences. */
+  .rail {
+    grid-row: 2; flex-direction: row; align-items: center; justify-content: space-around;
+    padding: 4px 6px; border-right: 0; border-top: 1px solid var(--border);
   }
-  .mobile-topbar .brand-logo { width: 22px; height: 22px; display: block; }
-  .hamburger {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    font-size: 20px;
-    line-height: 1;
-    background: transparent;
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-    color: var(--text);
-    cursor: pointer;
-  }
+  .rail-brand, .rail-foot { display: none; }
+  .rail-nav { flex-direction: row; flex: 1; justify-content: space-around; gap: 2px; }
+  .rail-link { flex: 1; padding: 6px 2px; }
+  .rail-job { margin: 0; border: 0; padding-top: 6px; }
+  .rail-job-slot { flex: 1; display: flex; }
+  .rail-job-slot .rail-link { flex: 1; }
 
-  .sidebar {
-    position: fixed;
-    top: 0; left: 0; bottom: 0;
-    width: 264px;
-    z-index: 70;
-    transform: translateX(-100%);
-    transition: transform var(--dur-med) var(--ease);
-  }
-  .sidebar.open { transform: none; box-shadow: var(--shadow); }
-  .scrim { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 60; }
-  .scrim.hidden { display: none; }
-
-  .content { grid-row: 2; padding: var(--sp-4); }
+  .content { grid-row: 1; padding: var(--sp-4); }
   .view-header h1 { font-size: var(--fs-xl); }
 
   /* Stack the fixed multi-column read layouts. */
@@ -1590,8 +1515,6 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
 
 
 /* ── §17.1055 — retractable sidebar (wide screens) ─────────────────────── */
-.sidebar-collapse { padding: 0 6px; font-size: 14px; line-height: 1; color: var(--text-faint); }
-.sidebar-collapse:hover { color: var(--text); }
 .sidebar-rail {
   display: none;
   position: fixed;
@@ -1617,7 +1540,7 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
   /* One column, not "0 1fr": with the sidebar display:none the outlet becomes
      the first grid item and would auto-place into the zero-width column. */
   .shell.sidebar-collapsed { grid-template-columns: 1fr; }
-  .shell.sidebar-collapsed .sidebar { display: none; }
+  .shell.sidebar-collapsed .rail { display: none; }
   .shell.sidebar-collapsed .sidebar-rail { display: inline-flex; }
   .shell.sidebar-collapsed .content { padding-left: 56px; }
 }
@@ -1674,6 +1597,7 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
 .conn-pill[hidden] { display: none; }
 .conn-pill[data-state="degraded"] { background: var(--warn); color: #1a1a1a; }
 
+.status-spin { vertical-align: middle; margin-right: 8px; }
 /* §17.1117 (ledger U-8) — the assist status line's liveness dot */
 .assist-pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; vertical-align: middle;
   background: var(--ok); box-shadow: 0 0 0 0 var(--ok); }
@@ -1687,8 +1611,6 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
 /* ── §17.1160 · Follow view: the plan as a rail, the current step as the pane ──
    §17.1163 — theme tokens ONLY (the first cut named --card/--fg/--muted/--hover,
    which do not exist: the fallbacks painted a WHITE rail on the dark theme). */
-.job-hub-head.compact { padding-bottom: 6px; }
-.job-hub-head.compact .job-hub-title-row h1, .job-hub-head.compact .view-title { font-size: 1.05rem; margin: 0; }
 .follow-mode .job-tab-outlet { padding-top: 4px; }
 /* §17.1164 — the grid is a BOUNDED chat surface: the pane is a flex column whose
    transcript scrolls and whose composer stays pinned (the classic .chat-main
@@ -1731,10 +1653,6 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
 .assist-main.follow .assist-verbs > .btn:not(:first-child):not(.verbs-more) { display: none; }
 /* §17.1163 — a long command line is READ here, not scrolled: wrap it; copy still copies the whole line */
 .assist-main.follow .md-pre code { white-space: pre-wrap; word-break: break-all; }
-@media (max-width: 720px) {
-  .assist-main.follow { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); height: calc(100vh - 120px); }
-  .follow-rail { max-height: 34vh; margin: 0 0 10px; }
-}
 
 /* §17.1166 — a command block the engine already ran through the local runner.
    The ask stays readable (the operator may want to see what was run) but is
@@ -1747,4 +1665,87 @@ button.step-hero-loop.linklike:hover { color: var(--text); text-decoration: unde
 pre.superseded {
   opacity: 0.55;
   border-left: 2px solid var(--ok);
+}
+
+/* ── The job page: stage strip + ⋯ menu (UX overhaul) ─────────────── */
+.job-hub-head { margin-bottom: 10px; }
+.job-hub-head .job-hub-title-row { gap: 10px; align-items: center; min-width: 0; }
+.job-title { margin: 0; font-size: var(--fs-2xl); font-weight: 650; line-height: 1.25; }
+.job-more { position: relative; }
+.job-more > summary { list-style: none; }
+.job-more > summary::-webkit-details-marker { display: none; }
+.job-more-body {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
+  display: flex; flex-direction: column; gap: 2px; min-width: 210px; padding: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow);
+}
+.job-more-body .btn { justify-content: flex-start; text-align: left; }
+.stage-slot { margin: 2px 0 16px; }
+.stage-strip { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 6px 0; }
+.stage { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 999px; font-size: var(--fs-sm); font-weight: var(--fw-semi); color: var(--text-faint); text-decoration: none; border: 1px solid transparent; }
+a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(--text); }
+.stage-done { color: var(--ok); }
+.stage-current { color: var(--accent); }
+.stage.active { background: var(--accent-soft); border-color: var(--accent-dim); color: var(--accent); }
+.stage-done.active { color: var(--ok); border-color: rgba(63, 185, 80, 0.4); background: rgba(63, 185, 80, 0.1); }
+.stage.locked { opacity: 0.55; cursor: default; }
+.stage-mark { font-size: 11px; }
+.stage-sep { width: 18px; height: 1px; background: var(--border-strong); flex: none; }
+.stage-hint-row { margin-top: 4px; gap: 8px; }
+.stage-hint { font-size: var(--fs-sm); }
+.follow-mode .stage-slot { margin-bottom: 8px; }
+.follow-mode .job-title { font-size: var(--fs-lg); }
+.start-control { gap: 0; }
+.start-control .start-main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.start-menu { position: relative; }
+.start-menu > summary { list-style: none; border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid rgba(255,255,255,0.25); padding-left: 8px; padding-right: 8px; }
+.start-menu > summary::-webkit-details-marker { display: none; }
+.start-menu-body {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
+  display: flex; flex-direction: column; gap: 2px; min-width: 240px; padding: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow);
+}
+.start-menu-body .btn { justify-content: flex-start; text-align: left; }
+.mode-row { margin-top: 4px; gap: 8px; font-size: var(--fs-sm); }
+.plan-lede { font-size: var(--fs-sm); min-width: 0; }
+.plan-edit-menu { position: relative; }
+.plan-edit-menu > summary { list-style: none; }
+.plan-edit-menu > summary::-webkit-details-marker { display: none; }
+.plan-edit-body {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
+  display: flex; flex-direction: column; gap: 2px; min-width: 190px; padding: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow);
+}
+.plan-edit-body .btn { justify-content: flex-start; text-align: left; }
+.plan-changes { margin-bottom: 10px; }
+.plan-changes:empty { display: none; }
+.output-onward { gap: 10px; }
+
+/* Run stage — the plan sheet on phones, the quiet status line, Guide me folds */
+.follow-sheet-btn, .follow-sheet-close { display: none; }
+.follow-pane-title { color: var(--text-dim); }
+.checklist-quiet { text-transform: none; letter-spacing: 0; font-weight: var(--fw-med); color: var(--text-faint); font-size: var(--fs-xs); }
+.assist-main.follow .guide-btn:not(.guiding) { display: none; }
+@media (max-width: 720px) {
+  /* header (2 lines) + pill + strip ≈ 230px above, the bottom bar ≈ 62px below */
+  .assist-main.follow { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); height: calc(100dvh - 300px); min-height: 380px; position: relative; }
+  .assist-main.follow .composer-top { flex-direction: column; align-items: stretch; gap: 6px; }
+  .assist-main.follow .composer-checklist { flex: none; max-height: none; min-width: 0; }
+  .assist-main.follow .chat-composer { padding: 8px 10px; }
+  .assist-main.follow .follow-rail { display: none; }
+  .assist-main.follow.rail-open .follow-rail {
+    display: flex; position: absolute; inset: 0; z-index: 20; margin: 0; max-height: none;
+    box-shadow: var(--shadow);
+  }
+  .follow-sheet-btn { display: inline-flex; }
+  .follow-sheet-close { display: inline-flex; }
+  .follow-pane-title { display: none; }
+  .follow-mode .job-hub-head .job-title { font-size: var(--fs-md); }
+}
+@media (max-width: 820px) {
+  .stage-strip { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 8px; }
+  .stage-strip::-webkit-scrollbar { display: none; }
+  .stage { flex: none; }
+  .plan-lede { display: none; }
+  .plan-warning { margin-top: 12px; }
 }

@@ -11,7 +11,8 @@ function sevBadge(sev) {
   return el("span", { class: `badge ${cls}`, text: sev });
 }
 
-export default function alerts(container) {
+export default function alerts(container, params, opts = {}) {
+  const embedded = !!(opts && opts.embedded);
   let disposed = false;
   const alertsBox = el("div", {});
   const errorsBox = el("div", {});
@@ -94,7 +95,7 @@ export default function alerts(container) {
 
   mount(
     container,
-    el(
+    embedded ? el("p", { class: "dim hub-lede", text: "What the engine flagged, and the errors nobody has resolved yet — resolve them here." }) : el(
       "div",
       { class: "view-header" },
       el(

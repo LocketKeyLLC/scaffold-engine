@@ -7,7 +7,8 @@ import * as api from "../api.js";
 import { el, mount } from "../util.js";
 import { emptyState, errorPanel, loading, toast } from "../components.js";
 
-export default function rag(container) {
+export default function rag(container, params, opts = {}) {
+  const embedded = !!(opts && opts.embedded);
   let disposed = false;
 
   const query = el("input", {
@@ -74,7 +75,7 @@ export default function rag(container) {
         emptyState({
           icon: "◎",
           title: "No results",
-          body: "Nothing crossed the confidence threshold. Ingest more via Research or GT extraction.",
+          body: "Nothing crossed the confidence threshold. Add knowledge from the Research tab.",
         })
       );
       return;
@@ -143,7 +144,7 @@ export default function rag(container) {
   const dedupBox = el("div", {}, loading("Loading dedup log…"));
   mount(
     container,
-    el(
+    embedded ? null : el(
       "div",
       { class: "view-header" },
       el(
@@ -156,6 +157,7 @@ export default function rag(container) {
         })
       )
     ),
+    embedded ? el("p", { class: "dim hub-lede", text: "Search what the engine has read. Results say how confident they are; add knowledge from the Research tab." }) : null,
     el(
       "div",
       { class: "card card-pad" },

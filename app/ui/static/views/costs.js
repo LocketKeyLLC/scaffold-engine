@@ -3,7 +3,7 @@
 // p50/p95/p99 latency) + recent per-job cost drill-down (GET /jobs/{id}/costs).
 import * as api from "../api.js";
 import { el, fmtNum, fmtUsd, mount, shortId, timeAgo } from "../util.js";
-import { errorPanel, loading, statTile } from "../components.js";
+import { errorPanel, loading, statTile, statusBadge } from "../components.js";
 
 const WINDOWS = [
   ["60", "last hour"],
@@ -75,7 +75,8 @@ export function renderJobCosts(container, jobId) {
   };
 }
 
-export default function costs(container) {
+export default function costs(container, params, opts = {}) {
+  const embedded = !!(opts && opts.embedded);
   let disposed = false;
 
   const windowSel = el(
@@ -159,7 +160,7 @@ export default function costs(container) {
           el("tbody", {}, ...withCosts.map(({ job, costs: c }) =>
             el("tr", {},
               el("td", {}, el("a", { href: `#/job/${job.id}/costs`, text: job.title || shortId(job.id) })),
-              el("td", {}, el("span", { class: "badge", text: job.status })),
+              el("td", {}, statusBadge(job.status)),
               el("td", { text: fmtNum(c?.call_count) }),
               el("td", { text: fmtUsd(c?.total_cost_usd) }),
               el("td", {
@@ -178,20 +179,22 @@ export default function costs(container) {
 
   mount(
     container,
-    el(
-      "div",
-      { class: "view-header" },
-      el(
+    embedded
+      ? el("div", { class: "row row-wrap hub-lede-row" }, el("p", { class: "dim hub-lede", text: "What the engine's model calls cost and how long they took, by model — and per job." }), el("span", { class: "spacer" }), windowSel)
+      : el(
         "div",
-        {},
-        el("h1", { text: "Costs" }),
-        el("div", {
-          class: "sub",
-          text: "System-wide LLM spend + latency by model, and recent per-job cost breakdowns.",
-        })
+        { class: "view-header" },
+        el(
+          "div",
+          {},
+          el("h1", { text: "Costs" }),
+          el("div", {
+            class: "sub",
+            text: "System-wide LLM spend + latency by model, and recent per-job cost breakdowns.",
+          })
+        ),
+        el("div", { class: "row" }, windowSel)
       ),
-      el("div", { class: "row" }, windowSel)
-    ),
     rollupBox,
     el("h2", { class: "costs-h2", text: "Recent jobs" }),
     jobsBox
