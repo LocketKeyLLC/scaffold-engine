@@ -56,3 +56,16 @@ def test_turn_runs_session_fk_revision_clears_orphans_then_cascades():
     src = Path("alembic/versions/0003_turn_runs_session_fk.py").read_text()
     assert src.index("DELETE FROM assist_turn_runs") < src.index("ADD CONSTRAINT")
     assert "REFERENCES assist_sessions(id) ON DELETE CASCADE" in src
+
+
+def test_ci_db_lane_runs_alembic_head_after_the_sql_runner():
+    """§17.1184 — the CI Postgres lane applied init.sql + the SQL runner and
+    stopped; every Alembic revision was invisible to the DB-backed tests until
+    0005 changed a CHECK constraint. The lane must upgrade to head the way the
+    lifespan does, and assert the newest revision's effect so a silent skip
+    cannot pass."""
+    wf = (ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+    i_sql = wf.index("python -m app.migrations && alembic upgrade head")
+    i_lane = wf.index("Integration lane (tests/integration/*_db")
+    assert i_sql < i_lane, "alembic upgrade head must run before the DB-backed lane"
+    assert "LIKE '%awaiting_decision%'" in wf and "RAISE EXCEPTION" in wf
