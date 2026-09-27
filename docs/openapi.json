@@ -1251,6 +1251,22 @@
             "title": "Node Key",
             "type": "string"
           },
+          "node_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Status"
+          },
+          "outcome": {
+            "default": "resolved",
+            "title": "Outcome",
+            "type": "string"
+          },
           "resolved": {
             "enum": [
               "operator",

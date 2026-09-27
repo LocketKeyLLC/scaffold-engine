@@ -40,7 +40,7 @@ async def test_parallel_frontier_diamond_concurrency_and_deps(monkeypatch):
     summary_calls = {"n": 0}
     both_siblings_started = asyncio.Event()
 
-    async def fake_claim(db, job_id, limit):
+    async def fake_claim(db, job_id, limit, exclude=None):
         ready = [k for k, deps in DAG.items()
                  if k not in claimed and all(d in done for d in deps)]
         take = ready[:limit]
@@ -99,7 +99,7 @@ async def test_parallel_frontier_diamond_concurrency_and_deps(monkeypatch):
 async def test_parallel_frontier_blocked_terminal(monkeypatch):
     """No completable nodes + not all done → loop finalizes 'blocked' via the
     execute_next_node terminal path (job still 'running')."""
-    async def fake_claim(db, job_id, limit):
+    async def fake_claim(db, job_id, limit, exclude=None):
         return []                                          # nothing claimable
 
     async def fake_all_done(db, job_id):

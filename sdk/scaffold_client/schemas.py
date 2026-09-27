@@ -451,6 +451,9 @@ class DecideResult(BaseModel):
     resolved: Literal["operator", "engine"]
     status: str = "executing"
     run_started: bool = False
+    # §17.1186 — what a run pause did: resolved | delegated | ran | failed | runbook | skipped
+    outcome: str = "resolved"
+    node_status: str | None = None
 
 
 class SkipNodeInput(BaseModel):

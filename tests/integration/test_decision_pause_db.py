@@ -5,7 +5,7 @@ everything else is production code on the real schema."""
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -131,3 +131,87 @@ async def test_an_undelegated_decision_is_never_claimed_by_the_frontier(db_sessi
 async def _get_next_node_serial(job_id):
     async with ea.async_session() as db:
         return await ea._get_next_node(db, job_id)
+
+
+# ── §17.1186 — a hands-on step with an open write channel ────────────────
+
+RUNBOOK = "## Run this\n```bash\npct start 111\n```\n\n## Verify\n- `pct status 111` reports running.\n"
+POLICY = {"allow": ["pct start"], "sudo": True, "helper": "11"}
+
+
+async def _seed_hands_on(db_session, job_id):
+    await db_session.execute(text("""
+        INSERT INTO dag_nodes (job_id, node_key, title, node_type, status, depends_on, execution_order, tool, prompt_template)
+        VALUES (:j, 'T1', 'Gather facts', 'task', 'done', '{}', 0, 'LLM', 'facts'),
+               (:j, 'ADD50', 'Start container 111', 'task', 'pending', '{T1}', 1, 'LLM',
+                'Bring LXC 111 back up. Done when `pct status 111` reports running.'),
+               (:j, 'T3', 'Write the summary', 'task', 'pending', '{ADD50}', 2, 'LLM', 'summarise')
+    """), {"j": job_id})
+    await db_session.commit()
+
+
+@pytest.mark.parametrize("parallel", [False, True], ids=["serial", "parallel"])
+async def test_a_hands_on_step_parks_for_approval_runs_on_approval_and_the_run_continues(db_session, insert_job, monkeypatch, parallel):
+    from app.modules import supervised_runs as sr
+    monkeypatch.setattr(settings, "decision_pause_enabled", True)
+    monkeypatch.setattr(settings, "execution_supervised_runs_enabled", True)
+    monkeypatch.setattr(settings, "parallel_execution_enabled", parallel)
+    monkeypatch.setattr(settings, "hands_on_assist_gate_enabled", True)     # the gate must NOT park with the channel open
+    monkeypatch.setattr(settings, "shell_tool_enabled", False)
+    monkeypatch.setattr(settings, "mcp_tool_enabled", True)
+    job_id = await insert_job(status="executing", refined_brief={"title": "lab", "description": "home lab"})
+    await _seed_hands_on(db_session, job_id)
+    spec = MagicMock(); spec.name = "pve-runner"; spec.headers = {"X-Runner-Token": "tok"}
+    executed: list[str] = []
+
+    async def fake_exec(job_id_, model_overrides=None, preclaimed_node=None, **kw):
+        node = preclaimed_node or await _get_next_node_serial(job_id_)
+        if sr.is_hands_on_node(node):
+            # the real seam: a claimed hands-on step is handed back for approval
+            async with ea.async_session() as db:
+                held = await ea._hand_back_for_approval(db, job_id_, node, "Shell")
+            if held is not None:
+                return held
+        executed.append(node["node_key"])
+        async with ea.async_session() as db:
+            await db.execute(text("UPDATE dag_nodes SET status='done', output_text='ran', completed_at=NOW() WHERE job_id=:j AND node_key=:k"),
+                             {"j": job_id_, "k": node["node_key"]})
+            await db.commit()
+        return {"status": "done", "node_key": node["node_key"], "title": node["title"], "tool": "LLM", "output": "ran"}
+
+    ran_block = [{"command": "pct start 111", "output": "", "exit": 0, "ok": True, "approval_id": "a1", "refused": False}]
+    common = dict(channel=AsyncMock(return_value=(spec, POLICY)), draft_runbook=AsyncMock(return_value=RUNBOOK))
+    with patch.object(sr, "channel", common["channel"]), patch.object(sr, "draft_runbook", common["draft_runbook"]), \
+         patch.object(ea, "execute_next_node", AsyncMock(side_effect=fake_exec)):
+        events = await _events(ea.execute_all_nodes(job_id))
+    assert events[-1] == "awaiting_decision", events
+    assert executed == []
+    row = await _status(db_session, job_id)
+    md = row["metadata"] if isinstance(row["metadata"], dict) else json.loads(row["metadata"])
+    asked = md["awaiting_decision"]
+    assert row["status"] == "awaiting_decision" and asked["kind"] == "run" and asked["node_key"] == "ADD50"
+    assert asked["commands"] == ["pct start 111"] and asked["verify"] == ["pct status 111"] and asked["refused"] == []
+    st = (await db_session.execute(text("SELECT status FROM dag_nodes WHERE job_id=:j AND node_key='ADD50'"), {"j": job_id})).scalar()
+    assert st == "pending"
+
+    # approve → the block runs, the checks run, the node is done with the report
+    with patch.object(sr, "channel", common["channel"]), \
+         patch("app.modules.assist_supervised.run_block", AsyncMock(return_value=ran_block)), \
+         patch("app.modules.assist_local_runner.run_probes", AsyncMock(return_value=("== V1 ==\nstatus: running\n", [{"id": "V1", "command": "pct status 111", "ok": True, "chars": 15}]))):
+        async with ea.async_session() as db:
+            out = await dp.resolve_decision(db, job_id, "ADD50", choice="run")
+    assert out["outcome"] == "ran"
+    n = (await db_session.execute(text("SELECT status, output_text, last_verification_reason FROM dag_nodes WHERE job_id=:j AND node_key='ADD50'"), {"j": job_id})).mappings().first()
+    assert n["status"] == "done" and "## Executed on pve-runner" in n["output_text"] and "status: running" in n["output_text"]
+    assert n["last_verification_reason"].startswith("supervised run through pve-runner")
+    row = await _status(db_session, job_id)
+    assert row["status"] == "executing"
+
+    # the restarted run executes T3 only
+    with patch.object(sr, "channel", common["channel"]), patch.object(sr, "draft_runbook", common["draft_runbook"]), \
+         patch.object(ea, "execute_next_node", AsyncMock(side_effect=fake_exec)), \
+         patch.object(ea, "_build_pipeline_summary", AsyncMock(return_value={"status": "completed", "total_nodes": 3, "passed": 3, "failed": 0})), \
+         patch.object(ea, "_flip_job_completed", AsyncMock(return_value=True)):
+        events = await _events(ea.execute_all_nodes(job_id))
+    assert executed == ["T3"], executed
+    assert "awaiting_decision" not in events

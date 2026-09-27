@@ -2023,6 +2023,11 @@ class Settings(BaseSettings):
     # operator (job → 'awaiting_decision'; POST /jobs/{id}/decide resumes)
     # instead of letting the model pick for them. Off → the old behaviour.
     decision_pause_enabled: bool = Field(default=True)
+    # §17.1186 — with a runner whose supervised write channel is open, a
+    # hands-on step in Auto mode parks the run with its drafted commands for
+    # the operator's approval (run / do it myself / skip) instead of writing
+    # a runbook and calling the step done. Off → §17.1183 behaviour.
+    execution_supervised_runs_enabled: bool = Field(default=True)
 
     # Manual prompt-edit cap (POST /prompts/{job_id}/{node_key}). Both
     # the orchestrator-side update_prompt() and the OWUI prompt_inspector
