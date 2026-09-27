@@ -722,16 +722,27 @@ export function renderTheater(container, jobId, ctx = {}) {
         placeholder: i.name, "aria-label": i.name, autocomplete: "off" });
       f.addEventListener("input", refresh);
       fields.set(i.name, f);
+      // §17.1188 — a pinned value is filled in; the system map and the facts
+      // are offered as chips naming their source; the operator picks.
+      if (i.value) f.value = i.value;
+      const sugg = Array.isArray(i.suggestions) ? i.suggestions : [];
+      const chips = sugg.length ? el("div", { class: "decision-suggest" },
+        el("span", { class: "faint", text: i.value ? "from your pins · or: " : "known: " }),
+        ...sugg.map((sg) => el("button", { class: "chip", type: "button",
+          title: sg.source, text: sg.confidence === "pinned" ? `${sg.value} (pinned)` : `${sg.value} — ${sg.source}`,
+          onClick: () => { f.value = sg.value; refresh(); f.focus(); } }))) : null;
       return el("label", { class: "decision-input-row" },
         el("span", { class: "mono decision-input-name", text: `<${i.name}>` }),
         f,
-        i.hint ? el("span", { class: "dim faint", text: i.hint }) : null);
+        i.hint ? el("span", { class: "dim faint", text: i.hint }) : null,
+        chips);
     });
     const note = el("textarea", { class: "input decision-note", placeholder: "Anything the engine should know (optional)" });
     const runBtn = el("button", { class: "btn btn-primary", text: `Run it through ${d.runner || "the runner"}` });
     const selfBtn = el("button", { class: "btn", text: "I'll do it myself (keep the runbook)" });
     const skipBtn = el("button", { class: "btn btn-ghost", text: "Skip this step" });
     if (!canRun || inputs.length) runBtn.disabled = true;
+    if (inputs.length) queueMicrotask(refresh);      // §17.1188 — prefilled pins count
     async function send(choice, label) {
       runBtn.disabled = selfBtn.disabled = skipBtn.disabled = true;
       const prev = runBtn.textContent; runBtn.textContent = label;

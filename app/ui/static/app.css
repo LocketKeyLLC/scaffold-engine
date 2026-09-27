@@ -1819,3 +1819,7 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
 .decision-input-row { display: grid; grid-template-columns: minmax(8rem, auto) 1fr; gap: 0.25rem 0.6rem; align-items: center; }
 .decision-input-row .dim { grid-column: 2; }
 .decision-input { margin: 0; }
+/* §17.1188 — known values offered as chips */
+.decision-suggest { grid-column: 2; display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; font-size: 0.85em; }
+.decision-suggest .chip { font: inherit; cursor: pointer; background: var(--bg-elev-2); color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 1px 9px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.decision-suggest .chip:hover { border-color: var(--accent); }
