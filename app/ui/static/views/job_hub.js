@@ -329,7 +329,7 @@ export function startControl(jobId, { size = "btn-sm" } = {}) {
     el("div", { class: "start-menu-body" },
       el("button", { class: "btn btn-sm btn-ghost", text: "✦ Walk me through it", title: "You run each step on your machines; the engine guides, verifies and adapts. It never touches your hardware.",
         onClick: () => { setExecMode("assist"); main.textContent = label(); menu.open = false; } }),
-      el("button", { class: "btn btn-sm btn-ghost", text: "▶ Let the engine run it", title: "The engine works every step itself and produces runbooks, configs and code. It still never connects to your machines.",
+      el("button", { class: "btn btn-sm btn-ghost", text: "▶ Let the engine run it", title: "The engine works every step itself and produces runbooks, configs and code. It connects to a machine only if you opened the write channel, and then it pauses at each step that would change one and asks you to approve the commands first.",
         onClick: () => { setExecMode("auto"); main.textContent = label(); menu.open = false; } })));
   return el("div", { class: "row start-control" }, main, menu);
 }

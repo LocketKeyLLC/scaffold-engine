@@ -92,6 +92,39 @@ async def start_setup_recipe(
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@router.get("/setup/runner/write_prefixes")
+async def runner_write_prefixes(job_id: str | None = None, db: AsyncSession = Depends(get_db)) -> dict:
+    """§17.1189 — the ``--write-allow`` prefixes a plan's remaining hands-on
+    steps would need, read off the plan itself.
+
+    The ``runner_writes`` recipe asks the operator to list them and then shows
+    a generic Proxmox example; the engine can read its own plan instead. Each
+    entry names the steps that need it, so the operator can allow a prefix for
+    a reason and leave the rest out. Deterministic — no model, no outbound
+    call, no writes. ``job_id`` defaults to the newest job that is not
+    finished. A command on the catastrophic denylist is listed with an empty
+    ``prefix`` and ``why`` beginning "never allowed": no list releases it.
+    """
+    from sqlalchemy import text as _text
+    from app.modules import supervised_runs as _sr
+    if not job_id:
+        row = (await db.execute(_text(
+            "SELECT id FROM jobs WHERE status NOT IN ('completed', 'failed', 'cancelled') "
+            "ORDER BY updated_at DESC LIMIT 1"))).first()
+        job_id = str(row[0]) if row else None
+    if not job_id:
+        return {"job_id": None, "prefixes": [], "detail": "no open job to read a plan from"}
+    prefixes = await _sr.write_prefixes_for_job(db, job_id)
+    allowed = [p for p in prefixes if p["prefix"]]
+    return {
+        "job_id": job_id, "prefixes": prefixes,
+        "install_fragment": " ".join(f'"{p["prefix"]}"' for p in allowed),
+        "detail": (f"{len(allowed)} command prefix(es) would let the engine carry out this plan's remaining "
+                   f"hands-on steps" if allowed else
+                   "no step still to do carries a command the engine could run"),
+    }
+
+
 # §17.1146 — the target machine fetches the helper FROM the engine (the operator
 # has one shell, on the target; scp from the engine host needs a second one).
 # Unauthenticated on purpose: it is the Apache-licensed script from the public

@@ -13271,6 +13271,63 @@
         ]
       }
     },
+    "/setup/runner/write_prefixes": {
+      "get": {
+        "description": "§17.1189 — the ``--write-allow`` prefixes a plan's remaining hands-on\nsteps would need, read off the plan itself.\n\nThe ``runner_writes`` recipe asks the operator to list them and then shows\na generic Proxmox example; the engine can read its own plan instead. Each\nentry names the steps that need it, so the operator can allow a prefix for\na reason and leave the rest out. Deterministic — no model, no outbound\ncall, no writes. ``job_id`` defaults to the newest job that is not\nfinished. A command on the catastrophic denylist is listed with an empty\n``prefix`` and ``why`` beginning \"never allowed\": no list releases it.",
+        "operationId": "runner_write_prefixes_setup_runner_write_prefixes_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "job_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Runner Write Prefixes Setup Runner Write Prefixes Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Runner Write Prefixes",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
     "/skip": {
       "post": {
         "description": "Step 15: Skip a specific DAG node.",

@@ -351,6 +351,30 @@ def _probe_failure_words(where: str, exc: BaseException) -> str:
     return f"{where}: {tail[:200] or exc.__class__.__name__}"
 
 
+async def _write_prefix_hint(db) -> str:
+    """§17.1189 — the recipe asks the operator to "list the prefixes this
+    plan's steps need". The engine can read them off the plan, so the status
+    line says which ones, rather than leaving them to a generic example.
+    Deterministic and DB-only: a detector never calls out to their machines."""
+    try:
+        from sqlalchemy import text as _text
+        from app.modules import supervised_runs as _sr
+        row = (await db.execute(_text(
+            "SELECT id FROM jobs WHERE status NOT IN ('completed', 'failed', 'cancelled') "
+            "ORDER BY updated_at DESC LIMIT 1"))).first()
+        if row is None:
+            return ""
+        allowed = [p["prefix"] for p in await _sr.write_prefixes_for_job(db, str(row[0])) if p["prefix"]]
+        if not allowed:
+            return ""
+        return (f" Your open plan's remaining hands-on steps need {len(allowed)}: "
+                + ", ".join(f"`{p}`" for p in allowed[:8])
+                + " (GET /setup/runner/write_prefixes for the steps behind each).")
+    except Exception as exc:
+        logger.warning("write_prefix_hint_failed err=%r", exc)
+        return ""
+
+
 async def _detect_runner_writes(db) -> tuple[str, str]:
     """§17.1185 — the supervised write channel: on when the registered runner
     exposes run_supervised with a non-empty allow-list."""
@@ -367,11 +391,13 @@ async def _detect_runner_writes(db) -> tuple[str, str]:
     except Exception as exc:
         return "off", f"could not read the runner's write policy: {exc}"
     if not known:
-        return "manual", "not checked yet — the engine reads the runner's write policy when a walkthrough loads; open one, or this recipe's verify step."
+        return "manual", ("not checked yet — the engine reads the runner's write policy when a walkthrough loads; "
+                          "open one, or this recipe's verify step." + await _write_prefix_hint(db))
     if pol:
         return "on", (f"the engine may run {len(pol['allow'])} approved command prefix(es) on the runner's machine, "
                       f"each block only after you approve it{' (as root)' if pol['sudo'] else ''}: " + "; ".join(pol["allow"][:8]))
-    return "off", "the runner was installed without --write-allow — it runs read-only checks only."
+    return "off", ("the runner was installed without --write-allow — it runs read-only checks only."
+                   + await _write_prefix_hint(db))
 
 
 async def _detect_runner_sudo(db) -> tuple[str, str]:

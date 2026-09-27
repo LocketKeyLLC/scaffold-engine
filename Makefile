@@ -68,6 +68,7 @@ _ensure_dev:
 # The production runtime is never touched; nothing to "restore" afterwards.
 TEST_DB_NAME ?= scaffold_engine_test
 RUNNER_LOOP_LOG_DIR ?= /tmp/scaffold-runner-loop
+AUTO_MODE_LOG_DIR ?= /tmp/scaffold-auto-mode
 # §17.1153 — lanes that share $(TEST_DB_NAME) run one at a time: a unit test that starts the app lifespan
 # sweeps EVERY 'running' turn row in that DB (the §17.875 zombie sweep), which killed an end-to-end run in flight.
 TEST_DB_LOCK ?= /tmp/scaffold-test-db.lock
@@ -117,6 +118,10 @@ test-integration: _ensure_dev ## §17.1108 — the integration-marked lane. DELI
 test-runner-loop: test-db ## §17.1153 — the local-runner loop END TO END (probe → repair step → re-point → look-ups → batched state check), in a THROWAWAY dev container against $(TEST_DB_NAME): starts its OWN engine (:8001) + helper (:8791); never touches the live engine or the operator's runner. ~4 min; needs Postgres + Ollama. Logs: $(RUNNER_LOOP_LOG_DIR)
 	@mkdir -p $(RUNNER_LOOP_LOG_DIR) && chmod 777 $(RUNNER_LOOP_LOG_DIR)
 	flock -w 7200 $(TEST_DB_LOCK) $(_TEST_RUN_PRE) -e ITEST_LOG_DIR=/itest -v $(RUNNER_LOOP_LOG_DIR):/itest scaffold-engine:dev pytest tests/integration/test_runner_loop_live.py --timeout=900 -q -p no:warnings
+
+test-auto-mode: test-db ## §17.1189 — AUTO MODE's own loop END TO END (decision pause → decide → run pause → approved block runs ON a runner → verify → the honest 'myself' fallback), in a THROWAWAY dev container against $(TEST_DB_NAME): its OWN engine (:8002) + helper (:8792, --write-allow confined to /tmp/scaffold-auto-itest/); never the live engine, never the operator's runner. ~3-6 min; needs Postgres + Ollama. Logs: $(AUTO_MODE_LOG_DIR)
+	@mkdir -p $(AUTO_MODE_LOG_DIR) && chmod 777 $(AUTO_MODE_LOG_DIR)
+	flock -w 7200 $(TEST_DB_LOCK) $(_TEST_RUN_PRE) -e ITEST_LOG_DIR=/itest -v $(AUTO_MODE_LOG_DIR):/itest scaffold-engine:dev pytest tests/integration/test_auto_mode_live.py --timeout=900 -q -p no:warnings
 
 test-pipelines: _ensure_dev_image ## §17.807 — OWUI pipeline tests (test_scaffold_router_*) with --noconftest (tests/conftest.py eager-loads app, shadowing the pipeline mocks); throwaway container (§17.1108)
 	$(_TEST_RUN) sh -c 'cd /code && pytest tests/test_scaffold_router_*.py --noconftest --timeout=30 -v'
