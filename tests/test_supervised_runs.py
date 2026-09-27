@@ -233,3 +233,190 @@ async def test_gate_counts_hands_on_steps_as_executable_when_the_channel_is_open
     with patch("app.modules.supervised_runs.channel", new=AsyncMock(return_value=None)):
         cls = await ea._classify_dag_executability(db, "j")
     assert cls["nonexec"] == 3 and cls["hands_on"] is True
+
+
+# ── §17.1189 — what the channel can actually carry ───────────────────────
+
+HEREDOC_RUNBOOK = """## Run this
+1. Write the unit file:
+```bash
+pct exec 106 -- bash -c 'cat > /etc/systemd/system/palworld.service <<EOF
+[Unit]
+Description=PalWorld Dedicated
+[Service]
+ExecStart=/opt/pal/start.sh
+WorkingDirectory=/opt/pal
+EOF'
+```
+2. Start it:
+```bash
+pct exec 106 -- systemctl start palworld
+```
+
+## Verify
+- `pct exec 106 -- systemctl is-active palworld` reports `active`.
+"""
+
+LOOP_RUNBOOK = """## Run this
+```bash
+for i in 1 2 3; do
+  pct set 10$i --nameserver 192.168.1.1
+done
+```
+"""
+
+
+def test_heredoc_fence_is_one_command_not_its_body_lines():
+    """A unit-file body is not a list of commands. Before this, the frame's
+    refusal list read `[Unit]`, `Description=…`, `ExecStart=…` — text the
+    model never meant as commands, gated as if it had."""
+    cmds = sr.runbook_commands(HEREDOC_RUNBOOK)
+    assert len(cmds) == 2, cmds
+    assert cmds[0].startswith("pct exec 106 -- bash -c") and "<<EOF" in cmds[0]
+    assert cmds[1] == "pct exec 106 -- systemctl start palworld"
+    for fragment in ("[Unit]", "Description=PalWorld Dedicated", "ExecStart=/opt/pal/start.sh",
+                     "WorkingDirectory=/opt/pal", "EOF'"):
+        assert fragment not in cmds, f"{fragment!r} was gated as a command"
+
+
+def test_heredoc_block_is_refused_once_for_the_real_reason():
+    from app.modules.assist_supervised import gate_block
+    runnable, refused = gate_block(sr.runbook_commands(HEREDOC_RUNBOOK), ["pct exec"])
+    assert [r["why"] for r in refused] == ["substitution/heredoc"], refused
+    assert runnable == ["pct exec 106 -- systemctl start palworld"]
+
+
+def test_multiline_loop_is_kept_whole():
+    cmds = sr.runbook_commands(LOOP_RUNBOOK)
+    assert len(cmds) == 1 and cmds[0].startswith("for i in 1 2 3; do")
+    assert "done" in cmds[0]
+
+
+def test_single_line_commands_are_still_split_per_line():
+    assert sr.runbook_commands(RUNBOOK) == ["pct start 111", "pct set 111 --nameserver 192.168.1.1"]
+
+
+@pytest.mark.asyncio
+async def test_draft_runbook_redraws_an_empty_thinking_draw():
+    """§17.1126 — model_general is a thinking model and this is a free-form
+    generate, so a tight budget returns success=True with empty text. The
+    draft must not hand the frame an empty runbook (no commands → the step
+    silently falls to 'I'll do it myself')."""
+    calls: list[dict] = []
+
+    async def fake_generate(prompt, **kw):
+        calls.append(kw)
+        text_out = "" if len(calls) == 1 else "## Run this\n```bash\npct start 111\n```"
+        return MagicMock(text=text_out, success=True)
+
+    with patch("app.model_router.generate", new=fake_generate):
+        out = await sr.draft_runbook({"node_key": "T1", "title": "start it"}, {"description": "brief"})
+    assert "pct start 111" in out
+    assert len(calls) >= 2, "an empty draw was accepted"
+    assert calls[0]["max_tokens"] == settings.node_generation_max_tokens, calls[0]["max_tokens"]
+    # the reasoning trace is discarded on the generate path (§17.683), so it is
+    # off from the FIRST draw — not only as a rescue after an empty one
+    assert calls[0]["think"] is False, calls[0]
+
+
+@pytest.mark.asyncio
+async def test_draft_runbook_tells_the_model_what_the_channel_can_carry():
+    seen: dict = {}
+
+    async def fake_generate(prompt, **kw):
+        seen.update(kw)
+        return MagicMock(text="## Run this\n```bash\npct start 111\n```", success=True)
+
+    with patch("app.model_router.generate", new=fake_generate):
+        await sr.draft_runbook({"node_key": "T1"}, "brief")
+    system = seen["system"]
+    assert "No heredocs" in system and "tee" in system and "its OWN shell" in system
+    seen.clear()
+    with patch("app.model_router.generate", new=fake_generate):
+        await sr.draft_runbook({"node_key": "T1"}, "brief", for_channel=False)
+    assert "No heredocs" not in seen["system"]
+
+
+# ── §17.1189 — the engine reads its own plan for the allow-list ───────────
+
+@pytest.mark.parametrize("cmd,want", [
+    ("qm set 106 --scsi0 local-lvm:40", "qm set"),
+    ("pct set 111 -nameserver 192.168.1.1", "pct set"),
+    ("qm resize 106 scsi0 40G", "qm resize"),
+    ("pvesm free local-lvm:vm-106-disk-1", "pvesm free"),
+    ("apt install -y dkms", "apt install"),
+    ("sudo -n systemctl enable palworld", "systemctl enable"),
+    ("tee -a /etc/caddy/Caddyfile", "tee -a /etc/caddy/"),   # a bare `tee` would allow writing anywhere
+    ("tee /etc/hosts", "tee /etc/"),
+    ("mkdir -p /opt/pal/data", "mkdir -p /opt/pal/"),
+    ("modprobe nvidia", "modprobe nvidia"),
+    ("tee -a", ""),                                          # nothing bounds it: not a prefix, the whole machine
+    ("tee report.txt", ""),                                  # a relative path cannot be bounded either
+    ("chmod +x /tmp/NVIDIA.run", "chmod +x /tmp/"),         # `+x` is a mode, not a flag, and not the target
+    ("chmod 700 /root/.ssh", "chmod 700 /root/"),
+    ("cp /etc/network/interfaces /etc/network/interfaces.bak", "cp /etc/network/"),
+    ("qm start 106", "qm start"),                            # a digit is not a subcommand
+])
+def test_prefix_for_is_the_narrowest_entry_that_would_pass(cmd, want):
+    assert sr.prefix_for(cmd) == want
+
+
+def test_a_plan_names_its_own_write_prefixes_and_nothing_else():
+    """The `runner_writes` recipe asked the operator to guess this list from a
+    generic Proxmox example. Prose is full of inline literals ("Done when `pct
+    status 111` reports `running`") — only what the engine's own write test
+    calls a write becomes a prefix."""
+    nodes = [
+        {"node_key": "A1", "title": "Resize the disk",
+         "description": "Run `qm resize 106 scsi0 40G`. Done when `qm config 106` reports scsi0 40G and the guest is `running`."},
+        {"node_key": "A2", "title": "Point DNS at the router",
+         "description": "Run `pct set 111 -nameserver 192.168.1.1`; check with `pct config 111`."},
+        {"node_key": "A3", "title": "Grow the other disk", "description": "Run `qm resize 110 scsi0 80G`."},
+        {"node_key": "A4", "title": "Reboot the host", "description": "Run `reboot` on the host."},
+    ]
+    got = sr.prefixes_for_nodes(nodes)
+    allowed = [(p["prefix"], p["steps"]) for p in got if p["prefix"]]
+    assert ("qm resize", ["A1", "A3"]) in allowed
+    assert ("pct set", ["A2"]) in allowed
+    assert allowed[0][0] == "qm resize"                       # most widely needed first
+    assert not any(p["prefix"] in ("running", "qm config", "pct config") for p in got), got
+    never = [p for p in got if not p["prefix"]]
+    assert never and never[0]["why"].startswith("never allowed: host power"), never
+    assert never[0]["steps"] == ["A4"]
+
+
+@pytest.mark.asyncio
+async def test_write_prefixes_for_job_reads_only_the_steps_still_to_do():
+    rows = [{"node_key": "P1", "title": "set it", "description": "Run `qm set 100 --ostype l26`.",
+             "prompt_template": "", "tool": "LLM", "node_type": "task"}]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(mappings=lambda: MagicMock(all=lambda: rows)))
+    got = await sr.write_prefixes_for_job(db, "job-1")
+    assert [p["prefix"] for p in got] == ["qm set"]
+    sql = str(db.execute.await_args[0][0])
+    assert "status IN ('pending', 'running', 'failed')" in sql, sql
+
+
+@pytest.mark.parametrize("cmd,prefixes", [
+    # the gate judges PER SEGMENT, and the runbook prompt asks for idempotent
+    # one-liners — so it is the FIX that needs allowing, not the check
+    ("pct status 111 | grep -q running || pct start 111", ["pct start"]),
+    ("qm config 106 | grep -q agent || qm set 106 --agent enabled=1", ["qm set"]),
+    ("printf '%s\\n' 'blacklist nouveau' | tee /etc/modprobe.d/bl.conf", ["tee /etc/modprobe.d/"]),
+    ("pct config 105 | grep net0", []),                      # read-only throughout
+    ("qm stop 100 && qm set 100 --ostype l26", ["qm stop", "qm set"]),
+])
+def test_prefixes_are_derived_per_segment(cmd, prefixes):
+    assert sr.prefixes_for_command(cmd)[0] == prefixes
+
+
+def test_a_command_on_the_denylist_is_reported_as_never_allowed():
+    assert sr.prefixes_for_command("echo ready && reboot") == ([], ["host power — do that by hand"])
+
+
+def test_the_channel_rules_name_the_forms_the_gate_can_read():
+    """Each rule here exists because the real plan lost a step to its absence:
+    a heredoc, a `$(…)`, a `>` redirect, a `cd` the next line relied on, and an
+    `if … then … fi` whose `then`-part no gate can read."""
+    for phrase in ("its OWN shell", "No heredocs", "tee", "if … then … fi", "guard chain", "read-only command"):
+        assert phrase in sr.CHANNEL_RULES, phrase

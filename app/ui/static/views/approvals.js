@@ -53,7 +53,7 @@ export function chainOutcome(st) {
 export const AFTER_APPROVE = [
   ["review", "Review the plan first", "Research and draw the plan, then stop — you look it over, change steps, and start when ready."],
   ["walk", "Start the walkthrough", "Research, draw the plan, and open the guided walkthrough at step 1 — you run each step, the engine guides."],
-  ["run", "Let the engine run it", "Research, draw the plan, and have the engine work every step itself — it produces runbooks, configs and code; it never connects to your machines."],
+  ["run", "Let the engine run it", "Research, draw the plan, and have the engine work every step itself — it produces runbooks, configs and code. It connects to a machine only if you opened the write channel (Capabilities → \u201cLet the engine run approved commands\u201d); then it stops at every step that would change one and asks you to approve the exact commands first."],
 ];
 export const AFTER_APPROVE_KEY = "scaffold_after_approve";
 export function approveBodyFor(choice) {

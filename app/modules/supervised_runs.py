@@ -108,9 +108,145 @@ def is_hands_on_node(node: dict) -> bool:
     return bool(on) and not why.startswith("tool:human")
 
 
+# ── what the channel would need to be open for THIS plan (§17.1189) ──────
+# The `runner_writes` recipe asks the operator to "list the prefixes this
+# plan's steps need" and then offers a generic Proxmox example. The engine
+# already knows: the plan's own steps carry the commands, `step_classify`
+# decides which ones write, and the gate matches on whole-token prefixes. So
+# the list is derivable — deterministically, with no model draw — and the
+# operator reads their own plan back instead of guessing.
+
+_PLACEHOLDER_TOKEN = re.compile(r"^<[A-Z][A-Z0-9_]{1,40}>$")
+_FILE_WRITERS = frozenset({"tee", "install", "cp", "mv", "touch", "mkdir", "chmod", "chown", "ln", "dd"})
+
+
+def prefix_for(command: str) -> str:
+    """The narrowest ``--write-allow`` entry that would let this command run.
+
+    Head plus subcommand for the two-word mutation forms the plan is full of
+    (``qm set``, ``pct set``, ``pvesm free``); head plus the target DIRECTORY,
+    slash-terminated, for a command whose argument is the thing it writes
+    (``tee -a /etc/caddy/Caddyfile`` → ``tee -a /etc/caddy/``) — a bare ``tee``
+    would allow writing anywhere. ``''`` when nothing narrower than the head
+    can be read off it."""
+    from app.modules.assist_supervised import _SUDO_RE
+    bare = _SUDO_RE.sub("", (command or "").strip(), count=1).strip()
+    toks = bare.split()
+    if not toks:
+        return ""
+    head = toks[0]
+    if head in _FILE_WRITERS:
+        # The target is the first ABSOLUTE path, not the first non-flag token:
+        # `chmod +x /tmp/x.run` carries a mode there, `chmod 700 /root/.ssh` a
+        # number. Everything before it (flags, mode) stays in the prefix.
+        target = next((t for t in toks[1:] if t.startswith("/")), "")
+        if target and "/" in target.rstrip("/")[1:]:
+            lead = toks[1:toks.index(target)]
+            return " ".join([head, *lead, target.rsplit("/", 1)[0] + "/"])
+        # No absolute target to bound it: a bare `tee -a` on the allow-list
+        # would let the engine write ANY file, which is not a prefix — it is
+        # the whole machine. Recommend nothing and let the step be the
+        # operator's to run (they can still allow it by hand if they mean to).
+        return ""
+    nxt = toks[1] if len(toks) > 1 else ""
+    if nxt and not nxt.startswith("-") and not _PLACEHOLDER_TOKEN.match(nxt) and "/" not in nxt and not nxt.isdigit():
+        return f"{head} {nxt}"
+    return head
+
+
+def prefixes_for_command(command: str) -> tuple[list[str], list[str]]:
+    """``(prefixes, never_allowed_reasons)`` for one command.
+
+    A command is judged by the gate PER SEGMENT (`write_allowed` splits on
+    ``&&``, ``||``, ``;``, ``|``), and the runbook prompt asks for idempotent
+    one-liners — so ``pct status 111 | grep -q running || pct start 111`` needs
+    ``pct start`` allowed, not ``pct status``. Deriving one prefix from the
+    whole string is the mistake that made a measurement of this read 5/21
+    instead of 12/21; the segment split is the same one the gate uses."""
+    from app.modules.assist_supervised import catastrophic, read_only, split_segments
+    from app.modules.step_classify import command_writes
+    prefixes: list[str] = []
+    never: list[str] = []
+    for seg in split_segments(command or ""):
+        seg = seg.strip()
+        if not seg or read_only(seg)[0] or not command_writes(seg):
+            continue
+        why = catastrophic(seg)
+        if why:
+            if why not in never:
+                never.append(why)
+            continue
+        p = prefix_for(seg)
+        if p and p not in prefixes:
+            prefixes.append(p)
+    return prefixes, never
+
+
+def prefixes_for_nodes(nodes: list[dict]) -> list[dict]:
+    """``[{prefix, steps, why}]`` — what these steps would need allowed, most
+    widely needed first. Only commands the engine's own write test calls a
+    write are counted, and a command on the catastrophic denylist is reported
+    separately (no allow-list entry can ever release it)."""
+    from app.modules.step_classify import step_commands
+    need: dict[str, set] = {}
+    refused: dict[str, set] = {}
+    for node in nodes:
+        key = str((node or {}).get("node_key") or "")
+        text_all = "\n".join(str((node or {}).get(f) or "") for f in ("title", "description", "prompt_template"))
+        for cmd, _sentence in step_commands(text_all):
+            prefixes, never = prefixes_for_command(cmd)
+            for p in prefixes:
+                need.setdefault(p, set()).add(key)
+            for why in never:
+                refused.setdefault(why, set()).add(key)
+    out = [{"prefix": p, "steps": sorted(ks), "why": f"{len(ks)} step(s) in this plan"}
+           for p, ks in sorted(need.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
+    for why, ks in sorted(refused.items()):
+        out.append({"prefix": "", "steps": sorted(ks), "why": f"never allowed: {why}"})
+    return out
+
+
+async def write_prefixes_for_job(db: AsyncSession, job_id: str) -> list[dict]:
+    """``prefixes_for_nodes`` over the job's steps that are still to do and
+    that change a machine."""
+    from app.modules.step_classify import step_is_hands_on
+    rows = (await db.execute(
+        text("""SELECT node_key, title, description, prompt_template, tool, node_type
+                FROM dag_nodes WHERE job_id = :jid AND status IN ('pending', 'running', 'failed')
+                ORDER BY execution_order"""),
+        {"jid": job_id})).mappings().all()
+    todo = [dict(r) for r in rows if step_is_hands_on(dict(r))[0]]
+    return prefixes_for_nodes(todo)
+
+
 # ── the runbook and its commands ────────────────────────────────────────
 
-async def draft_runbook(node: dict, brief: dict | str, upstream: str = "") -> str:
+# §17.1189 — what the supervised channel can actually carry.
+#
+# The runbook prompt is written for a HUMAN pasting a block into one shell, so
+# it reaches for heredocs, `$(…)`, `>` and a `cd` that the next line relies on.
+# The channel is not a shell session: `run_block` sends ONE command at a time,
+# each to its own `create_subprocess_shell` on the runner, and the write gate
+# refuses substitutions and redirects outright (`write_allowed`). Measured over
+# the operator's real plan, that mismatch — not policy, not risk — was the
+# single largest reason Auto mode could not run a step it had correctly
+# identified: 5 of 21 pending hands-on steps carried a heredoc or a `$(…)`,
+# and one sequence did `cd /tmp` and then named a file relatively.
+#
+# So when the engine may run the block, the drafter is told what "runnable"
+# means here. The operator-facing runbook (assist guidance) keeps the old
+# freedom — a human pasting a block CAN run a heredoc.
+CHANNEL_RULES = """
+Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, one command at a time):
+- Each line under "## Run this" must be ONE self-contained command. They are run in order, each in its OWN shell, so no shell state carries between them: never `cd` and then name a file relatively — write absolute paths (`wget -O /tmp/x.run …`, then `/tmp/x.run`).
+- No heredocs (`<<EOF`), no command substitution (`$(…)` or backticks), and no output redirection (`>` / `>>`). Write a file by piping into `tee` with the content as arguments: `printf '%s\n' 'line one' 'line two' | tee /etc/example.conf` (append with `tee -a`). `2>/dev/null` is fine.
+- No multi-line shell constructs, and no `if … then … fi` even on one line: each part of a command is judged on its own, and a `then`-prefixed part cannot be read. Write an idempotent step as a guard chain instead — `pct status 111 | grep -q running || pct start 111` — where the check and the fix are each a whole command. Same for loops: `for i in 1 2 3; do …; done` is better written as the straight-line sequence.
+- Under "## Verify", each check stays a read-only command (`pct status 111`, `systemctl is-active …`, `ls -ld …`).
+"""
+
+
+async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
+                        for_channel: bool = True) -> str:
     """The same runbook the executor would have written (its prompt and
     system), so the operator approves what Auto mode would have handed them."""
     from app import model_router
@@ -119,9 +255,33 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "") -> st
     prompt = build_base_prompt(node, b)
     if upstream:
         prompt = f"{prompt}\n\n{upstream}"
-    resp = await model_router.generate(prompt, role="model_general", system=EXECUTION_SYSTEM_RUNBOOK,
-                                       temperature=0.2, max_tokens=3000)
-    return (getattr(resp, "text", "") or "").strip()
+    # §17.1189 — the sibling this mirrors (the executor's own node generation)
+    # routes through the shared empty-guard at node_generation_max_tokens
+    # (8192); this call was a bare generate at 3000. On a thinking model
+    # num_predict is a SHARED reasoning+content budget and the reasoning trace
+    # is discarded on this path (§17.683), so 3000 is structurally starved —
+    # §17.1126 measured 1.8-3.8 K reasoning tokens per draw on
+    # deepseek-v4-pro. A success+empty draw yields a runbook with no commands,
+    # so the frame says "no runnable command was found" and the step falls to
+    # "I'll do it myself" with no stated reason. Measured on the real 131-step
+    # plan: 1 of 21 pending hands-on steps lost exactly that way.
+    from app.config import settings
+    from app.utils.llm_retry import generate_until_nonempty
+    system = EXECUTION_SYSTEM_RUNBOOK + ("\n" + CHANNEL_RULES if for_channel else "")
+    # think=False from the first draw, not only as a rescue: on the generate
+    # path model_router reads `response` and DISCARDS `thinking` (§17.683), so
+    # the reasoning is pure cost here — §17.1126 measured the same-length
+    # answer in 382 tokens / 2.5 s with it off against 14.6 s with it on.
+    resp = await generate_until_nonempty(
+        model_router.generate, prompt, {"role": "model_general", "think": False},
+        system=system, temperature=0.2,
+        max_tokens=settings.node_generation_max_tokens,
+        draws=settings.node_generation_max_draws, label=f"runbook {node.get('node_key')}",
+    )
+    out = (getattr(resp, "text", "") or "").strip()
+    if not out:
+        logger.error("draft_runbook_empty node=%s — every draw came back empty", node.get("node_key"))
+    return out
 
 
 _SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
@@ -138,13 +298,30 @@ def _section(text_out: str, name: str) -> str:
     return ""
 
 
+_MULTILINE_RE = re.compile(r"<<-?\s*['\"]?\w+|^\s*(?:for|while|until)\s.*\bdo\s*$|^\s*if\s.*\bthen\s*$", re.M)
+
+
 def runbook_commands(text_out: str) -> list[str]:
     """The commands under ``## Run this`` (every fence there, in order);
-    when the runbook has no such section, every fence in it."""
+    when the runbook has no such section, every fence in it.
+
+    §17.1189 — a fence carrying a HEREDOC or a multi-line ``for``/``if`` block
+    is one command spread over many lines, so splitting it per line invents
+    commands that never existed: the operator's own plan produced a refusal
+    list reading ``WorkingDirectory=x``, ``ExecStart=x``, ``reverse_proxy
+    x:x`` — systemd-unit and Caddyfile *body* lines, gated as if they were
+    commands. Such a fence is kept whole: the gate then refuses it once, for
+    the real reason (``substitution/heredoc``), and the operator reads one
+    honest refusal instead of five fictional ones."""
     from app.modules.assist_supervised import block_commands
     body = _section(text_out, "Run this") or (text_out or "")
     out: list[str] = []
     for fence in _FENCE_RE.findall(body):
+        if _MULTILINE_RE.search(fence):
+            whole = (fence or "").strip()
+            if whole:
+                out.append(whole)
+            continue
         out.extend(block_commands(fence))
     return out[:MAX_RUN_COMMANDS]
 

@@ -55,6 +55,19 @@ def _words(name: str) -> list[str]:
     return [w for w in name.upper().split("_") if w and w not in _GENERIC and len(w) > 1]
 
 
+def _mentions(text: str, words: list[str]) -> bool:
+    """§17.1189 — does this text name one of the placeholder's own words?
+
+    This was a SUBSTRING test, which a short word cannot survive: ``AI_VM_IP``
+    reduces to the single word ``AI`` (``VM`` and ``IP`` are generic), and
+    ``"ai" in text`` is true of *domain*, *available*, *chain*, *main* — so
+    every fact with an address in it looked like a match. Matched on word
+    boundaries instead (``ai-vm`` and ``ai_vm`` still match; ``domain`` does
+    not)."""
+    low = (text or "").lower()
+    return any(re.search(rf"(?<![a-z0-9]){re.escape(w.lower())}(?![a-z0-9])", low) for w in words)
+
+
 def _add(out: list[dict], value: str, source: str, confidence: str) -> None:
     value = str(value or "").strip()
     if not value or any(o["value"] == value for o in out) or len(out) >= MAX_SUGGESTIONS:
@@ -85,7 +98,7 @@ def suggest_for(name: str, env: dict) -> list[dict]:
             label = attrs.get("name") or attrs.get("hostname") or ""
             ekind = str(ent.get("kind") or "")
             src = f"system map: {ekind} {sid}" + (f" ({label})" if label else "")
-            mentions = any(w.lower() in (label or "").lower() or w.lower() in str(sid).lower() for w in words)
+            mentions = _mentions(f"{label} {sid}", words)
             if kind == "vmid" and ekind in ("vm", "ct") and str(sid).isdigit():
                 if mentions or not words:
                     _add(out, str(sid), src, "map")
@@ -103,10 +116,18 @@ def suggest_for(name: str, env: dict) -> list[dict]:
     facts = env.get("facts") or []
     for f in facts if isinstance(facts, list) else []:
         text = f if isinstance(f, str) else str((f or {}).get("text") or f)
-        low = text.lower()
-        if words and not any(w.lower() in low for w in words):
+        if words and not _mentions(text, words):
             continue
-        if not words and kind not in ("ip", "port", "vmid"):
+        # §17.1189 — a name whose every word is generic (``CONTAINER_IP``,
+        # ``HOST_IP``) has nothing to match on, and an ADDRESS drawn from an
+        # unrelated fact is a different machine or network: on the real session
+        # this offered 67.240.32.243 — the public address of the operator's
+        # DuckDNS domain, learned from a `getent hosts` fact — as a candidate
+        # container IP. An id or a port from an unmatched fact is still an id
+        # or a port on this host, so those stay on offer (with their source).
+        if not words and kind in ("ip", "prefix"):
+            continue
+        if not words and kind not in ("ip", "port", "vmid", "prefix"):
             continue
         src = "fact: " + text[:100]
         if kind == "ip":

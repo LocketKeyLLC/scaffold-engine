@@ -208,3 +208,39 @@ async def test_write_policy_is_cached_and_detection_never_calls_out():
     assert sw.cached_policy(spec) == (True, first)
     sw.clear_policy_cache(spec.name)
     assert sw.cached_policy(spec) == (False, None)
+
+
+# ── §17.1189 — "host power" is the HOST's power, not a guest's ────────────
+
+@pytest.mark.parametrize("cmd", [
+    "reboot", "sudo reboot", "sudo -n poweroff", "shutdown -h now", "systemctl reboot",
+    "halt", "init 0", "echo done && reboot", "systemctl kexec",
+])
+def test_host_power_is_still_refused(cmd):
+    assert sw.catastrophic(cmd) == "host power — do that by hand", cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "pct reboot 111",            # a container cycle: an ordinary build step
+    "qm reboot 106",             # a VM cycle, likewise
+    "pct shutdown 111",
+    "qm shutdown 106",
+    "systemctl restart sshd",    # a service, not the host
+    "grep reboot /var/log/syslog",   # read-only: the word, not the act
+    "ls -l /var/run/reboot-required",
+])
+def test_guest_power_and_the_word_itself_are_not_host_power(cmd):
+    """The denylist matched the WORD anywhere in the line, so it refused
+    `pct reboot 111` as "host power" while `qm start`/`pct start` were never
+    on the list at all — the middle of a lifecycle it otherwise allows. It
+    also refused a read-only `grep reboot …`. Measured on the operator's real
+    plan: 1 of 21 pending hands-on steps lost this way."""
+    assert sw.catastrophic(cmd) == "", cmd
+
+
+def test_guest_power_still_needs_the_operators_allow_list():
+    """Not catastrophic is not free: `pct reboot` still writes, so it runs
+    only when the operator put that prefix on the runner's --write-allow."""
+    assert sw.write_allowed("pct reboot 111", [])[0] is False
+    assert sw.write_allowed("pct reboot 111", ["pct start"])[0] is False
+    assert sw.write_allowed("pct reboot 111", ["pct reboot"])[0] is True

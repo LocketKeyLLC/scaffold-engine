@@ -90,3 +90,56 @@ def test_the_pause_passes_the_environment_to_the_frame():
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea._pause_for_decision)
     assert "job_environment(db, job_id)" in src and "frame_run(run_node, runbook, spec, policy, env=_env)" in src
+
+
+# ── §17.1189 — a suggestion must be ABOUT the value it is offered for ─────
+
+REAL_SHAPED_ENV = {
+    "substitutions": {"JELLYFIN_IP": "192.168.1.20"},
+    "profile": "Operator runs commands as root@pve in ONE interactive shell.",
+    "system_state": {
+        "110": {"kind": "vm", "attrs": {"name": "ai-vm", "ip": "192.168.1.30"}},
+        "120": {"kind": "ct", "attrs": {"ip": "192.168.1.26"}},
+        "host": {"kind": "host", "attrs": {"ip": "192.168.1.156"}},
+    },
+    # the real ledger's shape: a DNS fact carrying the operator's PUBLIC address
+    "facts": [
+        {"text": "pct exec 101 -- getent hosts defrusciohomelab.duckdns.org returns 67.240.32.243 (DNS resolution works)."},
+        {"text": "The ai-vm guest answers on 192.168.1.127."},
+    ],
+}
+
+
+def test_a_public_address_is_not_offered_as_a_container_ip():
+    """`CONTAINER_IP` reduces to NO distinguishing words (both are generic),
+    and the fact filter used to wave those through: on the operator's real
+    session the engine offered 67.240.32.243 — the public address of their
+    DuckDNS domain — as a candidate container IP."""
+    values = [s["value"] for s in ri.suggest_for("CONTAINER_IP", REAL_SHAPED_ENV)]
+    assert "67.240.32.243" not in values, values
+    assert all(s["confidence"] != "fact" for s in ri.suggest_for("CONTAINER_IP", REAL_SHAPED_ENV))
+    assert "192.168.1.26" in values          # the map still offers what it knows
+
+
+def test_a_two_letter_word_no_longer_matches_any_substring():
+    """`AI_VM_IP` reduces to the single word `AI`, and the filter was a
+    SUBSTRING test — so *domain*, *available* and *chain* all matched and every
+    fact with an address in it looked relevant."""
+    assert ri._mentions("the domain is available", ["AI"]) is False
+    assert ri._mentions("the ai-vm guest answers", ["AI"]) is True
+    assert ri._mentions("vm 110 (ai_vm) is running", ["AI"]) is True
+    got = ri.suggest_for("AI_VM_IP", REAL_SHAPED_ENV)
+    assert [s["value"] for s in got] == ["192.168.1.30", "192.168.1.127"], got
+    assert got[0]["confidence"] == "map" and "ai-vm" in got[0]["source"]
+
+
+def test_a_pin_with_the_same_name_still_prefills():
+    got = ri.suggest_inputs([{"name": "JELLYFIN_IP", "hint": "", "secret": False}], REAL_SHAPED_ENV)
+    assert got[0]["value"] == "192.168.1.20"
+    assert got[0]["suggestions"][0]["confidence"] == "pinned"
+
+
+def test_the_map_matches_a_name_on_word_boundaries():
+    env = {"system_state": {"106": {"kind": "vm", "attrs": {"name": "palworld-server"}},
+                            "110": {"kind": "vm", "attrs": {"name": "ai-vm"}}}}
+    assert [s["value"] for s in ri.suggest_for("PALWORLD_VMID", env)] == ["106"]

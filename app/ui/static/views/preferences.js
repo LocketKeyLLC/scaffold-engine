@@ -37,7 +37,7 @@ export default function preferences(container) {
         pref("Density", "Compact tightens paddings for more rows per screen.", densitySel("cozy", "▢ Cozy"), densitySel("compact", "▦ Compact")),
         // §17.853 — the Auto/Assist mode. It sat in the sidebar; the job page's
         // approve and start controls will carry it, this is the fallback.
-        pref("Execution mode", "Assist: you run each step on your machines with the engine guiding — it never touches your hardware. Auto: the engine works every step itself and produces runbooks, configs and code; it still never connects to your machines.",
+        pref("Execution mode", "Assist: you run each step on your machines with the engine guiding — it never touches your hardware. Auto: the engine works every step itself and produces runbooks, configs and code; it connects to a machine only if you opened the write channel (Capabilities \u2192 \u201cLet the engine run approved commands\u201d), and then only to run commands you approve block by block.",
           modeSel("assist", "✦ Assist"), modeSel("auto", "▶ Auto")),
         pref("Desktop alerts", "A system notification when a job needs you — the gate opens, a run finishes or fails, a walkthrough parks. The tab title always updates.",
           notify.notifySupported()

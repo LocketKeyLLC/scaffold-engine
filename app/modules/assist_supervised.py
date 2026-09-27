@@ -55,7 +55,13 @@ _CATASTROPHIC = (
     (re.compile(r"(?:^|\s)dd\s.*\bof=/dev/(?!null|zero)"), "dd onto a device"),
     (re.compile(r">\s*/dev/(?:sd|nvme|vd|hd|mapper|md)"), "redirect onto a device"),
     (re.compile(r":\(\)\s*\{"), "fork bomb"),
-    (re.compile(r"(?:^|\s)(?:shutdown|poweroff|halt|reboot|init\s+[06]|systemctl\s+(?:poweroff|halt|reboot|kexec))(?:\s|$)"), "host power — do that by hand"),
+    # §17.1189 — "host power" must not swallow GUEST power. `pct reboot 111` /
+    # `qm reboot 106` cycle one container or VM and are ordinary build steps,
+    # while `qm start`/`pct start`/`qm stop` were never on this list at all —
+    # so the denylist refused the middle of a lifecycle it otherwise allows.
+    # Measured on the real plan: 1 of 21 pending hands-on steps lost this way.
+    # The power words still bite as a command HEAD (bare, or through sudo).
+    (re.compile(r"(?:^|[;&|]\s*)(?:sudo\s+(?:-[A-Za-z]+\s+)*)?(?:shutdown|poweroff|halt|reboot|init\s+[06]|systemctl\s+(?:poweroff|halt|reboot|kexec))(?:\s|$)"), "host power — do that by hand"),
     (re.compile(r"(?:^|\s)(?:iptables|ip6tables|nft)\s+(?:-F|--flush|flush\s+ruleset)"), "firewall flush"),
     (re.compile(r"(?:^|\s)(?:systemctl\s+(?:stop|disable|mask)\s+local-runner-mcp|userdel\s+(?:-r\s+)?scaffold-runner|rm\s.*scaffold-runner)"), "the runner's own service"),
     (re.compile(r"(?:^|\s)(?:chmod|chown)\s+-[a-zA-Z]*R[a-zA-Z]*\s+\S+\s+/(?:\s|$)"), "recursive mode/owner change of /"),
