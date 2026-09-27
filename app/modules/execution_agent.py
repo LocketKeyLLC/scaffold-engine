@@ -2362,7 +2362,10 @@ async def _pause_for_decision(job_id: str) -> dict | None:
             return None
         spec, policy = ch
         runbook = await supervised_runs.draft_runbook(run_node, brief_full if isinstance(brief_full, dict) else brief, up_block)
-        frame = supervised_runs.frame_run(run_node, runbook, spec, policy)
+        from app.modules.runbook_inputs import job_environment
+        async with async_session() as db:
+            _env = await job_environment(db, job_id)          # §17.1188 — pins, system map, facts
+        frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env)
         logger.warning("supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
                        job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame["commands"]),
                        len(frame["refused"]), frame["runner"])

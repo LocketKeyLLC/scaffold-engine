@@ -242,13 +242,16 @@ def mask_secrets(text_out: str, values: dict[str, str], names: list[dict]) -> st
     return text_out
 
 
-def frame_run(node: dict, runbook: str, spec, policy: dict) -> dict:
+def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
     what would verify, what the gate refused (then ``run`` is not offered)."""
     from app.modules.assist_supervised import gate_block
     cmds = runbook_commands(runbook)
     verify = verify_commands(runbook)
     inputs = inputs_for(cmds, verify, runbook)
+    if inputs:                                   # §17.1188 — offer what the engine already knows
+        from app.modules.runbook_inputs import suggest_inputs
+        inputs = suggest_inputs(inputs, env)
     # §17.1187 — with placeholders the SHAPE is gated now (dummy values in
     # place); the real commands are gated again at resolve, once the operator
     # has supplied the values.
