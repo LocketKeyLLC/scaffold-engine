@@ -622,14 +622,15 @@ async def compute_deliverable_kind(
     if assist_completed:
         return "assist_completed"
     try:
-        row = await db.execute(
+        from app.modules.step_classify import step_is_hands_on
+        rows = (await db.execute(
             text(
-                "SELECT COUNT(*) FROM dag_nodes WHERE job_id = :jid "
-                "AND status = 'done' AND lower(tool) = 'shell'"
+                "SELECT tool, node_type, title, description, prompt_template "
+                "FROM dag_nodes WHERE job_id = :jid AND status = 'done'"
             ),
             {"jid": job_id},
-        )
-        shell_done = row.scalar() or 0
+        )).mappings().all()
+        shell_done = sum(1 for r in rows if step_is_hands_on(dict(r))[0])   # §17.1183
     except Exception:
         shell_done = 0
     if shell_done and not settings.shell_tool_enabled:
@@ -806,6 +807,7 @@ async def _compile_output(
     rows = await db.execute(
         text(
             "SELECT node_key, title, tool, status, output_text, depends_on, evidence, "
+            "       node_type, description, prompt_template, "   # §17.1183 — the runbook count reads what a step does
             "       COALESCE(is_output_node, FALSE) AS is_output_node, "
             "       COALESCE(is_deliverable, FALSE) AS is_deliverable "
             # §17.1180 — `NULLS LAST, node_key`, matching `render_plan_preview`
@@ -836,9 +838,13 @@ async def _compile_output(
     # §17.516 — in an Assist Mode finalization the operator executed every step,
     # so there is no "unexecuted runbook" — force runbook_count to 0 so the
     # PLAN-NOT-EXECUTED banner never fires (a positive assist header is used).
+    # §17.1183 — and an LLM-tagged step the engine could only write a runbook
+    # for (step_classify) counts the same: the banner must say how many steps
+    # were NOT executed, not how many were tagged Shell.
+    from app.modules.step_classify import step_is_hands_on
     runbook_count = (
         sum(1 for n in nodes
-            if n["status"] == "done" and (n["tool"] or "").lower() == "shell")
+            if n["status"] == "done" and step_is_hands_on(dict(n))[0])
         if (not settings.shell_tool_enabled and not assist_completed) else 0
     )
     done_count = sum(1 for n in nodes if n["status"] == "done")
