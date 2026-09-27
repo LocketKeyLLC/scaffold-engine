@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any, Literal, get_args
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +30,9 @@ JobStatus = Literal[
     # §17.624 — hands-on assist gate parked the job as a plan (predominantly
     # Shell/human DAG); nodes stay pending, operator drives it via /assist.
     "awaiting_assist",
+    # §17.1184 — the autonomous run stopped at a decision step to ask the
+    # operator; POST /jobs/{id}/decide records the answer and resumes it.
+    "awaiting_decision",
 ]
 
 # Runtime-iterable mirror of JobStatus, derived directly from the Literal
@@ -425,6 +428,30 @@ class ResumeJobInput(BaseModel):
     skip_optimize: bool = False
     skip_verify: bool = False
     model_overrides: dict | None = None
+
+class DecideInput(BaseModel):
+    """§17.1184 — body for POST /jobs/{job_id}/decide. Either the operator's
+    ``choice`` (an option label or their own words) or ``delegate=True``
+    ("let the engine decide"); ``note`` rides along as context."""
+    node_key: str = Field(min_length=1, max_length=64)
+    choice: str | None = Field(default=None, max_length=2000)
+    note: str | None = Field(default=None, max_length=4000)
+    delegate: bool = False
+
+    @model_validator(mode="after")
+    def _choice_or_delegate(self):
+        if not self.delegate and not (self.choice or "").strip():
+            raise ValueError("choice is required unless delegate=true")
+        return self
+
+
+class DecideResult(BaseModel):
+    job_id: str
+    node_key: str
+    resolved: Literal["operator", "engine"]
+    status: str = "executing"
+    run_started: bool = False
+
 
 class SkipNodeInput(BaseModel):
     job_id: str

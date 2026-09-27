@@ -45,7 +45,7 @@ function routeForJob(j) {
   if (["pending", "refining", "awaiting_confirmation"].includes(j.status))
     return `/job/${j.id}`;   // the job page opens on the approval stage
   if (j.status === "completed") return `/job/${j.id}/output`;
-  if (["awaiting_assist", "assisted_paused", "assisted_executing",
+  if (["awaiting_assist", "awaiting_decision", "assisted_paused", "assisted_executing",
        "assisted_running", "running"].includes(j.status))
     return `/job/${j.id}/run`;
   return `/job/${j.id}/plan`;

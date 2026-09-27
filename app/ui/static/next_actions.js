@@ -22,6 +22,7 @@ export const ACTION_LABELS = {
   restart_research: "Restart research",
   restart_assist: "Restart assist",
   start_assist: "Start assist",
+  decide: "Decide",
   next_step: "Next step",
   submit: "Submit evidence",
   view_plan: "View plan",
@@ -56,7 +57,7 @@ export function actionTarget(a, jobId) {
   switch (a.action) {
     case "view_plan": return { kind: "nav", href: `#/job/${job}/plan` };
     case "view_output": return { kind: "nav", href: `#/job/${job}/output` };
-    case "retry_node": case "skip_node": case "rerun": return { kind: "nav", href: `#/job/${job}/run` };
+    case "retry_node": case "skip_node": case "rerun": case "decide": return { kind: "nav", href: `#/job/${job}/run` };
     case "confirm": case "reconfirm": return { kind: "nav", href: `#/job/${job}` };
     case "start_assist": case "next_step": case "submit": case "restart_assist":
       return { kind: "nav", href: sid ? `#/assist/${sid}` : `#/job/${job}/run` };

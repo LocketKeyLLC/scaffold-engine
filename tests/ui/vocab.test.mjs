@@ -9,7 +9,7 @@ import { STATUS_LABEL, statusLabel, nextStep, bucketOf, NEEDS_YOU, IN_PROGRESS, 
 const JOB_STATUSES = [
   "pending", "refining", "awaiting_confirmation", "researching", "planning", "executing", "running",
   "completed", "failed", "cancelled", "blocked", "assisted_executing", "assisted_running", "assisted_paused",
-  "aggregating", "awaiting_assist",
+  "aggregating", "awaiting_assist", "awaiting_decision",
 ];
 
 test("every job status has plain words — no underscores, no enum leaks", () => {
@@ -41,7 +41,7 @@ test("every job status maps to one verb and one job-page destination", () => {
     assert.equal(typeof step.primary, "boolean");
   }
   // the ones the operator opens the app for are PRIMARY (acts), the rest are looks
-  for (const s of ["awaiting_confirmation", "awaiting_assist", "assisted_running", "assisted_paused", "blocked", "failed"]) {
+  for (const s of ["awaiting_confirmation", "awaiting_assist", "awaiting_decision", "assisted_running", "assisted_paused", "blocked", "failed"]) {
     assert.equal(nextStep({ id: "J1", status: s, node_count: 3 }).primary, true, s);
   }
   for (const s of ["refining", "researching", "planning", "running", "completed"]) {

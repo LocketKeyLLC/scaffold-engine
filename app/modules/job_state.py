@@ -40,6 +40,7 @@ JOB_STATUSES: frozenset[str] = frozenset({
     "executing", "running", "completed", "failed", "cancelled", "blocked",
     "assisted_executing", "assisted_running", "assisted_paused",
     "aggregating", "awaiting_assist",
+    "awaiting_decision",   # §17.1184 — the run stopped to ask the operator
 })
 
 # A job in one of these never moves again on its own; only an explicit reopen

@@ -376,6 +376,7 @@ const ACCOUNT_PROMPT_KEY = "scaffold_account_prompt_dismissed";
 const ATTENTION_LABEL = {
   awaiting_confirmation: "plan ready to approve",
   awaiting_assist: "waiting on you",
+  awaiting_decision: "needs your decision",
   assisted_paused: "walkthrough paused",
   blocked: "blocked",
   failed: "run failed",

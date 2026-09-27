@@ -47,6 +47,8 @@ export function flowState(job) {
     return { i: 3, hint: "The engine is working through the plan.", action: { label: "Watch the run", href: `#/job/${id}/run` } };
   if (["assisted_executing", "assisted_running"].includes(st))
     return { i: 3, hint: "You are walking through the plan, one step at a time.", action: { label: "Continue", href: `#/job/${id}/run` } };
+  if (st === "awaiting_decision")
+    return { i: 3, hint: "The run stopped to ask you a question — answer it and the engine carries on.", action: { label: "Decide", href: `#/job/${id}/run` } };
   if (st === "awaiting_assist" || st === "assisted_paused")
     return { i: 3, hint: "Parked for you — pick it up whenever you are ready.", action: { label: "Continue", href: `#/job/${id}/run` } };
   if (st === "completed")

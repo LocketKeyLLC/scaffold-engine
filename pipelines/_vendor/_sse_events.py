@@ -141,6 +141,9 @@ ADVANCE_COMPLETE = "advance_complete"
 # §17.624 — the hands-on assist gate parked the job as a plan (predominantly
 # Shell/human DAG) instead of auto-executing it; a literal _sse("awaiting_assist"…).
 AWAITING_ASSIST = "awaiting_assist"
+# §17.1184 — the run stopped at a decision node to ask the operator; payload
+# carries the framed question/options. A literal _sse("awaiting_decision"…).
+AWAITING_DECISION = "awaiting_decision"
 # §17.777 — per-job token/cost budget cap reached; the executor hard-stops the
 # job ('failed', error_summary 'cost_budget_exhausted') before the next node.
 # Emitted as a literal _sse("budget_exhausted", …) in both the serial and

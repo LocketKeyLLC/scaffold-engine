@@ -96,6 +96,8 @@ class StatusCounts(BaseModel):
     # (plan generated, nodes pending, operator drives it via /assist). Parity
     # with app.schemas.JOB_STATUSES is asserted in test_status_logs.py.
     awaiting_assist: int = 0
+    # §17.1184 — the run stopped at a decision step to ask the operator.
+    awaiting_decision: int = 0
 
 
 class RecentJobSummary(BaseModel):

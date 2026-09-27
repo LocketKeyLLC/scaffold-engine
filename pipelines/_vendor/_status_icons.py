@@ -48,4 +48,6 @@ STATUS_ICONS: dict[str, str] = {
     "cancelled": "🚫",
     # §17.624 — hands-on job parked as a plan; needs the operator via /assist.
     "awaiting_assist": "🙋",
+    # §17.1184 — the run stopped at a decision step to ask the operator.
+    "awaiting_decision": "❓",
 }

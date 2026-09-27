@@ -114,6 +114,28 @@ NEXT_ACTIONS: dict[str, list[dict[str, Any]]] = {
             "node_specific": False,
         },
     ],
+    # §17.1184 — the autonomous run stopped at a decision step to ask the
+    # operator. The question is on GET /jobs/{id} (metadata.awaiting_decision);
+    # POST /jobs/{id}/decide records the answer (or delegates) and resumes.
+    "awaiting_decision": [
+        {
+            "action": "decide",
+            "command": "/decide {job_id} <your choice>",
+            "endpoint": "/jobs/{job_id}/decide",
+            "method": "POST",
+            "description": "The run stopped to ask you a question — answer it "
+                           "(or hand the choice back to the engine) and it continues.",
+            "node_specific": False,
+        },
+        {
+            "action": "view_plan",
+            "command": "/results {job_id}",
+            "endpoint": "/dag/{job_id}",
+            "method": "GET",
+            "description": "See the step the run is waiting on and what comes after it.",
+            "node_specific": False,
+        },
+    ],
     # §17.624 — the hands-on assist gate parked this job as a plan (predominantly
     # Shell/human DAG); nodes are pending and the operator drives execution.
     "awaiting_assist": [
