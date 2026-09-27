@@ -9,6 +9,7 @@ import { statusBadge, loading, errorPanel, toast, emptyState, openDialog, askCho
 import { briefPanel } from "./brief_panel.js";
 
 import { storage } from "../storage.js";
+import { statusLabel } from "../vocab.js";
 
 // ── Picker ────────────────────────────────────────────────────────────
 function renderPicker(container) {
@@ -868,7 +869,13 @@ export function renderChat(container, sessionId, opts = {}) {
   // and the engine's own behaviours, built from the single ASSIST_HELP source.
   // Operator-initiated, so it never fights a background poll (no timer, no
   // modal): a plain toggled panel.
-  const helpPanel = el("div", { class: "assist-help", hidden: true });
+  // Live review (2026-09-27): the panel mounted ABOVE the chat and pushed the
+  // whole conversation off-screen. It is a dialog now — Esc closes, focus
+  // returns to the button that opened it (§17.1118 contract via openDialog).
+  const helpPanel = el("div", { class: "card modal-card assist-help", hidden: true });
+  let helpDialog = null;
+  const helpOverlay = el("div", { class: "modal-overlay", hidden: true }, helpPanel);
+  helpOverlay.addEventListener("click", (ev) => { if (ev.target === helpOverlay) toggleHelp(false); });
   function buildHelp() {
     const close = el("button", { class: "btn btn-sm btn-ghost assist-help-close", text: "✕", title: "Close help", "aria-label": "Close help", onClick: () => toggleHelp(false) });
     const secs = helpSections().map((s) =>
@@ -896,8 +903,12 @@ export function renderChat(container, sessionId, opts = {}) {
     const show = typeof force === "boolean" ? force : helpPanel.hidden;
     if (show && !helpPanel.childElementCount) buildHelp();
     helpPanel.hidden = !show;
+    helpOverlay.hidden = !show;
     if (helpBtn) helpBtn.setAttribute("aria-expanded", show ? "true" : "false");
-    if (show) helpPanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (show) {
+      if (!helpOverlay.isConnected) document.body.append(helpOverlay);
+      helpDialog = openDialog(helpPanel, { label: "How the Assistant works", onClose: () => toggleHelp(false) });
+    } else if (helpDialog) { helpDialog.close(); helpDialog = null; }
   }
   const helpBtn = el("button", { class: "btn btn-sm btn-ghost", text: "? Help", title: "What the buttons and the assistant do", "aria-expanded": "false", onClick: () => toggleHelp() });
 
@@ -917,9 +928,31 @@ export function renderChat(container, sessionId, opts = {}) {
   // which names where you are. Desktop never shows the button (CSS).
   const sheetBtn = el("button", { class: "btn btn-sm btn-ghost follow-sheet-btn", type: "button", "aria-expanded": "false", text: "Plan ▾",
     onClick: () => { const on = main.classList.toggle("rail-open"); sheetBtn.setAttribute("aria-expanded", on ? "true" : "false"); } });
+  // The session's reference material (your machines, pinned values, notes,
+  // memory, the runner, the brief) opens as a DRAWER over the conversation.
+  // It used to be a three-column card grid folded into the 280 px rail.
+  const sessionBtn = el("button", { class: "btn btn-sm btn-ghost follow-session-btn", type: "button", text: "ⓘ Session", title: "Your machines, pinned values, notes, the brief", "aria-expanded": "false", onClick: () => toggleSession() });
   const paneHead = el("div", { class: "follow-pane-head" },
     sheetBtn, el("span", { class: "follow-pane-title", text: "Conversation" }), el("span", { class: "spacer" }),
-    el("div", { class: "follow-scope", role: "group", "aria-label": "What the conversation shows" }, scopeAll, scopeStep));
+    el("div", { class: "follow-scope", role: "group", "aria-label": "What the conversation shows" }, scopeAll, scopeStep),
+    sessionBtn);
+  const sessionDrawer = el("aside", { class: "follow-drawer", hidden: true, "aria-label": "Session details" });
+  let sessionDialog = null;
+  function toggleSession(force) {
+    const show = typeof force === "boolean" ? force : sessionDrawer.hidden;
+    sessionDrawer.hidden = !show;
+    sessionBtn.setAttribute("aria-expanded", show ? "true" : "false");
+    if (show) {
+      if (!sessionDrawer.childElementCount) {
+        mount(sessionDrawer,
+          el("div", { class: "row follow-drawer-head" },
+            el("strong", { text: "This session" }), el("span", { class: "spacer" }),
+            el("button", { class: "btn btn-sm btn-ghost", text: "✕", "aria-label": "Close session details", onClick: () => toggleSession(false) })),
+          belowGrid, briefSlot);
+      }
+      sessionDialog = openDialog(sessionDrawer, { label: "Session details", onClose: () => toggleSession(false), trap: false });
+    } else if (sessionDialog) { sessionDialog.close(); sessionDialog = null; }
+  }
   function setScope(v) {
     followScope = v;
     storage.set(FOLLOW_SCOPE_KEY, v);   // the wrapper already swallows a blocked localStorage
@@ -940,7 +973,7 @@ export function renderChat(container, sessionId, opts = {}) {
   const completeSlot = el("div", { class: "assist-complete-slot" });
   const contractSlot = el("div", { class: "assist-contract-slot" });
   const main = follow
-    ? el("div", { class: "chat-main assist-main embedded follow" }, rail, el("div", { class: "follow-pane" }, completeSlot, paneHead, focusChip, transcript, composer))
+    ? el("div", { class: "chat-main assist-main embedded follow" }, rail, el("div", { class: "follow-pane" }, completeSlot, paneHead, focusChip, transcript, composer, sessionDrawer))
     : el("div", { class: "chat-main assist-main" + (embedded ? " embedded" : "") }, completeSlot, transcript, composer);
   // §17.845 — the editable living brief rides with the session (mounted once
   // the session tells us its job).
@@ -957,16 +990,17 @@ export function renderChat(container, sessionId, opts = {}) {
     // §17.1160 — the rail IS the plan context: no step card, no contract card,
     // no folded details row under the chat. Details + help open from the rail.
     // §17.1161 — the standalone route keeps its own one-line header.
-    mount(container, embedded ? null : header, helpPanel, main);
-    rail.append(el("div", { class: "follow-rail-foot" },
+    mount(container, embedded ? null : header, main);
+    rail.append(el("div", { class: "row follow-rail-foot" },
       el("button", { class: "btn btn-sm btn-ghost", text: "? Help", onClick: () => toggleHelp() }),
-      el("details", { class: "follow-details" }, el("summary", { class: "btn btn-sm btn-ghost", text: "Details" }), belowGrid, briefSlot)));
+      el("span", { class: "spacer" }),
+      el("button", { class: "btn btn-sm btn-ghost", text: "ⓘ Session", onClick: () => toggleSession(true) })));
     // every verb but ✓ Done goes behind the ⋯ menu — two things to press, the rest one click away
     Array.from(verbsBar.children).forEach((c, i) => { if (i > 0 && c !== moreMenu) moreBody.prepend(c); });
   } else {
     // §17.1180 — the card is rendered from `load()`, once the session is known.
     // Building it here passed `session === null` by construction.
-    mount(container, embedded ? null : header, helpPanel, contractSlot, stepHero, main, moreRow);
+    mount(container, embedded ? null : header, contractSlot, stepHero, main, moreRow);
   }
   let briefMounted = false;
 
@@ -1521,15 +1555,15 @@ export function renderChat(container, sessionId, opts = {}) {
         : null,
       el("div", { class: "card card-pad side-block" },
         el("div", { class: "side-title", text: "Session" }),
-        el("div", { class: "row row-wrap side-badges" }, statusBadge(session.status), session.current_node_key ? el("span", { class: "tag", text: "node " + session.current_node_key } ) : null),
-        row("Handoff", session.handoff_policy),
-        row("Replan", session.replan_policy),
-        row("Divergence", String(session.divergence_count ?? 0)),
+        el("div", { class: "row row-wrap side-badges" }, statusBadge(session.status), session.current_node_key ? el("span", { class: "tag", text: "on " + session.current_node_key } ) : null),
+        row("Hand-offs", { manual: "you decide, step by step", auto: "the engine takes steps it can do itself" }[session.handoff_policy] || session.handoff_policy),
+        row("Re-planning", { context_only: "adapts from what you tell it", always: "re-plans after every step", never: "never re-plans" }[session.replan_policy] || session.replan_policy),
+        row("Times the plan and reality disagreed", String(session.divergence_count ?? 0)),
         row("Started", fmtDate(session.started_at))
       ),
       el("div", { class: "card card-pad side-block" },
         el("div", { class: "side-title", text: "Steps" }),
-        el("div", { class: "step-counts" }, ...Object.entries(sc).map(([k, v]) => el("span", { class: "strip-item" }, el("span", { class: "tag", text: k }), el("span", { class: "strip-n mono", text: String(v) }))))
+        el("div", { class: "step-counts" }, ...Object.entries(sc).map(([k, v]) => el("span", { class: "strip-item" }, el("span", { class: "tag", text: statusLabel(k).toLowerCase() }), el("span", { class: "strip-n mono", text: String(v) }))))
       ),
       // §17.703 — the machine the engine believes you're on; empty until taught.
       // §17.850 — plus the pinned-values editor (operator-set substitutions
@@ -2145,6 +2179,8 @@ export function renderChat(container, sessionId, opts = {}) {
 
   return () => {
     disposed = true;
+    if (helpDialog) helpDialog.close();
+    helpOverlay.remove();
     clearInterval(idlePoll);
     document.removeEventListener("selectionchange", onSelChange);  // §17.890
     document.removeEventListener("click", onDocClick);  // §17.1055

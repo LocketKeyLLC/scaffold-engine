@@ -33,7 +33,13 @@ export function renderOutput(container, jobId) {
         api.get(`/logs/${jobId}`, { query: { include_compiled: true, include_output: true } }),
       ]);
       if (disposed) return;
+      // The compiled plan opens with the engine's own "PLAN — NOT EXECUTED …
+      // run /assist <id>" blockquote (shared with the CLI and OWUI, where the
+      // command is right). In the console the card below carries the same
+      // message with a button, so the blockquote is dropped from the RENDER
+      // only — Copy and Download still give the document as the engine wrote it.
       const compiled = logs.compiled_output || "";
+      const shown = compiled.replace(/^>\s*⚠️?\s*\*\*PLAN — NOT EXECUTED\.\*\*[^\n]*\n+(?:---\n+)?/u, "");
       const kind = job.deliverable_kind || logs.deliverable_kind;
 
       const copyBtn = el("button", {
@@ -48,7 +54,7 @@ export function renderOutput(container, jobId) {
       });
 
       const compiledBlock = compiled
-        ? el("div", { class: "card card-pad output-doc" }, el("div", { class: "md", html: mdToHtml(compiled) }))
+        ? el("div", { class: "card card-pad output-doc" }, el("div", { class: "md", html: mdToHtml(shown) }))
         : emptyState({ icon: "∅", title: "No output yet", body: "This job hasn't produced a deliverable yet. What each step produced is below." });
       // A plan that is still being walked through: the compiled document says
       // "not executed" and names a CLI command — in the console the way onward

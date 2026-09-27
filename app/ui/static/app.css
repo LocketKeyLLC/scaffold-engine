@@ -821,12 +821,10 @@ a.strip-item:hover { background: var(--bg-elev-2); }
 .assist-brief-slot { margin-top: 14px; }
 
 /* §17.1096 — the "?" help panel: a discoverable explanation of the controls
-   and the engine's own behaviours, one source of truth (ASSIST_HELP). */
-.assist-help {
-  margin: 0 0 14px; padding: 16px 18px;
-  background: var(--bg-elev); border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-}
+   and the engine's own behaviours, one source of truth (ASSIST_HELP).
+   Live review 2026-09-27: a dialog (modal-card), not a panel above the chat. */
+.assist-help { padding: 16px 18px; width: min(760px, 100%); }
+.assist-help[hidden] { display: none; }
 .assist-help-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .assist-help-head h2 { margin: 0; font-size: var(--fs-lg, 18px); }
 .assist-help-close { flex: none; }
@@ -1770,3 +1768,22 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
 .mode-row .row { gap: 8px; font-size: var(--fs-sm); }
 .mode-hint { font-size: var(--fs-xs); max-width: 72ch; }
 .drawing-card { display: flex; flex-direction: column; gap: 10px; max-width: 720px; }
+
+/* ── Run stage, live review 2026-09-27 ─────────────────────────────── */
+/* the ⋯ step menu sits at the bottom of the pane: it opens UPWARD, never
+   into the composer or off the bottom of the viewport */
+.assist-main.follow .verbs-more-body { top: auto; bottom: calc(100% + 4px); }
+/* the session drawer: reference material over the conversation, one column */
+.follow-pane { position: relative; }
+.follow-drawer {
+  position: absolute; top: 0; right: 0; bottom: 0; z-index: 25; width: min(460px, 100%);
+  display: flex; flex-direction: column; gap: 12px; padding: 12px 14px; overflow-y: auto;
+  background: var(--bg-elev); border-left: 1px solid var(--border-strong); box-shadow: -8px 0 24px rgba(0,0,0,0.28);
+}
+.follow-drawer[hidden] { display: none; }
+.follow-drawer-head { padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.follow-drawer .assist-below { display: flex; flex-direction: column; gap: 10px; margin: 0; }
+.follow-drawer .assist-brief-slot { margin: 0; }
+.follow-session-btn { margin-left: 4px; }
+.follow-rail-foot { justify-content: space-between; }
+@media (max-width: 720px) { .follow-drawer { width: 100%; } }
