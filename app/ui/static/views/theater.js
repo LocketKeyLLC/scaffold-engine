@@ -703,16 +703,43 @@ export function renderTheater(container, jobId, ctx = {}) {
     const verify = Array.isArray(d.verify) ? d.verify : [];
     const refused = Array.isArray(d.refused) ? d.refused : [];
     const canRun = cmds.length > 0 && refused.length === 0;
+    // §17.1187 — the values the runbook asked for (<NAME> placeholders): one
+    // field each, the command preview fills in as they are typed, and Run
+    // waits until every value is given. Secrets are password fields.
+    const inputs = Array.isArray(d.inputs) ? d.inputs : [];
+    const fields = new Map();
+    const PH = /<([A-Z][A-Z0-9_]{1,40})>/g;
+    const fill = (c) => c.replace(PH, (m, n) => (fields.get(n) && fields.get(n).value.trim()) || m);
+    const cmdPre = el("code", { text: cmds.join("\n") });
+    const verifyPre = el("code", { text: verify.join("\n") });
+    const refresh = () => {
+      cmdPre.textContent = cmds.map(fill).join("\n");
+      verifyPre.textContent = verify.map(fill).join("\n");
+      runBtn.disabled = !canRun || inputs.some((i) => !(fields.get(i.name) && fields.get(i.name).value.trim()));
+    };
+    const inputRows = inputs.map((i) => {
+      const f = el("input", { class: "input decision-input", type: i.secret ? "password" : "text",
+        placeholder: i.name, "aria-label": i.name, autocomplete: "off" });
+      f.addEventListener("input", refresh);
+      fields.set(i.name, f);
+      return el("label", { class: "decision-input-row" },
+        el("span", { class: "mono decision-input-name", text: `<${i.name}>` }),
+        f,
+        i.hint ? el("span", { class: "dim faint", text: i.hint }) : null);
+    });
     const note = el("textarea", { class: "input decision-note", placeholder: "Anything the engine should know (optional)" });
     const runBtn = el("button", { class: "btn btn-primary", text: `Run it through ${d.runner || "the runner"}` });
     const selfBtn = el("button", { class: "btn", text: "I'll do it myself (keep the runbook)" });
     const skipBtn = el("button", { class: "btn btn-ghost", text: "Skip this step" });
-    if (!canRun) runBtn.disabled = true;
+    if (!canRun || inputs.length) runBtn.disabled = true;
     async function send(choice, label) {
       runBtn.disabled = selfBtn.disabled = skipBtn.disabled = true;
       const prev = runBtn.textContent; runBtn.textContent = label;
+      const values = {};
+      for (const [n, f] of fields) if (f.value.trim()) values[n] = f.value.trim();
       try {
-        const res = await api.post(`/jobs/${jobId}/decide`, { node_key: nodeKey, choice, note: note.value.trim() || null });
+        const res = await api.post(`/jobs/${jobId}/decide`, { node_key: nodeKey, choice, note: note.value.trim() || null,
+          inputs: choice === "run" && inputs.length ? values : null });
         summaryEl.classList.add("hidden");
         const st = res.node_status || (choice === "skip" ? "skipped" : "done");
         ensureNode(nodeKey, { status: st });
@@ -725,8 +752,9 @@ export function renderTheater(container, jobId, ctx = {}) {
         else await loadInitial();
       } catch (e) {
         const dt = e.detail || {};
-        toast(`Could not record it: ${dt.error || e.detail || e.message}`, "err");
-        runBtn.disabled = !canRun; selfBtn.disabled = skipBtn.disabled = false; runBtn.textContent = prev;
+        const probs = Array.isArray(dt.problems) ? dt.problems.map((p) => `<${p.name}>: ${p.why}`).join("; ") : "";
+        toast(`Could not record it: ${dt.error || e.detail || e.message}${probs ? " — " + probs : ""}`, "err");
+        selfBtn.disabled = skipBtn.disabled = false; runBtn.textContent = prev; refresh();
       }
     }
     runBtn.addEventListener("click", () => send("run", "Running…"));
@@ -740,9 +768,12 @@ export function renderTheater(container, jobId, ctx = {}) {
         el("div", { class: "summary-where" }, el("span", { class: "mono", text: nodeKey }), el("span", { text: ` · ${d.title || ""}` })),
         el("div", { class: "decision-q", text: d.question || "" }),
         cmds.length ? el("div", { class: "decision-run-label", text: `Would run on ${d.runner || "the runner"}${d.sudo ? " (as root for the allowed commands)" : ""}, in order, stopping at the first failure:` }) : null,
-        cmds.length ? el("pre", { class: "decision-run-block" }, el("code", { text: cmds.join("\n") })) : null,
+        inputRows.length ? el("div", { class: "decision-inputs" },
+          el("div", { class: "decision-run-label", text: `It needs ${inputRows.length} value${inputRows.length === 1 ? "" : "s"} from you — they go into the commands below as you type:` }),
+          ...inputRows) : null,
+        cmds.length ? el("pre", { class: "decision-run-block" }, cmdPre) : null,
         verify.length ? el("div", { class: "decision-run-label", text: "Then checks (read-only):" }) : null,
-        verify.length ? el("pre", { class: "decision-run-block" }, el("code", { text: verify.join("\n") })) : null,
+        verify.length ? el("pre", { class: "decision-run-block" }, verifyPre) : null,
         refused.length ? el("div", { class: "decision-refused" },
           el("div", { class: "decision-run-label", text: "The engine cannot run this block — refused before anything was sent:" }),
           ...refused.map((r) => el("div", { class: "mono faint", text: `${r.command} — ${r.why}` }))) : null,

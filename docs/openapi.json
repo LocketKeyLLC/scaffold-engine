@@ -1216,6 +1216,20 @@
             "title": "Delegate",
             "type": "boolean"
           },
+          "inputs": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inputs"
+          },
           "node_key": {
             "maxLength": 64,
             "minLength": 1,

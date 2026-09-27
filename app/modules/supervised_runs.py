@@ -162,9 +162,84 @@ def verify_commands(text_out: str) -> list[str]:
     cands.extend(m.group(1).strip() for m in re.finditer(r"`([^`\n]{2,200})`", prose))
     out: list[str] = []
     for c in cands:
-        if c not in out and not c.startswith("/") and read_only_command(c):
+        # §17.1187 — a <PLACEHOLDER> reads as a redirect to the shell gate; judge
+        # the shape with a dummy value, keep the raw command for the operator.
+        shape = _PLACEHOLDER_RE.sub("x", c)
+        if c not in out and not c.startswith("/") and read_only_command(shape):
             out.append(c)
     return out[:MAX_VERIFY_COMMANDS]
+
+
+# ── inputs the runbook needs (§17.1187) ──────────────────────────────────
+# The runbook prompt's placeholder-first rule (§17.361) puts every operator-
+# supplied value into the commands as <SCREAMING_SNAKE_CASE>. A command with a
+# placeholder cannot run as written; the pause asks for the values inline.
+
+_PLACEHOLDER_RE = re.compile(r"<([A-Z][A-Z0-9_]{1,40})>")
+_SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:@%+=,~-]{1,200}$")
+_SECRET_NAME_RE = re.compile(r"PASS|SECRET|TOKEN|KEY|CREDENTIAL", re.I)
+
+
+def placeholders(commands: list[str]) -> list[str]:
+    """The distinct ``<NAME>`` tokens in the commands, in first-seen order."""
+    out: list[str] = []
+    for c in commands:
+        for m in _PLACEHOLDER_RE.finditer(c or ""):
+            if m.group(1) not in out:
+                out.append(m.group(1))
+    return out
+
+
+def input_hints(runbook: str) -> dict[str, str]:
+    """``{NAME: what the runbook says about it}`` from ``## Inputs needed``."""
+    body = _section(runbook, "Inputs needed")
+    hints: dict[str, str] = {}
+    for ln in (body or "").splitlines():
+        ln = ln.strip().lstrip("-*• ").strip()
+        if not ln:
+            continue
+        m = _PLACEHOLDER_RE.search(ln)
+        if m:
+            rest = (ln[:m.start()] + ln[m.end():]).strip(" :—–-`*")
+            hints.setdefault(m.group(1), rest[:200])
+    return hints
+
+
+def inputs_for(commands: list[str], verify: list[str], runbook: str) -> list[dict]:
+    """``[{name, hint, secret}]`` — the values the operator must supply."""
+    hints = input_hints(runbook)
+    return [{"name": n, "hint": hints.get(n, ""), "secret": bool(_SECRET_NAME_RE.search(n))}
+            for n in placeholders(list(commands) + list(verify))]
+
+
+def check_inputs(names: list[str], values: dict | None) -> tuple[dict[str, str], list[dict]]:
+    """``(clean values, problems)`` — every name present and shell-safe (no
+    whitespace, quotes, or shell metacharacters; the value is spliced into a
+    command verbatim, so the gate must be able to read it as one token)."""
+    values = values or {}
+    clean: dict[str, str] = {}
+    problems: list[dict] = []
+    for n in names:
+        v = str(values.get(n, "") if isinstance(values, dict) else "").strip()
+        if not v:
+            problems.append({"name": n, "why": "missing"})
+        elif not _SAFE_VALUE_RE.match(v):
+            problems.append({"name": n, "why": "letters, digits and . / : @ % + = , ~ - _ only — no spaces, quotes or shell characters"})
+        else:
+            clean[n] = v
+    return clean, problems
+
+
+def substitute(commands: list[str], values: dict[str, str]) -> list[str]:
+    return [_PLACEHOLDER_RE.sub(lambda m: values.get(m.group(1), m.group(0)), c or "") for c in commands]
+
+
+def mask_secrets(text_out: str, values: dict[str, str], names: list[dict]) -> str:
+    """A secret value never lands in the node's output or the transcript."""
+    for i in names:
+        if i.get("secret") and values.get(i["name"]):
+            text_out = text_out.replace(values[i["name"]], "***")
+    return text_out
 
 
 def frame_run(node: dict, runbook: str, spec, policy: dict) -> dict:
@@ -172,8 +247,13 @@ def frame_run(node: dict, runbook: str, spec, policy: dict) -> dict:
     what would verify, what the gate refused (then ``run`` is not offered)."""
     from app.modules.assist_supervised import gate_block
     cmds = runbook_commands(runbook)
-    runnable, refused = gate_block(cmds, policy.get("allow") or [])
     verify = verify_commands(runbook)
+    inputs = inputs_for(cmds, verify, runbook)
+    # §17.1187 — with placeholders the SHAPE is gated now (dummy values in
+    # place); the real commands are gated again at resolve, once the operator
+    # has supplied the values.
+    shape = substitute(cmds, {i["name"]: "x" for i in inputs}) if inputs else cmds
+    runnable, refused = gate_block(shape, policy.get("allow") or [])
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if cmds and not refused:
@@ -185,7 +265,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict) -> dict:
                     "tradeoff": "the step counts as a plan, not as executed"})
     options.append({"id": "skip", "label": "Skip this step", "fit": "not needed on this machine",
                     "tradeoff": "steps that depend on it may not make sense"})
-    q = (f"Run step {node.get('node_key')} — {node.get('title') or ''} — on {runner}?" if cmds and not refused
+    q = ((f"Run step {node.get('node_key')} — {node.get('title') or ''} — on {runner}?"
+          + (f" It needs {len(inputs)} value{'s' if len(inputs) != 1 else ''} from you first." if inputs else "")) if cmds and not refused
          else f"Step {node.get('node_key')} — {node.get('title') or ''} — changes a machine, and the engine cannot run it as written.")
     return {
         "kind": KIND, "question": q, "detail": "", "framed": True,
@@ -195,6 +276,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict) -> dict:
                 ("no runnable command was found in the runbook" if not cmds else
                  "some of its commands are not on the runner's allow-list — see the refusals")),
         "runner": runner, "commands": cmds, "verify": verify, "refused": refused,
+        "inputs": inputs,
         "runbook": runbook[:12000], "allow": list(policy.get("allow") or []), "sudo": bool(policy.get("sudo")),
         "hands_on_reason": node.get("hands_on_reason") or "",
     }
@@ -202,7 +284,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict) -> dict:
 
 # ── resolution ───────────────────────────────────────────────────────────
 
-async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str, waiting: dict) -> dict:
+async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str, waiting: dict,
+                      inputs: dict | None = None) -> dict:
     """Carry out the operator's choice on a ``kind="run"`` pause. Returns
     ``{"outcome": …}`` for ``decision_pause.resolve_decision`` to finish (it
     records the decision on the job and moves it back to executing)."""
@@ -227,16 +310,25 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     # choice == "run"
     if waiting.get("refused") or not waiting.get("commands"):
         return {"outcome": "not_runnable", "refused": waiting.get("refused") or []}
+    commands = [str(c) for c in waiting.get("commands") or []]
+    verify_cmds = [str(c) for c in waiting.get("verify") or []]
+    need = list(waiting.get("inputs") or [])
+    values: dict[str, str] = {}
+    if need:                                      # §17.1187 — the values the runbook asked for, checked, spliced in
+        values, problems = check_inputs([i["name"] for i in need], inputs)
+        if problems:
+            return {"outcome": "inputs_missing", "problems": problems, "inputs": need}
+        commands = substitute(commands, values)
+        verify_cmds = substitute(verify_cmds, values)
     ch = await channel(db)
     if ch is None:
         return {"outcome": "no_channel"}
     spec, policy = ch
     from app.modules import assist_supervised as _sw
     from app.modules import assist_local_runner as _lr
-    commands = [str(c) for c in waiting.get("commands") or []]
     runnable, refused = _sw.gate_block(commands, policy.get("allow") or [])
-    if refused:                                   # the policy changed since the frame was drawn
-        return {"outcome": "not_runnable", "refused": refused}
+    if refused:                                   # the policy changed since the frame was drawn, or a value broke the shape
+        return {"outcome": "not_runnable", "refused": [{"command": mask_secrets(r["command"], values, need), "why": r["why"]} for r in refused]}
     claimed = await db.execute(
         text("UPDATE dag_nodes SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW() "
              "WHERE job_id = :jid AND node_key = :nk AND status = 'pending'"),
@@ -248,7 +340,6 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     executed = await _sw.run_block(spec, runnable)
     ok = bool(executed) and all(e["ok"] for e in executed) and len(executed) == len(runnable)
     verify_out = ""
-    verify_cmds = [str(c) for c in waiting.get("verify") or []]
     if ok and verify_cmds:
         try:
             pasted, ran = await _lr.run_probes(spec, [{"id": f"V{i}", "command": c} for i, c in enumerate(verify_cmds, 1)])
@@ -258,7 +349,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                 for e in ran)
         except Exception as exc:
             verify_out = f"(verify could not run: {exc})"
-    output = _executed_report(runbook, spec.name, executed, verify_out)
+    output = mask_secrets(_executed_report(runbook, spec.name, executed, verify_out), values, need)
     if ok:
         await db.execute(
             text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), updated_at = NOW(), "
@@ -268,9 +359,9 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         logger.warning("supervised_run_done job=%s node=%s commands=%d", job_id, node_key, len(executed))
         return {"outcome": "ran", "node_status": "done", "executed": executed, "verify": verify_out}
     last = executed[-1] if executed else None
-    reason = ("the runner ran nothing" if not last else
-              (f"the runner refused `{last['command'][:80]}`: {last['output'][:200]}" if last.get("refused")
-               else f"`{last['command'][:80]}` exited {last['exit']}: {last['output'][-300:]}"))
+    reason = mask_secrets("the runner ran nothing" if not last else
+                          (f"the runner refused `{last['command'][:80]}`: {last['output'][:200]}" if last.get("refused")
+                           else f"`{last['command'][:80]}` exited {last['exit']}: {last['output'][-300:]}"), values, need)
     await db.execute(
         text("UPDATE dag_nodes SET status = 'failed', output_text = :out, completed_at = NOW(), updated_at = NOW(), "
              "last_verification_reason = :why WHERE job_id = :jid AND node_key = :nk AND status = 'running'"),
