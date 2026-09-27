@@ -318,3 +318,46 @@ def test_the_project_view_is_derived_from_history_not_stored():
     window = src[i - 900:i + 200]
     assert "FROM assist_turns" in window
     assert "node_key IS NOT NULL" in window
+
+
+# ── §17.1182 — the location banner is not the claim ──────────────────────
+# Live (ADD65, 2026-09-22): every Diagnosis opened with the §17.852 banner and
+# no full stop; eight "eliminated causes" began "📍 On: the Proxmox host shell
+# (root@pve) …", every new diagnosis re-tested every old one, and the operator
+# read "already tested and eliminated on this step (📍 On: the Proxmox " six
+# times in six minutes.
+
+_ADD65 = [
+    "## 👉 Do this next\n```bash\nqm start 106\n```\n## Diagnosis\n\n📍 On: the Proxmox host shell (root@pve)\n\n"
+    "The `nvidia-smi: not found` error is a red herring — it came from the runner's shell on the host. "
+    "The real blocker is simpler: VM 106 is currently stopped.\n## Fix\nx",
+    "## 👉 Do this next\n```bash\nqm status 106\n```\n## Diagnosis\n\n📍 On: the Proxmox host shell (root@pve)\n\n"
+    "VM 106 is stopped — that's the whole problem.\n## Fix\nx",
+    "## 👉 Do this next\n```bash\nqm guest exec 106 -- systemctl status qemu-guest-agent\n```\n## Diagnosis\n\n"
+    "📍 On: the Proxmox host shell (root@pve)\n\nThe guest agent is enabled on the VM, but nothing is listening inside it. "
+    "That means the package is not installed inside VM 106.\n## Fix\nx",
+    "## 👉 Do this next\n```bash\nqm terminal 106\n```\n## Diagnosis\n\n"
+    "The guest agent channel is dead because the agent program was never installed **inside** VM 106.\n## Fix\n"
+    "📍 On: the Proxmox host shell (root@pve)\nx",
+]
+
+
+def test_the_location_banner_is_not_the_claim():
+    assert extract_diagnosis(_ADD65[1]) == "VM 106 is stopped — that's the whole problem."
+    assert not extract_diagnosis(_ADD65[0]).startswith("📍")
+    assert extract_diagnosis("## Diagnosis\n📍 On: root@pve\n---\n## Fix\nx") == ""   # banner-only → nothing
+
+
+def test_the_live_add65_ledger_reads_as_causes_and_a_new_cause_is_not_a_retest():
+    led = harvest(_ADD65)
+    assert led["eliminated"] and all("📍" not in d for d in led["eliminated"])
+    assert led["eliminated"][1] == "VM 106 is stopped — that's the whole problem."
+    # "the agent is not installed" is a NEW cause after "the VM is stopped" —
+    # with the banner glued on, both shared {proxmox, host, shell, root, pve}
+    # and were flagged as the same hypothesis.
+    assert find_retested_hypothesis(_ADD65[2], harvest(_ADD65[:2])) == []
+    # …while a genuine re-diagnosis of a cause already ELIMINATED (everything
+    # but the newest) is still caught — the newest stays open by design
+    again = _reply("📍 On: the Proxmox host shell (root@pve)\n\nThe guest agent is enabled on the VM but nothing is listening inside it — the package is not installed.")
+    assert find_retested_hypothesis(again, harvest(_ADD65[:4]))
+    assert find_retested_hypothesis(again, harvest(_ADD65[:3])) == []   # still the open hypothesis, not a retest

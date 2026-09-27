@@ -49,12 +49,23 @@ _MAX_EACH = 240
 _MAX_KEPT = 12
 
 
+# §17.1182 — lines under `## Diagnosis` that are chrome, not a claim: the
+# mandatory `📍 On:` location banner (§17.852) and rules. Live (ADD65,
+# 2026-09-22): every fix's Diagnosis opened with "📍 On: the Proxmox host shell
+# (root@pve)" and no full stop, so the banner was glued onto every first
+# sentence — eight "eliminated causes" all began with it, shared its five
+# keywords, every new diagnosis "re-tested" every old one, and the operator read
+# "already tested and eliminated on this step (📍 On: the Proxmox " six times.
+_BANNER_LINE_RE = re.compile(r"^\s*(?:📍\s*On\s*:.*|-{3,}|\*{3,})\s*$")
+
+
 def extract_diagnosis(reply: str) -> str:
     """The cause a fix reply says it is addressing, trimmed to one claim."""
     m = _DIAGNOSIS_RE.search(reply or "")
     if not m:
         return ""
-    body = re.sub(r"\s+", " ", m.group(1)).strip()
+    lines = [ln for ln in m.group(1).splitlines() if not _BANNER_LINE_RE.match(ln)]
+    body = re.sub(r"\s+", " ", "\n".join(lines)).strip()
     if not body:
         return ""
     # The first sentence carries the claim; the rest is elaboration.

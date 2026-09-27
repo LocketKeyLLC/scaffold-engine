@@ -4378,8 +4378,13 @@ async def generate_fix(
         redundant_ = find_redundant_discovery(draft, _known_state)
         # §17.1158 — a look-up the runner ALREADY ran this session is redundant
         # discovery too: the directive names when it ran and what it printed.
-        from app.modules.assist_runner_lookup import find_repeated_lookups
+        from app.modules.assist_runner_lookup import find_repeated_lookups, find_dead_channel_commands
         redundant_ = redundant_ + find_repeated_lookups(draft, runner_ledger)
+        # §17.1182 — and a fix routed through a guest agent the record says is
+        # NOT running is arguing with the record too (folded into the same
+        # family so it rides the regenerate-then-warn machinery; its `known`
+        # names the way in).
+        redundant_ = redundant_ + find_dead_channel_commands(draft, runner_ledger)
         return hits_, novel_, banned_, reskind_, shell_, look_, contra_, redundant_
 
     if text_out:
@@ -4409,7 +4414,9 @@ async def generate_fix(
                     "shape one program returns versus the shape another expects, "
                     "the port one listens on versus the one another calls, the "
                     "path one writes versus the one another reads.")
-            if redundant_hits:  # §17.914 — you already have this; §17.1158 — or the runner already ran it
+            _dead = [h for h in redundant_hits if h.get("kind") == "dead_channel"]   # §17.1182
+            _redo = [h for h in redundant_hits if h.get("kind") != "dead_channel"]
+            if _redo:  # §17.914 — you already have this; §17.1158 — or the runner already ran it
                 directive.append(
                     "You asked for a DISCOVERY command whose answer is ALREADY on "
                     "file — read from the operator's earlier output, or run by the "
@@ -4419,7 +4426,18 @@ async def generate_fix(
                     "something DIFFERENT that would:\n"
                     + "\n".join(
                         f"- `{h['command']}` — already known: {h['known']}"
-                        for h in redundant_hits[:3]))
+                        for h in _redo[:3]))
+            if _dead:  # §17.1182 — the channel is dead; the record says so
+                # Generic on purpose (§17.1025 — no operator's stack named in
+                # query logic): the record entry below carries the specifics.
+                directive.append(
+                    "Your previous draft sent commands THROUGH a management "
+                    "channel that the record says is not working, so none of "
+                    "them can work — and a channel cannot repair itself. Route "
+                    "the repair AROUND it: a console or a direct login into that "
+                    "machine, fix it there, and only then verify through the "
+                    "channel. The record says exactly what is down and the way in:\n"
+                    + "\n".join(f"- `{h['command']}` — {h['known']}" for h in _dead[:3]))
             if look_hits:  # §17.907 — method before content
                 # The probe must name the resource THIS step is about. Sorting
                 # the whole ledger and truncating suggested `pct config 102`
@@ -4495,12 +4513,26 @@ async def generate_fix(
                     "the research, the playbook, or the operator's own output — "
                     "you may have invented them:\n"
                     + "\n".join(f"- {n}" for n in novel[:5]))
-            directive.append(
-                "STOP guessing. Lead with a DISCOVERY command whose OUTPUT prints "
-                "the ground truth (e.g. query the project's release API and print "
-                "the real download URL, `curl -I` the endpoint, list the actual "
-                "assets) and have the operator paste it back — OR use only URLs "
-                "that appear VERBATIM in the research/playbook/operator output.")
+            if novel:
+                directive.append(
+                    "STOP guessing. Lead with a DISCOVERY command whose OUTPUT prints "
+                    "the ground truth (e.g. query the project's release API and print "
+                    "the real download URL, `curl -I` the endpoint, list the actual "
+                    "assets) and have the operator paste it back — OR use only URLs "
+                    "that appear VERBATIM in the research/playbook/operator output.")
+            elif hits or redundant_hits:
+                # §17.1182 — "lead with a discovery command" was appended for EVERY
+                # violation. With the local runner running every read-only ask
+                # (§17.1150), that directive manufactured the loop it was meant to
+                # end: repeat → "go discover" → look-up → regenerated fix → repeat.
+                # A repeat wants a DIFFERENT METHOD, not another read.
+                directive.append(
+                    "Do not re-run what is listed above and do not ask for output "
+                    "that is already on file — use it. Change the METHOD: a "
+                    "different mechanism or route to the goal, not a different "
+                    "spelling of the same command. If the recorded output names "
+                    "why the method cannot work, say so in one line and take the "
+                    "other route.")
             regen = await _draw_fix([
                 {"role": "system", "content": fix_system},
                 {"role": "user", "content": user + "\n".join(directive)},
@@ -4522,9 +4554,17 @@ async def generate_fix(
                     redundant_meta_fix = reredundant  # §17.914
                     warn_bits = []
                     if reredundant:
-                        warn_bits.append(
-                            "asks you to re-run `" + reredundant[0]["command"]
-                            + "`, whose answer the engine already has")
+                        _rd = [h for h in reredundant if h.get("kind") == "dead_channel"]
+                        _rr = [h for h in reredundant if h.get("kind") != "dead_channel"]
+                        if _rr:
+                            warn_bits.append(
+                                "asks you to re-run `" + _rr[0]["command"]
+                                + "`, whose answer the engine already has")
+                        if _rd:   # §17.1182
+                            warn_bits.append(
+                                "sends `" + _rd[0]["command"][:60] + "` through a channel your own "
+                                "record says is not working (resource " + _rd[0]["resource"]
+                                + ") — repair it from a console or a direct login first")
                     if recontra:
                         warn_bits.append(
                             "calls a confirmed value fake ("
@@ -4562,8 +4602,8 @@ async def generate_fix(
                             + "; ".join(f"`{b['value']}`" for b in rebanned[:2]) + ")")
                     text_out = (
                         "⚠️ **Caution:** this fix " + " and ".join(warn_bits)
-                        + " — flagged twice by the integrity gate. Prefer its "
-                        "diagnostic commands over its download commands, and reply "
+                        + " — flagged twice by the integrity gate. Trust what it asks "
+                        "you to READ more than what it asks you to change, and reply "
                         "\"different approach\" to force a method change.\n\n"
                         + regen_text
                     )
