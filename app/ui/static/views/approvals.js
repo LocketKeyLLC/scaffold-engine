@@ -8,7 +8,7 @@ import * as router from "../router.js";
 import { el, mount, shortId, timeAgo, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState, askConfirm } from "../components.js";
 import { deliverableLabel } from "../vocab.js";
-import { isAssist, startAssistFor, onExecModeChange, setExecMode } from "../exec_mode.js";
+import { onExecModeChange, setExecMode } from "../exec_mode.js";
 
 // §17.1113 (ledger U-2) — the approve chain's outcome, typed. Exported for the
 // node tests: the bug this replaces was a null outcome read as success.
@@ -45,6 +45,26 @@ export function chainOutcome(st) {
 }
 
 /** Operator-facing sentence for a non-done outcome. Never says "approved". */
+// UX overhaul phase 5 — what approval leads to. The old gate had two coupled
+// switches (the sidebar's Auto/Assist mode + an "auto-run" checkbox) and in
+// Assist mode approval went STRAIGHT into the walkthrough: customizing the plan
+// was never a stage the flow passed through. Three explicit outcomes now, the
+// default being the one that lets you look at the plan before anything starts.
+export const AFTER_APPROVE = [
+  ["review", "Review the plan first", "Research and draw the plan, then stop — you look it over, change steps, and start when ready."],
+  ["walk", "Start the walkthrough", "Research, draw the plan, and open the guided walkthrough at step 1 — you run each step, the engine guides."],
+  ["run", "Let the engine run it", "Research, draw the plan, and have the engine work every step itself — it produces runbooks, configs and code; it never connects to your machines."],
+];
+export const AFTER_APPROVE_KEY = "scaffold_after_approve";
+export function approveBodyFor(choice) {
+  return { assist: choice === "walk", execute: choice === "run" };
+}
+export function approveTailFor(choice) {
+  return choice === "walk" ? " — research, plan & start the walkthrough"
+    : choice === "run" ? " — research, plan & run it"
+    : " — research & plan";
+}
+
 export function chainFailureText(out) {
   const kind = out && out.chain;
   if (kind === "error") return `The engine could not finish approving: ${out.error || "unknown error"}.`;
@@ -341,45 +361,43 @@ export function renderApprovalDetail(container, jobId) {
   // no assist session, and the "idea → approve → assist" progression the
   // OWUI auto-chain used to provide simply did not exist in the SPA. The
   // label now states the WHOLE destination, so the button never under-promises.
-  const approveTail = () =>
-    isAssist() ? " — research, plan & start the walkthrough" : " — research & plan";
-  // §17.853 / UX overhaul — the Auto/Assist choice is made HERE, where it is
-  // taken, as two labelled options; it used to be a sidebar toggle the gate
-  // silently read. Both write the same per-browser mode.
-  const modeBtn = (value, label, title) => {
-    const b = el("button", { class: "btn btn-sm mode-choice", text: label, title, "aria-pressed": "false" });
-    b.addEventListener("click", () => { setExecMode(value); refreshApproveLabel(); });
-    return b;
+  const afterChoice = () => {
+    const v = storage.get(AFTER_APPROVE_KEY);
+    return AFTER_APPROVE.some(([k]) => k === v) ? v : "review";
   };
-  const modeAssist = modeBtn("assist", "✦ Walk me through it", "You run each step on your machines with the engine guiding, verifying and adapting. It never touches your hardware.");
-  const modeAuto = modeBtn("auto", "▶ Let the engine run it", "The engine works every step itself and produces runbooks, configs and code. It still never connects to your machines.");
-  const modeRow = el("div", { class: "row row-wrap mode-row" },
-    el("span", { class: "dim", text: "After approval:" }), modeAssist, modeAuto);
+  const approveTail = () => approveTailFor(afterChoice());
+  // The choice also settles the per-browser Auto/Assist mode the Plan stage's
+  // Start button reads, so "start the walkthrough" and "let the engine run it"
+  // mean the same thing here and there.
+  const choiceBtns = AFTER_APPROVE.map(([value, label, title]) => {
+    const b = el("button", { class: "btn btn-sm mode-choice", text: label, title, "aria-pressed": "false" });
+    b.addEventListener("click", () => {
+      storage.set(AFTER_APPROVE_KEY, value);
+      if (value === "walk") setExecMode("assist");
+      if (value === "run") setExecMode("auto");
+      refreshApproveLabel();
+    });
+    b.dataset.choice = value;
+    return b;
+  });
+  const modeHint = el("div", { class: "dim mode-hint" });
+  const modeRow = el("div", { class: "mode-row" },
+    el("div", { class: "row row-wrap" }, el("span", { class: "dim", text: "After approval:" }), ...choiceBtns),
+    modeHint);
   const refreshModeRow = () => {
-    modeAssist.classList.toggle("btn-primary", isAssist()); modeAssist.setAttribute("aria-pressed", isAssist() ? "true" : "false");
-    modeAuto.classList.toggle("btn-primary", !isAssist()); modeAuto.setAttribute("aria-pressed", !isAssist() ? "true" : "false");
+    const cur = afterChoice();
+    choiceBtns.forEach((b) => { const on = b.dataset.choice === cur; b.classList.toggle("btn-primary", on); b.setAttribute("aria-pressed", on ? "true" : "false"); });
+    modeHint.textContent = (AFTER_APPROVE.find(([k]) => k === cur) || AFTER_APPROVE[0])[2];
   };
   const refreshApproveLabel = () => {
     refreshModeRow();
     approveBtn.textContent =
       (qa && qa.collect() ? "✓ Approve with answers" : "✓ Approve") + approveTail();
-    // Auto-run is an AUTO-mode concept: in Assist mode the walkthrough IS the
-    // run, so the checkbox would be a second, contradictory switch.
-    autoRunLabel.classList.toggle("hidden", isAssist());
   };
-  // §17.818 (plan 5.5) — one approve semantic across surfaces: approve always
-  // means confirm → plan-ready; RUNNING is an explicit choice. This toggle
-  // mirrors the OWUI auto-chain for operators who want approve→run in one
-  // gesture. UI preference only (localStorage) — the server chain entries
-  // (/ideate/confirm → /dag → /execute/all) are identical either way.
-  const autoRun = el("input", { type: "checkbox" });
-  autoRun.checked = storage.get("scaffold_auto_run") === "1";
-  autoRun.addEventListener("change", () =>
-    storage.set("scaffold_auto_run", autoRun.checked ? "1" : "0"));
-  const autoRunLabel = el("label", { class: "row faint autorun-toggle" },
-    autoRun, " Auto-run after approve");
-  // §17.895 — flipping the sidebar toggle while the gate is open must not
-  // leave the button describing the other mode's destination.
+  // §17.818's "auto-run after approve" checkbox is absorbed by the choice
+  // above ("Let the engine run it"); the server chain entries are unchanged.
+  // §17.895 — a mode change elsewhere must not leave the button describing
+  // the other destination.
   const offExecMode = onExecModeChange(() => refreshApproveLabel());
   // §17.1007 — the gate used to offer approve or reject-and-cancel, and the
   // most common correct answer at a gate is neither: it is "not yet, change
@@ -515,7 +533,7 @@ export function renderApprovalDetail(container, jobId) {
           // §17.1007 — three ways forward, weighted: approve leads, "send back"
           // is the ordinary second answer, cancel is the quiet last resort.
           modeRow,
-          el("div", { class: "drawer-actions approval-actions" }, approveBtn, reviseBtn, autoRunLabel, el("span", { class: "spacer" }), rejectBtn),
+          el("div", { class: "drawer-actions approval-actions" }, approveBtn, reviseBtn, el("span", { class: "spacer" }), rejectBtn),
           reviseBox,
           // 4. Reference material last, collapsed with counts.
           el(
@@ -654,7 +672,8 @@ export function renderApprovalDetail(container, jobId) {
     setBusy(true);
     const fb = qa ? qa.collect() : null;
     const nAns = fb ? (fb.match(/^Q:/gm) || []).length : 0;
-    const assist = isAssist(); // §17.895 — latch the mode for the whole chain
+    const choice = afterChoice();                 // latch the choice for the whole chain
+    const { assist, execute } = approveBodyFor(choice);
     showProgress(
       nAns
         ? `✓ ${nAns} answer${nAns === 1 ? "" : "s"} received — researching with your input… (a few minutes)`
@@ -673,9 +692,7 @@ export function renderApprovalDetail(container, jobId) {
       // between the two left the job stranded in `planning` with no plan.
       // Q/A pairs + free-form note from the questions card travel as feedback
       // and are folded into the brief before research.
-      await api.post(`/jobs/${jobId}/approve`, {
-        feedback: fb, assist, execute: !assist && autoRun.checked,
-      });
+      await api.post(`/jobs/${jobId}/approve`, { feedback: fb, assist, execute });
       if (disposed) return;
       const state = await waitForChain();
       if (disposed) return;
@@ -693,18 +710,15 @@ export function renderApprovalDetail(container, jobId) {
         return;
       }
       if (assist) {
-        // §17.895 — Assist mode carries STRAIGHT THROUGH into the walkthrough;
-        // the server started the session as the chain's last phase.
-        toast("Assist mode — the engine guides, you drive.", "ok");
+        // §17.895 — the walkthrough was started as the chain's last phase.
+        toast("The walkthrough is ready — the engine guides, you drive.", "ok");
         router.navigate(`/job/${jobId}/run`);
-      } else if (autoRun.checked) {
-        // §17.818 — hand off to the hub's Run tab (same /execute/all SSE
-        // the manual Run uses; sessionStorage carries the one-shot intent).
-        sessionStorage.setItem("scaffold_autorun", jobId);
-        toast("Approved — plan generated. Starting execution…", "ok");
+      } else if (execute) {
+        // the chain ran the plan server-side; the Run stage shows what happened
+        toast("Approved — the engine ran the plan.", "ok");
         router.navigate(`/job/${jobId}/run`);
       } else {
-        toast("Approved — the plan is drawn. Review it, then start.", "ok");
+        toast("Approved — the plan is drawn. Look it over, then start.", "ok");
         router.navigate(`/job/${jobId}/plan`);
       }
     } catch (e) {
