@@ -1,27 +1,20 @@
-// UI design phase — grouped-nav integrity tests (node:test; dev-only).
-// nav.js is the single source for the sidebar AND the command palette, so a
-// malformed entry here silently breaks discoverability in both.
-// Run: make test-ui   (or: node --test tests/ui/)
+// UX overhaul (2026-09-27) — the navigation model: three PLACES on the rail,
+// every page (places + tabs) in PAGES for the palette, and a place for every
+// route head so the rail highlight never falls back silently.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { NAV, NAV_GROUPS } from "../../app/ui/static/nav.js";
+import { NAV, NAV_GROUPS, PAGES, PLACE_OF, placeOf } from "../../app/ui/static/nav.js";
 
-test("every group has a label and at least one item", () => {
-  assert.ok(NAV_GROUPS.length >= 3);
-  for (const g of NAV_GROUPS) {
-    assert.ok(typeof g.label === "string" && g.label.length > 0);
-    assert.ok(Array.isArray(g.items) && g.items.length > 0, `group ${g.label} empty`);
-  }
-});
-
-test("flat NAV is exactly the groups flattened, in order", () => {
+test("the rail is exactly three places: Home, Knowledge, Settings", () => {
+  assert.deepEqual(NAV.map((n) => n.id), ["home", "knowledge", "settings"]);
   assert.deepEqual(NAV, NAV_GROUPS.flatMap((g) => g.items));
+  for (const n of NAV) assert.ok(!n.adminOnly, `${n.id} must not be admin-gated — a place is for everyone`);
 });
 
 test("ids and paths are unique; every entry is well-formed", () => {
   const ids = new Set();
   const paths = new Set();
-  for (const n of NAV) {
+  for (const n of PAGES) {
     assert.ok(n.id && n.path && n.label && n.icon, `malformed entry ${JSON.stringify(n)}`);
     assert.ok(n.path.startsWith("/"), `path ${n.path} must start with /`);
     assert.ok(!ids.has(n.id), `duplicate id ${n.id}`);
@@ -29,48 +22,37 @@ test("ids and paths are unique; every entry is well-formed", () => {
     ids.add(n.id);
     paths.add(n.path);
   }
+  for (const n of NAV) assert.ok(ids.has(n.id), `${n.id} must be in PAGES too`);
 });
 
-test("core destinations exist (easy access to all components)", () => {
-  const ids = new Set(NAV.map((n) => n.id));
-  // §17.859 — dag/theater/output collapsed into the job hub's tabs
-  // (#/job/:id); they are deliberately ABSENT from the nav.
-  for (const id of [
-    "new", "chat", "dashboard", "jobs",
-    "compare", "research", "rag", "library", "assist", "schedules",
-    "models", "costs", "traces", "alerts", "settings", "setup",
-  ]) {
-    assert.ok(ids.has(id), `missing nav entry: ${id}`);
+test("every former destination is still reachable as a page (palette)", () => {
+  const paths = new Set(PAGES.map((n) => n.path));
+  for (const p of ["/new", "/knowledge/search", "/knowledge/research", "/knowledge/library", "/knowledge/schedules",
+                   "/settings/models", "/settings/capabilities", "/settings/status", "/settings/costs",
+                   "/settings/traces", "/settings/alerts", "/settings/config", "/settings/preferences", "/setup"]) {
+    assert.ok(paths.has(p), `missing page: ${p}`);
   }
-  for (const id of ["dag", "theater", "output"]) {
-    assert.ok(!ids.has(id), `${id} must stay retired from the nav (job hub owns it, §17.859)`);
+  // the retired standalone destinations must NOT come back as pages
+  for (const id of ["dashboard", "jobs", "approvals", "assist", "compare", "dag", "theater", "output", "chat"]) {
+    assert.ok(![...PAGES].some((n) => n.id === id), `${id} must stay retired — it is a Home filter or a job stage now`);
   }
-  // §17.896 — approvals is a job STATUS, not a destination: it is the
-  // "Awaiting approval" chip in Jobs and the hub's Overview tab embeds the
-  // gate itself. The #/approvals route still resolves for old links.
-  assert.ok(!ids.has("approvals"),
-    "approvals must stay retired from the nav (Jobs owns the bucket, §17.896)");
-});
-
-test("§17.896 — the sidebar stays condensed", () => {
-  // The regression this guards: the nav creeping back toward the 17-item wall
-  // that made the DAG unfindable. System is the one collapsed-by-default
-  // group; everything outside it is everyday chrome.
-  const everyday = NAV_GROUPS.filter((g) => !g.collapsed);
-  const everydayItems = everyday.flatMap((g) => g.items);
-  assert.ok(everydayItems.length <= 12,
-    `${everydayItems.length} always-visible nav items — condense before adding more`);
-  const system = NAV_GROUPS.find((g) => g.label === "System");
-  assert.equal(system.collapsed, true, "System must default to collapsed");
 });
 
 test("admin-only surfaces keep their flags (§17.810/815/816/817)", () => {
-  const byId = Object.fromEntries(NAV.map((n) => [n.id, n]));
-  for (const id of ["chat", "models", "traces", "alerts", "settings", "setup"]) {
+  const byId = Object.fromEntries(PAGES.map((n) => [n.id, n]));
+  for (const id of ["settings-models", "settings-traces", "settings-alerts", "settings-config", "setup", "settings-capabilities"]) {
     assert.equal(byId[id].adminOnly, true, `${id} must be adminOnly`);
   }
-  // …and the everyday surfaces must NOT be admin-gated.
-  for (const id of ["new", "dashboard", "jobs", "compare", "research", "rag", "assist"]) {
+  for (const id of ["new", "home", "knowledge", "settings", "settings-costs", "settings-status", "settings-preferences", "knowledge-search"]) {
     assert.ok(!byId[id].adminOnly, `${id} must not be adminOnly`);
   }
+});
+
+test("every route head has a place, and unknown heads fall to Home", () => {
+  for (const head of ["", "new", "chat", "job", "jobs", "approvals", "assist", "compare"]) assert.equal(placeOf(`/${head}/x`), "home", head);
+  for (const head of ["knowledge", "research", "rag", "library", "schedules"]) assert.equal(placeOf(`/${head}`), "knowledge", head);
+  for (const head of ["settings", "models", "costs", "traces", "alerts", "capabilities", "setup"]) assert.equal(placeOf(`/${head}/tab`), "settings", head);
+  assert.equal(placeOf("/"), "home");
+  assert.equal(placeOf("/nope"), "home");
+  assert.ok(Object.values(PLACE_OF).every((v) => NAV.some((n) => n.id === v)), "every place must be a rail item");
 });

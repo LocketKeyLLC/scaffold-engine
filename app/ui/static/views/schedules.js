@@ -12,7 +12,8 @@ function statusBadge(s) {
   return el("span", { class: `badge ${cls}`, text: s || "never ran" });
 }
 
-export default function schedules(container) {
+export default function schedules(container, params, opts = {}) {
+  const embedded = !!(opts && opts.embedded);
   let disposed = false;
 
   const topic = el("input", { class: "input sched-topic", placeholder: "Research topic…" });
@@ -157,7 +158,7 @@ export default function schedules(container) {
 
   mount(
     container,
-    el(
+    embedded ? el("p", { class: "dim hub-lede", text: "Research that re-runs on a schedule and keeps the knowledge base current. A failed run says failed; a run refused by the lock says skipped." }) : el(
       "div",
       { class: "view-header" },
       el(

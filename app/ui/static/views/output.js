@@ -6,6 +6,7 @@ import * as api from "../api.js";
 import { jobStore } from "../store.js";
 import { el, mount, mdToHtml, copy } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, emptyState } from "../components.js";
+import { deliverableLabel } from "../vocab.js";
 
 function download(filename, textContent) {
   const blob = new Blob([textContent], { type: "text/markdown" });
@@ -48,7 +49,17 @@ export function renderOutput(container, jobId) {
 
       const compiledBlock = compiled
         ? el("div", { class: "card card-pad output-doc" }, el("div", { class: "md", html: mdToHtml(compiled) }))
-        : emptyState({ icon: "∅", title: "No compiled output", body: "This job hasn't produced a deliverable yet. Individual node outputs are below." });
+        : emptyState({ icon: "∅", title: "No output yet", body: "This job hasn't produced a deliverable yet. What each step produced is below." });
+      // A plan that is still being walked through: the compiled document says
+      // "not executed" and names a CLI command — in the console the way onward
+      // is the Run stage, so say so with a button.
+      const unfinished = !["completed", "cancelled", "failed"].includes(job.status) && (job.node_count || 0) > 0;
+      const onward = unfinished
+        ? el("div", { class: "card card-pad output-onward row row-wrap" },
+            el("span", { class: "dim", text: "This is the plan as it stands — the job is not finished yet." }),
+            el("span", { class: "spacer" }),
+            el("a", { class: "btn btn-sm btn-primary", href: `#/job/${jobId}/run`, text: "Continue the walkthrough →" }))
+        : null;
 
       const nodeBlocks = (logs.nodes || []).map((n) =>
         el(
@@ -74,13 +85,14 @@ export function renderOutput(container, jobId) {
           { class: "row row-wrap output-head" },
           statusBadge(job.status),
           el("h2", { class: "output-title", text: job.title || "(untitled)" }),
-          kind ? el("span", { class: "tag", text: kind }) : null,
+          kind ? el("span", { class: "tag", text: deliverableLabel(kind) }) : null,
           el("span", { class: "spacer" }),
           copyBtn,
           dlBtn
         ),
+        onward,
         compiledBlock,
-        nodeBlocks.length ? el("h3", { class: "output-section-h", text: `Node outputs (${nodeBlocks.length})` }) : null,
+        nodeBlocks.length ? el("h3", { class: "output-section-h", text: `What each step produced (${nodeBlocks.length})` }) : null,
         ...nodeBlocks
       );
     } catch (e) {

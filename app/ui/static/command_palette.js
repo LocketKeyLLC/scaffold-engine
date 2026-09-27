@@ -5,14 +5,15 @@
 import * as api from "./api.js";
 import * as router from "./router.js";
 import { el, mount, shortId, debounce } from "./util.js";
-import { NAV } from "./nav.js";
+import { PAGES } from "./nav.js";
 
-// Every view is jumpable — derived from the shared nav (this file used to
-// keep its own copy, which drifted to 10 of 18 views). Admin-only entries
-// are filtered at rebuild time against the cached principal (§17.815).
+// Every page is jumpable — derived from the shared nav model (this file used
+// to keep its own copy, which drifted to 10 of 18 views). PAGES lists the
+// places AND their tabs. Admin-only entries are filtered at rebuild time
+// against the cached principal (§17.815).
 function navCommands() {
   const p = api.principal();
-  return NAV.filter((n) => !n.adminOnly || p?.is_admin !== false);
+  return PAGES.filter((n) => !n.adminOnly || p?.is_admin !== false);
 }
 
 // Subsequence fuzzy score; -1 if `q` is not a subsequence of `text`.
@@ -42,7 +43,7 @@ function fuzzy(q, text) {
 function routeForJob(j) {
   // Pre-approval statuses: Overview IS the gate (job_hub.GATE_STATUSES).
   if (["pending", "refining", "awaiting_confirmation"].includes(j.status))
-    return `/job/${j.id}`;
+    return `/job/${j.id}`;   // the job page opens on the approval stage
   if (j.status === "completed") return `/job/${j.id}/output`;
   if (["awaiting_assist", "assisted_paused", "assisted_executing",
        "assisted_running", "running"].includes(j.status))
@@ -100,7 +101,7 @@ export function mountCommandPalette() {
 
   function rebuild() {
     const q = curQuery.trim();
-    const statics = navCommands().map((c) => ({ label: c.label, hint: "view", run: () => router.navigate(c.path), score: fuzzy(q, c.label) }))
+    const statics = navCommands().map((c) => ({ label: c.label, hint: "page", run: () => router.navigate(c.path), score: fuzzy(q, c.label) }))
       .filter((c) => q === "" || c.score >= 0)
       .sort((a, b) => b.score - a.score);
     items = [...statics, ...jobItems];

@@ -54,7 +54,7 @@ def test_every_registry_action_has_a_spa_label():
 
 @pytest.mark.parametrize("path", [
     "pipelines/scaffold_router.py", "pipelines/_vendor/_assist_handlers.py",
-    "cli/scaffold_cli/main.py", "app/ui/static/components.js", "app/ui/static/views/dashboard.js",
+    "cli/scaffold_cli/main.py", "app/ui/static/components.js", "app/ui/static/views/home.js",
 ])
 def test_no_inline_copy_of_the_noise_filter(path: str):
     p = ROOT / path
@@ -68,4 +68,4 @@ def test_no_inline_copy_of_the_noise_filter(path: str):
 def test_the_spa_renders_next_actions_somewhere():
     views = (ROOT / "app" / "ui" / "static" / "views")
     users = [p.name for p in views.glob("*.js") if "nextActionChips(" in p.read_text(encoding="utf-8")]
-    assert {"dashboard.js", "theater.js"} <= set(users), users
+    assert {"home.js", "theater.js"} <= set(users), users

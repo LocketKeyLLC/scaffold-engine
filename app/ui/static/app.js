@@ -6,19 +6,14 @@ import { INITIAL as HEALTH_INITIAL, nextHealth, healthText as healthLabel, dotSt
 import { placeholder } from "./views/placeholder.js";
 import { mountCommandPalette } from "./command_palette.js";
 import { toast } from "./components.js";
-import { NAV, NAV_GROUPS } from "./nav.js";
-import { execMode, setExecMode } from "./exec_mode.js";
+import { NAV, placeOf } from "./nav.js";
 import * as notify from "./notify.js";
-
 import { storage } from "./storage.js";
+import { UI_BUILD, THEME_LABELS, THEME_NAMES, currentTheme, cycleTheme } from "./prefs.js";
 
-// Visible build stamp (sidebar foot). Bump per UI change round — it exists so
-// "is my tab running the latest UI?" is answerable at a glance instead of by
-// diffing pixels (the §17.840/§17.842 stale-module debugging sink).
-const UI_BUILD = "r11";   // §17.1166 — superseded look-up asks are marked
-// §17.1055 — the sidebar retracts on wide screens (the operator asked for
-// the room: a walkthrough plus a terminal side by side). Per-browser, like
-// theme and density; the ≤820px drawer is unaffected.
+// §17.1055 — the rail retracts on wide screens (the operator asked for the
+// room: a walkthrough plus a terminal side by side). Per-browser, like theme
+// and density; the ≤820px bottom bar is unaffected.
 const SIDEBAR_COLLAPSED_KEY = "scaffold_sidebar_collapsed";
 function sidebarCollapsed() {
   try { return storage.get(SIDEBAR_COLLAPSED_KEY) === "1"; } catch { return false; }
@@ -87,9 +82,6 @@ document.addEventListener("click", async (e) => {
   }
 });
 
-// Nav structure (groups + admin flags) lives in nav.js, shared with the
-// command palette.
-
 const root = document.getElementById("root");
 let outlet = null; // the content container the active view renders into
 let cleanup = () => {}; // teardown hook returned by the active view
@@ -100,57 +92,8 @@ let cleanup = () => {}; // teardown hook returned by the active view
 // detached DOM) and one duplicate Escape handler per re-auth.
 let healthTimer = null;
 let attentionTimer = null; // §17.1007 — replaced, not stacked, per chrome rebuild
-let escHandler = null;
 let sidebarKeyHandler = null;  // §17.1055
 let jobPinHandler = null; // §17.896 — replaced, not stacked, per chrome rebuild
-
-// §17.896 — the sidebar's Current-job pin. Three verbs, named the way the
-// operator names them: the canvas is "DAG" here even though its hub tab is
-// "Plan", because "where's the DAG" is the question that got asked.
-const JOB_PIN_LINKS = [
-  ["plan", "⬡", "DAG"],
-  ["run", "◎", "Run"],       // §17.1161 — Run is the Follow layout (rail + pane)
-  ["full", "▶", "Full"],     // the classic walkthrough page
-  ["output", "▤", "Output"],
-];
-
-function renderJobPin(host) {
-  const job = currentJob();
-  if (!job) {
-    host.classList.add("hidden");
-    mount(host);
-    return;
-  }
-  host.classList.remove("hidden");
-  const path = router.currentPath() || "/";
-  mount(
-    host,
-    el("div", { class: "job-pin-label", text: "Current job" }),
-    el("a", {
-      class: "job-pin-title",
-      href: `#/job/${job.id}`,
-      text: job.title || "(untitled)",
-      title: job.title || "",
-    }),
-    el(
-      "div",
-      { class: "job-pin-links" },
-      ...JOB_PIN_LINKS.map(([tab, icon, label]) =>
-        el(
-          "a",
-          {
-            class:
-              "job-pin-link" + (path === `/job/${job.id}/${tab}` ? " active" : ""),
-            href: `#/job/${job.id}/${tab}`,
-            title: label,
-          },
-          el("span", { class: "job-pin-icon", text: icon }),
-          el("span", { text: label })
-        )
-      )
-    )
-  );
-}
 
 // ── Auth / connect gate ───────────────────────────────────────────────
 function gateStep(n, title, ...body) {
@@ -310,183 +253,97 @@ function connectGate(message) {
   input.focus();
 }
 
-// ── App chrome (sidebar + topbar + content outlet) ────────────────────
+// ── App chrome: the rail + content outlet ─────────────────────────────
+// UX overhaul (2026-09-27). The 220 px sidebar (5 groups, 19 destinations, a
+// pinned job block, an execution-mode block and a six-toggle footer) is a
+// 64 px rail: three places, the current job, the theme, and a small menu. On
+// phones the same rail is a bottom bar. Preferences live in Settings.
+function railLink(n, active) {
+  return el("a", { class: "rail-link" + (active ? " active" : ""), href: "#" + n.path, dataset: { nav: n.id }, title: n.label, "aria-label": n.label },
+    el("span", { class: "rail-icon", text: n.icon }),
+    el("span", { class: "rail-label", text: n.label }));
+}
+
+// §17.896 — the job the operator last opened stays one click away from every
+// screen. One rail item, not a block: the job page's stage strip owns the
+// rest (plan · run · output).
+function renderJobLink(host) {
+  const job = currentJob();
+  if (!job) { host.hidden = true; mount(host); return; }
+  host.hidden = false;
+  const path = router.currentPath() || "/";
+  mount(host, el("a", {
+    class: "rail-link rail-job" + (path.startsWith(`/job/${job.id}`) ? " active" : ""),
+    href: `#/job/${job.id}`, title: job.title || "Current job", "aria-label": `Current job: ${job.title || ""}`,
+  }, el("span", { class: "rail-icon", text: "◎" }), el("span", { class: "rail-label", text: "Current" })));
+}
+
 function buildChrome() {
   outlet = el("main", { class: "content", id: "outlet" });
 
-  // §17.815 — admin surfaces disappear for non-admin identities. Unknown
-  // principal (pre-§17.815 server) fails open to admin: the server still
-  // enforces authz on every request; this is navigation hygiene.
-  const p = api.principal();
-  const navLinks = [];
-  const navGroups = NAV_GROUPS.map((g) => {
-    const items = g.items.filter((n) => !n.adminOnly || p?.is_admin !== false);
-    if (!items.length) return null;
-    const links = items.map((n) =>
-      el(
-        "a",
-        { class: "nav-link", href: "#" + n.path, dataset: { nav: n.id } },
-        el("span", { class: "nav-icon", text: n.icon }),
-        el("span", { class: "nav-label", text: n.label })
-      )
-    );
-    navLinks.push(...links);
-    // Collapsible group. §17.854 (G7) — OPEN by default (unless the operator
-    // explicitly collapsed it), and always open when it owns the active view.
-    // §17.896 — a group may declare `collapsed: true` to start CLOSED (System);
-    // an explicit operator choice in scaffold_nav_closed still wins either way.
-    const closed = navClosedGroups();
-    const opened = navOpenedGroups();
-    const dflt = g.collapsed ? opened.has(g.label) : !closed.has(g.label);
-    const open = dflt || items.some((n) => n.id === topSegment(router.currentPath() || "/"));
-    const group = el(
-      "div",
-      { class: "nav-group" + (open ? "" : " collapsed"), dataset: { group: g.label } },
-      el(
-        "button",
-        {
-          class: "nav-group-label nav-group-toggle",
-          onClick: () => {
-            const collapsed = group.classList.toggle("collapsed");
-            // §17.896 — record the choice against whichever default this group
-            // has, so an explicitly-opened System group STAYS open.
-            if (g.collapsed) {
-              const set = navOpenedGroups();
-              collapsed ? set.delete(g.label) : set.add(g.label);
-              saveNavOpenedGroups(set);
-            } else {
-              const set = navClosedGroups();
-              collapsed ? set.add(g.label) : set.delete(g.label);
-              saveNavClosedGroups(set);
-            }
-          },
-        },
-        el("span", { class: "nav-group-chevron", text: "▸" }),
-        g.label
-      ),
-      ...links
-    );
-    return group;
-  }).filter(Boolean);
-
   const healthDot = el("span", { class: "health-dot", dataset: { state: "unknown" } });
   const healthText = el("span", { class: "health-text", text: "checking…" });
+  const p = api.principal();
 
-  // §17.896 — the pinned Current-job block. This is the DAG's front door: the
-  // canvas lives at #/job/:id/plan (a hub tab, §17.859) and had no sidebar
-  // presence at all, so finding it meant Jobs → pick a row → find the tab.
-  const jobPin = el("div", { class: "job-pin" });
-  renderJobPin(jobPin);
-  // Re-render on both signals: a hub load (setCurrentJob) and any navigation
-  // (so the active surface highlights and a cleared pin disappears).
+  const active = placeOf(router.currentPath() || "/");
+  const jobLink = el("div", { class: "rail-job-slot" });
+  renderJobLink(jobLink);
   if (jobPinHandler) window.removeEventListener("scaffold:currentjob", jobPinHandler);
-  jobPinHandler = () => renderJobPin(jobPin);
+  jobPinHandler = () => renderJobLink(jobLink);
   window.addEventListener("scaffold:currentjob", jobPinHandler);
 
+  const navEl = el("nav", { class: "rail-nav", "aria-label": "Places" },
+    ...NAV.map((n) => railLink(n, n.id === active)),
+    jobLink);
+
+  // Theme: one button, cycles auto → dark → light (the operator asked to keep
+  // the switch). Everything else in the old footer is Settings › Preferences.
+  const themeBtn = el("button", { class: "rail-btn", title: `Theme: ${THEME_NAMES[currentTheme()]}`, "aria-label": "Theme", text: THEME_LABELS[currentTheme()] });
+  themeBtn.addEventListener("click", () => {
+    const next = cycleTheme();
+    themeBtn.textContent = THEME_LABELS[next];
+    themeBtn.title = `Theme: ${THEME_NAMES[next]}`;
+  });
+
+  // The menu: who you are, engine health, the build, sign out.
+  const menu = el("details", { class: "rail-menu" },
+    el("summary", { class: "rail-btn", title: "Account, engine status, sign out", "aria-label": "Account and status" }, healthDot),
+    el("div", { class: "rail-menu-body" },
+      p ? el("div", { class: "identity", title: `key_id: ${p.key_id ?? "master"}` },
+            el("span", { class: "identity-name", text: p.identity }),
+            el("span", { class: "identity-role", text: ` (${p.role})` })) : null,
+      el("div", { class: "health" }, healthText),
+      el("div", { class: "faint mono ui-build", text: `ui ${UI_BUILD}` }),
+      el("a", { class: "btn btn-ghost btn-sm", href: "#/settings/preferences", text: "Preferences" }),
+      el("button", { class: "btn btn-ghost btn-sm", text: "Sign out", onClick: () => { api.setKey(""); location.reload(); } })));
+  const onDocClick = (e) => { if (menu.open && !menu.contains(e.target)) menu.open = false; };
+  document.addEventListener("click", onDocClick);
+
   const collapseBtn = el("button", {
-    class: "btn btn-ghost btn-sm sidebar-collapse",
-    title: "Hide the sidebar (⌃\\ toggles)",
-    "aria-label": "Hide the sidebar",
+    class: "rail-btn rail-collapse",
+    title: "Hide the rail (⌃\\ toggles)",
+    "aria-label": "Hide the rail",
     text: "⟨",
     onClick: () => setSidebarCollapsed(true),
   });
-  const sidebar = el(
-    "aside",
-    { class: "sidebar" },
-    el(
-      "div",
-      { class: "brand" },
-      el("img", { class: "brand-logo", src: "/ui/static/logo.svg", alt: "" }),
-      el("span", { class: "brand-name", text: "Scaffold" }),
-      el("span", { class: "spacer" }),
-      collapseBtn
-    ),
-    jobPin,
-    el("nav", { class: "nav" }, ...navGroups),
-    // §17.854 (audit G7) — the Auto/Assist switch changes what "Execute" MEANS
-    // everywhere, yet it lived in .foot-controls at 11.5px styled like the theme
-    // toggle (a "preference", not a safety-relevant mode). Promoted to its own
-    // labeled block at readable size, directly under the nav.
-    el(
-      "div",
-      { class: "exec-mode-block" },
-      el("div", { class: "exec-mode-heading", text: "Execution mode" }),
-      execModeToggle()
-    ),
-    el(
-      "div",
-      { class: "sidebar-foot" },
-      // §17.815 — who this key is (from /auth/whoami), so shared boxes show
-      // real attribution instead of an anonymous session.
-      p
-        ? el(
-            "div",
-            { class: "identity", title: `key_id: ${p.key_id ?? "master"}` },
-            el("span", { class: "identity-name", text: p.identity }),
-            el("span", { class: "identity-role", text: ` (${p.role})` })
-          )
-        : null,
-      el("div", { class: "foot-controls" }, themeToggle(), densityToggle(), notifyToggle()),
-      el("div", { class: "health" }, healthDot, healthText, el("span", { class: "faint mono ui-build", text: ` · ui ${UI_BUILD}` })),
-      el("button", {
-        class: "btn btn-ghost btn-sm",
-        text: "Sign out",
-        onClick: () => {
-          api.setKey("");
-          location.reload();
-        },
-      })
-    )
-  );
 
-  // ── Mobile chrome: hamburger + off-canvas slide-over ────────────────
-  // On wide screens the sidebar is a static grid column and these are
-  // display:none (CSS). At ≤820px the sidebar becomes a fixed drawer that
-  // this scrim/hamburger open and close.
-  function openNav() {
-    sidebar.classList.add("open");
-    scrim.classList.remove("hidden");
-    hamburger.setAttribute("aria-expanded", "true");
-  }
-  function closeNav() {
-    sidebar.classList.remove("open");
-    scrim.classList.add("hidden");
-    hamburger.setAttribute("aria-expanded", "false");
-  }
-  const scrim = el("div", { class: "scrim hidden", onClick: closeNav });
-  const hamburger = el("button", {
-    class: "hamburger",
-    "aria-label": "Open navigation",
-    "aria-expanded": "false",
-    text: "☰",
-    onClick: openNav,
-  });
-  const topbar = el(
-    "div",
-    { class: "mobile-topbar" },
-    hamburger,
-    el("img", { class: "brand-logo", src: "/ui/static/logo.svg", alt: "" }),
-    el("span", { class: "brand-name", text: "Scaffold" })
-  );
-  // Tapping a destination navigates → close the drawer; Escape closes too.
-  navLinks.forEach((a) => a.addEventListener("click", closeNav));
-  // §17.854 (audit G5) — replace, don't stack, the document-level Escape handler
-  // across chrome rebuilds.
-  if (escHandler) document.removeEventListener("keydown", escHandler);
-  escHandler = (e) => { if (e.key === "Escape") closeNav(); };
-  document.addEventListener("keydown", escHandler);
+  const rail = el("aside", { class: "rail" },
+    el("a", { class: "rail-brand", href: "#/", title: "Scaffold Engine", "aria-label": "Scaffold Engine — Home" },
+      el("img", { class: "brand-logo", src: "/ui/static/logo.svg", alt: "" })),
+    navEl,
+    el("div", { class: "rail-foot" }, themeBtn, menu, collapseBtn));
 
-  // §17.1055 — the rail: the one control that survives a collapsed sidebar.
-  const rail = el("button", {
+  // §17.1055 — the one control that survives a collapsed rail.
+  const railBtn = el("button", {
     class: "sidebar-rail",
-    title: "Show the sidebar (⌃\\ toggles)",
-    "aria-label": "Show the sidebar",
+    title: "Show the rail (⌃\\ toggles)",
+    "aria-label": "Show the rail",
     text: "☰",
     onClick: () => setSidebarCollapsed(false),
   });
-  // §17.1116 — the connection pill lives on the shell, not in the sidebar.
+  // §17.1116 — the connection pill lives on the shell, not in the rail.
   const connPill = el("div", { class: "conn-pill", role: "status", "aria-live": "polite", hidden: true });
-  const shell = el("div", { class: "shell" + (sidebarCollapsed() ? " sidebar-collapsed" : "") }, topbar, sidebar, scrim, rail, outlet, connPill);
+  const shell = el("div", { class: "shell" + (sidebarCollapsed() ? " sidebar-collapsed" : "") }, rail, railBtn, outlet, connPill);
   function setSidebarCollapsed(on) {
     shell.classList.toggle("sidebar-collapsed", !!on);
     try { on ? storage.set(SIDEBAR_COLLAPSED_KEY, "1") : storage.remove(SIDEBAR_COLLAPSED_KEY); } catch { /* private mode */ }
@@ -503,100 +360,10 @@ function buildChrome() {
   startAttentionPolling(); // §17.1007
 }
 
-// ── Theme + density toggles ───────────────────────────────────────────
-// Persisted per-browser; theme_boot.js re-applies both before first paint so
-// there's no flash. Theme cycles auto → dark → light; density toggles
-// comfortable ↔ compact (token overrides in app.css).
-const THEME_KEY = "scaffold_theme";
-const DENSITY_KEY = "scaffold_density";
-// §17.840 — set by the wizard's "Skip for now" AND the dashboard card's
-// Dismiss (dashboard.js uses the same literal): stops the boot-time route
-// into setup for operators who deliberately declined the account.
+// §17.840 — set by the wizard's "Skip for now" AND the Home notice's Dismiss
+// (home.js uses the same literal): stops the boot-time route into setup for
+// operators who deliberately declined the account.
 const ACCOUNT_PROMPT_KEY = "scaffold_account_prompt_dismissed";
-const THEME_LABELS = { auto: "◐ Auto", dark: "● Dark", light: "○ Light" };
-
-function themeToggle() {
-  const cur = () => storage.get(THEME_KEY) || "auto";
-  const btn = el("button", {
-    class: "btn btn-ghost",
-    title: "Theme (auto follows the OS)",
-    text: THEME_LABELS[cur()],
-  });
-  btn.addEventListener("click", () => {
-    const order = ["auto", "dark", "light"];
-    const next = order[(order.indexOf(cur()) + 1) % order.length];
-    if (next === "auto") {
-      storage.remove(THEME_KEY);
-      delete document.documentElement.dataset.theme;
-    } else {
-      storage.set(THEME_KEY, next);
-      document.documentElement.dataset.theme = next;
-    }
-    btn.textContent = THEME_LABELS[next];
-  });
-  return btn;
-}
-
-// §17.853 — global Auto/Assist execution mode toggle. Read by every execution
-// entry point (plan editor, theater Run, approve auto-run, flow guide).
-function execModeToggle() {
-  const label = () => (execMode() === "auto" ? "▶ Auto" : "✦ Assist");
-  const btn = el("button", {
-    class: "btn btn-ghost exec-mode-toggle",
-    title: "Execution mode — Assist: you run each step on your machines with the engine guiding (it never touches your hardware). Auto: the engine works every step itself, producing runbooks/configs/code autonomously.",
-    text: label(),
-  });
-  btn.classList.toggle("mode-auto", execMode() === "auto");
-  btn.addEventListener("click", () => {
-    const next = execMode() === "auto" ? "assist" : "auto";
-    setExecMode(next);
-    btn.textContent = label();
-    btn.classList.toggle("mode-auto", next === "auto");
-    toast(
-      next === "auto"
-        ? "▶ Auto mode: Execute runs the engine autonomously (it produces artifacts — it never connects to your machines)."
-        : "✦ Assist mode: Execute starts a guided session — you drive each step.",
-      "ok"
-    );
-  });
-  return btn;
-}
-
-// §17.1007 — opt-in desktop notifications. The permission request MUST ride a
-// real click (browsers reject load-time prompts and Chrome penalises the origin
-// permanently), so this is a button, not a boot-time ask. The TITLE badge needs
-// no permission and is always on — this toggle governs the louder channel only.
-function notifyToggle() {
-  const label = () => (notify.notifyEnabled() ? "⚑ Alerts on" : "⚐ Alerts off");
-  const btn = el("button", {
-    class: "btn btn-ghost",
-    title:
-      "Desktop alerts when a job needs you — the gate opens, a run finishes or fails, " +
-      "a walkthrough parks. The tab title always updates; this adds a system notification.",
-    text: label(),
-  });
-  if (!notify.notifySupported()) {
-    btn.disabled = true;
-    btn.title = "This browser has no Notification API — the tab title still updates.";
-    return btn;
-  }
-  btn.addEventListener("click", async () => {
-    if (notify.notifyEnabled()) {
-      notify.disableNotifications();
-      toast("Desktop alerts off — the tab title still updates.", "ok");
-    } else {
-      const ok = await notify.enableNotifications();
-      toast(
-        ok
-          ? "Desktop alerts on — you'll be called back when a job needs you."
-          : "The browser blocked notifications for this site. Allow them in site settings, then try again.",
-        ok ? "ok" : "err"
-      );
-    }
-    btn.textContent = label();
-  });
-  return btn;
-}
 
 // §17.1007 — the global attention watcher.
 //
@@ -605,7 +372,7 @@ function notifyToggle() {
 // burning cycles rendering things nobody is looking at; this loop exists
 // PRECISELY for the operator who is looking elsewhere, and skipping it while
 // hidden would disable the one feature it provides. The 30s cadence (vs the
-// dashboard's 10s) is the concession.
+// Home page's 10s) is the concession.
 const ATTENTION_LABEL = {
   awaiting_confirmation: "plan ready to approve",
   awaiting_assist: "waiting on you",
@@ -624,7 +391,7 @@ function startAttentionPolling() {
   async function tick() {
     let jobs;
     try {
-      const st = await api.status();   // §17.1122 — shared with the dashboard
+      const st = await api.status();   // §17.1122 — shared, memoized
       jobs = st.recent_jobs || [];
     } catch {
       return; // transient — the health dot already reports reachability
@@ -651,11 +418,11 @@ function startAttentionPolling() {
         title: `${title} — ${label}`,
         body:
           status === "awaiting_confirmation"
-            ? "The engine refined your idea and has questions. Open the gate to review and approve."
+            ? "The engine refined your idea and has questions. Open the job to review and approve."
             : status === "completed"
-            ? "The run finished. The compiled output is ready."
+            ? "The run finished. The output is ready."
             : status === "failed"
-            ? "The run stopped. The Run tab has the reason and the recovery verbs."
+            ? "The run stopped. The job's Run stage has the reason and the recovery verbs."
             : "This job is parked and needs you to continue it.",
         href: `#/job/${id}`,
       });
@@ -673,88 +440,20 @@ function startAttentionPolling() {
   attentionTimer = setInterval(tick, 30000);
 }
 
-function densityToggle() {
-  const compact = () => storage.get(DENSITY_KEY) === "compact";
-  const label = () => (compact() ? "▦ Compact" : "▢ Cozy");
-  const btn = el("button", {
-    class: "btn btn-ghost",
-    title: "Density — compact tightens paddings for more rows per screen",
-    text: label(),
-  });
-  btn.addEventListener("click", () => {
-    if (compact()) {
-      storage.remove(DENSITY_KEY);
-      delete document.documentElement.dataset.density;
-    } else {
-      storage.set(DENSITY_KEY, "compact");
-      document.documentElement.dataset.density = "compact";
-    }
-    btn.textContent = label();
-  });
-  return btn;
-}
-
-// Collapsed-group persistence: the OPEN set survives reloads; no stored
-// value means "everything collapsed" (the active view's group still
-// auto-expands so the operator always sees where they are).
-// §17.854 (audit G7) — store the CLOSED set, not the open set. The old
-// "scaffold_nav_open" default (no stored value → empty set → EVERY group
-// collapsed) hid Research/Library/Schedules/Costs from a first-time operator,
-// whose main problem is knowing the views exist. Inverted: default (empty
-// closed set) → everything open; the operator collapses what they don't want.
-const NAV_CLOSED_KEY = "scaffold_nav_closed";
-function navClosedGroups() {
-  try { return new Set(JSON.parse(storage.get(NAV_CLOSED_KEY)) || []); }
-  catch { return new Set(); }
-}
-function saveNavClosedGroups(set) {
-  storage.set(NAV_CLOSED_KEY, JSON.stringify([...set]));
-}
-
-// §17.896 — the mirror of the above for groups that default to COLLAPSED
-// (System): membership means "the operator deliberately opened this".
-const NAV_OPENED_KEY = "scaffold_nav_opened";
-function navOpenedGroups() {
-  try { return new Set(JSON.parse(storage.get(NAV_OPENED_KEY)) || []); }
-  catch { return new Set(); }
-}
-function saveNavOpenedGroups(set) {
-  storage.set(NAV_OPENED_KEY, JSON.stringify([...set]));
-}
-
 function highlightNav(path) {
-  const active = topSegment(path);
-  document.querySelectorAll(".nav-link").forEach((a) => {
+  const active = placeOf(path);
+  document.querySelectorAll(".rail-link[data-nav]").forEach((a) => {
     a.classList.toggle("active", a.dataset.nav === active);
-    // Deep links / palette jumps into a collapsed group must reveal the
-    // active item — expand (without persisting: a navigation isn't a
-    // deliberate "keep this open" choice).
-    if (a.dataset.nav === active) a.closest(".nav-group")?.classList.remove("collapsed");
   });
-  // §17.896 — keep the pin's active-tab highlight in step with the route.
-  const pin = document.querySelector(".job-pin");
-  if (pin) renderJobPin(pin);
-}
-
-// Detail routes without their own nav item map onto the sidebar item that owns
-// their flow, so the sidebar highlights sensibly while on them.
-// §17.896 — `approvals` lost its sidebar item (it is a job STATUS, now the
-// "Awaiting approval" chip in Jobs); the route still resolves, so both it and
-// the legacy `plan` route highlight Jobs rather than silently falling back to
-// Dashboard.
-const NAV_ALIAS = { plan: "jobs", approvals: "jobs", job: "jobs" };
-
-function topSegment(path) {
-  const seg = path.split("/").filter(Boolean)[0];
-  if (!seg) return "dashboard";
-  if (NAV_ALIAS[seg]) return NAV_ALIAS[seg];
-  return NAV.some((n) => n.id === seg) ? seg : "dashboard";
+  // §17.896 — keep the current-job link's highlight in step with the route.
+  const slot = document.querySelector(".rail-job-slot");
+  if (slot) renderJobLink(slot);
 }
 
 async function startHealthPolling(dot, text, pill) {
   // §17.1116 (ledger U-5) — a state with memory (health_state.js): the text
   // says "unreachable since 14:02 · last seen 3 min ago", and the fixed pill
-  // (outside the sidebar, so it survives the §17.1055 collapsed layout) is
+  // (outside the rail, so it survives the §17.1055 collapsed layout) is
   // shown whenever the engine is not simply up.
   let state = HEALTH_INITIAL;
   function render() {
@@ -808,27 +507,17 @@ function lazy(name, title) {
 }
 const VIEWS = {
   notfound: lazy("notfound", "Page not found"),
+  home: lazy("home", "Home"),
   new: lazy("compose", "New idea"),
-  chat: lazy("chat", "Chat"),
-  dashboard: lazy("dashboard", "Dashboard"),
-  jobs: lazy("jobs", "Jobs"),
-  approvals: lazy("approvals", "Approval Gate"),
-  // §17.859 — the job hub replaced the standalone dag/plan/theater/output
-  // views; their renderers are imported by job_hub.js directly.
+  chat: lazy("compose", "New idea"),   // the Chat page is folded into New idea (Ask the engine)
+  // §17.859 — the job page owns a job's whole life (stages); its renderers
+  // are imported by job_hub.js directly.
   job_hub: lazy("job_hub", "Job"),
-  compare: lazy("compare", "Compare Jobs"),
-  research: lazy("research", "Research Explorer"),
   assist: lazy("assist", "Assistant"),
-  models: lazy("models", "Models"),
-  rag: lazy("rag", "Knowledge (RAG)"),
-  schedules: lazy("schedules", "Schedules"),
+  compare: lazy("compare", "Compare Jobs"),
+  knowledge: lazy("knowledge", "Knowledge"),
   settings: lazy("settings", "Settings"),
   setup: lazy("setup", "Connect your models"),
-  capabilities: lazy("capabilities", "Capabilities"),
-  library: lazy("library", "Library"),
-  costs: lazy("costs", "Costs"),
-  traces: lazy("traces", "LLM Traces"),
-  alerts: lazy("alerts", "Alerts"),
 };
 
 // §17.854 (audit G5) — monotonically-increasing nav token. Two quick
@@ -845,37 +534,44 @@ async function loadAndRender(name, params, path) {
   renderView(mod.default, params, path);
 }
 
+// Old addresses keep resolving — as the tab of the place that now holds them.
+// A dead link must never look like a navigation (§17.1114), so every retired
+// route is REGISTERED here and lands on its successor with the same content.
 function registerRoutes() {
-  router.route("/", (p) => loadAndRender("dashboard", p, router.currentPath()));
-  router.route("/new", (p) => loadAndRender("new", p, router.currentPath()));
-  router.route("/chat", (p) => loadAndRender("chat", p, router.currentPath()));
-  router.route("/jobs", (p) => loadAndRender("jobs", p, router.currentPath()));
-  router.route("/jobs/:filter", (p) => loadAndRender("jobs", p, router.currentPath()));
-  router.route("/approvals", (p) => loadAndRender("approvals", p, router.currentPath()));
-  // §17.859 (audit G7) — the job hub: one job, one URL, six tabs. The old
-  // per-view routes (#/theater/:id, #/output/:id, #/plan/:id, #/dag/:id,
-  // #/approvals/:id, #/traces/:id) are gone — hard switch, operator decision.
-  router.route("/job/:jobId", (p) => loadAndRender("job_hub", p, router.currentPath()));
-  router.route("/job/:jobId/:tab", (p) => loadAndRender("job_hub", p, router.currentPath()));
-  router.route("/compare", (p) => loadAndRender("compare", p, router.currentPath()));
-  router.route("/compare/:jobA/:jobB", (p) => loadAndRender("compare", p, router.currentPath()));
-  router.route("/compare/:jobA", (p) => loadAndRender("compare", p, router.currentPath()));
-  router.route("/research", (p) => loadAndRender("research", p, router.currentPath()));
-  router.route("/research/:sessionId", (p) => loadAndRender("research", p, router.currentPath()));
-  router.route("/assist", (p) => loadAndRender("assist", p, router.currentPath()));
-  router.route("/assist/:sessionId", (p) => loadAndRender("assist", p, router.currentPath()));
-  router.route("/models", (p) => loadAndRender("models", p, router.currentPath()));
-  router.route("/rag", (p) => loadAndRender("rag", p, router.currentPath()));
-  router.route("/schedules", (p) => loadAndRender("schedules", p, router.currentPath()));
-  router.route("/settings", (p) => loadAndRender("settings", p, router.currentPath()));
-  router.route("/setup", (p) => loadAndRender("setup", p, router.currentPath()));
-  router.route("/capabilities", (p) => loadAndRender("capabilities", p, router.currentPath()));
-  router.route("/library", (p) => loadAndRender("library", p, router.currentPath()));
-  router.route("/costs", (p) => loadAndRender("costs", p, router.currentPath()));
-  router.route("/traces", (p) => loadAndRender("traces", p, router.currentPath()));
-  router.route("/alerts", (p) => loadAndRender("alerts", p, router.currentPath()));
+  // Literal route calls on purpose: tests/test_spa_route_inventory.py scans
+  // them to prove every in-SPA link resolves.
+  const go = (name, p, fixed = {}) => loadAndRender(name, { ...p, ...fixed }, router.currentPath());
+  router.route("/", (p) => go("home", p));
+  router.route("/jobs", (p) => go("home", p));
+  router.route("/jobs/:filter", (p) => go("home", p));
+  router.route("/approvals", (p) => go("home", p, { filter: "needs_you" }));
+  router.route("/assist", (p) => go("home", p, { filter: "active" }));
+  router.route("/assist/:sessionId", (p) => go("assist", p));            // §17.1162 — forwards to the job's Run stage
+  router.route("/new", (p) => go("new", p));
+  router.route("/chat", (p) => go("chat", p));
+  router.route("/job/:jobId", (p) => go("job_hub", p));
+  router.route("/job/:jobId/:tab", (p) => go("job_hub", p));
+  router.route("/compare", (p) => go("compare", p));
+  router.route("/compare/:jobA", (p) => go("compare", p));
+  router.route("/compare/:jobA/:jobB", (p) => go("compare", p));
+  router.route("/knowledge", (p) => go("knowledge", p));
+  router.route("/knowledge/:tab", (p) => go("knowledge", p));
+  router.route("/knowledge/:tab/:sessionId", (p) => go("knowledge", p));
+  router.route("/research", (p) => go("knowledge", p, { tab: "research" }));
+  router.route("/research/:sessionId", (p) => go("knowledge", p, { tab: "research" }));
+  router.route("/rag", (p) => go("knowledge", p, { tab: "search" }));
+  router.route("/library", (p) => go("knowledge", p, { tab: "library" }));
+  router.route("/schedules", (p) => go("knowledge", p, { tab: "schedules" }));
+  router.route("/settings", (p) => go("settings", p));
+  router.route("/settings/:tab", (p) => go("settings", p));
+  router.route("/models", (p) => go("settings", p, { tab: "models" }));
+  router.route("/capabilities", (p) => go("settings", p, { tab: "capabilities" }));
+  router.route("/costs", (p) => go("settings", p, { tab: "costs" }));
+  router.route("/traces", (p) => go("settings", p, { tab: "traces" }));
+  router.route("/alerts", (p) => go("settings", p, { tab: "alerts" }));
+  router.route("/setup", (p) => go("setup", p));
   // §17.1114 (ledger U-1) — an unknown route is a visible "Page not found",
-  // never the Dashboard: a dead link must look like a dead link.
+  // never Home: a dead link must look like a dead link.
   router.setNotFound((path) => loadAndRender("notfound", { path }, path));
 }
 
@@ -913,10 +609,9 @@ async function boot() {
     router.start();
     started = true;
   } else {
-    // chrome was rebuilt (e.g. after gate); re-dispatch current route
-    const path = router.currentPath();
-    const seg = topSegment(path);
-    loadAndRender(seg, router.getCurrent()?.params || {}, path);
+    // chrome was rebuilt (e.g. after gate); re-dispatch the current route
+    // through the router so the same handler (with its fixed params) runs.
+    router.redispatch();
   }
 }
 

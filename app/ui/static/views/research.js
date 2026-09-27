@@ -119,7 +119,8 @@ const RESEARCH_ICON = {
   warning: "⚠",
 };
 
-export default function research(container, params) {
+export default function research(container, params, opts = {}) {
+  const embedded = !!(opts && opts.embedded);   // rendered as a Knowledge tab: no page header of its own
   let disposed = false;
   let running = false;
   let abort = null;
@@ -150,17 +151,18 @@ export default function research(container, params) {
   const listOutlet = el("div", { class: "research-list" }, loading("Loading sessions…"));
   const auditOutlet = el("div", {});
 
+  const refreshBtn = el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => loadSessions() });
   mount(
     container,
-    el(
+    embedded ? null : el(
       "div",
       { class: "view-header" },
-      el("div", {}, el("h1", { text: "Research Explorer" }), el("div", { class: "sub", text: "Autonomous research sessions & live runs — a live run keeps going if you leave this page; come back to watch it" })),
-      el("div", { class: "header-actions" }, el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => loadSessions() }))
+      el("div", {}, el("h1", { text: "Research Explorer" }), el("div", { class: "sub", text: "Autonomous research sessions & live runs — a live run keeps going if you leave this page; come back to watch it" }))
     ),
+    embedded ? el("p", { class: "dim hub-lede", text: "Research a topic, a URL, a GitHub repo or an OpenAPI spec — what it finds is added to the knowledge base. A run keeps going if you leave this page." }) : null,
     runner,
     auditOutlet,
-    el("div", { class: "section-head research-sec" }, el("h2", { text: "Sessions" })),
+    el("div", { class: "section-head research-sec" }, el("h2", { text: "Runs" }), el("span", { class: "spacer" }), refreshBtn),
     listOutlet
   );
 
@@ -411,14 +413,14 @@ export default function research(container, params) {
       {},
       el("td", {}, statusBadge(s.status)),
       el("td", { class: "recent-title", text: s.topic || "(untitled)" }),
-      el("td", { class: "mono", text: s.depth || "—" }),
+      el("td", { class: "mono", text: (s.depth || "—").replace(/^direct_/, "") }),
       el("td", { class: "mono", text: s.domain || "—" }),
       el("td", { class: "mono", text: String(s.iterations_completed ?? "—") }),
       el("td", { class: "mono", text: String(s.total_entries_ingested ?? "—") }),
       el("td", { class: "mono", text: s.coverage_pct != null ? Math.round(s.coverage_pct) + "%" : "—" }),
       el("td", { class: "faint", text: timeAgo(s.updated_at || s.created_at) })
     );
-    makeClickable(tr, () => (location.hash = `#/research/${s.id}`),  // §17.854 G6
+    makeClickable(tr, () => (location.hash = `#/knowledge/research/${s.id}`),  // §17.854 G6
       { role: "link", label: `Open research ${s.topic || ""}` });
     return tr;
   }
@@ -435,7 +437,7 @@ export default function research(container, params) {
         el("h2", { class: "audit-title", text: `Provenance audit · ${meta.topic || shortId(sessionId)}` }),
         el("span", { class: "spacer" }),
         statusBadge(meta.status),
-        el("button", { class: "btn btn-sm btn-ghost", text: "✕", "aria-label": "Close", onClick: () => (location.hash = "#/research") })
+        el("button", { class: "btn btn-sm btn-ghost", text: "✕", "aria-label": "Close", onClick: () => (location.hash = "#/knowledge/research") })
       );
       const stats = el("div", { class: "summary-stats audit-stats" },
         stat("Provenance rows", fmtNum(t.provenance_rows)),

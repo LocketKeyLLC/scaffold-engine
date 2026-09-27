@@ -4,7 +4,7 @@
 // only the global picker, and its rows deep-link into the hub.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo } from "../util.js";
-import { emptyState, errorPanel, loading } from "../components.js";
+import { emptyState, errorPanel, loading, statusBadge } from "../components.js";
 
 const KINDS = ["", "generate", "chat", "tool_call", "embed"];
 
@@ -92,7 +92,8 @@ export function renderJobTraces(container, jobId) {
 }
 
 // ── Global picker (#/traces) ─────────────────────────────────────────
-export default function traces(container) {
+export default function traces(container, params, opts = {}) {
+  const embedded = !!(opts && opts.embedded);
   let disposed = false;
   const tracesBox = el("div", {});
 
@@ -114,7 +115,7 @@ export default function traces(container) {
             "div",
             { class: "card card-pad traces-job-row" },
             el("a", { href: `#/job/${j.id}/traces`, text: j.title || shortId(j.id) }),
-            el("span", { class: "badge", text: j.status }),
+            statusBadge(j.status),
             el("span", { class: "faint", text: timeAgo(j.updated_at || j.created_at) })
           )
         )
@@ -126,7 +127,7 @@ export default function traces(container) {
 
   mount(
     container,
-    el(
+    embedded ? el("p", { class: "dim hub-lede", text: "The full request and response of every model call, per job. Recorded only while trace capture is on." }) : el(
       "div",
       { class: "view-header" },
       el(

@@ -110,7 +110,7 @@ export function renderTheater(container, jobId, ctx = {}) {
   }
 
   const nodeListEl = el("div", { class: "theater-nodes" }, loading("Loading nodes…"));
-  const stageTitle = el("div", { class: "stage-node-title dim", text: "Idle — press Run to begin." });
+  const stageTitle = el("div", { class: "stage-node-title dim", text: "Nothing running — press ▶ to begin." });
   const stageBody = el("div", { class: "stage-body md" });
   const logEl = el("div", { class: "theater-log" });
   const summaryEl = el("div", { class: "theater-summary hidden" });
@@ -575,7 +575,7 @@ export function renderTheater(container, jobId, ctx = {}) {
         announceTerminal(
           nFailed ? "run finished with failures" : "run finished",
           nFailed
-            ? `${nFailed} step${nFailed === 1 ? "" : "s"} failed. The Run tab has the reason and the recovery verbs.`
+            ? `${nFailed} step${nFailed === 1 ? "" : "s"} failed. The Run stage has the reason and the ways forward.`
             : "The run completed. The compiled output is ready."
         );
         break;
@@ -583,7 +583,7 @@ export function renderTheater(container, jobId, ctx = {}) {
       case "execution_failed":
         log("execution_failed", `Execution failed — ${data.error || data.message || ""}`, "err");
         showFailure(data); // §17.1007 — endings get equal weight
-        announceTerminal("run failed", data.error || data.message || "The run stopped. Open the Run tab for the reason.");
+        announceTerminal("run failed", data.error || data.message || "The run stopped. Open the Run stage for the reason.");
         break;
       case "error":
         log("error", data.message || data.error || "Error", "err");

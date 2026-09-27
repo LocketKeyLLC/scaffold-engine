@@ -1,20 +1,24 @@
-// §17.859 (audit G7) — the job hub: one job's whole life on one URL.
-// Before this, a job's life spanned six peer views (approvals → plan → dag →
-// theater → output → traces) with four copy-pasted job pickers and no home —
-// the operator had to know the chain. #/job/:id is a persistent header strip
-// (title · status · quick actions) over a tab row:
-//   Overview · Plan · Run · Output · Traces · Costs
-// Tab switches are plain hash navigations (#/job/:id/:tab) — the router
-// re-renders the hub with the new tab active, so deep links, back/forward,
-// and refresh all work with zero in-page tab state.
+// The job page — one job's whole life on one URL, and the STAGE STRIP is the
+// navigation.
 //
-// The old per-view routes (#/theater/:id etc.) are gone (hard switch,
-// operator decision) — every in-SPA link now points here.
+//   Idea → Approve → Plan → Run → Output
+//
+// #/job/:id opens on the job's CURRENT stage (awaiting approval → the gate;
+// planning → the plan; walking through → the run; done → the output). Each
+// stage is a link; finished stages read ✓; stages the job has not reached are
+// not yet clickable. Brief, traces, costs and compare live behind ⋯ (Details),
+// shown once, instead of on two tabs at the same time.
+//
+// UX overhaul (2026-09-27). Before this the page was a six-tab hub whose
+// Overview was a metadata table with the raw status, whose Plan tab buried the
+// DAG under a toolbar, a stage strip, a two-paragraph explainer and the brief,
+// and whose Overview and Plan both embedded the whole brief editor. §17.859
+// made one URL per job; this makes the page read like the flow.
 import * as api from "../api.js";
 import { jobStore } from "../store.js";
-import { el, mount, shortId, timeAgo, setCurrentJob } from "../util.js";
-import { statusBadge, loading, errorPanel } from "../components.js";
-import { flowGuide } from "./flow_guide.js";
+import { el, mount, shortId, timeAgo, mdToHtml, setCurrentJob, copy } from "../util.js";
+import { statusBadge, loading, errorPanel, toast } from "../components.js";
+import { flowState } from "./flow_guide.js";
 import { briefPanel } from "./brief_panel.js";
 import { renderTheater } from "./theater.js";
 import { renderOutput } from "./output.js";
@@ -23,40 +27,43 @@ import { renderJobTraces } from "./traces.js";
 import { renderJobCosts } from "./costs.js";
 import { renderApprovalDetail } from "./approvals.js";
 import { renderChat } from "./assist.js";
+import { isAssist, startAssistFor } from "../exec_mode.js";
+import { deliverableLabel } from "../vocab.js";
 
-const TABS = [
-  ["overview", "Overview"],
+export const STAGES = [
+  ["idea", "Idea"],
+  ["approve", "Approve"],
   ["plan", "Plan"],
   ["run", "Run"],
   ["output", "Output"],
-  ["traces", "Traces"],
-  ["costs", "Costs"],
 ];
+const STAGE_KEYS = STAGES.map(([k]) => k);
 
-// §17.1011 — synonyms an operator (or an old link) may use for a real tab.
-// Every value MUST be a key in TABS; `resolveTab` is the single resolver.
+// §17.1011 — synonyms an operator (or an old link) may use for a real pane.
+// Every value MUST be a key in KNOWN_TABS; `resolveTab` is the single resolver.
+// `auto` = "the stage the job is at" (the old Overview address lands there).
 export const TAB_ALIASES = {
   assist: "run", walkthrough: "run", theater: "run", exec: "run",
   execute: "run", results: "output", dag: "plan", nodes: "plan",
+  overview: "auto", gate: "approve", approval: "approve", brief: "details",
 };
 
 export function resolveTab(raw) {
-  const t = raw || "overview";
+  const t = raw || "auto";
   return TAB_ALIASES[t] || t;
 }
 
-// §17.1114 (ledger U-1) — the tabs that exist. An unknown tab still renders
-// Overview (nothing else is sensible) but SAYS so, instead of silently
-// pretending the address was fine.
-export const KNOWN_TABS = ["overview", "plan", "run", "output", "traces", "costs", "follow", "full"];
+// §17.1114 (ledger U-1) — the panes that exist. An unknown one still renders
+// the job's current stage (nothing else is sensible) but SAYS so.
+export const KNOWN_TABS = ["auto", ...STAGE_KEYS, "details", "traces", "costs", "follow", "full"];
 
 export function unknownTabNotice(raw) {
   if (!raw) return "";
   const t = resolveTab(raw);
-  return KNOWN_TABS.includes(t) ? "" : `No tab named “${raw}” on this job — showing Overview.`;
+  return KNOWN_TABS.includes(t) ? "" : `No stage named “${raw}” on this job — showing where it is.`;
 }
 
-// Statuses where the job is driven through an assist session — the Run tab
+// Statuses where the job is driven through an assist session — the Run stage
 // embeds the assist walkthrough instead of the autonomous theater. /assist/
 // start is idempotent per job, so resolving the session this way is safe for
 // these statuses ONLY (on an auto-mode job it would CONVERT it to assist).
@@ -65,78 +72,107 @@ const ASSIST_STATUSES = new Set([
 ]);
 
 // The approval gate is a moment, not a place (operator decision): while the
-// job sits at (or before) the gate, Overview IS the gate.
-const GATE_STATUSES = new Set(["pending", "refining", "awaiting_confirmation"]);
+// job sits at (or before) the gate, Idea and Approve are the same page.
+export const GATE_STATUSES = new Set(["pending", "refining", "awaiting_confirmation"]);
 
-export function jobHref(id, tab) {
-  return tab && tab !== "overview" ? `#/job/${id}/${tab}` : `#/job/${id}`;
+/** Pure: the stage a job is AT — where #/job/:id opens. */
+export function stageFor(job) {
+  const st = job && job.status;
+  const nodes = (job && job.node_count) || 0;
+  if (GATE_STATUSES.has(st)) return "approve";
+  if (st === "completed") return "output";
+  if (["researching", "planning", "executing"].includes(st)) return "plan";
+  if (st === "cancelled") return nodes > 0 ? "plan" : "idea";
+  return "run";   // running, assisted_*, awaiting_assist, blocked, failed, aggregating
 }
 
-// ── Overview tab ─────────────────────────────────────────────────────
-function renderOverview(container, jobId, job) {
-  if (GATE_STATUSES.has(job.status)) {
-    // Embed the approval gate detail (questions card, approve/reject chain).
-    // It polls + navigates on approve by itself.
-    return renderApprovalDetail(container, jobId);
-  }
-  const metaRow = (k, v) =>
-    v == null || v === ""
-      ? null
-      : el("div", { class: "brief-field" },
-          el("div", { class: "brief-key", text: k }),
-          el("div", { class: "brief-val", text: String(v) }));
+/** Pure: which stages are open to click. Reached stages always; ahead only
+ *  when there is something there (a plan with nodes, a compiled output). */
+export function stageAccess(job) {
+  const cur = STAGE_KEYS.indexOf(stageFor(job));
+  const nodes = (job && job.node_count) || 0;
+  return Object.fromEntries(STAGE_KEYS.map((k, i) => {
+    if (i <= cur) return [k, true];
+    if (k === "plan") return [k, nodes > 0];
+    if (k === "run") return [k, nodes > 0 && !GATE_STATUSES.has(job.status)];
+    if (k === "output") return [k, !!(job && job.has_compiled_output)];
+    return [k, false];
+  }));
+}
+
+export function jobHref(id, tab) {
+  return tab && tab !== "auto" ? `#/job/${id}/${tab}` : `#/job/${id}`;
+}
+
+// ── Idea (a job past the gate) ────────────────────────────────────────
+function renderIdea(container, jobId, job) {
+  const brief = job.refined_brief || {};
   mount(
     container,
-    flowGuide(job, { here: `#/job/${jobId}` }),
-    el(
-      "div",
-      { class: "card card-pad" },
-      el("h3", { class: "brief-heading", text: "Job" }),
+    el("div", { class: "card card-pad brief-block" },
+      el("h3", { class: "brief-heading", text: "What you asked for" }),
+      job.input_text ? el("div", { class: "md brief-prose", html: mdToHtml(job.input_text) }) : el("p", { class: "dim", text: "No original request recorded." })),
+    brief.description
+      ? el("div", { class: "card card-pad brief-block" },
+          el("h3", { class: "brief-heading", text: "What the engine understood" }),
+          el("div", { class: "md brief-prose", html: mdToHtml(brief.description) }))
+      : null,
+    // §17.843 receipt — the approval-gate answers as the server holds them.
+    job.user_feedback
+      ? el("details", { class: "brief-details" },
+          el("summary", {}, "✓ Your answers from the approval gate"),
+          el("pre", { class: "md-pre feedback-receipt", text: job.user_feedback }))
+      : null,
+    el("p", { class: "dim", text: "Change the brief the engine plans and guides from under ⋯ › Details." })
+  );
+  return null;
+}
+
+// ── Details (⋯): the living brief + the job's facts ──────────────────
+function renderDetails(container, jobId, job) {
+  const fact = (k, v) => v == null || v === "" ? null
+    : el("div", { class: "brief-field" }, el("div", { class: "brief-key", text: k }), el("div", { class: "brief-val", text: String(v) }));
+  mount(
+    container,
+    briefPanel(jobId),
+    el("div", { class: "card card-pad" },
+      el("h3", { class: "brief-heading", text: "This job" }),
       el("div", { class: "brief-record" },
-        metaRow("status", job.status),
-        metaRow("domain", job.domain),
-        metaRow("deliverable", job.deliverable_kind),
-        metaRow("nodes", job.node_count),
-        // §17.1008 — the decomposition breadcrumb. `parent_job_id` and
-        // `component_index` have been on every job-detail read since umbrellas
-        // existed and were rendered by nothing, so an operator looking at a
-        // component job could not tell it was part of a larger build, which
-        // part it was, or how to get back to the whole. Found by extending the
-        // §17.1007c field inventory to this payload.
-        job.component_index != null ? metaRow("part of", `component ${job.component_index}`) : null,
-        metaRow("created", timeAgo(job.created_at)),
-        metaRow("updated", timeAgo(job.updated_at)),
-        metaRow("completed", job.completed_at ? timeAgo(job.completed_at) : null)
-      )
-    ),
+        fact("deliverable", deliverableLabel(job.deliverable_kind)),
+        fact("domain", job.domain),
+        fact("steps", job.node_count),
+        // §17.1008 — the decomposition breadcrumb.
+        job.component_index != null ? fact("part of", `component ${job.component_index}`) : null,
+        fact("created", timeAgo(job.created_at)),
+        fact("updated", timeAgo(job.updated_at)),
+        fact("finished", job.completed_at ? timeAgo(job.completed_at) : null),
+        fact("job id", job.id)),
+      el("div", { class: "row row-wrap drawer-actions" },
+        el("button", { class: "btn btn-sm btn-ghost", text: "Copy job id", onClick: async () => toast((await copy(job.id)) ? "Job id copied." : "Copy failed.", "") }),
+        el("a", { class: "btn btn-sm btn-ghost", href: `#/compare/${jobId}`, text: "Compare with another job" }))),
     // §17.1008 — a link back to the umbrella, not just a note that one exists.
     job.parent_job_id
       ? el("div", { class: "card card-pad umbrella-link" },
           el("span", { text: "This job is one component of a larger build. " }),
           el("a", { href: `#/job/${job.parent_job_id}`, text: "Open the umbrella job →" }))
       : null,
-    // §17.843 receipt — the approval-gate answers as the server holds them.
     job.user_feedback
-      ? el(
-          "details",
-          { class: "brief-details" },
-          el("summary", {}, "✓ Approval-gate answers folded into research & plan"),
-          el("pre", { class: "md-pre feedback-receipt", text: job.user_feedback })
-        )
-      : null,
-    briefPanel(jobId)
+      ? el("details", { class: "brief-details" },
+          el("summary", {}, "✓ Approval-gate answers (folded into research & plan)"),
+          el("pre", { class: "md-pre feedback-receipt", text: job.user_feedback }))
+      : null
   );
   return null;
 }
 
-// ── Run tab ──────────────────────────────────────────────────────────
+// ── Run ──────────────────────────────────────────────────────────────
 function renderRun(container, jobId, job, ctx, opts = {}) {
   if (!ASSIST_STATUSES.has(job.status)) return renderTheater(container, jobId, ctx);
   // Assist-driven job: resolve the (idempotent, unique-per-job) session and
   // embed the walkthrough.
   let disposed = false;
   let childDispose = null;
-  mount(container, loading("Opening assist session…"));
+  mount(container, loading("Opening the walkthrough…"));
   (async () => {
     try {
       const s = await api.post("/assist/start", { job_id: jobId });
@@ -157,85 +193,135 @@ function renderRun(container, jobId, job, ctx, opts = {}) {
   };
 }
 
-// ── Hub shell ────────────────────────────────────────────────────────
+// ── The stage strip ──────────────────────────────────────────────────
+function stageStrip(job, jobId, active) {
+  const cur = STAGE_KEYS.indexOf(stageFor(job));
+  const access = stageAccess(job);
+  const strip = el("div", { class: "stage-strip", role: "tablist", "aria-label": "Stages", onKeydown: (e) => {   // §17.1118 — arrow keys move between stages
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const tabs = Array.from(e.currentTarget.querySelectorAll('[role="tab"]:not([aria-disabled="true"])'));
+    const i = tabs.indexOf(document.activeElement);
+    if (i === -1) return;
+    e.preventDefault();
+    const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+    next.focus(); next.click();
+  } });
+  STAGES.forEach(([key, label], i) => {
+    const state = i < cur ? "done" : i === cur ? "current" : "ahead";
+    const open = access[key];
+    const cls = `stage stage-${state}` + (key === active ? " active" : "") + (open ? "" : " locked");
+    const node = open
+      ? el("a", { class: cls, href: jobHref(jobId, key), role: "tab", "aria-selected": key === active ? "true" : "false" })
+      : el("span", { class: cls, role: "tab", "aria-disabled": "true", "aria-selected": "false", title: "Not there yet" });
+    node.append(el("span", { class: "stage-mark", text: state === "done" ? "✓" : state === "current" ? "●" : "○" }), el("span", { class: "stage-label", text: label }));
+    if (i) strip.append(el("span", { class: "stage-sep", "aria-hidden": "true" }));
+    strip.append(node);
+  });
+  return strip;
+}
+
+// The one line under the strip: where the job is and the one thing to do —
+// from flow_guide's state (the hints and verbs the operator already knows),
+// suppressed when it points at the pane that is open.
+function stageHint(job, jobId, active) {
+  const { hint, action, secondary } = flowState(job);
+  // an action whose destination is the open stage is noise ("Approve →" on the gate)
+  const stageOfHref = (href) => {
+    const m = /#\/job\/[^/]+\/?([^/?#]*)/.exec(href || "");
+    const t = resolveTab(m ? m[1] : "");
+    return t === "auto" ? stageFor(job) : t;
+  };
+  const pointsHere = (a) => a && a.href && stageOfHref(a.href) === active;
+  let actionEl = null;
+  if (action && (action.start || action.resume || !pointsHere(action))) {
+    if (action.resume) {
+      const btn = el("button", { class: "btn btn-sm btn-primary", text: `${action.label} →` });
+      btn.addEventListener("click", async () => {
+        btn.disabled = true; btn.textContent = "Resuming…";
+        try { await api.post(`/jobs/${job.id}/approve`, {}); toast("Planning resumed — the plan lands on the Plan stage.", "ok"); }
+        catch (e) { toast(`Could not resume: ${e.detail || e.message}`, "err"); btn.disabled = false; btn.textContent = `${action.label} →`; }
+      });
+      actionEl = btn;
+    } else if (action.start) {
+      actionEl = startControl(job.id);
+    } else {
+      actionEl = el("a", { class: "btn btn-sm btn-primary", href: action.href, text: `${action.label} →` });
+    }
+  }
+  const secEl = secondary && !pointsHere(secondary) ? el("a", { class: "btn btn-sm btn-ghost", href: secondary.href, text: secondary.label }) : null;
+  if (!hint && !actionEl && !secEl) return null;
+  return el("div", { class: "row row-wrap stage-hint-row" },
+    el("span", { class: "dim stage-hint", text: hint }), el("span", { class: "spacer" }), secEl, actionEl);
+}
+
+// §17.853 — the Auto/Assist decision, made where it is taken: the start
+// control is a split button — the primary verb reads the mode, the small
+// chevron swaps it. Exported for the Plan stage's toolbar.
+export function startControl(jobId, { size = "btn-sm" } = {}) {
+  const { setExecMode } = execModeApi;
+  const label = () => (isAssist() ? "✦ Walk me through it" : "▶ Let the engine run it");
+  const main = el("button", { class: `btn ${size} btn-primary start-main`, text: label() });
+  main.addEventListener("click", async () => {
+    main.disabled = true;
+    const was = main.textContent;
+    main.textContent = "Starting…";
+    if (isAssist()) {
+      const ok = await startAssistFor(api, jobId, toast);
+      if (!ok) { main.disabled = false; main.textContent = was; }
+    } else {
+      sessionStorage.setItem("scaffold_autorun", jobId);   // §17.818 — the theater picks it up
+      location.hash = `#/job/${jobId}/run`;
+    }
+  });
+  const menu = el("details", { class: "start-menu" },
+    el("summary", { class: `btn ${size} btn-primary start-caret`, "aria-label": "Choose how to run this plan", title: "Choose how to run this plan", text: "▾" }),
+    el("div", { class: "start-menu-body" },
+      el("button", { class: "btn btn-sm btn-ghost", text: "✦ Walk me through it", title: "You run each step on your machines; the engine guides, verifies and adapts. It never touches your hardware.",
+        onClick: () => { setExecMode("assist"); main.textContent = label(); menu.open = false; } }),
+      el("button", { class: "btn btn-sm btn-ghost", text: "▶ Let the engine run it", title: "The engine works every step itself and produces runbooks, configs and code. It still never connects to your machines.",
+        onClick: () => { setExecMode("auto"); main.textContent = label(); menu.open = false; } })));
+  return el("div", { class: "row start-control" }, main, menu);
+}
+import * as execModeApi from "../exec_mode.js";
+
+// ── The page ─────────────────────────────────────────────────────────
 export default function jobHub(container, params) {
   const jobId = params && params.jobId;
-  // §17.1011 — an unknown tab silently rendered Overview. `#/job/:id/assist`
-  // is the natural guess for the walkthrough (assist lives in Run, and every
-  // other surface calls it "assist"), and guessing it landed the operator on
-  // the brief editor with no indication they had missed. Same failure shape as
-  // §17.859, where a retired hash route rendered the dashboard rather than an
-  // error and the idea→approve link was dead for weeks. Alias the known
-  // synonyms; anything still unknown falls back to Overview as before.
-  const tab = resolveTab(params && params.tab);
+  const requested = resolveTab(params && params.tab);
   let disposed = false;
   let childDispose = null;
   let statusListener = null;
 
-  // §17.1007 — the §17.854 G2 nav guard is gone with the reason for it. It
-  // asked "leaving STOPS the run — leave anyway?" on every tab and back click,
-  // which was true while the SSE response WAS the run. The run is now a
-  // detached background task (run_broker) and navigation costs nothing, so the
-  // confirm would be a dialog protecting against something that cannot happen.
-  // `setNavGuard` stays on ctx as a no-op: renderTheater is also mounted from
-  // outside the hub, and a missing method there would be a TypeError.
+  // §17.1007 — the run is a detached background task (run_broker); navigating
+  // away costs nothing, so no nav guard. `setNavGuard` stays on ctx as a no-op:
+  // renderTheater is also mounted from outside the hub.
   const ctx = { setNavGuard: () => {} };
 
-  const titleEl = el("h1", { text: "Job" });
-  const subEl = el("div", { class: "sub mono", text: shortId(jobId) });
+  const titleEl = el("h1", { class: "job-title", text: "Job" });
   const pillSlot = el("span", {});
-  const backLink = el("a", { class: "btn btn-sm btn-ghost", href: "#/jobs", text: "← Jobs" });
+  const backLink = el("a", { class: "btn btn-sm btn-ghost", href: "#/", text: "← Home", "aria-label": "Back to Home" });
+  const moreMenu = el("details", { class: "job-more" },
+    el("summary", { class: "btn btn-sm btn-ghost", text: "⋯", "aria-label": "More: details, traces, costs", title: "Details, traces, costs, classic view" }),
+    el("div", { class: "job-more-body" },
+      el("a", { class: "btn btn-sm btn-ghost", href: jobHref(jobId, "details"), text: "Details & brief" }),
+      el("a", { class: "btn btn-sm btn-ghost", href: jobHref(jobId, "traces"), text: "Model traces" }),
+      el("a", { class: "btn btn-sm btn-ghost", href: jobHref(jobId, "costs"), text: "Costs" }),
+      el("a", { class: "btn btn-sm btn-ghost", href: `#/compare/${jobId}`, text: "Compare" }),
+      el("a", { class: "btn btn-sm btn-ghost", href: jobHref(jobId, "full"), text: "Classic walkthrough view" })));
+  const onDocClick = (e) => { if (moreMenu.open && !moreMenu.contains(e.target)) moreMenu.open = false; };
+  document.addEventListener("click", onDocClick);
 
-  const compareLink = el("a", { class: "btn btn-sm btn-ghost", href: `#/compare/${jobId}`, text: "⚖ Compare" });
-
-
-  const tabRow = el(
-    "div",
-    { class: "job-tabs", role: "tablist", onKeydown: (e) => {   // §17.1118 — arrow keys move between tabs
-      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-      const tabs = Array.from(e.currentTarget.querySelectorAll('[role="tab"]'));
-      const i = tabs.indexOf(document.activeElement);
-      if (i === -1) return;
-      e.preventDefault();
-      const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
-      next.focus(); next.click();
-    } },
-    ...TABS.map(([key, label]) => {
-      const a = el("a", {
-        class: "job-tab" + (key === tab ? " active" : ""),
-        href: jobHref(jobId, key),
-        text: label,
-        role: "tab",
-        "aria-selected": key === tab ? "true" : "false",
-      });
-      return a;
-    })
-  );
-
+  const stripSlot = el("div", { class: "stage-slot" });
   const outlet = el("div", { class: "job-tab-outlet" }, loading("Loading…"));
   const tabNoticeText = unknownTabNotice(params && params.tab);
-  const tabNotice = tabNoticeText
-    ? el("div", { class: "card warn-inline", text: "⚠ " + tabNoticeText })
-    : el("span", { hidden: true });
+  const tabNotice = tabNoticeText ? el("div", { class: "card warn-inline", text: "⚠ " + tabNoticeText }) : null;
 
-  // §17.1160 — Follow: one header line, no tab strip, the sidebar folded to
-  // icons while here (restored on leave; the operator's own preference is kept).
-  const isFollow = tab === "follow" || tab === "run";   // §17.1161 — Run is the Follow layout
-  container.classList.toggle("follow-mode", isFollow);
-  const shellEl = document.querySelector(".shell");
-  const sidebarWas = shellEl ? shellEl.classList.contains("sidebar-collapsed") : false;
-  if (isFollow && shellEl) shellEl.classList.add("sidebar-collapsed");
   mount(
     container,
-    el(
-      "div",
-      { class: "view-header job-hub-head" + (isFollow ? " compact" : "") },
-      el("div", { class: "row job-hub-title-row" },
-        backLink,
-        el("div", {}, titleEl, isFollow ? null : subEl)),
-      el("div", { class: "header-actions" }, pillSlot, isFollow ? null : compareLink)
-    ),
-    isFollow ? null : tabRow,
+    el("div", { class: "view-header job-hub-head" },
+      el("div", { class: "row job-hub-title-row" }, backLink, titleEl),
+      el("div", { class: "header-actions" }, pillSlot, moreMenu)),
+    stripSlot,
     tabNotice,
     outlet
   );
@@ -251,23 +337,39 @@ export default function jobHub(container, params) {
     if (disposed) return;
     titleEl.textContent = job.title || "(untitled)";
     mount(pillSlot, statusBadge(job.status));
-    // §17.1052 — the Run tab finishes the job in place (last step ✓, or a
+    const tab = requested === "auto" || !KNOWN_TABS.includes(requested) ? stageFor(job) : requested;
+    // an "approve" link on a job past the gate reads its idea; "idea" at the gate IS the gate
+    const pane = GATE_STATUSES.has(job.status) && (tab === "idea" || tab === "approve") ? "approve"
+      : tab === "approve" && !GATE_STATUSES.has(job.status) ? "idea" : tab;
+    const isFollow = pane === "run" || pane === "follow";   // §17.1161 — Run is the Follow layout
+    container.classList.toggle("follow-mode", isFollow);
+    const stripFor = STAGE_KEYS.includes(pane) ? pane : "auto";
+    mount(stripSlot, stageStrip(job, jobId, stripFor), isFollow ? null : stageHint(job, jobId, stripFor));
+
+    // §17.1052 — the Run stage finishes the job in place (last step ✓, or a
     // stranded session finalized on reopen); the pill was rendered once from
-    // the job row and read "assisted running" next to a "completed" hero.
+    // the job row and read "in progress" next to a "completed" hero.
     const onStatus = (ev) => {
       if (disposed || !ev.detail || ev.detail.jobId !== jobId) return;
       job.status = ev.detail.status;
       mount(pillSlot, statusBadge(job.status));
+      mount(stripSlot, stageStrip(job, jobId, stripFor), isFollow ? null : stageHint(job, jobId, stripFor));
     };
     window.addEventListener("scaffold:job-status", onStatus);
     statusListener = onStatus;
-    setCurrentJob(job); // §17.896 — pin it in the sidebar (⬡ DAG · ▶ Run · ▤ Output)
+    setCurrentJob(job); // §17.896 — the rail's "Current" link
 
-    switch (tab) {
-      case "plan":
-        childDispose = renderPlan(outlet, jobId);
+    switch (pane) {
+      case "approve":
+        childDispose = renderApprovalDetail(outlet, jobId);
         break;
-      case "run":      // §17.1161 — the Follow layout IS the walkthrough (operator: "none of the changes are made" — it was hidden in a last tab)
+      case "idea":
+        childDispose = renderIdea(outlet, jobId, job);
+        break;
+      case "plan":
+        childDispose = renderPlan(outlet, jobId, { job });
+        break;
+      case "run":      // §17.1161 — the Follow layout IS the walkthrough
       case "follow":   // §17.1160 — kept as an alias so links keep working
         childDispose = renderRun(outlet, jobId, job, ctx, { follow: true });
         break;
@@ -277,6 +379,9 @@ export default function jobHub(container, params) {
       case "output":
         childDispose = renderOutput(outlet, jobId);
         break;
+      case "details":
+        childDispose = renderDetails(outlet, jobId, job);
+        break;
       case "traces":
         childDispose = renderJobTraces(outlet, jobId);
         break;
@@ -284,14 +389,14 @@ export default function jobHub(container, params) {
         childDispose = renderJobCosts(outlet, jobId);
         break;
       default:
-        childDispose = renderOverview(outlet, jobId, job);
+        childDispose = renderIdea(outlet, jobId, job);
     }
   })();
 
   return () => {
     disposed = true;
-    if (isFollow && shellEl && !sidebarWas) shellEl.classList.remove("sidebar-collapsed");
     container.classList.remove("follow-mode");
+    document.removeEventListener("click", onDocClick);
     if (statusListener) window.removeEventListener("scaffold:job-status", statusListener);
     if (childDispose) childDispose();
   };

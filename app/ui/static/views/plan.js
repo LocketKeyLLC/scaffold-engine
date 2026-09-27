@@ -8,9 +8,7 @@ import { jobStore } from "../store.js";
 import { el, mount, moveItem } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, openDialog, askConfirm } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
-import { briefPanel } from "./brief_panel.js";
-import { flowGuide } from "./flow_guide.js";
-import { isAssist, startAssistFor } from "../exec_mode.js";
+import { startControl } from "./job_hub.js";
 
 // §17.815 — edit attribution is SERVER-derived from the API key (audit-trail
 // integrity); the client no longer sends a spoofable label.
@@ -28,7 +26,7 @@ function field(label, control, hint) {
 // §17.859 — embedded as the job hub's Plan tab (standalone route died with
 // the hub). The read-only DAG canvas view folded in here too — this editor
 // already renders the same graph via dag_render.js.
-export function renderPlan(container, jobId) {
+export function renderPlan(container, jobId, opts = {}) {
   let disposed = false;
   let nodes = [];
   let byKey = {};
@@ -36,28 +34,28 @@ export function renderPlan(container, jobId) {
   let selectedKey = null;
 
   const warning = el("div", { class: "plan-warning hidden" });
-  const insertBtn = el("button", { class: "btn btn-sm", text: "＋ Insert node", onClick: () => openInsertDrawer() });
-  const reorderBtn = el("button", { class: "btn btn-sm", text: "↕ Reorder", onClick: () => toggleReorder() });
-  // §17.853 — mode-aware primary: Assist starts the guided session; Auto
-  // hands off to the theater's autonomous runner.
-  const executeBtn = el("button", {
-    class: "btn btn-sm btn-primary",
-    text: isAssist() ? "✦ Start assist mode" : "▶ Execute plan",
-    onClick: () => {
-      if (isAssist()) startAssistFor(api, jobId, toast);
-      else location.hash = `#/job/${jobId}/run`;
-    },
-  });
-
+  // UX overhaul — the toolbar is the plan's verbs only: how to start (the
+  // split button carries the Auto/Assist choice, §17.853), fit, and the edit
+  // verbs behind one menu. The stage strip above says where the job is.
+  const editMenu = el("details", { class: "plan-edit-menu" },
+    el("summary", { class: "btn btn-sm", text: "Edit steps ▾", "aria-label": "Edit steps", title: "Insert a step, or change the order" }),
+    el("div", { class: "plan-edit-body" },
+      el("button", { class: "btn btn-sm btn-ghost", text: "＋ Insert a step", onClick: () => { editMenu.open = false; openInsertDrawer(); } }),
+      el("button", { class: "btn btn-sm btn-ghost", text: "↕ Reorder steps", onClick: () => { editMenu.open = false; toggleReorder(); } }),
+      el("button", { class: "btn btn-sm btn-ghost", text: "↻ Reload", onClick: () => { editMenu.open = false; load(); } })));
+  const onDocClick = (e) => { if (editMenu.open && !editMenu.contains(e.target)) editMenu.open = false; };
+  document.addEventListener("click", onDocClick);
+  const status = (opts.job && opts.job.status) || null;
+  // a plan that is already being worked (or done) has no "start" — the Run stage owns it
+  const startable = !status || ["executing", "planning", "awaiting_assist", "cancelled"].includes(status);
   const header = el(
     "div",
     { class: "row row-wrap plan-toolbar" },
+    el("span", { class: "dim plan-lede", text: "Every box is a step, in the order the arrows give. Click one to read or edit what it will do." }),
     el("span", { class: "spacer" }),
     el("button", { class: "btn btn-sm", text: "Fit", onClick: () => graph.fit() }),
-    el("button", { class: "btn btn-sm", text: "Refresh", onClick: () => load() }),
-    insertBtn,
-    reorderBtn,
-    executeBtn
+    editMenu,
+    startable ? startControl(jobId) : null
   );
 
   const canvas = el("div", { class: "dag-canvas" });
@@ -71,45 +69,10 @@ export function renderPlan(container, jobId) {
     { class: "mobile-note" },
     "✎ Editing the plan is easiest on a wider screen. You can still tap a node to review it."
   );
-  // Where-am-I guidance (operator critique: "no real guidance — are the
-  // nodes researched and just awaiting confirmation?"). States the contract
-  // plainly: research is done, this graph is a PROPOSAL, nothing runs yet.
-  const guidance = el(
-    "div",
-    { class: "card card-pad plan-guidance" },
-    el("p", {
-      // §17.1176 — "it never touches your machines" was stated flatly here too.
-      // Auto mode genuinely produces runbooks and files rather than executing
-      // them (shell_tool_enabled is off), but the engine as a whole has one
-      // exception — the optional local runner — and three surfaces asserting
-      // the absolute made it the thing an operator would believe.
-      text: "Research is done and this plan was drawn from your brief plus what it found. Nothing has run yet — every node is a proposed step, executed in dependency order only when you start it: ✦ Assist mode walks YOU through each step; ▶ Auto mode has the engine work them itself, producing runbooks and files rather than running them on your machines. Switch modes in the sidebar.",
-    }),
-    el("p", {
-      class: "dim",
-      text: "Click a node to inspect or edit what it will do (instructions, tool, model, dependencies) · drag nothing — order comes from the arrows · Insert adds a step · decision nodes pause execution to ask you.",
-    })
-  );
-  // §17.843 — answer receipt: confirm the operator's approval-gate answers
-  // reached the plan (server-side truth via /jobs/{id}.user_feedback).
-  jobStore.get(jobId).then((job) => {
-    if (disposed || !job.user_feedback) return;
-    const n = (job.user_feedback.match(/^Q:/gm) || []).length;
-    guidance.append(
-      el(
-        "details",
-        { class: "brief-details" },
-        el("summary", {}, `✓ Your ${n || ""} answer${n === 1 ? "" : "s"} from the approval gate were folded into this plan — review them`),
-        el("pre", { class: "md-pre feedback-receipt", text: job.user_feedback })
-      )
-    );
-  }).catch(() => {});
-  // §17.847 — flow guide (where am I → what next), filled once the job loads.
-  const flowSlot = el("div", {});
-  jobStore.get(jobId).then((job) => {
-    const fg = flowGuide(job, { here: `#/job/${jobId}/plan` });
-    if (fg) mount(flowSlot, fg);
-  }).catch(() => {});
+  // The explainer card, the flow guide and the brief editor that used to sit
+  // above the canvas are gone from here: the stage strip says where the job
+  // is, the one-line lede says what the boxes are, and the brief lives under
+  // ⋯ › Details. The approval answers stay reachable there too.
   // §17.1047 — the plan change ledger: what the reconciliation triggers
   // (a confirmed fix, a decision, a note, a re-pinned value) changed in the
   // steps ahead, per step before → after, with revert where still possible.
@@ -147,8 +110,8 @@ export function renderPlan(container, jobId) {
           : null;
         return el("div", { class: "plan-change" }, head, what, ...diffs, resets, revertBtn);
       });
-      mount(changesPanel, el("details", { class: "brief-details", open: true },
-        el("summary", {}, `🔁 Plan changes (${entries.length}) — what the confirmed fixes, decisions, notes and pins changed in the steps ahead`),
+      mount(changesPanel, el("details", { class: "brief-details plan-changes-details" },
+        el("summary", {}, `Plan changes (${entries.length}) — what the confirmed fixes, decisions, notes and pins changed in the steps ahead`),
         ...rows));
     } catch (e) {
       // §17.1117 (ledger U-9) — an unreadable ledger used to look like "no
@@ -159,7 +122,7 @@ export function renderPlan(container, jobId) {
     }
   }
   loadChanges();
-  mount(container, header, flowSlot, mobileNote, guidance, briefPanel(jobId), warning, changesPanel, reorderPanel, stage);
+  mount(container, header, mobileNote, reorderPanel, stage, warning, changesPanel);
   mount(canvas, loading("Loading plan…"));
 
   const graph = createGraphCanvas(canvas);
@@ -478,6 +441,7 @@ export function renderPlan(container, jobId) {
 
   return () => {
     disposed = true;
+    document.removeEventListener("click", onDocClick);
     graph.destroy();
   };
 }

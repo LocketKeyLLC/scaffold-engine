@@ -6,7 +6,8 @@ import * as api from "../api.js";
 import { el, fmtNum, mount, shortId, timeAgo } from "../util.js";
 import { emptyState, errorPanel, loading, statTile } from "../components.js";
 
-export default function library(container) {
+export default function library(container, params, opts = {}) {
+  const embedded = !!(opts && opts.embedded);
   let disposed = false;
   let tab = "gt";
   const body = el("div", {});
@@ -197,20 +198,22 @@ export default function library(container) {
 
   mount(
     container,
-    el(
-      "div",
-      { class: "view-header" },
-      el(
+    embedded
+      ? el("div", { class: "row row-wrap hub-lede-row" }, el("p", { class: "dim hub-lede", text: "The ground-truth corpus the engine cites, and the files each finished job produced." }), el("span", { class: "spacer" }), tabs)
+      : el(
         "div",
-        {},
-        el("h1", { text: "Library" }),
-        el("div", {
-          class: "sub",
-          text: "The ground-truth corpus and per-job artifacts.",
-        })
+        { class: "view-header" },
+        el(
+          "div",
+          {},
+          el("h1", { text: "Library" }),
+          el("div", {
+            class: "sub",
+            text: "The ground-truth corpus and per-job artifacts.",
+          })
+        ),
+        tabs
       ),
-      tabs
-    ),
     body
   );
   renderGt();
