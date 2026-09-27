@@ -49,12 +49,23 @@ _MAX_EACH = 240
 _MAX_KEPT = 12
 
 
+# §17.1182 — lines under `## Diagnosis` that are chrome, not a claim: the
+# mandatory `📍 On:` location banner (§17.852) and rules. Live (ADD65,
+# 2026-09-22): every fix's Diagnosis opened with "📍 On: the Proxmox host shell
+# (root@pve)" and no full stop, so the banner was glued onto every first
+# sentence — eight "eliminated causes" all began with it, shared its five
+# keywords, every new diagnosis "re-tested" every old one, and the operator read
+# "already tested and eliminated on this step (📍 On: the Proxmox " six times.
+_BANNER_LINE_RE = re.compile(r"^\s*(?:📍\s*On\s*:.*|-{3,}|\*{3,})\s*$")
+
+
 def extract_diagnosis(reply: str) -> str:
     """The cause a fix reply says it is addressing, trimmed to one claim."""
     m = _DIAGNOSIS_RE.search(reply or "")
     if not m:
         return ""
-    body = re.sub(r"\s+", " ", m.group(1)).strip()
+    lines = [ln for ln in m.group(1).splitlines() if not _BANNER_LINE_RE.match(ln)]
+    body = re.sub(r"\s+", " ", "\n".join(lines)).strip()
     if not body:
         return ""
     # The first sentence carries the claim; the rest is elaboration.
@@ -155,12 +166,19 @@ def find_retested_hypothesis(draft: str, ledger: dict | None) -> list[dict]:
     d = extract_diagnosis(draft)
     if not d or not elim:
         return []
-    new = _keywords(d)
+    # §17.1182 — the step's SUBJECT words are in every diagnosis on that step
+    # and say nothing about whether two of them name the same cause. Live
+    # (ADD65 "Verify QEMU Guest Agent responds on VM 106"): "not installed
+    # inside VM 106" scored 0.42 against "no serial interface … and the guest
+    # agent …" on {guest, agent, vm, 106} alone — and the correct fix was
+    # captioned as a repeat of a cause it had nothing to do with.
+    subject = _keywords((ledger or {}).get("subject") or "")
+    new = _keywords(d) - subject
     if len(new) < 4:
         return []
     hits: list[dict] = []
     for prev in elim:
-        old = _keywords(prev)
+        old = _keywords(prev) - subject
         if len(old) < 4:
             continue
         overlap = len(new & old) / max(1, len(new | old))

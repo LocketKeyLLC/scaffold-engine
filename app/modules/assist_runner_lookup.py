@@ -349,28 +349,115 @@ async def recent_lookups(db, session_id: str, *, minutes: int = 180,
     return out
 
 
-def find_repeated_lookups(text_out: str, ledger: Optional[list[dict]]) -> list[dict]:
-    """Commands in the draft's fenced blocks that the runner already ran (the
-    ledger), as redundancy hits ``[{command, known, resource}]`` the fix gate
-    understands: ``known`` names when it ran and what it printed."""
-    if not ledger or not (text_out or "").strip():
-        return []
-    by_cmd = {e["command"]: e for e in ledger}
-    hits: list[dict] = []
-    seen: set[str] = set()
+def _draft_commands(text_out: str) -> list[str]:
+    """Every command line in the draft's fenced blocks, in reading order."""
+    out: list[str] = []
     for block in _FENCE_RE.findall(text_out or ""):
         for raw in block.splitlines():
             ln = " ".join(re.sub(r"^\$\s+", "", raw.strip()).split())
-            e = by_cmd.get(ln)
-            if not e or ln in seen:
-                continue
-            seen.add(ln)
-            at = e.get("at")
-            when = at.strftime("%H:%M UTC") if hasattr(at, "strftime") else str(at or "earlier")
-            out = (e.get("output") or "(no output)").strip().replace("\n", " ⏎ ")
-            who = "the operator ran it and pasted the result" if e.get("by") == "operator" else "the engine ran it through your local runner"
-            hits.append({"command": ln, "resource": "",
-                         "known": f"{who} at {when} and it printed: {out[:200]}"})
+            if ln and not ln.startswith("#"):
+                out.append(ln)
+    return out
+
+
+def find_repeated_lookups(text_out: str, ledger: Optional[list[dict]]) -> list[dict]:
+    """Commands in the draft's fenced blocks that the runner already ran (the
+    ledger), as redundancy hits ``[{command, known, resource}]`` the fix gate
+    understands: ``known`` names when it ran and what it printed.
+
+    §17.1182 — only commands BEFORE the draft's first write count. A command
+    after a change is a verification of that change, not discovery: "install
+    the agent, then `qm agent 106 ping`" is right even though the ping's last
+    answer is on file. Live (ADD65, 22:57): the gate flagged exactly that ping
+    as "whose answer the engine already has" on three fixes in a row."""
+    if not ledger or not (text_out or "").strip():
+        return []
+    from app.modules.assist_state_check import read_only_command
+    by_cmd = {e["command"]: e for e in ledger}
+    hits: list[dict] = []
+    seen: set[str] = set()
+    wrote = False
+    for ln in _draft_commands(text_out):
+        if not read_only_command(ln):
+            wrote = True
+            continue
+        if wrote:
+            continue                       # a check after a change is not a repeat
+        e = by_cmd.get(ln)
+        if not e or ln in seen:
+            continue
+        seen.add(ln)
+        at = e.get("at")
+        when = at.strftime("%H:%M UTC") if hasattr(at, "strftime") else str(at or "earlier")
+        out = (e.get("output") or "(no output)").strip().replace("\n", " ⏎ ")
+        who = "the operator ran it and pasted the result" if e.get("by") == "operator" else "the engine ran it through your local runner"
+        hits.append({"command": ln, "resource": "",
+                     "known": f"{who} at {when} and it printed: {out[:200]}"})
+    return hits
+
+
+# §17.1182 — a command sent through a channel the engine's OWN record says is
+# dead. Live (ADD65, 2026-09-22 22:57–23:04): `qm agent 106 ping` printed "QEMU
+# guest agent is not running" at 22:57; the next five replies sent the fix
+# THROUGH that agent — `qm guest exec 106 -- systemctl status …`, then
+# `qm guest exec 106 -- apt-get install -y qemu-guest-agent` (install the agent
+# via the agent). Each ran, each printed the same line, each was filed as a
+# fresh finding. The record already said none of it could work: an agent that
+# is not running has to be installed from INSIDE the guest (console or SSH).
+_GUEST_CHANNEL_RE = re.compile(r"\bqm\s+(?:guest\s+(?:exec|cmd)|agent)\s+(\d{2,5})\b")
+_AGENT_DEAD_RE = re.compile(r"QEMU guest agent is not running|No QEMU guest agent configured", re.I)
+
+
+def dead_guest_agents(ledger: Optional[list[dict]]) -> dict[str, dict]:
+    """``{vmid: ledger entry}`` for every VM whose NEWEST guest-channel record
+    says the agent is not running (the ledger is newest first, so the first
+    entry per id wins — a later successful ping clears it)."""
+    out: dict[str, dict] = {}
+    seen: set[str] = set()
+    for e in ledger or []:
+        m = _GUEST_CHANNEL_RE.search(e.get("command") or "")
+        if not m or m.group(1) in seen:
+            continue
+        seen.add(m.group(1))
+        if _AGENT_DEAD_RE.search(e.get("output") or ""):
+            out[m.group(1)] = e
+    return out
+
+
+def find_dead_channel_commands(text_out: str, ledger: Optional[list[dict]]) -> list[dict]:
+    """Guest-channel commands the draft leads with, for a VM whose agent the
+    record says is not running — ``[{command, known, resource, kind}]`` in the
+    redundancy shape the fix gate understands. The scan stops at the first
+    command that could REVIVE the agent (a write that is not itself sent
+    through the channel — an install typed at the console, an ssh); anything
+    after that is a legitimate check of the repair."""
+    dead = dead_guest_agents(ledger)
+    if not dead or not (text_out or "").strip():
+        return []
+    from app.modules.assist_state_check import read_only_command
+    hits: list[dict] = []
+    seen: set[str] = set()
+    for ln in _draft_commands(text_out):
+        m = _GUEST_CHANNEL_RE.search(ln)
+        if not m:
+            if not read_only_command(ln):
+                break                      # a repair not routed through the agent: what follows verifies it
+            continue
+        vmid = m.group(1)
+        e = dead.get(vmid)
+        if not e or ln in seen:
+            continue
+        seen.add(ln)
+        at = e.get("at")
+        when = at.strftime("%H:%M UTC") if hasattr(at, "strftime") else str(at or "earlier")
+        hits.append({
+            "command": ln, "resource": vmid, "kind": "dead_channel",
+            "known": (f"the guest agent on VM {vmid} is NOT running — `{e['command']}` printed "
+                      f"\"{(e.get('output') or '').strip()[:80]}\" at {when}. Nothing sent through "
+                      f"`qm guest exec`, `qm guest cmd` or `qm agent {vmid} …` can work until the agent "
+                      f"is installed and started from INSIDE the VM (its console or SSH); do not route "
+                      f"the install through the agent"),
+        })
     return hits
 
 

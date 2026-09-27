@@ -550,3 +550,73 @@ def test_the_two_reasons_a_reply_is_not_a_lookup_are_distinguished():
     writing = "**Run this now:**\n\n```bash\napt-get install -y nginx\n```"
     assert _rl.first_lookup_block(writing) is not None      # there IS a block …
     assert _rl.is_lookup(writing) is None                   # … the engine just won't run it
+
+
+# ---------------------------------------------------------------------------
+# §17.1182 — the ADD65 fix-loop: a check after a change is not a repeat; a
+# command through a dead guest agent is; the runner refuses a wrong-kind look-up.
+# ---------------------------------------------------------------------------
+
+_LED_PING = [{"command": "qm agent 106 ping", "output": "QEMU guest agent is not running",
+              "at": __import__("datetime").datetime(2026, 9, 22, 22, 57), "by": "operator"}]
+
+
+def test_a_check_after_a_change_is_not_a_repeated_lookup():
+    # the shape of turn 3111: install THROUGH the guest, then verify with the ping the ledger already has
+    fix = ("## Fix\n```bash\nqm guest exec 106 -- apt-get install -y qemu-guest-agent\n```\n"
+           "## Then\n```bash\nqm agent 106 ping\n```")
+    assert rl.find_repeated_lookups(fix, _LED_PING) == []
+    # …but the same ping ASKED FIRST, as discovery, is the repeat it always was
+    assert [h["command"] for h in rl.find_repeated_lookups("```bash\nqm agent 106 ping\n```", _LED_PING)] == ["qm agent 106 ping"]
+
+
+def test_a_command_through_a_dead_guest_agent_is_flagged_and_names_the_way_in():
+    assert list(rl.dead_guest_agents(_LED_PING)) == ["106"]
+    # turn 3116: the guide installs the agent THROUGH the agent
+    guide = "## 👉 Do this next\n```bash\nqm guest exec 106 -- apt-get install -y qemu-guest-agent\n```"
+    hits = rl.find_dead_channel_commands(guide, _LED_PING)
+    assert len(hits) == 1 and hits[0]["kind"] == "dead_channel" and hits[0]["resource"] == "106"
+    assert "INSIDE the VM" in hits[0]["known"] and "22:57 UTC" in hits[0]["known"]
+    # turn 3122: the repair goes in at the console, THEN pings — correct, not flagged
+    console = ("```bash\nqm terminal 106\n```\n```bash\nsudo apt install -y qemu-guest-agent\n```\n"
+               "```bash\nqm agent 106 ping\n```")
+    assert rl.find_dead_channel_commands(console, _LED_PING) == []
+    # a later successful ping clears the record (newest first)
+    alive = [{"command": "qm agent 106 ping", "output": "{\"return\": {}}", "at": None}] + _LED_PING
+    assert rl.dead_guest_agents(alive) == {} and rl.find_dead_channel_commands(guide, alive) == []
+    assert rl.find_dead_channel_commands(guide, None) == []
+
+
+def test_the_fix_gate_folds_the_dead_channel_into_redundancy_and_directs_around_it():
+    from app.modules import assist_guide
+    src = inspect.getsource(assist_guide.generate_fix)
+    assert "find_dead_channel_commands(draft, runner_ledger)" in src
+    assert 'h.get("kind") == "dead_channel"' in src
+    assert "a channel cannot repair itself" in src and "Route " in src
+    assert "record says is not working" in src
+    # §17.1182 — "lead with a discovery command" only for invented URLs, never for a plain repeat
+    assert src.index("if novel:\n                directive.append(\n                    \"STOP guessing.") > 0
+    assert "Change the METHOD" in src
+
+
+@pytest.mark.asyncio
+async def test_the_runner_will_not_run_a_lookup_that_addresses_the_wrong_resource_kind(monkeypatch):
+    from app.modules import assist_turn, assist_local_runner as lr, engine_setup as es, assist_environment as ae
+    spec = MagicMock(); spec.name = "pve-runner"
+    monkeypatch.setattr(lr, "runner_spec", AsyncMock(return_value=spec))
+    monkeypatch.setattr(es, "ensure_helper_refresh_step", AsyncMock(return_value=None))
+    monkeypatch.setattr(es, "recipe_context", AsyncMock(return_value={"target_host": "pve", "target_ip": "192.168.1.156", "target_user": "root"}))
+    monkeypatch.setattr(ae, "get_environment", AsyncMock(return_value={"facts": ["VM 106 (palworld-server) is a VM on the Proxmox host."]}))
+    ran_cmds = []
+    async def _run(spec, commands, on_progress=None):
+        ran_cmds.extend(commands)
+        return ("== L1 ==\nx\n", [{"id": "L1", "command": commands[0], "ok": True, "chars": 1}])
+    monkeypatch.setattr(rl, "run_lookup", _run)
+    wrong = "📍 On: the Proxmox host shell (root@pve)\n\n**Run this now:**\n```bash\npct exec 106 -- systemctl status --no-pager qemu-guest-agent\n```"
+    ev = [e async for e in assist_turn._auto_lookup("s", wrong, MagicMock(), set())]
+    assert ev == [] and ran_cmds == []                         # the engine already knew 106 is a VM: nothing runs
+    right = "📍 On: the Proxmox host shell (root@pve)\n\n**Run this now:**\n```bash\nqm config 106\n```"
+    ev = [e async for e in assist_turn._auto_lookup("s", right, MagicMock(), set())]
+    assert any(e[0] == "_record" for e in ev) and ran_cmds == ["qm config 106"]
+    src = inspect.getsource(assist_turn._auto_lookup)
+    assert "runner_lookup_skipped_wrong_kind" in src and "runner_lookup_kind_check_failed" in src

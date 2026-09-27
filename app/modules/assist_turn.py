@@ -444,6 +444,22 @@ async def _auto_lookup(session_id: str, reply_text: str, db, ran: set | None = N
             logger.info("runner_lookup_skipped_repeat sid=%s first=%r", session_id, commands[0][:80])
             return
         ran.add(key)
+    # §17.1182 — the gate KNEW `pct exec 106 …` addressed a VM (§17.898 flagged
+    # it in the reply's caution) and the runner ran it anyway: "Configuration
+    # file 'nodes/pve/lxc/106.conf' does not exist" then re-entered the loop as
+    # a finding. A look-up the engine can already tell is wrong is not run.
+    try:
+        from app.modules.assist_environment import get_environment as _get_env
+        from app.modules.assist_draft import resource_kinds_from_facts, find_resource_kind_violations
+        _env = await _get_env(session_id=session_id, db=db)
+        _bad = find_resource_kind_violations("```\n" + "\n".join(commands) + "\n```",
+                                             resource_kinds_from_facts(_env if isinstance(_env, dict) else None))
+        if _bad:
+            logger.info("runner_lookup_skipped_wrong_kind sid=%s cmd=%r id=%s used=%s correct=%s",
+                        session_id, _bad[0]["command"][:80], _bad[0]["id"], _bad[0]["used"], _bad[0]["correct"])
+            return
+    except Exception as exc:
+        logger.warning("runner_lookup_kind_check_failed sid=%s err=%r", session_id, exc)
     try:
         from app.modules import assist_local_runner as _lr
         spec = await _lr.runner_spec(db)
