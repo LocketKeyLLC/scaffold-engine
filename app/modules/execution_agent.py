@@ -2330,6 +2330,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
     mechanism as the §17.624 park)."""
     from app.modules import decision_pause, supervised_runs
     node = run_node = None
+    ch: tuple | None = None
     try:
         async with async_session() as db:
             if decision_pause.enabled():
@@ -2357,6 +2358,8 @@ async def _pause_for_decision(job_id: str) -> dict | None:
     if node is not None:
         frame = await decision_pause.frame_decision(node, brief=brief, upstream=up_block)
     else:
+        if ch is None or run_node is None:      # the branch above guarantees both; typed for the checker
+            return None
         spec, policy = ch
         runbook = await supervised_runs.draft_runbook(run_node, brief_full if isinstance(brief_full, dict) else brief, up_block)
         frame = supervised_runs.frame_run(run_node, runbook, spec, policy)
