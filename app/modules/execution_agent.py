@@ -268,18 +268,37 @@ def _node_is_nonexecutable(tool: str | None) -> bool:
 async def _classify_dag_executability(db: AsyncSession, job_id: str) -> dict:
     """§17.624 — count non-autonomously-executable nodes vs total and decide
     whether the DAG is predominantly hands-on (the gate threshold). Deterministic
-    — reads the DAG's tool tags, no LLM call."""
+    — no LLM call. §17.1183 — a node counts by what it DOES (step_classify:
+    a command that writes, a completion observed by a command, a `user@host`
+    target), not only by its tool tag: the assist engine's inserted repairs
+    are tagged LLM and were invisible to the tag count (78 of 93 on the live
+    home-lab plan). A checkpoint validates work the engine did not do, so it
+    is hands-on whenever anything else is."""
+    from app.modules.step_classify import step_is_hands_on
     rows = (await db.execute(
-        text("SELECT tool FROM dag_nodes WHERE job_id = :jid"),
+        text("SELECT tool, node_type, node_key, title, description, prompt_template "
+             "FROM dag_nodes WHERE job_id = :jid"),
         {"jid": job_id},
     )).mappings().all()
     total = len(rows)
-    nonexec = sum(1 for r in rows if _node_is_nonexecutable(r["tool"]))
+    flags: list[bool] = []
+    by_text = 0
+    for r in rows:
+        on, why = step_is_hands_on(dict(r))
+        if on and not why.startswith("tool:"):
+            by_text += 1
+            logger.info("hands_on_by_text job=%s node=%s reason=%s", job_id, r.get("node_key"), why)
+        flags.append(on)
+    if any(flags):
+        for i, r in enumerate(rows):
+            if not flags[i] and str(r.get("node_type") or "") == "checkpoint":
+                flags[i] = True
+    nonexec = sum(1 for f in flags if f)
     hands_on = (
         total > 0
         and nonexec > total * settings.hands_on_assist_gate_threshold
     )
-    return {"total": total, "nonexec": nonexec, "hands_on": hands_on}
+    return {"total": total, "nonexec": nonexec, "hands_on": hands_on, "by_text": by_text}
 
 
 async def _park_job_awaiting_assist(
@@ -1379,6 +1398,16 @@ async def execute_next_node(
         # flag, sees text output, and assumes the host was modified. The
         # flag-off path falls through to the normal LLM dispatch below, where
         # ``_system_for_tool("Shell")`` returns ``EXECUTION_SYSTEM_RUNBOOK``.
+        # §17.1183 — an LLM-tagged step that DOES host work (a write, a
+        # completion observed by a command) is a runbook step: it takes the
+        # runbook prompt and is reported `runbook_only`, exactly as a Shell
+        # step is, instead of being "completed" as prose.
+        if tool_lower == "llm":
+            from app.modules.step_classify import step_is_hands_on
+            _on, _why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {})
+            if _on:
+                logger.info("hands_on_step_as_runbook job=%s node=%s reason=%s", job_id, node_key, _why)
+                tool, tool_lower = "Shell", "shell"
         if tool_lower == "shell" and settings.shell_tool_enabled:
             raise NotImplementedError(
                 "Shell tool execution requested but no backend wired. "

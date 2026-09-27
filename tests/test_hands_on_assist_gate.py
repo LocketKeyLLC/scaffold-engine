@@ -60,7 +60,7 @@ async def test_classify_hands_on_majority_shell(monkeypatch):
         "LLM", "Shell", "Shell", "Shell", "Shell", "Shell", "LLM"
     )
     cls = await execution_agent._classify_dag_executability(db, "job-1")
-    assert cls == {"total": 7, "nonexec": 5, "hands_on": True}
+    assert cls == {"total": 7, "nonexec": 5, "hands_on": True, "by_text": 0}
 
 
 @pytest.mark.asyncio
@@ -80,7 +80,7 @@ async def test_classify_empty_dag_not_hands_on():
     db = AsyncMock()
     db.execute.return_value = _tools()
     cls = await execution_agent._classify_dag_executability(db, "job-1")
-    assert cls == {"total": 0, "nonexec": 0, "hands_on": False}
+    assert cls == {"total": 0, "nonexec": 0, "hands_on": False, "by_text": 0}
 
 
 # ── parking ──────────────────────────────────────────────────────────────────
@@ -152,3 +152,43 @@ def _mapping_result(row: dict):
     r.mappings.return_value = m
     r.first.return_value = None
     return r
+
+
+# ── §17.1183 — what a step DOES, not its tag ─────────────────────────────
+
+def _rows(*rows):
+    return _result(mappings_all=list(rows))
+
+
+@pytest.mark.asyncio
+async def test_classify_counts_llm_tagged_host_work(monkeypatch):
+    """The live home-lab shape: repairs inserted by the assist engine are
+    tagged LLM but install drivers and start containers — a tag count saw
+    37% Shell; the DAG is nearly all hands-on."""
+    monkeypatch.setattr(settings, "shell_tool_enabled", False)
+    monkeypatch.setattr(settings, "hands_on_assist_gate_threshold", 0.5)
+    db = AsyncMock()
+    db.execute.return_value = _rows(
+        {"tool": "LLM", "node_type": "task", "node_key": "ADD50", "title": "Start container 111",
+         "prompt_template": "Bring LXC 111 back up. Done when `pct status 111` reports 'status: running'."},
+        {"tool": "LLM", "node_type": "task", "node_key": "ADD88", "title": "Install Caddy",
+         "prompt_template": "Write the Caddyfile via `tee -a`."},
+        {"tool": "LLM", "node_type": "checkpoint", "node_key": "T37", "title": "Validate entire build",
+         "prompt_template": "Check all services reachable. No installs or config edits."},
+        {"tool": "LLM", "node_type": "task", "node_key": "T38", "title": "Document architecture",
+         "prompt_template": "Write comprehensive documentation."},
+    )
+    cls = await execution_agent._classify_dag_executability(db, "job-1")
+    assert cls == {"total": 4, "nonexec": 3, "hands_on": True, "by_text": 2}   # + the checkpoint
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_is_executable_when_nothing_else_is_hands_on(monkeypatch):
+    monkeypatch.setattr(settings, "shell_tool_enabled", False)
+    db = AsyncMock()
+    db.execute.return_value = _rows(
+        {"tool": "LLM", "node_type": "task", "node_key": "T1", "title": "Draft", "prompt_template": "Write the outline."},
+        {"tool": "LLM", "node_type": "checkpoint", "node_key": "T2", "title": "Review", "prompt_template": "Read it back."},
+    )
+    cls = await execution_agent._classify_dag_executability(db, "job-1")
+    assert cls["nonexec"] == 0 and cls["hands_on"] is False
