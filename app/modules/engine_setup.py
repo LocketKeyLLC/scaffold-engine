@@ -300,6 +300,16 @@ async def probe_local_runner(db) -> dict:
                 "detail": "no runner is registered on the engine side (ask me for the local runner again and answer yes)."}
     diag = await diagnose_runner_path(spec)
     diag.setdefault("checks", {})
+    try:                                   # §17.1185 — a probe is the moment to re-read the write policy
+        from app.modules import assist_supervised as _sw
+        _sw.clear_policy_cache(spec.name)
+        _pol = await _sw.write_policy(spec, use_cache=False) if diag.get("class") == "ok" else None
+        diag["checks"]["writes"] = _pol
+        if _pol:
+            diag["detail"] = (diag.get("detail") or "") + (f" Supervised writes: {len(_pol['allow'])} allowed prefix(es)"
+                                                          f"{' as root' if _pol['sudo'] else ''}: " + "; ".join(_pol["allow"][:8]) + ".")
+    except Exception as exc:
+        logger.warning("runner_probe_write_policy_failed err=%r", exc)
     diag["checks"]["token"] = (spec.headers or {}).get("X-Runner-Token") if isinstance(spec.headers, dict) else None
     diag["checks"]["script_url"] = RUNNER_SCRIPT_FALLBACK_URL
     engine_ip = None
@@ -339,6 +349,29 @@ def _probe_failure_words(where: str, exc: BaseException) -> str:
         return f"{where} answered but rejected the token — the running helper was started with a different --token; re-run the install line."
     tail = raw.split(":")[-1].strip() or raw.strip()
     return f"{where}: {tail[:200] or exc.__class__.__name__}"
+
+
+async def _detect_runner_writes(db) -> tuple[str, str]:
+    """§17.1185 — the supervised write channel: on when the registered runner
+    exposes run_supervised with a non-empty allow-list."""
+    st, _ = await _detect_local_runner(db)
+    if st != "on":
+        return "blocked", "Turn on the local runner first."
+    # Detectors never call out to the operator's machines: this reads what the
+    # engine last learned (the assist view asks the runner when it mounts).
+    try:
+        from app.modules import assist_local_runner as _lr
+        from app.modules import assist_supervised as _sw
+        spec = await _lr.runner_spec(db)
+        known, pol = _sw.cached_policy(spec) if spec is not None else (False, None)
+    except Exception as exc:
+        return "off", f"could not read the runner's write policy: {exc}"
+    if not known:
+        return "manual", "not checked yet — the engine reads the runner's write policy when a walkthrough loads; open one, or this recipe's verify step."
+    if pol:
+        return "on", (f"the engine may run {len(pol['allow'])} approved command prefix(es) on the runner's machine, "
+                      f"each block only after you approve it{' (as root)' if pol['sudo'] else ''}: " + "; ".join(pol["allow"][:8]))
+    return "off", "the runner was installed without --write-allow — it runs read-only checks only."
 
 
 async def _detect_runner_sudo(db) -> tuple[str, str]:
@@ -439,6 +472,48 @@ RECIPES: tuple[Recipe, ...] = (
             "4. Verify: in an assist session press Verify state; the reply must say \"Running N read-only checks "
             "through your local runner (pve-runner)\" instead of asking me to paste.\n"
             "The helper refuses anything that is not read-only; nothing here changes the target machine."
+        ),
+    ),
+    Recipe(
+        id="runner_writes",
+        steps=(
+            ("Decide which commands the engine may run on {target_host} with your approval",
+             "The engine can carry out a step's commands on {target_host} itself — but only commands whose FIRST WORDS are "
+             "on a list you write, and only after you approve each block in the walkthrough. List the prefixes this plan's "
+             "steps need (typical on a Proxmox host: apt-get install, pct set, pct start, qm set, qm start, systemctl restart, "
+             "systemctl enable, tee -a /etc/). A prefix ending in / allows any path under it. Never put a shell, an "
+             "interpreter or rm on the list. Done when you have the list."),
+            ("Re-run the runner install with the write list",
+             "On {target_host} ({target_user}@{target_host}), paste the install line again with your prefixes appended — "
+             "same token, the installer replaces the running service and writes /etc/sudoers.d/scaffold-runner-writes for "
+             "exactly those commands (validated with visudo):\n"
+             "```bash\n"
+             "curl -fsSL {script_url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
+             "--port {runner_port} --token {token} --write-allow \"apt-get install\" \"pct set\" \"tee -a /etc/\"\n"
+             "```\n"
+             "Done when the last line printed starts with OK: and ends with 'supervised writes for N approved prefix(es)'."),
+            ("Verify the engine sees the write channel",
+             "Nothing to type: the engine checks the runner's write policy itself when you open this step. Done when it "
+             "reports the prefixes you allowed. From then on a ▶ Run button appears on each command block in the "
+             "walkthrough; pressing it shows the exact commands and asks you to approve them, and every run is recorded "
+             "in this transcript marked [local-runner].\n" + PROBE_MARK),
+        ),
+        keywords=("write channel", "supervised write", "run approved commands", "engine run the commands", "run it for me",
+                  "write-allow", "let the engine do it", "engine do the step"),
+        title="Let the engine run approved commands",
+        summary="The engine carries out a step's commands on your machine itself — only commands on a list you wrote, each block only after you approve it.",
+        why_off="Writing to your machine is your decision, per machine and per command prefix; nothing is allowed until you list it.",
+        effort="20 min",
+        requires=("local_runner",),
+        detect=_detect_runner_writes,
+        probe=probe_local_runner,
+        brief=(
+            "Let the scaffold-engine local runner (already running on my target machine on port 8790 as an unprivileged "
+            "user) run a short list of command PREFIXES with my per-block approval, so the engine can carry out the plan's "
+            "steps on the machine itself instead of handing me every command to paste.\n\n"
+            "Re-run the one-paste install on the target with --write-allow \"<prefix>\" … appended (same token); the "
+            "installer writes /etc/sudoers.d/scaffold-runner-writes for exactly those commands. Ask me which prefixes "
+            "I want before running anything. Verify by opening the walkthrough: a ▶ Run button appears on command blocks."
         ),
     ),
     Recipe(

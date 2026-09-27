@@ -24,6 +24,20 @@ line starting with ``OK:`` or ``FAILED:``. Re-running it re-installs cleanly
 Every executed command is echoed to this process's log and recorded by the
 engine in the session transcript.
 
+Supervised writes (§17.1185): OFF unless you install with ``--write-allow``.
+Then a second tool, ``run_supervised``, runs a command that WRITES — but only
+when all four hold: the command's head matches one of YOUR ``--write-allow``
+prefixes (``"apt-get install" "pct set" "tee -a /etc/caddy/"``); it is not on
+the short absolute denylist (disk/filesystem destroyers, host power, firewall
+flush, the runner's own service); it carries an approval the engine signed
+for these exact bytes with a key derived from the shared token, unexpired and
+never seen before; and the engine recorded the operator's approval of that
+block first. ``--install --write-allow …`` also writes
+/etc/sudoers.d/scaffold-runner-writes (one full-path line per prefix,
+validated with visudo) so those commands — and only those — run as root
+through ``sudo -n``. Redirects are refused on this channel: write files with
+``tee``. Every supervised run is logged here with its approval id.
+
 sudo (§17.1078): the runner is unprivileged — §17.1171 made that true. It runs
 as the system account `scaffold-runner` (override with `--run-as`), which
 `--install` creates; before that the unit carried no `User=` and systemd ran it
@@ -62,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "10"
+HELPER_VERSION = "11"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -658,6 +672,111 @@ def read_only(cmd: str, _depth: int = 0) -> tuple[bool, str]:
 
 _SUDO_RE = re.compile(r"^\s*sudo\s+(?:-[A-Za-z]+\s+)*")
 
+# ---------------------------------------------------------------------------
+# §17.1185 — supervised writes. THE SAME helpers live in
+# app/modules/assist_supervised.py (the engine gates before it asks for an
+# approval and signs with the same derivation); tests/test_local_runner.py
+# pins them byte-equal.
+# ---------------------------------------------------------------------------
+
+# Refused even with an approval and an allow-list match. Not the security
+# boundary (the allow-list is); the floor under a typo or a bad plan.
+_CATASTROPHIC = (
+    (re.compile(r"(?:^|\s)rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*\s+)+(?:--no-preserve-root\s+)?(?:/|/\*|/(?:etc|boot|usr|bin|sbin|lib|lib64|var|home|root|dev|proc|sys|opt|srv)(?:/\*)?)(?:\s|$)"), "recursive delete of a system directory"),
+    (re.compile(r"(?:^|\s)(?:mkfs(?:\.\w+)?|wipefs|blkdiscard|sgdisk|sfdisk|parted|fdisk)\s"), "disk or filesystem destroyer"),
+    (re.compile(r"(?:^|\s)dd\s.*\bof=/dev/(?!null|zero)"), "dd onto a device"),
+    (re.compile(r">\s*/dev/(?:sd|nvme|vd|hd|mapper|md)"), "redirect onto a device"),
+    (re.compile(r":\(\)\s*\{"), "fork bomb"),
+    (re.compile(r"(?:^|\s)(?:shutdown|poweroff|halt|reboot|init\s+[06]|systemctl\s+(?:poweroff|halt|reboot|kexec))(?:\s|$)"), "host power — do that by hand"),
+    (re.compile(r"(?:^|\s)(?:iptables|ip6tables|nft)\s+(?:-F|--flush|flush\s+ruleset)"), "firewall flush"),
+    (re.compile(r"(?:^|\s)(?:systemctl\s+(?:stop|disable|mask)\s+local-runner-mcp|userdel\s+(?:-r\s+)?scaffold-runner|rm\s.*scaffold-runner)"), "the runner's own service"),
+    (re.compile(r"(?:^|\s)(?:chmod|chown)\s+-[a-zA-Z]*R[a-zA-Z]*\s+\S+\s+/(?:\s|$)"), "recursive mode/owner change of /"),
+)
+
+
+def catastrophic(cmd: str) -> str:
+    """The reason this command is refused even with an approval, or ''."""
+    flat = " ".join((cmd or "").split())
+    for rx, why in _CATASTROPHIC:
+        if rx.search(flat):
+            return why
+    return ""
+
+
+def write_allowed(cmd: str, allow: list[str], judge_read=None) -> tuple[bool, str]:
+    """``(ok, why)`` for the supervised channel. Every segment is either
+    read-only (per the read gate) or, once a leading ``sudo`` is stripped,
+    a whole-token prefix match of one ``--write-allow`` entry (an entry ending
+    in ``/`` matches any path under it). Redirects and substitutions are
+    refused here (write files with ``tee``); an empty allow-list refuses
+    everything."""
+    judge_read = judge_read or read_only
+    prefixes = [p.strip() for p in (allow or []) if p and p.strip()]
+    if not prefixes:
+        return False, "no --write-allow list on this runner"
+    if not (cmd or "").strip():
+        return False, "empty"
+    if "<<" in cmd or "$(" in cmd or "`" in cmd:
+        return False, "substitution/heredoc"
+    masked = mask_quoted(cmd)
+    if re.search(r"(?<![<>])>(?!\s*/dev/null|&\d)", masked) or ">>" in masked:
+        return False, "redirect — write the file with tee"
+    for segment in split_segments(cmd):
+        seg = segment.strip()
+        if not seg:
+            continue
+        if judge_read(seg)[0]:
+            continue
+        bare = _SUDO_RE.sub("", seg, count=1).strip()
+        if not any(bare == p or bare.startswith(p + " ") or (p.endswith("/") and bare.startswith(p)) for p in prefixes):
+            return False, f"not on the write-allow list: {bare[:60]}"
+    return True, ""
+
+
+def approval_key(token: str) -> bytes:
+    """The signing key for approvals: derived from the shared token, so the
+    channel needs no second secret. Same derivation in the engine."""
+    import hashlib
+    return hmac.new((token or "").encode(), b"scaffold-runner supervised writes v1", hashlib.sha256).digest()
+
+
+def approval_message(approval_id: str, nonce: str, exp: int, command: str) -> bytes:
+    return f"{approval_id}\n{nonce}\n{exp}\n{command}".encode()
+
+
+_SEEN_NONCES: dict[str, int] = {}
+APPROVAL_MAX_TTL = 900
+
+
+def verify_approval(command: str, approval: dict, token: str, *, now: int | None = None,
+                    seen: dict | None = None) -> tuple[bool, str]:
+    """``(ok, why)``: the signature covers these exact bytes, it is not
+    expired (nor minted for longer than APPROVAL_MAX_TTL), and the nonce has
+    not been used on this runner before."""
+    import hashlib
+    now = int(time.time()) if now is None else now
+    seen = _SEEN_NONCES if seen is None else seen
+    try:
+        aid, nonce, exp, sig = str(approval["id"]), str(approval["nonce"]), int(approval["exp"]), str(approval["sig"])
+    except (KeyError, TypeError, ValueError):
+        return False, "malformed approval"
+    if not token:
+        return False, "no token on this runner — approvals cannot be verified"
+    if exp <= now:
+        return False, "approval expired"
+    if exp - now > APPROVAL_MAX_TTL:
+        return False, "approval lifetime too long"
+    want = hmac.new(approval_key(token), approval_message(aid, nonce, exp, command), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(want, sig):
+        return False, "approval signature does not match this command"
+    for k, e in list(seen.items()):
+        if e <= now:
+            del seen[k]
+    if nonce in seen:
+        return False, "approval already used"
+    seen[nonce] = exp
+    return True, ""
+
 
 def apply_sudo_policy(cmd: str, allow: list[str]) -> tuple[str, str]:
     """``(command to run, note)``. A leading ``sudo`` becomes ``sudo -n`` when
@@ -695,10 +814,12 @@ def _privilege_note(output: str, returncode: int | None) -> str:
             "Capabilities \u2192 \"Give the runner administrator rights for specific commands\".)\n")
 
 
-def build_server(token: str | None, sudo_allow: list[str] | None = None):
+def build_server(token: str | None, sudo_allow: list[str] | None = None,
+                 write_allow: list[str] | None = None, write_sudo: bool = False):
     from mcp.server import MCPServer
     mcp = MCPServer("scaffold-local-runner")
     allow = list(sudo_allow or [])
+    writes = [w.strip() for w in (write_allow or []) if w and w.strip()]
 
     @mcp.tool(description=f"Run ONE read-only shell command on this machine and return its output. "
                           f"Refuses anything that writes. (helper v{HELPER_VERSION})")
@@ -717,6 +838,48 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None):
             return f"(timed out after {timeout_s}s)"
         text = out.decode("utf-8", errors="replace")[:20000]
         return note + _privilege_note(text, proc.returncode) + text
+
+    @mcp.tool(description="§17.1185 — what this runner may WRITE: the operator's --write-allow prefixes "
+                          "(empty = the supervised channel is off) and whether they run as root. "
+                          f"(helper v{HELPER_VERSION})")
+    async def write_policy() -> str:
+        import json as _json
+        return _json.dumps({"helper": HELPER_VERSION, "allow": writes, "sudo": bool(write_sudo and writes),
+                            "max_ttl": APPROVAL_MAX_TTL})
+
+    @mcp.tool(description="§17.1185 — run ONE command that WRITES, with the engine's signed approval of these exact "
+                          "bytes (the operator approved the block first). Refused unless its head is on this runner's "
+                          f"--write-allow list ({len(writes)} prefix{'es' if len(writes) != 1 else ''}). "
+                          f"(helper v{HELPER_VERSION})")
+    async def run_supervised(command: str, approval: dict, timeout_s: int = 180) -> str:
+        if not writes:
+            return "(refused by the local runner: no --write-allow list — the supervised channel is off here)"
+        why = catastrophic(command)
+        if why:
+            log.warning("REFUSED supervised (%s): %s", why, command)
+            return f"(refused by the local runner: {why})"
+        ok, why = write_allowed(command, writes)
+        if not ok:
+            log.warning("REFUSED supervised (%s): %s", why, command)
+            return f"(refused by the local runner: {why})"
+        ok, why = verify_approval(command, approval, token or "")
+        if not ok:
+            log.warning("REFUSED supervised (%s): %s", why, command)
+            return f"(refused by the local runner: {why})"
+        run_cmd = command
+        if write_sudo and not read_only(command)[0]:
+            run_cmd = f"sudo -n {_SUDO_RE.sub('', command, count=1).strip()}"
+        aid = str(approval.get("id", "?"))
+        log.warning("SUPERVISED id=%s RUN: %s", aid, run_cmd)
+        proc = await asyncio.create_subprocess_shell(run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return f"[exit timeout] (timed out after {timeout_s}s)"
+        text = out.decode("utf-8", errors="replace")[:20000]
+        log.warning("SUPERVISED id=%s exit=%s chars=%d", aid, proc.returncode, len(text))
+        return f"[exit {proc.returncode}]\n" + text
 
     return mcp
 
@@ -800,7 +963,8 @@ def env_file_text(token: str) -> str:
 
 def unit_text(*, python: str, script: str, host: str, port: int, token: str | None,
               sudo_allow: list[str] | None = None, user: str = RUNNER_USER,
-              env_file: str | None = ENV_FILE) -> str:
+              env_file: str | None = ENV_FILE, write_allow: list[str] | None = None,
+              write_sudo: bool = False) -> str:
     """The systemd unit, as text. Pure: tests read it without a root shell.
 
     §17.1171 — `User=`/`Group=` are REQUIRED, not decoration: without them
@@ -814,13 +978,17 @@ def unit_text(*, python: str, script: str, host: str, port: int, token: str | No
         cmd += ["--token", token]
     if sudo_allow:
         cmd += ["--sudo-allow", *sudo_allow]
+    if write_allow:                     # §17.1185 — the supervised channel, only when the operator listed prefixes
+        cmd += ["--write-allow", *write_allow]
+        if write_sudo:
+            cmd += ["--write-sudo"]
     exec_start = " ".join(shlex.quote(c) for c in cmd)
-    hardening = "" if sudo_allow else "NoNewPrivileges=yes\n"
+    hardening = "" if (sudo_allow or (write_allow and write_sudo)) else "NoNewPrivileges=yes\n"
     if token and env_file:
         hardening += f"EnvironmentFile={env_file}\n"
     return (
         "[Unit]\n"
-        "Description=scaffold-engine local runner (read-only MCP helper)\n"
+        "Description=scaffold-engine local runner (read-only MCP helper" + ("; supervised writes on" if write_allow else "") + ")\n"
         "After=network-online.target\n"
         "Wants=network-online.target\n\n"
         "[Service]\n"
@@ -901,6 +1069,54 @@ def _write_env_file(token: str, user: str, *, path: str = ENV_FILE) -> None:
                     path, user, exc)
 
 
+SUDOERS_WRITES = "/etc/sudoers.d/scaffold-runner-writes"
+
+
+def sudoers_writes_text(prefixes: list[str], user: str = RUNNER_USER, *, which=shutil.which) -> tuple[str, list[str]]:
+    """§17.1185 — one NOPASSWD line per write-allow prefix, the command
+    resolved to its full path (sudoers matches on the path). Returns the file
+    text and the prefixes that could NOT be resolved (they stay on the
+    allow-list but run unprivileged, and the runner's output says so)."""
+    lines, unresolved = [], []
+    for p in prefixes:
+        parts = p.split()
+        if not parts:
+            continue
+        full = parts[0] if parts[0].startswith("/") else which(parts[0])
+        if not full:
+            unresolved.append(p)
+            continue
+        rest = " ".join(parts[1:])
+        # a prefix ending in `/` ("tee -a /etc/caddy/") means any path under it
+        entry = f"{full} {rest}*" if rest and p.endswith("/") else (f"{full} {rest} *" if rest else f"{full} *")
+        lines.append(f"{user} ALL=(root) NOPASSWD: {entry}")
+    text = ("# written by scaffold local runner --install --write-allow (§17.1185); re-run the install to change it\n"
+            + "\n".join(lines) + ("\n" if lines else ""))
+    return text, unresolved
+
+
+def _install_sudoers_writes(write_allow: list[str], user: str, dest_dir: str, *, run=_run) -> bool:
+    """Write the sudoers file for exactly these prefixes, validated by visudo
+    BEFORE it lands in /etc/sudoers.d; a syntax error never gets installed.
+    Returns whether the prefixes will run as root."""
+    text_, unresolved = sudoers_writes_text(write_allow, user)
+    tmp = os.path.join(dest_dir, "sudoers.writes.tmp")
+    with open(tmp, "w") as fh:
+        fh.write(text_)
+    os.chmod(tmp, 0o440)
+    chk = run(["visudo", "-cf", tmp]) if shutil.which("visudo") else None
+    if chk is not None and chk.returncode == 0:
+        shutil.move(tmp, SUDOERS_WRITES)
+        os.chmod(SUDOERS_WRITES, 0o440)
+        print(f"[2b/4] supervised writes: {len(write_allow)} prefix(es) allowed, sudoers written to {SUDOERS_WRITES}"
+              + (f"; not resolvable to a path (run unprivileged): {', '.join(unresolved)}" if unresolved else ""))
+        return True
+    os.unlink(tmp)
+    print("[2b/4] supervised writes: allowed prefixes run UNPRIVILEGED — "
+          + ("visudo rejected the rule: " + (chk.stdout or "")[-300:] if chk is not None else "visudo not found"))
+    return False
+
+
 def install(args, *, run=_run) -> int:
     """Everything the install step used to ask the operator to type. Prints
     progress lines and ONE verdict line (``OK: …`` / ``FAILED: …``)."""
@@ -931,8 +1147,16 @@ def install(args, *, run=_run) -> int:
     if r.returncode != 0:
         print(f"FAILED: pip install did not finish:\n{(r.stdout or '')[-600:]}")
         return 1
+    write_allow = [w for w in (getattr(args, "write_allow", None) or []) if w.strip()]
+    write_sudo = False
+    if write_allow:
+        write_sudo = _install_sudoers_writes(write_allow, args.run_as, dest_dir, run=run)
+    elif os.path.exists(SUDOERS_WRITES):
+        os.unlink(SUDOERS_WRITES)          # writes switched off: the root grant goes with them
+        print(f"[2b/4] supervised writes off — removed {SUDOERS_WRITES}")
     unit = unit_text(python=os.path.join(venv, "bin", "python"), script=script, host=args.host, port=args.port,
-                     token=args.token, sudo_allow=args.sudo_allow, user=args.run_as)
+                     token=args.token, sudo_allow=args.sudo_allow, user=args.run_as,
+                     write_allow=write_allow, write_sudo=write_sudo)
     detached = not shutil.which("systemctl")
     if detached:
         # no systemd (a container, a BSD): start it detached and say so plainly.
@@ -981,7 +1205,8 @@ def install(args, *, run=_run) -> int:
     print(f"[4/4] port {args.port} answers ({why})")
     how = f"detached process, log {dest_dir}/runner.log" if detached else f"service {UNIT_NAME}"
     print(f"OK: local runner active on {args.host}:{args.port}/mcp/ ({how}) as the unprivileged user "
-          f"{args.run_as}; the engine can now run its read-only checks here.")
+          f"{args.run_as}; the engine can now run its read-only checks here"
+          + (f", and supervised writes for {len(write_allow)} approved prefix(es)" if write_allow else "") + ".")
     return 0
 
 
@@ -995,6 +1220,11 @@ def main() -> int:
                     help="§17.1179 — serve WITHOUT authentication; loopback binds only, never a routable address")
     ap.add_argument("--sudo-allow", nargs="*", default=[], metavar="PREFIX",
                     help="command prefixes that may run as `sudo -n` (needs matching NOPASSWD sudoers lines); anything else drops its sudo")
+    ap.add_argument("--write-allow", nargs="*", default=[], metavar="PREFIX",
+                    help="§17.1185 — command prefixes the engine may run through run_supervised with your per-block "
+                         "approval (e.g. \"apt-get install\" \"pct set\" \"tee -a /etc/caddy/\"); empty = writes off")
+    ap.add_argument("--write-sudo", action="store_true",
+                    help="run write-allowed commands as `sudo -n` (--install sets this after writing the sudoers file)")
     ap.add_argument("--install", action="store_true",
                     help="§17.1147 — as root: copy to --install-dir, make a venv, install deps, write+start the systemd unit, check the port")
     ap.add_argument("--install-dir", default=INSTALL_DIR)
@@ -1015,7 +1245,7 @@ def main() -> int:
     if why:
         print(f"FAILED: {why}", file=sys.stderr)
         return 2
-    mcp = build_server(args.token, sudo_allow=args.sudo_allow)
+    mcp = build_server(args.token, sudo_allow=args.sudo_allow, write_allow=args.write_allow, write_sudo=args.write_sudo)
     if args.stdio:
         asyncio.run(mcp.run_stdio_async()); return 0
     import contextlib
@@ -1049,7 +1279,8 @@ def main() -> int:
         app = Starlette(routes=[Mount("/mcp", app=guard)], lifespan=lifespan)
     else:
         app = Starlette(routes=[Mount("/mcp", app=sub)], lifespan=lifespan)
-    log.info("local runner listening on %s:%s/mcp/ (read-only)", args.host, args.port)
+    log.info("local runner listening on %s:%s/mcp/ (%s)", args.host, args.port,
+             f"read-only + supervised writes for {len(args.write_allow)} prefix(es)" if args.write_allow else "read-only")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 

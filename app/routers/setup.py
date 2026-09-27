@@ -51,9 +51,20 @@ async def runner_status(db: AsyncSession = Depends(get_db)) -> dict:
         spec = await _lr.runner_spec(db)
     except Exception as exc:
         logger.warning("runner_status_lookup_failed err=%r", exc)
+    # §17.1185 — does the runner carry the supervised write channel? One cheap
+    # tool listing (cached) + one policy call; None when it does not.
+    writes = None
+    if spec is not None and settings.mcp_tool_enabled:
+        try:
+            from app.modules import assist_supervised as _sw
+            writes = await _sw.write_policy(spec)
+        except Exception as exc:
+            logger.warning("runner_write_policy_failed err=%r", exc)
     return {
         "connected": spec is not None and settings.mcp_tool_enabled,
         "name": getattr(spec, "name", None),
+        "writes": ({"enabled": True, "allow": writes["allow"], "sudo": writes["sudo"]} if writes
+                   else {"enabled": False, "allow": [], "sudo": False}),
         "endpoint": getattr(spec, "endpoint", None),
         # what it MAY do, so the console can say it rather than imply it
         "runs": "read-only shell commands, gated before they are sent" if spec else None,
