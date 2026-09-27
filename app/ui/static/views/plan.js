@@ -5,13 +5,35 @@
 // execution theater. Reached via the approval gate's Approve chain.
 import * as api from "../api.js";
 import { jobStore } from "../store.js";
-import { el, mount, moveItem } from "../util.js";
+import { el, mount, moveItem, mdToHtml } from "../util.js";
 import { statusBadge, loading, errorPanel, toast, openDialog, askConfirm } from "../components.js";
 import { createGraphCanvas } from "./dag_render.js";
 import { startControl } from "./job_hub.js";
 
 // §17.815 — edit attribution is SERVER-derived from the API key (audit-trail
 // integrity); the client no longer sends a spoofable label.
+
+// Mirrors app/config.py VALID_TOOLS (tests/ui/plan_editor.test.mjs pins the set):
+// what a step uses, in the operator's words.
+export const TOOL_LABELS = {
+  LLM: "The model (thinks, writes, plans)",
+  Shell: "Your terminal (commands you run)",
+  CodeGen: "Code generation (writes and checks code)",
+  SearXNG: "Web search",
+  Milvus: "The knowledge base",
+  MCP: "An MCP tool",
+};
+
+// The next free step key: T<n> above every numeric T-key the plan has (engine
+// insertions are ADD<n>; the two never collide). Pure, pinned by the node test.
+export function nextNodeKey(keys) {
+  let max = 0;
+  const have = new Set(keys || []);
+  for (const k of have) { const m = /^T(\d+)$/.exec(k); if (m) max = Math.max(max, Number(m[1])); }
+  let n = max + 1;
+  while (have.has(`T${n}`)) n += 1;
+  return `T${n}`;
+}
 
 function field(label, control, hint) {
   return el(
@@ -126,7 +148,7 @@ export function renderPlan(container, jobId, opts = {}) {
   mount(canvas, loading("Loading plan…"));
 
   const graph = createGraphCanvas(canvas);
-  graph.onNodeClick((key) => openEditDrawer(byKey[key]));
+  graph.onNodeClick((key) => openEditDrawer(byKey[key]));   // opens the READ view; Edit is a verb inside
 
   function closeDrawer() {
     drawer.classList.add("hidden");
@@ -168,63 +190,130 @@ export function renderPlan(container, jobId, opts = {}) {
     }
   }
 
-  // ── Edit drawer ──────────────────────────────────────────────────
-  function depsSelect(current, excludeKey) {
-    const sel = el("select", { class: "input node-multiselect", multiple: true, size: Math.min(6, Math.max(2, nodes.length - 1)) });
-    for (const n of nodes) {
-      if (n.node_key === excludeKey) continue;
-      const opt = el("option", { value: n.node_key, text: `${n.node_key} · ${n.title || ""}` });
-      if ((current || []).includes(n.node_key)) opt.selected = true;
-      sel.append(opt);
-    }
+  // ── The step editor: read first, edit second ─────────────────────────
+  // UX overhaul phase 5. The drawer opened straight onto raw fields ("Prompt
+  // template", a free-text "Tool", a free-text "Assigned model", "Tool config
+  // (JSON)") and inserting a step asked the operator to INVENT a node key. Now a
+  // step opens as something to read — what it does, the instructions, what it
+  // uses, what it comes after — with "Edit this step" and "Insert a step after
+  // this" as the two verbs; the form names things in plain words, the tool is a
+  // labelled choice, the model comes from the catalog, keys are generated.
+  let catalog = null;   // model ids from /models/available (fail-soft: free text still works)
+  async function modelCatalog() {
+    if (catalog) return catalog;
+    try {
+      const res = await api.get("/models/available");
+      catalog = res.reachable === false ? [] : (res.models || [...(res.local || []), ...(res.cloud || [])]);
+    } catch (e) { console.debug("plan: model catalog unavailable — the model field stays free text", e); catalog = []; }
+    return catalog;
+  }
+  const titleOf = (k) => (byKey[k] && byKey[k].title) || "";
+
+  function depsPicker(current, excludeKey) {
+    const chosen = new Set(current || []);
+    const list = el("div", { class: "deps-picker" },
+      ...nodes.filter((n) => n.node_key !== excludeKey).map((n) => {
+        const cb = el("input", { type: "checkbox", value: n.node_key });
+        if (chosen.has(n.node_key)) cb.checked = true;
+        return el("label", { class: "deps-item" }, cb, el("span", { class: "mono faint deps-key", text: n.node_key }), el("span", { class: "deps-title", text: n.title || "" }));
+      }));
+    return { node: list, read: () => Array.from(list.querySelectorAll("input:checked")).map((i) => i.value) };
+  }
+
+  function toolSelect(current) {
+    const sel = el("select", { class: "input" });
+    for (const [k, label] of Object.entries(TOOL_LABELS)) sel.append(el("option", { value: k, text: label, selected: k === (current || "LLM") ? "" : null }));
+    if (current && !TOOL_LABELS[current]) sel.append(el("option", { value: current, text: current, selected: "" }));
     return sel;
   }
-  const readDeps = (sel) => Array.from(sel.selectedOptions).map((o) => o.value);
 
-  function openEditDrawer(node) {
+  function modelField(current) {
+    const listId = `plan-models-${jobId.slice(0, 8)}`;
+    const datalist = el("datalist", { id: listId });
+    modelCatalog().then((list) => mount(datalist, ...list.map((m) => el("option", { value: m }))));
+    const input = el("input", { class: "input", value: current || "", placeholder: "the role's default model", list: listId });
+    return { node: el("div", {}, input, datalist), read: () => input.value.trim() };
+  }
+
+  function readView(node) {
+    const deps = node.depends_on || [];
+    const tool = TOOL_LABELS[node.tool] || node.tool || "LLM";
+    return el("div", { class: "step-read" },
+      el("div", { class: "row row-wrap step-read-tags" },
+        statusBadge(node.status),
+        el("span", { class: "tag", text: tool }),
+        node.is_deliverable ? el("span", { class: "tag deliverable", text: "★ part of the deliverable" }) : null,
+        node.assigned_model ? el("span", { class: "tag mono", title: "Model for this step", text: String(node.assigned_model) }) : null),
+      node.description ? el("div", { class: "md step-read-desc", html: mdToHtml(node.description) }) : el("p", { class: "dim", text: "No description." }),
+      deps.length
+        ? el("div", { class: "step-read-after" }, el("span", { class: "dim", text: "Comes after: " }),
+            ...deps.map((k) => el("button", { class: "btn btn-sm btn-ghost step-dep", text: `${k} · ${titleOf(k).slice(0, 40)}`, title: titleOf(k), onClick: () => openEditDrawer(byKey[k]) })))
+        : el("div", { class: "step-read-after dim", text: "A first step — nothing comes before it." }),
+      node.prompt_template
+        ? el("details", { class: "brief-details step-read-instructions" },
+            el("summary", {}, "Instructions the engine follows for this step"),
+            el("div", { class: "md", html: mdToHtml(node.prompt_template) }))
+        : null,
+      node.tool === "MCP" && node.tool_config
+        ? el("details", { class: "brief-details" }, el("summary", {}, "Tool settings"), el("pre", { class: "md-pre json-pre", text: JSON.stringify(node.tool_config, null, 2) }))
+        : null);
+  }
+
+  function openEditDrawer(node, { edit = false } = {}) {
     if (!node) return;
     selectedKey = node.node_key;
     graph.setSelected(node.node_key);
     drawer.classList.remove("hidden");
     queueMicrotask(armDrawer);   // §17.1118 — after this function mounts the fields
 
+    const head = el("div", { class: "drawer-head" },
+      el("div", { class: "row" }, el("span", { class: "mono faint", text: node.node_key }), el("span", { class: "tag", title: "Edit version", text: `v${node.edit_version}` })),
+      el("button", { class: "btn btn-sm btn-ghost drawer-close", text: "✕", "aria-label": "Close editor", onClick: () => closeDrawer() }));
+    const title = el("h3", { class: "drawer-title", text: node.title || "(untitled step)" });
+
+    if (!edit) {
+      const more = el("details", { class: "verbs-more step-more" },
+        el("summary", { class: "btn btn-sm btn-ghost", text: "⋯", "aria-label": "More step actions", title: "Reset or delete this step" }),
+        el("div", { class: "verbs-more-body" },
+          el("button", { class: "btn btn-sm btn-ghost", text: "↺ Reset to not started", onClick: () => resetNode(node.node_key) }),
+          el("button", { class: "btn btn-sm btn-ghost btn-quiet-danger", text: "🗑 Delete this step", onClick: () => deleteNode(node.node_key) })));
+      mount(drawer, head, title, el("div", { class: "drawer-body" }, readView(node)),
+        el("div", { class: "drawer-actions" },
+          el("button", { class: "btn btn-sm btn-primary", text: "✎ Edit this step", onClick: () => openEditDrawer(node, { edit: true }) }),
+          el("button", { class: "btn btn-sm", text: "＋ Insert a step after this", onClick: () => openInsertDrawer({ after: node.node_key }) }),
+          el("span", { class: "spacer" }), more));
+      return;
+    }
+
     const titleIn = el("input", { class: "input", value: node.title || "" });
-    const descIn = el("textarea", { class: "input node-textarea", rows: 2 }, node.description || "");
-    const promptIn = el("textarea", { class: "input node-textarea", rows: 6 }, node.prompt_template || "");
-    const toolIn = el("input", { class: "input", value: node.tool || "LLM" });
-    const modelIn = el("input", { class: "input", value: node.assigned_model || "", placeholder: "(role default)" });
+    const descIn = el("textarea", { class: "input node-textarea", rows: 3 }, node.description || "");
+    const promptIn = el("textarea", { class: "input node-textarea", rows: 8 }, node.prompt_template || "");
+    const toolIn = toolSelect(node.tool);
+    const model = modelField(node.assigned_model);
     const delivIn = el("input", { type: "checkbox" });
     if (node.is_deliverable) delivIn.checked = true;
-    const depsIn = depsSelect(node.depends_on, node.node_key);
+    const deps = depsPicker(node.depends_on, node.node_key);
     const cfgIn = el("textarea", { class: "input node-textarea mono", rows: 3 }, node.tool_config ? JSON.stringify(node.tool_config, null, 2) : "");
+    const cfgField = field("Tool settings (JSON)", cfgIn, "Only for an MCP tool. Leave blank for none.");
+    const syncCfg = () => { cfgField.hidden = toolIn.value !== "MCP"; };
+    toolIn.addEventListener("change", syncCfg); syncCfg();
 
     const saveBtn = el("button", { class: "btn btn-sm btn-primary", text: "Save", onClick: () => save() });
-    const resetBtn = el("button", { class: "btn btn-sm", text: "Reset node", onClick: () => resetNode(node.node_key) });
-    const deleteBtn = el("button", { class: "btn btn-sm btn-danger", text: "Delete", onClick: () => deleteNode(node.node_key) });
+    const cancelBtn = el("button", { class: "btn btn-sm btn-ghost", text: "Cancel", onClick: () => openEditDrawer(byKey[node.node_key] || node) });
+    const ran = node.status !== "pending";
 
-    mount(
-      drawer,
-      el(
-        "div",
-        { class: "drawer-head" },
-        el("div", { class: "row" }, statusBadge(node.status), el("span", { class: "tag", text: `v${node.edit_version}` })),
-        el("button", { class: "btn btn-sm btn-ghost drawer-close", text: "✕", "aria-label": "Close editor", onClick: () => closeDrawer() })
-      ),
-      el("h3", { class: "drawer-title", text: `${node.node_key} · edit` }),
-      el(
-        "div",
-        { class: "node-form" },
+    mount(drawer, head, title,
+      ran ? el("div", { class: "plan-warning drawer-warning" }, el("span", { class: "warn-icon", text: "⚠" }), el("span", { text: "This step has already run. Changing what it does or what it comes after resets it, and every step after it, to not started." })) : null,
+      el("div", { class: "node-form" },
         field("Title", titleIn),
-        field("Description", descIn),
-        field("Prompt template", promptIn, "Edited on an already-run node → resets it + downstream."),
-        field("Tool", toolIn),
-        field("Assigned model", modelIn),
-        field("Depends on", depsIn),
-        el("div", { class: "node-field row" }, delivIn, el("label", { class: "node-field-label inline", text: "Is deliverable" })),
-        field("Tool config (JSON)", cfgIn, "MCP nodes only. Leave blank for none.")
-      ),
-      el("div", { class: "drawer-actions" }, saveBtn, resetBtn, deleteBtn)
-    );
+        field("What this step does", descIn, "One or two sentences, in plain words."),
+        field("Instructions the engine follows", promptIn, "What the engine is told when it works this step, or what it walks you through."),
+        field("It uses", toolIn),
+        field("Model for this step", model.node, "Blank = the role's default. Pick from the catalog or type a model id."),
+        field("Comes after", deps.node, "The steps that must finish before this one can start."),
+        el("div", { class: "node-field row" }, delivIn, el("label", { class: "node-field-label inline", text: "Its result is part of the deliverable" })),
+        cfgField),
+      el("div", { class: "drawer-actions" }, saveBtn, cancelBtn));
 
     async function save() {
       const fields = {};
@@ -232,43 +321,31 @@ export function renderPlan(container, jobId, opts = {}) {
       if (descIn.value !== (node.description || "")) fields.description = descIn.value;
       if (promptIn.value !== (node.prompt_template || "")) fields.prompt_template = promptIn.value;
       if (toolIn.value !== (node.tool || "LLM")) fields.tool = toolIn.value;
-      if (modelIn.value !== (node.assigned_model || "")) fields.assigned_model = modelIn.value || null;
+      if (model.read() !== (node.assigned_model || "")) fields.assigned_model = model.read() || null;
       if (delivIn.checked !== !!node.is_deliverable) fields.is_deliverable = delivIn.checked;
-      const newDeps = readDeps(depsIn);
-      if (JSON.stringify(newDeps) !== JSON.stringify(node.depends_on || [])) fields.depends_on = newDeps;
-      // tool_config: parse JSON if changed
+      const newDeps = deps.read();
+      if (JSON.stringify([...newDeps].sort()) !== JSON.stringify([...(node.depends_on || [])].sort())) fields.depends_on = newDeps;
       const cfgRaw = cfgIn.value.trim();
       const origCfg = node.tool_config ? JSON.stringify(node.tool_config, null, 2) : "";
       if (cfgIn.value !== origCfg) {
-        if (!cfgRaw) {
-          fields.tool_config = null;
-        } else {
-          try {
-            fields.tool_config = JSON.parse(cfgRaw);
-          } catch {
-            toast("Tool config is not valid JSON.", "err");
-            return;
-          }
+        if (!cfgRaw) fields.tool_config = null;
+        else {
+          try { fields.tool_config = JSON.parse(cfgRaw); }
+          catch { toast("Tool settings are not valid JSON.", "err"); return; }
         }
       }
-      if (!Object.keys(fields).length) {
-        toast("No changes.", "");
-        return;
-      }
+      if (!Object.keys(fields).length) { toast("No changes.", ""); openEditDrawer(node); return; }
       saveBtn.disabled = true;
       try {
-        const res = await api.patch(`/nodes/${jobId}/${node.node_key}`, {
-          ...fields,
-          expected_version: node.edit_version,
-        });
+        const res = await api.patch(`/nodes/${jobId}/${node.node_key}`, { ...fields, expected_version: node.edit_version });
         if (disposed) return;
-        const resetMsg = res.reset && res.reset.length ? ` — reset ${res.reset.length} node(s)` : "";
-        toast(`Saved ${node.node_key}${resetMsg}.`, "ok");
+        const n = res.reset && res.reset.length;
+        toast(`Saved ${node.node_key}${n ? ` — ${n} step${n === 1 ? "" : "s"} reset to not started` : ""}.`, "ok");
         await load();
       } catch (e) {
         if (disposed) return;
         if (e.status === 409) {
-          toast("Node was edited elsewhere — reloading fresh version.", "err");
+          toast("This step was changed elsewhere — showing the fresh version.", "err");
           await reloadAndReopen(node.node_key);
         } else {
           toast(`Save failed: ${e.detail || e.message}`, "err");
@@ -293,12 +370,12 @@ export function renderPlan(container, jobId, opts = {}) {
   }
 
   async function resetNode(key) {
-    if (!await askConfirm("Every downstream node is reset too, and their outputs are cleared.",
-      { title: `Reset ${key} to pending?`, confirmText: "Reset it", danger: true })) return;
+    if (!await askConfirm("Every step after it is reset too, and what they produced is cleared.",
+      { title: `Reset ${key} to not started?`, confirmText: "Reset it", danger: true })) return;
     try {
-      const res = await api.post(`/nodes/${jobId}/${key}/reset`, {});
+      await api.post(`/nodes/${jobId}/${key}/reset`, {});
       if (disposed) return;
-      toast(`Reset ${key}.`, "ok");
+      toast(`${key} is back to not started.`, "ok");
       await load();
     } catch (e) {
       if (!disposed) toast(`Reset failed: ${e.detail || e.message}`, "err");
@@ -306,12 +383,12 @@ export function renderPlan(container, jobId, opts = {}) {
   }
 
   async function deleteNode(key) {
-    if (!await askConfirm("Dependents are rewired around it and cascade-reset.",
+    if (!await askConfirm("The steps that came after it are re-wired around it and reset to not started.",
       { title: `Delete ${key}?`, confirmText: "Delete it", danger: true })) return;
     try {
       const res = await api.del(`/nodes/${jobId}/${key}`);
       if (disposed) return;
-      const extra = res.rewired && res.rewired.length ? ` — rewired ${res.rewired.length}` : "";
+      const extra = res.rewired && res.rewired.length ? ` — re-wired ${res.rewired.length}` : "";
       toast(`Deleted ${key}${extra}.`, "ok");
       closeDrawer();
       await load();
@@ -320,68 +397,54 @@ export function renderPlan(container, jobId, opts = {}) {
     }
   }
 
-  // ── Insert drawer ────────────────────────────────────────────────
-  function openInsertDrawer() {
+  // ── Insert ─────────────────────────────────────────────────────────
+  function openInsertDrawer({ after = null } = {}) {
     selectedKey = null;
     graph.clearSelected();
     drawer.classList.remove("hidden");
     queueMicrotask(armDrawer);   // §17.1118 — after this function mounts the fields
 
-    const keyIn = el("input", { class: "input mono", placeholder: "e.g. T99" });
-    const titleIn = el("input", { class: "input", placeholder: "Node title" });
-    const descIn = el("textarea", { class: "input node-textarea", rows: 2 });
-    const toolIn = el("input", { class: "input", value: "LLM" });
-    const promptIn = el("textarea", { class: "input node-textarea", rows: 4 });
-    const depsIn = depsSelect([], null);
+    const key = nextNodeKey(nodes.map((n) => n.node_key));
+    const titleIn = el("input", { class: "input", placeholder: "What the step achieves, e.g. Install Jellyfin" });
+    const descIn = el("textarea", { class: "input node-textarea", rows: 3, placeholder: "One or two sentences, in plain words." });
+    const toolIn = toolSelect(after && byKey[after] ? byKey[after].tool : "LLM");
+    const promptIn = el("textarea", { class: "input node-textarea", rows: 5, placeholder: "Optional — the engine writes a walkthrough from the title and description if you leave this blank." });
+    const deps = depsPicker(after ? [after] : [], null);
+    const addBtn = el("button", { class: "btn btn-sm btn-primary", text: "Add the step", onClick: () => doInsert() });
 
-    const addBtn = el("button", { class: "btn btn-sm btn-primary", text: "Insert", onClick: () => doInsert() });
-
-    mount(
-      drawer,
-      el(
-        "div",
-        { class: "drawer-head" },
-        el("div", { class: "row" }, el("span", { class: "tag", text: "new node" })),
-        el("button", { class: "btn btn-sm btn-ghost drawer-close", text: "✕", "aria-label": "Close editor", onClick: () => closeDrawer() })
-      ),
-      el("h3", { class: "drawer-title", text: "Insert node" }),
-      el(
-        "div",
-        { class: "node-form" },
-        field("Node key", keyIn, "Unique within the job."),
+    mount(drawer,
+      el("div", { class: "drawer-head" },
+        el("div", { class: "row" }, el("span", { class: "tag", text: "new step" }), el("span", { class: "mono faint", text: key })),
+        el("button", { class: "btn btn-sm btn-ghost drawer-close", text: "✕", "aria-label": "Close editor", onClick: () => closeDrawer() })),
+      el("h3", { class: "drawer-title", text: after ? `Insert a step after ${after}` : "Insert a step" }),
+      el("div", { class: "node-form" },
         field("Title", titleIn),
-        field("Description", descIn),
-        field("Tool", toolIn),
-        field("Prompt template", promptIn),
-        field("Depends on", depsIn)
-      ),
-      el("div", { class: "drawer-actions" }, addBtn)
-    );
+        field("What this step does", descIn),
+        field("It uses", toolIn),
+        field("Instructions the engine follows", promptIn),
+        field("Comes after", deps.node, "The steps that must finish before this one can start.")),
+      el("div", { class: "drawer-actions" }, addBtn, el("button", { class: "btn btn-sm btn-ghost", text: "Cancel", onClick: () => closeDrawer() })));
+    titleIn.focus();
 
     async function doInsert() {
-      const node_key = keyIn.value.trim();
       const title = titleIn.value.trim();
-      if (!node_key || !title) {
-        toast("Node key and title are required.", "err");
-        return;
-      }
+      if (!title) { toast("Give the step a title.", "err"); titleIn.focus(); return; }
       addBtn.disabled = true;
       try {
         await api.post(`/nodes/${jobId}`, {
-          node_key,
-          title,
+          node_key: key, title,
           description: descIn.value || null,
           tool: toolIn.value || "LLM",
           prompt_template: promptIn.value || null,
-          depends_on: readDeps(depsIn),
+          depends_on: deps.read(),
         });
         if (disposed) return;
-        toast(`Inserted ${node_key}.`, "ok");
+        toast(`Added ${key} — ${title}.`, "ok");
         closeDrawer();
         await load();
       } catch (e) {
         if (!disposed) {
-          toast(`Insert failed: ${e.detail || e.message}`, "err");
+          toast(`Could not add the step: ${e.detail || e.message}`, "err");
           addBtn.disabled = false;
         }
       }

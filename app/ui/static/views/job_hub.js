@@ -25,7 +25,8 @@ import { renderOutput } from "./output.js";
 import { renderPlan } from "./plan.js";
 import { renderJobTraces } from "./traces.js";
 import { renderJobCosts } from "./costs.js";
-import { renderApprovalDetail } from "./approvals.js";
+import { renderApprovalDetail, progressLine } from "./approvals.js";
+import * as router from "../router.js";
 import { renderChat } from "./assist.js";
 import { isAssist, startAssistFor } from "../exec_mode.js";
 import { deliverableLabel } from "../vocab.js";
@@ -165,6 +166,54 @@ function renderDetails(container, jobId, job) {
   return null;
 }
 
+// ── Plan, while it is still being drawn ──────────────────────────────
+// Between approval and the plan there are minutes of research + planning.
+// Leaving the gate (or reloading) used to land on an EMPTY canvas that never
+// updated. This pane shows the chain's own progress line, polls the job, and
+// re-opens the page on the Plan stage the moment the status moves on.
+export const DRAWING_STATUSES = new Set(["researching", "planning"]);
+export function planIsDrawing(job) {
+  return !!job && DRAWING_STATUSES.has(job.status) && !(job.node_count > 0);
+}
+function renderDrawing(container, jobId, job) {
+  let disposed = false;
+  const line = el("span", { class: "progress-msg", text: job.status === "researching" ? "Researching before drawing the plan…" : "Drawing the plan…" });
+  const startedAt = Date.parse(job.updated_at || job.created_at || "");
+  const meta = el("div", { class: "wait-meta" });
+  function paintMeta() {
+    const mins = startedAt ? Math.max(0, Math.floor((Date.now() - startedAt) / 60000)) : null;
+    mount(meta,
+      mins != null ? el("span", { class: "wait-elapsed mono", text: `${mins}m elapsed` }) : null,
+      el("span", { class: "faint", text: `${mins != null ? "· " : ""}usually a few minutes · this page updates itself` }));
+  }
+  paintMeta();
+  mount(container,
+    el("div", { class: "card card-pad drawing-card" },
+      el("div", { class: "approval-progress" }, el("span", { class: "spin" }), line),
+      meta,
+      el("p", { class: "dim wait-leave" }, "Safe to leave — the job keeps going, and Home will say when the plan is ready.")));
+  async function tick() {
+    if (disposed || document.hidden) return;
+    try {
+      const [st, fresh] = await Promise.all([
+        api.get(`/jobs/${jobId}/approve`).catch(() => null),
+        jobStore.get(jobId, { fresh: true }),
+      ]);
+      if (disposed) return;
+      if (st) { const t = progressLine(st); if (t) line.textContent = t; }
+      paintMeta();
+      if (!planIsDrawing(fresh)) {
+        window.dispatchEvent(new CustomEvent("scaffold:job-status", { detail: { jobId, status: fresh.status } }));
+        router.redispatch();   // the page re-opens on the stage the job is at now
+      }
+    } catch (e) {
+      line.textContent = `Could not reach the engine (${e.detail || e.message}) — retrying…`;
+    }
+  }
+  const timer = setInterval(tick, 4000);   // registered in tests/test_spa_poll_modal_wiring.py
+  return () => { disposed = true; clearInterval(timer); };
+}
+
 // ── Run ──────────────────────────────────────────────────────────────
 function renderRun(container, jobId, job, ctx, opts = {}) {
   if (!ASSIST_STATUSES.has(job.status)) return renderTheater(container, jobId, ctx);
@@ -248,6 +297,8 @@ function stageHint(job, jobId, active) {
       actionEl = el("a", { class: "btn btn-sm btn-primary", href: action.href, text: `${action.label} →` });
     }
   }
+  // the Plan stage's toolbar owns the Start control — never two Start buttons
+  if (active === "plan" && action && action.start) actionEl = null;
   const secEl = secondary && !pointsHere(secondary) ? el("a", { class: "btn btn-sm btn-ghost", href: secondary.href, text: secondary.label }) : null;
   if (!hint && !actionEl && !secEl) return null;
   return el("div", { class: "row row-wrap stage-hint-row" },
@@ -367,7 +418,7 @@ export default function jobHub(container, params) {
         childDispose = renderIdea(outlet, jobId, job);
         break;
       case "plan":
-        childDispose = renderPlan(outlet, jobId, { job });
+        childDispose = planIsDrawing(job) ? renderDrawing(outlet, jobId, job) : renderPlan(outlet, jobId, { job });
         break;
       case "run":      // §17.1161 — the Follow layout IS the walkthrough
       case "follow":   // §17.1160 — kept as an alias so links keep working
