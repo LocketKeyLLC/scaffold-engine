@@ -216,15 +216,23 @@ jobs:
       # asyncpg deps + the runner's own file-resolution: _MIGRATIONS_DIR is the
       # baked /code/db/migrations, overlaid by the PR's db/ mount). This mirrors
       # the production startup path exactly.
-      - name: Apply migrations 034+ (init.sql is the 033 baseline)
+      # §17.1184 — and then `alembic upgrade head`, exactly as the lifespan does
+      # after the SQL runner (§17.1075). Revisions 0002–0004 only added columns
+      # the DB-lane tests never read, so this gap stayed invisible until 0005
+      # changed jobs_status_check and the lane failed on a status the schema
+      # under test had never heard of.
+      - name: Apply migrations 034+ (init.sql is the 033 baseline), then alembic head
         run: |
           docker run --rm --network host \
             -e DATABASE_URL="$DATABASE_URL" \
             -e PYTHONPATH=/code:/code/sdk \
             -v "$PWD/app:/code/app:ro" \
             -v "$PWD/db:/code/db:ro" \
+            -v "$PWD/alembic:/code/alembic:ro" \
+            -v "$PWD/alembic.ini:/code/alembic.ini:ro" \
+            -w /code \
             scaffold-orchestrator:ci \
-            python -m app.migrations
+            sh -c 'python -m app.migrations && alembic upgrade head'
 
       # §17.812 — fail LOUDLY if the load-bearing RBAC/runtime schema is absent,
       # so a broken migration can't slip through on exception-handler coverage.
@@ -234,7 +242,8 @@ jobs:
             -v ON_ERROR_STOP=1 -c \
             "SELECT 'api_keys'::regclass, 'runtime_profile'::regclass, 'model_overrides'::regclass;" \
             -c "SELECT owner FROM jobs LIMIT 0;" \
-            -c "SELECT quick_mode FROM jobs LIMIT 0;"
+            -c "SELECT quick_mode FROM jobs LIMIT 0;" \
+            -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'jobs_status_check' AND pg_get_constraintdef(oid) LIKE '%awaiting_decision%') THEN RAISE EXCEPTION 'alembic head not applied: jobs_status_check lacks awaiting_decision (§17.1184)'; END IF; END \$\$;"
 
       # §17.555 — full unit suite + app/ coverage gate at COVERAGE_MIN%.
       # §17.588 — mount THIS PR's source over the (pulled) image so tests run

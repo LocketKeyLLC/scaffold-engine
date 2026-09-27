@@ -38,7 +38,11 @@ from app.database import get_db
 from app.modules.cleanup import reap_stale_jobs
 from app.modules.execution_agent import execute_all_nodes
 from app.modules.execution_handler import cancel_active_job, resume_cancelled_job
+from app.modules import decision_pause, run_broker
+from app.modules.profiles import resolve_job_overrides
 from app.schemas import (
+    DecideInput,
+    DecideResult,
     BriefUpdateInput,
     BriefUpdateResponse,
     CancelJobResult,
@@ -131,6 +135,60 @@ async def resume_job_endpoint(
         execute_all_nodes(job_id, model_overrides=body.model_overrides),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/jobs/{job_id}/decide", response_model=DecideResult, tags=["Management"])
+async def decide_endpoint(
+    job_id: UuidPath,
+    body: DecideInput,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1184 — answer the question an autonomous run stopped to ask.
+
+    The run parked the job in ``awaiting_decision`` at a decision node (the
+    question is on ``GET /jobs/{id}`` → ``metadata.awaiting_decision``). With
+    ``choice`` the answer becomes the node's output — downstream steps read it
+    as upstream context — and the node is done; with ``delegate=true`` the
+    node is marked as the engine's to decide and the next run executes it.
+    Either way the job returns to ``executing`` and the detached run is
+    restarted (idempotent per job; ``/execute/all`` attaches to it).
+
+    Status codes: 200 on success; 404 unknown job; 409 when the job is not
+    waiting on that node (``current_status`` / ``waiting_on`` in detail);
+    422 when neither a choice nor delegate=true was given.
+    """
+    try:
+        parsed_id = UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+    await assert_visible(db, principal, str(parsed_id), detail=f"Job {job_id} not found")
+    outcome = await decision_pause.resolve_decision(
+        db, str(parsed_id), body.node_key, choice=body.choice, note=body.note or "", delegate=body.delegate,
+    )
+    if outcome["outcome"] == "not_found":
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if outcome["outcome"] in ("not_waiting", "node_gone"):
+        raise HTTPException(status_code=409, detail={
+            "error": "job is not waiting on this decision",
+            "current_status": outcome.get("current_status"),
+            "waiting_on": outcome.get("waiting_on"),
+            "node_key": body.node_key,
+        })
+    # Restart the detached run (§17.1007): the response returns at once and the
+    # Run stage attaches to the run via /execute/all, which is idempotent.
+    run_started = False
+    try:
+        overrides = await resolve_job_overrides(str(parsed_id), None)
+        run_broker.start(str(parsed_id), lambda: execute_all_nodes(str(parsed_id), model_overrides=overrides))
+        run_started = True
+    except Exception as exc:  # the decision is recorded either way; the operator can press Run
+        logger.warning('event="decide_run_restart_failed" job=%s error=%s', job_id, exc)
+    return DecideResult(
+        job_id=str(parsed_id), node_key=body.node_key,
+        resolved="engine" if outcome["outcome"] == "delegated" else "operator",
+        status="executing", run_started=run_started,
     )
 
 

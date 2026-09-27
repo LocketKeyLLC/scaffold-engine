@@ -2019,6 +2019,10 @@ class Settings(BaseSettings):
     # fire. 0.5 → strict majority hands-on parks the job; a mostly-LLM DAG with
     # a stray Shell step still runs autonomously.
     hands_on_assist_gate_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    # §17.1184 — the autonomous run stops at a `decision` node and asks the
+    # operator (job → 'awaiting_decision'; POST /jobs/{id}/decide resumes)
+    # instead of letting the model pick for them. Off → the old behaviour.
+    decision_pause_enabled: bool = Field(default=True)
 
     # Manual prompt-edit cap (POST /prompts/{job_id}/{node_key}). Both
     # the orchestrator-side update_prompt() and the OWUI prompt_inspector

@@ -536,6 +536,18 @@ async def _get_next_node(db: AsyncSession, job_id: str) -> dict | None:
 async def _claim_ready_nodes(
     db: AsyncSession, job_id: str, limit: int,
 ) -> list[dict]:
+    """§17.1184 — a decision node the operator has not delegated is never
+    claimed here: the frontier runs everything else, then the drained loop
+    asks (``_pause_for_decision``)."""
+    from app.modules import decision_pause
+    ask = decision_pause.enabled()
+    delegated = await decision_pause.delegated_decisions(db, job_id) if ask else []
+    return await _claim_ready_nodes_sql(db, job_id, limit, ask=ask, delegated=delegated)
+
+
+async def _claim_ready_nodes_sql(
+    db: AsyncSession, job_id: str, limit: int, *, ask: bool = False, delegated: list[str] | None = None,
+) -> list[dict]:
     """§17.568 — atomically claim up to ``limit`` dep-satisfied pending nodes
     for parallel-frontier execution. This is the atomic claim the
     ``_get_next_node`` docstring (§17.409) prescribes for same-job parallelism:
@@ -546,12 +558,15 @@ async def _claim_ready_nodes(
     """
     if limit <= 0:
         return []
+    delegated = list(delegated or [])
     claimed = await db.execute(
         text("""
             UPDATE dag_nodes SET status = 'running', started_at = NOW()
             WHERE id IN (
                 SELECT n.id FROM dag_nodes n
                 WHERE n.job_id = :jid AND n.status = 'pending'
+                  AND (NOT :ask OR n.node_type IS DISTINCT FROM 'decision'
+                       OR n.node_key = ANY(:delegated))
                   AND NOT EXISTS (
                       SELECT 1
                       FROM unnest(COALESCE(n.depends_on, ARRAY[]::text[])) AS dep(k)
@@ -569,7 +584,7 @@ async def _claim_ready_nodes(
                       assigned_model, prompt_template, execution_order, tool, domain,
                       tool_config, retry_count, last_verification_reason
         """),
-        {"jid": job_id, "lim": limit},
+        {"jid": job_id, "lim": limit, "ask": ask, "delegated": delegated},
     )
     rows = [dict(r) for r in claimed.mappings()]
     await db.commit()
@@ -2264,7 +2279,7 @@ async def _peek_next_node(job_id: str) -> dict | None:
     async with async_session() as db:
         rows = await db.execute(
             text("""
-                SELECT node_key, title, tool, depends_on, execution_order
+                SELECT node_key, title, tool, node_type, depends_on, execution_order
                 FROM dag_nodes
                 WHERE job_id = :jid AND status = 'pending'
                 ORDER BY execution_order ASC
@@ -2284,6 +2299,50 @@ async def _peek_next_node(job_id: str) -> dict | None:
         if all(d in done_keys for d in deps):
             return c
     return None
+
+
+async def _pause_for_decision(job_id: str) -> dict | None:
+    """§17.1184 — if the next claimable step is a decision the operator has not
+    delegated, frame it, park the job in ``awaiting_decision`` and return the
+    SSE payload; else None. Called by BOTH execute paths before a claim, so a
+    decision node is never handed to the model unasked. The job leaves
+    'running' here, which makes the outer finally's cleanup a no-op (same
+    mechanism as the §17.624 park)."""
+    from app.modules import decision_pause
+    if not decision_pause.enabled():
+        return None
+    try:
+        async with async_session() as db:
+            node = await decision_pause.pending_decision(db, job_id)
+            if node is None:
+                return None
+            job = await _get_job(db, job_id)
+            brief = _brief_text(job)
+            upstream = await _fetch_upstream_outputs(db, job_id, node.get("depends_on") or [])
+    except Exception as exc:
+        # The LOOK-UP failing must not sink the run — but it is logged as an
+        # error, not a debug line: a silent miss here means the model decides
+        # for the operator (feedback: fail-soft hides the first-run defect).
+        logger.error("decision_pause_check_failed job=%s err=%s", job_id, exc)
+        return None
+    up_block = _format_upstream_block(upstream, node.get("node_key") or "") if upstream else ""
+    frame = await decision_pause.frame_decision(node, brief=brief, upstream=up_block)
+    async with async_session() as db:
+        return await decision_pause.park_awaiting_decision(db, job_id, node, frame)
+
+
+def _brief_text(job: dict | None) -> str:
+    """The refined brief as prose for the framing prompt (fail-soft to '')."""
+    import json as _json
+    rb = (job or {}).get("refined_brief")
+    if isinstance(rb, str):
+        try:
+            rb = _json.loads(rb)
+        except (ValueError, TypeError):
+            return rb[:2000]
+    if isinstance(rb, dict):
+        return str(rb.get("description") or rb.get("summary") or rb.get("goal") or _json.dumps(rb)[:2000])
+    return str((job or {}).get("input_text") or "")[:2000]
 
 
 async def _run_parallel_frontier(
@@ -2364,6 +2423,12 @@ async def _run_parallel_frontier(
             #    (blocked) case the job is still 'running', so execute_next_node
             #    runs its terminal/partial-compile + blocked-cause logic.
             if not inflight:
+                # §17.1184 — nothing running and nothing claimable: is that
+                # because the next step is the operator's to decide?
+                _asked = await _pause_for_decision(job_id)
+                if _asked is not None:
+                    yield _sse("awaiting_decision", _asked)
+                    return
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
                 async with async_session() as _term_db:
                     all_done = await _all_nodes_done(_term_db, job_id)
@@ -2524,6 +2589,8 @@ async def execute_all_nodes(
                               job hard-stopped ('failed') before the next node
         awaiting_assist     — §17.624 hands-on gate parked the job as a plan
                               (predominantly Shell/human DAG); run /assist
+        awaiting_decision   — §17.1184 the next step is a decision node; the
+                              job waits for POST /jobs/{id}/decide
     """
 
     def _sse(event: str, data: dict) -> str:
@@ -2717,6 +2784,12 @@ async def execute_all_nodes(
         while True:
             # ---- Session 4 (short peek only; execute_next_node owns its own sessions) ----
             node = await _peek_next_node(job_id)
+            if node is not None and str(node.get("node_type") or "") == "decision":
+                # §17.1184 — the operator's call, not the model's: ask and stop.
+                _asked = await _pause_for_decision(job_id)
+                if _asked is not None:
+                    yield _sse("awaiting_decision", _asked)
+                    return
             if node is not None:
                 yield _sse("node_start", {
                     "job_id": job_id,

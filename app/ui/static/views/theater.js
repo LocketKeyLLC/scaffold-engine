@@ -36,7 +36,7 @@ export function framesAfter(frames, seen) {
   return Array.isArray(frames) ? frames.slice(Math.max(0, seen | 0)) : [];
 }
 
-const TERMINAL = new Set(["pipeline_complete", "execution_failed", "error", "budget_exhausted", "awaiting_assist"]);
+const TERMINAL = new Set(["pipeline_complete", "execution_failed", "error", "budget_exhausted", "awaiting_assist", "awaiting_decision"]);
 
 function eventIcon(ev) {
   return (
@@ -50,6 +50,7 @@ function eventIcon(ev) {
       pipeline_complete: "★",
       execution_failed: "✕",
       awaiting_assist: "✦",
+      awaiting_decision: "?",
       budget_exhausted: "$",
       error: "⚠",
       warning: "⚠",
@@ -104,9 +105,9 @@ export function renderTheater(container, jobId, ctx = {}) {
     progressBar.classList.remove("hidden");
     const pct = Math.max(0, Math.min(100, pr.pct ?? 0));
     progFill.style.width = pct + "%";
-    progText.textContent =
-      (pr.summary || `${pr.completed}/${pr.total} ${pr.unit || ""}`) +
-      (pr.eta_human ? ` · ~${pr.eta_human} left` : "");
+    const summary = pr.summary || `${pr.completed}/${pr.total} ${pr.unit || ""}`;
+    // the server's summary may already carry the ETA — don't print it twice
+    progText.textContent = summary + (pr.eta_human && !summary.includes(pr.eta_human) ? ` · ~${pr.eta_human} left` : "");
   }
 
   const nodeListEl = el("div", { class: "theater-nodes" }, loading("Loading nodes…"));
@@ -311,6 +312,13 @@ export function renderTheater(container, jobId, ctx = {}) {
       if (data.detached_running && !running) {
         log("queued", "Attaching to the run already in progress…", "ok");
         attachRun();
+      } else if (data.job_status === "awaiting_decision" && !running) {
+        // §17.1184 — the question lives on the job row (metadata.awaiting_decision)
+        jobStore.get(jobId, { fresh: true }).then((job) => {
+          if (disposed) return;
+          const asked = job && job.metadata && job.metadata.awaiting_decision;
+          if (asked) showDecision(asked);
+        }).catch(() => {});
       } else if (data.job_status === "running" && !running) {
         // Row says running, no live task — the process restarted mid-run.
         // Say so honestly and let the operator decide to pick it up.
@@ -565,6 +573,13 @@ export function renderTheater(container, jobId, ctx = {}) {
         log("awaiting_assist", "Parked — awaiting assist (human-in-the-loop).", "warn");
         announceTerminal("waiting on you", "The run parked and needs you to drive the next step."); // §17.1007
         break;
+      case "awaiting_decision":
+        // §17.1184 — the run stopped at a decision step; the card asks, the
+        // answer restarts the run and this stream re-attaches to it.
+        log("awaiting_decision", `${data.node_key} — waiting for your decision`, "warn");
+        showDecision(data);
+        announceTerminal("needs your decision", data.question || "The run stopped to ask you a question.");
+        break;
       case "pipeline_complete": {
         const nFailed = Number(data.failed || 0);
         // §17.1007 — a "complete" pipeline carrying failed nodes is a failure
@@ -677,6 +692,79 @@ export function renderTheater(container, jobId, ctx = {}) {
             : null)
       )
     );
+  }
+
+  // §17.1184 — the run stopped to ask. One question, the options the plan
+  // names (a suggestion marked as such — the choice stays the operator's), a
+  // line for their own answer, and "let the engine decide" as an explicit act.
+  function showDecision(d) {
+    const nodeKey = d.node_key;
+    const opts = Array.isArray(d.options) ? d.options : [];
+    const name = `decision-${nodeKey}`;
+    const other = el("input", { class: "input decision-other", type: "text", placeholder: opts.length ? "Or answer in your own words…" : "Your answer…", "aria-label": "Your own answer" });
+    const note = el("textarea", { class: "input decision-note", placeholder: "Anything the engine should know about this choice (optional)" });
+    const rows = opts.map((o, i) => {
+      const input = el("input", { type: "radio", name, value: o.label });
+      if (o.label === d.suggested) input.checked = true;
+      return el("label", { class: "decision-option" },
+        input,
+        el("span", { class: "opt-label" }, o.label,
+          o.label === d.suggested ? el("span", { class: "tag suggested", text: "suggested" }) : null),
+        el("span", { class: "opt-meta dim" },
+          o.fit ? `Fits: ${o.fit}` : "", o.fit && o.tradeoff ? " · " : "", o.tradeoff ? `Trade-off: ${o.tradeoff}` : ""));
+    });
+    other.addEventListener("input", () => { if (other.value.trim()) rows.forEach((r) => { r.querySelector("input").checked = false; }); });
+    rows.forEach((r) => r.addEventListener("change", () => { other.value = ""; }));
+
+    const chosen = () => {
+      const typed = other.value.trim();
+      if (typed) return typed;
+      const picked = rows.map((r) => r.querySelector("input")).find((i) => i.checked);
+      return picked ? picked.value : "";
+    };
+    const decideBtn = el("button", { class: "btn btn-primary", text: "Decide and continue" });
+    const engineBtn = el("button", { class: "btn btn-ghost", text: "Let the engine decide" });
+    async function send(body, label) {
+      decideBtn.disabled = engineBtn.disabled = true;
+      decideBtn.textContent = label;
+      try {
+        const res = await api.post(`/jobs/${jobId}/decide`, { node_key: nodeKey, ...body });
+        summaryEl.classList.add("hidden");
+        toast(res.resolved === "engine" ? `${nodeKey} handed to the engine — continuing.` : `${nodeKey} decided — continuing.`, "ok");
+        ensureNode(nodeKey, { status: res.resolved === "engine" ? "pending" : "done" });
+        renderNodes();
+        if (res.run_started && !running) attachRun();
+        else await loadInitial();
+      } catch (e) {
+        toast(`Could not record the decision: ${e.detail && e.detail.error ? e.detail.error : e.detail || e.message}`, "err");
+        decideBtn.disabled = engineBtn.disabled = false;
+        decideBtn.textContent = "Decide and continue";
+      }
+    }
+    decideBtn.addEventListener("click", () => {
+      const c = chosen();
+      if (!c) { toast("Pick an option or type your answer first.", "warn"); other.focus(); return; }
+      send({ choice: c, note: note.value.trim() || null }, "Recording…");
+    });
+    engineBtn.addEventListener("click", () => send({ delegate: true, note: note.value.trim() || null }, "Handing over…"));
+
+    summaryEl.classList.remove("hidden");
+    mount(
+      summaryEl,
+      el("div", { class: "card card-pad summary-card decision-card" },
+        el("div", { class: "summary-title", text: "The run stopped to ask you" }),
+        el("div", { class: "summary-where" }, el("span", { class: "mono", text: nodeKey }), el("span", { text: ` · ${d.title || ""}` })),
+        el("div", { class: "decision-q", text: d.question || d.title || "What do you want here?" }),
+        !d.framed && d.detail ? el("div", { class: "decision-detail dim", text: d.detail }) : null,
+        rows.length ? el("div", { class: "decision-options" }, ...rows) : null,
+        d.suggested && d.why ? el("div", { class: "decision-why dim", text: `Why ${d.suggested}: ${d.why} — your call.` }) : null,
+        other,
+        note,
+        el("div", { class: "row row-wrap summary-actions" }, decideBtn, engineBtn,
+          el("a", { class: "btn btn-sm", href: `#/job/${jobId}/plan`, text: "See the plan" }))
+      )
+    );
+    other.scrollIntoView && summaryEl.scrollIntoView({ block: "nearest" });
   }
 
   loadInitial();

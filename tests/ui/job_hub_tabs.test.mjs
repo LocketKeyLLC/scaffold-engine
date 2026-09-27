@@ -75,7 +75,7 @@ test("#/job/:id opens on the stage the job is AT", () => {
   assert.equal(stageFor(j("researching")), "plan");
   assert.equal(stageFor(j("planning")), "plan");
   assert.equal(stageFor(j("executing")), "plan");
-  for (const s of ["running", "assisted_running", "assisted_paused", "awaiting_assist", "blocked", "failed"]) assert.equal(stageFor(j(s)), "run", s);
+  for (const s of ["running", "assisted_running", "assisted_paused", "awaiting_assist", "awaiting_decision", "blocked", "failed"]) assert.equal(stageFor(j(s)), "run", s);
   assert.equal(stageFor(j("completed")), "output");
   assert.equal(stageFor(j("cancelled", { node_count: 0 })), "idea");
   assert.equal(stageFor(j("cancelled")), "plan");

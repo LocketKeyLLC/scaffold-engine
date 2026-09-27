@@ -17,6 +17,7 @@ export const STATUS_LABEL = {
   running: "Running",
   aggregating: "Combining results",
   awaiting_assist: "Ready to walk through",
+  awaiting_decision: "Waiting for your decision",
   assisted_executing: "In progress",
   assisted_running: "In progress",
   assisted_paused: "Paused",
@@ -61,7 +62,7 @@ export function deliverableLabel(kind) {
 
 // The three Home buckets. "Needs you" is what an operator opens the app for;
 // "in progress" is the engine working; "done" is history.
-export const NEEDS_YOU = new Set(["awaiting_confirmation", "awaiting_assist", "assisted_paused", "blocked", "failed"]);
+export const NEEDS_YOU = new Set(["awaiting_confirmation", "awaiting_assist", "awaiting_decision", "assisted_paused", "blocked", "failed"]);
 export const IN_PROGRESS = new Set(["pending", "refining", "researching", "planning", "executing", "running", "assisted_executing", "assisted_running", "aggregating"]);
 export const DONE = new Set(["completed", "cancelled"]);
 
@@ -101,6 +102,8 @@ export function nextStep(job, { progress } = {}) {
       return { label: "Watch", href: `#/job/${id}`, primary: false, hint: "Combining the component results." };
     case "awaiting_assist":
       return { label: "Start walkthrough", href: `#/job/${id}/run`, primary: true, hint: "The plan is parked for you to walk through step by step." };
+    case "awaiting_decision":
+      return { label: "Decide", href: `#/job/${id}/run`, primary: true, hint: "The run stopped to ask you a question — answer it and it continues." };
     case "assisted_executing":
     case "assisted_running":
       return { label: "Continue", href: `#/job/${id}/run`, primary: true, hint: `Walking through the plan${pos}.` };

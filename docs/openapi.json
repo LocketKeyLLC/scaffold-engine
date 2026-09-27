@@ -1160,6 +1160,88 @@
         "title": "DagInput",
         "type": "object"
       },
+      "DecideInput": {
+        "description": "§17.1184 — body for POST /jobs/{job_id}/decide. Either the operator's\n``choice`` (an option label or their own words) or ``delegate=True``\n(\"let the engine decide\"); ``note`` rides along as context.",
+        "properties": {
+          "choice": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Choice"
+          },
+          "delegate": {
+            "default": false,
+            "title": "Delegate",
+            "type": "boolean"
+          },
+          "node_key": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Node Key",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "node_key"
+        ],
+        "title": "DecideInput",
+        "type": "object"
+      },
+      "DecideResult": {
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "node_key": {
+            "title": "Node Key",
+            "type": "string"
+          },
+          "resolved": {
+            "enum": [
+              "operator",
+              "engine"
+            ],
+            "title": "Resolved",
+            "type": "string"
+          },
+          "run_started": {
+            "default": false,
+            "title": "Run Started",
+            "type": "boolean"
+          },
+          "status": {
+            "default": "executing",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "node_key",
+          "resolved"
+        ],
+        "title": "DecideResult",
+        "type": "object"
+      },
       "DedupLogEntry": {
         "additionalProperties": true,
         "description": "One row of ``GET /rag/dedup``'s ``entries`` list.",
@@ -4495,6 +4577,11 @@
           "awaiting_confirmation": {
             "default": 0,
             "title": "Awaiting Confirmation",
+            "type": "integer"
+          },
+          "awaiting_decision": {
+            "default": 0,
+            "title": "Awaiting Decision",
             "type": "integer"
           },
           "blocked": {
@@ -9376,6 +9463,68 @@
         ]
       }
     },
+    "/jobs/{job_id}/decide": {
+      "post": {
+        "description": "§17.1184 — answer the question an autonomous run stopped to ask.\n\nThe run parked the job in ``awaiting_decision`` at a decision node (the\nquestion is on ``GET /jobs/{id}`` → ``metadata.awaiting_decision``). With\n``choice`` the answer becomes the node's output — downstream steps read it\nas upstream context — and the node is done; with ``delegate=true`` the\nnode is marked as the engine's to decide and the next run executes it.\nEither way the job returns to ``executing`` and the detached run is\nrestarted (idempotent per job; ``/execute/all`` attaches to it).\n\nStatus codes: 200 on success; 404 unknown job; 409 when the job is not\nwaiting on that node (``current_status`` / ``waiting_on`` in detail);\n422 when neither a choice nor delegate=true was given.",
+        "operationId": "decide_endpoint_jobs__job_id__decide_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecideInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecideResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Decide Endpoint",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
     "/jobs/{job_id}/reconciliation": {
       "get": {
         "description": "§17.1047 — every change the reconciliation triggers (§17.1043–1046)\napplied to this job's plan: trigger, source step, corrections, and per\nnode the task text before and after — with which nodes can still be\nreverted (pending, text unchanged since).",
@@ -13298,7 +13447,8 @@
                     "assisted_running",
                     "assisted_paused",
                     "aggregating",
-                    "awaiting_assist"
+                    "awaiting_assist",
+                    "awaiting_decision"
                   ],
                   "type": "string"
                 },

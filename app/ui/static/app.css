@@ -410,7 +410,7 @@ select.input:focus-visible,
 .badge.st-running, .badge.st-executing, .badge.st-assisted_running, .badge.st-assisted_executing { color: var(--run); border-color: rgba(88, 166, 255, 0.4); background: rgba(88, 166, 255, 0.1); }
 .badge.st-failed, .badge.st-error { color: var(--err); border-color: rgba(248, 81, 73, 0.4); background: rgba(248, 81, 73, 0.1); }
 .badge.st-cancelled, .badge.st-skipped, .badge.st-abandoned { color: var(--text-faint); }
-.badge.st-blocked, .badge.st-awaiting_confirmation, .badge.st-awaiting_assist, .badge.st-paused, .badge.st-assisted_paused, .badge.st-awaiting_reply { color: var(--warn); border-color: rgba(210, 153, 34, 0.4); background: rgba(210, 153, 34, 0.1); }
+.badge.st-blocked, .badge.st-awaiting_confirmation, .badge.st-awaiting_assist, .badge.st-awaiting_decision, .badge.st-paused, .badge.st-assisted_paused, .badge.st-awaiting_reply { color: var(--warn); border-color: rgba(210, 153, 34, 0.4); background: rgba(210, 153, 34, 0.1); }
 .badge.st-pending, .badge.st-refining, .badge.st-planning, .badge.st-researching, .badge.st-aggregating, .badge.st-active { color: var(--purple); border-color: rgba(188, 140, 255, 0.4); background: rgba(188, 140, 255, 0.1); }
 
 .tag {
@@ -1787,3 +1787,18 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
 .follow-session-btn { margin-left: 4px; }
 .follow-rail-foot { justify-content: space-between; }
 @media (max-width: 720px) { .follow-drawer { width: 100%; } }
+
+/* §17.1184 — the run stopped to ask: one question, the options, a suggestion, the answer box */
+.decision-card { border-color: var(--warn); }
+.decision-q { font-size: 1.05rem; font-weight: 600; margin: 0.25rem 0 0.5rem; }
+.decision-detail { white-space: pre-wrap; max-height: 12rem; overflow: auto; }
+.decision-options { display: grid; gap: 0.5rem; margin: 0.75rem 0; }
+.decision-option { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 0.6rem; align-items: start; padding: 0.55rem 0.7rem; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+.decision-option:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.decision-option .opt-label { font-weight: 600; }
+.decision-option .opt-meta { grid-column: 2; font-size: 0.9em; }
+.decision-option .tag.suggested { margin-left: 0.4rem; }
+.decision-other { width: 100%; box-sizing: border-box; margin-top: 0.25rem; }
+.decision-note { min-height: 3.2rem; }
+.decision-card .input { margin-top: 0.5rem; }
+.decision-why { margin: 0.25rem 0 0.5rem; }
