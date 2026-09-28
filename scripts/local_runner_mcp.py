@@ -1341,9 +1341,26 @@ def install(args, *, run=_run) -> int:
         return 1
     print(f"[4/4] port {args.port} answers ({why})")
     how = f"detached process, log {dest_dir}/runner.log" if detached else f"service {UNIT_NAME}"
+    # §17.1194 — the verdict line says which MODE the writes got. It used to
+    # end "…and supervised writes for 4 approved prefix(es)" whether or not the
+    # root grant was established, so an operator read OK: and approved a
+    # `qm set` that could only ever come back "permission denied". Live on
+    # Proxmox: no `sudo` package at all, so visudo was missing, the sudoers
+    # file was never written, and the one `[2b/4]` line saying so was three
+    # lines above a cheerful OK:.
+    writes_note = ""
+    if write_allow:
+        if write_sudo:
+            writes_note = f", and supervised writes for {len(write_allow)} approved prefix(es) AS ROOT"
+        else:
+            writes_note = (f", and supervised writes for {len(write_allow)} approved prefix(es) — but UNPRIVILEGED: "
+                           f"they run as {args.run_as}, so anything needing root (qm, pct, pvesm on Proxmox) will come "
+                           f"back 'permission denied'. "
+                           + ("Install sudo (`apt install sudo`) and re-run this line to grant root for exactly "
+                              "those prefixes." if not shutil.which("visudo")
+                              else "visudo rejected the rule — see the [2b/4] line above."))
     print(f"OK: local runner active on {args.host}:{args.port}/mcp/ ({how}) as the unprivileged user "
-          f"{args.run_as}; the engine can now run its read-only checks here"
-          + (f", and supervised writes for {len(write_allow)} approved prefix(es)" if write_allow else "") + ".")
+          f"{args.run_as}; the engine can now run its read-only checks here" + writes_note + ".")
     return 0
 
 

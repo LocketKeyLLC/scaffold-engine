@@ -436,3 +436,47 @@ def test_the_channel_rules_name_the_forms_the_gate_can_read():
     `if … then … fi` whose `then`-part no gate can read."""
     for phrase in ("its OWN shell", "No heredocs", "tee", "if … then … fi", "guard chain", "read-only command"):
         assert phrase in sr.CHANNEL_RULES, phrase
+
+
+# ── §17.1194 — a refused prefix is a permission request ──────────────────
+
+@pytest.mark.asyncio
+async def test_a_refused_prefix_is_remembered_so_it_can_be_offered():
+    """The allow-list the engine recommends is read off the PLAN's words; what
+    runs is the drafted RUNBOOK, and it reaches for more. Live: ADD65's text
+    named `qm agent 106 ping` while its runbook needed `qm start 106`, so the
+    run stopped on a prefix the recommendation could not have known about."""
+    db = AsyncMock()
+    frame = {"node_key": "ADD65", "refused": [
+        {"command": "qm status 106 | grep -q running || qm start 106",
+         "why": "not on the write-allow list: qm start 106"},
+        {"command": "for i in $(seq 1 12); do …", "why": "substitution/heredoc"},
+    ]}
+    got = await sr.record_wanted_prefixes(db, "job-1", frame)
+    assert got == ["qm start"], got                       # the heredoc one is not a permission question
+    sql = " ".join(str(db.execute.await_args[0][0]).split())
+    assert "wanted_prefixes" in sql and "UPDATE jobs" in sql, sql
+    assert json.loads(db.execute.await_args[0][1]["add"]) == ["qm start"]
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_recorded_when_nothing_was_refused_for_permission():
+    db = AsyncMock()
+    assert await sr.record_wanted_prefixes(db, "j", {"refused": []}) == []
+    assert await sr.record_wanted_prefixes(
+        db, "j", {"refused": [{"command": "reboot", "why": "host power — do that by hand"}]}) == []
+    db.execute.assert_not_awaited()
+
+
+def test_the_pause_on_screen_is_read_for_wanted_prefixes_too():
+    """§17.1195 — reading only what was RECORDED sends an operator to copy an
+    install line missing the very prefix the card in front of them is refusing
+    (a run parked before the recording existed, or by an older build)."""
+    frame = {"refused": [
+        {"command": "qm status 106 | grep -q running || qm start 106",
+         "why": "not on the write-allow list: qm start 106"},
+        {"command": "for i in $(seq 1 12); do …", "why": "substitution/heredoc"},
+        {"command": "reboot", "why": "host power — do that by hand"},
+    ]}
+    assert sr.wanted_prefixes_in(frame) == ["qm start"]
+    assert sr.wanted_prefixes_in({}) == [] and sr.wanted_prefixes_in({"refused": []}) == []

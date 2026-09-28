@@ -77,6 +77,57 @@ async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:
     return (spec, pol) if pol else None
 
 
+_NOT_ALLOWED = "not on the write-allow list"
+
+
+def wanted_prefixes_in(frame: dict) -> list[str]:
+    """The prefixes a pause frame was refused for, in first-seen order.
+
+    Only PERMISSION refusals: a `substitution/heredoc` is a shape the channel
+    cannot carry whatever is allowed, and a denylist refusal is never granted.
+    Pure, so the same reading serves the moment of the refusal (recorded on the
+    job) and the pause an operator is looking at now (§17.1195)."""
+    from app.modules.assist_supervised import _SUDO_RE
+    wanted: list[str] = []
+    for r in (frame or {}).get("refused") or []:
+        why = str((r or {}).get("why") or "")
+        if not why.startswith(_NOT_ALLOWED):
+            continue
+        bare = _SUDO_RE.sub("", why[len(_NOT_ALLOWED):].lstrip(": ").strip(), count=1)
+        for p in prefixes_for_command(bare)[0] or [prefix_for(bare)]:
+            if p and p not in wanted:
+                wanted.append(p)
+    return wanted
+
+
+async def record_wanted_prefixes(db: AsyncSession, job_id: str, frame: dict) -> list[str]:
+    """§17.1194 — remember the prefixes a real step was refused for.
+
+    The allow-list the engine recommends (§17.1189) is read off the PLAN's own
+    words. What actually runs is the DRAFTED runbook, and it reaches for more:
+    live, step ADD65's plan text said `qm agent 106 ping` (a check) while its
+    runbook needed `qm start 106` to get there — so the run stopped on a prefix
+    the recommendation could not have known about. Guessing the superset up
+    front would mean recommending permissions for commands that may never run;
+    asking at the moment one is refused is what a phone does with a camera.
+
+    Stored on the job, so the connection page can offer them next to the ones
+    the plan named. Names only — this is a permission request, not a command.
+    """
+    wanted = wanted_prefixes_in(frame)
+    if not wanted:
+        return []
+    await db.execute(text("""
+        UPDATE jobs SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{wanted_prefixes}',
+               COALESCE(metadata->'wanted_prefixes', '[]'::jsonb) || CAST(:add AS jsonb), true)
+         WHERE id = :jid
+    """), {"jid": job_id, "add": json.dumps(wanted)})
+    await db.commit()
+    logger.warning("wanted_prefixes_recorded job=%s node=%s prefixes=%s",
+                   job_id, frame.get("node_key"), ",".join(wanted))
+    return wanted
+
+
 async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     """The first dep-satisfied pending node that does host work (§17.1183)
     and has no recorded decision — the step the run would claim next."""

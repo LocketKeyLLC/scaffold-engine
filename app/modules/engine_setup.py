@@ -891,12 +891,48 @@ async def _plan_write_prefixes(db) -> list[str]:
     return [p["prefix"] for p in await _sr.write_prefixes_for_job(db, job_id) if p["prefix"]]
 
 
+async def _wanted_from_open_pause(db, job_id: str) -> list[str]:
+    """§17.1195 — prefixes the pause currently on screen was refused for."""
+    from app.modules import supervised_runs as _sr
+    try:
+        row = (await db.execute(text("SELECT metadata->'awaiting_decision' FROM jobs WHERE id = :j"),
+                                {"j": job_id})).scalar()
+        frame = row if isinstance(row, dict) else (json.loads(row) if isinstance(row, str) else {})
+        return _sr.wanted_prefixes_in(frame or {})
+    except Exception as exc:
+        logger.warning("wanted_from_open_pause_failed job=%s err=%r", job_id, exc)
+        return []
+
+
 async def prefixes_needed(db) -> list[dict]:
     """§17.1193 — the prefixes with the steps behind each, for the connection
-    page (the status line's short form is `_write_prefix_hint`)."""
+    page (the status line's short form is `_write_prefix_hint`).
+
+    §17.1194 — plus the ones a real step was actually REFUSED for. The list read
+    off the plan's words is not the whole truth: what runs is the drafted
+    runbook, and it reaches for more (live: ADD65's text named `qm agent` while
+    its runbook needed `qm start`). Those arrive marked, so the operator widens
+    the list for a reason they can see rather than a guess.
+    """
     from app.modules import supervised_runs as _sr
     job_id = await open_plan_job(db)
-    return await _sr.write_prefixes_for_job(db, job_id) if job_id else []
+    if job_id is None:
+        return []
+    out = await _sr.write_prefixes_for_job(db, job_id)
+    have = {p["prefix"] for p in out}
+    row = (await db.execute(text("SELECT metadata->'wanted_prefixes' FROM jobs WHERE id = :j"),
+                            {"j": job_id})).scalar()
+    wanted = list(row if isinstance(row, list) else (json.loads(row) if isinstance(row, str) else []))
+    # §17.1195 — and the pause the operator is looking at RIGHT NOW. Reading
+    # only what was recorded means a run parked before this existed, or parked
+    # by an older build, sends them to copy an install line that is missing the
+    # very prefix the card in front of them is refusing. The live frame is the
+    # truth for the question "what do I need to allow to get past this?".
+    wanted += await _wanted_from_open_pause(db, job_id)
+    for p in dict.fromkeys(str(w) for w in wanted or []):
+        if p and p not in have:
+            out.append({"prefix": p, "steps": [], "why": "a step asked for this and was refused"})
+    return out
 
 
 def install_line(ctx: dict, *, prefixes: Optional[list[str]] = None,

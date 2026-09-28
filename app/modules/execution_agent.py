@@ -2369,6 +2369,14 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         logger.warning("supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
                        job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame["commands"]),
                        len(frame["refused"]), frame["runner"])
+        # §17.1194 — a prefix a REAL step was refused for is the honest way to
+        # widen the allow-list: the recommendation is read off the plan's words,
+        # the runbook reaches for more. Recorded, never acted on.
+        try:
+            async with async_session() as db:
+                await supervised_runs.record_wanted_prefixes(db, job_id, {**frame, "node_key": run_node.get("node_key")})
+        except Exception as exc:
+            logger.warning("wanted_prefixes_record_failed job=%s err=%r", job_id, exc)
     async with async_session() as db:
         return await decision_pause.park_awaiting_decision(db, job_id, target, frame)
 

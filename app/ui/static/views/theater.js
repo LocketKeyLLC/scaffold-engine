@@ -175,7 +175,11 @@ export function renderTheater(container, jobId, ctx = {}) {
           "div",
           { class: `theater-node st-${n.status}${key === currentKey ? " current" : ""}` },
           el("span", { class: "tn-key mono", text: key }),
-          el("span", { class: "tn-title", text: n.title || "" }),
+          // §17.1195 — the list ellipsises every title ("Verify the state
+          // chec…"), and there was nothing to read the rest with: "there are
+          // lines or text near the left side and top but i am unable to access
+          // the information". A hover/long-press title carries the whole thing.
+          el("span", { class: "tn-title", text: n.title || "", title: n.title || "" }),
           // §17.1135 — the fields /exec/status carries and nothing rendered (ledger D-7):
           // a runnable pending node, and when a node started / finished
           n.is_deliverable ? el("span", { class: "tag", title: "Deliverable node — its output is part of the result", text: "★" }) : null,
@@ -787,7 +791,14 @@ export function renderTheater(container, jobId, ctx = {}) {
         verify.length ? el("pre", { class: "decision-run-block" }, verifyPre) : null,
         refused.length ? el("div", { class: "decision-refused" },
           el("div", { class: "decision-run-label", text: "The engine cannot run this block — refused before anything was sent:" }),
-          ...refused.map((r) => el("div", { class: "mono faint", text: `${r.command} — ${r.why}` }))) : null,
+          ...refused.map((r) => el("div", { class: "mono faint", text: `${r.command} — ${r.why}` })),
+          // §17.1195 — a refusal that says only WHAT is wrong strands the
+          // operator: "the Web UI states that i need to permission but nowhere
+          // does it show me how to allow the permission". A permission refusal
+          // now names the prefix and links to the page that grants it; the
+          // engine has already recorded it there (§17.1194), so the install
+          // line on that page contains it.
+          ...permissionHelp(refused)) : null,
         d.why ? el("div", { class: "decision-why dim", text: `${d.why} — your call.` }) : null,
         el("details", { class: "decision-runbook" }, el("summary", { text: "The full runbook the engine drafted" }),
           el("div", { class: "md", html: mdToHtml(d.runbook || "") })),
@@ -802,6 +813,37 @@ export function renderTheater(container, jobId, ctx = {}) {
   // §17.1184 — the run stopped to ask. One question, the options the plan
   // names (a suggestion marked as such — the choice stays the operator's), a
   // line for their own answer, and "let the engine decide" as an explicit act.
+  // §17.1195 — what to DO about each kind of refusal, in the operator's terms.
+  // Three kinds reach this card and they need different things: a permission
+  // one is fixable on the Machines page (and the engine has already put the
+  // prefix there); a shape one is the engine's own to redraft; a denylist one
+  // is never granted and must stay the operator's.
+  const _NOT_ALLOWED = "not on the write-allow list";
+  function permissionHelp(refused) {
+    const out = [];
+    const prefixes = [];
+    for (const r of refused) {
+      const why = String(r.why || "");
+      if (!why.startsWith(_NOT_ALLOWED)) continue;
+      const bare = why.slice(_NOT_ALLOWED.length).replace(/^[:\s]+/, "").trim();
+      const p = bare.split(/\s+/).slice(0, 2).join(" ");
+      if (p && !prefixes.includes(p)) prefixes.push(p);
+    }
+    if (prefixes.length) {
+      out.push(el("p", { class: "decision-fix", },
+        el("span", { text: `To let the engine do this, allow ${prefixes.map((p) => `“${p}”`).join(" and ")} on this machine — ` }),
+        el("a", { href: "#/settings/machines", text: "Settings → Machines" }),
+        el("span", { text: " already lists it; copy the line there and run it once on the machine, then press Decide again." })));
+    }
+    if (refused.some((r) => /substitution|heredoc|redirect/.test(String(r.why || "")))) {
+      out.push(el("p", { class: "decision-fix dim", text: "One command uses a shell form the channel cannot carry (a loop, a $(…) or a redirect). No permission fixes that — run this step yourself, or skip it." }));
+    }
+    if (refused.some((r) => /do that by hand|catastrophic|destroyer|fork bomb|power/.test(String(r.why || "")))) {
+      out.push(el("p", { class: "decision-fix dim", text: "One command is on the never-allowed list (host power, a disk destroyer). The engine will not run it whatever you allow — this step stays yours." }));
+    }
+    return out;
+  }
+
   function showDecision(d) {
     if (d && d.kind === "run") return showRunApproval(d);   // §17.1186
     const nodeKey = d.node_key;

@@ -103,6 +103,18 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
             "allow": list((policy or {}).get("allow") or []),
             "sudo": bool((policy or {}).get("sudo")),
             "helper": (policy or {}).get("helper"),
+            # §17.1194 — `sudo: false` is not a detail. The helper runs as an
+            # unprivileged user, so on a Proxmox host every allow-listed
+            # command (`qm`, `pct`, `pvesm`) comes back "permission denied" —
+            # after the operator approved it. Live cause: the host has no
+            # `sudo` package at all, so the installer's visudo step could not
+            # run and the grant was never written.
+            "privilege_note": ("" if not policy or policy.get("sudo") else
+                               "These run as the runner's unprivileged user, so anything needing root — qm, pct and "
+                               "pvesm on a Proxmox host — will be refused by the machine itself. The install could not "
+                               "write the root grant: that step needs the `sudo` package on the target (`apt install "
+                               "sudo`), after which re-running the line above grants root for exactly these prefixes "
+                               "and nothing else."),
         },
         "secrets": secrets,
         "secrets_error": secrets_error,
