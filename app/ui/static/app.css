@@ -1833,3 +1833,9 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
    open but UNPRIVILEGED, so a command they approve is refused by the machine
    itself. Uses --warn, which the log lines already define. */
 .warn-line { border-left: 3px solid var(--warn); padding-left: 10px; }
+
+/* §17.1195 — the "here is what to do about it" line under a refusal. The
+   refusal said only what was wrong, which strands the operator on the one
+   screen where they need a next step. */
+.decision-fix { margin: 6px 0 0; font-size: 13px; }
+.decision-fix a { color: var(--accent); }
