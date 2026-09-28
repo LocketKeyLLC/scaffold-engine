@@ -76,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "13"
+HELPER_VERSION = "14"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -950,7 +950,8 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
                           "bytes (the operator approved the block first). Refused unless its head is on this runner's "
                           f"--write-allow list ({len(writes)} prefix{'es' if len(writes) != 1 else ''}). "
                           f"(helper v{HELPER_VERSION})")
-    async def run_supervised(command: str, approval: dict, timeout_s: int = 180) -> str:
+    async def run_supervised(command: str, approval: dict, timeout_s: int = 180,
+                             env: dict | None = None) -> str:
         if not writes:
             return "(refused by the local runner: no --write-allow list — the supervised channel is off here)"
         why = catastrophic(command)
@@ -971,16 +972,30 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
         # and argv never carries the value. A reference this runner cannot
         # resolve is refused: running it would leave the shell to expand it to
         # the empty string and the command would half-work with a blank secret.
+        # §17.1193 — a value may come from this runner's own file OR from the
+        # engine, sent out of band with this call (the operator typed it into a
+        # form once and the engine keeps it encrypted). Either way it is bound
+        # to a `$NAME` the APPROVED command already references: a name the
+        # command does not mention is refused, so a caller cannot smuggle
+        # environment into a block the operator approved. The command bytes —
+        # and so the HMAC over them — are untouched either way.
         refs = secret_refs(command)
-        env = None
+        sent = {k: v for k, v in (env or {}).items() if isinstance(k, str) and isinstance(v, str)}
+        extra = [k for k in sent if k not in refs]
+        if extra:
+            log.warning("REFUSED supervised (env not referenced by the command: %s): %s", ",".join(extra), command)
+            return ("(refused by the local runner: the request carried values for "
+                    + ", ".join(f"${n}" for n in extra) + ", which this command does not reference)")
+        run_env = None
         if refs:
-            unknown = [n for n in refs if n not in store]
+            resolved = {n: (sent.get(n) or store.get(n) or "") for n in refs}
+            unknown = [n for n, v in resolved.items() if not v]
             if unknown:
                 log.warning("REFUSED supervised (unknown secret %s): %s", ",".join(unknown), command)
                 return ("(refused by the local runner: this command needs "
                         + ", ".join(f"${n}" for n in unknown)
-                        + ", which is not in this runner's secrets file)")
-            env = {**os.environ, **{n: store[n] for n in refs}}
+                        + ", which neither the engine sent nor this runner's secrets file holds)")
+            run_env = {**os.environ, **resolved}
         run_cmd = command
         if write_sudo and not read_only(command)[0]:
             # `sudo -n` drops the environment; the names this command needs are
@@ -990,13 +1005,13 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
         aid = str(approval.get("id", "?"))
         log.warning("SUPERVISED id=%s RUN: %s", aid, run_cmd)   # `$NAME`, never its value
         proc = await asyncio.create_subprocess_shell(
-            run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env)
+            run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=run_env)
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         except asyncio.TimeoutError:
             proc.kill()
             return f"[exit timeout] (timed out after {timeout_s}s)"
-        text = redact(out.decode("utf-8", errors="replace")[:20000], store)
+        text = redact(out.decode("utf-8", errors="replace")[:20000], {**store, **sent})
         log.warning("SUPERVISED id=%s exit=%s chars=%d secrets=%d", aid, proc.returncode, len(text), len(refs))
         return f"[exit {proc.returncode}]\n" + text
 

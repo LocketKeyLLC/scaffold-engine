@@ -37,6 +37,7 @@ export const PAGES = [
   { id: "knowledge-library", path: "/knowledge/library", label: "Knowledge · Library", icon: "❒" },
   { id: "knowledge-schedules", path: "/knowledge/schedules", label: "Knowledge · Schedules", icon: "◷" },
   { id: "settings-models", path: "/settings/models", label: "Settings · Models", icon: "⚙", adminOnly: true },
+  { id: "settings-machines", path: "/settings/machines", label: "Settings · Machines", icon: "▤", adminOnly: true },
   { id: "settings-capabilities", path: "/settings/capabilities", label: "Settings · Capabilities", icon: "⚡", adminOnly: true },
   { id: "settings-status", path: "/settings/status", label: "Settings · Status", icon: "●" },
   { id: "settings-costs", path: "/settings/costs", label: "Settings · Costs", icon: "◍" },

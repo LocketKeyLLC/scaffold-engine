@@ -96,16 +96,21 @@ def test_a_value_never_enters_the_command_the_runner_logs_or_runs():
     so argv never carries it."""
     src = pathlib.Path(ROOT / "scripts" / "local_runner_mcp.py").read_text(encoding="utf-8")
     run_sup = src[src.index("async def run_supervised"):src.index("    return mcp")]
-    assert "env = {**os.environ, **{n: store[n] for n in refs}}" in run_sup
+    assert "run_env = {**os.environ, **resolved}" in run_sup
     assert 'log.warning("SUPERVISED id=%s RUN: %s", aid, run_cmd)' in run_sup
     # the command handed to the shell is the one that was approved, unmodified
     assert "run_cmd = command" in run_sup
-    assert "create_subprocess_shell(\n            run_cmd" in run_sup and "env=env)" in run_sup
+    assert "create_subprocess_shell(\n            run_cmd" in run_sup and "env=run_env)" in run_sup
     # an unresolvable reference is refused, not expanded to the empty string
-    assert "unknown = [n for n in refs if n not in store]" in run_sup
-    assert "is not in this runner's secrets file" in run_sup
+    assert 'unknown = [n for n, v in resolved.items() if not v]' in run_sup
+    assert "neither the engine sent nor this runner's secrets file holds" in run_sup
     # sudo drops the environment, so the names ride --preserve-env by NAME
     assert '"--preserve-env=" + ",".join(refs)' in run_sup
+    # §17.1193 — a value the engine sends is bound to a reference the APPROVED
+    # command already carries; anything else is refused, so `env` cannot be
+    # used to smuggle environment into a block the operator agreed to.
+    assert "extra = [k for k in sent if k not in refs]" in run_sup
+    assert "which this command does not reference" in run_sup
 
 
 def test_both_tools_redact_their_output():
@@ -159,4 +164,7 @@ def test_an_unexpandable_secret_moves_from_resolved_to_missing():
         ["psql 'host=h password=<TOK>'"], [], inputs, {"secrets": ["TOK"]})
     assert resolved == [] and missing == ["TOK"]
     assert cmds == ["psql 'host=h password=<TOK>'"]
-    assert kept == []                                     # still never asked of the operator
+    # §17.1193 — asking would not help here: the runbook put the placeholder
+    # where the shell will not expand a reference, so no stored value could be
+    # delivered. This is the ONE case the operator is still not asked.
+    assert kept == []

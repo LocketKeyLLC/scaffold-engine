@@ -58,6 +58,19 @@ async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:
         if spec is None or not settings.mcp_tool_enabled:
             return None
         pol = await _sw.write_policy(spec)
+        if pol:
+            # §17.1193 — the names the ENGINE holds for this machine, alongside
+            # the ones in the runner's own file. Names only; the values are read
+            # at run time and sent out of band. Its OWN try: this is an extra,
+            # and a missing table (the migration has not run yet) must not make
+            # the whole write channel disappear — that would turn a schema lag
+            # into "the engine silently stopped being able to run anything".
+            try:
+                from app.modules import runner_secrets as _rs
+                pol = {**pol, "held": await _rs.names(db)}
+            except Exception as exc:
+                logger.warning("runner_secret_names_unavailable err=%r", exc)
+                pol = {**pol, "held": []}
     except Exception as exc:
         logger.warning("supervised_runs_channel_failed err=%r", exc)
         return None
@@ -353,6 +366,8 @@ def verify_commands(text_out: str) -> list[str]:
 # placeholder cannot run as written; the pause asks for the values inline.
 
 _PLACEHOLDER_RE = re.compile(r"<([A-Z][A-Z0-9_]{1,40})>")
+# §17.1193 — the same shape the runner reads: `$NAME` / `${NAME}`.
+_SECRET_REF_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{0,63})\}?")
 _SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9_./:@%+=,~-]{1,200}$")
 _SECRET_NAME_RE = re.compile(r"PASS|SECRET|TOKEN|KEY|CREDENTIAL", re.I)
 
@@ -486,21 +501,28 @@ def apply_runner_secrets(commands: list[str], verify: list[str], inputs: list[di
     the runner, which logs it, and `create_subprocess_shell` put it in the
     target's process table. Masking protected the record, never the run.
 
-    So a secret is never carried. When the runner's own store holds that NAME
-    (``policy['secrets']``, names only — the values never leave that machine),
-    the placeholder becomes a `$NAME` reference the runner expands as an
-    environment variable at execution. When it does not, the engine asks for
-    nothing and the block is not runnable: the operator adds the value to the
-    runner's secrets file, and it still never passes through here.
+    So the VALUE is never carried in the command. The placeholder becomes a
+    `$NAME` reference, and the runner expands it as an environment variable at
+    execution from whichever store holds it.
+
+    §17.1193 — there are now two such stores, and the operator may simply be
+    asked. `policy['secrets']` are names in the runner's own file (values never
+    leave that machine); `held` are names the ENGINE keeps, encrypted, from a
+    value the operator typed once into a form — sent out of band at run time,
+    the way Actions and Ansible do it. §17.1191 refused to hold one at all and
+    made the operator edit a file on the target by hand; that was stricter than
+    any tool this engine is measured against, and it bought nothing the
+    out-of-band delivery does not already buy.
 
     Returns ``(commands, verify, inputs, resolved, missing)`` — ``inputs`` with
-    every secret removed (there is nothing left to type), ``resolved`` the
-    names the runner will supply, ``missing`` the ones it cannot.
+    every ALREADY-KNOWN secret removed (there is nothing to type), ``resolved``
+    the names some store will supply, ``missing`` the ones nothing holds yet:
+    those stay in ``inputs``, marked, so the pause can ask for them once.
     """
     secret_names = [str(i.get("name") or "") for i in inputs if i.get("secret")]
     if not secret_names:
         return commands, verify, inputs, [], []
-    known = {str(n) for n in (policy.get("secrets") or [])}
+    known = {str(n) for n in (policy.get("secrets") or [])} | {str(n) for n in (policy.get("held") or [])}
     resolved = [n for n in secret_names if n in known]
     missing = [n for n in secret_names if n not in known]
 
@@ -519,9 +541,23 @@ def apply_runner_secrets(commands: list[str], verify: list[str], inputs: list[di
             out.append(c)
         return out
 
+    # The rewrite runs FIRST: it is what discovers an unquotable placeholder,
+    # and `blocked` is read off that. (Computing them the other way round left
+    # `unquotable` empty and every name looked askable.)
     cmds_out, verify_out = _ref(commands), _ref(verify)
-    kept = [i for i in inputs if not i.get("secret")]
-    return cmds_out, verify_out, kept, resolved, missing
+    # §17.1193 — a secret nothing holds yet is ASKED FOR, once, and the answer
+    # is stored encrypted rather than spliced into the command. An unquotable
+    # name is the exception: asking would not help, because the runbook put the
+    # placeholder where the shell will not expand a reference, so no stored
+    # value could ever be delivered there.
+    blocked = {p.split()[0].strip("<>") for p in unquotable}
+    askable = [n for n in missing if n not in blocked]
+    kept = [i for i in inputs if not i.get("secret") or i.get("name") in askable]
+    for i in kept:
+        if i.get("secret"):
+            i["store"] = "engine"          # the form writes it to the engine's own store
+            i["kept_encrypted"] = True     # said in the UI: typed once, never shown again
+    return cmds_out, verify_out, kept, resolved, [n for n in missing if n in blocked]
 
 
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None) -> dict:
@@ -615,14 +651,29 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                 "secrets_missing": waiting.get("secrets_missing") or []}
     commands = [str(c) for c in waiting.get("commands") or []]
     verify_cmds = [str(c) for c in waiting.get("verify") or []]
-    need = [i for i in (waiting.get("inputs") or []) if not i.get("secret")]   # §17.1191
+    asked = list(waiting.get("inputs") or [])
+    need = [i for i in asked if not i.get("secret")]
+    secrets_asked = [i for i in asked if i.get("secret")]
     values: dict[str, str] = {}
-    if need:                                      # §17.1187 — the values the runbook asked for, checked, spliced in
-        values, problems = check_inputs([i["name"] for i in need], inputs)
+    if asked:                                     # §17.1187 — the values the runbook asked for, checked
+        _all, problems = check_inputs([i["name"] for i in asked], inputs)
         if problems:
-            return {"outcome": "inputs_missing", "problems": problems, "inputs": need}
-        commands = substitute(commands, values)
-        verify_cmds = substitute(verify_cmds, values)
+            return {"outcome": "inputs_missing", "problems": problems, "inputs": asked}
+        values = {k: v for k, v in _all.items() if k in {i["name"] for i in need}}
+        # §17.1193 — a SECRET answer is stored encrypted and referenced, never
+        # spliced: the command keeps `$NAME`, so the bytes the operator
+        # approved, the runner's log line and the target's process table never
+        # carry it. A plain value is substituted as before.
+        for i in secrets_asked:
+            name = i["name"]
+            from app.modules import runner_secrets as _rs
+            await _rs.set_secret(db, name, _all[name],
+                                 runner=str(waiting.get("runner") or "") or None, hint=str(i.get("hint") or ""))
+            commands = [secret_ref_rewrite(c, name)[0] for c in commands]
+            verify_cmds = [secret_ref_rewrite(c, name)[0] for c in verify_cmds]
+        if need:
+            commands = substitute(commands, values)
+            verify_cmds = substitute(verify_cmds, values)
     ch = await channel(db)
     if ch is None:
         return {"outcome": "no_channel"}
@@ -639,8 +690,18 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     if not claimed.rowcount:
         return {"outcome": "node_gone"}
     await db.commit()
-    logger.warning("supervised_run_started job=%s node=%s runner=%s commands=%d", job_id, node_key, spec.name, len(runnable))
-    executed = await _sw.run_block(spec, runnable)
+    # §17.1193 — the values for the `$NAME` references these commands carry,
+    # read from the engine's encrypted store and handed to `run_block` OUT OF
+    # BAND. Names the runner's own file holds are simply absent here and it
+    # resolves them itself. This dict is never logged and never written back.
+    refs = sorted({m.group(1) for c in runnable + verify_cmds for m in _SECRET_REF_RE.finditer(c or "")})
+    secret_env: dict[str, str] = {}
+    if refs:
+        from app.modules import runner_secrets as _rs
+        secret_env = await _rs.values_for(db, refs)
+    logger.warning("supervised_run_started job=%s node=%s runner=%s commands=%d secrets=%d",
+                   job_id, node_key, spec.name, len(runnable), len(secret_env))
+    executed = await _sw.run_block(spec, runnable, env=secret_env)
     ok = bool(executed) and all(e["ok"] for e in executed) and len(executed) == len(runnable)
     verify_out = ""
     if ok and verify_cmds:

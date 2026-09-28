@@ -86,14 +86,14 @@ async def test_run_refuses_until_the_values_are_given_then_runs_the_filled_comma
 
 
 @pytest.mark.asyncio
-async def test_a_secret_value_is_not_taken_at_all(caplog):
-    """§17.1191 supersedes §17.1187 for SECRET-named values.
-
-    Masking the record was never enough: the substituted command still reached
-    the runner, which logs it, and `create_subprocess_shell` put it in the
-    target's process table. So the engine stops accepting the value — even one
-    sent on the wire — and the block is not runnable until the runner itself
-    holds it."""
+async def test_a_secret_value_is_not_taken_when_the_frame_said_it_cannot_be(caplog):
+    """§17.1193 — the engine WILL take a secret now (asked once, kept
+    encrypted, delivered out of band). What it still refuses is a frame that
+    already declared the name undeliverable — the runbook put the placeholder
+    where the shell will not expand a reference. A value sent on the wire for
+    such a name is ignored, not spliced: masking the record was never enough,
+    because the substituted command would still reach the runner's log line and
+    the target's process table."""
     waiting = {"kind": "run", "runbook": "## Run this\n```\npct set 111 --password <ADMIN_PASSWORD>\n```\n",
                "commands": ["pct set 111 --password <ADMIN_PASSWORD>"], "verify": [], "refused": [],
                "inputs": [{"name": "ADMIN_PASSWORD", "hint": "", "secret": True}],
@@ -122,18 +122,25 @@ def test_a_secret_the_runner_holds_becomes_a_reference_not_a_question():
     assert "run" in [o["id"] for o in frame["options"]]
 
 
-def test_a_secret_the_runner_does_not_hold_blocks_the_run_and_says_where_it_belongs():
+def test_a_secret_nothing_holds_yet_is_asked_for_once():
+    """§17.1193 supersedes §17.1191's refusal. Every tool this engine is
+    measured against — Ansible Vault, Actions secrets, Jenkins credentials —
+    asks once, keeps the value encrypted and injects it at run time. Refusing
+    to hold it bought nothing that out-of-band delivery does not already buy,
+    and made the operator edit a file on the target by hand."""
     runbook = ("## Run this\n```bash\npct exec 120 -- app-cli --key <API_TOKEN>\n```\n"
                "## Inputs needed\n- <API_TOKEN> the upstream token\n")
     frame = sr.frame_run({"node_key": "T1", "title": "wire it"}, runbook, _spec(),
                          {"allow": ["pct exec"], "secrets": []})
-    assert frame["secrets_missing"] == ["API_TOKEN"] and frame["secrets_resolved"] == []
-    assert "run" not in [o["id"] for o in frame["options"]] and frame["suggested"] == "myself"
-    assert not any(i["name"] == "API_TOKEN" for i in frame["inputs"])   # never asked
-    why = " ".join(r["why"] for r in frame["refused"])
-    assert "holds no value for API_TOKEN" in why and "never takes a password" in why
-    # and the gate's own verdict is not polluted by the placeholder's angle brackets
-    assert "redirect" not in why
+    asked = [i for i in frame["inputs"] if i["name"] == "API_TOKEN"]
+    assert asked, "the operator was not asked for a value nothing holds"
+    assert asked[0]["secret"] is True and asked[0]["store"] == "engine"
+    assert asked[0]["kept_encrypted"] is True
+    assert asked[0]["hint"] == "the upstream token"      # the runbook's own words survive
+    assert not frame["secrets_missing"], frame["secrets_missing"]
+    assert "run" in [o["id"] for o in frame["options"]] and frame["suggested"] == "run"
+    assert not frame["refused"], frame["refused"]
+    assert "<API_TOKEN>" in frame["commands"][0]     # still a placeholder until the answer arrives
 
 
 def test_the_decide_path_carries_inputs_and_stores_only_their_names():

@@ -303,17 +303,29 @@ def _exit_of(text_out: str) -> tuple[Optional[int], str]:
     return code, (text_out or "")[m.end():]
 
 
-async def run_block(spec, commands: list[str], *, on_progress=None) -> list[dict]:
+async def run_block(spec, commands: list[str], *, on_progress=None,
+                    env: dict[str, str] | None = None) -> list[dict]:
     """Run the approved commands in order through the runner; stop at the
     first failure (a write block is a sequence — what follows assumed the
-    previous step worked). ``[{command, output, exit, ok, approval_id}]``."""
+    previous step worked). ``[{command, output, exit, ok, approval_id}]``.
+
+    §17.1193 — ``env`` carries the values for the ``$NAME`` references in these
+    commands, OUT OF BAND: the command string (and the approval signed over it)
+    keeps ``$NAME``, so nothing here puts a secret in the bytes, the log line,
+    or the target's process table. Only the names a command actually references
+    are sent, and the runner refuses any it did not ask for.
+    """
     from app.modules import mcp_client
     token = runner_token(spec)
     done: list[dict] = []
     for i, cmd in enumerate(commands, 1):
         ap = mint_approval(cmd, token)
+        payload = {"command": cmd, "approval": ap, "timeout_s": 180}
+        needed = {n: v for n, v in (env or {}).items() if f"${n}" in cmd or "${" + n + "}" in cmd}
+        if needed:
+            payload["env"] = needed
         try:
-            res = await mcp_client.call_tool(spec, WRITE_TOOL, {"command": cmd, "approval": ap, "timeout_s": 180})
+            res = await mcp_client.call_tool(spec, WRITE_TOOL, payload)
             raw = res.text or ""
             st = getattr(res, "structured", None)
             if isinstance(st, dict) and isinstance(st.get("result"), str):

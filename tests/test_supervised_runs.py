@@ -104,9 +104,25 @@ async def test_channel_is_none_when_off_or_without_a_runner_or_policy(monkeypatc
          patch("app.modules.assist_supervised.write_policy", new=AsyncMock(return_value=None)):
         assert await sr.channel(AsyncMock()) is None
     with patch("app.modules.assist_local_runner.runner_spec", new=AsyncMock(return_value=_spec())), \
-         patch("app.modules.assist_supervised.write_policy", new=AsyncMock(return_value=POLICY)):
+         patch("app.modules.assist_supervised.write_policy", new=AsyncMock(return_value=POLICY)), \
+         patch("app.modules.runner_secrets.names", new=AsyncMock(return_value=["DB_PASSWORD"])):
         spec, pol = await sr.channel(AsyncMock())
-    assert spec.name == "pve-runner" and pol == POLICY
+    assert spec.name == "pve-runner" and {k: v for k, v in pol.items() if k != "held"} == POLICY
+    assert pol["held"] == ["DB_PASSWORD"]          # §17.1193 — names the ENGINE holds
+
+
+@pytest.mark.asyncio
+async def test_the_write_channel_survives_a_missing_secret_store(monkeypatch):
+    """The held-names look-up is an EXTRA. A missing table (the migration has
+    not run yet) must not make the whole write channel disappear — that turns a
+    schema lag into 'the engine silently stopped being able to run anything'."""
+    monkeypatch.setattr(settings, "execution_supervised_runs_enabled", True)
+    monkeypatch.setattr(settings, "mcp_tool_enabled", True)
+    with patch("app.modules.assist_local_runner.runner_spec", new=AsyncMock(return_value=_spec())), \
+         patch("app.modules.assist_supervised.write_policy", new=AsyncMock(return_value=POLICY)), \
+         patch("app.modules.runner_secrets.names", new=AsyncMock(side_effect=RuntimeError("no such table"))):
+        ch = await sr.channel(AsyncMock())
+    assert ch is not None and ch[1]["allow"] == POLICY["allow"] and ch[1]["held"] == []
 
 
 # ── resolution ───────────────────────────────────────────────────────────

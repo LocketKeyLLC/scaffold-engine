@@ -567,6 +567,7 @@ function registerRoutes() {
   router.route("/settings/:tab", (p) => go("settings", p));
   router.route("/models", (p) => go("settings", p, { tab: "models" }));
   router.route("/capabilities", (p) => go("settings", p, { tab: "capabilities" }));
+  router.route("/machines", (p) => go("settings", p, { tab: "machines" }));   // §17.1193
   router.route("/costs", (p) => go("settings", p, { tab: "costs" }));
   router.route("/traces", (p) => go("settings", p, { tab: "traces" }));
   router.route("/alerts", (p) => go("settings", p, { tab: "alerts" }));
