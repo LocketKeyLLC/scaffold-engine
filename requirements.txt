@@ -35,11 +35,11 @@ requests==2.34.2
 # CrossEncoder(...).predict(...) which is API-stable (#86).
 sentence-transformers==6.1.0
 setuptools==84.0.0  # §17.585 — was 71.1.0 (PYSEC-2025-49); also bumped in Dockerfile
-sqlalchemy[asyncio]==2.0.54
+sqlalchemy[asyncio]==2.1.0
 structlog==26.1.0
 trafilatura==2.1.0  # HELD: 2.2.0 drops <h1> headings from extraction (audit M12) — see .github/dependabot.yml ignore
 tzlocal==5.4.4
-uvicorn[standard]==0.53.0
+uvicorn[standard]==0.54.0
 psycopg2-binary==2.9.13
 
 # --- PDF ingestion (4.5b) ---
@@ -70,12 +70,12 @@ prometheus-client==0.26.0
 # request when otel_enabled. API/SDK/exporter (1.43.0) + instrumentation
 # (0.64b0) must move together. Importing at process start stays cheap; the SDK
 # only initializes when init_tracing() actually runs.
-opentelemetry-api==1.44.0
-opentelemetry-sdk==1.44.0
-opentelemetry-exporter-otlp-proto-http==1.44.0
-opentelemetry-instrumentation-fastapi==0.65b0
-opentelemetry-instrumentation-httpx==0.65b0
-opentelemetry-instrumentation-asyncpg==0.65b0
+opentelemetry-api==1.45.0
+opentelemetry-sdk==1.45.0
+opentelemetry-exporter-otlp-proto-http==1.45.0
+opentelemetry-instrumentation-fastapi==0.66b0
+opentelemetry-instrumentation-httpx==0.66b0
+opentelemetry-instrumentation-asyncpg==0.66b0
 
 # §17.900 — Fernet symmetric encryption for provider API keys at rest
 # (`provider_connections.api_key_enc`). Already present transitively; pinned
@@ -98,5 +98,5 @@ transitions==0.9.3
 # §17.1075 — Alembic for schema changes after db/migrations/075
 alembic==1.20.0
 # §17.1076 — procrastinate trial (Postgres task queue; psycopg 3 is its connector)
-procrastinate==3.9.0
+procrastinate==3.10.0
 psycopg[binary,pool]==3.3.6

@@ -5,8 +5,8 @@
 # (#82) so CI never drifts from what the container actually runs.
 fastapi==0.141.1
 starlette==1.7.0  # §17.584 — CVE-2026-48710 + PYSEC-2026-248/249 (see requirements.txt)
-uvicorn[standard]==0.53.0
-sqlalchemy[asyncio]==2.0.54
+uvicorn[standard]==0.54.0
+sqlalchemy[asyncio]==2.1.0
 asyncpg==0.31.0
 pydantic==2.13.5
 pydantic-settings==2.15.0
@@ -61,5 +61,5 @@ transitions==0.9.3
 # §17.1075 — Alembic for schema changes after db/migrations/075
 alembic==1.20.0
 # §17.1076 — procrastinate trial (Postgres task queue; psycopg 3 is its connector)
-procrastinate==3.9.0
+procrastinate==3.10.0
 psycopg[binary,pool]==3.3.6
