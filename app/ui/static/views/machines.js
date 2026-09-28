@@ -111,6 +111,7 @@ export default function machines(container, params, opts = {}) {
         : el("p", { class: "cap-summary", text: w.checked
             ? "Closed — the helper there was installed without a write list, so the engine can only read."
             : "Not checked yet. Press Test again above, or run the line below." }),
+      w.privilege_note ? el("p", { class: "sub cap-line warn-line", text: w.privilege_note }) : null,
       needed.length
         ? el("div", {},
             el("p", { class: "sub cap-line", text: "Your open plan's remaining steps need these, read off the plan itself:" }),

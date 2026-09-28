@@ -1828,3 +1828,8 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
    with a copy button beside it; `.md-pre`'s scroll keeps it from pushing the
    page sideways, and the wrap keeps it readable without one. */
 .machines-install { white-space: pre-wrap; word-break: break-all; padding-top: 12px; font-size: 12px; }
+
+/* §17.1194 — the line an operator must not skim past: the write channel is
+   open but UNPRIVILEGED, so a command they approve is refused by the machine
+   itself. Uses --warn, which the log lines already define. */
+.warn-line { border-left: 3px solid var(--warn); padding-left: 10px; }
