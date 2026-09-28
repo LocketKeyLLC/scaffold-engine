@@ -98,7 +98,7 @@ export default function machines(container, params, opts = {}) {
     const needed = (d.needed_prefixes || []).filter((p) => p.prefix);
     const rows = needed.map((p) =>
       el("li", { class: "sub", text: `${p.prefix} — ${p.why}${p.steps && p.steps.length ? " (" + p.steps.slice(0, 6).join(", ") + ")" : ""}` }));
-    const install = el("pre", { class: "code-block", text: d.install || "" });
+    const install = el("pre", { class: "md-pre machines-install", text: d.install || "" });
     const copy = el("button", { class: "btn btn-sm btn-ghost", text: "⧉ copy" });
     copy.addEventListener("click", async () => {
       try { await navigator.clipboard.writeText(d.install || ""); toast("Copied — paste it on the machine.", "ok"); }
@@ -125,7 +125,9 @@ export default function machines(container, params, opts = {}) {
   function secretsCard(d) {
     const list = el("div", {});
     const held = d.secrets || [];
-    if (!held.length) {
+    if (d.secrets_error) {
+      list.append(el("p", { class: "sub cap-line", text: d.secrets_error }));
+    } else if (!held.length) {
       list.append(el("p", { class: "sub cap-line", text: "Nothing stored. A step that needs a password will ask you for it once, here or at the run." }));
     } else {
       for (const s of held) {

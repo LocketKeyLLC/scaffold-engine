@@ -72,6 +72,19 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
     known_policy, policy = (_sw.cached_policy(spec) if spec is not None else (False, None))
     ctx = await _es.recipe_context(db)
     prefixes = await _es.prefixes_needed(db)
+    # §17.1193 — the value store is one PART of this page. A schema that has not
+    # caught up (the code deployed, `alembic upgrade head` still to run) must
+    # degrade that one card, not 500 the whole connection screen — which is
+    # exactly the screen an operator opens when something is wrong. Caught by
+    # running the endpoint against a database without the table.
+    secrets: list[dict] = []
+    secrets_error = ""
+    try:
+        secrets = await _rs.list_secrets(db)
+    except Exception as exc:
+        await db.rollback()
+        secrets_error = "the value store is not available yet (the database migration has not run)"
+        logger.warning("machines_secrets_unavailable err=%r", exc)
     endpoint = str(getattr(spec, "endpoint", "") or "")
     m = re.match(r"https?://([^:/]+):?(\d+)?", endpoint)
     return {
@@ -91,7 +104,8 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
             "sudo": bool((policy or {}).get("sudo")),
             "helper": (policy or {}).get("helper"),
         },
-        "secrets": await _rs.list_secrets(db),
+        "secrets": secrets,
+        "secrets_error": secrets_error,
         "needed_prefixes": prefixes,
         "install": _es.install_line(ctx, prefixes=[p["prefix"] for p in prefixes if p["prefix"]]),
         "mcp_enabled": bool(settings.mcp_tool_enabled),
