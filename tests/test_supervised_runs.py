@@ -466,3 +466,17 @@ async def test_nothing_is_recorded_when_nothing_was_refused_for_permission():
     assert await sr.record_wanted_prefixes(
         db, "j", {"refused": [{"command": "reboot", "why": "host power — do that by hand"}]}) == []
     db.execute.assert_not_awaited()
+
+
+def test_the_pause_on_screen_is_read_for_wanted_prefixes_too():
+    """§17.1195 — reading only what was RECORDED sends an operator to copy an
+    install line missing the very prefix the card in front of them is refusing
+    (a run parked before the recording existed, or by an older build)."""
+    frame = {"refused": [
+        {"command": "qm status 106 | grep -q running || qm start 106",
+         "why": "not on the write-allow list: qm start 106"},
+        {"command": "for i in $(seq 1 12); do …", "why": "substitution/heredoc"},
+        {"command": "reboot", "why": "host power — do that by hand"},
+    ]}
+    assert sr.wanted_prefixes_in(frame) == ["qm start"]
+    assert sr.wanted_prefixes_in({}) == [] and sr.wanted_prefixes_in({"refused": []}) == []

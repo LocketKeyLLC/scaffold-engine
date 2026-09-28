@@ -80,6 +80,26 @@ async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:
 _NOT_ALLOWED = "not on the write-allow list"
 
 
+def wanted_prefixes_in(frame: dict) -> list[str]:
+    """The prefixes a pause frame was refused for, in first-seen order.
+
+    Only PERMISSION refusals: a `substitution/heredoc` is a shape the channel
+    cannot carry whatever is allowed, and a denylist refusal is never granted.
+    Pure, so the same reading serves the moment of the refusal (recorded on the
+    job) and the pause an operator is looking at now (§17.1195)."""
+    from app.modules.assist_supervised import _SUDO_RE
+    wanted: list[str] = []
+    for r in (frame or {}).get("refused") or []:
+        why = str((r or {}).get("why") or "")
+        if not why.startswith(_NOT_ALLOWED):
+            continue
+        bare = _SUDO_RE.sub("", why[len(_NOT_ALLOWED):].lstrip(": ").strip(), count=1)
+        for p in prefixes_for_command(bare)[0] or [prefix_for(bare)]:
+            if p and p not in wanted:
+                wanted.append(p)
+    return wanted
+
+
 async def record_wanted_prefixes(db: AsyncSession, job_id: str, frame: dict) -> list[str]:
     """§17.1194 — remember the prefixes a real step was refused for.
 
@@ -94,16 +114,7 @@ async def record_wanted_prefixes(db: AsyncSession, job_id: str, frame: dict) -> 
     Stored on the job, so the connection page can offer them next to the ones
     the plan named. Names only — this is a permission request, not a command.
     """
-    from app.modules.assist_supervised import _SUDO_RE
-    wanted: list[str] = []
-    for r in frame.get("refused") or []:
-        why = str(r.get("why") or "")
-        if not why.startswith(_NOT_ALLOWED):
-            continue
-        bare = _SUDO_RE.sub("", why[len(_NOT_ALLOWED):].lstrip(": ").strip(), count=1)
-        for p in prefixes_for_command(bare)[0] or [prefix_for(bare)]:
-            if p and p not in wanted:
-                wanted.append(p)
+    wanted = wanted_prefixes_in(frame)
     if not wanted:
         return []
     await db.execute(text("""
