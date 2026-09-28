@@ -262,3 +262,104 @@ def spawn_handoff_background(*, session_id: str, node_key: str, mode: str) -> "a
 def _sse(event_type: str, payload: dict) -> str:
     """SSE wire format. Same shape as research_agent / execution_agent."""
     return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+
+# ── §17.1190 — hand the REST of the plan to the engine ────────────────────
+# `handoff_step(mode="all_remaining")` has existed since §17.856 and routes
+# into `execute_all_nodes` — the path that now stops to ask at a decision
+# (§17.1184) and at every step that changes a machine (§17.1186). The operator
+# could not reach it: the SPA only ever posted `mode:"single"`, and the
+# `auto_all_remaining` handoff POLICY fires on a skip and is fixed at session
+# start. These two give the walkthrough an honest control — one that says what
+# would happen BEFORE it happens, and refuses when the answer is "nothing".
+
+
+async def preview_all_remaining(db, session_id: str) -> dict:
+    """What handing the rest of this plan to the engine would mean, right now.
+
+    Deterministic, read-only, no model: the steps left, how many of them change
+    a machine, whether a runner's write channel is open to carry them, and
+    whether the §17.624 gate would simply park the job back here (it would, if
+    the plan is predominantly hands-on and no channel is open — pressing the
+    button then achieves nothing, so the button must say so instead)."""
+    from app.modules import supervised_runs
+    from app.modules.execution_agent import _classify_dag_executability
+    from app.modules.step_classify import step_is_hands_on
+
+    sess = (await db.execute(
+        text("SELECT id, job_id, status, current_node_key FROM assist_sessions WHERE id = :sid"),
+        {"sid": session_id},
+    )).mappings().first()
+    if not sess:
+        raise ValueError(f"assist session not found: {session_id}")
+    job_id = str(sess["job_id"])
+    rows = (await db.execute(
+        text("""SELECT node_key, title, description, prompt_template, tool, node_type
+                  FROM dag_nodes WHERE job_id = :jid AND status = 'pending'
+                 ORDER BY execution_order"""),
+        {"jid": job_id},
+    )).mappings().all()
+    remaining = [dict(r) for r in rows]
+    hands_on = [r for r in remaining if step_is_hands_on(r, shell_backend=False)[0]]
+    decisions = [r for r in remaining if str(r.get("node_type") or "") == "decision"]
+
+    ch = await supervised_runs.channel(db)
+    runner = getattr(ch[0], "name", None) if ch else None
+    allow = list((ch[1].get("allow") or [])) if ch else []
+    cls = await _classify_dag_executability(db, job_id)
+    would_park = bool(cls.get("hands_on"))
+
+    blocker = ""
+    if sess["status"] != "active":
+        blocker = f"this walkthrough is {sess['status']}, not active"
+    elif not remaining:
+        blocker = "every step of this plan is already done or skipped"
+    elif would_park:
+        blocker = ("the engine would hand this plan straight back: "
+                   f"{cls['nonexec']} of {cls['total']} steps change a machine and no runner has an open "
+                   "write channel. Open one first — Capabilities → “Let the engine run approved commands”.")
+    return {
+        "session_id": str(sess["id"]), "job_id": job_id, "session_status": sess["status"],
+        "current_node_key": sess["current_node_key"],
+        "remaining": len(remaining), "hands_on": len(hands_on), "decisions": len(decisions),
+        "remaining_keys": [r["node_key"] for r in remaining][:200],
+        "channel_open": ch is not None, "runner": runner, "allow": allow,
+        "would_park": would_park, "gate": cls,
+        "can_start": not blocker, "blocker": blocker,
+    }
+
+
+async def start_all_remaining(db, session_id: str, node_key: str | None = None) -> dict:
+    """Hand every remaining step to the engine and start the run DETACHED.
+
+    The SSE ``/handoff`` path calls ``execute_all_nodes`` inside the response
+    generator, so a closed tab would cancel a run of this size — the §17.1007
+    hostage bug. This uses the same seam ``/jobs/{id}/decide`` uses:
+    ``run_broker.start`` (idempotent per job), and returns at once. The Run
+    stage attaches through ``/execute/all``.
+    """
+    from app.modules import run_broker
+    from app.modules.execution_agent import execute_all_nodes
+
+    pre = await preview_all_remaining(db, session_id)
+    if not pre["can_start"]:
+        return {**pre, "started": False}
+    job_id = pre["job_id"]
+    await db.execute(
+        text("""UPDATE assist_steps SET status = 'handed_off', updated_at = NOW()
+                 WHERE session_id = :sid AND status IN ('pending', 'presented')"""),
+        {"sid": session_id},
+    )
+    await db.commit()
+    async with async_session() as db2:
+        await transition(db2, job_id, to="executing", reason="assist_handoff_all_remaining")
+        await db2.commit()
+    started = False
+    try:
+        run_broker.start(job_id, lambda: execute_all_nodes(job_id))
+        started = True
+    except Exception as exc:                     # the steps are handed off either way
+        logger.error("handoff_all_start_failed job=%s err=%r", job_id, exc)
+    logger.warning("assist_handoff_all_remaining job=%s session=%s remaining=%d hands_on=%d runner=%s started=%s",
+                   job_id, session_id, pre["remaining"], pre["hands_on"], pre["runner"], started)
+    return {**pre, "started": started, "node_key": node_key or pre["current_node_key"]}

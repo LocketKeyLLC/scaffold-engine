@@ -6036,6 +6036,114 @@
         ]
       }
     },
+    "/assist/{session_id}/handoff/all": {
+      "post": {
+        "description": "§17.1190 — hand every remaining step to the engine and start the run.\n\nThe run is DETACHED (`run_broker`, the seam `/jobs/{id}/decide` uses), so\nclosing the tab does not cancel it; the Run stage attaches via\n`/execute/all`. From here the engine works the plan on its own and stops to\nask — at a decision node, and at every step that would change a machine,\nwhere it shows the exact commands and waits for approval.\n\n409 when the handoff would achieve nothing (the walkthrough is not active,\nnothing is left, or the plan is predominantly hands-on with no open write\nchannel — the gate would hand it straight back); the body says which.",
+        "operationId": "assist_handoff_all_assist__session_id__handoff_all_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Assist Handoff All Assist  Session Id  Handoff All Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Handoff All",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/{session_id}/handoff/preview": {
+      "get": {
+        "description": "§17.1190 — what handing the REST of this plan to the engine would mean.\n\nRead-only and deterministic: the steps left, how many change a machine,\nwhether a runner's write channel is open to carry them, and whether the\n§17.624 gate would simply park the job back to this walkthrough. The\ncontrol that offers the handoff reads this first, so it can say what will\nhappen — or why pressing it would achieve nothing.",
+        "operationId": "assist_handoff_preview_assist__session_id__handoff_preview_get",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Assist Handoff Preview Assist  Session Id  Handoff Preview Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Handoff Preview",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
     "/assist/{session_id}/interpret": {
       "post": {
         "description": "§17.626 — classify a plain-language turn into an assist intent so the\npipeline can route it (advance / skip / submit / fix / finalize / pause /\nquestion) without the operator typing a /assist subcommand. Fail-soft: an\nunresolvable step or classifier hiccup returns intent='question'.",
