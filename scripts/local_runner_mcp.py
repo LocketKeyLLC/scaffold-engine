@@ -76,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "12"
+HELPER_VERSION = "13"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -820,12 +820,99 @@ def _privilege_note(output: str, returncode: int | None) -> str:
             "Capabilities \u2192 \"Give the runner administrator rights for specific commands\".)\n")
 
 
+# ---------------------------------------------------------------------------
+# §17.1191 — secrets the RUNNER holds, not the engine.
+#
+# Before this, a runbook that needed a password put a <DB_PASSWORD> placeholder
+# in its commands, the operator typed the value at the run pause, and the
+# engine spliced it into the command string. The engine masked it in the node
+# output and the transcript (§17.1187) — and then sent the substituted command
+# here, where `log.warning("SUPERVISED … RUN: %s")` wrote it to this machine's
+# journal and `create_subprocess_shell` put it in this machine's process table
+# for any local user to read. Masking protected the RECORD, never the run.
+#
+# So the value never travels. The operator writes it into a file this runner
+# owns (mode 0600, `--secrets-file`); the engine learns only the NAMES, writes
+# `$NAME` into the command, and the value is injected as an ENVIRONMENT
+# variable at execution — so the shell expands it, argv never carries it, and
+# the logged command still reads `$NAME`.
+# ---------------------------------------------------------------------------
+
+_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
+def load_secrets(path: str | None) -> dict:
+    """``{NAME: value}`` from a KEY=VALUE file, or {} when there is none.
+
+    Refuses a file that is group- or world-readable: a store anyone on the box
+    can read is worse than no store, because the engine would then believe the
+    secret is held safely."""
+    if not path:
+        return {}
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        log.warning("secrets file %s cannot be read (%s) — no runner secrets", path, exc.__class__.__name__)
+        return {}
+    if st.st_mode & 0o077:
+        log.error("REFUSING secrets file %s: mode %o is readable by other users — chmod 600 it", path, st.st_mode & 0o777)
+        return {}
+    out: dict = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, _, value = line.partition("=")
+                name = name.strip()
+                value = value.strip().strip('"').strip("'")
+                if not _NAME_RE.match(name):
+                    log.warning("secrets file: ignoring %r (names are A-Z, 0-9 and _)", name[:40])
+                    continue
+                if value:
+                    out[name] = value
+    except OSError as exc:
+        log.warning("secrets file %s could not be read: %r", path, exc)
+        return {}
+    log.info("loaded %d runner secret(s) from %s", len(out), path)
+    return out
+
+
+_SECRET_REF_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]{0,63})\}?")
+
+
+def secret_refs(command: str) -> list[str]:
+    """The ``$NAME`` / ``${NAME}`` references in a command, in first-seen order."""
+    out: list[str] = []
+    for m in _SECRET_REF_RE.finditer(command or ""):
+        if m.group(1) not in out:
+            out.append(m.group(1))
+    return out
+
+
+def redact(text_out: str, secrets: dict) -> str:
+    """Replace every known secret VALUE with ``***``.
+
+    Defence in depth: the design keeps values out of commands and logs, but a
+    command's own OUTPUT can still echo one (`grep` over a config file, a tool
+    that prints its connection string). Longest first, so a value that contains
+    another is not half-redacted."""
+    if not secrets or not text_out:
+        return text_out
+    for value in sorted((v for v in secrets.values() if v), key=len, reverse=True):
+        text_out = text_out.replace(value, "***")
+    return text_out
+
+
 def build_server(token: str | None, sudo_allow: list[str] | None = None,
-                 write_allow: list[str] | None = None, write_sudo: bool = False):
+                 write_allow: list[str] | None = None, write_sudo: bool = False,
+                 secrets: dict | None = None):
     from mcp.server import MCPServer
     mcp = MCPServer("scaffold-local-runner")
     allow = list(sudo_allow or [])
     writes = [w.strip() for w in (write_allow or []) if w and w.strip()]
+    store = dict(secrets or {})          # §17.1191 — values live here and nowhere else
 
     @mcp.tool(description=f"Run ONE read-only shell command on this machine and return its output. "
                           f"Refuses anything that writes. (helper v{HELPER_VERSION})")
@@ -842,7 +929,10 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
         except asyncio.TimeoutError:
             proc.kill()
             return f"(timed out after {timeout_s}s)"
-        text = out.decode("utf-8", errors="replace")[:20000]
+        # §17.1191 — a READ-ONLY command can still print a secret (a `grep` over
+        # a config file, a tool that echoes its connection string). Redact what
+        # this runner knows before the text leaves the machine.
+        text = redact(out.decode("utf-8", errors="replace")[:20000], store)
         return note + _privilege_note(text, proc.returncode) + text
 
     @mcp.tool(description="§17.1185 — what this runner may WRITE: the operator's --write-allow prefixes "
@@ -851,7 +941,10 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
     async def write_policy() -> str:
         import json as _json
         return _json.dumps({"helper": HELPER_VERSION, "allow": writes, "sudo": bool(write_sudo and writes),
-                            "max_ttl": APPROVAL_MAX_TTL})
+                            "max_ttl": APPROVAL_MAX_TTL,
+                            # §17.1191 — the NAMES this runner can resolve. Never the values:
+                            # the engine writes `$NAME` into a command and this runner expands it.
+                            "secrets": sorted(store)})
 
     @mcp.tool(description="§17.1185 — run ONE command that WRITES, with the engine's signed approval of these exact "
                           "bytes (the operator approved the block first). Refused unless its head is on this runner's "
@@ -872,19 +965,39 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
         if not ok:
             log.warning("REFUSED supervised (%s): %s", why, command)
             return f"(refused by the local runner: {why})"
+        # §17.1191 — `$NAME` references resolve HERE, from this runner's own
+        # store, as environment variables. The command string keeps `$NAME`, so
+        # the approval covers exactly these bytes, the log below prints `$NAME`,
+        # and argv never carries the value. A reference this runner cannot
+        # resolve is refused: running it would leave the shell to expand it to
+        # the empty string and the command would half-work with a blank secret.
+        refs = secret_refs(command)
+        env = None
+        if refs:
+            unknown = [n for n in refs if n not in store]
+            if unknown:
+                log.warning("REFUSED supervised (unknown secret %s): %s", ",".join(unknown), command)
+                return ("(refused by the local runner: this command needs "
+                        + ", ".join(f"${n}" for n in unknown)
+                        + ", which is not in this runner's secrets file)")
+            env = {**os.environ, **{n: store[n] for n in refs}}
         run_cmd = command
         if write_sudo and not read_only(command)[0]:
-            run_cmd = f"sudo -n {_SUDO_RE.sub('', command, count=1).strip()}"
+            # `sudo -n` drops the environment; the names this command needs are
+            # passed through explicitly so the value still never enters argv.
+            keep = ("--preserve-env=" + ",".join(refs) + " ") if refs else ""
+            run_cmd = f"sudo -n {keep}{_SUDO_RE.sub('', command, count=1).strip()}"
         aid = str(approval.get("id", "?"))
-        log.warning("SUPERVISED id=%s RUN: %s", aid, run_cmd)
-        proc = await asyncio.create_subprocess_shell(run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        log.warning("SUPERVISED id=%s RUN: %s", aid, run_cmd)   # `$NAME`, never its value
+        proc = await asyncio.create_subprocess_shell(
+            run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, env=env)
         try:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         except asyncio.TimeoutError:
             proc.kill()
             return f"[exit timeout] (timed out after {timeout_s}s)"
-        text = out.decode("utf-8", errors="replace")[:20000]
-        log.warning("SUPERVISED id=%s exit=%s chars=%d", aid, proc.returncode, len(text))
+        text = redact(out.decode("utf-8", errors="replace")[:20000], store)
+        log.warning("SUPERVISED id=%s exit=%s chars=%d secrets=%d", aid, proc.returncode, len(text), len(refs))
         return f"[exit {proc.returncode}]\n" + text
 
     return mcp
@@ -970,7 +1083,7 @@ def env_file_text(token: str) -> str:
 def unit_text(*, python: str, script: str, host: str, port: int, token: str | None,
               sudo_allow: list[str] | None = None, user: str = RUNNER_USER,
               env_file: str | None = ENV_FILE, write_allow: list[str] | None = None,
-              write_sudo: bool = False) -> str:
+              write_sudo: bool = False, secrets_file: str | None = None) -> str:
     """The systemd unit, as text. Pure: tests read it without a root shell.
 
     §17.1171 — `User=`/`Group=` are REQUIRED, not decoration: without them
@@ -988,6 +1101,8 @@ def unit_text(*, python: str, script: str, host: str, port: int, token: str | No
         cmd += ["--write-allow", *write_allow]
         if write_sudo:
             cmd += ["--write-sudo"]
+    if secrets_file:                    # §17.1191 — values the runner resolves, never the engine
+        cmd += ["--secrets-file", secrets_file]
     exec_start = " ".join(shlex.quote(c) for c in cmd)
     hardening = "" if (sudo_allow or (write_allow and write_sudo)) else "NoNewPrivileges=yes\n"
     if token and env_file:
@@ -1162,7 +1277,8 @@ def install(args, *, run=_run) -> int:
         print(f"[2b/4] supervised writes off — removed {SUDOERS_WRITES}")
     unit = unit_text(python=os.path.join(venv, "bin", "python"), script=script, host=args.host, port=args.port,
                      token=args.token, sudo_allow=args.sudo_allow, user=args.run_as,
-                     write_allow=write_allow, write_sudo=write_sudo)
+                     write_allow=write_allow, write_sudo=write_sudo,
+                     secrets_file=getattr(args, "secrets_file", None))
     detached = not shutil.which("systemctl")
     if detached:
         # no systemd (a container, a BSD): start it detached and say so plainly.
@@ -1231,6 +1347,10 @@ def main() -> int:
                          "approval (e.g. \"apt-get install\" \"pct set\" \"tee -a /etc/caddy/\"); empty = writes off")
     ap.add_argument("--write-sudo", action="store_true",
                     help="run write-allowed commands as `sudo -n` (--install sets this after writing the sudoers file)")
+    ap.add_argument("--secrets-file", default=None, metavar="PATH",
+                    help="§17.1191 — a KEY=VALUE file (mode 0600) this runner reads. The engine learns only the "
+                         "NAMES and writes $NAME into a command; the value is injected as an environment variable "
+                         "here, so it never enters the engine, the transcript, the log line or the process table")
     ap.add_argument("--install", action="store_true",
                     help="§17.1147 — as root: copy to --install-dir, make a venv, install deps, write+start the systemd unit, check the port")
     ap.add_argument("--install-dir", default=INSTALL_DIR)
@@ -1251,7 +1371,8 @@ def main() -> int:
     if why:
         print(f"FAILED: {why}", file=sys.stderr)
         return 2
-    mcp = build_server(args.token, sudo_allow=args.sudo_allow, write_allow=args.write_allow, write_sudo=args.write_sudo)
+    mcp = build_server(args.token, sudo_allow=args.sudo_allow, write_allow=args.write_allow,
+                       write_sudo=args.write_sudo, secrets=load_secrets(getattr(args, "secrets_file", None)))
     if args.stdio:
         asyncio.run(mcp.run_stdio_async()); return 0
     import contextlib

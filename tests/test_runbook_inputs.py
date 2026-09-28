@@ -86,19 +86,54 @@ async def test_run_refuses_until_the_values_are_given_then_runs_the_filled_comma
 
 
 @pytest.mark.asyncio
-async def test_a_secret_value_never_reaches_the_record():
+async def test_a_secret_value_is_not_taken_at_all(caplog):
+    """§17.1191 supersedes §17.1187 for SECRET-named values.
+
+    Masking the record was never enough: the substituted command still reached
+    the runner, which logs it, and `create_subprocess_shell` put it in the
+    target's process table. So the engine stops accepting the value — even one
+    sent on the wire — and the block is not runnable until the runner itself
+    holds it."""
     waiting = {"kind": "run", "runbook": "## Run this\n```\npct set 111 --password <ADMIN_PASSWORD>\n```\n",
                "commands": ["pct set 111 --password <ADMIN_PASSWORD>"], "verify": [], "refused": [],
-               "inputs": [{"name": "ADMIN_PASSWORD", "hint": "", "secret": True}]}
-    db = AsyncMock(); claim = MagicMock(); claim.rowcount = 1; done = MagicMock(); done.rowcount = 1
-    db.execute = AsyncMock(side_effect=[claim, done])
-    executed = [{"command": "pct set 111 --password hunter2", "output": "set hunter2", "exit": 0, "ok": True, "approval_id": "a", "refused": False}]
+               "inputs": [{"name": "ADMIN_PASSWORD", "hint": "", "secret": True}],
+               "secrets_missing": ["ADMIN_PASSWORD"]}
+    db = AsyncMock()
     with patch.object(sr, "channel", new=AsyncMock(return_value=(_spec(), {"allow": ["pct set"], "sudo": False}))), \
-         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=executed)):
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock()) as rb:
         out = await sr.resolve_run(db, "j", "T1", "run", waiting, inputs={"ADMIN_PASSWORD": "hunter2"})
-    assert out["outcome"] == "ran"
-    rec = db.execute.await_args_list[1].args[1]["out"]
-    assert "hunter2" not in rec and "pct set 111 --password ***" in rec
+    assert out["outcome"] == "not_runnable"
+    assert out["secrets_missing"] == ["ADMIN_PASSWORD"]
+    rb.assert_not_awaited()                       # nothing was sent to the runner
+    db.execute.assert_not_awaited()               # and the node was not claimed
+
+
+def test_a_secret_the_runner_holds_becomes_a_reference_not_a_question():
+    """The value stays on the target: the engine writes `$NAME`, asks nothing,
+    and the runner expands it as an environment variable when it runs."""
+    runbook = ("## Run this\n```bash\npct exec 120 -- app-cli --key <API_TOKEN> --host <APP_HOST>\n```\n"
+               "## Inputs needed\n- <API_TOKEN> the upstream token\n- <APP_HOST> where the app runs\n")
+    spec = _spec()
+    frame = sr.frame_run({"node_key": "T1", "title": "wire it"}, runbook, spec,
+                         {"allow": ["pct exec"], "secrets": ["API_TOKEN"]})
+    assert frame["commands"] == ["pct exec 120 -- app-cli --key $API_TOKEN --host <APP_HOST>"]
+    assert [i["name"] for i in frame["inputs"]] == ["APP_HOST"]     # the secret is not asked for
+    assert frame["secrets_resolved"] == ["API_TOKEN"] and frame["secrets_missing"] == []
+    assert "run" in [o["id"] for o in frame["options"]]
+
+
+def test_a_secret_the_runner_does_not_hold_blocks_the_run_and_says_where_it_belongs():
+    runbook = ("## Run this\n```bash\npct exec 120 -- app-cli --key <API_TOKEN>\n```\n"
+               "## Inputs needed\n- <API_TOKEN> the upstream token\n")
+    frame = sr.frame_run({"node_key": "T1", "title": "wire it"}, runbook, _spec(),
+                         {"allow": ["pct exec"], "secrets": []})
+    assert frame["secrets_missing"] == ["API_TOKEN"] and frame["secrets_resolved"] == []
+    assert "run" not in [o["id"] for o in frame["options"]] and frame["suggested"] == "myself"
+    assert not any(i["name"] == "API_TOKEN" for i in frame["inputs"])   # never asked
+    why = " ".join(r["why"] for r in frame["refused"])
+    assert "holds no value for API_TOKEN" in why and "never takes a password" in why
+    # and the gate's own verdict is not polluted by the placeholder's angle brackets
+    assert "redirect" not in why
 
 
 def test_the_decide_path_carries_inputs_and_stores_only_their_names():

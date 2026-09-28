@@ -400,6 +400,31 @@ async def _detect_runner_writes(db) -> tuple[str, str]:
                    + await _write_prefix_hint(db))
 
 
+async def _detect_runner_secrets(db) -> tuple[str, str]:
+    """§17.1191 — does the runner hold values the engine can reference by name?
+
+    Like every detector this reads only what the engine already learned (the
+    cached write policy); it never calls out to the operator's machines. The
+    policy reports NAMES only — a value never leaves the target."""
+    st, _ = await _detect_runner_writes(db)
+    if st in ("blocked", "manual"):
+        return ("blocked", "Open the supervised write channel first.") if st == "blocked" else \
+               ("manual", "not checked yet — the engine reads the runner's policy when a walkthrough loads.")
+    try:
+        from app.modules import assist_local_runner as _lr
+        from app.modules import assist_supervised as _sw
+        spec = await _lr.runner_spec(db)
+        known, pol = _sw.cached_policy(spec) if spec is not None else (False, None)
+    except Exception as exc:
+        return "off", f"could not read the runner's policy: {exc}"
+    names = list((pol or {}).get("secrets") or [])
+    if names:
+        return "on", ("the runner can supply " + ", ".join(f"`${n}`" for n in names[:8])
+                      + " to a command you approve — the engine never sees the values.")
+    return "off", ("no secrets file on the runner — a step needing a password cannot be run for you, "
+                   "and the engine will not ask you to type one.")
+
+
 async def _detect_runner_sudo(db) -> tuple[str, str]:
     st, _ = await _detect_local_runner(db)
     if st != "on":
@@ -540,6 +565,60 @@ RECIPES: tuple[Recipe, ...] = (
             "Re-run the one-paste install on the target with --write-allow \"<prefix>\" … appended (same token); the "
             "installer writes /etc/sudoers.d/scaffold-runner-writes for exactly those commands. Ask me which prefixes "
             "I want before running anything. Verify by opening the walkthrough: a ▶ Run button appears on command blocks."
+        ),
+    ),
+    Recipe(
+        id="runner_secrets",
+        steps=(
+            ("Decide which values the runner should hold",
+             "A step that needs a password, an API token or a key cannot be run for you today: the engine will not "
+             "take a secret, because a value it holds would end up in the command it sends, in the runner's log on "
+             "{target_host}, and in that machine's process table. Instead the value stays on {target_host} and the "
+             "engine only ever writes its NAME. List the names this plan needs (SCREAMING_SNAKE_CASE, e.g. "
+             "DB_PASSWORD, API_TOKEN). Done when you have the list."),
+            ("Write them into a file only the runner can read",
+             "On {target_host}, as root, create the file with one NAME=value per line and lock it down — the runner "
+             "refuses a file any other user can read:\n"
+             "```bash\n"
+             "install -d -m 700 -o {runner_user} -g {runner_user} /etc/scaffold-runner\n"
+             "install -m 600 -o {runner_user} -g {runner_user} /dev/null /etc/scaffold-runner/secrets.env\n"
+             "sudo -u {runner_user} tee -a /etc/scaffold-runner/secrets.env\n"
+             "```\n"
+             "Type each NAME=value line after the last command, then press Ctrl-D. Done when "
+             "`ls -l /etc/scaffold-runner/secrets.env` shows `-rw------- {runner_user} {runner_user}`. "
+             "Do NOT paste the file's contents back here — the engine does not want the values."),
+            ("Re-run the install with the secrets file",
+             "On {target_host}, paste the install line again with your write list AND the secrets file appended — "
+             "same token; the installer replaces the running service:\n"
+             "```bash\n"
+             "curl -fsSL {script_url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
+             "--port {runner_port} --token {token} --write-allow \"<your prefixes>\" "
+             "--secrets-file /etc/scaffold-runner/secrets.env\n"
+             "```\n"
+             "Done when the last line printed starts with OK:."),
+            ("Verify the engine sees the names and not the values",
+             "Nothing to type: the engine reads the runner's policy itself when you open this step. Done when it "
+             "lists the NAMES you wrote and nothing else. From then on a runbook that needs one of them uses "
+             "`$NAME`, the runner expands it at the moment it runs, and the value never reaches the engine, this "
+             "transcript, the runner's log line or the process table.\n" + PROBE_MARK),
+        ),
+        keywords=("runner secret", "secrets file", "api token", "a password for a step", "credential store",
+                  "keep my password", "secret the engine can use", "password wallet", "store a password"),
+        title="Let the engine use a secret you keep on your machine",
+        summary="A step that needs a password can be run for you — the value stays on your machine and the engine only writes its name.",
+        why_off="A secret the engine holds would end up in the command it sends, the runner's log and the process table; this keeps it on the machine that needs it.",
+        effort="15 min",
+        requires=("runner_writes",),
+        detect=_detect_runner_secrets,
+        probe=probe_local_runner,
+        brief=(
+            "Let the scaffold-engine local runner supply named secrets to commands I approve, so a step that needs a "
+            "password or an API token can be carried out without the engine ever holding the value.\n\n"
+            "The values go in a KEY=VALUE file on the target machine that only the runner's service account can read "
+            "(mode 0600), and the helper is re-installed with --secrets-file pointing at it. The engine learns only "
+            "the NAMES: a runbook then writes $NAME, and the runner injects the value as an environment variable at "
+            "the moment it runs the approved command. Ask me which names I need before writing anything, and never "
+            "ask me to paste a value into this conversation."
         ),
     ),
     Recipe(

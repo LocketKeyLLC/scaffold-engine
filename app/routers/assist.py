@@ -1305,6 +1305,48 @@ async def assist_handoff(session_id: UuidPath, body: AssistHandoffInput, request
     )
 
 
+@router.get("/assist/{session_id}/handoff/preview")
+async def assist_handoff_preview(session_id: UuidPath, db=Depends(get_db)) -> dict:
+    """§17.1190 — what handing the REST of this plan to the engine would mean.
+
+    Read-only and deterministic: the steps left, how many change a machine,
+    whether a runner's write channel is open to carry them, and whether the
+    §17.624 gate would simply park the job back to this walkthrough. The
+    control that offers the handoff reads this first, so it can say what will
+    happen — or why pressing it would achieve nothing.
+    """
+    from app.modules import assist_handoff
+    try:
+        return await assist_handoff.preview_all_remaining(db, str(session_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post("/assist/{session_id}/handoff/all")
+async def assist_handoff_all(session_id: UuidPath, db=Depends(get_db)) -> dict:
+    """§17.1190 — hand every remaining step to the engine and start the run.
+
+    The run is DETACHED (`run_broker`, the seam `/jobs/{id}/decide` uses), so
+    closing the tab does not cancel it; the Run stage attaches via
+    `/execute/all`. From here the engine works the plan on its own and stops to
+    ask — at a decision node, and at every step that would change a machine,
+    where it shows the exact commands and waits for approval.
+
+    409 when the handoff would achieve nothing (the walkthrough is not active,
+    nothing is left, or the plan is predominantly hands-on with no open write
+    channel — the gate would hand it straight back); the body says which.
+    """
+    from app.modules import assist_handoff
+    try:
+        res = await assist_handoff.start_all_remaining(db, str(session_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    if not res.get("started"):
+        raise HTTPException(status_code=409, detail={"error": res.get("blocker") or "could not start the run",
+                                                     "preview": res})
+    return res
+
+
 @router.post("/assist/{session_id}/pause")
 async def assist_pause(session_id: UuidPath, db=Depends(get_db)):
     try:

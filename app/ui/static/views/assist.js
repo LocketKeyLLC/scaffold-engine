@@ -5,7 +5,7 @@
 // / assist_guide_done). Message composer persists via /assist/{id}/turn.
 import * as api from "../api.js";
 import { el, mount, shortId, timeAgo, fmtDate, mdToHtml, stickyScroll, selectionWithin, sentinelFor } from "../util.js";
-import { statusBadge, loading, errorPanel, toast, emptyState, openDialog, askChoice } from "../components.js";
+import { statusBadge, loading, errorPanel, toast, emptyState, openDialog, askChoice, askConfirm } from "../components.js";
 import { briefPanel } from "./brief_panel.js";
 
 import { storage } from "../storage.js";
@@ -399,6 +399,7 @@ export const ASSIST_HELP = {
     "🔧 Fix error": "Paste the error into the box first, then press this. You get a diagnosis for YOUR environment — the engine reads it against what it already knows about your machines, not a generic answer.",
     "⏩ Skip": "Skips the current step for now. It's recorded and you can come back to it later.",
     "🤝 Engine does it": "Hands the step to the engine to finish on its own — but only work the engine itself can do (thinking, writing, planning). It will not run anything on your machine for this: the one exception anywhere in the engine is the optional local runner — read-only checks on its own, and (only if you opened the write channel) the commands of a block you approve with ▶ Run — listed under Session details when it is connected.",
+    "⏭ Engine finishes the rest": "Hands the whole remainder of the plan to the engine and closes this walkthrough — it works the steps itself from here and comes back to you with questions. It stops at every step that would change a machine, shows you the exact commands, and runs nothing until you approve that block; a decision comes back as a question. Before it starts it tells you how many steps are left, how many touch a machine, and which commands it is allowed to run on which machine. If no write channel is open and the plan is mostly hands-on, it refuses and says so, because the engine would only hand the plan straight back.",
     "↶ Restore a reopened step": "If a re-plan or a state check reopened a step you'd already finished, this puts it back to done with the evidence it had. It's refused once you've done more work on that step, so it can't erase real progress.",
     "⏸": "Pauses the session so nothing runs while you step away; press it again to resume right where you left off.",
   },
@@ -904,6 +905,41 @@ export function renderChat(container, sessionId, opts = {}) {
       await api.post(`/assist/${sessionId}/handoff`, { node_key: nk, mode: "single" });
       toast(`Step ${nk} handed to the engine.`, "ok");
       load();
+    }),
+    // §17.1190 — hand the REST of the plan over. The capability has existed
+    // since §17.856 (`mode:"all_remaining"` → `execute_all_nodes`), but this
+    // view only ever posted `mode:"single"`, so the operator's only route to
+    // it was a handoff POLICY fixed at session start. The engine now knows
+    // what the handoff would mean before it happens, and says so here.
+    verb("⏭ Engine finishes the rest", "Hand every remaining step to the engine — it works the plan on its own and stops to ask before anything that changes a machine", async () => {
+      let pre;
+      try {
+        pre = await api.get(`/assist/${sessionId}/handoff/preview`);
+      } catch (e) {
+        toast((e && e.message) || "Could not read what the handoff would do", "err");
+        return;
+      }
+      if (!pre.can_start) { toast(pre.blocker || "Nothing to hand over.", "err"); return; }
+      const lines = [
+        `${pre.remaining} step${pre.remaining === 1 ? "" : "s"} left; the engine takes them from here.`,
+        pre.hands_on
+          ? `${pre.hands_on} of them change a machine — it stops at each one and shows you the exact commands to approve before running anything.`
+          : "None of them change a machine.",
+        pre.decisions ? `${pre.decisions} decision${pre.decisions === 1 ? "" : "s"} will come back to you as a question.` : "",
+        pre.channel_open
+          ? `It can run commands on ${pre.runner}, and only these: ${(pre.allow || []).join(", ") || "(none)"}.`
+          : "No write channel is open, so it will not run anything on your machines.",
+        "This walkthrough closes; you can watch the run and answer its questions on the Run tab.",
+      ].filter(Boolean);
+      if (!(await askConfirm(lines.join("\n\n"), {
+        title: "Let the engine finish the rest?", confirmText: "Hand it over" }))) return;
+      try {
+        const res = await api.post(`/assist/${sessionId}/handoff/all`, {});
+        toast(`${res.remaining} step(s) handed to the engine.`, "ok");
+        location.hash = `#/job/${res.job_id}/run`;
+      } catch (e) {
+        toast((e && e.message) || "Could not hand the plan over", "err");
+      }
     }),
     // §17.1056 — undo a reopen from its pre-image (the engine keeps one for
     // every step a confirmed re-plan or state check reopens).
