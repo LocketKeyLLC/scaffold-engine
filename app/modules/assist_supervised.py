@@ -222,8 +222,11 @@ def cached_policy(spec) -> tuple[bool, Optional[dict]]:
     return False, None
 
 
+_SECRET_REF_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
 async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
-    """``{allow, sudo, helper}`` when the runner exposes the supervised
+    """``{allow, sudo, helper, secrets}`` when the runner exposes the supervised
     channel with a non-empty allow-list; None when it does not (an older
     helper, or one installed without ``--write-allow``). Cached per runner
     for a few minutes: the assist view asks on every mount."""
@@ -248,7 +251,12 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
         _policy_cache[name] = (time.monotonic() + 60.0, None)
         return None
     allow = [str(a) for a in (pol.get("allow") or []) if str(a).strip()]
-    out = {"allow": allow, "sudo": bool(pol.get("sudo")), "helper": str(pol.get("helper") or "")} if allow else None
+    # §17.1191 — the NAMES the runner can resolve (`$NAME` in a command), never
+    # their values. An older helper does not report the field; [] then means
+    # "this runner holds no secrets", which is the safe reading.
+    secrets = sorted({str(n) for n in (pol.get("secrets") or []) if _SECRET_REF_NAME.match(str(n))})
+    out = ({"allow": allow, "sudo": bool(pol.get("sudo")), "helper": str(pol.get("helper") or ""),
+            "secrets": secrets} if allow else None)
     _policy_cache[name] = (time.monotonic() + _POLICY_TTL, out)
     return out
 

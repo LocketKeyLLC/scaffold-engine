@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -59,6 +60,10 @@ BASE = f"http://127.0.0.1:{ENGINE_PORT}"
 # says so. The steps name the path; the gate is what makes it true.
 MARKER_DIR = "/tmp/scaffold-auto-itest"
 WRITE_ALLOW = [f"mkdir -p {MARKER_DIR}/", f"tee {MARKER_DIR}/", f"touch {MARKER_DIR}/"]
+# §17.1191 — a value the RUNNER holds. The engine must never see it: it writes
+# `$ITEST_SECRET`, and the runner expands it as an environment variable.
+SECRET_NAME = "ITEST_SECRET"
+SECRET_VALUE = "s3cr3t-" + uuid.uuid4().hex[:10]
 
 
 def _port_open(port: int, timeout: float = 1.0) -> bool:
@@ -85,10 +90,16 @@ def helper():
     """The helper as the operator would run it, WITH the write channel open."""
     assert not _port_open(HELPER_PORT), f"port {HELPER_PORT} is already taken"
     shutil.rmtree(MARKER_DIR, ignore_errors=True)
-    log = open(os.environ.get("ITEST_LOG_DIR", "/tmp") + "/itest_auto_helper.log", "wb")
+    log_dir = os.environ.get("ITEST_LOG_DIR", "/tmp")
+    secrets_path = os.path.join(log_dir, "itest_secrets.env")
+    with open(secrets_path, "w", encoding="utf-8") as fh:
+        fh.write(f"{SECRET_NAME}={SECRET_VALUE}\n")
+    os.chmod(secrets_path, 0o600)
+    log = open(log_dir + "/itest_auto_helper.log", "wb")
     proc = subprocess.Popen(
         [sys.executable, str(ROOT / "scripts" / "local_runner_mcp.py"), "--host", "127.0.0.1",
-         "--port", str(HELPER_PORT), "--token", TOKEN, "--write-allow", *WRITE_ALLOW],
+         "--port", str(HELPER_PORT), "--token", TOKEN, "--write-allow", *WRITE_ALLOW,
+         "--secrets-file", secrets_path],
         stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
     )
     try:
@@ -166,10 +177,15 @@ NODES = [
      f"On the host, create the staging directory the library will use.\n\n"
      f"Run this:\n\n```bash\nmkdir -p {MARKER_DIR}/stage1\n```\n\n"
      f"Done when `ls -ld {MARKER_DIR}/stage1` prints the directory.", ["D1"]),
+    ("H3", "task", f"Record the library token at {MARKER_DIR}/stage1/token.txt",
+     f"On the host, write the library token into the staging directory.\n\n"
+     f"Run this:\n\n```bash\nprintf '%s' '<{SECRET_NAME}>' | tee {MARKER_DIR}/stage1/token.txt\n```\n\n"
+     f"## Inputs needed\n- <{SECRET_NAME}> the library token\n\n"
+     f"Done when `ls -l {MARKER_DIR}/stage1/token.txt` shows the file.", ["H1"]),
     ("H2", "task", "Restart the media server service so it picks up the new mount",
      "On the host, restart the media service.\n\n"
      "Run this:\n\n```bash\nsystemctl restart scaffold-itest-media.service\n```\n\n"
-     "Done when `systemctl is-active scaffold-itest-media.service` reports active.", ["H1"]),
+     "Done when `systemctl is-active scaffold-itest-media.service` reports active.", ["H3"]),
 ]
 
 
@@ -284,7 +300,34 @@ async def test_auto_mode_asks_then_runs(job):
     assert os.path.isdir(f"{MARKER_DIR}/stage1"), \
         f"the approved command did not actually run: {MARKER_DIR}/stage1 is missing"
 
-    # ── 5. a step outside the allow-list is NOT offered 'run' ───────────
+    # ── 5. a secret the RUNNER holds is referenced, never carried ───────
+    ask3 = await _await_pause(jid, "H3")
+    assert ask3.get("kind") == "run", ask3
+    assert ask3.get("secrets_resolved") == [SECRET_NAME], ask3.get("secrets_resolved")
+    assert not ask3.get("secrets_missing"), ask3.get("secrets_missing")
+    assert not any(i["name"] == SECRET_NAME for i in ask3.get("inputs") or []), "the engine asked for the secret"
+    blob = json.dumps(ask3)
+    assert SECRET_VALUE not in blob, "the secret's VALUE reached the engine's pause frame"
+    assert any(f"${SECRET_NAME}" in c for c in ask3["commands"]), ask3["commands"]
+
+    r = await _decide(jid, {"node_key": "H3", "choice": "run"})
+    assert r.status_code == 200, r.text
+    assert r.json()["outcome"] == "ran", r.json()
+    h3 = await _node(jid, "H3")
+    assert h3["status"] == "done", h3
+    # the runner expanded it: the file really holds the value
+    with open(f"{MARKER_DIR}/stage1/token.txt", encoding="utf-8") as fh:
+        assert fh.read().strip() == SECRET_VALUE
+    # …and nothing that leaves the runner carries it
+    assert SECRET_VALUE not in (h3["output_text"] or ""), "the value landed in the node's output"
+    assert f"${SECRET_NAME}" in (h3["output_text"] or ""), h3["output_text"][:400]
+    helper_log = open(os.environ.get("ITEST_LOG_DIR", "/tmp") + "/itest_auto_helper.log",
+                      encoding="utf-8", errors="replace").read()
+    assert SECRET_VALUE not in helper_log, "the runner logged the secret's value"
+    assert re.search(rf"SUPERVISED id=\w+ RUN: .*\${SECRET_NAME}", helper_log), \
+        "the runner's log line did not show the reference"
+
+    # ── 6. a step outside the allow-list is NOT offered 'run' ───────────
     ask2 = await _await_pause(jid, "H2")
     assert ask2.get("kind") == "run", ask2
     assert ask2["suggested"] == "myself", ask2["suggested"]

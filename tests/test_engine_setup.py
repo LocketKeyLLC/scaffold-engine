@@ -84,7 +84,8 @@ async def test_detection_reads_live_settings(monkeypatch):
     monkeypatch.setattr(settings, "assist_step_fsm_strict", False)
     out = {r["id"]: r for r in await es.list_recipes(_db())}
     assert {k: v["status"] for k, v in out.items()} == {
-        "local_runner": "off", "runner_writes": "blocked", "runner_sudo": "blocked", "queue_worker": "off", "reranker_sidecar": "off", "step_fsm_strict": "off"}
+        "local_runner": "off", "runner_writes": "blocked", "runner_secrets": "blocked", "runner_sudo": "blocked",
+        "queue_worker": "off", "reranker_sidecar": "off", "step_fsm_strict": "off"}
     assert out["runner_sudo"]["status_detail"] == "Turn on the local runner first."
     monkeypatch.setattr(settings, "assist_local_runner_server", "pve-runner")
     spec = MagicMock(); spec.enabled = True; spec.endpoint = "http://10.0.0.5:8790/mcp/"; spec.command = None
@@ -94,7 +95,8 @@ async def test_detection_reads_live_settings(monkeypatch):
         monkeypatch.setattr(settings, "assist_step_fsm_strict", True)
         out = {r["id"]: r for r in await es.list_recipes(_db())}
     assert {k: v["status"] for k, v in out.items()} == {
-        "local_runner": "on", "runner_writes": "manual", "runner_sudo": "manual", "queue_worker": "on", "reranker_sidecar": "on", "step_fsm_strict": "on"}
+        "local_runner": "on", "runner_writes": "manual", "runner_secrets": "manual", "runner_sudo": "manual",
+        "queue_worker": "on", "reranker_sidecar": "on", "step_fsm_strict": "on"}
     assert "10.0.0.5:8790" in out["local_runner"]["status_detail"]
     # a name set but not registered is OFF with the reason, not "on"
     with patch("app.modules.mcp_registry.get_server", new=AsyncMock(return_value=None)):

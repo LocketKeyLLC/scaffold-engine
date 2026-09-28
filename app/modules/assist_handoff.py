@@ -23,6 +23,21 @@ from app.modules.job_state import transition
 logger = logging.getLogger("scaffold.assist")
 
 
+async def _mark_remaining_handed_off(db, session_id: str) -> None:
+    """Every step still to do becomes ``handed_off`` so assist will not re-claim
+    it. ONE write site, shared by the SSE `all_remaining` path and §17.1190's
+    detached one — a second copy would be a second unchecked `assist_steps`
+    status write for the §17.1112 ratchet to count, and the two could drift."""
+    await db.execute(
+        text("""
+            UPDATE assist_steps SET status = 'handed_off', updated_at = NOW()
+             WHERE session_id = :sid
+               AND status IN ('pending', 'presented')
+        """),
+        {"sid": session_id},
+    )
+
+
 async def handoff_step(
     *, session_id: str, node_key: str, mode: str, db
 ) -> AsyncGenerator[str, None]:
@@ -57,14 +72,7 @@ async def handoff_step(
             {"sid": session_id, "nk": node_key},
         )
     else:
-        await db.execute(
-            text("""
-                UPDATE assist_steps SET status = 'handed_off', updated_at = NOW()
-                 WHERE session_id = :sid
-                   AND status IN ('pending', 'presented')
-            """),
-            {"sid": session_id},
-        )
+        await _mark_remaining_handed_off(db, session_id)
     await db.commit()
 
     # Switch the job out of assisted_* into 'executing' so the autonomous
@@ -345,11 +353,7 @@ async def start_all_remaining(db, session_id: str, node_key: str | None = None) 
     if not pre["can_start"]:
         return {**pre, "started": False}
     job_id = pre["job_id"]
-    await db.execute(
-        text("""UPDATE assist_steps SET status = 'handed_off', updated_at = NOW()
-                 WHERE session_id = :sid AND status IN ('pending', 'presented')"""),
-        {"sid": session_id},
-    )
+    await _mark_remaining_handed_off(db, session_id)
     await db.commit()
     async with async_session() as db2:
         await transition(db2, job_id, to="executing", reason="assist_handoff_all_remaining")

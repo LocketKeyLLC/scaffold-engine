@@ -419,6 +419,111 @@ def mask_secrets(text_out: str, values: dict[str, str], names: list[dict]) -> st
     return text_out
 
 
+def _quote_spans(cmd: str) -> list[tuple[int, int, str]]:
+    """``(start, end, quote)`` for every quoted span, outermost only."""
+    spans, i, n = [], 0, len(cmd or "")
+    while i < n:
+        c = cmd[i]
+        if c in "'\"":
+            j = cmd.find(c, i + 1)
+            if j == -1:
+                break
+            spans.append((i, j, c))
+            i = j + 1
+        else:
+            i += 1
+    return spans
+
+
+def secret_ref_rewrite(cmd: str, name: str) -> tuple[str, str]:
+    """``(command, problem)`` — ``<NAME>`` replaced by a reference the SHELL
+    will actually expand.
+
+    A naive ``<NAME>`` → ``$NAME`` is wrong inside single quotes: the shell
+    does not expand there, so the command runs with the literal text ``$NAME``
+    and *succeeds* with the wrong value. The integration test caught exactly
+    that — a runbook wrote ``printf '%s' '<TOKEN>' | tee …`` and the file
+    ended up holding ``$TOKEN``.
+
+    * outside quotes, or inside double quotes → ``$NAME``
+    * a whole single-quoted token, ``'<NAME>'`` → ``"$NAME"`` (quoted, so a
+      value with spaces still arrives as one argument)
+    * inside a single-quoted span mixed with other text → refused: rewriting
+      the span's quotes could change what the rest of it means.
+    """
+    ph = f"<{name}>"
+    if ph not in (cmd or ""):
+        return cmd, ""
+    out, i, n = [], 0, len(cmd)
+    spans = _quote_spans(cmd)
+    while i < n:
+        j = cmd.find(ph, i)
+        if j == -1:
+            out.append(cmd[i:])
+            break
+        span = next((sp for sp in spans if sp[0] < j and j + len(ph) <= sp[1]), None)
+        if span and span[2] == "'":
+            if span[0] + 1 == j and span[1] == j + len(ph):      # the whole token
+                out.append(cmd[i:span[0]])
+                out.append(f'"${name}"')
+                i = span[1] + 1
+                continue
+            return cmd, (f"{ph} sits inside a single-quoted string, where the shell would not expand "
+                         f"${name} — the runbook must quote it with double quotes or leave it bare")
+        out.append(cmd[i:j])
+        out.append(f"${name}")
+        i = j + len(ph)
+    return "".join(out), ""
+
+
+def apply_runner_secrets(commands: list[str], verify: list[str], inputs: list[dict],
+                         policy: dict) -> tuple[list[str], list[str], list[dict], list[str], list[str]]:
+    """§17.1191 — turn secret-named placeholders into runner-resolved refs.
+
+    A `<DB_PASSWORD>` used to be typed by the operator at the pause and spliced
+    into the command by the engine. Masking then kept it out of the node output
+    and the transcript (§17.1187) — but the substituted command still reached
+    the runner, which logs it, and `create_subprocess_shell` put it in the
+    target's process table. Masking protected the record, never the run.
+
+    So a secret is never carried. When the runner's own store holds that NAME
+    (``policy['secrets']``, names only — the values never leave that machine),
+    the placeholder becomes a `$NAME` reference the runner expands as an
+    environment variable at execution. When it does not, the engine asks for
+    nothing and the block is not runnable: the operator adds the value to the
+    runner's secrets file, and it still never passes through here.
+
+    Returns ``(commands, verify, inputs, resolved, missing)`` — ``inputs`` with
+    every secret removed (there is nothing left to type), ``resolved`` the
+    names the runner will supply, ``missing`` the ones it cannot.
+    """
+    secret_names = [str(i.get("name") or "") for i in inputs if i.get("secret")]
+    if not secret_names:
+        return commands, verify, inputs, [], []
+    known = {str(n) for n in (policy.get("secrets") or [])}
+    resolved = [n for n in secret_names if n in known]
+    missing = [n for n in secret_names if n not in known]
+
+    unquotable: list[str] = []
+
+    def _ref(cmds: list[str]) -> list[str]:
+        out = []
+        for c in cmds:
+            for n in list(resolved):
+                c, problem = secret_ref_rewrite(c, n)
+                if problem and problem not in unquotable:
+                    unquotable.append(problem)
+                    if n in resolved:
+                        resolved.remove(n)
+                        missing.append(n)
+            out.append(c)
+        return out
+
+    cmds_out, verify_out = _ref(commands), _ref(verify)
+    kept = [i for i in inputs if not i.get("secret")]
+    return cmds_out, verify_out, kept, resolved, missing
+
+
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
     what would verify, what the gate refused (then ``run`` is not offered)."""
@@ -426,16 +531,32 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     cmds = runbook_commands(runbook)
     verify = verify_commands(runbook)
     inputs = inputs_for(cmds, verify, runbook)
+    # §17.1191 — a secret is resolved BY THE RUNNER or not at all; it is never
+    # typed here and never travels through the engine.
+    cmds, verify, inputs, secrets_resolved, secrets_missing = apply_runner_secrets(cmds, verify, inputs, policy)
     if inputs:                                   # §17.1188 — offer what the engine already knows
         from app.modules.runbook_inputs import suggest_inputs
         inputs = suggest_inputs(inputs, env)
     # §17.1187 — with placeholders the SHAPE is gated now (dummy values in
     # place); the real commands are gated again at resolve, once the operator
     # has supplied the values.
-    shape = substitute(cmds, {i["name"]: "x" for i in inputs}) if inputs else cmds
+    # The SHAPE is what the gate judges (§17.1187): a `<PLACEHOLDER>` reads as a
+    # redirect, so every one gets a dummy — including a secret the runner cannot
+    # resolve, whose real refusal is stated once below rather than as a fake
+    # "redirect" per command.
+    _dummies = {i["name"]: "x" for i in inputs}
+    _dummies.update({n: "x" for n in secrets_missing})
+    shape = substitute(cmds, _dummies) if _dummies else cmds
     runnable, refused = gate_block(shape, policy.get("allow") or [])
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
+    if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner
+        refused = list(refused) + [{
+            "command": ", ".join(f"${n}" for n in secrets_missing),
+            "why": (f"{runner} holds no value for {', '.join(secrets_missing)} — add it to that machine's "
+                    "runner secrets file (Capabilities → \u201cLet the engine use a secret you keep on your "
+                    "machine\u201d). The engine never takes a password."),
+        }]
     if cmds and not refused:
         options.append({"id": "run", "label": f"Run it through {runner}",
                         "fit": f"the engine runs these {len(cmds)} command{'s' if len(cmds) != 1 else ''} on the machine, then the checks",
@@ -457,6 +578,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                  "some of its commands are not on the runner's allow-list — see the refusals")),
         "runner": runner, "commands": cmds, "verify": verify, "refused": refused,
         "inputs": inputs,
+        "secrets_resolved": secrets_resolved, "secrets_missing": secrets_missing,
         "runbook": runbook[:12000], "allow": list(policy.get("allow") or []), "sudo": bool(policy.get("sudo")),
         "hands_on_reason": node.get("hands_on_reason") or "",
     }
@@ -488,11 +610,12 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             {"jid": job_id, "nk": node_key, "out": out})
         return {"outcome": "runbook" if upd.rowcount else "node_gone", "node_status": "done"}
     # choice == "run"
-    if waiting.get("refused") or not waiting.get("commands"):
-        return {"outcome": "not_runnable", "refused": waiting.get("refused") or []}
+    if waiting.get("refused") or not waiting.get("commands") or waiting.get("secrets_missing"):
+        return {"outcome": "not_runnable", "refused": waiting.get("refused") or [],
+                "secrets_missing": waiting.get("secrets_missing") or []}
     commands = [str(c) for c in waiting.get("commands") or []]
     verify_cmds = [str(c) for c in waiting.get("verify") or []]
-    need = list(waiting.get("inputs") or [])
+    need = [i for i in (waiting.get("inputs") or []) if not i.get("secret")]   # §17.1191
     values: dict[str, str] = {}
     if need:                                      # §17.1187 — the values the runbook asked for, checked, spliced in
         values, problems = check_inputs([i["name"] for i in need], inputs)
