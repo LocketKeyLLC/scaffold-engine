@@ -357,14 +357,7 @@ async def _write_prefix_hint(db) -> str:
     line says which ones, rather than leaving them to a generic example.
     Deterministic and DB-only: a detector never calls out to their machines."""
     try:
-        from sqlalchemy import text as _text
-        from app.modules import supervised_runs as _sr
-        row = (await db.execute(_text(
-            "SELECT id FROM jobs WHERE status NOT IN ('completed', 'failed', 'cancelled') "
-            "ORDER BY updated_at DESC LIMIT 1"))).first()
-        if row is None:
-            return ""
-        allowed = [p["prefix"] for p in await _sr.write_prefixes_for_job(db, str(row[0])) if p["prefix"]]
+        allowed = await _plan_write_prefixes(db)
         if not allowed:
             return ""
         return (f" Your open plan's remaining hands-on steps need {len(allowed)}: "
@@ -798,13 +791,104 @@ async def list_recipes(db) -> list[dict]:
         status, detail = await r.detect(db) if r.detect else ("manual", "")
         job = jobs.get(r.id)
         if status != "on" and job and job["status"] not in _CLOSED_JOB_STATUSES:
-            status, detail = "in_progress", f"a walkthrough is open (job {job['job_id'][:8]}…, {job['status']})."
+            # §17.1192 — the open-walkthrough line REPLACED the detector's, and
+            # with it everything the engine had worked out. Live: the card for
+            # the write channel named the four prefixes this plan needs while it
+            # was `manual`, then dropped them the moment the operator pressed
+            # the button — exactly when they were about to be asked for. Keep
+            # both: what is happening, and what the engine knows.
+            detail = (f"a walkthrough is open (job {job['job_id'][:8]}…, {job['status']})."
+                      + (f" {detail}" if detail else ""))
+            status = "in_progress"
         out.append({
             "id": r.id, "title": r.title, "summary": r.summary, "why_off": r.why_off, "effort": r.effort,
             "requires": list(r.requires), "status": status, "status_detail": detail,
             "job_id": job["job_id"] if job else None, "job_status": job["status"] if job else None,
         })
     return out
+
+
+async def known_facts_block(db, recipe: "Recipe") -> str:
+    """§17.1192 — the answers the engine already holds, appended to a recipe's
+    brief before it goes through refinement.
+
+    The write-channel walkthrough opened with nine open questions, two of them
+    *"which exact command prefixes does the operator want to allow"* and *"what
+    is the exact one-paste install command string and the token value to
+    reuse"*. The engine had both: it derives the prefixes from the plan's own
+    steps (§17.1189) and it composes that install line itself, token included,
+    in every repair hint it prints. Asking the operator to supply what the
+    machine is holding is the §17.1180 defect in a new place — and here it is
+    worse, because a typed answer can disagree with the registry and strand the
+    runner on a token nobody has.
+
+    Deterministic: registry + plan, no model, no outbound call. ``""`` when the
+    engine knows nothing worth stating, so an ordinary recipe is unchanged.
+    """
+    # Only the recipes that act ON the runner get the runner's facts: a token
+    # in the brief of an unrelated recipe (the queue worker, the reranker) is
+    # noise at best and a credential in the wrong transcript at worst.
+    if not (recipe.id == "local_runner" or recipe.id.startswith("runner_")):
+        return ""
+    lines: list[str] = []
+    try:
+        ctx = await recipe_context(db)
+        if known(ctx, "target_host") or known(ctx, "target_ip"):
+            where = ctx.get("target_host") if known(ctx, "target_host") else ctx.get("target_ip")
+            lines.append(f"- The target machine is **{where}**"
+                         + (f" (reachable at {ctx['target_ip']})" if known(ctx, "target_ip") else "") + ".")
+        if ctx.get("token"):
+            lines.append(f"- The runner's token is already registered: `{ctx['token']}` — REUSE it. "
+                         "Minting a new one strands the running helper on a token the engine no longer has.")
+        if recipe.id in ("runner_writes", "runner_secrets"):
+            prefixes = await _plan_write_prefixes(db)
+            if prefixes:
+                lines.append("- The command prefixes this operator's open plan needs, read off its own steps: "
+                             + ", ".join(f"`{p}`" for p in prefixes)
+                             + ". Propose exactly these and ask the operator to confirm or trim them; "
+                               "do not ask them to produce the list.")
+            lines.append(f"- The one-paste install line is: `curl -fsSL {ctx.get('script_url')} "
+                         f"-o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
+                         f"--port {RUNNER_PORT} --token {ctx.get('token')} "
+                         + ("--write-allow \"<the prefixes above>\"" if recipe.id == "runner_writes"
+                            else "--write-allow \"<the prefixes above>\" --secrets-file /etc/scaffold-runner/secrets.env")
+                         + "` — one invocation, one --write-allow flag, prefixes quoted and space-separated.")
+    except Exception as exc:
+        logger.warning("known_facts_block_failed recipe=%s err=%r", recipe.id, exc)
+        return ""
+    if not lines:
+        return ""
+    return ("\n\nWHAT THE ENGINE ALREADY KNOWS (do not ask the operator for these — "
+            "state them and ask only for a correction):\n" + "\n".join(lines))
+
+
+async def open_plan_job(db) -> Optional[str]:
+    """The operator's open BUILD job — the newest unfinished one that actually
+    has steps left.
+
+    Not simply "the newest open job": the moment the operator presses *Walk me
+    through it*, the recipe's own walkthrough becomes the newest open job and it
+    has no plan at all, so a look-up keyed on recency answers about the wrong
+    job and returns nothing. A setup walkthrough is excluded by its own marker,
+    and a job with no pending node cannot be the one being asked about.
+    """
+    row = (await db.execute(text("""
+        SELECT j.id FROM jobs j
+         WHERE j.status NOT IN ('completed', 'failed', 'cancelled')
+           AND COALESCE(j.metadata->>'setup_recipe', '') = ''
+           AND EXISTS (SELECT 1 FROM dag_nodes n WHERE n.job_id = j.id AND n.status = 'pending')
+         ORDER BY j.updated_at DESC LIMIT 1
+    """))).first()
+    return str(row[0]) if row else None
+
+
+async def _plan_write_prefixes(db) -> list[str]:
+    """The write-allow prefixes the operator's open plan needs (§17.1189)."""
+    from app.modules import supervised_runs as _sr
+    job_id = await open_plan_job(db)
+    if job_id is None:
+        return []
+    return [p["prefix"] for p in await _sr.write_prefixes_for_job(db, job_id) if p["prefix"]]
 
 
 async def start_recipe(db, recipe_id: str, *, owner: Optional[str]) -> dict:
@@ -833,12 +917,13 @@ async def start_recipe(db, recipe_id: str, *, owner: Optional[str]) -> dict:
             raise ValueError(f"'{BY_ID[dep].title}' must be on first")
     from app.modules.idea_refinement import create_ideation_job
     from app.modules.ideation_workflow import spawn_phase1_background
-    job_id = await create_ideation_job(r.brief, db, owner=owner)
+    brief = r.brief + await known_facts_block(db, r)          # §17.1192
+    job_id = await create_ideation_job(brief, db, owner=owner)
     await db.execute(text("""
         UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:m AS jsonb) WHERE id = :jid
     """), {"m": json.dumps({"setup_recipe": r.id, "prescriptive": True}), "jid": job_id})
     await db.commit()
-    spawn_phase1_background(job_id, r.brief)
+    spawn_phase1_background(job_id, brief)
     logger.info("engine_setup_started recipe=%s job_id=%s", r.id, job_id)
     return {"job_id": job_id, "status": "refining", "recipe": r.id}
 
@@ -989,10 +1074,14 @@ async def _registered_runner_token(db) -> str:
     return str(headers.get("X-Runner-Token") or "") if isinstance(headers, dict) else ""
 
 
-async def recipe_context(db, session_id: str) -> dict:
+async def recipe_context(db, session_id: Optional[str] = None) -> dict:
     """What the engine already knows that a recipe step needs: the target
     machine (system map host + the profile's `user@host`), its own reachable
-    URL (remembered from the operator's requests), and a fresh token."""
+    URL (remembered from the operator's requests), and a fresh token.
+
+    §17.1192 — ``session_id`` is optional: `start_recipe` runs before any
+    session exists, and the newest active walkthrough's ledger holds the same
+    facts."""
     import re as _re
     import secrets
     ctx = dict(_UNKNOWN)
@@ -1008,8 +1097,11 @@ async def recipe_context(db, session_id: str) -> dict:
     # A new token is now minted ONLY when none is registered.
     ctx["token"] = await _registered_runner_token(db) or secrets.token_hex(24)
     try:
-        row = (await db.execute(text("SELECT metadata FROM assist_sessions WHERE id = :sid"),
-                                {"sid": session_id})).mappings().first()
+        row = (await db.execute(
+            text("SELECT metadata FROM assist_sessions WHERE id = :sid"), {"sid": session_id},
+        )).mappings().first() if session_id else (await db.execute(
+            text("SELECT metadata FROM assist_sessions WHERE status = 'active' "
+                 "ORDER BY updated_at DESC LIMIT 1"))).mappings().first()
         meta = (row or {}).get("metadata") or {}
         env = meta.get("environment") if isinstance(meta, dict) else {}
         env = env if isinstance(env, dict) else {}
