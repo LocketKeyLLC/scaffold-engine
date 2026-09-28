@@ -105,13 +105,12 @@ async def runner_write_prefixes(job_id: str | None = None, db: AsyncSession = De
     finished. A command on the catastrophic denylist is listed with an empty
     ``prefix`` and ``why`` beginning "never allowed": no list releases it.
     """
-    from sqlalchemy import text as _text
+    from app.modules import engine_setup as _es
     from app.modules import supervised_runs as _sr
     if not job_id:
-        row = (await db.execute(_text(
-            "SELECT id FROM jobs WHERE status NOT IN ('completed', 'failed', 'cancelled') "
-            "ORDER BY updated_at DESC LIMIT 1"))).first()
-        job_id = str(row[0]) if row else None
+        # §17.1192 — the operator's open BUILD job, not merely the newest open
+        # one: a setup walkthrough is newer and has no plan.
+        job_id = await _es.open_plan_job(db)
     if not job_id:
         return {"job_id": None, "prefixes": [], "detail": "no open job to read a plan from"}
     prefixes = await _sr.write_prefixes_for_job(db, job_id)
