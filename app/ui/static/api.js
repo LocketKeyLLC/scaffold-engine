@@ -93,6 +93,7 @@ export async function req(path, { method = "GET", body, signal, query } = {}) {
 export const get = (p, opts) => req(p, { ...opts, method: "GET" });
 export const post = (p, body, opts) => req(p, { ...opts, method: "POST", body });
 export const patch = (p, body, opts) => req(p, { ...opts, method: "PATCH", body });
+export const put = (p, body, opts) => req(p, { ...opts, method: "PUT", body });   // §17.1193
 export const del = (p, opts) => req(p, { ...opts, method: "DELETE" });
 
 /**

@@ -891,6 +891,31 @@ async def _plan_write_prefixes(db) -> list[str]:
     return [p["prefix"] for p in await _sr.write_prefixes_for_job(db, job_id) if p["prefix"]]
 
 
+async def prefixes_needed(db) -> list[dict]:
+    """§17.1193 — the prefixes with the steps behind each, for the connection
+    page (the status line's short form is `_write_prefix_hint`)."""
+    from app.modules import supervised_runs as _sr
+    job_id = await open_plan_job(db)
+    return await _sr.write_prefixes_for_job(db, job_id) if job_id else []
+
+
+def install_line(ctx: dict, *, prefixes: Optional[list[str]] = None,
+                 secrets_file: Optional[str] = None) -> str:
+    """The one command the operator runs on the target, fully filled in.
+
+    §17.1193 — this string was written out by hand in three recipe steps and in
+    `diagnose_runner_path`'s repair text, each with its own idea of the flags.
+    One place, so the connection page, the walkthrough and a repair hint cannot
+    disagree about what to paste.
+    """
+    allow = " ".join(f'"{p}"' for p in (prefixes or []) if p)
+    return (f"curl -fsSL {ctx.get('script_url') or RUNNER_SCRIPT_FALLBACK_URL} -o /tmp/local_runner_mcp.py"
+            f" && python3 /tmp/local_runner_mcp.py --install"
+            f" --port {RUNNER_PORT} --token {ctx.get('token') or '<the token the engine registered>'}"
+            + (f" --write-allow {allow}" if allow else "")
+            + (f" --secrets-file {secrets_file}" if secrets_file else ""))
+
+
 async def start_recipe(db, recipe_id: str, *, owner: Optional[str]) -> dict:
     """Open the walkthrough: the recipe's brief goes through the same door as
     any operator idea. Raises KeyError for an unknown id and ValueError when

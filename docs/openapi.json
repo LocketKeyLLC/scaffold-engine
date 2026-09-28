@@ -1112,6 +1112,60 @@
         "title": "ConfirmInput",
         "type": "object"
       },
+      "ConnectInput": {
+        "description": "What it takes to reach a machine. Nothing else is required of anyone.",
+        "properties": {
+          "host": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Host",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "name": {
+            "default": "pve-runner",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "port": {
+            "default": 8790,
+            "maximum": 65535.0,
+            "minimum": 1.0,
+            "title": "Port",
+            "type": "integer"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "title": "ConnectInput",
+        "type": "object"
+      },
       "ConnectionInput": {
         "description": "§17.900 — one provider's credentials/endpoint.",
         "properties": {
@@ -4499,6 +4553,39 @@
           "created_at"
         ],
         "title": "ScheduleResponse",
+        "type": "object"
+      },
+      "SecretInput": {
+        "properties": {
+          "hint": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Hint",
+            "type": "string"
+          },
+          "runner": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runner"
+          },
+          "value": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "SecretInput",
         "type": "object"
       },
       "SkipNodeInput": {
@@ -13271,6 +13358,113 @@
         "summary": "Delete Schedule"
       }
     },
+    "/setup/machines": {
+      "get": {
+        "description": "Everything the connection page shows, in one call: the registered\nrunner, what the engine last learned about it, the values it holds by name,\nand the command prefixes this operator's plan needs.\n\nRead-only and cheap — it does NOT call out to the machine. `POST\n/setup/machines/probe` is the button that does, because that costs seconds.",
+        "operationId": "list_machines_setup_machines_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Machines Setup Machines Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Machines",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
+    "/setup/machines/connect": {
+      "post": {
+        "description": "Point the engine at a machine and say at once whether it answered.\n\nRegisters (or re-points) the runner row and probes it in the same call, so\nthe form reports a real result instead of \"saved\" — the failure mode this\nreplaces is a walkthrough that records an address and finds out ten minutes\nlater that nothing is there.",
+        "operationId": "connect_machine_setup_machines_connect_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Connect Machine Setup Machines Connect Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Connect Machine",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
+    "/setup/machines/probe": {
+      "post": {
+        "description": "Ask the machine, now. Seconds, and it is the operator's button.",
+        "operationId": "probe_machine_setup_machines_probe_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Probe Machine Setup Machines Probe Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Probe Machine",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
     "/setup/recipes": {
       "get": {
         "description": "Every optional capability with its live status (on / off / blocked /\nin_progress / manual), the plain-words reason it ships off, and the job\ncarrying its walkthrough when one is open.",
@@ -13431,6 +13625,142 @@
           }
         ],
         "summary": "Runner Write Prefixes",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
+    "/setup/secrets": {
+      "get": {
+        "description": "Names and metadata. A value never comes back out of this API.",
+        "operationId": "list_secrets_endpoint_setup_secrets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Secrets Endpoint Setup Secrets Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Secrets Endpoint",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
+    "/setup/secrets/{name}": {
+      "delete": {
+        "operationId": "delete_secret_endpoint_setup_secrets__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Secret Endpoint Setup Secrets  Name  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Delete Secret Endpoint",
+        "tags": [
+          "Setup"
+        ]
+      },
+      "put": {
+        "description": "Store one value, encrypted at rest, referenced from then on by name.",
+        "operationId": "put_secret_setup_secrets__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Secret Setup Secrets  Name  Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Put Secret",
         "tags": [
           "Setup"
         ]

@@ -847,6 +847,7 @@ from app.routers.auth_info import router as auth_info_router
 from app.routers.operator_account import router as operator_account_router
 from app.routers.meta import router as meta_router
 from app.routers.setup import router as setup_router
+from app.routers.machines import router as machines_router  # §17.1193 — connecting a machine is a setting
 from app.routers.profiles import router as profiles_router
 app.include_router(workflow_router)
 app.include_router(research_router)
@@ -865,6 +866,7 @@ app.include_router(auth_info_router)  # §17.815 — GET /auth/whoami (SPA login
 app.include_router(operator_account_router)  # §17.840 — admin account (password unlocks console)
 app.include_router(meta_router)  # §17.817 — first-run state (connect-models wizard)
 app.include_router(setup_router)  # §17.1081 — optional capabilities as self-setup walkthroughs
+app.include_router(machines_router)  # §17.1193 — the connection form the walkthrough replaced
 app.include_router(profiles_router)  # §17.809 — runtime compute profiles (/config/profile)
 
 

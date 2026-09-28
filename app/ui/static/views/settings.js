@@ -11,6 +11,7 @@ import { hubTabs } from "./knowledge.js";
 // [key, label, adminOnly]
 export const TABS = [
   ["models", "Models", true],
+  ["machines", "Machines", true],
   ["capabilities", "Capabilities", true],
   ["status", "Status", false],
   ["costs", "Costs", false],
@@ -33,6 +34,7 @@ export function resolveTab(raw, isAdmin = true) {
 
 const LOADERS = {
   models: () => import("./models.js"),
+  machines: () => import("./machines.js"),
   capabilities: () => import("./capabilities.js"),
   status: () => import("./status.js"),
   costs: () => import("./costs.js"),
