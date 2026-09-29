@@ -272,7 +272,9 @@ function contractCard(onDismiss, session, force) {
 }
 
 // §17.859 — exported: the job hub's Run tab embeds the walkthrough for
-// assisted_* jobs (it resolves the session via the idempotent /assist/start).
+// assisted_* jobs. §17.1209 — it resolves the session with a READ
+// (`GET /assist/for-job/{job_id}`); `POST /assist/start` was never idempotent
+// about anything but creation, and on mount it finished jobs (§17.1208).
 // §17.1054 — the newest durable turn id (0 when none / optimistic-only).
 // §17.1095 — what to do when a turn was killed by an engine restart (the
 // "died" frame). If the operator's last message already got an answer, the
