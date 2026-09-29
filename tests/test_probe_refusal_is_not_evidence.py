@@ -20,7 +20,7 @@ is evidence the thing is missing.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -140,3 +140,70 @@ async def test_a_mixed_batch_keeps_the_good_sections_only():
             spec, [{"id": "S:T1", "command": "qm status 106"}, {"id": "S:T2", "command": "pct status 111"}])
     assert set(sc.attribute_sections(pasted)) == {"S:T1"}
     assert [(e["id"], e["ran"]) for e in executed] == [("S:T1", True), ("S:T2", False)]
+
+
+# ── a probe the runner cannot run goes to the operator, not to nobody ─────
+
+def test_the_continuation_message_does_not_blame_the_paste():
+    """The old sentence explained every missing marker as a paste problem. For
+    a probe the ENGINE could not run, that sends the operator looking for a
+    dropped `== … ==` line that was never there."""
+    from app.modules import assist_state_check as sc
+    remaining = [{"id": "S:T1", "command": "qm status 106", "claim": "VM 106 is running"}]
+    msg = sc.render_continuation_message(
+        [], remaining, missing_ids=["S:T1", "S:T2"], deferred=0, total=2,
+        blocked={"S:T1": "the runner is not allowed to read this"})
+    assert "Your local runner could not run: `S:T1`" in msg, msg
+    assert "the runner is not allowed to read this" in msg, msg
+    assert "Those need a shell on the machine itself." in msg, msg
+    # the genuinely absent one keeps the original explanation, and only it
+    assert "did not cover: `S:T2`" in msg and "`S:T1`, `S:T2`" not in msg, msg
+
+
+@pytest.mark.asyncio
+async def test_an_unprivileged_runner_asks_the_operator_instead_of_finalising():
+    """The §17.1202 machine: the runner refuses EVERY probe, so nothing is
+    pasted. `sections_present` is 0, the partial branch used to be skipped, and
+    the whole check finalised `unknown` without ever asking anyone. A blocked
+    probe now holds the check open on its own."""
+    from app.modules import assist_state_check as sc
+    probes = [{"id": "S:T1", "command": "qm status 106", "claim": "VM 106 is running",
+               "kind": "step", "node_key": "n1"},
+              {"id": "S:T2", "command": "pct status 111", "claim": "CT 111 is running",
+               "kind": "step", "node_key": "n2"}]
+    pending = {"probes": probes, "deferred": [], "verdicts": [], "probes_total": 2, "node_key": "n1"}
+    db = MagicMock(); db.execute = AsyncMock(); db.commit = AsyncMock()
+    blocked = {"S:T1": "the runner is not allowed to read this",
+               "S:T2": "the runner is not allowed to read this"}
+    with patch.object(sc, "get_pending_state_check", new=AsyncMock(return_value=pending)):
+        out = await sc.resolve_state_check(db=db, session_id="sid", pasted="", blocked=blocked)
+    assert out.get("pending") is True, out
+    assert "Your local runner could not run" in out["message"], out["message"]
+    assert "qm status 106" in out["message"], "the script to paste must be there"
+
+
+@pytest.mark.asyncio
+async def test_with_no_runner_reason_an_empty_paste_still_finalises():
+    """The guard that keeps this from hanging forever: when nothing was pasted
+    and the engine has no reason of its own, the check completes as it always
+    did rather than waiting on a paste that is not coming."""
+    from app.modules import assist_state_check as sc
+    probes = [{"id": "S:T1", "command": "qm status 106", "claim": "VM 106 is running",
+               "kind": "step", "node_key": "n1"}]
+    pending = {"probes": probes, "deferred": [], "verdicts": [], "probes_total": 1, "node_key": "n1"}
+    db = MagicMock(); db.execute = AsyncMock(); db.commit = AsyncMock()
+    with patch.object(sc, "get_pending_state_check", new=AsyncMock(return_value=pending)):
+        out = await sc.resolve_state_check(db=db, session_id="sid", pasted="", blocked={})
+    assert not out.get("pending"), out
+
+
+def test_the_loop_stops_re_sending_what_the_runner_refused():
+    """A refused probe will not run better next pass. Without this the engine
+    burns its twelve batches re-asking a runner that has already said no."""
+    import inspect
+    from app.modules import assist_turn
+    src = inspect.getsource(assist_turn)
+    assert '_todo = [p for p in _pend["probes"] if p["id"] not in _blocked]' in src, src
+    assert "if not _todo:" in src
+    assert "run_probes(_spec, _todo" in src, "the next batch must be the filtered list"
+    assert "blocked=_blocked" in src, "the reasons must reach resolve_state_check"
