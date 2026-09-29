@@ -51,6 +51,29 @@ async def runner_spec(db):
     return spec
 
 
+#: §17.1204 — what a runner says when it did NOT run the command. None of these
+#: is output about the operator's system, and the state-check judge reads a
+#: section body as exactly that. The privilege note says so in its own words:
+#: "a permission refusal, not a statement about your system" — live (§17.1202),
+#: an unprivileged runner on a Proxmox host answered every `qm`/`pct` check with
+#: `Unable to load access control list`, and that is what the judge was ruling on.
+_NOT_EVIDENCE = (
+    ("(refused by the local runner", "the runner refused it"),
+    ("(runner error:", "the call to the runner did not come back"),
+    ("(timed out after", "it timed out on the machine"),
+    ("(the runner is UNPRIVILEGED", "the runner is not allowed to read this"),
+)
+
+
+def not_evidence(text_out: str, is_error: bool = False) -> str:
+    """Why this probe says nothing about the system, or ``''`` when it ran."""
+    head = (text_out or "").lstrip()
+    for prefix, why in _NOT_EVIDENCE:
+        if head.startswith(prefix):
+            return why
+    return "the runner reported an error" if is_error else ""
+
+
 async def run_probes(spec, probes: list[dict], *, on_progress=None) -> tuple[str, list[dict]]:
     """Execute the probes through the runner and return ``(pasted, executed)``
     where ``pasted`` is exactly the marker-attributed text a human paste
@@ -60,24 +83,34 @@ async def run_probes(spec, probes: list[dict], *, on_progress=None) -> tuple[str
 
     chunks: list[str] = []
     executed: list[dict] = []
-    seen: dict[str, tuple[str, bool]] = {}   # identical commands run once
+    seen: dict[str, tuple[str, str]] = {}   # identical commands run once
     for i, p in enumerate(probes, 1):
         cmd = p["command"]
         if not read_only_command(cmd):  # belt and braces — plan_probes already gated
             logger.warning("local_runner_refused id=%s cmd=%r", p["id"], cmd[:80])
             continue
         if cmd in seen:
-            out, ok = seen[cmd]
+            out, why = seen[cmd]
         else:
             try:
                 res = await call_tool(spec, "run_readonly", {"command": cmd, "timeout_s": 20})
                 out = _plain_output(res)
-                ok = not res.is_error
+                why = not_evidence(out, bool(res.is_error))
             except Exception as exc:
-                out, ok = f"(runner error: {exc})", False
-            seen[cmd] = (out, ok)
-        chunks.append(f'== {p["id"]} ==\n{out.rstrip()}\n')
-        executed.append({"id": p["id"], "command": cmd, "ok": ok, "chars": len(out)})
+                out, why = f"(runner error: {exc})", "the call to the runner did not come back"
+            seen[cmd] = (out, why)
+        # §17.1204 — ONLY real output becomes a section. `judge_outputs` reads a
+        # section body as the command's answer, and a present-but-empty one as
+        # "it printed nothing" — which is itself evidence. A refusal is neither:
+        # writing it under the marker asks the judge to rule on a claim from a
+        # sentence about the runner. An absent marker is the one shape that
+        # means "unknown", which is the truth here.
+        if not why:
+            chunks.append(f'== {p["id"]} ==\n{out.rstrip()}\n')
+        else:
+            logger.warning("local_runner_no_evidence id=%s why=%s cmd=%r", p["id"], why, cmd[:80])
+        executed.append({"id": p["id"], "command": cmd, "ok": not why, "ran": not why,
+                         "why": why, "output": out.rstrip(), "chars": len(out)})
         if on_progress is not None:
             try:
                 await on_progress(i, len(probes))
@@ -99,6 +132,21 @@ def _plain_output(res) -> str:
 def transcript_record(executed: list[dict], pasted: str) -> str:
     """What goes into the transcript as the operator turn: the marker, the
     commands, and the output — the same thing a paste would have been."""
-    head = f"{MARKER} the state check ran {len(executed)} read-only probe(s) through your local runner:\n"
-    cmds = "\n".join(f"  {e['id']}: {e['command']}" for e in executed)
-    return head + cmds + "\n\n" + pasted
+    ran = [e for e in executed if e.get("ran", True)]
+    head = f"{MARKER} the state check ran {len(ran)} read-only probe(s) through your local runner:\n"
+    cmds = "\n".join(f"  {e['id']}: {e['command']}" for e in ran)
+    # §17.1204 — a probe that produced no evidence is left out of the output
+    # above on purpose, so it is judged "unknown" rather than ruled on from a
+    # refusal. Left out silently it would look like it had simply passed, so it
+    # is named here with the reason and the runner's own words.
+    blocked = [e for e in executed if not e.get("ran", True)]
+    tail = ""
+    if blocked:
+        # The TAIL of the output, not the head: the privilege note is ~250
+        # characters of fixed boilerplate and the line that says what actually
+        # happened (`Unable to load access control list`) comes after it.
+        tail = ("\n\nThese could not be checked through the runner, so they stay unknown:\n"
+                + "\n".join(f"  {e['id']}: {e['command']} — {e.get('why') or 'it did not run'}"
+                            f"{chr(10) + '    ' + (e.get('output') or '')[-200:] if e.get('output') else ''}"
+                            for e in blocked))
+    return head + cmds + "\n\n" + pasted + tail
