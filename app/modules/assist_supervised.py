@@ -349,21 +349,35 @@ async def run_block(spec, commands: list[str], *, on_progress=None,
             st = getattr(res, "structured", None)
             if isinstance(st, dict) and isinstance(st.get("result"), str):
                 raw = st["result"]
+            unreachable = False
         except Exception as exc:
+            # §17.1201 — a transport error is NOT a command result. "SSE stream
+            # ended without a response" means the call did not come back; it
+            # says nothing about whether the command ran. Reporting that as
+            # `exited None` invites a retry of a write whose outcome nobody
+            # knows. Live on ADD65: `sleep 10 && qm agent 106 ping`.
             raw = f"(runner error: {exc})"
+            unreachable = True
         code, out = _exit_of(raw)
         refused = raw.startswith("(refused by the local runner")
+        # §17.1201 — a READ-ONLY command's non-zero exit is an ANSWER, not a
+        # failure of the block. `qm config 106 | grep scsi0` exits 1 when the
+        # disk is gone — which is the check PASSING — and that aborted the run
+        # on ADD81 after the write it was verifying had already succeeded. The
+        # writes are the sequence; a read in the middle is information.
+        informational = (not refused and not unreachable and code not in (0, None)
+                         and read_only(cmd)[0])
         ok = (code == 0) and not refused
         done.append({"command": cmd, "output": out.rstrip(), "exit": code, "ok": ok, "approval_id": ap["id"],
-                     "refused": refused})
-        logger.warning("supervised_run runner=%s approval=%s exit=%s refused=%s cmd=%r",
-                       getattr(spec, "name", "?"), ap["id"], code, refused, cmd[:120])
+                     "refused": refused, "unreachable": unreachable, "informational": informational})
+        logger.warning("supervised_run runner=%s approval=%s exit=%s refused=%s informational=%s cmd=%r",
+                       getattr(spec, "name", "?"), ap["id"], code, refused, informational, cmd[:120])
         if on_progress is not None:
             try:
                 await on_progress(i, len(commands))
             except Exception:
                 pass
-        if not ok:
+        if not ok and not informational:
             break
     return done
 
