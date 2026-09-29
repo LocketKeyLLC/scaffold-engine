@@ -1,0 +1,53 @@
+#!/bin/sh
+# §17.1203 — a Proxmox-shaped `qm`, for testing the engine's DIAGNOSIS without a
+# hypervisor. It reproduces the behaviours that actually bit the operator, and
+# nothing else:
+#
+#   * `qm set <id> --scsiN <storage>:<size>` ALLOCATES a new disk, so it fails
+#     when the storage name is wrong — the live ADD81 failure, verbatim:
+#       storage 'local-lvm' does not exist / 400 Parameter verification failed.
+#   * `qm resize` is the command that actually grows an existing disk.
+#   * unprivileged callers get pmxcfs's refusal, which never says "permission":
+#       ipcc_send_rec[1] failed / Unable to load access control list
+#
+# The storages here are deliberately NOT `local-lvm`: a diagnosis can only name
+# `local-zfs` if it looked at the machine.
+set -e
+
+if [ "${FAKE_PVE_UNPRIVILEGED:-0}" = "1" ]; then
+    echo "ipcc_send_rec[1] failed: Unknown error -1" >&2
+    echo "ipcc_send_rec[2] failed: Unknown error -1" >&2
+    echo "Unable to load access control list: Unknown error -1" >&2
+    exit 255
+fi
+
+cmd="$1"; shift || true
+case "$cmd" in
+  list)
+    echo "      VMID NAME                 STATUS     MEM(MB)    BOOTDISK(GB) PID"
+    echo "       106 palworld-server      stopped     8192              40.00 0"
+    echo "       110 ai-vm                running    16384             100.00 1234"
+    ;;
+  status)  echo "status: stopped" ;;
+  config)
+    echo "boot: order=scsi0"
+    echo "cores: 4"
+    echo "name: palworld-server"
+    echo "scsi0: local-zfs:vm-106-disk-0,size=40G"
+    ;;
+  set)
+    for a in "$@"; do
+      case "$a" in
+        local-lvm:*)
+          echo "storage 'local-lvm' does not exist" >&2
+          echo "400 Parameter verification failed." >&2
+          exit 2 ;;
+      esac
+    done
+    echo "update VM ${1:-?}: $*"
+    ;;
+  resize)  echo "  Size of logical volume pve/vm-106-disk-0 changed." ;;
+  start|stop|reboot) echo "${cmd}ing VM" ;;
+  agent)   echo "{\"result\":{}}" ;;
+  *)       echo "Unknown command '$cmd'" >&2; exit 1 ;;
+esac

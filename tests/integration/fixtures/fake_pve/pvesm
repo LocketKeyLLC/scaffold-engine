@@ -1,0 +1,23 @@
+#!/bin/sh
+# §17.1203 — a Proxmox-shaped `pvesm`. The storage list is the FACT a diagnosis
+# can only have by looking: there is no `local-lvm` here, which is why the live
+# `qm set … local-lvm:100` failed and why "the storage name may be different"
+# was a guess the engine could have settled in one read.
+set -e
+
+if [ "${FAKE_PVE_UNPRIVILEGED:-0}" = "1" ]; then
+    echo "ipcc_send_rec[1] failed: Unknown error -1" >&2
+    echo "Unable to load access control list: Unknown error -1" >&2
+    exit 255
+fi
+
+case "$1" in
+  status)
+    echo "Name             Type     Status           Total            Used       Available        %"
+    echo "local             dir     active       100597760        14680064        85917696    14.59%"
+    echo "local-zfs     zfspool     active      1920000000       420000000      1500000000    21.88%"
+    echo "backup-nas        nfs     active      8000000000      3100000000      4900000000    38.75%"
+    ;;
+  free) echo "freed" ;;
+  *)    echo "Unknown command '$1'" >&2; exit 1 ;;
+esac
