@@ -72,6 +72,16 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
     known_policy, policy = (_sw.cached_policy(spec) if spec is not None else (False, None))
     ctx = await _es.recipe_context(db)
     prefixes = await _es.prefixes_needed(db)
+    reads = await _es.read_prefixes_needed(db)      # §17.1198 — the READ grant
+    # §17.1198 — the installer REPLACES the runner's lists, so a recommendation
+    # that omits what is already allowed silently takes it away. Live, the write
+    # list had moved on to the next step's needs and `qm start` — granted ten
+    # minutes earlier, and the reason the current step can run at all — had
+    # dropped off it. Anything already allowed stays, said plainly.
+    already = list((policy or {}).get("allow") or [])
+    have = {p["prefix"] for p in prefixes}
+    prefixes += [{"prefix": a, "steps": [], "why": "already allowed on this runner"}
+                 for a in already if a not in have]
     # §17.1193 — the value store is one PART of this page. A schema that has not
     # caught up (the code deployed, `alembic upgrade head` still to run) must
     # degrade that one card, not 500 the whole connection screen — which is
@@ -119,7 +129,9 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
         "secrets": secrets,
         "secrets_error": secrets_error,
         "needed_prefixes": prefixes,
-        "install": _es.install_line(ctx, prefixes=[p["prefix"] for p in prefixes if p["prefix"]]),
+        "needed_read_prefixes": reads,
+        "install": _es.install_line(ctx, prefixes=[p["prefix"] for p in prefixes if p["prefix"]],
+                                    sudo_allow=[p["prefix"] for p in reads if p["prefix"]]),
         "mcp_enabled": bool(settings.mcp_tool_enabled),
     }
 

@@ -96,6 +96,7 @@ export default function machines(container, params, opts = {}) {
   function channelCard(d) {
     const w = d.write_channel || {};
     const needed = (d.needed_prefixes || []).filter((p) => p.prefix);
+    const reads = (d.needed_read_prefixes || []).filter((p) => p.prefix);   // §17.1198
     const rows = needed.map((p) =>
       el("li", { class: "sub", text: `${p.prefix} — ${p.why}${p.steps && p.steps.length ? " (" + p.steps.slice(0, 6).join(", ") + ")" : ""}` }));
     const install = el("pre", { class: "md-pre machines-install", text: d.install || "" });
@@ -117,6 +118,11 @@ export default function machines(container, params, opts = {}) {
             el("p", { class: "sub cap-line", text: "Your open plan's remaining steps need these, read off the plan itself:" }),
             el("ul", {}, ...rows))
         : el("p", { class: "sub cap-line", text: "No step still to do needs a command run for you." }),
+      reads.length
+        ? el("div", {},
+            el("p", { class: "sub cap-line", text: "And these it must be allowed to READ as root — on a Proxmox host even a check goes through /etc/pve, so an unprivileged runner cannot look at all:" }),
+            el("ul", {}, ...reads.map((p) => el("li", { class: "sub", text: `${p.prefix} — ${p.why}` }))))
+        : null,
       el("p", { class: "sub cap-line", text: "Run this once on the machine — it installs or replaces the helper with exactly these allowed:" }),
       install,
       el("div", { class: "row row-wrap cap-actions" }, copy));

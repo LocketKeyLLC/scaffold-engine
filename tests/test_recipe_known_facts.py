@@ -112,3 +112,21 @@ def test_an_open_walkthrough_no_longer_erases_what_the_engine_knows():
     src = inspect.getsource(es.list_recipes)
     assert 'f" {detail}" if detail else ""' in src, src
     assert 'status, detail = "in_progress"' not in src
+
+
+# ── §17.1198 — a recommendation must never shrink what is already allowed ─
+
+@pytest.mark.asyncio
+async def test_the_install_line_keeps_what_the_runner_already_allows():
+    """The installer REPLACES the runner's lists. A recommendation read off the
+    plan moves on as the plan does — live, `qm start` was granted, the run
+    advanced to the next step, and the recommended list no longer contained it.
+    Re-running that line would have taken the permission away and re-broken the
+    step it had just unblocked."""
+    import inspect
+    import app.routers.machines as m
+    src = inspect.getsource(m.list_machines)
+    assert 'already = list((policy or {}).get("allow") or [])' in src
+    assert '"why": "already allowed on this runner"' in src
+    assert src.index("already = list(") < src.index('"install": _es.install_line'), \
+        "the union must happen before the install line is built"

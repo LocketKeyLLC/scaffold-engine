@@ -935,7 +935,55 @@ async def prefixes_needed(db) -> list[dict]:
     return out
 
 
+async def read_prefixes_needed(db) -> list[dict]:
+    """§17.1198 — the READ commands this runner needs root for.
+
+    Two sources, and the first is evidence: commands that actually came back
+    unable to read (`needs_root_prefixes`, recorded when a supervised run hit
+    a privilege wall). The second is the plan's own read-only checks whose head
+    is one of the tools that talk to `/etc/pve` — on a Proxmox host `qm status`
+    and `pct config` need root exactly as much as `qm set` does, which is the
+    thing that is surprising and so worth stating before it bites.
+    """
+    from app.modules.assist_supervised import read_only, split_segments
+    from app.modules.step_classify import step_commands
+    from app.modules.supervised_runs import prefix_for
+    job_id = await open_plan_job(db)
+    if job_id is None:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    row = (await db.execute(text("SELECT metadata->'needs_root_prefixes' FROM jobs WHERE id = :j"),
+                            {"j": job_id})).scalar()
+    for p in (row if isinstance(row, list) else (json.loads(row) if isinstance(row, str) else [])) or []:
+        if str(p) and str(p) not in seen:
+            seen.add(str(p))
+            out.append({"prefix": str(p), "why": "a step tried this and could not read"})
+    rows = (await db.execute(text(
+        """SELECT title, description, prompt_template FROM dag_nodes
+            WHERE job_id = :j AND status IN ('pending', 'running', 'failed')"""), {"j": job_id})).mappings().all()
+    for r in rows:
+        for cmd, _s in step_commands("\n".join(str(r.get(k) or "") for k in ("title", "description", "prompt_template"))):
+            for seg in split_segments(cmd):
+                seg = seg.strip()
+                if not seg or not read_only(seg)[0]:
+                    continue
+                if seg.split()[0] not in _PVE_TOOLS:
+                    continue
+                p = prefix_for(seg)
+                if p and p not in seen:
+                    seen.add(p)
+                    out.append({"prefix": p, "why": "a check in this plan reads through /etc/pve"})
+    return out
+
+
+#: Tools whose READS go through pmxcfs, so an unprivileged runner cannot use
+#: them at all — the surprise §17.1198 was built from.
+_PVE_TOOLS = frozenset({"qm", "pct", "pvesm", "pvesh", "pveum", "pvecm", "pvenode", "ha-manager"})
+
+
 def install_line(ctx: dict, *, prefixes: Optional[list[str]] = None,
+                 sudo_allow: Optional[list[str]] = None,
                  secrets_file: Optional[str] = None) -> str:
     """The one command the operator runs on the target, fully filled in.
 
@@ -945,10 +993,15 @@ def install_line(ctx: dict, *, prefixes: Optional[list[str]] = None,
     disagree about what to paste.
     """
     allow = " ".join(f'"{p}"' for p in (prefixes or []) if p)
+    reads = " ".join(f'"{p}"' for p in (sudo_allow or []) if p)
     return (f"curl -fsSL {ctx.get('script_url') or RUNNER_SCRIPT_FALLBACK_URL} -o /tmp/local_runner_mcp.py"
             f" && python3 /tmp/local_runner_mcp.py --install"
             f" --port {RUNNER_PORT} --token {ctx.get('token') or '<the token the engine registered>'}"
             + (f" --write-allow {allow}" if allow else "")
+            # §17.1198 — reads that need root are a SEPARATE grant: the write
+            # list covers what changes the machine, this covers what the engine
+            # cannot even look at without privilege.
+            + (f" --sudo-allow {reads}" if reads else "")
             + (f" --secrets-file {secrets_file}" if secrets_file else ""))
 
 
