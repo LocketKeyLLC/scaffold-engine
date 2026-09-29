@@ -109,3 +109,18 @@ def test_the_supervised_path_elevates_reads_only_under_any():
     src = (ROOT / "scripts" / "local_runner_mcp.py").read_text(encoding="utf-8")
     run_sup = src[src.index("async def run_supervised"):src.index("    return mcp")]
     assert "if write_sudo and (ANY in writes or not read_only(command)[0]):" in run_sup
+
+
+def test_any_on_the_write_list_elevates_the_READ_tool_too():
+    """§17.1202 — ANY writes `NOPASSWD: ALL`, so the grant already covers reads.
+    Without this the read-only tool kept running unprivileged and every
+    `qm`/`pct`/`pvesm` CHECK came back "ipcc_send_rec … Unable to load access
+    control list" on a machine whose runner had full rights — the engine could
+    not look at the state it was reasoning about, including to check its own
+    diagnosis."""
+    src = (ROOT / "scripts" / "local_runner_mcp.py").read_text(encoding="utf-8")
+    build = src[src.index("def build_server("):src.index("    return mcp")]
+    assert "if ANY in writes and write_sudo and ANY not in allow:" in build
+    assert "allow.append(ANY)" in build
+    # and the read tool is the one that consumes `allow`
+    assert "apply_sudo_policy(command, allow)" in build

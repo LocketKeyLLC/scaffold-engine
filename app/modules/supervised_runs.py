@@ -767,6 +767,52 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
 
 # ── resolution ───────────────────────────────────────────────────────────
 
+#: §17.1202 — what to look at when a command of this shape fails. Read-only,
+#: cheap, and chosen because each one turns a GUESS in the diagnosis into a
+#: fact: the live diagnosis said "the storage name may be different" when
+#: `pvesm status` settles it in one line.
+_STATE_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("storage", ("pvesm status",)),
+    ("does not exist", ("pvesm status", "qm list", "pct list")),
+    ("qm ", ("qm list",)),
+    ("pct ", ("pct list",)),
+    ("No space left", ("df -h",)),
+    ("not found", ("which qm pct pvesm",)),
+)
+
+
+async def _failure_state(db: AsyncSession, executed: list[dict]) -> str:
+    """Read the machine on the subject of the failure. ``""`` when nothing fits.
+
+    Only read-only commands, only through the runner's read tool, capped — this
+    is context for a diagnosis, not an investigation. Fail-soft: a probe that
+    cannot run leaves the diagnosis exactly as it was.
+    """
+    from app.modules import assist_local_runner as _lr
+    bad = [e for e in executed if not e.get("ok") and not e.get("informational")]
+    if not bad:
+        return ""
+    subject = f"{bad[-1].get('command','')}\n{bad[-1].get('output','')}"
+    wanted: list[str] = []
+    for needle, probes in _STATE_PROBES:
+        if needle.lower() in subject.lower():
+            for p in probes:
+                if p not in wanted:
+                    wanted.append(p)
+    if not wanted:
+        return ""
+    try:
+        spec = await _lr.runner_spec(db)
+        if spec is None:
+            return ""
+        pasted, _ran = await _lr.run_probes(
+            spec, [{"id": f"S{i}", "command": c} for i, c in enumerate(wanted[:4], 1)])
+        return (pasted or "")[:3000]
+    except Exception as exc:
+        logger.warning("failure_state_probe_failed err=%r", exc)
+        return ""
+
+
 async def diagnose_failure(db: AsyncSession, job_id: str, node_key: str,
                            executed: list[dict], reason: str) -> str:
     """§17.1201 — work out WHY a supervised block failed, and what to try next.
@@ -798,6 +844,14 @@ async def diagnose_failure(db: AsyncSession, job_id: str, node_key: str,
                       f"with the operator's approval. {reason}")
         _node, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=node_key)
         env = await job_environment(db, job_id)
+        # §17.1202 — ACCURACY, not provenance. A diagnosis built from the web
+        # alone guesses at this machine: the live one said "the storage name may
+        # be different" when one read settles it. The engine already has a
+        # read-only channel to the machine that just failed, so it looks BEFORE
+        # it reasons and hands the model the real state alongside the error.
+        state = await _failure_state(db, executed)
+        if state:
+            error_text += f"\n\nWHAT THIS MACHINE ACTUALLY REPORTS RIGHT NOW (read-only, just checked):\n{state}"
         res = await generate_fix(
             ctx=ctx, error_text=error_text,
             # research is what makes this more than a re-read of the error: an

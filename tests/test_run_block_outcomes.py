@@ -182,3 +182,58 @@ async def test_a_diagnosis_that_cannot_be_produced_never_loses_the_failure():
         assert await sr.diagnose_failure(AsyncMock(), "j", "ADD81", [
             {"command": "x", "output": "y", "exit": 1, "ok": False, "informational": False}], "r") == ""
     assert await sr.diagnose_failure(AsyncMock(), "j", "ADD81", [], "r") == ""
+
+
+# ── §17.1202 — accuracy: check the machine before reasoning about it ─────
+
+async def test_the_diagnosis_reads_the_machine_on_the_subject_of_the_failure():
+    """The live diagnosis said "the storage name may be different" — a guess a
+    single read settles. The engine already has a read-only channel to the
+    machine that just failed, so it looks BEFORE it reasons."""
+    asked = {}
+
+    async def fake_probes(spec, probes, **kw):
+        asked["cmds"] = [p["command"] for p in probes]
+        return ("== S1 ==\nlocal       dir     active\nlocal-zfs   zfspool active\n", probes)
+
+    with patch("app.modules.assist_local_runner.runner_spec", new=AsyncMock(return_value=MagicMock())), \
+         patch("app.modules.assist_local_runner.run_probes", new=fake_probes):
+        state = await sr._failure_state(AsyncMock(), [
+            {"command": "qm set 106 --scsi0 local-lvm:100",
+             "output": "storage 'local-lvm' does not exist", "exit": 2, "ok": False, "informational": False}])
+    assert "pvesm status" in asked["cmds"], asked["cmds"]
+    assert "local-zfs" in state, "the machine's real answer never reached the diagnosis"
+
+
+async def test_the_real_state_is_handed_to_the_model_with_the_error():
+    seen = {}
+
+    async def fake_fix(**kw):
+        seen.update(kw); return {"fix": "ok"}
+
+    with patch("app.modules.assist_agent._assemble_ctx_for_node",
+               new=AsyncMock(return_value=({}, MagicMock()))), \
+         patch("app.modules.runbook_inputs.job_environment", new=AsyncMock(return_value={})), \
+         patch.object(sr, "_failure_state", new=AsyncMock(return_value="local-zfs   zfspool active")), \
+         patch("app.modules.assist_guide.generate_fix", new=fake_fix):
+        await sr.diagnose_failure(AsyncMock(), "j", "ADD81", [
+            {"command": "qm set 106 --scsi0 local-lvm:100", "output": "storage 'local-lvm' does not exist",
+             "exit": 2, "ok": False, "informational": False}], "reason")
+    assert "WHAT THIS MACHINE ACTUALLY REPORTS RIGHT NOW" in seen["error_text"]
+    assert "local-zfs" in seen["error_text"]
+
+
+async def test_an_unrelated_failure_probes_nothing():
+    """This is context for a diagnosis, not an investigation."""
+    assert await sr._failure_state(AsyncMock(), [
+        {"command": "systemctl restart nginx", "output": "Job failed", "exit": 1,
+         "ok": False, "informational": False}]) == ""
+    assert await sr._failure_state(AsyncMock(), []) == ""
+
+
+async def test_a_probe_that_cannot_run_leaves_the_diagnosis_alone():
+    with patch("app.modules.assist_local_runner.runner_spec",
+               new=AsyncMock(side_effect=RuntimeError("no runner"))):
+        assert await sr._failure_state(AsyncMock(), [
+            {"command": "pvesm status", "output": "storage gone", "exit": 2,
+             "ok": False, "informational": False}]) == ""
