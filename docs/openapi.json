@@ -9846,6 +9846,56 @@
         ]
       }
     },
+    "/jobs/{job_id}/reask": {
+      "post": {
+        "description": "§17.1197 — ask the parked question again, against what is possible NOW.\n\nA pause is a snapshot. The operator goes and does what it asked — widens the\nrunner's allow-list, installs the root grant — and comes back to the same\ngreyed-out button, because nothing re-reads the policy for a question\nalready on screen. This drops the frame and restarts the run, which\nre-drafts the same step against the current permissions. Nothing is\ndecided; no node is touched.\n\n409 when the job is not waiting on a question.",
+        "operationId": "reask_endpoint_jobs__job_id__reask_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Reask Endpoint",
+        "tags": [
+          "Management"
+        ]
+      }
+    },
     "/jobs/{job_id}/reconciliation": {
       "get": {
         "description": "§17.1047 — every change the reconciliation triggers (§17.1043–1046)\napplied to this job's plan: trigger, source step, corrections, and per\nnode the task text before and after — with which nodes can still be\nreverted (pending, text unchanged since).",

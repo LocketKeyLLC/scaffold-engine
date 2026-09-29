@@ -283,3 +283,34 @@ def _as_dict(v: Any) -> dict:
 
 def enabled() -> bool:
     return bool(settings.decision_pause_enabled)
+
+
+async def reask(db: AsyncSession, job_id: str) -> dict:
+    """§17.1197 — throw away a parked question and let the run ask it again.
+
+    A pause is a snapshot of what was possible when it was drawn. The operator
+    then does exactly what it asked — widens the allow-list, installs the root
+    grant — and returns to the same greyed-out button, because nothing re-reads
+    the policy for a question already on screen. This clears the frame and puts
+    the job back to ``executing``; the caller restarts the run, which re-drafts
+    the step against the permissions that exist now.
+
+    Nothing is decided and no node is touched: the same step is asked again.
+    """
+    job = (await db.execute(
+        text("SELECT status, metadata FROM jobs WHERE id = :jid FOR UPDATE"), {"jid": job_id},
+    )).mappings().first()
+    if not job:
+        return {"outcome": "not_found"}
+    if str(job["status"]) != STATUS:
+        return {"outcome": "not_waiting", "current_status": str(job["status"])}
+    meta = job["metadata"] if isinstance(job["metadata"], dict) else json.loads(job["metadata"] or "{}")
+    asked = meta.get("awaiting_decision") or {}
+    await db.execute(
+        text("UPDATE jobs SET metadata = COALESCE(metadata, '{}'::jsonb) - 'awaiting_decision' WHERE id = :jid"),
+        {"jid": job_id},
+    )
+    ok = await transition(db, job_id, to="executing", expected_from=(STATUS,), reason="reask")
+    await db.commit()
+    logger.warning("decision_pause_reask job=%s node=%s transitioned=%s", job_id, asked.get("node_key"), ok)
+    return {"outcome": "reasked", "node_key": asked.get("node_key"), "status": "executing"}
