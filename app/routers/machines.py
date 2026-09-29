@@ -29,6 +29,16 @@ from app.database import get_db
 
 logger = logging.getLogger("scaffold")
 
+
+#: The host and port an endpoint names. §17.1204 — the install line and the
+#: runner block both read the port, and they must agree on it.
+def endpoint_parts(endpoint) -> tuple[str | None, int | None]:
+    m = re.match(r"https?://([^:/]+):?(\d+)?", str(endpoint or ""))
+    if not m:
+        return None, None
+    return m.group(1), (int(m.group(2)) if m.group(2) else None)
+
+
 router = APIRouter(tags=["Setup"], dependencies=[Depends(require_admin)])
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,253}$")
@@ -70,7 +80,16 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
     except Exception as exc:
         logger.warning("machines_lookup_failed err=%r", exc)
     known_policy, policy = (_sw.cached_policy(spec) if spec is not None else (False, None))
+    # §17.1204 — the write-channel view above cannot answer what else `--install`
+    # would replace (the root-read list, the values file). Cache-only, because
+    # this endpoint is documented as not calling out.
+    _, setup = (_sw.cached_setup(spec) if spec is not None else (False, None))
     ctx = await _es.recipe_context(db)
+    # §17.1204 — build the line for the port the runner is actually registered
+    # on, not the default, so it agrees with the endpoint shown beside it.
+    _host, _port = endpoint_parts(getattr(spec, "endpoint", "")) if spec is not None else (None, None)
+    if _port:
+        ctx = {**ctx, "port": _port}
     prefixes = await _es.prefixes_needed(db)
     reads = await _es.read_prefixes_needed(db)      # §17.1198 — the READ grant
     # §17.1198 — the installer REPLACES the runner's lists, so a recommendation
@@ -82,6 +101,18 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
     have = {p["prefix"] for p in prefixes}
     prefixes += [{"prefix": a, "steps": [], "why": "already allowed on this runner"}
                  for a in already if a not in have]
+    # §17.1204 — the READ list is replaced by the same `--install`, so it needed
+    # the same union. It did not have one: a runner granted `pvesm status` by
+    # hand lost it the moment the plan stopped mentioning it.
+    #
+    # `ANY` is skipped, and that is not a detail: a trusted runner REPORTS
+    # `sudo_allow: ["ANY"]` because §17.1202 derives it from the write grant, so
+    # unioning it verbatim would put `--sudo-allow "ANY"` on the ENUMERATED
+    # line — the one whose whole purpose is to be the alternative to trusting
+    # the machine — and show "ANY" as a read prefix the plan asked for.
+    read_have = {p["prefix"] for p in reads} | {_sw.ANY}
+    reads += [{"prefix": a, "why": "already allowed on this runner"}
+              for a in list((setup or {}).get("sudo_allow") or []) if a and a not in read_have]
     # §17.1193 — the value store is one PART of this page. A schema that has not
     # caught up (the code deployed, `alembic upgrade head` still to run) must
     # degrade that one card, not 500 the whole connection screen — which is
@@ -95,14 +126,19 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
         await db.rollback()
         secrets_error = "the value store is not available yet (the database migration has not run)"
         logger.warning("machines_secrets_unavailable err=%r", exc)
+    # §17.1204 — `--install` REPLACES the service, so a line without
+    # `--secrets-file` unwires the file the runner resolves `$NAME` from and
+    # every value-bearing command starts failing. Prefer the path the runner
+    # reports (v17); the recipe's path when it holds values but did not say.
+    _secrets_file = ((setup or {}).get("secrets_file")
+                     or (_es.RUNNER_SECRETS_PATH if (secrets or (setup or {}).get("secrets")) else None))
     endpoint = str(getattr(spec, "endpoint", "") or "")
-    m = re.match(r"https?://([^:/]+):?(\d+)?", endpoint)
     return {
         "connected": spec is not None,
         "runner": {
             "name": getattr(spec, "name", None),
-            "host": m.group(1) if m else None,
-            "port": int(m.group(2)) if (m and m.group(2)) else _es.RUNNER_PORT,
+            "host": _host,
+            "port": _port or _es.RUNNER_PORT,
             "endpoint": endpoint or None,
             "enabled": bool(getattr(spec, "enabled", False)),
             "description": getattr(spec, "description", None),
@@ -131,12 +167,13 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
         "needed_prefixes": prefixes,
         "needed_read_prefixes": reads,
         "install": _es.install_line(ctx, prefixes=[p["prefix"] for p in prefixes if p["prefix"]],
-                                    sudo_allow=[p["prefix"] for p in reads if p["prefix"]]),
+                                    sudo_allow=[p["prefix"] for p in reads if p["prefix"]],
+                                    secrets_file=_secrets_file),
         # §17.1199 — the other way to set this machine up. The enumerated list
         # can only be completed by failing, one console round-trip per command
         # nobody predicted; this trusts the machine with whatever the operator
         # approves, which is the decision they are already making per block.
-        "install_trusted": _es.install_line(ctx, prefixes=[_sw.ANY]),
+        "install_trusted": _es.install_line(ctx, prefixes=[_sw.ANY], secrets_file=_secrets_file),
         "trust_mode": ("approve" if _sw.ANY in ((policy or {}).get("allow") or []) else "list"),
         "mcp_enabled": bool(settings.mcp_tool_enabled),
     }
