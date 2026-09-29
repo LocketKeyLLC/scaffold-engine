@@ -2361,11 +2361,32 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         if ch is None or run_node is None:      # the branch above guarantees both; typed for the checker
             return None
         spec, policy = ch
-        runbook = await supervised_runs.draft_runbook(run_node, brief_full if isinstance(brief_full, dict) else brief, up_block)
+        _brief = brief_full if isinstance(brief_full, dict) else brief
+        runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block)
         from app.modules.runbook_inputs import job_environment
         async with async_session() as db:
             _env = await job_environment(db, job_id)          # §17.1188 — pins, system map, facts
         frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env)
+        # §17.1196 — the engine wrote a block its OWN gate refuses, and handed
+        # the operator the dead end: "the runner is active but the run button is
+        # greyed out?? how do we continue?" A SHAPE refusal is the engine's
+        # mistake, not a decision for anyone — `for i in $(seq 1 12)` is a form
+        # the channel cannot carry however much is allowed. Redraft once with
+        # the refusal quoted back, the way a compiler error feeds the next
+        # attempt, and only ask when the second try is still not runnable.
+        fix = supervised_runs.shape_retry_note(frame)
+        if fix:
+            logger.warning("supervised_run_redraft job=%s node=%s refusals=%s", job_id,
+                           run_node.get("node_key"), "; ".join(r["why"] for r in frame["refused"])[:200])
+            retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix)
+            if retry:
+                second = supervised_runs.frame_run(run_node, retry, spec, policy, env=_env)
+                if second["commands"] and not second["refused"]:
+                    logger.warning("supervised_run_redraft_clean job=%s node=%s commands=%d",
+                                   job_id, run_node.get("node_key"), len(second["commands"]))
+                    frame = second
+                elif len(second["refused"]) < len(frame["refused"]) and second["commands"]:
+                    frame = second                            # closer; show the better of the two
         logger.warning("supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
                        job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame["commands"]),
                        len(frame["refused"]), frame["runner"])

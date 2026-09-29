@@ -480,3 +480,61 @@ def test_the_pause_on_screen_is_read_for_wanted_prefixes_too():
     ]}
     assert sr.wanted_prefixes_in(frame) == ["qm start"]
     assert sr.wanted_prefixes_in({}) == [] and sr.wanted_prefixes_in({"refused": []}) == []
+
+
+# ── §17.1196 — the engine redrafts its own unrunnable block ──────────────
+
+SHAPE = {"refused": [{"command": "for i in $(seq 1 12); do qm agent 106 ping; done",
+                      "why": "substitution/heredoc"}]}
+PERMISSION = {"refused": [{"command": "qm start 106", "why": "not on the write-allow list: qm start 106"}]}
+DENYLIST = {"refused": [{"command": "reboot", "why": "host power — do that by hand"}]}
+
+
+def test_a_shape_refusal_is_the_engines_own_mistake_and_is_redrafted():
+    """`for i in $(seq 1 12)` cannot run however much is allowed, so parking on
+    it hands the operator a greyed-out button and no way forward — which is
+    exactly what happened: "the runner is active but the run button is greyed
+    out?? how do we continue?" """
+    note = sr.shape_retry_note(SHAPE)
+    assert note, "a shape refusal must produce a correction"
+    assert "REFUSED BY THE RUNNER'S GATE" in note
+    assert "$(seq 1 12)" in note, "the correction must quote what was actually refused"
+    assert "substitution/heredoc" in note
+    assert "NEVER build it with" in note or "$(…)" in note
+
+
+def test_a_permission_refusal_is_the_operators_and_is_not_redrafted_around():
+    """Redrafting around a permission is the engine talking itself out of
+    asking — the operator decides what their machine may run."""
+    assert sr.shape_retry_note(PERMISSION) == ""
+    assert sr.shape_retry_note({"refused": SHAPE["refused"] + PERMISSION["refused"]}) == ""
+
+
+def test_a_denylist_refusal_is_never_redrafted_around():
+    assert sr.shape_retry_note(DENYLIST) == ""
+
+
+def test_a_clean_frame_asks_for_nothing():
+    assert sr.shape_retry_note({"refused": []}) == "" and sr.shape_retry_note({}) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_retry_note_reaches_the_second_draft():
+    seen = []
+
+    async def fake_generate(prompt, **kw):
+        seen.append(prompt)
+        return MagicMock(text="## Run this\n```bash\nqm agent 106 ping\n```", success=True)
+
+    with patch("app.model_router.generate", new=fake_generate):
+        await sr.draft_runbook({"node_key": "ADD65"}, "brief", retry_note="FIX THIS: no $(…)")
+    assert "FIX THIS: no $(…)" in seen[0], "the gate's own refusal never reached the model"
+
+
+def test_the_executor_redrafts_before_it_asks():
+    import inspect
+    src = inspect.getsource(ea._pause_for_decision)
+    assert "shape_retry_note(frame)" in src
+    assert "retry_note=fix" in src
+    assert src.index("shape_retry_note(frame)") < src.index("park_awaiting_decision"), \
+        "the redraft must happen BEFORE the operator is asked"

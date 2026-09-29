@@ -138,6 +138,44 @@ async def resume_job_endpoint(
     )
 
 
+@router.post("/jobs/{job_id}/reask", tags=["Management"])
+async def reask_endpoint(
+    job_id: UuidPath,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1197 — ask the parked question again, against what is possible NOW.
+
+    A pause is a snapshot. The operator goes and does what it asked — widens the
+    runner's allow-list, installs the root grant — and comes back to the same
+    greyed-out button, because nothing re-reads the policy for a question
+    already on screen. This drops the frame and restarts the run, which
+    re-drafts the same step against the current permissions. Nothing is
+    decided; no node is touched.
+
+    409 when the job is not waiting on a question.
+    """
+    try:
+        parsed_id = UUID(job_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+    await assert_visible(db, principal, str(parsed_id), detail=f"Job {job_id} not found")
+    out = await decision_pause.reask(db, str(parsed_id))
+    if out["outcome"] == "not_found":
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if out["outcome"] == "not_waiting":
+        raise HTTPException(status_code=409, detail={"error": "job is not waiting on a question",
+                                                     "current_status": out.get("current_status")})
+    started = False
+    try:
+        overrides = await resolve_job_overrides(str(parsed_id), None)
+        run_broker.start(str(parsed_id), lambda: execute_all_nodes(str(parsed_id), model_overrides=overrides))
+        started = True
+    except Exception as exc:
+        logger.warning('event="reask_run_restart_failed" job=%s error=%s', job_id, exc)
+    return {**out, "run_started": started}
+
+
 @router.post("/jobs/{job_id}/decide", response_model=DecideResult, tags=["Management"])
 async def decide_endpoint(
     job_id: UuidPath,

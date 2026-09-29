@@ -745,6 +745,25 @@ export function renderTheater(container, jobId, ctx = {}) {
     const runBtn = el("button", { class: "btn btn-primary", text: `Run it through ${d.runner || "the runner"}` });
     const selfBtn = el("button", { class: "btn", text: "I'll do it myself (keep the runbook)" });
     const skipBtn = el("button", { class: "btn btn-ghost", text: "Skip this step" });
+    // §17.1197 — a pause is a SNAPSHOT. The operator goes and does exactly what
+    // it asked (widens the allow-list, installs the root grant), comes back,
+    // and the button is still grey — because nothing re-reads the policy for a
+    // question already on screen. Offered whenever the engine held the block
+    // back, which is when the operator has something to go and change.
+    const reaskBtn = el("button", { class: "btn btn-ghost", title: "Re-draft this step against what the runner allows now — decides nothing",
+                                    text: "↻ Ask again with what's allowed now" });
+    reaskBtn.addEventListener("click", async () => {
+      reaskBtn.disabled = true; reaskBtn.textContent = "Asking again…";
+      try {
+        await api.post(`/jobs/${jobId}/reask`, {});
+        toast("Re-drafting this step against the current permissions…", "ok");
+        summaryEl.classList.add("hidden");
+        attachRun();
+      } catch (e) {
+        toast((e && (e.detail?.error || e.message)) || "Could not ask again", "err");
+        reaskBtn.disabled = false; reaskBtn.textContent = "↻ Ask again with what's allowed now";
+      }
+    });
     if (!canRun || inputs.length) runBtn.disabled = true;
     if (inputs.length) queueMicrotask(refresh);      // §17.1188 — prefilled pins count
     async function send(choice, label) {
@@ -804,6 +823,7 @@ export function renderTheater(container, jobId, ctx = {}) {
           el("div", { class: "md", html: mdToHtml(d.runbook || "") })),
         note,
         el("div", { class: "row row-wrap summary-actions" }, runBtn, selfBtn, skipBtn,
+          canRun ? null : reaskBtn,          // §17.1197 — only where there is something to go and fix
           el("a", { class: "btn btn-sm", href: `#/job/${jobId}/plan`, text: "See the plan" }))
       )
     );

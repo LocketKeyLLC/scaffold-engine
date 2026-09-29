@@ -80,6 +80,57 @@ async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:
 _NOT_ALLOWED = "not on the write-allow list"
 
 
+_SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty")
+
+
+def shape_retry_note(frame: dict) -> str:
+    """§17.1196 — the correction to feed back when the engine's own gate refused
+    the engine's own block for its SHAPE, or ``""`` when there is nothing to fix.
+
+    A shape refusal is not a decision for the operator: `for i in $(seq 1 12)`
+    is a form the channel cannot carry however much is allowed, so parking on it
+    hands them a greyed-out button and no way forward. A PERMISSION refusal is
+    different — that one is genuinely theirs — so a frame carrying one is left
+    alone; redrafting around a permission is the engine talking itself out of
+    asking. Likewise a denylist refusal, which must never be redrafted around.
+    """
+    from app.modules.assist_supervised import catastrophic
+    shapes = [r for r in (frame or {}).get("refused") or []
+              if any(s in str(r.get("why") or "") for s in _SHAPE_REFUSALS)]
+    if not shapes:
+        return ""
+    if any(catastrophic(str(r.get("command") or "")) for r in (frame or {}).get("refused") or []):
+        return ""
+    if any(str(r.get("why") or "").startswith(_NOT_ALLOWED) for r in (frame or {}).get("refused") or []):
+        return ""
+    lines = "\n".join(f"- `{str(r.get('command') or '')[:160]}` — {r.get('why')}" for r in shapes)
+    return (
+        "YOUR PREVIOUS DRAFT WAS REFUSED BY THE RUNNER'S GATE — rewrite it so every command can run.\n"
+        f"{lines}\n"
+        "Rules that were broken, restated: each command runs alone, in its own shell. No `$(…)` or backticks "
+        "ANYWHERE — including to build a list for a loop; write the list out literally (`for i in 1 2 3; do …; "
+        "done`) or, better, drop the loop and state the checks as separate commands. No heredoc: write a file with "
+        "`printf '%s\\n' 'line' | tee /path`. No `>`/`>>` redirects. A retry/wait loop is rarely worth it here — "
+        "the operator sees the result of each command, so a single check is usually enough."
+    )
+
+
+def frame_is_stale(frame: dict, policy: dict) -> bool:
+    """§17.1197 — was this pause drafted under a different permission set?
+
+    A parked question is a snapshot. The operator then goes and does the very
+    thing it asked for — widens the allow-list, installs the root grant — and
+    comes back to the same greyed-out button, because nothing re-reads the
+    policy for a question already on screen. Comparing the allow-list the frame
+    was drawn with against the runner's current one says so cheaply.
+    """
+    if not frame or frame.get("kind") != KIND:
+        return False
+    was = {str(a) for a in (frame.get("allow") or [])}
+    now = {str(a) for a in ((policy or {}).get("allow") or [])}
+    return was != now or bool(frame.get("sudo")) != bool((policy or {}).get("sudo"))
+
+
 def wanted_prefixes_in(frame: dict) -> list[str]:
     """The prefixes a pause frame was refused for, in first-seen order.
 
@@ -304,21 +355,29 @@ CHANNEL_RULES = """
 Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, one command at a time):
 - Each line under "## Run this" must be ONE self-contained command. They are run in order, each in its OWN shell, so no shell state carries between them: never `cd` and then name a file relatively — write absolute paths (`wget -O /tmp/x.run …`, then `/tmp/x.run`).
 - No heredocs (`<<EOF`), no command substitution (`$(…)` or backticks), and no output redirection (`>` / `>>`). Write a file by piping into `tee` with the content as arguments: `printf '%s\n' 'line one' 'line two' | tee /etc/example.conf` (append with `tee -a`). `2>/dev/null` is fine.
-- No multi-line shell constructs, and no `if … then … fi` even on one line: each part of a command is judged on its own, and a `then`-prefixed part cannot be read. Write an idempotent step as a guard chain instead — `pct status 111 | grep -q running || pct start 111` — where the check and the fix are each a whole command. Same for loops: `for i in 1 2 3; do …; done` is better written as the straight-line sequence.
+- No multi-line shell constructs, and no `if … then … fi` even on one line: each part of a command is judged on its own, and a `then`-prefixed part cannot be read. Write an idempotent step as a guard chain instead — `pct status 111 | grep -q running || pct start 111` — where the check and the fix are each a whole command.
+- Avoid loops. A retry/wait loop is rarely worth it here: the operator sees the result of each command, so one check is usually enough. If you truly need one, write the list out literally (`for i in 1 2 3; do …; done`) — NEVER build it with `$(seq …)`, which is command substitution and is refused wherever it appears.
 - Under "## Verify", each check stays a read-only command (`pct status 111`, `systemctl is-active …`, `ls -ld …`).
 """
 
 
 async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
-                        for_channel: bool = True) -> str:
+                        for_channel: bool = True, retry_note: str = "") -> str:
     """The same runbook the executor would have written (its prompt and
-    system), so the operator approves what Auto mode would have handed them."""
+    system), so the operator approves what Auto mode would have handed them.
+
+    §17.1196 — ``retry_note`` carries the gate's own refusal back into a second
+    draft. The rules are in the system prompt; a refusal says which one this
+    draft actually broke, which is the difference between a style guide and a
+    compiler error."""
     from app import model_router
     from app.modules.prompt_assembly import EXECUTION_SYSTEM_RUNBOOK, build_base_prompt
     b = brief if isinstance(brief, dict) else {"description": str(brief or "")}
     prompt = build_base_prompt(node, b)
     if upstream:
         prompt = f"{prompt}\n\n{upstream}"
+    if retry_note:
+        prompt = f"{prompt}\n\n{retry_note}"
     # §17.1189 — the sibling this mirrors (the executor's own node generation)
     # routes through the shared empty-guard at node_generation_max_tokens
     # (8192); this call was a bare generate at 3000. On a thinking model
