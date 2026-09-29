@@ -1509,16 +1509,34 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
             # the runner ran the first 23 of 48 probes and the engine handed the
             # remaining 25 to the operator to paste, in three scripts, over
             # twelve minutes. The per-script budget exists for a human's clipboard.
+            # §17.1204 — with ONE exception, and it is not a weakening of that:
+            # a probe the runner has already REFUSED. It cannot run there, so the
+            # operator's shell is the only thing left; everything the runner can
+            # still run, it runs.
             from app.modules import assist_state_check as _sc
             _batches = 1
+            # §17.1204 — what the runner could not run, and why. These are
+            # missing from the paste for a reason the engine KNOWS, so they keep
+            # the check open and go to the operator instead of being re-sent to
+            # a runner that has already refused them.
+            _blocked = {e["id"]: e.get("why") or "it did not run"
+                        for e in executed if not e.get("ran", True)}
             while True:
-                _res = await _sc.resolve_state_check(db=db, session_id=session_id, pasted=pasted)
+                _res = await _sc.resolve_state_check(db=db, session_id=session_id, pasted=pasted,
+                                                     blocked=_blocked)
                 _pend = await _sc.get_pending_state_check(db=db, session_id=session_id) if _res.get("pending") else None
                 if not _pend or not _pend.get("probes") or _batches >= 12:
                     break
+                # §17.1204 — a probe the runner already refused will not run any
+                # better on the next pass; re-sending it costs a round trip and
+                # ends in the same refusal. When nothing is left that it CAN
+                # run, stop: the pending message is already the paste request.
+                _todo = [p for p in _pend["probes"] if p["id"] not in _blocked]
+                if not _todo:
+                    break
                 _batches += 1
-                yield _ev(ASSIST_TURN_STATUS, {"text": f"🩺 Batch {_batches}: running {len(_pend['probes'])} more read-only checks through your local runner…"})
-                _t2 = asyncio.create_task(_lr.run_probes(_spec, _pend["probes"], on_progress=_lp))
+                yield _ev(ASSIST_TURN_STATUS, {"text": f"🩺 Batch {_batches}: running {len(_todo)} more read-only checks through your local runner…"})
+                _t2 = asyncio.create_task(_lr.run_probes(_spec, _todo, on_progress=_lp))
                 while not _t2.done():
                     try:
                         yield _ev(ASSIST_TURN_STATUS, {"text": await asyncio.wait_for(_pq.get(), timeout=1.0)})
@@ -1529,6 +1547,8 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
                 pasted, executed = _t2.result()
                 if not executed:
                     break
+                _blocked.update({e["id"]: e.get("why") or "it did not run"
+                                 for e in executed if not e.get("ran", True)})
                 try:
                     await assist_agent.ingest_turn(session_id=session_id, role="operator", kind="message",
                                                    content=_lr.transcript_record(executed, pasted), node_key=_rnk, db=db)

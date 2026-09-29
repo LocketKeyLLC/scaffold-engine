@@ -841,19 +841,34 @@ def _runner_offer(n: int) -> str:
 
 
 def render_continuation_message(judged: list[dict], remaining: list[dict], *, missing_ids: list[str],
-                                deferred: int, total: int) -> str:
+                                deferred: int, total: int, blocked: Optional[dict] = None) -> str:
     """§17.1138 — after a PARTIAL paste: what was judged so far, which ids the
     paste did not cover, and the next script (the uncovered ids first, then the
-    probes deferred by the per-batch budget)."""
+    probes deferred by the per-batch budget).
+
+    §17.1204 — `blocked` is ``{id: why}`` for probes the local runner could not
+    run. They are missing for a reason the engine KNOWS, so they are named
+    separately: telling an operator their markers "got dropped" when the runner
+    refused the command sends them looking for a paste error that is not there.
+    """
     n = {"confirmed": 0, "contradicted": 0, "unknown": 0}
     for v in judged:
         n[v["verdict"]] = n.get(v["verdict"], 0) + 1
     head = (f"🩺 **State check — {len(judged)} of {total} answered so far: "
             f"✅ {n['confirmed']} confirmed · ❌ {n['contradicted']} contradicted · ❔ {n['unknown']} unclear.**")
-    miss = (f"\nThe paste did not cover: {', '.join(f'`{i}`' for i in missing_ids[:12])}"
-            f"{'…' if len(missing_ids) > 12 else ''} — "
+    blocked = blocked or {}
+    absent = [i for i in missing_ids if i not in blocked]
+    miss = (f"\nThe paste did not cover: {', '.join(f'`{i}`' for i in absent[:12])}"
+            f"{'…' if len(absent) > 12 else ''} — "
             "the markers for those were absent (a partial run, or the `== … ==` lines got dropped)."
-            if missing_ids else "")
+            if absent else "")
+    # §17.1204 — the engine tried these itself and the runner would not run them.
+    # Said plainly, with the reason, because the next move is the operator's shell.
+    hit = [i for i in missing_ids if i in blocked]
+    if hit:
+        why = "; ".join(sorted({str(blocked[i]) for i in hit}))
+        miss += (f"\nYour local runner could not run: {', '.join(f'`{i}`' for i in hit[:12])}"
+                 f"{'…' if len(hit) > 12 else ''} — {why}. Those need a shell on the machine itself.")
     nxt = (f"\n\nNext {len(remaining)} check{'s' if len(remaining) != 1 else ''}"
            f"{f' ({deferred} of them were held back from the first script)' if deferred else ''} — "
            "same rule, every command only reads. Paste the output back, or say **skip the rest** "
@@ -1121,7 +1136,8 @@ def looks_like_probe_output(text_value: str) -> bool:
     return bool(MARKER_RE.search(text_value or ""))
 
 
-async def resolve_state_check(*, db, session_id: str, pasted: str, finish: bool = False) -> dict:
+async def resolve_state_check(*, db, session_id: str, pasted: str, finish: bool = False,
+                              blocked: Optional[dict] = None) -> dict:
     """Judge the pasted output, retract contradicted facts, stage the
     structural proposal, record the check on the session. Returns
     ``{message, verdicts, proposal, retracted}``."""
@@ -1144,7 +1160,15 @@ async def resolve_state_check(*, db, session_id: str, pasted: str, finish: bool 
         sections_present = sum(1 for p in probes if p["id"] in present_ids)
         missing = [p for p in probes if p["id"] not in present_ids]
         answered = [v for v in fresh if v["id"] in present_ids]
-        if sections_present and (missing or deferred):
+        # §17.1204 — a probe the RUNNER could not run is not "not pasted yet",
+        # it is waiting on the operator's own shell, and it must keep the check
+        # open on its own. `sections_present` alone cannot do that: an
+        # unprivileged runner refuses EVERY probe, so nothing is pasted, the
+        # partial branch is skipped and the whole check quietly finalises
+        # `unknown` without ever asking anyone. That is the §17.1202 machine.
+        blocked = {k: v for k, v in (blocked or {}).items()}
+        stuck = [p for p in probes if p["id"] in blocked and p["id"] not in present_ids]
+        if (sections_present or stuck) and (missing or deferred):
             # §17.1138 — a PARTIAL paste keeps the check open: judge what came
             # back, queue the uncovered ids + the deferred probes as the next
             # script. Before this, 47 probes → 4 pasted → 43 "unknown" and done.
@@ -1161,7 +1185,8 @@ async def resolve_state_check(*, db, session_id: str, pasted: str, finish: bool 
                            session_id, pending.get("node_key"), len(prior) + len(answered), total, len(missing), len(deferred))
             return {"message": render_continuation_message(prior + answered, remaining,
                                                            missing_ids=[p["id"] for p in missing],
-                                                           deferred=len(deferred), total=total),
+                                                           deferred=len(deferred), total=total,
+                                                           blocked=blocked),
                     "verdicts": prior + answered, "proposal": None, "retracted": [], "pending": True}
         verdicts = prior + fresh
     contradicted = [v for v in verdicts if v["verdict"] == "contradicted"]
