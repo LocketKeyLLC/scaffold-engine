@@ -538,3 +538,57 @@ def test_the_executor_redrafts_before_it_asks():
     assert "retry_note=fix" in src
     assert src.index("shape_retry_note(frame)") < src.index("park_awaiting_decision"), \
         "the redraft must happen BEFORE the operator is asked"
+
+
+# ── §17.1198 — "could not read" is not "the machine is broken" ────────────
+
+PVE_DENIAL = ("ipcc_send_rec[1] failed: Unknown error -1\n"
+              "ipcc_send_rec[2] failed: Unknown error -1\n"
+              "Unable to load access control list")
+
+
+@pytest.mark.parametrize("out,hit", [
+    (PVE_DENIAL, True),                                  # Proxmox never says "permission"
+    ("bash: /etc/pve/x: Permission denied", True),
+    ("qm: unable to parse", False),
+    ("Configuration file 'nodes/pve/qemu-server/106.conf' does not exist", False),
+    ("", False),
+])
+def test_a_read_that_could_not_read_is_recognised(out, hit):
+    assert bool(sr._NEEDS_ROOT_RE.search(out)) is hit
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_is_reported_as_privilege_not_as_a_broken_step():
+    """Live: `qm start 106` ran as root and succeeded, then `qm agent 106 ping`
+    ran unprivileged (read-only commands deliberately get no write grant),
+    failed, and the step was marked failed as though the machine were broken."""
+    waiting = {"kind": "run", "runbook": "## Run this\n```\nqm start 106\nqm agent 106 ping\n```",
+               "commands": ["qm start 106", "qm agent 106 ping"], "verify": [], "refused": [], "inputs": []}
+    executed = [
+        {"command": "qm start 106", "output": "", "exit": 0, "ok": True, "approval_id": "a", "refused": False},
+        {"command": "qm agent 106 ping", "output": PVE_DENIAL, "exit": 255, "ok": False, "approval_id": "b", "refused": False},
+    ]
+    db = AsyncMock()
+    claim = MagicMock(); claim.rowcount = 1
+    db.execute = AsyncMock(return_value=claim)
+    with patch.object(sr, "channel", new=AsyncMock(return_value=(_spec(), {"allow": ["qm start"], "sudo": True}))), \
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=executed)), \
+         patch.object(sr, "record_needs_root", new=AsyncMock(return_value=["qm agent"])) as rec:
+        out = await sr.resolve_run(db, "j", "ADD65", "run", waiting)
+    assert out["outcome"] == "failed"
+    assert "could not read on that machine" in out["reason"]
+    assert "unprivileged for READ commands" in out["reason"]
+    assert "Settings → Machines" in out["reason"]
+    assert "exited 255" not in out["reason"], "the raw exit code is not the explanation"
+    rec.assert_awaited_once()
+    assert rec.await_args[0][2] == ["qm agent 106 ping"]
+
+
+@pytest.mark.asyncio
+async def test_the_read_grant_is_recorded_as_a_prefix():
+    db = AsyncMock()
+    got = await sr.record_needs_root(db, "job-1", ["qm agent 106 ping", "qm agent 110 ping", "pct config 111"])
+    assert got == ["qm agent", "pct config"]            # de-duplicated, narrowed to prefixes
+    sql = " ".join(str(db.execute.await_args[0][0]).split())
+    assert "needs_root_prefixes" in sql

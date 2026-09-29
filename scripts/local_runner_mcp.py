@@ -808,7 +808,15 @@ def apply_sudo_policy(cmd: str, allow: list[str]) -> tuple[str, str]:
 _DENIED_RE = re.compile(
     r"(?i)\b(?:permission denied|operation not permitted|are you root|"
     r"must be (?:run as |the )?root|requires? root|need(?:s|ed)? to be root|"
-    r"insufficient privileges|not authorized|EACCES)\b")
+    r"insufficient privileges|not authorized|EACCES)\b"
+    # §17.1198 — Proxmox does not say "permission denied" when an unprivileged
+    # user talks to /etc/pve: `qm`, `pct` and `pvesm` fail through pmxcfs with
+    # `ipcc_send_rec[1] failed: Unknown error -1` and "Unable to load access
+    # control list". Live, `qm agent 106 ping` came back exit 255 with exactly
+    # that and was reported as a broken step — the machine was fine, the runner
+    # simply could not read.
+    r"|ipcc_send_rec\[\d+\] failed"
+    r"|Unable to load access control list")
 
 
 def _privilege_note(output: str, returncode: int | None) -> str:
@@ -1013,7 +1021,13 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
             return f"[exit timeout] (timed out after {timeout_s}s)"
         text = redact(out.decode("utf-8", errors="replace")[:20000], {**store, **sent})
         log.warning("SUPERVISED id=%s exit=%s chars=%d secrets=%d", aid, proc.returncode, len(text), len(refs))
-        return f"[exit {proc.returncode}]\n" + text
+        # §17.1198 — the privilege note belonged on THIS path too. A block is a
+        # mix: its writes get the root grant, its read-only checks deliberately
+        # do not — and on a Proxmox host a read needs root just as much. Live,
+        # `qm start 106` ran as root and succeeded, then `qm agent 106 ping`
+        # ran unprivileged, failed, and the step was marked failed as though
+        # the machine were broken.
+        return f"[exit {proc.returncode}]\n" + _privilege_note(text, proc.returncode) + text
 
     return mcp
 

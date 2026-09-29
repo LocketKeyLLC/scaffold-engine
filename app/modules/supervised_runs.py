@@ -82,6 +82,41 @@ _NOT_ALLOWED = "not on the write-allow list"
 
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty")
 
+# §17.1198 — the same signatures the runner's own privilege note reads, so both
+# ends agree on "this failed because it could not read, not because the machine
+# is broken". Proxmox is the reason for the last two: an unprivileged user
+# talking to /etc/pve gets `ipcc_send_rec … failed` and "Unable to load access
+# control list", never the word "permission".
+_NEEDS_ROOT_RE = re.compile(
+    r"(?i)\b(?:permission denied|operation not permitted|are you root|must be (?:run as |the )?root|"
+    r"requires? root|need(?:s|ed)? to be root|insufficient privileges|not authorized|EACCES)\b"
+    r"|ipcc_send_rec\[\d+\] failed|Unable to load access control list")
+
+
+async def record_needs_root(db: AsyncSession, job_id: str, commands: list[str]) -> list[str]:
+    """Remember the READ commands that failed for want of root.
+
+    The evidence-based twin of `record_wanted_prefixes` (§17.1194): rather than
+    guess which of a plan's read-only checks need privilege on this particular
+    host, record the ones that actually came back unable to read, and let the
+    connection page offer exactly those for the runner's ``--sudo-allow`` list.
+    """
+    wanted: list[str] = []
+    for c in commands:
+        p = prefix_for(str(c or ""))
+        if p and p not in wanted:
+            wanted.append(p)
+    if not wanted:
+        return []
+    await db.execute(text("""
+        UPDATE jobs SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{needs_root_prefixes}',
+               COALESCE(metadata->'needs_root_prefixes', '[]'::jsonb) || CAST(:add AS jsonb), true)
+         WHERE id = :jid
+    """), {"jid": job_id, "add": json.dumps(wanted)})
+    await db.commit()
+    logger.warning("needs_root_recorded job=%s prefixes=%s", job_id, ",".join(wanted))
+    return wanted
+
 
 def shape_retry_note(frame: dict) -> str:
     """§17.1196 — the correction to feed back when the engine's own gate refused
@@ -833,9 +868,25 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         logger.warning("supervised_run_done job=%s node=%s commands=%d", job_id, node_key, len(executed))
         return {"outcome": "ran", "node_status": "done", "executed": executed, "verify": verify_out}
     last = executed[-1] if executed else None
-    reason = mask_secrets("the runner ran nothing" if not last else
-                          (f"the runner refused `{last['command'][:80]}`: {last['output'][:200]}" if last.get("refused")
-                           else f"`{last['command'][:80]}` exited {last['exit']}: {last['output'][-300:]}"), values, need)
+    # §17.1198 — a command that failed because the runner could not read is not
+    # a broken machine. The write grant covers writes; a READ-ONLY command in
+    # the same block deliberately runs unprivileged, and on a Proxmox host that
+    # is exactly what `qm`/`pct`/`pvesm` need root for. Say which it was, and
+    # record the command so the connection page can offer the read grant.
+    needs_root = [e for e in executed if not e["ok"] and _NEEDS_ROOT_RE.search(str(e.get("output") or ""))]
+    if needs_root:
+        try:
+            await record_needs_root(db, job_id, [e["command"] for e in needs_root])
+        except Exception as exc:
+            logger.warning("needs_root_record_failed job=%s err=%r", job_id, exc)
+    reason = mask_secrets(
+        (f"`{needs_root[-1]['command'][:80]}` could not read on that machine — the runner is unprivileged for "
+         f"READ commands (the write grant covers writes only). Allow it to read as root: Settings → Machines, "
+         f"or Capabilities → “Give the runner administrator rights for specific commands”.")
+        if needs_root else
+        ("the runner ran nothing" if not last else
+         (f"the runner refused `{last['command'][:80]}`: {last['output'][:200]}" if last.get("refused")
+          else f"`{last['command'][:80]}` exited {last['exit']}: {last['output'][-300:]}")), values, need)
     await db.execute(
         text("UPDATE dag_nodes SET status = 'failed', output_text = :out, completed_at = NOW(), updated_at = NOW(), "
              "last_verification_reason = :why WHERE job_id = :jid AND node_key = :nk AND status = 'running'"),
