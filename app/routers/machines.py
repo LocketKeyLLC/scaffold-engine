@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,9 +76,14 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
 
     spec = None
     try:
-        spec = await _lr.runner_spec(db)
+        # §17.1205 — INCLUDING a paused one. `runner_spec` hides a disabled row
+        # from every consumer, which is the point of pausing — but this page is
+        # where you un-pause it, so if it vanished here the pause would be a
+        # one-way door.
+        spec = await _lr.runner_spec(db, include_disabled=True)
     except Exception as exc:
         logger.warning("machines_lookup_failed err=%r", exc)
+    paused = spec is not None and not spec.enabled
     known_policy, policy = (_sw.cached_policy(spec) if spec is not None else (False, None))
     # §17.1204 — the write-channel view above cannot answer what else `--install`
     # would replace (the root-read list, the values file). Cache-only, because
@@ -134,7 +139,8 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
                      or (_es.RUNNER_SECRETS_PATH if (secrets or (setup or {}).get("secrets")) else None))
     endpoint = str(getattr(spec, "endpoint", "") or "")
     return {
-        "connected": spec is not None,
+        "connected": spec is not None and not paused,
+        "paused": paused,
         "runner": {
             "name": getattr(spec, "name", None),
             "host": _host,
@@ -227,6 +233,89 @@ async def probe_machine(db: AsyncSession = Depends(get_db)) -> dict:
     """Ask the machine, now. Seconds, and it is the operator's button."""
     from app.modules import engine_setup as _es
     return await _es.probe_local_runner(db)
+
+
+class RunInput(BaseModel):
+    """One read-only command to run on the connected machine, now."""
+    command: str = Field(min_length=1, max_length=2000)
+
+
+@router.post("/setup/machines/pause")
+async def pause_machine(paused: bool = True, db: AsyncSession = Depends(get_db)) -> dict:
+    """§17.1205 — stop (or resume) the engine USING this machine.
+
+    Not `systemctl stop` on the target: the runner refuses commands touching its
+    own service by design, and the engine has no other channel to it. This flips
+    the registry row's `enabled` flag, which is what every caller checks
+    (`runner_spec` returns None for a disabled row), so the helper keeps running
+    there and the engine simply stops sending it anything. Reversible, instant,
+    and it does not discard the token the way Forget does.
+    """
+    from app.modules import assist_local_runner as _lr
+    from app.modules import assist_supervised as _sw
+    from app.modules import mcp_client, mcp_registry
+    spec = await _lr.runner_spec(db, include_disabled=True)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="no machine is connected")
+    spec.enabled = not paused
+    await mcp_registry.upsert_server(db, spec)
+    await db.commit()
+    mcp_client.clear_tool_cache(spec.name)
+    _sw.clear_policy_cache(spec.name)
+    logger.warning("machine_%s name=%s", "paused" if paused else "resumed", spec.name)
+    return {"name": spec.name, "enabled": spec.enabled, "paused": paused}
+
+
+@router.post("/setup/machines/run")
+async def run_on_machine(body: RunInput, db: AsyncSession = Depends(get_db)) -> dict:
+    """§17.1205 — run ONE read-only command on the connected machine and return
+    what it printed. The operator could see the runner existed and not ask it
+    anything.
+
+    Gated by the same deterministic `read_only_command` the state check uses, so
+    this is not a shell: a command that could write is refused here, before it is
+    sent, and the runner refuses it again on its own side.
+    """
+    from app.modules import assist_local_runner as _lr
+    from app.modules.assist_state_check import read_only_command
+    from app.modules.mcp_client import call_tool
+    cmd = body.command.strip()
+    if not read_only_command(cmd):
+        raise HTTPException(status_code=422, detail={
+            "error": "that command is not read-only, so it will not be sent",
+            "hint": "this box only reads. A command that changes the machine goes through a step you approve."})
+    spec = await _lr.runner_spec(db)
+    if spec is None:
+        raise HTTPException(status_code=409, detail="no machine is connected (or it is paused)")
+    try:
+        res = await call_tool(spec, "run_readonly", {"command": cmd, "timeout_s": 20})
+        out = _lr._plain_output(res)
+    except Exception as exc:
+        logger.warning("machine_run_failed cmd=%r err=%r", cmd[:80], exc)
+        return {"command": cmd, "ran": False, "why": "the call to the runner did not come back",
+                "output": f"(runner error: {exc})"}
+    why = _lr.not_evidence(out, bool(res.is_error))
+    return {"command": cmd, "ran": not why, "why": why, "output": out}
+
+
+@router.get("/setup/machines/activity")
+async def machine_activity(limit: int = Query(40, ge=1, le=200),
+                           db: AsyncSession = Depends(get_db)) -> dict:
+    """§17.1205 — what this machine has been asked to do, newest first.
+
+    In memory and bounded, so `since` says when the count starts from: the page
+    must not imply a durable log it does not have.
+    """
+    from app.modules import assist_local_runner as _lr
+    from app.modules import runner_activity as _ra
+    name = None
+    try:
+        spec = await _lr.runner_spec(db)
+        name = getattr(spec, "name", None)
+    except Exception as exc:
+        logger.warning("machine_activity_lookup_failed err=%r", exc)
+    return {"runner": name, "entries": _ra.recent(runner=name, limit=limit),
+            **_ra.summary(runner=name)}
 
 
 @router.get("/setup/secrets")

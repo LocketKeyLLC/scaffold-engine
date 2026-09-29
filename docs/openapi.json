@@ -4387,6 +4387,22 @@
         "title": "RouteInput",
         "type": "object"
       },
+      "RunInput": {
+        "description": "One read-only command to run on the connected machine, now.",
+        "properties": {
+          "command": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Command",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "title": "RunInput",
+        "type": "object"
+      },
       "ScheduleCreate": {
         "properties": {
           "cron_expression": {
@@ -5356,6 +5372,56 @@
           }
         ],
         "summary": "Assist Candidates",
+        "tags": [
+          "Assist"
+        ]
+      }
+    },
+    "/assist/for-job/{job_id}": {
+      "get": {
+        "description": "§17.1209 — resolve a job's assist session WITHOUT touching it.\n\nOpening a job in the console used to `POST /assist/start` to learn the\nsession id, on the comment that it was \"idempotent, unique-per-job\". It is\nidempotent about *creating* a session and not about anything else: the\nresume path runs §17.1052's stranded-session repair, which finalizes a\nsession whose steps are all terminal — and §17.1208 showed what that then\ndid to the job. So merely LOOKING at a job could finish it. Live, on this\noperator's job, opening the page took it from `blocked` to `completed`\nacross 21 pending and 2 failed nodes.\n\nA page view is a read. This is the read: the session id and its status, or\n404 when the job has none. Starting one stays an explicit POST.",
+        "operationId": "assist_session_for_job_assist_for_job__job_id__get",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Assist Session For Job",
         "tags": [
           "Assist"
         ]
@@ -13437,6 +13503,59 @@
         ]
       }
     },
+    "/setup/machines/activity": {
+      "get": {
+        "description": "§17.1205 — what this machine has been asked to do, newest first.\n\nIn memory and bounded, so `since` says when the count starts from: the page\nmust not imply a durable log it does not have.",
+        "operationId": "machine_activity_setup_machines_activity_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 40,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Machine Activity Setup Machines Activity Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Machine Activity",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
     "/setup/machines/connect": {
       "post": {
         "description": "Point the engine at a machine and say at once whether it answered.\n\nRegisters (or re-points) the runner row and probes it in the same call, so\nthe form reports a real result instead of \"saved\" — the failure mode this\nreplaces is a walkthrough that records an address and finds out ten minutes\nlater that nothing is there.",
@@ -13486,6 +13605,57 @@
         ]
       }
     },
+    "/setup/machines/pause": {
+      "post": {
+        "description": "§17.1205 — stop (or resume) the engine USING this machine.\n\nNot `systemctl stop` on the target: the runner refuses commands touching its\nown service by design, and the engine has no other channel to it. This flips\nthe registry row's `enabled` flag, which is what every caller checks\n(`runner_spec` returns None for a disabled row), so the helper keeps running\nthere and the engine simply stops sending it anything. Reversible, instant,\nand it does not discard the token the way Forget does.",
+        "operationId": "pause_machine_setup_machines_pause_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "paused",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Paused",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pause Machine Setup Machines Pause Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Pause Machine",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
     "/setup/machines/probe": {
       "post": {
         "description": "Ask the machine, now. Seconds, and it is the operator's button.",
@@ -13510,6 +13680,55 @@
           }
         ],
         "summary": "Probe Machine",
+        "tags": [
+          "Setup"
+        ]
+      }
+    },
+    "/setup/machines/run": {
+      "post": {
+        "description": "§17.1205 — run ONE read-only command on the connected machine and return\nwhat it printed. The operator could see the runner existed and not ask it\nanything.\n\nGated by the same deterministic `read_only_command` the state check uses, so\nthis is not a shell: a command that could write is refused here, before it is\nsent, and the runner refuses it again on its own side.",
+        "operationId": "run_on_machine_setup_machines_run_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Run On Machine Setup Machines Run Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Run On Machine",
         "tags": [
           "Setup"
         ]

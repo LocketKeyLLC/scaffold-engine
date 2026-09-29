@@ -193,6 +193,21 @@ async def list_tools(spec: McpServerSpec, *, use_cache: bool = True) -> list[dic
     return tools
 
 
+#: §17.1205 — kept here as a literal rather than imported, so recording cannot
+#: make a tool call fail on an import error. `runner_activity.COMMAND_TOOLS` is
+#: the same tuple and a test holds them equal.
+_COMMAND_TOOLS = ("run_readonly", "run_supervised")
+
+
+def _note_failure(act, spec, tool_name: str, args: dict, exc: BaseException) -> None:
+    if act is None:
+        return
+    try:
+        act[0].note_failure(spec, tool_name, args, exc, act[1])
+    except Exception as err:                                # pragma: no cover
+        logger.warning("runner_activity_note_failed err=%r", err)
+
+
 async def call_tool(
     spec: McpServerSpec, tool_name: str, arguments: dict[str, Any] | None = None
 ) -> McpToolResult:
@@ -213,18 +228,40 @@ async def call_tool(
                 raw_content=list(getattr(result, "content", None) or []),
             )
 
+    # §17.1205 — the ONE place every runner command is sent, so the one place it
+    # is recorded for the operator to watch. Not at the callers (`run_probes`,
+    # `run_block`, the walkthrough look-ups, the guest checks): four sites that
+    # would drift. Only the tools that carry a command — the tool listings and
+    # `write_policy` are the engine asking a runner about itself, and the probe
+    # calls those on every page load.
+    _act = None
+    if tool_name in _COMMAND_TOOLS:
+        try:
+            from app.modules import runner_activity as _ra
+            _act = (_ra, _ra.started(spec.name))
+        except Exception:                                   # never break the call
+            _act = None
+
     try:
         out = await asyncio.wait_for(_do(), timeout=settings.mcp_call_timeout + 10.0)
     except asyncio.TimeoutError as exc:
+        _note_failure(_act, spec, tool_name, args, exc)
         raise McpError(
             f"mcp server {spec.name!r} tool {tool_name!r}: timed out"
         ) from exc
-    except McpError:
+    except McpError as exc:
+        _note_failure(_act, spec, tool_name, args, exc)
         raise
     except Exception as exc:
+        _note_failure(_act, spec, tool_name, args, exc)
         raise McpError(
             f"mcp server {spec.name!r} tool {tool_name!r}: {_describe_exc(exc)}"
         ) from exc
+    if _act is not None:
+        try:
+            _act[0].note_result(spec, tool_name, args, out, _act[1])
+        except Exception as exc:
+            logger.warning("runner_activity_note_failed err=%r", exc)
 
     if out.is_error:
         raise McpToolError(

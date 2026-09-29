@@ -1828,6 +1828,18 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
    with a copy button beside it; `.md-pre`'s scroll keeps it from pushing the
    page sideways, and the wrap keeps it readable without one. */
 .machines-install { white-space: pre-wrap; word-break: break-all; padding-top: 12px; font-size: 12px; }
+/* §17.1205 — the answer to "ask it something", and the list of what it has run. */
+.machines-out { white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; font-size: 12px; }
+.machines-out:empty { display: none; }
+.machines-activity { list-style: none; margin: 6px 0 0; padding: 0; max-height: 340px; overflow: auto; }
+.machines-activity li { padding: 3px 0; border-bottom: 1px solid var(--line, rgba(127,127,127,.18)); word-break: break-word; }
+.machines-activity li:last-child { border-bottom: 0; }
+/* §17.1207 — where a job stands when nothing is streaming. */
+.stage-verdict { font-weight: 600; margin: 0 0 6px; }
+.stage-standing { list-style: none; margin: 4px 0 10px; padding: 0; }
+.stage-standing li { padding: 4px 0; border-bottom: 1px solid var(--line, rgba(127,127,127,.18)); }
+.stage-standing li:last-child { border-bottom: 0; }
+.stage-reason { white-space: pre-wrap; word-break: break-word; font-size: 12px; opacity: .8; margin-top: 2px; }
 
 /* §17.1194 — the line an operator must not skim past: the write channel is
    open but UNPRIVILEGED, so a command they approve is refused by the machine

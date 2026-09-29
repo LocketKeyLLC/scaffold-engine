@@ -27,8 +27,15 @@ logger = logging.getLogger("scaffold")
 MARKER = "[local-runner]"
 
 
-async def runner_spec(db):
-    """The configured runner's registry spec, or None when the feature is off."""
+async def runner_spec(db, *, include_disabled: bool = False):
+    """The configured runner's registry spec, or None when the feature is off.
+
+    §17.1205 — `include_disabled` is for the ONE caller that needs a paused
+    runner: the thing that un-pauses it. Everything else must keep seeing None
+    for a disabled row, because that is what "the engine sends this machine
+    nothing" means. A second resolver would have drifted from this one, so it is
+    a flag on the single rule instead.
+    """
     from app.config import settings
     name = (settings.assist_local_runner_server or "").strip()
     if not name:
@@ -37,15 +44,15 @@ async def runner_spec(db):
         try:
             from app.modules.engine_setup import LOCAL_RUNNER_MARK
             from app.modules.mcp_registry import list_servers
-            for spec in await list_servers(db):
-                if spec.enabled and (spec.description or "").startswith(LOCAL_RUNNER_MARK):
+            for spec in await list_servers(db, include_disabled=include_disabled):
+                if (spec.enabled or include_disabled) and (spec.description or "").startswith(LOCAL_RUNNER_MARK):
                     return spec
         except Exception as exc:
             logger.warning("local_runner_tagged_lookup_failed err=%r", exc)
         return None
     from app.modules.mcp_registry import get_server
     spec = await get_server(db, name)
-    if spec is None or not spec.enabled:
+    if spec is None or not (spec.enabled or include_disabled):
         logger.warning("local_runner_not_available name=%s (unregistered or disabled)", name)
         return None
     return spec
