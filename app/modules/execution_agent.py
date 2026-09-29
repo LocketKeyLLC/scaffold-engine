@@ -2402,6 +2402,35 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         return await decision_pause.park_awaiting_decision(db, job_id, target, frame)
 
 
+async def _decision_is_stale(db: AsyncSession, job_id: str, node_key: str, entry: dict) -> bool:
+    """§17.1200 — has this decision already been spent on an attempt?
+
+    The record carries the moment the operator answered. If the node has been
+    written since — it ran, or failed, or was reopened — the answer belongs to
+    that past attempt and the step must be asked about again. Anything
+    unparseable counts as stale: asking once more costs a click, while the
+    other way round marks a machine-changing step done without running it.
+    """
+    at = str((entry or {}).get("at") or "")
+    if not at:
+        return True
+    row = (await db.execute(
+        text("SELECT updated_at, status FROM dag_nodes WHERE job_id = :jid AND node_key = :nk"),
+        {"jid": job_id, "nk": node_key})).mappings().first()
+    if not row:
+        return True
+    try:
+        from datetime import datetime
+        answered = datetime.fromisoformat(at)
+        touched = row["updated_at"]
+        if answered.tzinfo is None or touched is None:
+            return True
+        return touched > answered
+    except Exception as exc:
+        logger.warning("decision_staleness_unreadable job=%s node=%s err=%r", job_id, node_key, exc)
+        return True
+
+
 async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, tool: str) -> dict | None:
     """§17.1186 — a claimed hands-on step, with a runner whose write channel is
     open and no decision recorded for it, goes back to ``pending`` (``started_at``
@@ -2414,9 +2443,19 @@ async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, too
         _ch = await _sr.channel(db)
         if _ch is None:
             return None
+        # §17.1200 — a decision is consumed by the attempt it authorised. It is
+        # recorded to stop ONE pending node being asked twice in a single pass;
+        # it must not silence the ask for a node that has since run and been
+        # put back. Live: ADD65 was approved, its supervised run FAILED on a
+        # privilege error, the node was reopened to retry — and this early
+        # return sent it down the ordinary path, where a hands-on step is
+        # "completed" with the runbook as prose and marked done. A step that
+        # changes a machine was recorded as finished having executed nothing,
+        # which is the precise outcome §17.1183–1186 exist to prevent.
         decided = _sr._as_dict((await db.execute(
             text("SELECT metadata->'decisions' FROM jobs WHERE id = :jid"), {"jid": job_id})).scalar())
-        if node_key in decided:
+        entry = decided.get(node_key)
+        if entry is not None and not await _decision_is_stale(db, job_id, node_key, entry):
             return None
     except Exception as exc:
         logger.error("supervised_run_seam_failed job=%s node=%s err=%s", job_id, node_key, exc)
