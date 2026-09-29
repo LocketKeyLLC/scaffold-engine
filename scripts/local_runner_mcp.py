@@ -76,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "16"
+HELPER_VERSION = "17"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -942,7 +942,7 @@ def redact(text_out: str, secrets: dict) -> str:
 
 def build_server(token: str | None, sudo_allow: list[str] | None = None,
                  write_allow: list[str] | None = None, write_sudo: bool = False,
-                 secrets: dict | None = None):
+                 secrets: dict | None = None, secrets_file: str | None = None):
     from mcp.server import MCPServer
     mcp = MCPServer("scaffold-local-runner")
     allow = list(sudo_allow or [])
@@ -985,6 +985,12 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
         import json as _json
         return _json.dumps({"helper": HELPER_VERSION, "allow": writes, "sudo": bool(write_sudo and writes),
                             "max_ttl": APPROVAL_MAX_TTL,
+                            # §17.1204 — the READ grant and the values file are part of
+                            # this runner's setup too, and the installer REPLACES the lot.
+                            # Reporting them is what lets the engine rebuild the install
+                            # line for a refresh without quietly taking something away.
+                            "sudo_allow": list(allow),
+                            "secrets_file": secrets_file or None,
                             # §17.1191 — the NAMES this runner can resolve. Never the values:
                             # the engine writes `$NAME` into a command and this runner expands it.
                             "secrets": sorted(store)})
@@ -1467,7 +1473,8 @@ def main() -> int:
         print(f"FAILED: {why}", file=sys.stderr)
         return 2
     mcp = build_server(args.token, sudo_allow=args.sudo_allow, write_allow=args.write_allow,
-                       write_sudo=args.write_sudo, secrets=load_secrets(getattr(args, "secrets_file", None)))
+                       write_sudo=args.write_sudo, secrets=load_secrets(getattr(args, "secrets_file", None)),
+                       secrets_file=getattr(args, "secrets_file", None))
     if args.stdio:
         asyncio.run(mcp.run_stdio_async()); return 0
     import contextlib

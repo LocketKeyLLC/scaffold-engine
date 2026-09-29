@@ -194,9 +194,16 @@ async def diagnose_runner_path(spec) -> dict:
         want = expected_helper_version()
         if want and checks["helper_version"] != want:
             return {"class": "stale_helper", "checks": checks,
+                    # §17.1204 — this used to state one cause outright ("it refuses
+                    # read-only commands the engine now allows"). Not every bump is
+                    # that: v17 changed only what the helper REPORTS about its own
+                    # grants. The gate is build equality, so the honest detail is
+                    # the mismatch and what it can cost, not a diagnosis of which.
                     "detail": (f"reached {host}:{port} as '{spec.name}', but the helper running there is "
                                f"{'version ' + checks['helper_version'] if checks['helper_version'] else 'an older build'} "
-                               f"and the engine ships version {want} — it refuses read-only commands the engine now allows.")}
+                               f"and the engine ships version {want} — not the same build, so it can refuse "
+                               f"read-only forms the engine now allows, and it may not report everything the "
+                               f"engine needs to refresh it without dropping a grant.")}
         return {"class": "ok", "checks": checks,
                 "detail": f"reached http://{host}:{port}/mcp/ as '{spec.name}' and found its run_readonly tool"}
     return {"class": "not_runner", "checks": checks,
@@ -263,19 +270,15 @@ def runner_repair_block(diag: dict, *, engine_ip: Optional[str] = None) -> str:
                 f"the service is up:\n\n```bash\n{cmd}\n```\n\n"
                 f"Paste what it printed here. If the address differs from {host}, tell me the right one and I re-register the runner.")
     if cls == "stale_helper":
-        tok, url = ch.get("token") or "<the token the engine registered>", ch.get("script_url") or RUNNER_SCRIPT_FALLBACK_URL
-        cmd = (f"curl -fsSL {url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
-               f"--port {port} --token {tok}")
+        cmd, kept = repair_install_line(ch)
         return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
-                f"Refresh it with the same one line as the install (same token; the installer replaces the running "
-                f"service):\n\n```bash\n{cmd}\n```\n\nPaste its last line here and I re-check right away.")
+                f"Refresh it with one line — same token, and {kept}:\n\n```bash\n{cmd}\n```\n\n"
+                f"Paste its last line here and I re-check right away.")
     if cls == "token":
-        tok, url = ch.get("token") or "<the token the engine registered>", ch.get("script_url") or RUNNER_SCRIPT_FALLBACK_URL
-        cmd = (f"curl -fsSL {url} -o /tmp/local_runner_mcp.py && python3 /tmp/local_runner_mcp.py --install "
-               f"--port {port} --token {tok}")
+        cmd, kept = repair_install_line(ch)
         return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
-                f"Re-run the install with the token the engine registered — the installer replaces the running "
-                f"service:\n\n```bash\n{cmd}\n```\n\nPaste its last line here and I re-check the connection right away.")
+                f"Re-run the install with the token the engine registered — {kept}:\n\n```bash\n{cmd}\n```\n\n"
+                f"Paste its last line here and I re-check the connection right away.")
     if cls == "not_runner":
         return (f"**What I checked from the engine host:** {diag['detail']}\n\n"
                 f"Something else is listening on port {port} of {host}. On the target, this shows what holds the port "
@@ -303,8 +306,18 @@ async def probe_local_runner(db) -> dict:
     try:                                   # §17.1185 — a probe is the moment to re-read the write policy
         from app.modules import assist_supervised as _sw
         _sw.clear_policy_cache(spec.name)
-        _pol = await _sw.write_policy(spec, use_cache=False) if diag.get("class") == "ok" else None
+        # §17.1204 — a STALE helper still answers, and what it answers is the
+        # only record of what that machine is set up with. Reading it only on
+        # `ok` is why the refresh line could not carry the grants forward.
+        _asked = diag.get("class") in ("ok", "stale_helper")
+        _pol = await _sw.write_policy(spec, use_cache=False) if _asked else None
         diag["checks"]["writes"] = _pol
+        # §17.1204 — and the FULL answer, because `writes` is None both for a
+        # runner that holds nothing and for one that never replied. The repair
+        # line must not read the first as the second: "it holds nothing" is an
+        # answer, and falling back to the plan for it grants prefixes the
+        # operator never approved.
+        diag["checks"]["runner_setup"] = await _sw.runner_setup(spec) if _asked else None
         if _pol:
             diag["detail"] = (diag.get("detail") or "") + (f" Supervised writes: {len(_pol['allow'])} allowed prefix(es)"
                                                           f"{' as root' if _pol['sudo'] else ''}: " + "; ".join(_pol["allow"][:8]) + ".")
@@ -312,6 +325,16 @@ async def probe_local_runner(db) -> dict:
         logger.warning("runner_probe_write_policy_failed err=%r", exc)
     diag["checks"]["token"] = (spec.headers or {}).get("X-Runner-Token") if isinstance(spec.headers, dict) else None
     diag["checks"]["script_url"] = RUNNER_SCRIPT_FALLBACK_URL
+    # §17.1204 — the fallback when the runner cannot tell us what it holds (a
+    # rejected token answers nothing): what this operator's plan needs, which is
+    # what the connection page recommends. Better than a line that grants none.
+    try:
+        diag["checks"]["plan_grants"] = {
+            "allow": [p["prefix"] for p in await prefixes_needed(db) if p.get("prefix")],
+            "sudo_allow": [p["prefix"] for p in await read_prefixes_needed(db) if p.get("prefix")],
+        }
+    except Exception as exc:
+        logger.warning("runner_probe_plan_grants_failed err=%r", exc)
     engine_ip = None
     try:
         engine_ip = await _engine_ip_from_sessions(db)
@@ -994,15 +1017,88 @@ def install_line(ctx: dict, *, prefixes: Optional[list[str]] = None,
     """
     allow = " ".join(f'"{p}"' for p in (prefixes or []) if p)
     reads = " ".join(f'"{p}"' for p in (sudo_allow or []) if p)
+    # §17.1204 — the port this runner is REGISTERED on, not the default. The
+    # diagnosis above the repair line quotes the registered port ("nothing is
+    # listening on port 9001 there"); a line that then says `--port 8790`
+    # contradicts the sentence it sits under and reinstalls the helper where
+    # the engine is not looking. `diagnose_runner_path`'s checks spell it
+    # `port`, `recipe_context` spells it `runner_port`.
+    port = ctx.get("port") or ctx.get("runner_port") or RUNNER_PORT
     return (f"curl -fsSL {ctx.get('script_url') or RUNNER_SCRIPT_FALLBACK_URL} -o /tmp/local_runner_mcp.py"
             f" && python3 /tmp/local_runner_mcp.py --install"
-            f" --port {RUNNER_PORT} --token {ctx.get('token') or '<the token the engine registered>'}"
+            f" --port {port} --token {ctx.get('token') or '<the token the engine registered>'}"
             + (f" --write-allow {allow}" if allow else "")
             # §17.1198 — reads that need root are a SEPARATE grant: the write
             # list covers what changes the machine, this covers what the engine
             # cannot even look at without privilege.
             + (f" --sudo-allow {reads}" if reads else "")
             + (f" --secrets-file {secrets_file}" if secrets_file else ""))
+
+
+#: Where the recipe puts the runner's values file. The helper reports its own
+#: path from v17; this is the fallback for a runner that answers an older shape.
+RUNNER_SECRETS_PATH = "/etc/scaffold-runner/secrets.env"
+
+
+def repair_install_line(checks: dict) -> tuple[str, str]:
+    """§17.1204 — the line that REPAIRS a runner, carrying forward everything
+    it already has, plus a phrase saying so.
+
+    `--install` replaces the service outright: the write list, the root-read
+    grant and the values file are exactly the flags on the line, and a flag
+    that is not on it is revoked. The repair text for `stale_helper` and
+    `token` was written by hand as ``--install --port --token`` and nothing
+    else, so the one line the engine hands an operator to FIX their runner
+    would have closed their write channel — live, a machine trusted with
+    `--write-allow ANY` and root, told to refresh to pick up a read fix, would
+    have come back read-only and the job would have gone backwards.
+
+    What the runner reports about ITSELF is the authority, and "it holds
+    nothing" is one of its answers: a machine deliberately left read-only must
+    not be handed a line that opens a write channel. The plan is the fallback
+    for the one case where the runner told us nothing at all (a rejected token
+    answers nothing) — and then the phrase says the grants are being ADDED,
+    because claiming a read-only runner "already allows" them is how an
+    escalation gets itself run.
+    """
+    from app.modules.assist_supervised import ANY as _ANY
+    setup = checks.get("runner_setup")
+    plan = checks.get("plan_grants") or {}
+    answered = isinstance(setup, dict)
+    if answered:
+        allow = [p for p in (setup.get("allow") or []) if p]
+        # v15/v16 report neither field. None means "did not say", so the plan
+        # fills in; [] means the runner said it holds none, which stands.
+        reads_said = isinstance(setup.get("sudo_allow"), list)
+        reads = ([p for p in setup["sudo_allow"] if p] if reads_said
+                 else [p for p in (plan.get("sudo_allow") or []) if p])
+        secrets_file = setup.get("secrets_file") or (
+            RUNNER_SECRETS_PATH if setup.get("secrets") else None)
+    else:
+        allow = [p for p in (plan.get("allow") or []) if p]
+        reads_said = False
+        reads = [p for p in (plan.get("sudo_allow") or []) if p]
+        secrets_file = None
+    if _ANY in allow:
+        # §17.1202 — ANY writes `NOPASSWD: ALL`, which already covers reads.
+        reads, reads_said = [], True
+    line = install_line(checks, prefixes=allow, sudo_allow=reads, secrets_file=secrets_file)
+    if not allow and not reads and not secrets_file:
+        return line, "the installer replaces the running service"
+    kept, added = [], []
+    if _ANY in allow:
+        kept.append("this machine stays trusted with whatever you approve")
+    elif allow:
+        (kept if answered else added).append(
+            f"the {len(allow)} prefix(es) it already allows stay allowed" if answered
+            else f"it gains the {len(allow)} write prefix(es) your plan needs")
+    if reads:
+        (kept if reads_said else added).append(
+            f"the {len(reads)} root-read grant(s) stay" if reads_said
+            else f"it gains the {len(reads)} root-read grant(s) your plan needs")
+    if secrets_file:
+        kept.append("its values file stays wired in")
+    return line, " and ".join(kept + added)
 
 
 async def start_recipe(db, recipe_id: str, *, owner: Optional[str]) -> dict:

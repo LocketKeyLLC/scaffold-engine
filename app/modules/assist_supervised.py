@@ -223,19 +223,37 @@ def runner_token(spec) -> str:
 
 _POLICY_TTL = 300.0
 _policy_cache: dict[str, tuple[float, Optional[dict]]] = {}
+#: §17.1204 — everything the runner reports about its OWN setup, kept apart from
+#: `_policy_cache`. That one holds the write-channel verdict, whose None means
+#: "no writes allowed"; this one's None means "the runner could not be asked".
+#: Rebuilding an install line needs those two apart — see `runner_setup`.
+_setup_cache: dict[str, tuple[float, Optional[dict]]] = {}
 
 
 def clear_policy_cache(name: Optional[str] = None) -> None:
     if name is None:
         _policy_cache.clear()
+        _setup_cache.clear()
     else:
         _policy_cache.pop(name, None)
+        _setup_cache.pop(name, None)
 
 
 def cached_policy(spec) -> tuple[bool, Optional[dict]]:
     """``(known, policy)`` from the cache alone — never calls out. Recipe
     detection reads this (detectors must not touch the operator's machines)."""
     hit = _policy_cache.get(getattr(spec, "name", "") or "")
+    if hit and hit[0] > time.monotonic():
+        return True, hit[1]
+    return False, None
+
+
+def cached_setup(spec) -> tuple[bool, Optional[dict]]:
+    """§17.1204 — ``(known, setup)`` from the cache alone, never calling out.
+    The connection page builds install lines and is documented as cheap, but
+    those lines REPLACE the service: it needs what the runner holds without
+    paying for a round trip to find out."""
+    hit = _setup_cache.get(getattr(spec, "name", "") or "")
     if hit and hit[0] > time.monotonic():
         return True, hit[1]
     return False, None
@@ -268,16 +286,51 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
     except Exception as exc:
         logger.warning("supervised_policy_unavailable runner=%s err=%r", getattr(spec, "name", "?"), exc)
         _policy_cache[name] = (time.monotonic() + 60.0, None)
+        _setup_cache[name] = (time.monotonic() + 60.0, None)
         return None
     allow = [str(a) for a in (pol.get("allow") or []) if str(a).strip()]
     # §17.1191 — the NAMES the runner can resolve (`$NAME` in a command), never
     # their values. An older helper does not report the field; [] then means
     # "this runner holds no secrets", which is the safe reading.
     secrets = sorted({str(n) for n in (pol.get("secrets") or []) if _SECRET_REF_NAME.match(str(n))})
+    # §17.1204 — the whole of what `--install` would REPLACE, recorded before the
+    # write-channel view narrows it. The two fields below are exactly the grants
+    # the repair line used to drop: they were parsed nowhere, so helper v17
+    # reporting them bought nothing. `None` (not `[]`) for a helper that does not
+    # report the field at all — "it did not say" is not "it has none".
+    _setup_cache[name] = (time.monotonic() + _POLICY_TTL, {
+        "allow": allow, "sudo": bool(pol.get("sudo")), "helper": str(pol.get("helper") or ""),
+        "secrets": secrets,
+        "sudo_allow": ([str(a) for a in pol["sudo_allow"] if str(a).strip()]
+                       if isinstance(pol.get("sudo_allow"), list) else None),
+        "secrets_file": (str(pol["secrets_file"]) if pol.get("secrets_file") else None),
+    })
     out = ({"allow": allow, "sudo": bool(pol.get("sudo")), "helper": str(pol.get("helper") or ""),
             "secrets": secrets} if allow else None)
     _policy_cache[name] = (time.monotonic() + _POLICY_TTL, out)
     return out
+
+
+async def runner_setup(spec, *, use_cache: bool = True) -> Optional[dict]:
+    """§17.1204 — every grant ``--install`` would REPLACE, as the runner reports
+    it: ``{allow, sudo, helper, secrets, sudo_allow, secrets_file}``. ``None``
+    when the runner could not be asked at all; ``sudo_allow``/``secrets_file``
+    are ``None`` when the helper is too old to report them.
+
+    Deliberately separate from `write_policy`. That function's ``None`` is a
+    verdict about one thing — "no supervised write channel" — and it answers
+    ``None`` both for a runner that holds nothing and for one that never
+    replied. Rebuilding an install line needs those apart: read "holds nothing"
+    as "unknown" and the fallback grants prefixes the operator never approved.
+    """
+    name = getattr(spec, "name", "") or ""
+    if use_cache:
+        hit = _setup_cache.get(name)
+        if hit and hit[0] > time.monotonic():
+            return hit[1]
+    await write_policy(spec, use_cache=False)   # one call out; it fills both caches
+    hit = _setup_cache.get(name)
+    return hit[1] if hit else None
 
 
 _SENTINEL_RE = re.compile(r'^\s*echo\s+"== S:[^"]+ =="\s*$')
