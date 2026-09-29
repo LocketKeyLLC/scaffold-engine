@@ -3857,15 +3857,39 @@ async def _maybe_finalize_session(*, session_id: str, db) -> None:
     )).mappings().first()
     if not sess:
         return
-    await db.execute(
-        text("""
-            UPDATE jobs
-               SET status = 'completed', completed_at = NOW(), updated_at = NOW()
-             WHERE id = :jid
-               AND status IN ('assisted_executing', 'assisted_running', 'assisted_paused')
-        """),
-        {"jid": sess["job_id"]},
-    )
+    # §17.1208 — the SESSION being finished is not the JOB being finished.
+    #
+    # The count above is over `assist_steps`, and `handed_off` is terminal there:
+    # it means the operator gave the step to the autonomous executor, not that
+    # the work succeeded. Whether it did lives in `dag_nodes`. Live, this job:
+    # 61 committed / 47 skipped / 23 handed_off steps — and 61 done / 47 skipped
+    # / 21 pending / 2 FAILED nodes. The 23 handed-off steps are exactly the 23
+    # unfinished nodes, and the job was marked `completed` with a ✅ deliverable
+    # over the top of them. *"fix the completed status too."*
+    #
+    # The autonomous path has guarded this since §17.281 (`_all_nodes_done`,
+    # NOT IN ('done','skipped'), written because a DAG finishing with any
+    # surviving failure still flipped to completed). Same rule, same helper —
+    # this path simply never asked. When the DAG is not done the job status is
+    # left to the executor, which sets `blocked` through its own guarded flip.
+    from app.modules.execution_agent import _all_nodes_done
+    dag_done = await _all_nodes_done(db, str(sess["job_id"]))
+    if not dag_done:
+        logger.warning(
+            "assist_session_finalized_job_unfinished session_id=%s job=%s "
+            "(steps terminal, DAG is not — job status left alone)",
+            session_id, sess["job_id"],
+        )
+    else:
+        await db.execute(
+            text("""
+                UPDATE jobs
+                   SET status = 'completed', completed_at = NOW(), updated_at = NOW()
+                 WHERE id = :jid
+                   AND status IN ('assisted_executing', 'assisted_running', 'assisted_paused')
+            """),
+            {"jid": sess["job_id"]},
+        )
     # §17.516 — synthesize a deliverable from the mirrored per-node evidence so
     # the default /results shows a "here's what you built" summary. Before this,
     # the assist path never called _compile_output, leaving compiled_output NULL
