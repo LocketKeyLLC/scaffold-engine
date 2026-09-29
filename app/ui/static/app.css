@@ -1839,3 +1839,6 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
    screen where they need a next step. */
 .decision-fix { margin: 6px 0 0; font-size: 13px; }
 .decision-fix a { color: var(--accent); }
+
+/* §17.1199 — the rule between "list the commands" and "trust what you approve" */
+.cap-rule { border: 0; border-top: 1px solid var(--border); margin: 14px 0 10px; }
