@@ -187,7 +187,16 @@ def test_verify_state_runs_every_batch_through_the_runner_and_repair_commit_repo
     from app.routers import assist as r
     src = inspect.getsource(assist_turn._start_state_check)
     blk = src[src.index("§17.1152 — EVERY batch"):src.index("falling back to the paste")]
-    assert "while True:" in blk and "resolve_state_check(" in blk and "get_pending_state_check(" in blk and "run_probes(_spec, _pend[\"probes\"]" in blk
+    assert "while True:" in blk and "resolve_state_check(" in blk and "get_pending_state_check(" in blk
+    # §17.1204 — the batch is every pending probe MINUS only the ones the runner
+    # itself refused, so §17.1152 still holds where it matters: the engine may
+    # never hand the operator a probe the runner could still run. Pinning the
+    # exemption is the point — it is what keeps it from widening.
+    assert '_todo = [p for p in _pend["probes"] if p["id"] not in _blocked]' in blk, blk
+    assert "run_probes(_spec, _todo" in blk, blk
+    assert blk.count('for e in executed if not e.get("ran", True)') == 2, \
+        "_blocked is seeded from the first batch and updated per batch, from nothing but probes that did not run"
+    assert "blocked=_blocked" in blk, "the reasons must reach resolve_state_check"
     assert "_batches >= 12" in blk                                      # bounded
     rs = inspect.getsource(r.assist_submit)
     assert rs.index("submit_step(") < rs.index("repoint_after_repair(") < rs.index('result["success_verdict"] = verdict')

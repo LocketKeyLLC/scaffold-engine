@@ -1509,6 +1509,10 @@ async def _start_state_check(session_id: str, nk, db) -> AsyncIterator[_Event]:
             # the runner ran the first 23 of 48 probes and the engine handed the
             # remaining 25 to the operator to paste, in three scripts, over
             # twelve minutes. The per-script budget exists for a human's clipboard.
+            # §17.1204 — with ONE exception, and it is not a weakening of that:
+            # a probe the runner has already REFUSED. It cannot run there, so the
+            # operator's shell is the only thing left; everything the runner can
+            # still run, it runs.
             from app.modules import assist_state_check as _sc
             _batches = 1
             # §17.1204 — what the runner could not run, and why. These are
