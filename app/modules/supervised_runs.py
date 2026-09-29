@@ -767,6 +767,106 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
 
 # ── resolution ───────────────────────────────────────────────────────────
 
+#: §17.1202 — what to look at when a command of this shape fails. Read-only,
+#: cheap, and chosen because each one turns a GUESS in the diagnosis into a
+#: fact: the live diagnosis said "the storage name may be different" when
+#: `pvesm status` settles it in one line.
+_STATE_PROBES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("storage", ("pvesm status",)),
+    ("does not exist", ("pvesm status", "qm list", "pct list")),
+    ("qm ", ("qm list",)),
+    ("pct ", ("pct list",)),
+    ("No space left", ("df -h",)),
+    ("not found", ("which qm pct pvesm",)),
+)
+
+
+async def _failure_state(db: AsyncSession, executed: list[dict]) -> str:
+    """Read the machine on the subject of the failure. ``""`` when nothing fits.
+
+    Only read-only commands, only through the runner's read tool, capped — this
+    is context for a diagnosis, not an investigation. Fail-soft: a probe that
+    cannot run leaves the diagnosis exactly as it was.
+    """
+    from app.modules import assist_local_runner as _lr
+    bad = [e for e in executed if not e.get("ok") and not e.get("informational")]
+    if not bad:
+        return ""
+    subject = f"{bad[-1].get('command','')}\n{bad[-1].get('output','')}"
+    wanted: list[str] = []
+    for needle, probes in _STATE_PROBES:
+        if needle.lower() in subject.lower():
+            for p in probes:
+                if p not in wanted:
+                    wanted.append(p)
+    if not wanted:
+        return ""
+    try:
+        spec = await _lr.runner_spec(db)
+        if spec is None:
+            return ""
+        pasted, _ran = await _lr.run_probes(
+            spec, [{"id": f"S{i}", "command": c} for i, c in enumerate(wanted[:4], 1)])
+        return (pasted or "")[:3000]
+    except Exception as exc:
+        logger.warning("failure_state_probe_failed err=%r", exc)
+        return ""
+
+
+async def diagnose_failure(db: AsyncSession, job_id: str, node_key: str,
+                           executed: list[dict], reason: str) -> str:
+    """§17.1201 — work out WHY a supervised block failed, and what to try next.
+
+    Auto mode's failure path ended at "node failed, here is the exit code".
+    The walkthrough has diagnosed errors since §17.1027 — it reads the
+    environment ledger, researches what it does not recognise, and proposes
+    corrected commands — and the operator's question was whether the runner can
+    do the same. It can: `assist_guide.generate_fix` takes a step context, an
+    error and an environment, and needs no assist session, so the autonomous
+    path can use the same head the ✦ Fix button does.
+
+    The error handed to it is the real one: the failing command and its actual
+    output, not a summary, because a summary is what a diagnosis is FOR.
+    Fail-soft to ``""`` — a diagnosis that cannot be produced must never turn a
+    recorded failure into a lost one.
+    """
+    from app.config import settings
+    try:
+        from app.modules.assist_agent import _assemble_ctx_for_node
+        from app.modules.assist_guide import generate_fix
+        from app.modules.runbook_inputs import job_environment
+        bad = [e for e in executed if not e.get("ok") and not e.get("informational")]
+        last = bad[-1] if bad else (executed[-1] if executed else None)
+        if last is None:
+            return ""
+        error_text = (f"$ {last['command']}\n{str(last.get('output') or '').strip()[-4000:]}\n"
+                      f"(exit {last.get('exit')})\n\nThe engine ran this itself through the local runner, "
+                      f"with the operator's approval. {reason}")
+        _node, ctx = await _assemble_ctx_for_node(db=db, job_id=job_id, node_key=node_key)
+        env = await job_environment(db, job_id)
+        # §17.1202 — ACCURACY, not provenance. A diagnosis built from the web
+        # alone guesses at this machine: the live one said "the storage name may
+        # be different" when one read settles it. The engine already has a
+        # read-only channel to the machine that just failed, so it looks BEFORE
+        # it reasons and hands the model the real state alongside the error.
+        state = await _failure_state(db, executed)
+        if state:
+            error_text += f"\n\nWHAT THIS MACHINE ACTUALLY REPORTS RIGHT NOW (read-only, just checked):\n{state}"
+        res = await generate_fix(
+            ctx=ctx, error_text=error_text,
+            # research is what makes this more than a re-read of the error: an
+            # `ipcc_send_rec` or a `qm: command not found` is not in the plan.
+            research=bool(settings.assist_guide_research),
+            environment=env, node_key=node_key, domain=_node.get("domain"),
+        )
+        out = str((res or {}).get("fix") or "").strip()
+        logger.warning("supervised_run_diagnosed job=%s node=%s chars=%d", job_id, node_key, len(out))
+        return out
+    except Exception as exc:
+        logger.warning("supervised_run_diagnose_failed job=%s node=%s err=%r", job_id, node_key, exc)
+        return ""
+
+
 async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str, waiting: dict,
                       inputs: dict | None = None) -> dict:
     """Carry out the operator's choice on a ``kind="run"`` pause. Returns
@@ -847,7 +947,10 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     logger.warning("supervised_run_started job=%s node=%s runner=%s commands=%d secrets=%d",
                    job_id, node_key, spec.name, len(runnable), len(secret_env))
     executed = await _sw.run_block(spec, runnable, env=secret_env)
-    ok = bool(executed) and all(e["ok"] for e in executed) and len(executed) == len(runnable)
+    # §17.1201 — a read that answered "no" is not a failed block (`grep` exits 1
+    # when the thing it looked for is gone, which is often the check passing).
+    ok = (bool(executed) and len(executed) == len(runnable)
+          and all(e["ok"] or e.get("informational") for e in executed))
     verify_out = ""
     if ok and verify_cmds:
         try:
@@ -868,6 +971,11 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         logger.warning("supervised_run_done job=%s node=%s commands=%d", job_id, node_key, len(executed))
         return {"outcome": "ran", "node_status": "done", "executed": executed, "verify": verify_out}
     last = executed[-1] if executed else None
+    # §17.1201 — the runner's connection dropped. Nobody knows whether the
+    # command ran, and a write whose outcome is unknown is a different decision
+    # from one that definitely failed. Say so, and do not pretend to an exit
+    # code ("exited None" was what the operator saw).
+    dropped = [e for e in executed if e.get("unreachable")]
     # §17.1198 — a command that failed because the runner could not read is not
     # a broken machine. The write grant covers writes; a READ-ONLY command in
     # the same block deliberately runs unprivileged, and on a Proxmox host that
@@ -880,6 +988,10 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         except Exception as exc:
             logger.warning("needs_root_record_failed job=%s err=%r", job_id, exc)
     reason = mask_secrets(
+        (f"the connection to {spec.name} dropped while `{dropped[-1]['command'][:80]}` was running "
+         f"({dropped[-1]['output'][:120]}). Whether it ran on the machine is UNKNOWN — check before retrying, "
+         f"because a repeat of a write that already happened is not the same as a retry of one that did not.")
+        if dropped else
         (f"`{needs_root[-1]['command'][:80]}` could not read on that machine — the runner is unprivileged for "
          f"READ commands (the write grant covers writes only). Allow it to read as root: Settings → Machines, "
          f"or Capabilities → “Give the runner administrator rights for specific commands”.")
@@ -887,12 +999,24 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         ("the runner ran nothing" if not last else
          (f"the runner refused `{last['command'][:80]}`: {last['output'][:200]}" if last.get("refused")
           else f"`{last['command'][:80]}` exited {last['exit']}: {last['output'][-300:]}")), values, need)
+    # §17.1201 — the runner can problem-solve, the way the walkthrough does.
+    # Until now a failed block ended the step: node `failed`, a one-line reason,
+    # and nothing tried. Assist has diagnosed errors since §17.1027 — reading
+    # the environment ledger, researching what it does not recognise, and
+    # proposing corrected commands — and `generate_fix` needs no session, so
+    # Auto can use the same head. The diagnosis rides on the node's output and
+    # the returned dict, where the Run stage shows it.
+    diagnosis = await diagnose_failure(db, job_id, node_key, executed, reason)
+    if diagnosis:
+        output = f"{output}\n\n## What went wrong, and what to try\n\n{diagnosis}"
     await db.execute(
         text("UPDATE dag_nodes SET status = 'failed', output_text = :out, completed_at = NOW(), updated_at = NOW(), "
              "last_verification_reason = :why WHERE job_id = :jid AND node_key = :nk AND status = 'running'"),
         {"jid": job_id, "nk": node_key, "out": output, "why": f"supervised run stopped — {reason}"[:1000]})
-    logger.warning("supervised_run_failed job=%s node=%s reason=%s", job_id, node_key, reason[:200])
-    return {"outcome": "failed", "node_status": "failed", "executed": executed, "reason": reason}
+    logger.warning("supervised_run_failed job=%s node=%s diagnosed=%s reason=%s",
+                   job_id, node_key, bool(diagnosis), reason[:200])
+    return {"outcome": "failed", "node_status": "failed", "executed": executed, "reason": reason,
+            "diagnosis": diagnosis, "unknown_outcome": bool(dropped)}
 
 
 def _executed_report(runbook: str, runner: str, executed: list[dict], verify_out: str) -> str:

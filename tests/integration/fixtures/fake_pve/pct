@@ -1,0 +1,15 @@
+#!/bin/sh
+# §17.1203 — a Proxmox-shaped `pct`, same contract as the fake `qm`.
+set -e
+if [ "${FAKE_PVE_UNPRIVILEGED:-0}" = "1" ]; then
+    echo "ipcc_send_rec[1] failed: Unknown error -1" >&2
+    echo "Unable to load access control list: Unknown error -1" >&2
+    exit 255
+fi
+case "$1" in
+  list)   echo "VMID       Status     Lock         Name"; echo "111        running                 control-panel" ;;
+  status) echo "status: running" ;;
+  config) echo "hostname: control-panel"; echo "net0: name=eth0,bridge=vmbr0,ip=192.168.1.25/24" ;;
+  set|start|stop|reboot|exec) echo "ok" ;;
+  *)      echo "Unknown command '$1'" >&2; exit 1 ;;
+esac

@@ -176,12 +176,18 @@ async def test_a_failed_command_fails_the_node_with_the_reason():
     executed = [{"command": "pct start 111", "output": "CT 111 does not exist", "exit": 2, "ok": False, "approval_id": "a", "refused": False}]
     with patch.object(sr, "channel", new=AsyncMock(return_value=(_spec(), POLICY))), \
          patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=executed)), \
+         patch.object(sr, "diagnose_failure", new=AsyncMock(return_value="")), \
          patch("app.modules.assist_local_runner.run_probes", new=AsyncMock()) as probes:
         out = await sr.resolve_run(db, "j", "ADD50", "run", waiting)
     assert out["outcome"] == "failed" and "exited 2" in out["reason"]
     probes.assert_not_awaited()                                   # no verify after a failure
-    sql, params = db.execute.await_args_list[1].args
-    assert "SET status = 'failed'" in sql.text and params["why"].startswith("supervised run stopped")
+    # §17.1201 — found by CONTENT, not by position: the diagnosis pass added
+    # calls ahead of this one and a positional assertion broke on a change that
+    # was not about it.
+    fails = [c for c in db.execute.await_args_list
+             if "SET status = 'failed'" in str(c.args[0])]
+    assert len(fails) == 1, [str(c.args[0])[:60] for c in db.execute.await_args_list]
+    assert fails[0].args[1]["why"].startswith("supervised run stopped")
 
 
 @pytest.mark.asyncio

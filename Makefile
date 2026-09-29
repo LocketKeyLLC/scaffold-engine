@@ -123,6 +123,10 @@ test-auto-mode: test-db ## §17.1189 — AUTO MODE's own loop END TO END (decisi
 	@mkdir -p $(AUTO_MODE_LOG_DIR) && chmod 777 $(AUTO_MODE_LOG_DIR)
 	flock -w 7200 $(TEST_DB_LOCK) $(_TEST_RUN_PRE) -e ITEST_LOG_DIR=/itest -v $(AUTO_MODE_LOG_DIR):/itest scaffold-engine:dev pytest tests/integration/test_auto_mode_live.py --timeout=900 -q -p no:warnings
 
+test-diagnosis: test-db ## §17.1203 — DIAGNOSIS ACCURACY against a Proxmox-SHAPED machine (tests/integration/fixtures/fake_pve): its own helper (:8794, --write-allow ANY) over the real MCP transport. Measures whether a diagnosis names storage that exists ONLY on the machine — i.e. whether it looked. Needs Ollama + SearXNG. ~3-6 min.
+	@mkdir -p $(AUTO_MODE_LOG_DIR) && chmod 777 $(AUTO_MODE_LOG_DIR)
+	flock -w 7200 $(TEST_DB_LOCK) $(_TEST_RUN_PRE) -e ITEST_LOG_DIR=/itest -v $(AUTO_MODE_LOG_DIR):/itest scaffold-engine:dev pytest tests/integration/test_diagnosis_accuracy_live.py --timeout=900 -q -p no:warnings -s
+
 test-pipelines: _ensure_dev_image ## §17.807 — OWUI pipeline tests (test_scaffold_router_*) with --noconftest (tests/conftest.py eager-loads app, shadowing the pipeline mocks); throwaway container (§17.1108)
 	$(_TEST_RUN) sh -c 'cd /code && pytest tests/test_scaffold_router_*.py --noconftest --timeout=30 -v'
 

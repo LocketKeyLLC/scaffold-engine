@@ -76,7 +76,7 @@ log = logging.getLogger("local-runner")
 # with the copy it ships (the tool description carries it) and, when the
 # helper on the target is older, walks the operator through a one-paste
 # refresh instead of feeding itself refusals it cannot act on.
-HELPER_VERSION = "15"
+HELPER_VERSION = "16"
 
 # The same verb table as the engine's assist_state_check._MUTATION_RE, applied
 # to the head of every simple command.
@@ -947,6 +947,14 @@ def build_server(token: str | None, sudo_allow: list[str] | None = None,
     mcp = MCPServer("scaffold-local-runner")
     allow = list(sudo_allow or [])
     writes = [w.strip() for w in (write_allow or []) if w and w.strip()]
+    # §17.1202 — ANY on the WRITE list writes `NOPASSWD: ALL`, so the grant
+    # already covers reads; without this the read-only tool kept running
+    # unprivileged and every `qm`/`pct`/`pvesm` CHECK came back
+    # "ipcc_send_rec … Unable to load access control list" on a machine whose
+    # runner had full rights. The engine could not even look at the state it
+    # was reasoning about — including to check its own diagnosis.
+    if ANY in writes and write_sudo and ANY not in allow:
+        allow.append(ANY)
     store = dict(secrets or {})          # §17.1191 — values live here and nowhere else
 
     @mcp.tool(description=f"Run ONE read-only shell command on this machine and return its output. "
