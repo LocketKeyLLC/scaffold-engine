@@ -105,6 +105,14 @@ export default function machines(container, params, opts = {}) {
       try { await navigator.clipboard.writeText(d.install || ""); toast("Copied — paste it on the machine.", "ok"); }
       catch { toast("Select the line and copy it.", "err"); }
     });
+    // §17.1199 — the trust-level alternative to enumerating commands
+    w.trusted = d.trust_mode === "approve";
+    const trustedInstall = el("pre", { class: "md-pre machines-install", text: d.install_trusted || "" });
+    const copyTrusted = el("button", { class: "btn btn-sm", text: "⧉ copy the trusted line" });
+    copyTrusted.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(d.install_trusted || ""); toast("Copied — paste it on the machine.", "ok"); }
+      catch { toast("Select the line and copy it.", "err"); }
+    });
     return el("div", { class: "card card-pad" },
       el("h3", { class: "cap-title", text: "What the engine may run there" }),
       w.open
@@ -125,7 +133,19 @@ export default function machines(container, params, opts = {}) {
         : null,
       el("p", { class: "sub cap-line", text: "Run this once on the machine — it installs or replaces the helper with exactly these allowed:" }),
       install,
-      el("div", { class: "row row-wrap cap-actions" }, copy));
+      el("div", { class: "row row-wrap cap-actions" }, copy),
+      // §17.1199 — the list above can only be completed by FAILING: each step
+      // turns up a command nobody predicted, and each one costs a console
+      // round-trip. The operator already approves every block; this offers the
+      // trust level that matches the decision they are actually making.
+      el("hr", { class: "cap-rule" }),
+      el("p", { class: "cap-summary", text: w.trusted
+        ? "This machine is set to run anything you approve. Each block still stops for your approval, each command is still signed, and the never-allowed list (host power, disk destroyers) still refuses."
+        : "Or: stop listing commands. The list above grows every time a step needs something nobody predicted, and each addition costs you a paste on the machine. You already read and approve every block — this makes that the whole decision." }),
+      w.trusted ? null : el("p", { class: "sub cap-line warn-line", text:
+        "What changes: the runner may run any command the engine puts in front of you, as root, once you press the approve button for that block. What does not: nothing runs unapproved, every command is signed and single-use, and the never-allowed list still refuses host power and disk destroyers." }),
+      w.trusted ? null : trustedInstall,
+      w.trusted ? null : el("div", { class: "row row-wrap cap-actions" }, copyTrusted));
   }
 
   // ── 3. the values it holds ─────────────────────────────────────────

@@ -77,19 +77,38 @@ def catastrophic(cmd: str) -> str:
     return ""
 
 
+#: §17.1199 — the operator's alternative to enumerating commands. With this on
+#: the list, any command that is not on the catastrophic denylist may run —
+#: still only inside a block the operator approved, still signed per command,
+#: still single-use. The trust boundary becomes the MACHINE and the APPROVAL,
+#: which is how Ansible (`become`), Jenkins agents and self-hosted runners all
+#: work, instead of a whitelist that can only be discovered by failing.
+ANY = "ANY"
+
+
 def write_allowed(cmd: str, allow: list[str], judge_read=None) -> tuple[bool, str]:
     """``(ok, why)`` for the supervised channel. Every segment is either
     read-only (per the read gate) or, once a leading ``sudo`` is stripped,
     a whole-token prefix match of one ``--write-allow`` entry (an entry ending
     in ``/`` matches any path under it). Redirects and substitutions are
     refused here (write files with ``tee``); an empty allow-list refuses
-    everything."""
+    everything.
+
+    §17.1199 — the single entry ``ANY`` means the operator has said this
+    machine trusts what they approve: everything but the catastrophic denylist
+    passes, shape rules included. The shape rules exist to make PREFIX MATCHING
+    sound — a `$(…)` can hide a command from a prefix — and there is no prefix
+    to match here; the operator reads the literal text and presses the button,
+    which is the same thing they were doing by hand.
+    """
     judge_read = judge_read or read_only
     prefixes = [p.strip() for p in (allow or []) if p and p.strip()]
     if not prefixes:
         return False, "no --write-allow list on this runner"
     if not (cmd or "").strip():
         return False, "empty"
+    if ANY in prefixes:
+        return True, ""
     if "<<" in cmd or "$(" in cmd or "`" in cmd:
         return False, "substitution/heredoc"
     masked = mask_quoted(cmd)

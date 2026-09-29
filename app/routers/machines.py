@@ -132,6 +132,12 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
         "needed_read_prefixes": reads,
         "install": _es.install_line(ctx, prefixes=[p["prefix"] for p in prefixes if p["prefix"]],
                                     sudo_allow=[p["prefix"] for p in reads if p["prefix"]]),
+        # §17.1199 — the other way to set this machine up. The enumerated list
+        # can only be completed by failing, one console round-trip per command
+        # nobody predicted; this trusts the machine with whatever the operator
+        # approves, which is the decision they are already making per block.
+        "install_trusted": _es.install_line(ctx, prefixes=[_sw.ANY]),
+        "trust_mode": ("approve" if _sw.ANY in ((policy or {}).get("allow") or []) else "list"),
         "mcp_enabled": bool(settings.mcp_tool_enabled),
     }
 
