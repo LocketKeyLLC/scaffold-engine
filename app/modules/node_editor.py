@@ -137,9 +137,81 @@ def _transitive_downstream(nodes: list[dict], node_key: str) -> set[str]:
     return seen
 
 
-def _validate_graph(deps_by_key: dict[str, list[str]]) -> str | None:
+def _cycle_nodes(deps_by_key: dict[str, list[str]]) -> set[str]:
+    """The nodes Kahn's cannot order — those in a cycle, or behind one."""
+    keys = set(deps_by_key)
+    indeg = {k: len(deps_by_key[k]) for k in keys}
+    adj: dict[str, list[str]] = {k: [] for k in keys}
+    for k, deps in deps_by_key.items():
+        for d in deps:
+            if d in adj:
+                adj[d].append(k)
+    queue = deque([k for k in keys if indeg[k] == 0])
+    ordered: set[str] = set()
+    while queue:
+        k = queue.popleft()
+        ordered.add(k)
+        for nxt in adj[k]:
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                queue.append(nxt)
+    return keys - ordered
+
+
+def _find_cycle(deps_by_key: dict[str, list[str]]) -> list[str]:
+    """One concrete cycle as a path, so the message can NAME it. An operator
+    told "there is a cycle" and nothing else cannot act on it."""
+    color: dict[str, int] = {}
+    stack: list[str] = []
+
+    def walk(u: str) -> list[str] | None:
+        color[u] = 1
+        stack.append(u)
+        for v in deps_by_key.get(u, []):
+            if v not in deps_by_key:
+                continue
+            if color.get(v) == 1:
+                return stack[stack.index(v):] + [v]
+            if color.get(v, 0) == 0:
+                hit = walk(v)
+                if hit:
+                    return hit
+        stack.pop()
+        color[u] = 2
+        return None
+
+    for k in deps_by_key:
+        if color.get(k, 0) == 0:
+            hit = walk(k)
+            if hit:
+                return hit
+    return []
+
+
+def _validate_graph(
+    deps_by_key: dict[str, list[str]], *,
+    baseline: dict[str, list[str]] | None = None,
+) -> str | None:
     """Return an error message if any dep ref is unknown or the graph has a
-    cycle (Kahn's), else None."""
+    cycle, else None.
+
+    §17.1210 — `baseline` is the graph WITHOUT the caller's edit, and it exists
+    because this function used to answer "edit would create a dependency cycle"
+    for a plan that was already cyclic before anyone touched it. Two harms, and
+    the second is the bad one:
+
+    1. It blamed the edit. Live, on a 131-node plan carrying EIGHT cycles from
+       earlier re-plans, every insert was refused with a message pointing at the
+       wrong thing — and naming no node, so there was nothing to go and look at.
+    2. It made the cycles PERMANENT. Every call site validates the whole graph,
+       so with a cycle present no edit passed — including the edits that would
+       remove it. The only tool for fixing a cycle was locked behind the cycle.
+
+    So: an edit is judged on whether it makes things WORSE. When the baseline is
+    already cyclic, an edit that adds no node to the tangle is allowed through
+    (that is how a plan gets repaired), and one that widens it is refused naming
+    what it added. With an acyclic baseline the old behaviour stands exactly.
+    """
     keys = set(deps_by_key)
     for k, deps in deps_by_key.items():
         for d in deps:
@@ -147,25 +219,22 @@ def _validate_graph(deps_by_key: dict[str, list[str]]) -> str | None:
                 return f"node {k} depends on unknown node {d}"
             if d == k:
                 return f"node {k} depends on itself"
-    # Kahn's topo sort: in-degree of a node = number of its dependencies;
-    # an edge dep -> node lets us decrement as deps are satisfied.
-    indeg = {k: len(deps_by_key[k]) for k in keys}
-    adj: dict[str, list[str]] = {k: [] for k in keys}
-    for k, deps in deps_by_key.items():
-        for d in deps:
-            adj[d].append(k)
-    queue = deque([k for k in keys if indeg[k] == 0])
-    visited = 0
-    while queue:
-        k = queue.popleft()
-        visited += 1
-        for nxt in adj[k]:
-            indeg[nxt] -= 1
-            if indeg[nxt] == 0:
-                queue.append(nxt)
-    if visited != len(keys):
-        return "edit would create a dependency cycle"
-    return None
+    stuck = _cycle_nodes(deps_by_key)
+    if not stuck:
+        return None
+    cyc = _find_cycle(deps_by_key)
+    shown = " → ".join(cyc) if cyc else ", ".join(sorted(stuck)[:8])
+    if baseline is None:
+        return f"the plan's dependencies contain a cycle: {shown}"
+    was = _cycle_nodes(baseline)
+    if stuck <= was:
+        logger.warning(
+            "node_edit_on_cyclic_plan: allowed (no worse) cycle=%s stuck=%d", shown, len(stuck),
+        )
+        return None
+    added = sorted(stuck - was)
+    return (f"this edit would pull {', '.join(added[:6])} into a dependency cycle: {shown}"
+            if was else f"this edit would create a dependency cycle: {shown}")
 
 
 async def _renumber(db: AsyncSession, job_id: str, ordered_keys: list[str]) -> None:
@@ -198,8 +267,33 @@ async def _audit(
 
 
 async def _reset_keys(db: AsyncSession, job_id: str, keys: list[str]) -> None:
+    """Reset nodes to pending — and write down what they were first.
+
+    §17.1211 — this destroyed status, output, both timestamps and the failure
+    reason for every key, and recorded NOTHING. When it fired wrongly on a live
+    job the only reason the work was recoverable is that `assist_steps` happened
+    to carry the same record; an autonomous job has no such second copy and the
+    loss would have been permanent. The pre-image goes to `dag_node_edits` as a
+    `reset` row, which is the table a revert would read.
+    """
     if not keys:
         return
+    rows = (await db.execute(
+        text("SELECT node_key, status, output_text, started_at, completed_at, "
+             "       last_verification_reason "
+             "  FROM dag_nodes WHERE job_id = :j AND node_key = ANY(:keys) "
+             "   AND status <> 'pending'"),
+        {"j": job_id, "keys": keys},
+    )).mappings().all()
+    for r in rows:
+        await _audit(
+            db, job_id, r["node_key"], "reset",
+            {"status": r["status"], "output_text": r["output_text"],
+             "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+             "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+             "last_verification_reason": r["last_verification_reason"]},
+            {"status": "pending"}, "node_editor:reset",
+        )
     await db.execute(
         text(
             "UPDATE dag_nodes SET status = 'pending', output_text = NULL, "
@@ -209,19 +303,34 @@ async def _reset_keys(db: AsyncSession, job_id: str, keys: list[str]) -> None:
         ),
         {"j": job_id, "keys": keys},
     )
+    if rows:
+        logger.warning("node_reset_preimage job=%s nodes=%d keys=%s",
+                       job_id, len(rows), sorted(r["node_key"] for r in rows))
 
 
 async def _reopen_job(db: AsyncSession, job_id: str) -> None:
-    """A reset/edit that invalidates output re-opens a terminal job so the
-    executor will pick the reset nodes back up."""
-    await db.execute(
+    """A reset/edit that invalidates output re-opens a TERMINAL job so the
+    executor will pick the reset nodes back up.
+
+    §17.1211 — `blocked` is not terminal and must not be swept up here. It is
+    re-enterable already, and rewriting it to `executing` claims a run is in
+    flight when none is: live, a `blocked` job became `executing` with zero
+    running nodes because an edit touched it, and every surface then said the
+    engine was working on something it was not. The three genuinely terminal
+    statuses still reopen, because there the status would otherwise outrank the
+    work that has just been invalidated.
+    """
+    res = await db.execute(
         text(
             "UPDATE jobs SET status = 'executing', compiled_output = NULL, "
             "updated_at = now() "
-            "WHERE id = :j AND status IN ('completed', 'failed', 'blocked', 'cancelled')"
+            "WHERE id = :j AND status IN ('completed', 'failed', 'cancelled') "
+            "RETURNING id"
         ),
         {"j": job_id},
     )
+    if res.fetchone() is not None:
+        logger.warning("node_edit_reopened_terminal_job job=%s -> executing", job_id)
 
 
 def _version_conflict(node: dict, expected_version: int | None) -> dict | None:
@@ -276,9 +385,9 @@ async def edit_node(
     # If depends_on changes, validate the post-edit graph.
     if "depends_on" in updates:
         new_deps = list(updates["depends_on"] or [])
-        deps_by_key = {n["node_key"]: list(n["depends_on"] or []) for n in nodes}
-        deps_by_key[node_key] = new_deps
-        err = _validate_graph(deps_by_key)
+        base = {n["node_key"]: list(n["depends_on"] or []) for n in nodes}
+        deps_by_key = {**base, node_key: new_deps}
+        err = _validate_graph(deps_by_key, baseline=base)
         if err:
             return {"error": err, "http_status": 400}
 
@@ -314,7 +423,24 @@ async def edit_node(
     # Output invalidation: an invalidating edit to an already-run node resets
     # it + transitive downstream (their inputs / this output are now stale).
     reset_keys: list[str] = []
-    if INVALIDATING_FIELDS & set(updates) and node["status"] != "pending":
+    # §17.1211 — an edit that only REMOVES dependencies invalidates nothing.
+    # The node ran; dropping a prerequisite it never actually needed does not
+    # make what it produced stale. This reset fired on ANY `depends_on` change,
+    # so cutting eight spurious edges out of a tangled plan reset 31 finished
+    # nodes to pending and wiped their output — on a live job, and with no
+    # pre-image (see `_reset_keys`). The recovery only existed because
+    # `assist_steps` happened to hold the same record.
+    touched = set(updates)
+    if touched == {"depends_on"}:
+        was = set(node["depends_on"] or [])
+        now = set(updates["depends_on"] or [])
+        if now <= was:                      # purely a removal (or a no-op)
+            touched = set()
+            logger.info(
+                "node_edit_deps_narrowed job=%s node=%s dropped=%s (no reset)",
+                job_id, node_key, sorted(was - now),
+            )
+    if INVALIDATING_FIELDS & touched and node["status"] != "pending":
         # Compute downstream over the POST-edit graph (the node's new deps
         # don't affect who depends on IT, but keep the snapshot consistent).
         post_nodes = [dict(n) for n in nodes]
@@ -353,9 +479,9 @@ async def insert_node(
         return {"error": f"node {node_key} already exists", "http_status": 409}
 
     new_deps = list(spec.get("depends_on") or [])
-    deps_by_key = {n["node_key"]: list(n["depends_on"] or []) for n in nodes}
-    deps_by_key[node_key] = new_deps
-    err = _validate_graph(deps_by_key)
+    base = {n["node_key"]: list(n["depends_on"] or []) for n in nodes}
+    deps_by_key = {**base, node_key: new_deps}
+    err = _validate_graph(deps_by_key, baseline=base)
     if err:
         return {"error": err, "http_status": 400}
 
@@ -414,7 +540,10 @@ async def delete_node(
         n["node_key"]: [d for d in (n["depends_on"] or []) if d != node_key]
         for n in nodes if n["node_key"] != node_key
     }
-    err = _validate_graph(deps_by_key)
+    err = _validate_graph(
+        deps_by_key,
+        baseline={n["node_key"]: list(n["depends_on"] or []) for n in nodes},
+    )
     if err:
         return {"error": err, "http_status": 400}
 
