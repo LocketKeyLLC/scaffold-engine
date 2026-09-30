@@ -1,0 +1,134 @@
+"""§17.1213 — do not run a block the machine already contradicts, and say what
+would fix it.
+
+Two steps ran on the operator's host while the engine had a read-only channel to
+it, and both were doomed before they were sent:
+
+    ADD21  pct exec 111 -- pm2 start 1   ->  exited 255: container '111' not running!
+    ADD82  pct exec 106 -- apt-get …     ->  106 is a VM, not a container
+
+The first had a prerequisite the DAG never expressed (ADD50 "Start container
+111" is still pending). The second is simply the wrong tool for that guest: `pct`
+addresses containers, 106 is a VM, and one `qm list` says so.
+
+The engine could have known both. It had the channel, it had been reading that
+host all evening, and it ran them anyway — then reported the failures as though
+the machine had surprised it.
+
+So: before a hands-on block is offered, the guests it names are checked against
+what the host actually reports. `pct list` and `qm list`, read-only, once each.
+A contradiction is not a decision for anyone — it goes into the frame's
+`refused`, which turns Run off and flips the suggestion to "I'll do it myself"
+— and the refusal NAMES the remedy, including the plan step that would satisfy
+it when one exists. The operator asked for exactly that: *"if something needs
+the user's input, the engine should request it from the user."* A greyed button
+is not a request.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any, Optional
+
+logger = logging.getLogger("scaffold")
+
+#: `pct exec 111 -- …`, `qm set 106 --scsi0 …`. The verb may be absent
+#: (`qm 106` is not valid, so a verb is required).
+_GUEST_RE = re.compile(r"\b(pct|qm)\s+([a-z][a-z-]*)\s+(\d{3,5})\b")
+
+#: `pct list` → `VMID Status Lock Name`
+_PCT_ROW = re.compile(r"^\s*(\d{3,5})\s+(\S+)", re.M)
+#: `qm list` → `VMID NAME STATUS …`
+_QM_ROW = re.compile(r"^\s*(\d{3,5})\s+(\S+)\s+(\S+)", re.M)
+
+#: Verbs that need the guest actually RUNNING, not merely defined.
+_NEEDS_RUNNING = frozenset({"exec", "enter", "push", "pull"})
+
+
+def guests_in(commands: list[str]) -> list[tuple[str, str, str]]:
+    """``[(tool, verb, id)]`` the commands address, in order, deduplicated."""
+    out: list[tuple[str, str, str]] = []
+    for c in commands or []:
+        for m in _GUEST_RE.finditer(str(c)):
+            t = (m.group(1), m.group(2), m.group(3))
+            if t not in out:
+                out.append(t)
+    return out
+
+
+def parse_pct_list(text_out: str) -> dict[str, str]:
+    """``{ctid: status}``. The header row is skipped by the digit anchor."""
+    return {m.group(1): m.group(2).lower() for m in _PCT_ROW.finditer(text_out or "")}
+
+
+def parse_qm_list(text_out: str) -> dict[str, str]:
+    """``{vmid: status}`` — `qm list` puts NAME between the id and the status."""
+    return {m.group(1): m.group(3).lower() for m in _QM_ROW.finditer(text_out or "")}
+
+
+async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None) -> list[dict]:
+    """``[{command, why}]`` for every command the host contradicts.
+
+    `plan` is the job's nodes, so a refusal can name the step that would make
+    this one runnable rather than leaving the operator to find it. Fail-soft:
+    if the host cannot be read, nothing is refused — this must never invent a
+    blocker out of its own blindness.
+    """
+    guests = guests_in(commands)
+    if not guests or spec is None:
+        return []
+    cts = parse_pct_list(await _read(spec, "pct list"))
+    vms = parse_qm_list(await _read(spec, "qm list"))
+    if not cts and not vms:
+        logger.warning("preconditions_unreadable — nothing refused")
+        return []
+
+    out: list[dict] = []
+    for tool, verb, gid in guests:
+        cmd = next((c for c in commands if re.search(rf"\b{tool}\s+{verb}\s+{gid}\b", str(c))), f"{tool} {verb} {gid}")
+        is_ct, is_vm = gid in cts, gid in vms
+        if tool == "pct" and is_vm and not is_ct:
+            out.append({"command": cmd, "why": (
+                f"{gid} is a VM on this host, not a container — `pct` cannot address it. "
+                f"The same thing for a VM is `qm {verb}` (or `qm guest exec` inside it).")})
+        elif tool == "qm" and is_ct and not is_vm:
+            out.append({"command": cmd, "why": (
+                f"{gid} is a container on this host, not a VM — `qm` cannot address it. Use `pct {verb}`.")})
+        elif not is_ct and not is_vm:
+            out.append({"command": cmd, "why": f"there is no guest {gid} on this host — `pct list` and `qm list` do not have it."})
+        elif verb in _NEEDS_RUNNING:
+            status = cts.get(gid) if is_ct else vms.get(gid)
+            if status and status != "running":
+                fix = _step_that_starts(gid, plan)
+                out.append({"command": cmd, "why": (
+                    f"{'container' if is_ct else 'VM'} {gid} is {status}, so `{tool} {verb}` fails before it starts."
+                    + (f" {fix} is the step that starts it, and it has not run yet." if fix
+                       else f" Start it first (`{tool} start {gid}`)."))})
+    if out:
+        logger.warning("preconditions_unmet count=%d first=%r", len(out), out[0]["why"][:120])
+    return out
+
+
+def _step_that_starts(gid: str, plan: Optional[list[dict]]) -> Optional[str]:
+    """The pending plan step whose title says it starts this guest — so the
+    refusal points at the fix instead of describing the problem twice."""
+    for n in plan or []:
+        if (n.get("status") or "") not in ("pending", "failed"):
+            continue
+        title = str(n.get("title") or "")
+        if gid in title and re.search(r"\bstart\b", title, re.I):
+            return f"{n.get('node_key')} · {title[:60]}"
+    return None
+
+
+async def _read(spec, command: str) -> str:
+    """One read-only listing. Never raises; a refusal is not an answer."""
+    try:
+        from app.modules.assist_local_runner import _plain_output, not_evidence
+        from app.modules.mcp_client import call_tool
+        res = await call_tool(spec, "run_readonly", {"command": command, "timeout_s": 15})
+        out = _plain_output(res)
+        return "" if not_evidence(out, bool(res.is_error)) else out
+    except Exception as exc:
+        logger.warning("precondition_read_failed cmd=%r err=%r", command, exc)
+        return ""

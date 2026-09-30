@@ -2366,7 +2366,24 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         from app.modules.runbook_inputs import job_environment
         async with async_session() as db:
             _env = await job_environment(db, job_id)          # §17.1188 — pins, system map, facts
-        frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env)
+        # §17.1213 — ask the host whether this block can work at all, before
+        # offering it. ADD21 ran `pct exec 111` against a stopped container and
+        # ADD82 ran `pct exec 106` against a VM; one `pct list` + `qm list`
+        # answers both, through the channel the engine was already using.
+        _pre: list[dict] = []
+        try:
+            from app.modules.runbook_preconditions import unmet
+            async with async_session() as db:
+                _plan = (await db.execute(
+                    text("SELECT node_key, title, status FROM dag_nodes WHERE job_id = :j"),
+                    {"j": job_id})).mappings().all()
+            _pre = await unmet(supervised_runs.runbook_commands(runbook), spec,
+                               plan=[dict(r) for r in _plan])
+        except Exception as exc:
+            logger.warning("preconditions_failed job=%s node=%s err=%r",
+                           job_id, run_node.get("node_key"), exc)
+        frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env,
+                                          preconditions=_pre)
         # §17.1196 — the engine wrote a block its OWN gate refuses, and handed
         # the operator the dead end: "the runner is active but the run button is
         # greyed out?? how do we continue?" A SHAPE refusal is the engine's
@@ -2380,13 +2397,50 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                            run_node.get("node_key"), "; ".join(r["why"] for r in frame["refused"])[:200])
             retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix)
             if retry:
-                second = supervised_runs.frame_run(run_node, retry, spec, policy, env=_env)
+                second = supervised_runs.frame_run(run_node, retry, spec, policy, env=_env,
+                                                   preconditions=_pre)
                 if second["commands"] and not second["refused"]:
                     logger.warning("supervised_run_redraft_clean job=%s node=%s commands=%d",
                                    job_id, run_node.get("node_key"), len(second["commands"]))
                     frame = second
                 elif len(second["refused"]) < len(frame["refused"]) and second["commands"]:
                     frame = second                            # closer; show the better of the two
+        # §17.1215 — and does the block actually DO the step? The gate judges
+        # shape and §17.1213 judges the machine; neither notices a draft that
+        # quietly leaves out what the step spelled out. One redraft with the
+        # omissions quoted back, the same move §17.1196 makes for a refusal.
+        try:
+            from app.modules.runbook_coverage import coverage_retry_note, uncovered
+            _step_text = " ".join(str(run_node.get(k) or "") for k in
+                                  ("description", "prompt_template", "title"))
+            _missing = uncovered(_step_text, frame.get("commands") or [])
+            if _missing:
+                logger.warning("runbook_coverage_redraft job=%s node=%s missing=%s", job_id,
+                               run_node.get("node_key"), "; ".join(_missing)[:200])
+                _again = await supervised_runs.draft_runbook(
+                    run_node, _brief, up_block, retry_note=coverage_retry_note(_missing))
+                if _again:
+                    _third = supervised_runs.frame_run(run_node, _again, spec, policy,
+                                                       env=_env, preconditions=_pre)
+                    # §17.1211's lesson in miniature: never replace a working
+                    # block with an empty one.
+                    if _third.get("commands") and not uncovered(_step_text, _third["commands"]):
+                        frame = _third
+                        logger.warning("runbook_coverage_redraft_clean job=%s node=%s", job_id,
+                                       run_node.get("node_key"))
+        except Exception as exc:
+            logger.warning("runbook_coverage_failed job=%s node=%s err=%r", job_id,
+                           run_node.get("node_key"), exc)
+        # §17.1212 — anything the machine itself can answer, read rather than
+        # ask. Runs after the redraft so it fills the commands actually parked.
+        if frame.get("inputs"):
+            try:
+                from app.modules.runbook_discovery import discover_inputs
+                frame["inputs"] = await discover_inputs(
+                    frame["inputs"], frame.get("commands") or [], spec)
+            except Exception as exc:
+                logger.warning("runbook_discovery_failed job=%s node=%s err=%r",
+                               job_id, run_node.get("node_key"), exc)
         logger.warning("supervised_run_parked job=%s node=%s reason=%s commands=%d refused=%d runner=%s",
                        job_id, run_node.get("node_key"), run_node.get("hands_on_reason"), len(frame["commands"]),
                        len(frame["refused"]), frame["runner"])

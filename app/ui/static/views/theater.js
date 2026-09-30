@@ -147,7 +147,7 @@ export function renderTheater(container, jobId, ctx = {}) {
   let jobTitle = ""; // §17.1007 — names the job in the notification, not a UUID
   jobStore.get(jobId).then((job) => {
     jobTitle = job.title || "";
-    const fg = flowGuide(job, { here: `#/job/${jobId}/run` });
+    const fg = flowGuide(job, { here: `#/job/${jobId}/run`, steps: false });
     if (fg) mount(flowSlot, fg);
   }).catch(() => {});
   mount(container, header, flowSlot, progressBar, grid);
@@ -157,7 +157,10 @@ export function renderTheater(container, jobId, ctx = {}) {
     lastJobStatus = status;
     // §17.1134 — /exec/status carries next_actions (retry/skip/resume …); render them
     // beside the pill instead of leaving the recovery vocabulary on the wire (ledger D-6)
-    mount(statusPill, statusBadge(status), nextActionChips(actions, { jobId, limit: 3 }));
+    // §17.1214 — the job hub renders this badge at the top of the page, so
+    // showing it again three inches below said "Waiting for your decision"
+    // twice. The next-actions are NOT duplicated, so they stay.
+    mount(statusPill, nextActionChips(actions, { jobId, limit: 3 }));
   }
 
   // §17.1007 — call the operator back when a run ends while they are looking
@@ -193,7 +196,36 @@ export function renderTheater(container, jobId, ctx = {}) {
   // failed — and ZERO of the pending could start, because every one of them
   // waits on the two that failed. None of that was on the page. The payload has
   // carried all of it since §17.1135/§17.1007; the surface simply never asked.
+  function scrollToCurrent() {
+    try {
+      const row = nodeListEl.querySelector(".theater-node.current");
+      if (!row) return;
+      // §17.1214 — scroll the LIST, never the page. `scrollIntoView` walks up
+      // and scrolls every scrollable ancestor, which took the job title and the
+      // stage strip off the top of the screen to reveal a row in a side column.
+      const top = row.offsetTop - nodeListEl.clientHeight / 2 + row.offsetHeight / 2;
+      nodeListEl.scrollTop = Math.max(0, top);
+    } catch (e) {
+      // a list that is not mounted yet needs no scrolling; nothing to recover
+      void e;
+    }
+  }
+
   function renderStanding() {
+    // §17.1214 — when a decision card is up it IS the account of now. Two
+    // panels describing the same moment in different words is what the
+    // operator read as the page not resolving: the card said "the run stopped
+    // for your approval" while the panel below said "1 step can run now".
+    if (!summaryEl.classList.contains("hidden")) {
+      stageTitle.classList.add("dim");
+      stageTitle.textContent = "Where this job stands";
+      const all = [...nodeState.values()];
+      const n = (st) => all.filter((x) => x.status === st).length;
+      mount(stageBody, el("p", { class: "sub",
+        text: `${n("done")} done · ${n("skipped")} skipped · ${n("pending")} pending · ${n("failed")} failed`
+              + " — the step above is the one waiting on you." }));
+      return;
+    }
     const all = [...nodeState.entries()].sort((a, b) => (a[1].order ?? 0) - (b[1].order ?? 0));
     const failed = all.filter(([, n]) => n.status === "failed");
     const pending = all.filter(([, n]) => n.status === "pending");
@@ -578,7 +610,7 @@ export function renderTheater(container, jobId, ctx = {}) {
     jobStore.get(jobId, { fresh: true }).then((job) => {   // the run just changed it
       if (disposed) return;
       jobTitle = job.title || jobTitle;
-      const fg = flowGuide(job, { here: `#/job/${jobId}/run` });
+      const fg = flowGuide(job, { here: `#/job/${jobId}/run`, steps: false });
       if (fg) mount(flowSlot, fg);
     }).catch(() => {});
   }
@@ -704,6 +736,8 @@ export function renderTheater(container, jobId, ctx = {}) {
 
   function showSummary(d) {
     summaryEl.classList.remove("hidden");
+    // §17.1214 — the standing panel steps back once a card owns "now"
+    queueMicrotask(() => { if (!disposed) renderStanding(); });
     // §17.1007 — "Pipeline complete" over 3 passed / 2 failed was the card
     // claiming a win the run did not have. The heading now reads the counts.
     const failed = Number(d.failed || 0);
@@ -757,6 +791,8 @@ export function renderTheater(container, jobId, ctx = {}) {
     }
 
     summaryEl.classList.remove("hidden");
+    // §17.1214 — the standing panel steps back once a card owns "now"
+    queueMicrotask(() => { if (!disposed) renderStanding(); });
     mount(
       summaryEl,
       el("div", { class: "card card-pad summary-card summary-failed" },
@@ -787,6 +823,10 @@ export function renderTheater(container, jobId, ctx = {}) {
   // can carry it out: the exact commands, the checks, and three verbs. The
   // decide call with "run" IS the operator's approval of that block.
   function showRunApproval(d) {
+    // §17.1214 — "it does not clearly show what it is working on". The step
+    // under decision IS what it is working on; light it in the list and bring
+    // it into view instead of leaving the operator to find it among 132 rows.
+    if (d && d.node_key) { currentKey = d.node_key; renderNodes(); scrollToCurrent(); }
     const nodeKey = d.node_key;
     const cmds = Array.isArray(d.commands) ? d.commands : [];
     const verify = Array.isArray(d.verify) ? d.verify : [];
@@ -801,15 +841,31 @@ export function renderTheater(container, jobId, ctx = {}) {
     const fill = (c) => c.replace(PH, (m, n) => (fields.get(n) && fields.get(n).value.trim()) || m);
     const cmdPre = el("code", { text: cmds.join("\n") });
     const verifyPre = el("code", { text: verify.join("\n") });
+    const needLabel = el("span", { class: "sub decision-need" });
     const refresh = () => {
       cmdPre.textContent = cmds.map(fill).join("\n");
       verifyPre.textContent = verify.map(fill).join("\n");
-      runBtn.disabled = !canRun || inputs.some((i) => !(fields.get(i.name) && fields.get(i.name).value.trim()));
+      const missing = inputs.filter((i) => !(fields.get(i.name) && fields.get(i.name).value.trim()));
+      runBtn.disabled = !canRun || missing.length > 0;
+      // §17.1212 — a greyed button with no reason beside it reads as broken
+      // (§17.1196: "the runner is active but the run button is greyed out??").
+      needLabel.textContent = !canRun ? ""
+        : missing.length ? `Fill ${missing.map((i) => "<" + i.name + ">").join(", ")} to enable Run — or press Enter.`
+        : "";
     };
     const inputRows = inputs.map((i) => {
       const f = el("input", { class: "input decision-input", type: i.secret ? "password" : "text",
         placeholder: i.name, "aria-label": i.name, autocomplete: "off" });
       f.addEventListener("input", refresh);
+      // §17.1212 — "there is, yet again no clear 'enter'". Enter submits once
+      // every value is in, which is what a form full of text boxes promises.
+      f.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Enter") return;
+        ev.preventDefault();
+        const empty = inputs.find((x) => !(fields.get(x.name) && fields.get(x.name).value.trim()));
+        if (empty) { const n = fields.get(empty.name); if (n) n.focus(); return; }
+        if (!runBtn.disabled) runBtn.click();
+      });
       fields.set(i.name, f);
       // §17.1188 — a pinned value is filled in; the system map and the facts
       // are offered as chips naming their source; the operator picks.
@@ -880,6 +936,8 @@ export function renderTheater(container, jobId, ctx = {}) {
     selfBtn.addEventListener("click", () => send("myself", "Recording…"));
     skipBtn.addEventListener("click", () => send("skip", "Skipping…"));
     summaryEl.classList.remove("hidden");
+    // §17.1214 — the standing panel steps back once a card owns "now"
+    queueMicrotask(() => { if (!disposed) renderStanding(); });
     mount(
       summaryEl,
       el("div", { class: "card card-pad summary-card decision-card" },
@@ -888,7 +946,16 @@ export function renderTheater(container, jobId, ctx = {}) {
         el("div", { class: "decision-q", text: d.question || "" }),
         cmds.length ? el("div", { class: "decision-run-label", text: `Would run on ${d.runner || "the runner"}${d.sudo ? " (as root for the allowed commands)" : ""}, in order, stopping at the first failure:` }) : null,
         inputRows.length ? el("div", { class: "decision-inputs" },
-          el("div", { class: "decision-run-label", text: `It needs ${inputRows.length} value${inputRows.length === 1 ? "" : "s"} from you — they go into the commands below as you type:` }),
+          // §17.1212 — when the engine read a value off the machine it says so,
+          // because "confirm what I found" is a different request from "go and
+          // find this out and type it in".
+          el("div", { class: "decision-run-label", text: (() => {
+            const read = inputs.filter((i) => (i.suggestions || []).some((sg) => sg.confidence === "measured")).length;
+            const n = inputRows.length;
+            if (read >= n) return `${n} value${n === 1 ? "" : "s"} below — read off the machine just now. Check ${n === 1 ? "it" : "them"} and press Enter.`;
+            if (read) return `${n} values below; ${read} read off the machine just now, the rest need you.`;
+            return `It needs ${n} value${n === 1 ? "" : "s"} from you — they go into the commands below as you type:`;
+          })() }),
           ...inputRows) : null,
         cmds.length ? el("pre", { class: "decision-run-block" }, cmdPre) : null,
         verify.length ? el("div", { class: "decision-run-label", text: "Then checks (read-only):" }) : null,
@@ -907,6 +974,7 @@ export function renderTheater(container, jobId, ctx = {}) {
         el("details", { class: "decision-runbook" }, el("summary", { text: "The full runbook the engine drafted" }),
           el("div", { class: "md", html: mdToHtml(d.runbook || "") })),
         note,
+        needLabel,
         el("div", { class: "row row-wrap summary-actions" }, runBtn, selfBtn, skipBtn,
           canRun ? null : reaskBtn,          // §17.1197 — only where there is something to go and fix
           el("a", { class: "btn btn-sm", href: `#/job/${jobId}/plan`, text: "See the plan" }))
@@ -952,6 +1020,7 @@ export function renderTheater(container, jobId, ctx = {}) {
   function showDecision(d) {
     if (d && d.kind === "run") return showRunApproval(d);   // §17.1186
     const nodeKey = d.node_key;
+    if (nodeKey) { currentKey = nodeKey; renderNodes(); scrollToCurrent(); }
     const opts = Array.isArray(d.options) ? d.options : [];
     const name = `decision-${nodeKey}`;
     const other = el("input", { class: "input decision-other", type: "text", placeholder: opts.length ? "Or answer in your own words…" : "Your answer…", "aria-label": "Your own answer" });
@@ -1002,6 +1071,8 @@ export function renderTheater(container, jobId, ctx = {}) {
     engineBtn.addEventListener("click", () => send({ delegate: true, note: note.value.trim() || null }, "Handing over…"));
 
     summaryEl.classList.remove("hidden");
+    // §17.1214 — the standing panel steps back once a card owns "now"
+    queueMicrotask(() => { if (!disposed) renderStanding(); });
     mount(
       summaryEl,
       el("div", { class: "card card-pad summary-card decision-card" },

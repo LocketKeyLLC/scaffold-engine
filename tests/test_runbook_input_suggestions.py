@@ -89,7 +89,11 @@ def test_the_pause_passes_the_environment_to_the_frame():
     import inspect
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea._pause_for_decision)
-    assert "job_environment(db, job_id)" in src and "frame_run(run_node, runbook, spec, policy, env=_env)" in src
+    assert "job_environment(db, job_id)" in src, "the ledger must be read"
+    # §17.1213 — the call gained `preconditions=`, so assert the ARGUMENT the
+    # invariant is about rather than the whole literal spelling of the call.
+    assert "frame_run(run_node, runbook, spec, policy," in src and "env=_env" in src, src
+    assert "preconditions=_pre" in src, "the machine's verdict must reach the frame too"
 
 
 # ── §17.1189 — a suggestion must be ABOUT the value it is offered for ─────

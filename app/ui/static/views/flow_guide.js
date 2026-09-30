@@ -65,7 +65,12 @@ function stalledFor(job) {
   return Number.isFinite(ts) ? Date.now() - ts : 0;
 }
 
-export function flowGuide(job, { here = "" } = {}) {
+// §17.1214 — `steps:false` drops the five-stage strip and keeps the hint.
+// Inside the job hub the strip is rendered ALREADY, at the top of the page, so
+// the Run tab was showing the operator two of them — one saying Run is current
+// while the badge beside it said "Waiting for your decision". The hint ("the run
+// stopped to ask you a question") is the half that is not duplicated.
+export function flowGuide(job, { here = "", steps = true } = {}) {
   if (!job || !job.status) return null;
   const { i, hint, action, secondary } = flowState(job);
   // A `start` action is a verb — it stays visible even on the surface it
@@ -108,7 +113,7 @@ export function flowGuide(job, { here = "" } = {}) {
   return el(
     "div",
     { class: "card flow-guide" },
-    el(
+    steps ? el(
       "div",
       { class: "flow-steps" },
       ...STAGES.flatMap((label, idx) => [
@@ -118,7 +123,7 @@ export function flowGuide(job, { here = "" } = {}) {
           text: idx < i ? `✓ ${label}` : label,
         }),
       ])
-    ),
+    ) : null,
     el(
       "div",
       { class: "row row-wrap flow-hint-row" },
