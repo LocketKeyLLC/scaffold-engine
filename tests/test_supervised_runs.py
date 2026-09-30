@@ -598,3 +598,131 @@ async def test_the_read_grant_is_recorded_as_a_prefix():
     assert got == ["qm agent", "pct config"]            # de-duplicated, narrowed to prefixes
     sql = " ".join(str(db.execute.await_args[0][0]).split())
     assert "needs_root_prefixes" in sql
+
+
+# ── §17.1223: the single-step path asks too ──────────────────────────────
+
+
+def _hands_on_row():
+    return {"id": "n1", "node_key": "ADD50", "title": "Start container 111 (control-panel)",
+            "tool": "LLM", "node_type": "task", "description": "pct start 111",
+            "prompt_template": "Run `pct start 111` on the host.", "depends_on": []}
+
+
+@pytest.mark.asyncio
+async def test_single_step_execute_parks_instead_of_returning_a_bare_needs_approval(monkeypatch):
+    """`POST /execute` on a hands-on step must PARK a question, not answer
+    `needs_approval` with nothing for the operator to approve.
+
+    Live: it returned `needs_approval` for ADD50 three times while
+    `jobs.metadata` carried no `awaiting_decision` and the node stayed
+    `pending` — the step the operator had just approved could not be run from
+    any surface.
+    """
+    from contextlib import asynccontextmanager
+
+    monkeypatch.setattr(settings, "execution_supervised_runs_enabled", True)
+    monkeypatch.setattr(settings, "shell_tool_enabled", False)
+
+    db = AsyncMock()
+
+    @asynccontextmanager
+    async def _sess():
+        yield db
+
+    parked = {"job_id": "j", "status": "awaiting_decision", "node_key": "ADD50",
+              "kind": "run", "commands": ["pct start 111"]}
+    claimed = AsyncMock()
+    with patch.object(ea, "async_session", lambda: _sess()), \
+         patch.object(ea, "_get_job", AsyncMock(return_value={"id": "j", "status": "executing"})), \
+         patch.object(ea, "enforce_job_budget", AsyncMock(return_value=None)), \
+         patch.object(ea, "_peek_next_node", AsyncMock(return_value=_hands_on_row())), \
+         patch.object(ea, "_pause_for_decision", AsyncMock(return_value=parked)) as pause, \
+         patch.object(ea, "_get_next_node", claimed):
+        out = await ea.execute_next_node("j")
+
+    assert out["status"] == "awaiting_decision" and out["node_key"] == "ADD50"
+    assert pause.await_count == 1
+    # and it never claimed: a claim would flip the node to 'running' and the
+    # hand-back would have to put it back, which is the loop the fix removes.
+    assert claimed.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_single_step_execute_still_claims_an_ordinary_step(monkeypatch):
+    """The gate must not swallow steps that are nobody's decision — an
+    ordinary LLM step is claimed as before (the vacuity check for the test
+    above)."""
+    from contextlib import asynccontextmanager
+
+    monkeypatch.setattr(settings, "execution_supervised_runs_enabled", True)
+    db = AsyncMock()
+
+    @asynccontextmanager
+    async def _sess():
+        yield db
+
+    ordinary = {**_hands_on_row(), "title": "Write the project README",
+                "description": "Summarise the design in prose.",
+                "prompt_template": "Summarise the design in prose."}
+    with patch.object(ea, "async_session", lambda: _sess()), \
+         patch.object(ea, "_get_job", AsyncMock(return_value={"id": "j", "status": "executing"})), \
+         patch.object(ea, "enforce_job_budget", AsyncMock(return_value=None)), \
+         patch.object(ea, "_peek_next_node", AsyncMock(return_value=ordinary)), \
+         patch.object(ea, "_pause_for_decision", AsyncMock(return_value={"x": 1})) as pause, \
+         patch.object(ea, "_get_next_node", AsyncMock(return_value=None)):
+        out = await ea.execute_next_node("j")
+
+    assert pause.await_count == 0
+    assert out.get("status") != "awaiting_decision"
+
+
+def test_single_step_pause_is_ordered_after_the_status_and_budget_gates():
+    """Parking is a job-status write: a job that is not executable must never
+    be moved into `awaiting_decision`."""
+    src = inspect.getsource(ea.execute_next_node)
+    assert src.index("not executable") < src.index("enforce_job_budget") < src.index("_peek_next_node(job_id)")
+    assert src.index("_peek_next_node(job_id)") < src.index("_get_next_node(db, job_id)")
+
+
+# ── §17.1224: stored values reach EVERY prompt path ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stored_values_block_names_only_and_forbids_re_asking():
+    with patch.object(sr, "known_secret_names", AsyncMock(return_value=[
+            {"name": "AIRVPN_WG_CONF", "hint": "AirVPN WireGuard config"},
+            {"name": "MASS_PASSWORD", "hint": "mass password"}])):
+        cmd = await sr.stored_values_block(for_commands=True)
+        prose = await sr.stored_values_block(for_commands=False)
+    for block in (cmd, prose):
+        assert "$AIRVPN_WG_CONF" in block and "$MASS_PASSWORD" in block
+        assert "AirVPN WireGuard config" in block
+    # prose steps are the ones that told the operator to go and fetch it
+    assert "generate it" in prose and "download" in prose
+    assert "expanded on the machine" in cmd
+
+
+@pytest.mark.asyncio
+async def test_stored_values_block_is_empty_when_nothing_is_stored():
+    with patch.object(sr, "known_secret_names", AsyncMock(return_value=[])):
+        assert await sr.stored_values_block() == ""
+    with patch.object(sr, "known_secret_names", AsyncMock(side_effect=RuntimeError("no store"))):
+        assert await sr.stored_values_block() == ""
+
+
+def test_both_prompt_paths_carry_the_stored_values_block():
+    """§17.1224 — the drafter had it alone and the executor wrote prose telling
+    the operator to go and generate a config already in the store (ADD102).
+    Both call the ONE helper; neither re-renders the text itself."""
+    draft = inspect.getsource(sr.draft_runbook)
+    node_exec = inspect.getsource(ea.execute_next_node)
+    assert "await stored_values_block()" in draft
+    assert "stored_values_block(" in node_exec
+    # attached as a grounding block, so the optimizer cannot rewrite it away
+    assert node_exec.index("stored_values_block(") < node_exec.index('raw_prompt = _task_prompt + "".join(_grounding_blocks)')
+    assert "_grounding_blocks.append(_stored)" in node_exec
+    # exactly one place renders the words
+    body = open("app/modules/supervised_runs.py").read()
+    assert body.count("VALUES ALREADY STORED") == 1
+    assert "VALUES ALREADY STORED" not in open("app/modules/execution_agent.py").read()

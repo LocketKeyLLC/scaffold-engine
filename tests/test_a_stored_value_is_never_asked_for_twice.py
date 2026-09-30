@@ -37,12 +37,16 @@ async def test_an_unreadable_store_falls_back_to_asking():
 
 
 def test_the_prompt_carries_names_and_forbids_the_value():
+    """§17.1224 moved the wording into `stored_values_block`, the ONE renderer
+    both the drafter and the executor's node generation call — the drift this
+    test was guarding against had already happened on the other path."""
     import inspect
-    src = inspect.getsource(sr.draft_runbook)
+    src = inspect.getsource(sr.stored_values_block)
     assert "VALUES ALREADY STORED" in src
     assert "NEVER ask the" in src, "the whole point: do not ask twice"
     assert "not write the value itself" in src, "a value must never enter a prompt"
     assert "${n['name']}" in src or "$" in src
+    assert "await stored_values_block()" in inspect.getsource(sr.draft_runbook)
 
 
 def test_only_names_and_hints_are_read_from_the_store():
@@ -54,8 +58,15 @@ def test_only_names_and_hints_are_read_from_the_store():
     assert 'r.get("value")' not in src and '"value"' not in src
 
 
-def test_a_drafter_that_cannot_read_the_store_still_drafts():
+@pytest.mark.asyncio
+async def test_a_drafter_that_cannot_read_the_store_still_drafts():
+    """A store failure must not stop a runbook: the block renders empty and the
+    drafter appends it unconditionally, so the prompt is simply the old one."""
     import inspect
-    src = inspect.getsource(sr.draft_runbook)
+    src = inspect.getsource(sr.stored_values_block)
     i = src.index("known_secret_names()")
-    assert "except Exception" in src[i:i + 900], "a store failure must not stop a runbook"
+    assert "except Exception" in src[i:i + 400]
+    with patch.object(sr, "known_secret_names", AsyncMock(side_effect=RuntimeError("down"))):
+        assert await sr.stored_values_block() == ""
+    # appended with no `if` around it, so an empty block cannot skip the append
+    assert "prompt += await stored_values_block()" in inspect.getsource(sr.draft_runbook)

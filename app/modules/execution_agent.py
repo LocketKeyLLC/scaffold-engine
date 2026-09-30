@@ -1191,6 +1191,43 @@ async def execute_next_node(
         if _budget_stop is not None:
             return _budget_stop
 
+        # §17.1223 — the SINGLE-step path must ask the operator too.
+        #
+        # Both streaming loops peek before a claim and park the job when the
+        # next step is the operator's to decide (§17.1184) or changes a machine
+        # (§17.1186). `execute_next_node` called on its own — `POST /execute`,
+        # the Run-this-step button, the MCP `execute_next` tool — did not. It
+        # claimed the hands-on step, `_hand_back_for_approval` put it straight
+        # back to `pending`, and the caller got `{"status": "needs_approval"}`
+        # with NOTHING written to `jobs.metadata`: a status word naming an
+        # approval that was never requested, on a job whose steps are nearly
+        # all hands-on. Live, on the operator's home-lab job: `POST /execute`
+        # answered `needs_approval` for ADD50 while the job carried no
+        # `awaiting_decision` at all and the node stayed pending — the step
+        # they had just said yes to could not be run by any surface.
+        #
+        # Ordered after the status and budget gates on purpose: parking is a
+        # job-status write, and a job that is not executable must not be moved
+        # into `awaiting_decision`. Skipped when the caller pre-claimed, since
+        # the parallel frontier has already run this check itself.
+        if preclaimed_node is None:
+            try:
+                _peek = await _peek_next_node(job_id)
+                _ask_first = _peek is not None and (
+                    str(_peek.get("node_type") or "") == "decision"
+                    or (settings.execution_supervised_runs_enabled and _hands_on_peek(_peek))
+                )
+            except Exception as exc:
+                # Logged as an error, not a debug line: a silent miss here is
+                # the model deciding for the operator (same reasoning as
+                # `_pause_for_decision`'s own look-up guard).
+                logger.error("single_step_pause_peek_failed job=%s err=%s", job_id, exc)
+                _ask_first = False
+            if _ask_first:
+                _asked = await _pause_for_decision(job_id)
+                if _asked is not None:
+                    return dict(_asked)
+
         # §17.568 — parallel path passes an already-claimed node; serial path
         # (preclaimed_node None) claims here, byte-identical to before.
         node = (
@@ -1629,6 +1666,19 @@ async def execute_next_node(
                 logger.info("rag_context_injected: chars=%d node='%s'", len(rag_context), title)
                 _node_sources.append({"kind": "milvus", "query": rag_query, "text": rag_context})
 
+        # §17.1224 — the values the operator already gave. Attached as a
+        # grounding block, not into the task text, so the optimizer cannot
+        # rewrite it away (§17.1042). Shared with the runbook drafter, which is
+        # the sibling that had it first and alone.
+        try:
+            from app.modules.supervised_runs import stored_values_block
+            _stored = await stored_values_block(
+                for_commands=(tool or "").lower() in ("shell", "mcp"))
+            if _stored:
+                _grounding_blocks.append(_stored)
+        except Exception as exc:
+            logger.warning("stored_values_block_failed job=%s node=%s err=%r",
+                           job_id, node_key, exc)
         raw_prompt = _task_prompt + "".join(_grounding_blocks)
 
         # Inject upstream outputs (size-managed + confidence-weighted, §17.477).

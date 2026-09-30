@@ -414,6 +414,52 @@ async def known_secret_names() -> list[dict]:
         return []
 
 
+async def stored_values_block(*, for_commands: bool = True) -> str:
+    """§17.1224 — the ONE rendering of "the operator already gave us this".
+
+    §17.1222 taught the runbook drafter the names of the stored values. Its own
+    docstring names the sibling it mirrors — "the executor's own node
+    generation" — and that sibling was never taught them, so the awareness
+    existed on exactly one of the three prompt paths. Live, on the home-lab
+    job: ADD102 ("Put the download client behind AirVPN") was written up as
+    prose by the executor, and its first two instructions were
+
+        Go to Config Generator … generate a configuration. Download the
+        resulting `.conf` file.
+        Go to Ports and request a new forwarded port.
+
+    while `AIRVPN_WG_CONF` sat in the store, labelled, from the operator's own
+    upload minutes earlier. Asking someone to go and fetch what they already
+    handed you is the precise complaint §17.1222 was written to answer, and it
+    survived because the fix was applied at one call site instead of the shared
+    layer (feedback: sibling call sites drift).
+
+    Names only — a value never enters a prompt. Fail-soft: a store that cannot
+    be read yields "", which is the old behaviour of asking.
+    """
+    try:
+        names = await known_secret_names()
+    except Exception as exc:
+        logger.warning("known_secret_names_failed err=%r", exc)
+        return ""
+    if not names:
+        return ""
+    listed = "\n".join(f"  ${n['name']}" + (f"  ({n['hint']})" if n.get("hint") else "")
+                       for n in names)
+    how = (
+        "Write `$NAME` directly in the command; it is expanded on the machine at run "
+        "time and never appears in the block, the transcript or any log. Do not invent "
+        "a placeholder for something already on this list, and do not write the value "
+        "itself even if you think you know it."
+        if for_commands else
+        "Refer to it as `$NAME`. The operator already supplied it and it is held for "
+        "them — do NOT write a step that tells them to create it, generate it, download "
+        "it, look it up or type it again, and do not write the value itself."
+    )
+    return ("\n\nVALUES ALREADY STORED — reference these by name and NEVER ask the "
+            "operator for them again:\n" + listed + "\n\n" + how)
+
+
 async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
                         for_channel: bool = True, retry_note: str = "") -> str:
     """The same runbook the executor would have written (its prompt and
@@ -434,20 +480,7 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     # had been typed once and labelled. The operator: "Entering secrets should
     # be similar, like labeling it 'mass password' then applying it across the
     # project." Names only — a value never enters a prompt.
-    try:
-        names = await known_secret_names()
-        if names:
-            prompt += (
-                "\n\nVALUES ALREADY STORED — reference these by name and NEVER ask the "
-                "operator for them again:\n"
-                + "\n".join(f"  ${n['name']}" + (f"  ({n['hint']})" if n.get("hint") else "")
-                             for n in names)
-                + "\n\nWrite `$NAME` directly in the command; it is expanded on the machine "
-                  "at run time and never appears in the block, the transcript or any log. "
-                  "Do not invent a placeholder for something already on this list, and do "
-                  "not write the value itself even if you think you know it.")
-    except Exception as exc:
-        logger.warning("known_secret_names_failed err=%r", exc)
+    prompt += await stored_values_block()
     if upstream:
         prompt = f"{prompt}\n\n{upstream}"
     if retry_note:

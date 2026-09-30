@@ -239,8 +239,14 @@ class TestCompileOutputCache:
         blocked_query_result = MagicMock()
         blocked_query_result.fetchall.return_value = []
 
+        # §17.1223 — the single-step path peeks before claiming; None = nothing
+        # to peek, so the blocked branch is reached exactly as before.
+        peek_result = MagicMock()
+        peek_result.mappings.return_value.first.return_value = None
+
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[
+            peek_result,           # the §17.1223 peek
             cached_result,         # SELECT compiled_output -> cache hit
             status_update_result,  # UPDATE status = 'blocked' (idempotent guard)
             blocked_query_result,  # SELECT for blocked_nodes detail
@@ -277,8 +283,12 @@ class TestCompileOutputCache:
         blocked_query_result = MagicMock()
         blocked_query_result.fetchall.return_value = []
 
+        peek_result = MagicMock()
+        peek_result.mappings.return_value.first.return_value = None
+
         db = AsyncMock()
         db.execute = AsyncMock(side_effect=[
+            peek_result,           # the §17.1223 peek
             cached_result,         # SELECT compiled_output -> None
             status_update_result,  # UPDATE compiled_output + status
             blocked_query_result,  # SELECT for blocked_nodes detail

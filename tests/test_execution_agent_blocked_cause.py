@@ -69,8 +69,16 @@ def _make_blocked_branch_db(rows: list) -> AsyncMock:
     cached_result.scalar.return_value = None
     update_result = MagicMock()
 
+    # §17.1223 — execute_next_node now PEEKS the next node before claiming, so
+    # the single-step path can park a decision/hands-on step instead of
+    # returning a bare `needs_approval`. None here: nothing to peek, so the
+    # blocked branch is reached exactly as before.
+    peek_result = MagicMock()
+    peek_result.mappings.return_value.first.return_value = None
+
     db = AsyncMock()
     db.execute = AsyncMock(side_effect=[
+        peek_result,           # SELECT ... (the §17.1223 peek)
         cached_result,         # SELECT compiled_output
         update_result,         # UPDATE jobs SET ... status='blocked'
         blocked_rows_result,   # SELECT dag_nodes for blocked-node detail
