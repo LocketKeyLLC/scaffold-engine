@@ -1697,6 +1697,46 @@ async def generate_dag(
     warnings.extend(dag_warnings)
     warnings.extend(normalize_warnings)  # #26 #25
     warnings.extend(validator_warnings)  # W.3
+    # §17.1220 — ENFORCE the decisions, do not merely ask for them. Anything the
+    # operator could not answer gets a `decision` node inserted here if the
+    # planner did not write one, and every step about that same thing is made to
+    # wait on it. A prompt instruction was not enough: §17.686 has asked planners
+    # for a configure-step-per-install since long before this operator's media
+    # stack was installed and never configured.
+    try:
+        from app.modules.unanswered import ensure_decisions
+        _asks = ensure_decisions(normalized, brief or {})
+        if _asks:
+            _by = {n.get("node_key"): n for n in normalized}
+            for _a in _asks:
+                for _w in _a.pop("_waiters", []):
+                    _n = _by.get(_w)
+                    if _n is not None and _a["node_key"] not in (_n.get("depends_on") or []):
+                        _n["depends_on"] = list(_n.get("depends_on") or []) + [_a["node_key"]]
+                normalized.insert(0, _a)             # decisions come first
+            edges = _build_edges(normalized)
+            graph_errors, warnings = _validate_graph(normalized, edges)
+            logger.warning("plan_decisions_inserted job=%s n=%d keys=%s", job_id, len(_asks),
+                           [a["node_key"] for a in _asks])
+            for _a in _asks:
+                warnings.append(f"{_a['node_key']} inserted: the operator could not answer this "
+                                f"and steps were being planned around it")
+    except Exception as exc:                        # never block a plan on this
+        logger.warning("ensure_decisions_failed job=%s err=%r", job_id, exc)
+
+    # §17.1219 — a service this plan installs and never configures is work the
+    # operator will discover at the end and have to finish themselves. Recorded
+    # as a warning on the plan, named per service, so it is visible rather than
+    # inferred from what is missing.
+    try:
+        from app.modules.plan_coverage import uncovered as _uncovered
+        for _g in _uncovered([{"node_key": n.get("node_key"), "title": n.get("title")}
+                              for n in normalized]):
+            warnings.append(
+                f"{_g['node_key']} installs {_g['subject']} and no step configures it — "
+                f"the operator will have to set it up themselves")
+    except Exception as exc:                       # never block a plan on this
+        logger.warning("plan_coverage_failed job=%s err=%r", job_id, exc)
     if graph_errors:
         await _fail_job(db, uid, f"Graph validation errors: {'; '.join(graph_errors)}")
         return {"job_id": job_id, "status": "failed", "errors": graph_errors}

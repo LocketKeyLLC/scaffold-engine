@@ -396,6 +396,24 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 """
 
 
+async def known_secret_names() -> list[dict]:
+    """§17.1222 — ``[{name, hint}]`` for every value some store already holds.
+
+    NAMES ONLY. The value never leaves its store: the engine writes `$NAME` and
+    the runner expands it on the machine (§17.1191). Fail-soft — a drafter that
+    cannot read the store simply asks, which is the old behaviour.
+    """
+    try:
+        from app.database import async_session
+        from app.modules import runner_secrets as _rs
+        async with async_session() as db:
+            rows = await _rs.list_secrets(db)
+        return [{"name": r.get("name"), "hint": (r.get("hint") or "")[:120]}
+                for r in rows if r.get("name")]
+    except Exception:
+        return []
+
+
 async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
                         for_channel: bool = True, retry_note: str = "") -> str:
     """The same runbook the executor would have written (its prompt and
@@ -409,6 +427,27 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     from app.modules.prompt_assembly import EXECUTION_SYSTEM_RUNBOOK, build_base_prompt
     b = brief if isinstance(brief, dict) else {"description": str(brief or "")}
     prompt = build_base_prompt(node, b)
+    # §17.1222 — a value the operator already gave once must never be asked for
+    # again. The store, the `$NAME` reference and the out-of-band delivery all
+    # existed (§17.1191/1193); what did not was the drafter KNOWING the names,
+    # so it wrote "enter the password" into step after step for a password that
+    # had been typed once and labelled. The operator: "Entering secrets should
+    # be similar, like labeling it 'mass password' then applying it across the
+    # project." Names only — a value never enters a prompt.
+    try:
+        names = await known_secret_names()
+        if names:
+            prompt += (
+                "\n\nVALUES ALREADY STORED — reference these by name and NEVER ask the "
+                "operator for them again:\n"
+                + "\n".join(f"  ${n['name']}" + (f"  ({n['hint']})" if n.get("hint") else "")
+                             for n in names)
+                + "\n\nWrite `$NAME` directly in the command; it is expanded on the machine "
+                  "at run time and never appears in the block, the transcript or any log. "
+                  "Do not invent a placeholder for something already on this list, and do "
+                  "not write the value itself even if you think you know it.")
+    except Exception as exc:
+        logger.warning("known_secret_names_failed err=%r", exc)
     if upstream:
         prompt = f"{prompt}\n\n{upstream}"
     if retry_note:

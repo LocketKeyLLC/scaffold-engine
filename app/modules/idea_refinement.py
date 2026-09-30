@@ -44,6 +44,38 @@ Rules:
 - Keep goals specific and actionable
 - No filler words, no hedging
 
+§17.1219 — ASSUME THE OPERATOR KNOWS NOTHING ABOUT THE TECHNOLOGY. This is the
+standing instruction for this engine and it governs every `ambiguities` entry.
+
+An ambiguity is a QUESTION THEY CAN ANSWER, not a request for a specification.
+Write it the way you would ask someone who has never heard the words. Measured
+on a real job: eight ambiguities were phrased as spec requests — "Preferred tech
+stack and hosting for the custom UI control panel (web app, framework, where it
+runs)", "Storage layout for the 2x 6TB SAS HDDs (ZFS mirror/RAID, passthrough,
+etc.)", "Model/type of the additional graphics card". Three came back "unsure",
+and one of those was the control panel, which then got BUILT to a shape the
+operator had never chosen and could not correct.
+
+So, for every ambiguity:
+  * Ask about the OUTCOME they want, never the implementation. Not "preferred
+    tech stack for the control panel" but "What should the control panel let you
+    do from your phone or laptop — see what's running, start and stop things,
+    watch downloads, or something else?"
+  * OFFER THE OPTIONS. Give 2-4 concrete choices in plain words with the
+    trade-off of each, so the answer is a pick rather than an essay. Not "ZFS
+    mirror/RAID or passthrough?" but "Two 6TB drives: keep a full copy on each
+    so one can die without losing anything (6TB usable), or use both for space
+    (12TB usable, a drive dying loses everything)?"
+  * NEVER require a part number, a version, a framework name, or a term of art.
+    If you need one, ask a question the engine can answer for itself later, or
+    say the engine will find it out.
+  * If they cannot answer, that is a DECISION FOR THE PLAN, not a gap to fill
+    silently. Say so in the ambiguity.
+  * Ask about anything the plan will BUILD or CONFIGURE for them. A service
+    installed but never configured to their taste is the same failure: on that
+    job, four media services were installed and NOTHING asked how they wanted
+    media found or downloaded.
+
 §17.649 — Non-destructive default (READ CAREFULLY). When the idea refers to an
 EXISTING or already-running system — signalled by words like "existing",
 "already", "current", "my <server/host/cluster/database>", "on my …", a named
@@ -164,7 +196,14 @@ REFINE_BRIEF_TOOL = Tool(
             "ambiguities": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Anything unclear that may need clarification",
+                "description": (
+                    "Questions the OPERATOR can answer, in plain words, assuming they know "
+                    "nothing about the technology (§17.1219). Ask about the outcome they "
+                    "want and offer 2-4 concrete choices with the trade-off of each — never "
+                    "ask for a part number, version, framework or term of art. Cover anything "
+                    "the plan will build or configure for them, including how each installed "
+                    "service should be set up."
+                ),
             },
         },
         "required": ["title", "description", "domain", "goals", "complexity"],

@@ -633,7 +633,23 @@ def _brief_essentials(brief: dict) -> str:
                      + "\n".join(f"- {i[:200]}" for i in inputs))
     feedback = (brief.get("user_feedback") or "").strip()
     if feedback:
-        parts.append("Operator answers (already decided — honor, do not re-ask):\n" + feedback[:1200])
+        # §17.1218 — "already decided … do not re-ask" was applied to answers
+        # that decided NOTHING. Three of this operator's eight ambiguities came
+        # back "unsure", went in under that heading, and the planner dutifully
+        # did not re-ask — it built a control panel to a spec they had just said
+        # they did not have. Split them: an answer is honoured, a non-answer is
+        # a decision still owed to the operator.
+        from app.modules.unanswered import decision_brief, parse_feedback, unresolved
+        pairs = parse_feedback(feedback)
+        answered = [p for p in pairs if p["answered"]]
+        if answered:
+            parts.append("Operator answers (already decided — honor, do not re-ask):\n"
+                         + "\n".join(f"Q: {p['question']}\nA: {p['answer']}" for p in answered)[:1200])
+        elif not pairs:
+            parts.append("Operator answers (already decided — honor, do not re-ask):\n" + feedback[:1200])
+        note = decision_brief(unresolved(brief))
+        if note:
+            parts.append(note.strip())
     return "\n\n".join(parts)
 
 
@@ -647,6 +663,16 @@ def build_base_prompt(node: dict, brief: dict) -> str:
         goal = goals[0] if goals else ""
     essentials = _brief_essentials(brief or {})
     tail = f"\n\n{essentials}" if essentials else ""
+    # §17.1221 — the question belongs to the STEP, asked when the operator gets
+    # here, not to the plan. This is the one place every step's guide and runbook
+    # is assembled, so a step that depends on something undecided opens by asking
+    # it — the same way a run pause asks for the values it needs (§17.1187).
+    try:
+        from app.modules.unanswered import ask_first_block, questions_for_step
+        tail += ask_first_block(questions_for_step(
+            title, brief or {}, description=str(node.get("description") or "")))
+    except Exception:                      # a prompt must never fail to assemble
+        pass
     if template:
         return f"{template}\n\nContext: {goal}{tail}"
     return (
