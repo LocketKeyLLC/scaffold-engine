@@ -80,7 +80,9 @@ async def channel(db: AsyncSession) -> Optional[tuple[Any, dict]]:
 _NOT_ALLOWED = "not on the write-allow list"
 
 
-_SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty")
+#: §17.1234 adds "cannot report an HTTP error" — a shape the engine can fix
+#: itself, so the redraft must recognise it as one.
+_SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error")
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -395,6 +397,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - Under "## Verify", each check stays a read-only command (`pct status 111`, `systemctl is-active …`, `ls -ld …`).
 - DO the work with an API or a CLI, never by describing the web UI. "Open the Prowlarr web UI and go to Settings → Apps → Add Application", "click Test, then Save" is not something this channel can carry out — it produces a runbook with no commands at all, and the step falls back to the operator doing it by hand. Almost every service here has an HTTP API: drive it with `curl` (`curl -s -X POST http://HOST:9696/api/v1/indexer -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' -d '{…}'`), or its own CLI where it has one.
 - If you can CHECK something with a command under "## Verify", you can DO it with a command under "## Run this". A Verify section full of `curl …/api/v1/…` calls beside a Run section of UI clicks is the specific contradiction to avoid: the same API that answers the check also makes the change.
+- A `curl` that CHANGES something must fail loudly: add `--fail-with-body` (so an HTTP 400/401/404/500 exits non-zero and still shows the server's message). Without it `curl -s` exits 0 having fetched an error page, and a step that changed nothing is reported as done — live, nine `POST`s to an API answered "must be greater than 0" and every one "succeeded". A read under "## Verify" may stay a plain `curl -s`.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
 """
 
@@ -465,6 +468,72 @@ def _verify_commands_in(runbook: str) -> list[str]:
     if not m:
         return []
     return [c for c in runbook_commands("## Run this\n" + m.group(1))]
+
+
+#: a `curl` that changes something: an explicit write method, or a body.
+_CURL_WRITE = re.compile(r"(?:^|\s)curl\b(?=.*(?:-X\s*(?:POST|PUT|PATCH|DELETE)\b|\s(?:-d|--data(?:-raw|-binary|-urlencode)?|-F|--form|-T|--upload-file)\b))", re.I)
+#: the flags that make its exit code mean something.
+_CURL_FAILS = re.compile(r"(?:--fail-with-body|--fail-early|\s--fail\b|\s-f\b|\s-[a-eg-zA-Z]*f[a-eg-zA-Z]*\s)")
+
+
+#: a runbook saying, in its own words, that it cannot be carried out yet.
+_SELF_BLOCKED = re.compile(
+    r"(?i)\b(?:is|are|remains?|stays?)\s+blocked\s+until\b"
+    r"|\bblocked\s+(?:until|on|by)\b"
+    r"|\bcannot\s+(?:proceed|continue|be\s+(?:done|completed|carried\s+out))\s+until\b"
+    r"|\bcan(?:not|'t)\s+be\s+(?:verified|proven|tested)\s+until\b"
+    r"|\bmust\s+wait\s+(?:for|until)\b"
+    r"|\bnot\s+possible\s+until\b")
+
+
+def declares_itself_blocked(text_value: str) -> Optional[str]:
+    """§17.1235 — the sentence in which a step says it is not done.
+
+    Live, ADD98 ("Prove it end to end: ask for one film and watch it"), recorded
+    `done`, whose FIRST line was
+
+        This proof is blocked until the download client decision from ADD102 is
+        resolved and ADD97 steps 1-2 are complete.
+
+    It produced prose, no command ran, it said in its own words that it could not
+    be carried out — and it counted toward the job's finished total. A step that
+    describes its own blockage is the clearest possible signal that the work did
+    not happen, and it was the one signal nothing read.
+
+    Deliberately narrow: only a self-declaration about THIS step. A runbook that
+    lists prerequisites ("Radarr container 103 is running") is describing a state
+    it expects, not announcing a failure, and must still pass.
+    """
+    for para in re.split(r"\n\s*\n", str(text_value or ""))[:6]:
+        m = _SELF_BLOCKED.search(para)
+        if m:
+            sentence = next((sn.strip() for sn in re.split(r"(?<=[.!?])\s+", para)
+                             if _SELF_BLOCKED.search(sn)), para.strip())
+            return " ".join(sentence.split())[:300]
+    return None
+
+
+def curl_writes_without_fail(commands: list[str]) -> list[dict]:
+    """§17.1234 — ``[{command, why}]`` for every write-shaped `curl` whose exit
+    code cannot report an HTTP error.
+
+    The root cause under §17.1233: `curl -s` exits 0 when the server answers
+    400, so the runner reports success for a request the service rejected. Nine
+    of them in one block on ADD96, all rejected, the step marked done. Reported
+    as a SHAPE refusal, which the existing §17.1196 redraft already feeds back
+    to the drafter — so the engine fixes its own block instead of the operator
+    discovering it later.
+    """
+    out: list[dict] = []
+    for c in commands or []:
+        cmd = str(c)
+        if _CURL_WRITE.search(cmd) and not _CURL_FAILS.search(cmd):
+            out.append({"command": cmd, "why": (
+                "this `curl` sends a change but cannot report an HTTP error: `curl -s` exits 0 "
+                "even when the server answers 400 or 401, so a request the service REJECTED "
+                "would be recorded as done. Add `--fail-with-body` so the failure is a non-zero "
+                "exit and the server's message is still shown.")})
+    return out
 
 
 async def host_inventory(spec) -> str:
@@ -924,6 +993,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     shape = substitute(cmds, _dummies) if _dummies else cmds
     runnable, refused = gate_block(shape, policy.get("allow") or [])
     refused = list(refused) + list(preconditions or [])      # §17.1213
+    # §17.1234 — a write that cannot report an HTTP error is a SHAPE problem the
+    # engine made, so it joins the gate's refusals and the §17.1196 redraft gets
+    # a chance to fix it before the operator ever sees the block.
+    refused = refused + curl_writes_without_fail(cmds)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner
@@ -1155,6 +1228,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     indeterminate = bool(dropped) and not hard_fail
     verify_out = ""
     confirmed_after_drop = False
+    refuted: list[dict] = []
     if verify_cmds and (ok or indeterminate):
         try:
             pasted, ran = await _lr.run_probes(spec, [{"id": f"V{i}", "command": c} for i, c in enumerate(verify_cmds, 1)])
@@ -1165,6 +1239,29 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             if indeterminate:
                 confirmed_after_drop = await _goal_confirmed(
                     str(waiting.get("title") or node_key), verify_cmds, pasted)
+            elif ok:
+                # §17.1233 — and judge them when the commands "succeeded" too.
+                #
+                # Live, ADD96: nine `curl -s -X POST` calls to Prowlarr's API,
+                # every one answered with a validation error array ("'App Profile
+                # Id' must be greater than '0'"), nothing added — and every one
+                # exited 0, because `curl -s` succeeds at fetching a 400. The
+                # step was recorded `done`. All four verify checks came back
+                # EMPTY, sitting in the same record, and nothing read them:
+                # §17.1225 judged the checks only when a response was lost.
+                # Judging the transport and not the answer is the whole bug.
+                #
+                # Asymmetric on purpose: only a `contradicted` verdict downgrades
+                # a step. An ambiguous check must never fail work that really
+                # happened, so `unknown` leaves the outcome alone.
+                _against = contradicted(await _verify_verdicts(
+                    str(waiting.get("title") or node_key), verify_cmds, pasted))
+                if _against:
+                    ok = False
+                    refuted = _against
+                    logger.warning("supervised_run_verify_contradicted job=%s node=%s checks=%d first=%r",
+                                   job_id, node_key, len(_against),
+                                   str(_against[0].get("reason"))[:140])
         except Exception as exc:
             verify_out = f"(verify could not run: {exc})"
     output = mask_secrets(_executed_report(runbook, spec.name, executed, verify_out), values, need)
@@ -1217,6 +1314,10 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
          f"READ commands (the write grant covers writes only). Allow it to read as root: Settings → Machines, "
          f"or Capabilities → “Give the runner administrator rights for specific commands”.")
         if needs_root else
+        ("every command exited 0, but this step's own verify checks say the work did not land: "
+         + "; ".join(str(v.get("reason") or v.get("claim") or "")[:120] for v in refuted[:3])
+         + ". A command that fetched an error page still exits 0 — the check is what settles it.")
+        if refuted else
         ("the runner ran nothing" if not last else
          (f"the runner refused `{last['command'][:80]}`: {last['output'][:200]}" if last.get("refused")
           else f"`{last['command'][:80]}` exited {last['exit']}: {last['output'][-300:]}")), values, need)
@@ -1240,6 +1341,34 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             "diagnosis": diagnosis, "unknown_outcome": bool(dropped)}
 
 
+async def _verify_verdicts(title: str, verify_cmds: list[str], pasted: str) -> list[dict]:
+    """§17.1233 — the state-check judge's verdicts for this step's own checks.
+
+    One place builds the probes so the drop path (§17.1225) and the success path
+    read the SAME evidence the same way.
+    """
+    if not verify_cmds or not (pasted or "").strip():
+        return []
+    try:
+        from app.modules.assist_state_check import judge_outputs
+        probes = [{"id": f"V{i}", "kind": "state", "claim": title, "command": c}
+                  for i, c in enumerate(verify_cmds, 1)]
+        return await judge_outputs(probes, pasted)
+    except Exception as exc:
+        logger.warning("verify_judge_failed err=%r", exc)
+        return []
+
+
+def contradicted(verdicts: list[dict]) -> list[dict]:
+    """The checks that positively say the goal is NOT met.
+
+    Only `contradicted` counts — never `unknown`. A step that really worked must
+    not be marked failed because a check was ambiguous, so the asymmetry is
+    deliberate: evidence AGAINST downgrades, absence of evidence does not.
+    """
+    return [v for v in verdicts or [] if str(v.get("verdict") or "") == "contradicted"]
+
+
 async def _goal_confirmed(title: str, verify_cmds: list[str], pasted: str) -> bool:
     """§17.1225 — did the step's own checks, read back off the machine, show its
     goal already met?
@@ -1259,16 +1388,7 @@ async def _goal_confirmed(title: str, verify_cmds: list[str], pasted: str) -> bo
     partial evidence is the failure mode this whole seam exists to prevent, and
     the honest fallback (`failed`, outcome unknown) is what happens today.
     """
-    if not verify_cmds or not (pasted or "").strip():
-        return False
-    try:
-        from app.modules.assist_state_check import judge_outputs
-        probes = [{"id": f"V{i}", "kind": "state", "claim": title, "command": c}
-                  for i, c in enumerate(verify_cmds, 1)]
-        verdicts = await judge_outputs(probes, pasted)
-    except Exception as exc:
-        logger.warning("goal_confirm_judge_failed err=%r", exc)
-        return False
+    verdicts = await _verify_verdicts(title, verify_cmds, pasted)
     if not verdicts or len(verdicts) != len(verify_cmds):
         return False
     ok = all(str(v.get("verdict") or "") == "confirmed" for v in verdicts)

@@ -1984,7 +1984,29 @@ async def execute_next_node(
         logger.warning("node_output_verification_failed node=%s err=%r", node_key, exc)
 
     verify_status: Literal["pass", "fail", "skipped"]
-    if skip_verify:
+    # §17.1235 — a step that says, in its own words, that it cannot be carried
+    # out yet must not be recorded as finished. Live, ADD98 ("Prove it end to
+    # end: ask for one film and watch it") was `done` and opened with "This
+    # proof is blocked until the download client decision from ADD102 is
+    # resolved and ADD97 steps 1-2 are complete." No command ran. It counted
+    # toward the job's finished total, which is the dishonesty about "finished"
+    # that §17.1208/1214-1216 exist to stop — and the one signal nothing read
+    # was the step's own sentence. Checked before every verifier, because a
+    # verifier that reads "contains what the task requested, even partially"
+    # passes a well-written description of being stuck.
+    _self_blocked = None
+    try:
+        from app.modules.supervised_runs import declares_itself_blocked
+        _self_blocked = declares_itself_blocked(output)
+    except Exception as exc:
+        logger.warning("self_blocked_check_failed node=%s err=%r", node_key, exc)
+    if _self_blocked:
+        logger.warning("node_declares_itself_blocked node=%s sentence=%r", node_key, _self_blocked)
+        verify_status = "fail"
+        reason, confidence = (
+            f"the step's own output says it cannot be carried out yet: \"{_self_blocked}\" — "
+            "nothing was executed, so it is not finished", 0.0)
+    elif skip_verify:
         verify_status = "skipped"
         reason, confidence = "verification skipped", 0.0
     else:
