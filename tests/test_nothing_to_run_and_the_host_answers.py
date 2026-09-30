@@ -368,3 +368,76 @@ def test_every_shape_the_drafter_has_actually_used_is_covered():
     # a bare generic word is nobody's service and nobody's host address
     assert not rd._IP_NAMES.match("HOST")
     assert not rd._HOST_IP_NAMES.match("HOST")
+
+
+# ── §17.1232: the drafter is told which machines exist ────────────────────
+
+
+QM_LIST = """      VMID NAME                 STATUS     MEM(MB)
+       106 palworld             running    16384
+       110 ubuntu-builder       stopped    4096
+"""
+
+
+@pytest.mark.asyncio
+async def test_the_inventory_names_every_guest_and_how_to_address_it():
+    """Live, ADD96's third draw: `curl http://<PROXMOX_HOST_IP>:9696/api/v1/…`
+    while Prowlarr is container 102. The drafter did not know a guest existed."""
+    real = """VMID       Status     Lock         Name
+101        running                 jellyfin
+102        running                 prowlarr
+103        running                 radarr
+"""
+    with patch.object(rd, "_read", AsyncMock(side_effect=lambda spec, c:
+                      real if c == "pct list" else QM_LIST if c == "qm list" else "")):
+        block = await sr.host_inventory(SimpleNamespace(name="pve-runner"))
+    assert "container 102 — prowlarr" in block
+    assert "container 101 — jellyfin" in block and "container 103 — radarr" in block
+    assert "VM 106 — palworld (running)" in block
+    guest_lines = [l for l in block.splitlines() if l.startswith("  ")]
+    assert len(guest_lines) == 5                    # 3 containers + 2 VMs
+    assert not any("NAME" in l or "VMID" in l for l in guest_lines), guest_lines
+    # and the rule that makes the inventory actionable
+    assert "<NAME_IP>" in block and "pct exec" in block
+    assert "`pct` cannot address a VM" in block
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_host_yields_no_inventory_rather_than_a_wrong_one():
+    with patch.object(rd, "_read", AsyncMock(return_value="")):
+        assert await sr.host_inventory(SimpleNamespace(name="r")) == ""
+    assert await sr.host_inventory(None) == ""
+    with patch.object(rd, "_read", AsyncMock(side_effect=RuntimeError("down"))):
+        assert await sr.host_inventory(SimpleNamespace(name="r")) == ""
+
+
+def test_the_channel_rules_say_where_a_service_lives():
+    assert "not the host's" in sr.CHANNEL_RULES
+    assert "<PROXMOX_HOST_IP>" in sr.CHANNEL_RULES     # named as the thing NOT to write
+
+
+@pytest.mark.asyncio
+async def test_the_drafter_only_gets_the_inventory_when_the_engine_may_run_it():
+    """A runbook the OPERATOR will carry out by hand is not addressed by the
+    engine, so it does not need the machine list — and must not pay for it."""
+    inv = AsyncMock(return_value="\n\nGUESTS")
+    with patch.object(sr, "host_inventory", inv), \
+         patch.object(sr, "stored_values_block", AsyncMock(return_value="")), \
+         patch("app.utils.llm_retry.generate_until_nonempty", new=AsyncMock(return_value="rb")), \
+         patch("app.modules.prompt_assembly.build_base_prompt", return_value="p"):
+        await sr.draft_runbook({"node_key": "X"}, {}, for_channel=False, spec=SimpleNamespace(name="r"))
+    inv.assert_not_awaited()
+
+
+def test_every_draft_call_site_passes_the_runner():
+    """A gate goes blind when code moves: a new redraft that forgets `spec`
+    would silently go back to drafting without the machine list. Enumerated off
+    the AST, not grepped, so a call split over lines still counts."""
+    import ast as _ast
+    src = open("app/modules/execution_agent.py").read()
+    calls = [n for n in _ast.walk(_ast.parse(src))
+             if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+             and n.func.attr == "draft_runbook"]
+    assert len(calls) == 4, f"expected the 4 known draft sites, found {len(calls)}"
+    for c in calls:
+        assert "spec" in [k.arg for k in c.keywords], f"draft_runbook at line {c.lineno} drops spec"

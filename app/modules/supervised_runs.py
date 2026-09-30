@@ -395,6 +395,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - Under "## Verify", each check stays a read-only command (`pct status 111`, `systemctl is-active …`, `ls -ld …`).
 - DO the work with an API or a CLI, never by describing the web UI. "Open the Prowlarr web UI and go to Settings → Apps → Add Application", "click Test, then Save" is not something this channel can carry out — it produces a runbook with no commands at all, and the step falls back to the operator doing it by hand. Almost every service here has an HTTP API: drive it with `curl` (`curl -s -X POST http://HOST:9696/api/v1/indexer -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' -d '{…}'`), or its own CLI where it has one.
 - If you can CHECK something with a command under "## Verify", you can DO it with a command under "## Run this". A Verify section full of `curl …/api/v1/…` calls beside a Run section of UI clicks is the specific contradiction to avoid: the same API that answers the check also makes the change.
+- A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
 """
 
 
@@ -466,6 +467,46 @@ def _verify_commands_in(runbook: str) -> list[str]:
     return [c for c in runbook_commands("## Run this\n" + m.group(1))]
 
 
+async def host_inventory(spec) -> str:
+    """§17.1232 — the guests that exist, for the drafter that keeps guessing.
+
+    Live, ADD96's third draw: `curl -s -X POST http://<PROXMOX_HOST_IP>:9696/api/v1/indexer`.
+    Prowlarr is container 102 on that host, Radarr 103, Sonarr 104 — one `pct
+    list` says so, through the channel the engine had open. The drafter did not
+    know any guest existed, so it addressed a service listening inside a
+    container at the host's own address, and named the placeholder to match.
+    Nothing downstream can repair that: discovery resolves a name to a machine,
+    and the name pointed at the wrong machine.
+
+    Read-only, both listings, fail-soft to "" — a drafter without the inventory
+    writes what it wrote before.
+    """
+    if spec is None:
+        return ""
+    try:
+        from app.modules.runbook_discovery import _read, guests_by_name
+        cts = await _read(spec, "pct list")
+        vms = await _read(spec, "qm list")
+    except Exception as exc:
+        logger.warning("host_inventory_failed err=%r", exc)
+        return ""
+    lines: list[str] = []
+    for name, cid in sorted(guests_by_name(cts).items(), key=lambda kv: kv[1]):
+        lines.append(f"  container {cid} — {name}")
+    for m in re.finditer(r"^\s*(\d{3,5})\s+(\S+)\s+(\S+)", vms or "", re.M):
+        if m.group(2).lower() != "name":
+            lines.append(f"  VM {m.group(1)} — {m.group(2)} ({m.group(3)})")
+    if not lines:
+        return ""
+    return ("\n\nGUESTS ON THIS HOST (read just now, and this is the whole list):\n"
+            + "\n".join(lines)
+            + "\n\nAddress a service at the guest it runs in. If a name here matches the "
+              "service your step is about, the placeholder for its address must be named after "
+              "that guest — `<NAME_IP>` — so the engine can read the address off the host and "
+              "fill it in. Use `pct exec <id> -- …` to act inside a container and `qm` for a VM; "
+              "`pct` cannot address a VM and `qm` cannot address a container.")
+
+
 async def known_secret_names() -> list[dict]:
     """§17.1222 — ``[{name, hint}]`` for every value some store already holds.
 
@@ -531,7 +572,7 @@ async def stored_values_block(*, for_commands: bool = True) -> str:
 
 
 async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
-                        for_channel: bool = True, retry_note: str = "") -> str:
+                        for_channel: bool = True, retry_note: str = "", spec=None) -> str:
     """The same runbook the executor would have written (its prompt and
     system), so the operator approves what Auto mode would have handed them.
 
@@ -551,6 +592,9 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     # be similar, like labeling it 'mass password' then applying it across the
     # project." Names only — a value never enters a prompt.
     prompt += await stored_values_block()
+    # §17.1232 — what machines exist, so the draft addresses the right one.
+    if for_channel and spec is not None:
+        prompt += await host_inventory(spec)
     if upstream:
         prompt = f"{prompt}\n\n{upstream}"
     if retry_note:
