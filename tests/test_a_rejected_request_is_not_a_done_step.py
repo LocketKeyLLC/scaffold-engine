@@ -234,3 +234,70 @@ def test_the_executor_checks_it_before_every_verifier():
     assert 'verify_status = "fail"' in src[src.index("declares_itself_blocked(output)"):
                                           src.index("elif skip_verify:")]
     assert "nothing was executed, so it is not finished" in src
+
+
+# ── §17.1238: Run and Verify disagreed about what a command looks like ────
+
+
+ADD110_RUNBOOK = """## Inputs needed
+
+None — this step only starts an existing container and confirms its state.
+
+## Run this
+
+`pct start 120`
+
+## Verify
+
+`pct status 120` — expect `status: running` in the output.
+"""
+
+
+def test_an_inline_run_command_is_extracted():
+    """Live ADD110, a one-command step drafted correctly: the Verify check was
+    extracted and the Run command was not, so the frame carried ZERO commands and
+    the step could not be carried out. §17.1227's redraft could not help — the
+    second draft was just as correct and just as invisible."""
+    assert sr.runbook_commands(ADD110_RUNBOOK) == ["pct start 120"]
+
+
+def test_the_two_siblings_now_agree():
+    """`verify_commands` always accepted inline literals; `runbook_commands`
+    never did. That disagreement is the bug."""
+    assert sr.verify_commands(ADD110_RUNBOOK) == ["pct status 120"]
+    assert sr.runbook_commands(ADD110_RUNBOOK)
+
+
+def test_a_fenced_runbook_is_unchanged():
+    fenced = "## Run this\n\n```bash\npct start 120\npct status 120\n```\n"
+    assert sr.runbook_commands(fenced) == ["pct start 120", "pct status 120"]
+
+
+def test_inline_is_only_a_fallback_so_a_fenced_runbook_gains_no_prose_commands():
+    """Only when the fences yielded nothing — a good fenced runbook must never
+    have prose-derived commands mixed in."""
+    mixed = ("## Run this\n\n```bash\npct start 120\n```\n\n"
+             "Then check it with `pct status 120` if you like.\n")
+    assert sr.runbook_commands(mixed) == ["pct start 120"]
+
+
+def test_prose_that_is_not_a_command_yields_nothing():
+    """A backticked path and an assignment are not commands."""
+    assert sr.runbook_commands(
+        "## Run this\n\nWrite the file at `/etc/pve/firewall/120.fw` and set `enable: 1`.\n") == []
+    assert sr.runbook_commands("## Run this\n\nThe panel lives in `/opt/panel`.\n") == []
+
+
+def test_a_heredoc_fence_is_still_kept_whole():
+    """§17.1189's behaviour must survive the fallback being added."""
+    hd = ("## Run this\n\n```bash\ncat <<EOF > /tmp/x\n[Unit]\nExecStart=/bin/true\nEOF\n```\n")
+    got = sr.runbook_commands(hd)
+    assert len(got) == 1 and "ExecStart=/bin/true" in got[0]
+
+
+def test_the_frame_offers_run_for_the_inline_one_liner():
+    """End to end: the frame that carried zero commands now offers Run."""
+    frame = sr.frame_run({"node_key": "ADD110", "title": "Start container 120 (caddy-proxy)"},
+                         ADD110_RUNBOOK, SimpleNamespace(name="pve-runner"), {"allow": ["pct"]})
+    assert frame["commands"] == ["pct start 120"]
+    assert frame["refused"] == [] and frame["suggested"] == "run"

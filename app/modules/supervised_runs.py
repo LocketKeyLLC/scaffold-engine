@@ -736,6 +736,42 @@ def runbook_commands(text_out: str) -> list[str]:
                 out.append(whole)
             continue
         out.extend(block_commands(fence))
+    if not out:
+        # §17.1238 — no fence at all: the drafter wrote the command inline in
+        # backticks. `verify_commands` two functions below has always accepted
+        # that form; this one never did, so the two siblings disagreed about what
+        # a command looks like.
+        #
+        # Live, ADD110 ("Start container 120 (caddy-proxy)") — a one-command step,
+        # drafted correctly:
+        #
+        #     ## Run this
+        #     `pct start 120`
+        #     ## Verify
+        #     `pct status 120` - expect `status: running`
+        #
+        # The Verify check was extracted and the Run command was not, so the
+        # frame carried ZERO commands, Run was not offered, and the step the
+        # operator had just asked for could not be carried out. §17.1227's
+        # no-commands redraft fired and could not help: the second draft was
+        # just as correct and just as invisible.
+        #
+        # Reuses `step_classify.step_commands`, which already reads fences AND
+        # inline literals with the guards that matter (a path or an assignment is
+        # not a command). Only when the fences yielded nothing, so a good fenced
+        # runbook can never have prose-derived commands mixed into it.
+        try:
+            from app.modules.step_classify import step_commands
+            seen: set[str] = set()
+            for cmd, _sentence in step_commands(body):
+                c = (cmd or "").strip()
+                if c and c not in seen:
+                    seen.add(c)
+                    out.append(c)
+            if out:
+                logger.warning("runbook_commands_from_inline count=%d first=%r", len(out), out[0][:80])
+        except Exception as exc:
+            logger.warning("inline_command_extract_failed err=%r", exc)
     return out[:MAX_RUN_COMMANDS]
 
 
