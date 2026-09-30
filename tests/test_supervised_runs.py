@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -72,7 +73,12 @@ def test_frame_offers_run_only_when_the_gate_is_clean():
 @pytest.mark.asyncio
 async def test_pending_hands_on_skips_decided_and_decision_nodes_and_human_steps():
     db = AsyncMock()
-    r1 = MagicMock(); r1.scalar.return_value = {"ADD50": {"by": "operator", "choice": "myself"}}
+    # §17.1245 — presence alone no longer hides a node: the decision has to still
+    # belong to the CURRENT attempt, so it carries `at` and the node's updated_at
+    # is older than it.
+    _answered = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
+    r1 = MagicMock(); r1.scalar.return_value = {
+        "ADD50": {"by": "operator", "choice": "myself", "at": _answered.isoformat()}}
     r2 = MagicMock(); r2.mappings.return_value.all.return_value = [
         {"node_key": "ADD50", "title": "Start container 111", "prompt_template": "Done when `pct status 111` reports running.",
          "depends_on": [], "tool": "LLM", "node_type": "task", "description": None, "retry_count": 0, "last_verification_reason": None},
@@ -85,7 +91,9 @@ async def test_pending_hands_on_skips_decided_and_decision_nodes_and_human_steps
         {"node_key": "ADD88", "title": "Install Caddy", "prompt_template": "Write the file via `tee -a`.", "depends_on": [], "tool": "LLM",
          "node_type": "task", "description": None, "retry_count": 0, "last_verification_reason": None},
     ]
-    db.execute = AsyncMock(side_effect=[r1, r2])
+    r3 = MagicMock()   # ADD50's row: written BEFORE the answer, so the answer stands
+    r3.mappings.return_value.first.return_value = {"updated_at": _answered - timedelta(seconds=5)}
+    db.execute = AsyncMock(side_effect=[r1, r2, r3])
     with patch.object(settings, "shell_tool_enabled", False), patch.object(settings, "mcp_tool_enabled", True):
         node = await sr.pending_hands_on(db, "j")
     assert node["node_key"] == "ADD88" and node["hands_on_reason"] == "writes:tee -a"
@@ -851,3 +859,26 @@ async def test_goal_confirmed_needs_every_check_confirmed():
     assert await sr._goal_confirmed("t", ["a"], "   ") is False
     with patch("app.modules.assist_state_check.judge_outputs", new=AsyncMock(side_effect=RuntimeError("x"))):
         assert await sr._goal_confirmed("t", ["a"], "== V1 ==\nx") is False
+
+
+@pytest.mark.asyncio
+async def test_a_SPENT_decision_no_longer_hides_a_node(monkeypatch):
+    """§17.1245 — live ADD111: the operator approved it, the run died on the
+    five-second clock, the step was reset, and it could never be offered again
+    because their approval from the FAILED attempt was still on the job."""
+    answered = datetime(2026, 9, 30, 12, 0, 0, tzinfo=timezone.utc)
+    db = AsyncMock()
+    r1 = MagicMock(); r1.scalar.return_value = {
+        "ADD111": {"by": "operator", "choice": "run", "at": answered.isoformat()}}
+    r2 = MagicMock(); r2.mappings.return_value.all.return_value = [
+        {"node_key": "ADD111", "title": "Set up Pi-hole", "prompt_template": "Run `pct create 130 x`.",
+         "depends_on": [], "tool": "LLM", "node_type": "task", "description": None,
+         "retry_count": 0, "last_verification_reason": None},
+    ]
+    r3 = MagicMock()   # written AFTER the answer — the reset — so the answer is spent
+    r3.mappings.return_value.first.return_value = {"updated_at": answered + timedelta(minutes=3)}
+    db.execute = AsyncMock(side_effect=[r1, r2, r3])
+    with patch.object(settings, "shell_tool_enabled", False):
+        node = await sr.pending_hands_on(db, "j")
+    assert node is not None and node["node_key"] == "ADD111", \
+        "a step reset after a failed approved run must be offered for approval again"

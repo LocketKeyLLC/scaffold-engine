@@ -217,6 +217,43 @@ async def record_wanted_prefixes(db: AsyncSession, job_id: str, frame: dict) -> 
     return wanted
 
 
+async def decision_is_stale(db: AsyncSession, job_id: str, node_key: str, entry: dict) -> bool:
+    """§17.1200/§17.1245 — has this decision already been spent on an attempt?
+
+    The record carries the moment the operator answered. If the node has been
+    written since — it ran, it failed, it was reopened — the answer belongs to
+    that past attempt and the step must be asked about again. Anything
+    unparseable counts as stale: asking once more costs a click, the other way
+    round marks a machine-changing step done without running it.
+
+    §17.1245 — this lived in `execution_agent` and only `_hand_back_for_approval`
+    used it. `pending_hands_on`, three functions below here, skipped ANY node with
+    a recorded decision and never asked whether that decision was spent. Live,
+    ADD111: the operator approved it, the run died on §17.1244's five-second
+    clock, the step was reset — and it could never be offered for approval again,
+    because their approval from the failed attempt was still on the job. One
+    implementation now, called from both.
+    """
+    at = str((entry or {}).get("at") or "")
+    if not at:
+        return True
+    row = (await db.execute(
+        text("SELECT updated_at FROM dag_nodes WHERE job_id = :jid AND node_key = :nk"),
+        {"jid": job_id, "nk": node_key})).mappings().first()
+    if not row:
+        return True
+    try:
+        from datetime import datetime
+        answered = datetime.fromisoformat(at)
+        touched = row["updated_at"]
+        if answered.tzinfo is None or touched is None:
+            return True
+        return touched > answered
+    except Exception as exc:
+        logger.warning("decision_staleness_unreadable job=%s node=%s err=%r", job_id, node_key, exc)
+        return True
+
+
 async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     """The first dep-satisfied pending node that does host work (§17.1183)
     and has no recorded decision — the step the run would claim next."""
@@ -244,7 +281,10 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     )).mappings().all()
     for r in rows:
         node = dict(r)
-        if node["node_key"] in decided:
+        # §17.1245 — a decision is consumed by the attempt it authorised. Skip the
+        # node only while that answer still belongs to THIS attempt.
+        _entry = decided.get(node["node_key"])
+        if _entry is not None and not await decision_is_stale(db, job_id, node["node_key"], _entry):
             continue
         if str(node.get("node_type") or "") == "decision":
             continue

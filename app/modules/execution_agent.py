@@ -2638,32 +2638,14 @@ async def _pause_for_decision(job_id: str) -> dict | None:
 
 
 async def _decision_is_stale(db: AsyncSession, job_id: str, node_key: str, entry: dict) -> bool:
-    """§17.1200 — has this decision already been spent on an attempt?
+    """§17.1245 — delegates to `supervised_runs.decision_is_stale`.
 
-    The record carries the moment the operator answered. If the node has been
-    written since — it ran, or failed, or was reopened — the answer belongs to
-    that past attempt and the step must be asked about again. Anything
-    unparseable counts as stale: asking once more costs a click, while the
-    other way round marks a machine-changing step done without running it.
+    The rule lived here and only this file used it, while `pending_hands_on` in
+    supervised_runs skipped decided nodes without ever asking whether the
+    decision was spent. Name kept for the callers and tests that reference it.
     """
-    at = str((entry or {}).get("at") or "")
-    if not at:
-        return True
-    row = (await db.execute(
-        text("SELECT updated_at, status FROM dag_nodes WHERE job_id = :jid AND node_key = :nk"),
-        {"jid": job_id, "nk": node_key})).mappings().first()
-    if not row:
-        return True
-    try:
-        from datetime import datetime
-        answered = datetime.fromisoformat(at)
-        touched = row["updated_at"]
-        if answered.tzinfo is None or touched is None:
-            return True
-        return touched > answered
-    except Exception as exc:
-        logger.warning("decision_staleness_unreadable job=%s node=%s err=%r", job_id, node_key, exc)
-        return True
+    from app.modules.supervised_runs import decision_is_stale
+    return await decision_is_stale(db, job_id, node_key, entry)
 
 
 async def _hand_back_for_approval(db: AsyncSession, job_id: str, node: dict, tool: str) -> dict | None:

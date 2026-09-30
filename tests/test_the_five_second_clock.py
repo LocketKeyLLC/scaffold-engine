@@ -27,6 +27,7 @@ import inspect
 
 from app.config import settings
 from app.modules import assist_supervised as sup
+from app.modules import supervised_runs as sr
 from app.modules import mcp_client
 
 
@@ -76,3 +77,65 @@ def test_the_runner_timeout_is_named_not_inlined():
     src = inspect.getsource(sup.run_block)
     assert "RUN_COMMAND_TIMEOUT_S" in src
     assert '"timeout_s": 180' not in src
+
+
+# ── §17.1245: an approval must not be consumed by an attempt that failed ──
+
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+
+def _row(updated_at):
+    r = MagicMock()
+    r.mappings.return_value.first.return_value = {"updated_at": updated_at}
+    return r
+
+
+@pytest.mark.asyncio
+async def test_a_decision_is_stale_once_the_node_has_been_written_since():
+    answered = datetime.now(timezone.utc)
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_row(answered + timedelta(seconds=5)))
+    assert await sr.decision_is_stale(db, "j", "ADD111", {"at": answered.isoformat()}) is True
+
+
+@pytest.mark.asyncio
+async def test_a_decision_still_belongs_to_the_attempt_it_authorised():
+    answered = datetime.now(timezone.utc)
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_row(answered - timedelta(seconds=5)))
+    assert await sr.decision_is_stale(db, "j", "ADD111", {"at": answered.isoformat()}) is False
+
+
+@pytest.mark.asyncio
+async def test_anything_unreadable_counts_as_stale():
+    """Asking once more costs a click; the other way round marks a
+    machine-changing step done without running it."""
+    db = AsyncMock(); db.execute = AsyncMock(return_value=_row(None))
+    assert await sr.decision_is_stale(db, "j", "n", {"at": "2026-01-01T00:00:00+00:00"}) is True
+    assert await sr.decision_is_stale(db, "j", "n", {}) is True
+    assert await sr.decision_is_stale(db, "j", "n", {"at": "not a date"}) is True
+    missing = MagicMock(); missing.mappings.return_value.first.return_value = None
+    db.execute = AsyncMock(return_value=missing)
+    assert await sr.decision_is_stale(db, "j", "n", {"at": datetime.now(timezone.utc).isoformat()}) is True
+
+
+def test_pending_hands_on_checks_staleness_not_just_presence():
+    """Live ADD111: approved, the run died on the five-second clock, the step was
+    reset — and it could never be offered for approval again, because the
+    approval from the FAILED attempt was still on the job."""
+    src = inspect.getsource(sr.pending_hands_on)
+    assert "decision_is_stale(" in src
+    assert 'if node["node_key"] in decided:' not in src, "presence alone must not skip a node"
+
+
+def test_there_is_exactly_one_staleness_rule():
+    """It lived in execution_agent and only that file used it — which is how
+    pending_hands_on came to disagree with it."""
+    from app.modules import execution_agent as ea
+    assert "supervised_runs import decision_is_stale" in inspect.getsource(ea._decision_is_stale)
+    body = open("app/modules/supervised_runs.py").read()
+    assert body.count("def decision_is_stale") == 1
+    assert "fromisoformat" not in inspect.getsource(ea._decision_is_stale), "the rule must live in one place"
