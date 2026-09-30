@@ -301,3 +301,107 @@ def test_the_frame_offers_run_for_the_inline_one_liner():
                          ADD110_RUNBOOK, SimpleNamespace(name="pve-runner"), {"allow": ["pct"]})
     assert frame["commands"] == ["pct start 120"]
     assert frame["refused"] == [] and frame["suggested"] == "run"
+
+
+# ── §17.1239: an unreadable check is not evidence against the work ────────
+
+
+_DROP = ("(runner error: mcp server 'pve-runner' tool 'run_supervised': "
+         "MCPError: SSE stream ended without a response)")
+
+
+def test_evidence_means_a_marker_arrived():
+    ran = [{"id": "V1", "command": "pct status 120"}]
+    assert sr._has_evidence("== V1 ==\nstatus: running\n", ran) is True
+    # a marker with nothing under it IS evidence — "the list is empty"
+    assert sr._has_evidence("== V1 ==\n", ran) is True
+    # a marker that never arrived is not
+    assert sr._has_evidence("", ran) is False
+    assert sr._has_evidence("some unrelated text", ran) is False
+    assert sr._has_evidence("== V1 ==\n", []) is False
+
+
+def test_the_probe_report_renders_identically_for_a_recheck():
+    ran = [{"id": "V1", "command": "pct status 120"}, {"id": "V2", "command": "ls /x"}]
+    got = sr._probe_report("== V1 ==\nstatus: running\n", ran)
+    assert "$ pct status 120\nstatus: running" in got
+    assert "$ ls /x\n(no output)" in got
+
+
+@pytest.mark.asyncio
+async def test_a_blank_check_is_retried_once_and_the_second_read_wins(monkeypatch):
+    """Live ADD110: `pct start 120` lost its response, `pct status 120` then
+    printed nothing because the runner was still recovering, the step was
+    recorded failed — and container 120 was running."""
+    monkeypatch.setattr(sr, "_RECHECK_DELAY_S", 0)
+    db = AsyncMock(); claim = MagicMock(); claim.rowcount = 1
+    db.execute = AsyncMock(return_value=claim); db.commit = AsyncMock()
+    spec = SimpleNamespace(name="pve-runner")
+    executed = [{"command": "pct start 120", "ok": False, "exit": None,
+                 "output": _DROP, "unreachable": True}]
+    waiting = {"kind": "run", "node_key": "ADD110", "title": "Start container 120 (caddy-proxy)",
+               "runbook": "## Run this", "commands": ["pct start 120"],
+               "verify": ["pct status 120"], "refused": []}
+    ran = [{"id": "V1", "command": "pct status 120"}]
+    probes = AsyncMock(side_effect=[("", ran), ("== V1 ==\nstatus: running\n", ran)])
+    with patch.object(sr, "channel", AsyncMock(return_value=(spec, {"allow": ["pct"]}))), \
+         patch("app.modules.assist_supervised.gate_block", return_value=(["pct start 120"], [])), \
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=executed)), \
+         patch("app.modules.assist_local_runner.run_probes", probes), \
+         patch.object(sr, "_goal_confirmed", AsyncMock(return_value=True)), \
+         patch.object(sr, "diagnose_failure", AsyncMock(return_value="")):
+        out = await sr.resolve_run(db, "j", "ADD110", "run", waiting)
+    assert probes.await_count == 2, "a blank check must be read again"
+    assert out["outcome"] == "ran" and out["node_status"] == "done"
+    assert out["confirmed_after_drop"] is True
+
+
+@pytest.mark.asyncio
+async def test_still_blank_after_the_recheck_says_UNKNOWN_not_failed_verification(monkeypatch):
+    """The wording matters: claiming the checks "did NOT show its goal met" when
+    they printed nothing at all is a false statement about the machine."""
+    monkeypatch.setattr(sr, "_RECHECK_DELAY_S", 0)
+    db = AsyncMock(); claim = MagicMock(); claim.rowcount = 1
+    db.execute = AsyncMock(return_value=claim); db.commit = AsyncMock()
+    spec = SimpleNamespace(name="pve-runner")
+    executed = [{"command": "pct start 120", "ok": False, "exit": None,
+                 "output": _DROP, "unreachable": True}]
+    waiting = {"kind": "run", "node_key": "ADD110", "title": "t", "runbook": "r",
+               "commands": ["pct start 120"], "verify": ["pct status 120"], "refused": []}
+    ran = [{"id": "V1", "command": "pct status 120"}]
+    goal = AsyncMock(return_value=True)          # would pass if it were consulted
+    with patch.object(sr, "channel", AsyncMock(return_value=(spec, {"allow": ["pct"]}))), \
+         patch("app.modules.assist_supervised.gate_block", return_value=(["pct start 120"], [])), \
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=executed)), \
+         patch("app.modules.assist_local_runner.run_probes", new=AsyncMock(return_value=("", ran))), \
+         patch.object(sr, "_goal_confirmed", goal), \
+         patch.object(sr, "diagnose_failure", AsyncMock(return_value="")):
+        out = await sr.resolve_run(db, "j", "ADD110", "run", waiting)
+    assert out["outcome"] == "failed"
+    assert "UNKNOWN" in out["reason"]
+    assert "came back empty twice" in out["reason"]
+    assert "did NOT show its goal met" not in out["reason"]
+    goal.assert_not_awaited()                    # nothing to judge
+
+
+@pytest.mark.asyncio
+async def test_a_check_that_answers_is_not_read_twice(monkeypatch):
+    monkeypatch.setattr(sr, "_RECHECK_DELAY_S", 0)
+    db = AsyncMock(); claim = MagicMock(); claim.rowcount = 1
+    db.execute = AsyncMock(return_value=claim); db.commit = AsyncMock()
+    spec = SimpleNamespace(name="pve-runner")
+    executed = [{"command": "pct start 120", "ok": False, "exit": None,
+                 "output": _DROP, "unreachable": True}]
+    waiting = {"kind": "run", "node_key": "X", "title": "t", "runbook": "r",
+               "commands": ["pct start 120"], "verify": ["pct status 120"], "refused": []}
+    ran = [{"id": "V1", "command": "pct status 120"}]
+    probes = AsyncMock(return_value=("== V1 ==\nstatus: stopped\n", ran))
+    with patch.object(sr, "channel", AsyncMock(return_value=(spec, {"allow": ["pct"]}))), \
+         patch("app.modules.assist_supervised.gate_block", return_value=(["pct start 120"], [])), \
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=executed)), \
+         patch("app.modules.assist_local_runner.run_probes", probes), \
+         patch.object(sr, "_goal_confirmed", AsyncMock(return_value=False)), \
+         patch.object(sr, "diagnose_failure", AsyncMock(return_value="")):
+        out = await sr.resolve_run(db, "j", "X", "run", waiting)
+    assert probes.await_count == 1
+    assert out["outcome"] == "failed" and "did NOT show its goal met" in out["reason"]

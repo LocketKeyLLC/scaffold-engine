@@ -23,6 +23,7 @@ channel is open: hands-on steps are executable — one approval each.
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -1264,17 +1265,34 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     indeterminate = bool(dropped) and not hard_fail
     verify_out = ""
     confirmed_after_drop = False
+    unreadable = False
     refuted: list[dict] = []
     if verify_cmds and (ok or indeterminate):
         try:
             pasted, ran = await _lr.run_probes(spec, [{"id": f"V{i}", "command": c} for i, c in enumerate(verify_cmds, 1)])
-            verify_out = "\n".join(
-                f"$ {e['command']}\n" + (re.search(rf"== {e['id']} ==\n(.*?)(?=\n== V\d+ ==|\Z)", pasted, re.S).group(1).rstrip()
-                                         if re.search(rf"== {e['id']} ==", pasted) else "(no output)")
-                for e in ran)
+            verify_out = _probe_report(pasted, ran)
             if indeterminate:
-                confirmed_after_drop = await _goal_confirmed(
-                    str(waiting.get("title") or node_key), verify_cmds, pasted)
+                # §17.1239 — the runner was still recovering from the dropped
+                # stream, so the check that would settle it came back EMPTY.
+                # Live, ADD110: `pct start 120` lost its response, `pct status
+                # 120` then printed nothing, the step was recorded failed — and
+                # the container was running. An unreadable check is not evidence
+                # against the work (§17.1204's rule, applied to our own probe);
+                # give the channel one more moment and ask again.
+                if not _has_evidence(pasted, ran):
+                    await asyncio.sleep(_RECHECK_DELAY_S)
+                    pasted2, ran2 = await _lr.run_probes(
+                        spec, [{"id": f"V{i}", "command": c} for i, c in enumerate(verify_cmds, 1)])
+                    if _has_evidence(pasted2, ran2):
+                        pasted, ran = pasted2, ran2
+                        verify_out = _probe_report(pasted, ran)
+                        logger.warning("verify_recheck_got_evidence job=%s node=%s", job_id, node_key)
+                    else:
+                        unreadable = True
+                        logger.warning("verify_recheck_still_blank job=%s node=%s", job_id, node_key)
+                if not unreadable:
+                    confirmed_after_drop = await _goal_confirmed(
+                        str(waiting.get("title") or node_key), verify_cmds, pasted)
             elif ok:
                 # §17.1233 — and judge them when the commands "succeeded" too.
                 #
@@ -1340,7 +1358,11 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     reason = mask_secrets(
         (f"the connection to {spec.name} dropped while `{dropped[-1]['command'][:80]}` was running "
          f"({dropped[-1]['output'][:120]}). "
-         + ("The step's own verify checks were then read back off the machine and did NOT show its goal "
+         + ("The step's own verify checks could not be read either — they came back empty twice — so "
+            "whether it ran on the machine is UNKNOWN. Read the state yourself before retrying: a "
+            "repeat of a write that already happened is not a retry."
+            if unreadable else
+            "The step's own verify checks were then read back off the machine and did NOT show its goal "
             "met, so it is recorded as stopped." if verify_cmds else
             "Whether it ran on the machine is UNKNOWN and this step carries no verify check to settle it — "
             "check before retrying, because a repeat of a write that already happened is not the same as a "
@@ -1403,6 +1425,33 @@ def contradicted(verdicts: list[dict]) -> list[dict]:
     deliberate: evidence AGAINST downgrades, absence of evidence does not.
     """
     return [v for v in verdicts or [] if str(v.get("verdict") or "") == "contradicted"]
+
+
+#: §17.1239 — how long to let a dropped channel settle before re-reading.
+_RECHECK_DELAY_S = 4
+
+
+def _probe_report(pasted: str, ran: list[dict]) -> str:
+    """The `$ cmd` / output block the operator reads. One renderer, so a
+    re-check renders identically to the first read."""
+    out = []
+    for e in ran or []:
+        m = re.search(rf"== {e['id']} ==\n(.*?)(?=\n== V\d+ ==|\Z)", pasted or "", re.S)
+        out.append(f"$ {e['command']}\n" + (m.group(1).rstrip() if m else "(no output)"))
+    return "\n".join(out)
+
+
+def _has_evidence(pasted: str, ran: list[dict]) -> bool:
+    """Did the probes actually say anything?
+
+    A marker present with nothing under it is evidence ("the list is empty");
+    a marker that never arrived is not. All-missing means the channel did not
+    answer, which must not be read as the work having failed (§17.1204).
+    """
+    for e in ran or []:
+        if re.search(rf"== {e['id']} ==", pasted or ""):
+            return True
+    return False
 
 
 async def _goal_confirmed(title: str, verify_cmds: list[str], pasted: str) -> bool:
