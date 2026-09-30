@@ -70,11 +70,25 @@ export function renderTheater(container, jobId, ctx = {}) {
   const nodeState = new Map(); // node_key -> {status, title, tool, output}
   let currentKey = null;
 
-  const runBtn = el("button", { class: "btn btn-primary", text: isAssist() ? "✦ Start assist" : "▶ Run all", onClick: () => toggleRun() });
+  // §17.1206 — ONE source for what the run button is called, because the page
+  // also tells the operator to press it by name. It used to say "press ▶ to
+  // begin" as a fixed string while this label was mode-aware, so in assist mode
+  // the only button on the page read "✦ Start assist" and the instruction named
+  // a ▶ that was nowhere: *"it states 'Nothing running-press to begin' BUT THE
+  // BUTTON IS ABSOLUTELY NO WHERE ON THE PAGE AT ALL."* §17.854 kept the BUTTON
+  // honest when the mode toggles and never touched the sentence about it.
+  const runLabel = () => (isAssist() ? "✦ Start assist" : "▶ Run all");
+  const idleStageText = () => `Nothing running — press ${runLabel()} to begin.`;
+
+  const runBtn = el("button", { class: "btn btn-primary", text: runLabel(), onClick: () => toggleRun() });
   // §17.854 (audit S4) — keep the run button honest if the mode toggles while
   // the theater is open (only when idle; a running label reads "■ Stop").
   const offExecMode = onExecModeChange(() => {
-    if (!running) runBtn.textContent = isAssist() ? "✦ Start assist" : "▶ Run all";
+    if (!running) {
+      runBtn.textContent = runLabel();
+      // and the sentence that names it, or they disagree again
+      if (stageTitle.textContent.startsWith("Nothing running")) stageTitle.textContent = idleStageText();
+    }
   });
   const statusPill = el("span", {});
 
@@ -111,7 +125,7 @@ export function renderTheater(container, jobId, ctx = {}) {
   }
 
   const nodeListEl = el("div", { class: "theater-nodes" }, loading("Loading nodes…"));
-  const stageTitle = el("div", { class: "stage-node-title dim", text: "Nothing running — press ▶ to begin." });
+  const stageTitle = el("div", { class: "stage-node-title dim", text: idleStageText() });
   const stageBody = el("div", { class: "stage-body md" });
   const logEl = el("div", { class: "theater-log" });
   const summaryEl = el("div", { class: "theater-summary hidden" });
@@ -164,6 +178,71 @@ export function renderTheater(container, jobId, ctx = {}) {
     const line = el("div", { class: `log-line ${cls || ""}` }, el("span", { class: "log-ico", text: eventIcon(ev) }), el("span", { class: "log-txt", text }));
     logEl.append(line);
     logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // §17.1207 — WHERE THIS JOB STANDS, whenever nothing is streaming.
+  //
+  // The stage panel was live-only: with no run attached it said "Nothing
+  // running" and showed an empty body, so a job that had stopped told the
+  // operator nothing about why or what was left. *"when trying to see what its
+  // actually doing it shows nothing. No information other then whats 'qued' not
+  // even what its actually working on. Leaving the user in a neverending state
+  // of limbo."*
+  //
+  // Live, this job: status `completed`, 61 done, 47 skipped, 21 pending, 2
+  // failed — and ZERO of the pending could start, because every one of them
+  // waits on the two that failed. None of that was on the page. The payload has
+  // carried all of it since §17.1135/§17.1007; the surface simply never asked.
+  function renderStanding() {
+    const all = [...nodeState.entries()].sort((a, b) => (a[1].order ?? 0) - (b[1].order ?? 0));
+    const failed = all.filter(([, n]) => n.status === "failed");
+    const pending = all.filter(([, n]) => n.status === "pending");
+    const ready = pending.filter(([, n]) => n.depsMet);
+    const done = all.filter(([, n]) => n.status === "done").length;
+    const skipped = all.filter(([, n]) => n.status === "skipped").length;
+    if (!all.length) return;
+
+    stageTitle.classList.add("dim");
+    stageTitle.textContent = failed.length || pending.length
+      ? "Where this job stands" : idleStageText();
+
+    // The one sentence that answers "am I waiting on the engine, or is it
+    // waiting on me" — which is the whole of the limbo.
+    const verdict = failed.length && !ready.length && pending.length
+      ? `Stopped. ${failed.length} step${failed.length === 1 ? "" : "s"} failed and the remaining `
+        + `${pending.length} all wait on ${failed.length === 1 ? "it" : "them"} — nothing can start until `
+        + `${failed.length === 1 ? "it is" : "they are"} sorted out.`
+      : ready.length
+        ? `${ready.length} step${ready.length === 1 ? "" : "s"} can run now`
+          + (failed.length ? `, and ${failed.length} failed earlier.` : ` — press ${runLabel()}.`)
+        : pending.length
+          ? `${pending.length} step${pending.length === 1 ? "" : "s"} left, none of them ready yet.`
+          : "Every step is done or skipped.";
+
+    const kids = [
+      el("p", { class: "stage-verdict", text: verdict }),
+      el("p", { class: "sub", text: `${done} done · ${skipped} skipped · ${pending.length} pending · ${failed.length} failed` }),
+    ];
+
+    if (failed.length) {
+      kids.push(el("p", { class: "sub cap-line", text: "What stopped it:" }));
+      kids.push(el("ul", { class: "stage-standing" }, ...failed.map(([key, n]) => el("li", {},
+        el("span", { class: "mono", text: key }),
+        el("span", { text: " · " + (n.title || "") }),
+        n.reason ? el("div", { class: "stage-reason mono", text: n.reason }) : null))));
+    }
+    if (pending.length) {
+      const shown = (ready.length ? ready : pending).slice(0, 6);
+      kids.push(el("p", { class: "sub cap-line",
+        text: ready.length ? "Ready to run:" : "Waiting on the steps above:" }));
+      kids.push(el("ul", { class: "stage-standing" }, ...shown.map(([key, n]) => el("li", {},
+        el("span", { class: "mono", text: key }),
+        el("span", { text: " · " + (n.title || "") })))));
+      if (pending.length > shown.length) {
+        kids.push(el("p", { class: "sub", text: `…and ${pending.length - shown.length} more, in the list on the left.` }));
+      }
+    }
+    mount(stageBody, ...kids);
   }
 
   function renderNodes() {
@@ -300,9 +379,14 @@ export function renderTheater(container, jobId, ctx = {}) {
           status: n.status, title: n.title, tool: n.tool,
           order: n.execution_order, output: "", reason: n.failure_reason || "",
           evidence: n.evidence || null,  // §17.1040
+          // §17.1207 — whether this step COULD start. Carried in the payload
+          // since §17.1135 and read by nothing, and it is the difference
+          // between "21 steps left" and "21 steps that cannot move".
+          depsMet: !!n.deps_met, actionable: !!n.actionable,
         });
       renderNodes();
       setProgress(data.progress);
+      if (!running) renderStanding();
       // §17.1007 — a run is in flight for this job RIGHT NOW: attach to it.
       //
       // This is the payoff of detaching. Open the Run tab on a job that is
@@ -327,7 +411,8 @@ export function renderTheater(container, jobId, ctx = {}) {
         // Row says running, no live task — the process restarted mid-run.
         // Say so honestly and let the operator decide to pick it up.
         log("warning",
-          "This job is marked running but nothing is executing — the engine restarted mid-run. Press ▶ to carry on with the remaining steps.",
+          "This job is marked running but nothing is executing — the engine restarted mid-run. "
+          + `Press ${runLabel()} to carry on with the remaining steps.`,
           "warn");
       }
       // §17.1009 — replay what a run that is no longer in flight actually did.

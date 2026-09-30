@@ -42,7 +42,7 @@ export default function machines(container, params, opts = {}) {
       return;
     }
     if (disposed) return;
-    mount(body, connectCard(d), channelCard(d), secretsCard(d));
+    mount(body, connectCard(d), controlCard(d), activityCard(d), channelCard(d), secretsCard(d));
   }
 
   // ── 1. the machine ─────────────────────────────────────────────────
@@ -50,10 +50,18 @@ export default function machines(container, params, opts = {}) {
     const r = d.runner || {};
     const host = el("input", { class: "input", type: "text", placeholder: "192.168.1.156 or a hostname", value: r.host || "" });
     const port = el("input", { class: "input input-sm", type: "number", value: String(r.port || 8790) });
-    const status = el("p", { class: "sub cap-line", text: d.connected ? `connected as ${r.name} at ${r.endpoint}` : "no machine connected yet" });
+    const status = el("p", { class: "sub cap-line",
+      // §17.1205 — a paused machine is still connected. Reporting it as "no
+      // machine connected yet" would send the operator to re-connect it.
+      text: d.paused ? `paused — ${r.name} at ${r.endpoint} is still there, the engine is not using it`
+        : d.connected ? `connected as ${r.name} at ${r.endpoint}` : "no machine connected yet" });
     const result = el("p", { class: "sub cap-line", text: "" });
 
-    const save = el("button", { class: "btn btn-primary", text: d.connected ? "Re-point and test" : "Connect and test" });
+    // §17.1205 — a PAUSED machine is connected, so the button must not offer to
+    // "Connect" it: this is the re-point action either way, and inviting a
+    // connect implies the address was never saved.
+    const known = d.connected || d.paused;
+    const save = el("button", { class: "btn btn-primary", text: known ? "Re-point and test" : "Connect and test" });
     save.addEventListener("click", async () => {
       const h = host.value.trim();
       if (!h) { toast("Enter the machine's address first.", "err"); return; }
@@ -83,7 +91,121 @@ export default function machines(container, params, opts = {}) {
         el("label", { class: "sub", text: "Address" }), host,
         el("label", { class: "sub", text: "Port" }), port),
       status, result,
-      el("div", { class: "row row-wrap cap-actions" }, save, d.connected ? test : null));
+      el("div", { class: "row row-wrap cap-actions" }, save, known ? test : null));
+  }
+
+  // ── 1b. §17.1205 — stop, start, and ask it something ───────────────
+  //
+  // The page could connect a machine and test it, and nothing else: no way to
+  // stop it, no way to ask it anything, no way to see what it had been doing.
+  //
+  // "Stop" is deliberately the ENGINE's use of it, not the service. The runner
+  // refuses commands touching its own service by design (its denylist names
+  // `local-runner-mcp`), and the engine has no other channel to the machine —
+  // so the honest control here is the registry flag, and the real systemctl
+  // lines are given to run where they can actually run.
+  function controlCard(d) {
+    if (!d.runner) return null;
+    const r = d.runner;
+    const out = el("pre", { class: "md-pre machines-out", text: "" });
+
+    const pause = el("button", { class: d.paused ? "btn btn-primary" : "btn btn-ghost",
+                                 text: d.paused ? "▶ Resume" : "⏸ Pause" });
+    pause.addEventListener("click", async () => {
+      if (!d.paused && !(await askConfirm(
+        "The engine will stop sending it anything — state checks and approved blocks included. "
+        + "The helper keeps running there and nothing is forgotten. You can resume from here.",
+        { title: "Pause this machine?", confirmText: "Pause" }))) return;
+      pause.disabled = true;
+      try {
+        await api.post(`/setup/machines/pause?paused=${d.paused ? "false" : "true"}`, {});
+        toast(d.paused ? "Resumed." : "Paused — the engine will not use it.", "ok");
+        await load();
+      } catch (e) { toast((e && e.message) || "Could not change it", "err"); pause.disabled = false; }
+    });
+
+    const svc = `systemctl status local-runner-mcp\nsystemctl restart local-runner-mcp\nsystemctl stop local-runner-mcp`;
+    const svcPre = el("pre", { class: "md-pre machines-install", text: svc });
+    const copySvc = el("button", { class: "btn btn-sm btn-ghost", text: "⧉ copy" });
+    copySvc.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(svc); toast("Copied — run it on the machine.", "ok"); }
+      catch { toast("Select the lines and copy them.", "err"); }
+    });
+
+    const cmd = el("input", { class: "input", type: "text",
+                              placeholder: "pvesm status", value: "" });
+    const run = el("button", { class: "btn", text: "Ask it" });
+    async function ask() {
+      const c = cmd.value.trim();
+      if (!c) { toast("Type a command that only reads.", "err"); return; }
+      run.disabled = true; const was = run.textContent; run.textContent = "Asking…";
+      out.textContent = "";
+      try {
+        const res = await api.post("/setup/machines/run", { command: c });
+        out.textContent = res.ran ? (res.output || "(it printed nothing)")
+          : `did not run — ${res.why}\n\n${res.output || ""}`.trim();
+        if (!res.ran) toast(res.why, "err");
+      } catch (e) {
+        // a 422 from the read-only gate is the useful case: say what it said
+        const m = (e && e.message) || "it did not run";
+        out.textContent = m;
+        toast(m, "err");
+      }
+      run.disabled = false; run.textContent = was;
+      await refreshActivity();
+    }
+    run.addEventListener("click", ask);
+    cmd.addEventListener("keydown", (ev) => { if (ev.key === "Enter") ask(); });
+
+    return el("div", { class: "card card-pad" },
+      el("h3", { class: "cap-title", text: "Start, stop, and ask it something" }),
+      el("p", { class: "cap-summary", text: d.paused
+        ? "Paused: the engine sends this machine nothing. The helper is still running there — resume and it picks straight back up."
+        : "Pausing stops the engine using this machine, without forgetting it or touching the helper running there." }),
+      el("div", { class: "row row-wrap cap-actions" }, pause),
+      el("p", { class: "sub cap-line", text: "To control the service itself, run these on the machine — the engine will not stop its own runner:" }),
+      svcPre,
+      el("div", { class: "row row-wrap cap-actions" }, copySvc),
+      el("p", { class: "sub cap-line", text: "Ask it something now. Read-only only: anything that could change the machine is refused here before it is sent." }),
+      el("div", { class: "row row-wrap cap-actions" }, cmd, run),
+      out);
+  }
+
+  // ── 1c. §17.1205 — what it has been doing ──────────────────────────
+  const actBody = el("div", {});
+
+  async function refreshActivity() {
+    let a;
+    try { a = await api.get("/setup/machines/activity"); }
+    catch { mount(actBody, el("p", { class: "sub cap-line", text: "could not read the activity" })); return; }
+    if (disposed) return;
+    const rows = a.entries || [];
+    if (!rows.length) {
+      mount(actBody, el("p", { class: "sub cap-line",
+        text: "Nothing yet. Commands appear here as the engine runs them — state checks, look-ups, and blocks you approve." }));
+      return;
+    }
+    mount(actBody,
+      el("p", { class: "sub cap-line", text: `${a.count} since the engine started`
+        + (a.refused ? `, ${a.refused} refused` : "") + (a.running ? ` · ${a.running} running now` : "") }),
+      el("ul", { class: "machines-activity" }, ...rows.map((e) => el("li", { class: "sub" },
+        el("span", { class: "dim", text: (e.at || "").slice(11, 19) + " " }),
+        el("span", { text: (e.ran ? "✓ " : "⨯ ") + e.command }),
+        el("span", { class: "dim", text: e.ran
+          ? ` — ${e.kind === "write" ? "approved block" : "read"}${e.lines ? `, ${e.lines} line${e.lines === 1 ? "" : "s"}` : ""}`
+          : ` — ${e.why}` })))));
+  }
+
+  function activityCard(d) {
+    if (!d.runner) return null;
+    refreshActivity();
+    const again = el("button", { class: "btn btn-sm btn-ghost", text: "Refresh" });
+    again.addEventListener("click", refreshActivity);
+    return el("div", { class: "card card-pad" },
+      el("h3", { class: "cap-title", text: "What it has been doing" }),
+      el("p", { class: "cap-summary", text: "Every command the engine has sent this machine, newest first. Kept in memory, so it starts over when the engine restarts." }),
+      actBody,
+      el("div", { class: "row row-wrap cap-actions" }, again));
   }
 
   function say(node, probe) {

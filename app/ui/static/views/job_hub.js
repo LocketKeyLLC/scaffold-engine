@@ -217,14 +217,20 @@ function renderDrawing(container, jobId, job) {
 // ── Run ──────────────────────────────────────────────────────────────
 function renderRun(container, jobId, job, ctx, opts = {}) {
   if (!ASSIST_STATUSES.has(job.status)) return renderTheater(container, jobId, ctx);
-  // Assist-driven job: resolve the (idempotent, unique-per-job) session and
-  // embed the walkthrough.
+  // §17.1209 — RESOLVE the session, do not start one. This was
+  // `POST /assist/start` on the comment that it was "idempotent,
+  // unique-per-job". It is idempotent about creating a session and about
+  // nothing else: the resume path runs §17.1052's stranded-session repair,
+  // which finalizes a session whose steps are all terminal — and §17.1208
+  // showed what that did to the job behind it. Opening this page took the
+  // operator's job from `blocked` to `completed` over 21 pending and 2 failed
+  // nodes. Looking at a job is a read; only a click starts anything.
   let disposed = false;
   let childDispose = null;
   mount(container, loading("Opening the walkthrough…"));
   (async () => {
     try {
-      const s = await api.post("/assist/start", { job_id: jobId });
+      const s = await api.get(`/assist/for-job/${encodeURIComponent(jobId)}`);
       if (disposed) return;
       const sid = s && (s.session_id || s.id);
       if (!sid) {

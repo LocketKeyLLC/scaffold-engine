@@ -639,7 +639,7 @@ async def compute_deliverable_kind(
 
 
 def _prepend_assist_completed_banner(
-    text: str | None, step_count: int,
+    text: str | None, step_count: int, *, unfinished: int = 0, failed: int = 0,
 ) -> str | None:
     """§17.516 — positive header for a deliverable compiled from an Assist Mode
     run. The operator executed and verified each step on their own systems, so
@@ -647,17 +647,35 @@ def _prepend_assist_completed_banner(
     — and the §17.506 PLAN-NOT-EXECUTED banner must be suppressed for it. The
     deliverable below is synthesized from the evidence the operator submitted.
 
+    §17.1208 — unless it is not finished. `handed_off` is terminal for a
+    session but says nothing about whether the work succeeded, so this banner
+    went over the top of a job with 21 pending and 2 FAILED nodes and called it
+    Completed. The step count was never the lie — 61 steps really were executed
+    — the word "Completed" was, so the header says what is actually left rather
+    than swapping in the PLAN-NOT-EXECUTED banner, which would be just as untrue.
+
     Returns the input unchanged when ``text`` is None.
     """
     if text is None:
         return text
     plural = "step" if step_count == 1 else "steps"
-    banner = (
-        f"> ✅ **Completed via Assist Mode** — you executed and verified "
-        f"{step_count} {plural} on your own systems. The summary below is "
-        f"compiled from the evidence you submitted."
-        f"\n\n---\n\n"
-    )
+    if unfinished > 0:
+        left = f"{unfinished} step{'' if unfinished == 1 else 's'} did not finish"
+        if failed:
+            left += f" ({failed} failed)"
+        banner = (
+            f"> ⚠️ **Partly done via Assist Mode** — you executed and verified "
+            f"{step_count} {plural} on your own systems, and {left}. What follows "
+            f"is what was built so far, not the whole plan."
+            f"\n\n---\n\n"
+        )
+    else:
+        banner = (
+            f"> ✅ **Completed via Assist Mode** — you executed and verified "
+            f"{step_count} {plural} on your own systems. The summary below is "
+            f"compiled from the evidence you submitted."
+            f"\n\n---\n\n"
+        )
     return banner + text
 
 
@@ -859,7 +877,12 @@ async def _compile_output(
         text_value = await _maybe_compile_value_check(job_id, text_value, nodes, db=db)
         banner_text = _prepend_skipped_banner(text_value, skipped_count, total_count)
         if assist_completed:
-            banner_text = _prepend_assist_completed_banner(banner_text, done_count)
+            # §17.1208 — the nodes this deliverable does NOT cover, counted from
+            # the same list the deliverable is built from.
+            _unfinished = [n for n in nodes if n.get("status") not in ("done", "skipped")]
+            banner_text = _prepend_assist_completed_banner(
+                banner_text, done_count, unfinished=len(_unfinished),
+                failed=sum(1 for n in _unfinished if n.get("status") == "failed"))
         else:
             banner_text = _prepend_plan_only_banner(
                 banner_text, runbook_count, total_count, job_id,

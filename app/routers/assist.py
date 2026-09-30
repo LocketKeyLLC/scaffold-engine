@@ -374,6 +374,41 @@ async def assist_start(
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+# §17.1209 — declared BEFORE `/assist/{session_id}` for the same reason as
+# `candidates` below: the literal path must win the route match.
+@router.get("/assist/for-job/{job_id}")
+async def assist_session_for_job(
+    job_id: UuidPath,
+    db=Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1209 — resolve a job's assist session WITHOUT touching it.
+
+    Opening a job in the console used to `POST /assist/start` to learn the
+    session id, on the comment that it was "idempotent, unique-per-job". It is
+    idempotent about *creating* a session and not about anything else: the
+    resume path runs §17.1052's stranded-session repair, which finalizes a
+    session whose steps are all terminal — and §17.1208 showed what that then
+    did to the job. So merely LOOKING at a job could finish it. Live, on this
+    operator's job, opening the page took it from `blocked` to `completed`
+    across 21 pending and 2 failed nodes.
+
+    A page view is a read. This is the read: the session id and its status, or
+    404 when the job has none. Starting one stays an explicit POST.
+    """
+    await assert_visible(db, principal, str(job_id),
+                         detail=f"job not found: {job_id}")
+    row = (await db.execute(text(
+        "SELECT id, status, current_node_key FROM assist_sessions "
+        " WHERE job_id = :jid ORDER BY updated_at DESC LIMIT 1"
+    ), {"jid": str(job_id)})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404,
+                            detail=f"no assist session for job {job_id}")
+    return {"session_id": str(row["id"]), "status": row["status"],
+            "current_node_key": row["current_node_key"]}
+
+
 # §17.626 — declared BEFORE `/assist/{session_id}` so the literal path wins the
 # route match (FastAPI matches in declaration order; otherwise `candidates`
 # binds to `{session_id}`).
