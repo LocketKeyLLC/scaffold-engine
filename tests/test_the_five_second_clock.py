@@ -139,3 +139,27 @@ def test_there_is_exactly_one_staleness_rule():
     body = open("app/modules/supervised_runs.py").read()
     assert body.count("def decision_is_stale") == 1
     assert "fromisoformat" not in inspect.getsource(ea._decision_is_stale), "the rule must live in one place"
+
+
+# ── §17.1246: pveam reads go through pmxcfs too ───────────────────────────
+
+
+def test_every_proxmox_tool_whose_reads_need_root_is_listed():
+    """`pveam` was missing, and it is the one that bit: ADD111 needed the current
+    Debian template name, only `pveam available` gives it, and the runner's read
+    came back with the pmxcfs signature this set exists to predict. Because
+    `pveam` was not listed, no read grant for it was ever offered — so the
+    install line the engine shows the operator could not have fixed the step."""
+    from app.modules.engine_setup import _PVE_TOOLS
+    for tool in ("qm", "pct", "pveam", "pvesm", "pvesh", "pveum", "pvecm", "pvenode"):
+        assert tool in _PVE_TOOLS, f"{tool} reads through /etc/pve and needs root"
+
+
+def test_the_pmxcfs_signature_is_what_marks_a_privilege_wall():
+    """The refusal does not contain the word "permission", which is why §17.1198
+    matches on the signature instead — and it has to keep doing so."""
+    from app.modules.supervised_runs import _NEEDS_ROOT_RE
+    real = ("update successful\nipcc_send_rec[1] failed: Unknown error -1\n"
+            "Unable to load access control list: Unknown error -1\n")
+    assert _NEEDS_ROOT_RE.search(real)
+    assert "permission" not in real.lower()
