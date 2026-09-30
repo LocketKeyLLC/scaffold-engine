@@ -68,11 +68,15 @@ _STORAGE_NAMES = re.compile(r"^(STORAGE|STORAGE_NAME|STORAGE_ID|POOL|TARGET_STOR
 # NOT a service: `PROXMOX_NODE_IP` is the HOST's address, and matching it against
 # a guest called "node" would be §17.1189(E) all over again.
 _CTID_NAMES = re.compile(r"^([A-Z][A-Z0-9_]*?)_(?:CTID|CT_ID|CONTAINER_ID|LXC_ID|VMID)$")
-_IP_NAMES = re.compile(r"^([A-Z][A-Z0-9_]*?)_(?:IP|IP_ADDRESS|ADDR)$")
+# `_HOST`/`_HOSTNAME` count: a drafter names the same value either way
+# (`PROWLARR_IP` one draw, `PROWLARR_HOST` the next), and on this LAN the guest's
+# ADDRESS is the answer both times — a bare container name does not resolve, and
+# the ledger cheerfully offers "prowlarr" as if it did.
+_IP_NAMES = re.compile(r"^([A-Z][A-Z0-9_]*?)_(?:IP|IP_ADDRESS|IPADDR|ADDR|ADDRESS|HOST|HOSTNAME)$")
 _APIKEY_NAMES = re.compile(r"^([A-Z][A-Z0-9_]*?)_API_KEY$")
 _NODE_NAMES = re.compile(r"^(?:PROXMOX_)?NODE(?:_NAME)?$")
 #: names for the HOST's own address, which `pct list` cannot answer.
-_HOST_IP_NAMES = re.compile(r"^(?:PROXMOX_)?(?:NODE|HOST|PVE|SERVER)_(?:IP|IP_ADDRESS|ADDR)$")
+_HOST_IP_NAMES = re.compile(r"^(?:PROXMOX_)?(?:NODE|HOST|PVE|SERVER)_(?:IP|IP_ADDRESS|IPADDR|ADDR|ADDRESS)$")
 
 #: words that name no service. A placeholder made only of these is about the
 #: host or is simply unqualified, and must draw nothing from the guest list.

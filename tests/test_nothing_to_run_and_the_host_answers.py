@@ -335,3 +335,36 @@ async def test_a_host_shaped_name_never_probes_a_guest():
 def test_loopback_is_never_offered():
     assert rd._all_ipv4("127.0.0.1 10.1.1.1 10.1.1.1") == ["10.1.1.1"]
     assert rd._all_ipv4("") == []
+
+
+# ── §17.1229c: the drafter names the same value _HOST or _IP ──────────────
+
+
+@pytest.mark.asyncio
+async def test_a_service_HOST_placeholder_is_answered_with_the_guests_address():
+    """Live, on the redraft after §17.1229b: the drafter called them
+    `PROWLARR_HOST`/`RADARR_HOST`/`SONARR_HOST`, which matched no pattern, and
+    the ledger offered the bare name 'prowlarr' as if it resolved on this LAN."""
+    reads = {
+        "pct list": PCT_LIST,
+        "pct exec 105 -- hostname -I": "192.168.1.45\n",
+        "pct exec 107 -- hostname -I": "192.168.1.47\n",
+    }
+    inputs = [{"name": "PROWLARR_HOST"}, {"name": "RADARR_HOSTNAME"}]
+    with patch.object(rd, "_read", AsyncMock(side_effect=lambda spec, c: reads.get(c, ""))):
+        await rd._discover_guest_inputs(inputs, SimpleNamespace(name="pve-runner"))
+    assert inputs[0]["value"] == "192.168.1.45"
+    assert inputs[1]["value"] == "192.168.1.47"
+
+
+def test_every_shape_the_drafter_has_actually_used_is_covered():
+    """The two live draws named the same value differently; both must match."""
+    for name in ("PROWLARR_IP", "PROWLARR_HOST", "PROWLARR_HOSTNAME",
+                 "PROWLARR_ADDRESS", "PROWLARR_CONTAINER_IP"):
+        assert rd._IP_NAMES.match(name), name
+        assert not rd._HOST_IP_NAMES.match(name), name
+    for name in ("PROXMOX_NODE_IP", "HOST_IP", "PVE_ADDR", "NODE_ADDRESS"):
+        assert rd._HOST_IP_NAMES.match(name), name
+    # a bare generic word is nobody's service and nobody's host address
+    assert not rd._IP_NAMES.match("HOST")
+    assert not rd._HOST_IP_NAMES.match("HOST")
