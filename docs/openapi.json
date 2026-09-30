@@ -3764,6 +3764,34 @@
         "title": "NodeResetInput",
         "type": "object"
       },
+      "NodeSatisfiedInput": {
+        "description": "§17.1226 — body for POST /nodes/{job_id}/{node_key}/satisfied.",
+        "properties": {
+          "edited_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited By"
+          },
+          "evidence": {
+            "description": "What shows the step's goal is already met — the commands read back and their output. Written into the node.",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Evidence",
+            "type": "string"
+          }
+        },
+        "required": [
+          "evidence"
+        ],
+        "title": "NodeSatisfiedInput",
+        "type": "object"
+      },
       "ProbeInput": {
         "properties": {
           "model": {
@@ -11632,6 +11660,72 @@
           }
         ],
         "summary": "Node Reset"
+      }
+    },
+    "/nodes/{job_id}/{node_key}/satisfied": {
+      "post": {
+        "description": "§17.1226 — this step's goal is already met; record it with the evidence\nand cascade nothing. See `node_editor.mark_satisfied`.",
+        "operationId": "node_satisfied_nodes__job_id___node_key__satisfied_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "node_key",
+            "required": true,
+            "schema": {
+              "title": "Node Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeSatisfiedInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Node Satisfied"
       }
     },
     "/observability/alerts": {

@@ -23,6 +23,7 @@ from app.schemas import (
     NodeInsertInput,
     NodeReorderInput,
     NodeResetInput,
+    NodeSatisfiedInput,
 )
 from app.utils.ids import UuidPath
 
@@ -140,6 +141,21 @@ async def node_reorder(
     await _guard(db, principal, job_id)
     return _dispatch(await node_editor.reorder_nodes(
         job_id, body.ordered_keys,
+        edited_by=_attributed(principal, body.edited_by), db=db,
+    ))
+
+
+@router.post("/nodes/{job_id}/{node_key}/satisfied")
+async def node_satisfied(
+    job_id: UuidPath, node_key: str, body: NodeSatisfiedInput,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1226 — this step's goal is already met; record it with the evidence
+    and cascade nothing. See `node_editor.mark_satisfied`."""
+    await _guard(db, principal, job_id)
+    return _dispatch(await node_editor.mark_satisfied(
+        job_id, node_key, evidence=body.evidence,
         edited_by=_attributed(principal, body.edited_by), db=db,
     ))
 

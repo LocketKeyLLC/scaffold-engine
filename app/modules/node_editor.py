@@ -603,6 +603,65 @@ async def reorder_nodes(
     return {"status": "ok", "order": ordered_keys}
 
 
+async def mark_satisfied(
+    job_id: str, node_key: str, *, evidence: str, edited_by: str | None = None, db: AsyncSession,
+) -> dict:
+    """§17.1226 — record that ONE step's goal is already met, with the evidence,
+    and cascade NOTHING.
+
+    The gap this closes, live: ADD50 ran `pct start 111` through the runner, the
+    SSE response was lost, and the step was recorded `failed`. Two read-only
+    checks then showed container 111 running with `node` listening on `*:3001`
+    — the work HAD happened. There was no way to say so. `reset_node` is the
+    only status write the API offers and it resets the transitive downstream,
+    which here would have re-opened a `skipped` sibling, "Set VM 106's scsi0
+    disk to 40G", on a disk that had just been grown to 100G. The only safe
+    option was to leave a true thing recorded as false.
+
+    So: this marks exactly the named node `done`, appends the evidence to its
+    output, records the pre-image (§17.1211) and touches nothing else. It is
+    NOT a way to skip work — the caller supplies the evidence and it is written
+    into the node where the next step reads it.
+
+    Refuses a node already `done` (nothing to correct) and a `running` one (a
+    worker owns it).
+    """
+    if not (evidence or "").strip():
+        return {"error": "evidence is required — a step is not done because someone said so",
+                "http_status": 422}
+    nodes = await _load_nodes(db, job_id)
+    node = next((n for n in nodes if n["node_key"] == node_key), None)
+    if not node:
+        return {"error": f"node {node_key} not found", "http_status": 404}
+    if node["status"] == "done":
+        return {"error": f"{node_key} is already done", "http_status": 409}
+    if node["status"] == "running":
+        return {"error": f"{node_key} is running — a worker owns it; wait for it to land",
+                "http_status": 409}
+    prior = (await db.execute(
+        text("SELECT output_text FROM dag_nodes WHERE job_id = :j AND node_key = :nk"),
+        {"j": job_id, "nk": node_key})).scalar() or ""
+    block = ("## Recorded as already done\n\n" + evidence.strip())
+    await db.execute(
+        text("UPDATE dag_nodes SET status = 'done', completed_at = NOW(), updated_at = NOW(), "
+             "started_at = COALESCE(started_at, NOW()), "
+             "output_text = CASE WHEN COALESCE(output_text, '') = '' THEN :block "
+             "ELSE output_text || :sep || :block END, "
+             "last_verification_reason = :why "
+             "WHERE job_id = :j AND node_key = :nk AND status <> 'running'"),
+        {"j": job_id, "nk": node_key, "block": block, "sep": "\n\n",
+         "why": "recorded as already done, with evidence (§17.1226)"})
+    await _audit(db, job_id, node_key, "satisfied",
+                 {"status": node["status"], "output_text": prior[:8000]},
+                 {"status": "done", "evidence": evidence[:4000], "cascade": []},
+                 edited_by)
+    await db.commit()
+    logger.info("node_marked_satisfied job=%s node=%s was=%s evidence_chars=%d",
+                job_id, node_key, node["status"], len(evidence))
+    return {"status": "ok", "node_key": node_key, "was": node["status"],
+            "node_status": "done", "cascade": []}
+
+
 async def reset_node(
     job_id: str, node_key: str, *, edited_by: str | None = None, db: AsyncSession,
 ) -> dict:

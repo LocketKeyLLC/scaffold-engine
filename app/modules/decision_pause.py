@@ -60,7 +60,7 @@ async def pending_decision(db: AsyncSession, job_id: str) -> dict | None:
     delegated = await delegated_decisions(db, job_id)
     row = (await db.execute(
         text("""
-            SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on
+            SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.execution_order
             FROM dag_nodes n
             WHERE n.job_id = :jid AND n.status = 'pending' AND n.node_type = 'decision'
               AND NOT (n.node_key = ANY(:delegated))

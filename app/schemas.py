@@ -802,6 +802,14 @@ class NodeResetInput(BaseModel):
     edited_by: str | None = None
 
 
+class NodeSatisfiedInput(BaseModel):
+    """§17.1226 — body for POST /nodes/{job_id}/{node_key}/satisfied."""
+    evidence: str = Field(min_length=1, max_length=8000,
+                          description="What shows the step's goal is already met — the commands "
+                                      "read back and their output. Written into the node.")
+    edited_by: str | None = None
+
+
 class ExecRetryInput(BaseModel):
     """Body for POST /exec/retry — fix-list #14.
 

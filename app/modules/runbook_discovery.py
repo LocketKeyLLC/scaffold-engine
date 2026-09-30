@@ -51,6 +51,65 @@ _STORAGE_RE = re.compile(r"^(\S+)\s+\S+\s+active\b", re.M)
 _DISK_NAMES = re.compile(r"^(DISK|DISK_NAME|DISK_ID|VOLUME|VOLUME_ID|VOL|UNUSED_DISK)$")
 _STORAGE_NAMES = re.compile(r"^(STORAGE|STORAGE_NAME|STORAGE_ID|POOL|TARGET_STORAGE)$")
 
+# §17.1229 — the rest of what a Proxmox host answers about itself.
+#
+# ADD96 asked the operator to type ELEVEN values: the node name, the storage,
+# three container ids, three IP addresses and three API keys. Every one of them
+# is readable through the same channel, and the *arr API keys are readable from
+# each container's own `config.xml`. The engine asked a person to go and look up
+# eleven things about a machine it was already reading.
+#
+# The name carries the SERVICE (`PROWLARR_IP` → prowlarr), matched against the
+# guest names `pct list` reports, so nothing is guessed from a bare `CONTAINER_IP`
+# (§17.1189(E) — an unqualified name drew the operator's public address).
+_CTID_NAMES = re.compile(r"^([A-Z][A-Z0-9]*)_(?:CTID|CT_ID|CONTAINER_ID|LXC_ID|VMID)$")
+_IP_NAMES = re.compile(r"^([A-Z][A-Z0-9]*)_(?:IP|IP_ADDRESS|ADDR|HOST)$")
+_APIKEY_NAMES = re.compile(r"^([A-Z][A-Z0-9]*)_API_KEY$")
+_NODE_NAMES = re.compile(r"^(?:PROXMOX_)?NODE(?:_NAME)?$")
+
+#: `pct list` rows: VMID Status Lock Name — the name is the last column.
+_PCT_NAMED = re.compile(r"^\s*(\d{3,5})\s+(\S+)(?:\s+\S*)?\s+(\S+)\s*$", re.M)
+#: the first IPv4 out of `hostname -I` / `ip -4 addr`, loopback excluded.
+_IPV4 = re.compile(r"\b(?!127\.)(\d{1,3}(?:\.\d{1,3}){3})\b")
+#: `<ApiKey>e6b…</ApiKey>` in a *arr `config.xml`.
+_APIKEY_XML = re.compile(r"<ApiKey>\s*([A-Za-z0-9]{16,64})\s*</ApiKey>", re.I)
+
+
+def guests_by_name(text_out: str) -> dict[str, str]:
+    """``{lowercased guest name: ctid}`` from `pct list`. The header row has
+    "NAME" as its name column and is dropped by the digit anchor on the id."""
+    out: dict[str, str] = {}
+    for m in _PCT_NAMED.finditer(text_out or ""):
+        ctid, name = m.group(1), m.group(3).strip().lower()
+        if name and name != "name":
+            out.setdefault(name, ctid)
+    return out
+
+
+def match_guest(service: str, by_name: dict[str, str]) -> Optional[str]:
+    """The ctid whose guest name IS, or clearly contains, this service.
+
+    Exact first, then a unique substring hit. Two candidates means the engine
+    must not pick: a wrong ctid here runs a write against the wrong container.
+    """
+    svc = (service or "").strip().lower()
+    if not svc:
+        return None
+    if svc in by_name:
+        return by_name[svc]
+    hits = sorted({cid for name, cid in by_name.items() if svc in name or name in svc})
+    return hits[0] if len(hits) == 1 else None
+
+
+def first_ipv4(text_out: str) -> Optional[str]:
+    m = _IPV4.search(text_out or "")
+    return m.group(1) if m else None
+
+
+def apikey_from_config(text_out: str) -> Optional[str]:
+    m = _APIKEY_XML.search(text_out or "")
+    return m.group(1) if m else None
+
 MAX_PER_INPUT = 3
 
 
@@ -97,6 +156,10 @@ async def discover_inputs(inputs: list[dict], commands: list[str], spec) -> list
             if not (i.get("value") or "").strip() and not (i.get("suggestions") or [])
             and not i.get("secret")
             and (_DISK_NAMES.match(i.get("name") or "") or _STORAGE_NAMES.match(i.get("name") or ""))]
+    # §17.1229 — the guest-shaped names are resolved separately: they need
+    # `pct list` rather than `qm config`, and an API key ends up in the store
+    # instead of on the screen.
+    await _discover_guest_inputs(inputs, spec)
     if not want:
         return inputs
     vmid = vmid_from(commands)
@@ -134,6 +197,94 @@ async def discover_inputs(inputs: list[dict], commands: list[str], spec) -> list
         logger.warning("runbook_input_discovered name=%s vmid=%s picks=%d prefilled=%s",
                        name, vmid, len(picks), len(picks) == 1)
     return inputs
+
+
+async def _discover_guest_inputs(inputs: list[dict], spec) -> None:
+    """§17.1229 — resolve the ctid / IP / node-name / API-key inputs off the host.
+
+    Mutates `inputs` in place, fail-soft throughout. Each kind is read only when
+    something actually asks for it, and one `pct list` serves all of them.
+
+    An API key is NOT prefilled: it is stored under its own name (§17.1193) and
+    the input is marked satisfied by reference, so the command keeps `$NAME` and
+    the value never enters a prompt, a block or a log. That is the whole point of
+    the store — reading a secret onto the screen to save a person typing it would
+    trade one problem for a worse one.
+    """
+    pend = [i for i in inputs if not (i.get("value") or "").strip() and not (i.get("suggestions") or [])]
+    if not pend:
+        return
+    runner = getattr(spec, "name", "the runner") or "the runner"
+    names = {i["name"]: i for i in pend if i.get("name")}
+    ctid_want = {n: m.group(1) for n, m in ((n, _CTID_NAMES.match(n)) for n in names) if m}
+    ip_want = {n: m.group(1) for n, m in ((n, _IP_NAMES.match(n)) for n in names) if m}
+    key_want = {n: m.group(1) for n, m in ((n, _APIKEY_NAMES.match(n)) for n in names) if m}
+    node_want = [n for n in names if _NODE_NAMES.match(n)]
+
+    if node_want:
+        host = (await _read(spec, "hostname")).strip().splitlines()
+        if host and host[0].strip():
+            for n in node_want:
+                names[n]["value"] = host[0].strip()
+                names[n]["suggestions"] = [_sugg(host[0].strip(), runner, "hostname")]
+                logger.warning("runbook_input_discovered name=%s kind=node value=%s", n, host[0].strip())
+
+    if not (ctid_want or ip_want or key_want):
+        return
+    by_name = guests_by_name(await _read(spec, "pct list"))
+    if not by_name:
+        return
+    # service -> ctid, resolved once and shared by all three kinds
+    svc_ctid: dict[str, Optional[str]] = {}
+    for svc in set(ctid_want.values()) | set(ip_want.values()) | set(key_want.values()):
+        svc_ctid[svc] = match_guest(svc, by_name)
+
+    for n, svc in ctid_want.items():
+        cid = svc_ctid.get(svc)
+        if cid:
+            names[n]["value"] = cid
+            names[n]["suggestions"] = [_sugg(cid, runner, f"pct list, guest named {svc}")]
+            logger.warning("runbook_input_discovered name=%s kind=ctid value=%s", n, cid)
+
+    for n, svc in ip_want.items():
+        cid = svc_ctid.get(svc)
+        if not cid:
+            continue
+        ip = first_ipv4(await _read(spec, f"pct exec {cid} -- hostname -I"))
+        if ip:
+            names[n]["value"] = ip
+            names[n]["suggestions"] = [_sugg(ip, runner, f"hostname -I inside container {cid}")]
+            logger.warning("runbook_input_discovered name=%s kind=ip ctid=%s value=%s", n, cid, ip)
+
+    for n, svc in key_want.items():
+        cid = svc_ctid.get(svc)
+        if not cid:
+            continue
+        key = None
+        for path in ("/config/config.xml", f"/var/lib/{svc.lower()}/config.xml",
+                     f"/opt/{svc.lower()}/config.xml"):
+            key = apikey_from_config(await _read(spec, f"pct exec {cid} -- cat {path}"))
+            if key:
+                break
+        if not key:
+            continue
+        try:
+            from app.database import async_session
+            from app.modules import runner_secrets as _rs
+            async with async_session() as db:
+                await _rs.set_secret(db, n, key, runner=getattr(spec, "name", None),
+                                     hint=f"read from {svc.lower()}'s config.xml in container {cid}")
+                await db.commit()
+        except Exception as exc:
+            logger.warning("discovered_secret_store_failed name=%s err=%r", n, exc)
+            continue
+        # satisfied by REFERENCE: the command keeps `$NAME`, nothing is shown.
+        names[n]["stored"] = True
+        names[n]["secret"] = True
+        names[n]["value"] = ""
+        names[n]["hint"] = (f"already read off {svc.lower()} in container {cid} and stored — "
+                            f"the command uses $" + n + ", you do not need to type it")
+        logger.warning("runbook_input_stored name=%s kind=api_key ctid=%s chars=%d", n, cid, len(key))
 
 
 async def _read(spec, command: str) -> str:

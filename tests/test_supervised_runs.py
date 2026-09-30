@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -726,3 +727,127 @@ def test_both_prompt_paths_carry_the_stored_values_block():
     body = open("app/modules/supervised_runs.py").read()
     assert body.count("VALUES ALREADY STORED") == 1
     assert "VALUES ALREADY STORED" not in open("app/modules/execution_agent.py").read()
+
+
+# ── §17.1225: a lost response is not a failed command ────────────────────
+
+
+_DROP = "(runner error: mcp server 'pve-runner' tool 'run_supervised': MCPError: SSE stream ended without a response)"
+
+
+def _executed(ok_first=True, drop_second=True):
+    return [
+        {"command": "pct status 111", "ok": True, "exit": 0, "output": "status: stopped\n"},
+        {"command": "pct start 111", "ok": False, "exit": None, "output": _DROP, "unreachable": drop_second},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_lost_response_with_the_goal_met_is_done_not_failed(monkeypatch):
+    """Live ADD50: `pct start 111` lost its SSE response, the container WAS
+    running, and the step was recorded failed while the engine told the operator
+    to run `pct status 111` — the command in its own verify list, on a host it
+    had an open read-only channel to."""
+    from contextlib import asynccontextmanager
+
+    db = AsyncMock()
+    claim = MagicMock(); claim.rowcount = 1
+    db.execute = AsyncMock(return_value=claim)
+    db.commit = AsyncMock()
+    spec = SimpleNamespace(name="pve-runner")
+
+    waiting = {"kind": "run", "node_key": "ADD50", "title": "Start container 111 (control-panel)",
+               "runbook": "## Run this", "commands": ["pct status 111", "pct start 111"],
+               "verify": ["pct status 111"], "refused": []}
+
+    with patch.object(sr, "channel", AsyncMock(return_value=(spec, {"allow": ["pct"]}))), \
+         patch("app.modules.assist_supervised.gate_block",
+               return_value=(["pct status 111", "pct start 111"], [])), \
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=_executed())), \
+         patch("app.modules.assist_local_runner.run_probes",
+               new=AsyncMock(return_value=("== V1 ==\nstatus: running\n",
+                                           [{"id": "V1", "command": "pct status 111"}]))), \
+         patch.object(sr, "_goal_confirmed", AsyncMock(return_value=True)), \
+         patch.object(sr, "diagnose_failure", AsyncMock(return_value="")) as diag:
+        out = await sr.resolve_run(db, "j", "ADD50", "run", waiting)
+
+    assert out["outcome"] == "ran" and out["node_status"] == "done"
+    assert out["confirmed_after_drop"] is True
+    diag.assert_not_awaited()          # nothing to diagnose: it worked
+    written = " ".join(str(c.args[1]) for c in db.execute.await_args_list if len(c.args) > 1)
+    assert "status = 'done'" in " ".join(str(c.args[0]) for c in db.execute.await_args_list)
+    assert "response" in written and "lost" in written
+
+
+@pytest.mark.asyncio
+async def test_a_lost_response_with_the_goal_NOT_met_still_fails(monkeypatch):
+    """The vacuity check: the drop path must not become a rubber stamp."""
+    from contextlib import asynccontextmanager
+
+    db = AsyncMock()
+    claim = MagicMock(); claim.rowcount = 1
+    db.execute = AsyncMock(return_value=claim)
+    db.commit = AsyncMock()
+    spec = SimpleNamespace(name="pve-runner")
+    waiting = {"kind": "run", "node_key": "ADD50", "title": "Start container 111",
+               "runbook": "## Run this", "commands": ["pct status 111", "pct start 111"],
+               "verify": ["pct status 111"], "refused": []}
+
+    with patch.object(sr, "channel", AsyncMock(return_value=(spec, {"allow": ["pct"]}))), \
+         patch("app.modules.assist_supervised.gate_block",
+               return_value=(["pct status 111", "pct start 111"], [])), \
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=_executed())), \
+         patch("app.modules.assist_local_runner.run_probes",
+               new=AsyncMock(return_value=("== V1 ==\nstatus: stopped\n",
+                                           [{"id": "V1", "command": "pct status 111"}]))), \
+         patch.object(sr, "_goal_confirmed", AsyncMock(return_value=False)), \
+         patch.object(sr, "diagnose_failure", AsyncMock(return_value="try this")):
+        out = await sr.resolve_run(db, "j", "ADD50", "run", waiting)
+
+    assert out["outcome"] == "failed" and out["node_status"] == "failed"
+    assert out["unknown_outcome"] is True
+    assert "did NOT show its goal" in out["reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_real_command_failure_never_reaches_the_drop_path():
+    """A non-zero exit is a failure, whatever else happened in the block —
+    `indeterminate` requires that NOTHING actually failed."""
+    from contextlib import asynccontextmanager
+
+    db = AsyncMock()
+    claim = MagicMock(); claim.rowcount = 1
+    db.execute = AsyncMock(return_value=claim); db.commit = AsyncMock()
+    spec = SimpleNamespace(name="pve-runner")
+    executed = [
+        {"command": "pct start 111", "ok": False, "exit": 255, "output": "container '111' not running!"},
+        {"command": "pct exec 111 -- true", "ok": False, "exit": None, "output": _DROP, "unreachable": True},
+    ]
+    waiting = {"kind": "run", "node_key": "X", "title": "t", "runbook": "r",
+               "commands": ["pct start 111", "pct exec 111 -- true"], "verify": ["pct status 111"], "refused": []}
+    goal = AsyncMock(return_value=True)          # would pass if it were consulted
+    with patch.object(sr, "channel", AsyncMock(return_value=(spec, {"allow": ["pct"]}))), \
+         patch("app.modules.assist_supervised.gate_block",
+               return_value=(["pct start 111", "pct exec 111 -- true"], [])), \
+         patch("app.modules.assist_supervised.run_block", new=AsyncMock(return_value=executed)), \
+         patch("app.modules.assist_local_runner.run_probes", new=AsyncMock(return_value=("", []))) as probes, \
+         patch.object(sr, "_goal_confirmed", goal), \
+         patch.object(sr, "diagnose_failure", AsyncMock(return_value="")):
+        out = await sr.resolve_run(db, "j", "X", "run", waiting)
+    assert out["outcome"] == "failed"
+    goal.assert_not_awaited()
+    probes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_goal_confirmed_needs_every_check_confirmed():
+    with patch("app.modules.assist_state_check.judge_outputs",
+               new=AsyncMock(return_value=[{"verdict": "confirmed"}, {"verdict": "unknown"}])):
+        assert await sr._goal_confirmed("t", ["a", "b"], "== V1 ==\nx") is False
+    with patch("app.modules.assist_state_check.judge_outputs",
+               new=AsyncMock(return_value=[{"verdict": "confirmed"}, {"verdict": "confirmed"}])):
+        assert await sr._goal_confirmed("t", ["a", "b"], "== V1 ==\nx") is True
+    # no evidence, and a judge that blows up, are both "not confirmed"
+    assert await sr._goal_confirmed("t", ["a"], "   ") is False
+    with patch("app.modules.assist_state_check.judge_outputs", new=AsyncMock(side_effect=RuntimeError("x"))):
+        assert await sr._goal_confirmed("t", ["a"], "== V1 ==\nx") is False

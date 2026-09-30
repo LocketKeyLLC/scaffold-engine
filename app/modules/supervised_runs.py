@@ -223,7 +223,7 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     rows = (await db.execute(
         text("""
             SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.tool, n.node_type,
-                   n.retry_count, n.last_verification_reason
+                   n.retry_count, n.last_verification_reason, n.execution_order
             FROM dag_nodes n
             WHERE n.job_id = :jid AND n.status = 'pending'
               AND NOT EXISTS (
@@ -393,7 +393,77 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - No multi-line shell constructs, and no `if … then … fi` even on one line: each part of a command is judged on its own, and a `then`-prefixed part cannot be read. Write an idempotent step as a guard chain instead — `pct status 111 | grep -q running || pct start 111` — where the check and the fix are each a whole command.
 - Avoid loops. A retry/wait loop is rarely worth it here: the operator sees the result of each command, so one check is usually enough. If you truly need one, write the list out literally (`for i in 1 2 3; do …; done`) — NEVER build it with `$(seq …)`, which is command substitution and is refused wherever it appears.
 - Under "## Verify", each check stays a read-only command (`pct status 111`, `systemctl is-active …`, `ls -ld …`).
+- DO the work with an API or a CLI, never by describing the web UI. "Open the Prowlarr web UI and go to Settings → Apps → Add Application", "click Test, then Save" is not something this channel can carry out — it produces a runbook with no commands at all, and the step falls back to the operator doing it by hand. Almost every service here has an HTTP API: drive it with `curl` (`curl -s -X POST http://HOST:9696/api/v1/indexer -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' -d '{…}'`), or its own CLI where it has one.
+- If you can CHECK something with a command under "## Verify", you can DO it with a command under "## Run this". A Verify section full of `curl …/api/v1/…` calls beside a Run section of UI clicks is the specific contradiction to avoid: the same API that answers the check also makes the change.
 """
+
+
+def no_commands_retry_note(step_text: str, runbook: str) -> str:
+    """§17.1227 — the draft described a web UI, so there is nothing to run.
+
+    Live, ADD96 ("Add the search sources to Prowlarr and connect it to Radarr
+    and Sonarr"): a 3,961-character runbook whose "## Run this" was nine steps
+    of *"Open the Prowlarr web UI"*, *"go to Indexers → Add Indexer"*, *"Click
+    Test to verify the connection, then Save"* — and whose "## Verify" section
+    called `curl -s http://…:9696/api/v1/indexer -H "X-Api-Key: …"` four times.
+    The drafter knew the API existed and used it only to CHECK. `commands` came
+    back empty, so Run was never offered, the frame suggested "I'll do it
+    myself", and the operator was handed nine screens of clicking on a host the
+    engine could reach.
+
+    Neither existing redraft trigger fires on this: `shape_retry_note` needs a
+    REFUSAL (there were none — there was nothing to refuse) and the coverage
+    pass only replaces a draft with one that is both non-empty and complete,
+    which a UI-clicking redraft never is. So the specific remedy has to be
+    named, the way §17.1196 names a gate refusal.
+    """
+    if not (runbook or "").strip():
+        return ""
+    verify = [c for c in _verify_commands_in(runbook) if c]
+    api = sorted({m.group(0) for c in verify for m in _API_PATH_RE.finditer(c)})
+    lines = [
+        "YOUR DRAFT HAS NOTHING TO RUN. The \"## Run this\" section came back with no commands — "
+        "it describes navigating a web UI, which this channel cannot carry out. A runbook with no "
+        "commands means the engine offers the operator nothing and they do the whole step by hand.",
+        "",
+        "Rewrite \"## Run this\" as shell commands, one self-contained command per line.",
+    ]
+    if api:
+        lines += [
+            "",
+            "Your OWN \"## Verify\" section already calls this service's HTTP API:",
+            *[f"  {a}" for a in api[:6]],
+            "",
+            "That is the same API that makes the change. Use it — `curl -s -X POST …` with "
+            "`-H \"X-Api-Key: $NAME\"` and a JSON body — instead of telling the operator where to "
+            "click. If a call needs a field you do not know, GET the relevant endpoint first and "
+            "say so in the step.",
+        ]
+    else:
+        lines += [
+            "",
+            "If the thing you are configuring has an HTTP API or a CLI, drive that. Do not write "
+            "\"open the UI and click\" as a step the engine is meant to run.",
+        ]
+    lines += [
+        "",
+        "If some part genuinely CANNOT be done without a browser, put only that part in a final "
+        "\"## By hand\" section and make every other part a command — a step that is 80% runnable "
+        "is worth far more than one that is 0% runnable.",
+    ]
+    return "\n".join(lines)
+
+
+#: `/api/v1/indexer`, `/api/v3/rootfolder` — an API path in a drafted command.
+_API_PATH_RE = re.compile(r"/api/v\d+/[A-Za-z0-9_/-]+")
+
+
+def _verify_commands_in(runbook: str) -> list[str]:
+    """The fenced commands under a "## Verify" heading only."""
+    m = re.search(r"^##+\s*Verify.*?$(.*)", runbook or "", re.M | re.S)
+    if not m:
+        return []
+    return [c for c in runbook_commands("## Run this\n" + m.group(1))]
 
 
 async def known_secret_names() -> list[dict]:
@@ -1032,31 +1102,53 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     # when the thing it looked for is gone, which is often the check passing).
     ok = (bool(executed) and len(executed) == len(runnable)
           and all(e["ok"] or e.get("informational") for e in executed))
+    # §17.1225 — a lost RESPONSE is not a failed COMMAND. `dropped` is computed
+    # here, before the verify decision, because the verify probes are exactly
+    # what settles an unknown outcome — see `_goal_confirmed`.
+    dropped = [e for e in executed if e.get("unreachable")]
+    hard_fail = [e for e in executed
+                 if not e["ok"] and not e.get("informational") and not e.get("unreachable")]
+    indeterminate = bool(dropped) and not hard_fail
     verify_out = ""
-    if ok and verify_cmds:
+    confirmed_after_drop = False
+    if verify_cmds and (ok or indeterminate):
         try:
             pasted, ran = await _lr.run_probes(spec, [{"id": f"V{i}", "command": c} for i, c in enumerate(verify_cmds, 1)])
             verify_out = "\n".join(
                 f"$ {e['command']}\n" + (re.search(rf"== {e['id']} ==\n(.*?)(?=\n== V\d+ ==|\Z)", pasted, re.S).group(1).rstrip()
                                          if re.search(rf"== {e['id']} ==", pasted) else "(no output)")
                 for e in ran)
+            if indeterminate:
+                confirmed_after_drop = await _goal_confirmed(
+                    str(waiting.get("title") or node_key), verify_cmds, pasted)
         except Exception as exc:
             verify_out = f"(verify could not run: {exc})"
     output = mask_secrets(_executed_report(runbook, spec.name, executed, verify_out), values, need)
-    if ok:
+    if confirmed_after_drop:
+        output += ("\n\n## The response was lost, the work was not\n\nThe connection to "
+                   f"{spec.name} dropped before `{dropped[-1]['command'][:80]}` answered, so the engine "
+                   "did not know whether it had run. The checks above were then read back off the "
+                   "machine and they show the step's goal already met, so it is recorded as done "
+                   "rather than retried — repeating a write that already happened is not a retry.")
+    if ok or confirmed_after_drop:
         await db.execute(
             text("UPDATE dag_nodes SET status = 'done', output_text = :out, completed_at = NOW(), updated_at = NOW(), "
                  "last_verification_reason = :why WHERE job_id = :jid AND node_key = :nk AND status = 'running'"),
             {"jid": job_id, "nk": node_key, "out": output,
-             "why": f"supervised run through {spec.name}: {len(executed)} command(s) ran, all exited 0"})
-        logger.warning("supervised_run_done job=%s node=%s commands=%d", job_id, node_key, len(executed))
-        return {"outcome": "ran", "node_status": "done", "executed": executed, "verify": verify_out}
+             "why": (f"supervised run through {spec.name}: {len(executed)} command(s) ran, all exited 0"
+                     if ok else
+                     f"supervised run through {spec.name}: the response to "
+                     f"`{dropped[-1]['command'][:60]}` was lost, and the verify checks read back off "
+                     f"the machine confirm the step's goal is met")})
+        logger.warning("supervised_run_done job=%s node=%s commands=%d confirmed_after_drop=%s",
+                       job_id, node_key, len(executed), confirmed_after_drop)
+        return {"outcome": "ran", "node_status": "done", "executed": executed, "verify": verify_out,
+                "confirmed_after_drop": confirmed_after_drop}
     last = executed[-1] if executed else None
     # §17.1201 — the runner's connection dropped. Nobody knows whether the
     # command ran, and a write whose outcome is unknown is a different decision
     # from one that definitely failed. Say so, and do not pretend to an exit
     # code ("exited None" was what the operator saw).
-    dropped = [e for e in executed if e.get("unreachable")]
     # §17.1198 — a command that failed because the runner could not read is not
     # a broken machine. The write grant covers writes; a READ-ONLY command in
     # the same block deliberately runs unprivileged, and on a Proxmox host that
@@ -1070,8 +1162,12 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             logger.warning("needs_root_record_failed job=%s err=%r", job_id, exc)
     reason = mask_secrets(
         (f"the connection to {spec.name} dropped while `{dropped[-1]['command'][:80]}` was running "
-         f"({dropped[-1]['output'][:120]}). Whether it ran on the machine is UNKNOWN — check before retrying, "
-         f"because a repeat of a write that already happened is not the same as a retry of one that did not.")
+         f"({dropped[-1]['output'][:120]}). "
+         + ("The step's own verify checks were then read back off the machine and did NOT show its goal "
+            "met, so it is recorded as stopped." if verify_cmds else
+            "Whether it ran on the machine is UNKNOWN and this step carries no verify check to settle it — "
+            "check before retrying, because a repeat of a write that already happened is not the same as a "
+            "retry of one that did not."))
         if dropped else
         (f"`{needs_root[-1]['command'][:80]}` could not read on that machine — the runner is unprivileged for "
          f"READ commands (the write grant covers writes only). Allow it to read as root: Settings → Machines, "
@@ -1098,6 +1194,44 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
                    job_id, node_key, bool(diagnosis), reason[:200])
     return {"outcome": "failed", "node_status": "failed", "executed": executed, "reason": reason,
             "diagnosis": diagnosis, "unknown_outcome": bool(dropped)}
+
+
+async def _goal_confirmed(title: str, verify_cmds: list[str], pasted: str) -> bool:
+    """§17.1225 — did the step's own checks, read back off the machine, show its
+    goal already met?
+
+    Used only when a command's RESPONSE was lost (`unreachable`) and nothing
+    actually failed. The engine already had the means to answer this and did not
+    use them: live, ADD50 ran `pct status 111` (stopped) then `pct start 111`,
+    whose SSE stream ended before it answered. The step was recorded FAILED and
+    the operator was told to "run `pct status 111` and tell me what it shows" —
+    the very command sitting in the step's own verify list, on a host the engine
+    had an open read-only channel to. The container was running. The start had
+    worked; only the answer was lost.
+
+    Reuses the state-check judge (§17.1050) — its deterministic pre-pass settles
+    an obvious case with no model draw, and the model reads the rest against the
+    step's goal. Requires EVERY check to be confirmed: a step recorded done on
+    partial evidence is the failure mode this whole seam exists to prevent, and
+    the honest fallback (`failed`, outcome unknown) is what happens today.
+    """
+    if not verify_cmds or not (pasted or "").strip():
+        return False
+    try:
+        from app.modules.assist_state_check import judge_outputs
+        probes = [{"id": f"V{i}", "kind": "state", "claim": title, "command": c}
+                  for i, c in enumerate(verify_cmds, 1)]
+        verdicts = await judge_outputs(probes, pasted)
+    except Exception as exc:
+        logger.warning("goal_confirm_judge_failed err=%r", exc)
+        return False
+    if not verdicts or len(verdicts) != len(verify_cmds):
+        return False
+    ok = all(str(v.get("verdict") or "") == "confirmed" for v in verdicts)
+    logger.warning("goal_confirmed_after_drop title=%r checks=%d confirmed=%s verdicts=%s",
+                   title[:60], len(verdicts), ok,
+                   [str(v.get("verdict")) for v in verdicts])
+    return ok
 
 
 def _executed_report(runbook: str, runner: str, executed: list[dict], verify_out: str) -> str:
