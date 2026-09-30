@@ -4,7 +4,7 @@ Pure-helper coverage for the graph logic + operation decision branches
 (version conflict, validation, cascade) with `_load_nodes` patched and a mock
 db — the SQL write paths are verified live (see the §17.478 OVERVIEW entry).
 """
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -14,8 +14,17 @@ from app.modules import node_editor
 
 
 def _db():
+    """§17.1211 — `execute` must return something Result-SHAPED. It returned a
+    bare AsyncMock, so `.mappings()` yielded a coroutine and any code using the
+    ordinary `(await db.execute(...)).mappings().all()` idiom — which the rest
+    of this codebase uses everywhere — blew up in the tests while working in
+    production. A fake that cannot express the real return type hides the code
+    under test."""
     db = AsyncMock()
-    db.execute = AsyncMock()
+    result = MagicMock()
+    result.mappings.return_value.all.return_value = []
+    result.mappings.return_value.first.return_value = None
+    db.execute = AsyncMock(return_value=result)
     db.commit = AsyncMock()
     return db
 
