@@ -1840,6 +1840,12 @@ a.stage:hover { text-decoration: none; background: var(--bg-elev-2); color: var(
 .stage-standing li { padding: 4px 0; border-bottom: 1px solid var(--line, rgba(127,127,127,.18)); }
 .stage-standing li:last-child { border-bottom: 0; }
 .stage-reason { white-space: pre-wrap; word-break: break-word; font-size: 12px; opacity: .8; margin-top: 2px; }
+/* §17.1212 — why the Run button is not clickable yet, next to the button. */
+.decision-need { display: block; margin: 8px 0 4px; }
+.decision-need:empty { display: none; }
+/* §17.1216 — what is left, where a completion card would have gone. */
+.assist-outstanding { display: block; }
+.assist-blocker-why { white-space: pre-wrap; word-break: break-word; opacity: .8; font-size: 12px; }
 
 /* §17.1194 — the line an operator must not skim past: the write channel is
    open but UNPRIVILEGED, so a command they approve is refused by the machine

@@ -417,11 +417,19 @@ def _restorable_steps(metadata) -> list[dict]:
     return [latest[k] for k in sorted(latest)]
 
 
-def _assist_step_progress(step_counts: dict) -> Optional[dict]:
+def _assist_step_progress(step_counts: dict, out: Optional[dict] = None) -> Optional[dict]:
     """Derive a count/pct progress block from an assist step roll-up.
 
     No time ETA: assist is human-gated between steps, so wall-clock remaining is
     meaningless. Returns None for a trivial (<2 step) session.
+
+    §17.1216 — `out` is `job_outstanding.outstanding()`, and when it is present
+    it WINS. The step roll-up counts `handed_off` as terminal, which is true of
+    the session (there is nothing left to ask) and false of the work: the
+    autonomous executor owns those steps and its verdict is in `dag_nodes`.
+    Counting them as finished is what printed "131/131 steps · 100%" over a job
+    with 3 failed and 14 pending. §17.1208 fixed this arithmetic for the job
+    status and this was one of the three siblings still doing it the old way.
     """
     from app.config import settings
 
@@ -430,7 +438,11 @@ def _assist_step_progress(step_counts: dict) -> Optional[dict]:
     total = sum(int(v) for v in step_counts.values())
     if total < 2:
         return None
-    done = sum(int(v) for k, v in step_counts.items() if k in _ASSIST_STEP_TERMINAL)
+    if out and out.get("known") and out.get("total"):
+        total = int(out["total"])
+        done = int(out.get("done") or 0)
+    else:
+        done = sum(int(v) for k, v in step_counts.items() if k in _ASSIST_STEP_TERMINAL)
     pct = int(round(100.0 * done / total)) if total else None
     return {
         "phase": "assisted_executing",
@@ -485,12 +497,22 @@ async def get_session(*, session_id: str, db) -> Optional[dict]:
     raw_meta = sess_dict.pop("metadata", None)
     env = _environment_from_metadata(raw_meta)
     step_counts = {r["status"]: r["cnt"] for r in rollup}
+    # §17.1216 — the one answer to "is this finished", read off the table that
+    # records the WORK. Every surface reads this instead of counting steps.
+    try:
+        from app.modules.job_outstanding import headline, outstanding as _out
+        _o = await _out(db, str(sess_dict.get("job_id")))
+        _o["headline"] = headline(_o)
+    except Exception as exc:
+        logger.warning("assist_outstanding_failed sid=%s err=%r", session_id, exc)
+        _o = {"finished": False, "known": False}
     return {
+        "outstanding": _o,
         **{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in sess_dict.items()},
         "step_counts": step_counts,
         # §17.811 — step progress. Assist is human-gated between steps, so there
         # is no honest wall-clock ETA; report completed/total/pct only.
-        "progress": _assist_step_progress(step_counts),
+        "progress": _assist_step_progress(step_counts, _o),
         "divergence_count": int(divergence_count),
         "memory_facts": env.get("facts") or [],
         # §17.1180 (audit U6) — the ↶ Restore verb asked the operator, through a

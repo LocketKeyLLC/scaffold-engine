@@ -664,12 +664,41 @@ export function renderChat(container, sessionId, opts = {}) {
   }
   // §17.1052 — completion hand-off (the ✓ path and a reload of a finished
   // session both land here; the turn-loop path says the same in its own words).
+  // §17.1216 — "it should feel smooth and flow as if everything is happening
+  // smoothly while informing the user." A surface that says "3 failed" and
+  // stops has informed nobody: on this job all 14 pending steps waited on those
+  // 3 failures and nothing offered a move. So this names the blocker, says how
+  // much it is holding up, and points at where to act.
+  function renderOutstandingCard(out, jid) {
+    const b = (out.blockers || [])[0];
+    const card = el("div", { class: "assist-complete assist-outstanding" },
+      el("div", { class: "row row-wrap" },
+        el("strong", { text: out.headline || "This plan is not finished yet." }),
+        el("span", { class: "spacer" }),
+        jid ? el("a", { class: "btn btn-primary btn-sm", href: `#/job/${jid}/run`, text: "Open the run →" }) : null,
+        jid ? el("a", { class: "btn btn-ghost btn-sm", href: `#/job/${jid}/plan`, text: "Review the plan" }) : null),
+      el("p", { class: "sub", text: `${out.done} done · ${out.pending} pending · ${out.failed} failed` }),
+      b ? el("p", { class: "sub" },
+            el("span", { class: "mono", text: b.node_key }),
+            el("span", { text: ` · ${b.title}` }),
+            b.unblocks ? el("span", { class: "dim", text: ` — holding up ${b.unblocks} step${b.unblocks === 1 ? "" : "s"}` }) : null)
+        : null,
+      b && b.reason ? el("p", { class: "sub mono assist-blocker-why", text: b.reason }) : null);
+    completeSlot.append(card);
+  }
+
   function completionText() {
     return "🎉 **Every step in this plan is done — the project is complete.** The deliverable has been compiled: open the Output stage to read it, or the Plan stage to review what changed along the way.";
   }
   function renderCompletionCard() {
     if (!completeSlot || completeSlot.querySelector(".assist-complete")) return;
     const jid = session?.job_id;
+    // §17.1216 — the session being finished is not the JOB being finished.
+    // `handed_off` steps are terminal here and their verdict lives in
+    // dag_nodes; this card fired over 3 failed and 14 pending steps and told
+    // the operator "nothing needed from you right now".
+    const out = session?.outstanding;
+    if (out && out.known && !out.finished) return renderOutstandingCard(out, jid);
     const card = el("div", { class: "assist-complete row row-wrap" },
       el("strong", { text: "🎉 Job complete" }),
       el("span", { class: "dim", text: " — every step is done and the deliverable is compiled." }),
@@ -1274,9 +1303,14 @@ export function renderChat(container, sessionId, opts = {}) {
     // §17.938 — `step_counts` is keyed by ASSIST-step status, where the
     // terminal state is `committed`; `done` is the dag_nodes vocabulary and
     // never appears here. Count every terminal state (§17.938).
-    const doneN = (sc.committed || 0) + (sc.done || 0)
-      + (sc.skipped || 0) + (sc.handed_off || 0);
-    const totalN = Object.values(sc).reduce((a, b) => a + b, 0);
+    // §17.1216 — one truth. `handed_off` is terminal for the SESSION and says
+    // nothing about whether the work succeeded, so the roll-up is only the
+    // fallback for a payload that has no dag_nodes answer.
+    const _o = session.outstanding;
+    const doneN = (_o && _o.known) ? _o.done
+      : (sc.committed || 0) + (sc.done || 0) + (sc.skipped || 0) + (sc.handed_off || 0);
+    const totalN = (_o && _o.known && _o.total) ? _o.total
+      : Object.values(sc).reduce((a, b) => a + b, 0);
     const cur = steps.find((x) => x.node_key === nk);
     const pos = planPosition(steps, nk);
     const total = pos.total || totalN;

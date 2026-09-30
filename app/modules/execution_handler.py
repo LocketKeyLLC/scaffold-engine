@@ -15,6 +15,9 @@ from app.modules.recovery import next_actions_for
 logger = logging.getLogger("scaffold.execution_handler")
 
 
+#: §17.1214 — past this an ETA carries no information; the surface says nothing.
+_ETA_MAX_MS = 7 * 24 * 60 * 60 * 1000
+
 _TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "blocked"}
 
 
@@ -54,9 +57,33 @@ def _compute_read_progress(rows, job_status: str | None = None) -> dict | None:
     is_terminal = job_status in _TERMINAL_JOB_STATUSES
     eta_ms = None
     if done_timed > 0 and remaining > 0 and not is_terminal:
-        span_ms = (max(ends) - min(starts)).total_seconds() * 1000.0
-        if span_ms > 0:
-            eta_ms = int(span_ms / done_timed * remaining)
+        # §17.1214 — the BUSY wall time, not the calendar span.
+        #
+        # §17.812 replaced mean-duration × remaining with the span from the
+        # first start to the last finish, because that is concurrency-correct.
+        # It is also idle-correct only if the work never stopped. On an assist
+        # job the operator executes steps over DAYS with sleep in between, and
+        # the span swallows every gap: live, 117 timed nodes across ~5 days and
+        # 15 remaining produced "~1540h 53m left" — 64 days, printed next to a
+        # progress bar, which is worse than printing nothing.
+        #
+        # Merging the node intervals keeps §17.812's property (overlapping work
+        # counts once) and drops the gaps between them.
+        merged_ms, cur_s, cur_e = 0.0, None, None
+        for st_, en_ in sorted(zip(starts, ends, strict=True)):   # appended in one loop
+            if cur_e is None or st_ > cur_e:
+                if cur_e is not None:
+                    merged_ms += (cur_e - cur_s).total_seconds() * 1000.0
+                cur_s, cur_e = st_, en_
+            else:
+                cur_e = max(cur_e, en_)
+        if cur_e is not None:
+            merged_ms += (cur_e - cur_s).total_seconds() * 1000.0
+        if merged_ms > 0:
+            eta_ms = int(merged_ms / done_timed * remaining)
+        # Beyond a week it is not an estimate, it is a number. Say nothing.
+        if eta_ms is not None and eta_ms > _ETA_MAX_MS:
+            eta_ms = None
     pct = int(round(100.0 * completed / total))
     running = next((r.title for r in rows if r.status == "running"), None)
     eta_human = ("~" + humanize_ms(eta_ms)) if eta_ms is not None else None

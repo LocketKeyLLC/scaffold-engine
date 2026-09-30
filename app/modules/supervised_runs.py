@@ -705,9 +705,17 @@ def apply_runner_secrets(commands: list[str], verify: list[str], inputs: list[di
     return cmds_out, verify_out, kept, resolved, [n for n in missing if n in blocked]
 
 
-def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None) -> dict:
+def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
+              preconditions: Optional[list[dict]] = None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
-    what would verify, what the gate refused (then ``run`` is not offered)."""
+    what would verify, what the gate refused (then ``run`` is not offered).
+
+    §17.1213 — `preconditions` are refusals the MACHINE raised, not the gate:
+    the block names a guest that is stopped, or does not exist, or is addressed
+    with the wrong tool. They join `refused` so Run is off and the suggestion
+    flips to "I'll do it myself", because a block the host already contradicts
+    is not a decision for anyone.
+    """
     from app.modules.assist_supervised import gate_block
     cmds = runbook_commands(runbook)
     verify = verify_commands(runbook)
@@ -729,6 +737,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     _dummies.update({n: "x" for n in secrets_missing})
     shape = substitute(cmds, _dummies) if _dummies else cmds
     runnable, refused = gate_block(shape, policy.get("allow") or [])
+    refused = list(refused) + list(preconditions or [])      # §17.1213
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner
