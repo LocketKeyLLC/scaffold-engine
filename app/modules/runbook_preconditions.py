@@ -114,8 +114,11 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None)
                 out.append({"command": cmd, "why": (
                     f"id {gid} is already taken on this host — it is "
                     f"{'a container' if is_ct else 'a VM'} — so `{tool} {verb} {gid}` would collide "
-                    f"with it. Proxmox shares one id space between containers and VMs: pick an id "
-                    f"that is in neither `pct list` nor `qm list`.")})
+                    f"with it. Proxmox shares one id space between containers and VMs, so pick an id "
+                    f"in neither `pct list` nor `qm list`. If this step ALREADY created {gid} and is "
+                    f"being run again to finish what comes after, guard the create instead of "
+                    f"repeating it: `{tool} status {gid} >/dev/null 2>&1 || {tool} {verb} {gid} …` — "
+                    f"then the rest of the block can run without building it twice.")})
             else:
                 made.add(gid)
             continue

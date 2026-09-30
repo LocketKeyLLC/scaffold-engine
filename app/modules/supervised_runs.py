@@ -263,7 +263,7 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     rows = (await db.execute(
         text("""
             SELECT n.node_key, n.title, n.description, n.prompt_template, n.depends_on, n.tool, n.node_type,
-                   n.retry_count, n.last_verification_reason, n.execution_order
+                   n.retry_count, n.last_verification_reason, n.execution_order, n.output_text
             FROM dag_nodes n
             WHERE n.job_id = :jid AND n.status = 'pending'
               AND NOT EXISTS (
@@ -681,6 +681,72 @@ async def stored_values_block(*, for_commands: bool = True) -> str:
             "operator for them again:\n" + listed + "\n\n" + how)
 
 
+def executed_commands(report: str) -> list[str]:
+    """The commands an earlier attempt actually sent, in order, from its own
+    ``## Executed on`` report. `run_block` stops at the first failure, so the
+    LAST one is where it stopped and everything before it happened."""
+    i = (report or "").find("## Executed on")
+    if i < 0:
+        return []
+    body = report[i:]
+    end = body.find("\n## ", 1)
+    if end > 0:
+        body = body[:end]
+    return [m.group(1).strip() for m in re.finditer(r"^\$ (.+)$", body, re.M)]
+
+
+def attempt_feedback(node: dict) -> str:
+    """§17.1247 — what the LAST attempt at this step did, and why it stopped.
+
+    The gap this closes is the one that made a human the feedback loop all
+    evening. A supervised run that fails on the machine records its reason on the
+    node and its diagnosis in the output; `pending_hands_on` even SELECTs
+    `retry_count` and `last_verification_reason` onto the dict it hands the
+    drafter — and `draft_runbook` never read either. It calls `build_base_prompt`
+    directly, so it never sees `_format_reviewer_feedback`, which only the
+    ordinary LLM node path uses. Every redraft of a failed hands-on step was a
+    FIRST attempt from the model's point of view.
+
+    ADD111 needed five runs. Four of them re-made a mistake the engine had
+    already seen: an invented template version, a dropped `pveam download`, a
+    privileged read that had already been refused. The engine held all of it. The
+    only path from the failure to the next draft was a person pasting it into the
+    step's description by hand.
+
+    Gated on the REASON, not on `retry_count`: `reset_node` deliberately does not
+    bump the counter, and a reset is how a supervised step gets another attempt,
+    so `_format_reviewer_feedback`'s `retry_count > 0` would have stayed silent
+    here even if it had been wired in.
+    """
+    reason = str(node.get("last_verification_reason") or "").strip()
+    if not reason:
+        return ""
+    ran = executed_commands(str(node.get("output_text") or ""))
+    lines = [
+        "\n\nTHE PREVIOUS ATTEMPT AT THIS STEP FAILED. Do not repeat it.",
+        "",
+        "Why it stopped:",
+        f"  {reason[:700]}",
+    ]
+    if ran:
+        lines += ["", "What it actually sent, in order — the run stops at the first failure, so "
+                      "everything above the last line DID happen on the machine:"]
+        for i, c in enumerate(ran, 1):
+            mark = "FAILED HERE" if i == len(ran) else "ok"
+            lines.append(f"  {i}. [{mark}] {c[:150]}")
+        lines += [
+            "",
+            "So write this draft to FINISH FROM THERE, not to start over. Guard anything "
+            "already done instead of repeating it — `pct status N >/dev/null 2>&1 || pct create N …`, "
+            "`pct status N | grep -q running || pct start N` — because a create or a start that "
+            "has already happened fails the second time and would stop this attempt at the very "
+            "first command.",
+        ]
+    lines += ["", "Address the reason above specifically. If it was a value you did not read off the "
+                  "machine, read it. If it was a command the runner may not run, do not send it again."]
+    return "\n".join(lines)
+
+
 async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
                         for_channel: bool = True, retry_note: str = "", spec=None) -> str:
     """The same runbook the executor would have written (its prompt and
@@ -701,6 +767,8 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     # had been typed once and labelled. The operator: "Entering secrets should
     # be similar, like labeling it 'mass password' then applying it across the
     # project." Names only — a value never enters a prompt.
+    # §17.1247 — what the last attempt at this step did, and why it stopped.
+    prompt += attempt_feedback(node)
     prompt += await stored_values_block()
     # §17.1232 — what machines exist, so the draft addresses the right one.
     # §17.1242 — and what hardware is in it, so it stops asking about the GPUs.

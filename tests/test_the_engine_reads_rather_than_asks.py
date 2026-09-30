@@ -218,6 +218,10 @@ async def test_a_create_onto_a_taken_id_IS_refused():
     assert ct and "already taken" in ct[0]["why"] and "a container" in ct[0]["why"]
     assert vm and "already taken" in vm[0]["why"] and "a VM" in vm[0]["why"]
     assert "one id space" in vm[0]["why"]
+    # §17.1243b — and it says how to RESUME a step that already made the guest,
+    # which is the state a partially-completed step leaves behind.
+    assert "being run again" in ct[0]["why"]
+    assert "pct status 111 >/dev/null 2>&1 || pct create 111" in ct[0]["why"]
 
 
 @pytest.mark.asyncio
