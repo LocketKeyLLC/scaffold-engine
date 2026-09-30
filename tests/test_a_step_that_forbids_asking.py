@@ -137,6 +137,28 @@ def test_the_executor_checks_it_before_the_verifiers():
         assert field in seg, field
 
 
+def test_the_snapshot_the_gate_reads_actually_carries_the_description():
+    """§17.1237 — the test above passed while the gate was silent on three live
+    attempts: it only proved the field NAMES appear in the source, and
+    `node_snapshot` had no `description` key at all, so `violation()` was handed
+    text that could not contain the operator's corrections. Assert the key
+    exists, not that the word does."""
+    import ast as _ast
+    import inspect
+    from app.modules import execution_agent as ea
+    src = inspect.getsource(ea.execute_next_node)
+    tree = _ast.parse(inspect.cleandoc(src.split("\n", 1)[1]) if False else src.lstrip())
+    keys: set[str] = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Assign) and any(
+                isinstance(t, _ast.Name) and t.id == "node_snapshot" for t in node.targets):
+            assert isinstance(node.value, _ast.Dict)
+            keys = {k.value for k in node.value.keys if isinstance(k, _ast.Constant)}
+    assert keys, "node_snapshot assignment not found"
+    for required in ("description", "prompt_template", "title"):
+        assert required in keys, f"node_snapshot drops {required}: {sorted(keys)}"
+
+
 # ── §17.1236b: the second draw shared no wording with the first ───────────
 
 OUTPUT2 = (FIX / "add100_output2.txt").read_text()
@@ -210,3 +232,43 @@ def test_a_delivered_step_that_mentions_a_settled_fact_still_passes():
         "with a login page. You open one address on your phone.\n\n"
         "## Files written\n\n`/opt/panel/app.py`\n")
     assert sc.violation(STEP, delivered) is None
+
+
+# ── §17.1237: the description has to reach the model at all ──────────────
+
+
+def test_the_description_is_rendered_into_the_prompt():
+    """Live: ADD100's corrections lived in `description`, nothing rendered it,
+    and the step ignored them three times. It was never disobeying."""
+    from app.modules.prompt_assembly import build_base_prompt
+    p = build_base_prompt(
+        {"title": "Rebuild the control panel", "prompt_template": "Rebuild it.",
+         "description": "THREE capabilities, not four. Outside access is IN scope for this step."},
+        {"description": "Secure Proxmox HomeLab"})
+    assert "THREE capabilities, not four" in p
+    assert "Outside access is IN scope for this step" in p
+    assert "WHAT THIS STEP MUST DO" in p
+    assert "this wins" in p                      # it outranks the task line
+
+
+def test_a_description_already_in_the_template_is_not_repeated():
+    from app.modules.prompt_assembly import build_base_prompt
+    desc = "Start container 111 and confirm port 3001 is listening."
+    p = build_base_prompt({"title": "t", "prompt_template": f"Do this: {desc}", "description": desc}, {})
+    assert p.count(desc) == 1
+    assert "WHAT THIS STEP MUST DO" not in p
+
+
+def test_no_description_changes_nothing():
+    from app.modules.prompt_assembly import build_base_prompt
+    for d in (None, "", "   "):
+        p = build_base_prompt({"title": "t", "prompt_template": "Do it.", "description": d}, {})
+        assert "WHAT THIS STEP MUST DO" not in p
+
+
+def test_the_gate_now_sees_the_corrections_end_to_end():
+    """The whole chain: description -> snapshot -> violation(). Uses the real
+    step text and the real third output, which the gate was silent on live."""
+    third = (FIX / "add100_output3.txt").read_text() if (FIX / "add100_output3.txt").exists() else None
+    assert third, "fixture missing"
+    assert sc.violation(STEP, third), "the third live draw must be caught"

@@ -663,6 +663,28 @@ def build_base_prompt(node: dict, brief: dict) -> str:
         goal = goals[0] if goals else ""
     essentials = _brief_essentials(brief or {})
     tail = f"\n\n{essentials}" if essentials else ""
+    # §17.1237 — the step's own description, which nothing rendered.
+    #
+    # `prompt_template` and `title` were the whole task; `description` was read
+    # only as a matching hint for §17.1221 below, and the autonomous executor did
+    # not even put it in its node snapshot. So the column the planner writes the
+    # step's specification into, and the ONE field an operator (or a repair) can
+    # edit without invalidating the node, was invisible to the model.
+    #
+    # Live, ADD100: the operator's corrections were written into `description`
+    # — three capabilities not four, outside access now IN scope, pick the
+    # approach and do not ask — and the step then ignored all of them across
+    # three attempts, asking again in three different phrasings. It was never
+    # disobeying: it never saw them. A `PATCH /nodes/{job}/{key}` setting
+    # `description` was a no-op for auto mode.
+    #
+    # Rendered as instructions, because that is what they are, and skipped when
+    # the template already carries the same text so nothing is said twice.
+    desc = str(node.get("description") or "").strip()
+    if desc and desc not in template:
+        tail += ("\n\nWHAT THIS STEP MUST DO — from the plan, including any correction the "
+                 "operator has made to it. This is the specification; where it disagrees with "
+                 "the task line above, this wins:\n" + desc)
     # §17.1221 — the question belongs to the STEP, asked when the operator gets
     # here, not to the plan. This is the one place every step's guide and runbook
     # is assembled, so a step that depends on something undecided opens by asking

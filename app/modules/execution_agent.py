@@ -1610,6 +1610,11 @@ async def execute_next_node(
             "node_key": node_key,
             "title": title,
             "prompt_template": node.get("prompt_template"),
+            # §17.1237 — the step's DESCRIPTION. It was missing here, so nothing
+            # downstream could see it: not the prompt, not §17.1221's
+            # ask-first matching, not §17.1236's gate. See build_base_prompt.
+            "description": node.get("description"),
+            "node_type": node.get("node_type"),
             "domain": node.get("domain"),
             # Sprint W.1 — _build_prompt prepends a Reviewer feedback block
             # when retry_count > 0 AND a prior rejection reason is on the row.
