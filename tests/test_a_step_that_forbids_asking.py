@@ -135,3 +135,78 @@ def test_the_executor_checks_it_before_the_verifiers():
     seg = src[src.index("_constraint_violation("):src.index("elif skip_verify:")]
     for field in ("description", "prompt_template", "title"):
         assert field in seg, field
+
+
+# ── §17.1236b: the second draw shared no wording with the first ───────────
+
+OUTPUT2 = (FIX / "add100_output2.txt").read_text()
+
+
+def test_the_second_live_draw_is_caught_too():
+    """Retried, ADD100 asked again in completely different words: "## Decision
+    needed: Should the control panel be reachable from outside your home?" and
+    "The one thing you did not say is whether…". None of the first draw's
+    phrases appear in it."""
+    assert not any(p in OUTPUT2 for p in ("why I am asking", "I cannot build", "## The question"))
+    assert sc.violation(STEP, OUTPUT2)
+
+
+def test_the_second_draw_gets_the_more_specific_reason():
+    """It is not merely asking when told not to — it re-asks a question the
+    operator ANSWERED, and the reason must say so and quote both sides."""
+    v = sc.violation(STEP, OUTPUT2)
+    assert "ALREADY ANSWERED" in v
+    assert "asked and answered" in v                       # the step's own sentence
+    assert "reachable from outside your home" in v         # the output's
+    assert "Re-asking a settled question" in v
+
+
+def test_reopens_settled_needs_both_sides():
+    settled = 'They were asked and answered: "yes it should be accessible outside".'
+    reopen = "You did not say whether you want outside access."
+    assert sc.reopens_settled(settled, reopen)
+    assert sc.reopens_settled("Build the panel.", reopen) is None
+    assert sc.reopens_settled(settled, "Built it, reachable from outside via Tailscale.") is None
+
+
+def test_unrelated_subjects_are_never_paired():
+    """A false positive fails work that was actually done, so the overlap has to
+    be about the same thing."""
+    assert sc.reopens_settled("The storage pool is already decided: local-lvm.",
+                              "You did not say which movie you want first.") is None
+    assert sc.reopens_settled("The VLAN id is already settled.",
+                              "You have not decided on the wallpaper.") is None
+
+
+def test_one_distinctive_long_word_is_enough_but_a_short_one_is_not():
+    """Measured on the real pair: the two sentences share exactly ONE word,
+    `outside`, and are unmistakably the same subject. Requiring two missed the
+    case the gate was written for."""
+    assert sc.reopens_settled("Remote access is already decided.",
+                              "You did not say whether you want remote access.")
+    # a single short shared word is not a subject
+    assert sc.reopens_settled("The plan is already settled.",
+                              "You did not say which plan file to use.") is None
+
+
+@pytest.mark.parametrize("phrase", [
+    "## Decision needed: should this be public?",
+    "The one thing you did not say is whether you want it.",
+    "You haven't told me which option you prefer.",
+    "Here are the options, in plain words:",
+    "Before I can build this, I need to know the stack.",
+    "Awaiting your decision on the proxy.",
+])
+def test_the_second_draws_vocabulary_is_recognised(phrase):
+    assert sc.asks_the_operator(phrase), phrase
+
+
+def test_a_delivered_step_that_mentions_a_settled_fact_still_passes():
+    """The vacuity check for the new branch: quoting the settled decision while
+    DELIVERING must not be read as re-opening it."""
+    delivered = (
+        "## Control panel rebuilt\n\n"
+        "Outside access was already answered — yes — so it is served over Tailscale "
+        "with a login page. You open one address on your phone.\n\n"
+        "## Files written\n\n`/opt/panel/app.py`\n")
+    assert sc.violation(STEP, delivered) is None

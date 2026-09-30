@@ -91,8 +91,13 @@ def forbids_asking(step_text: str) -> Optional[str]:
 
 
 def asks_the_operator(output: str) -> Optional[str]:
-    """The place the output asks instead of delivering."""
-    return _hit(output, _ASKS)
+    """The place the output asks instead of delivering.
+
+    Two pattern sets, one per live draw (§17.1236b): the second attempt at the
+    same step shared no wording with the first, so the vocabulary is extended
+    from real text rather than guessed at.
+    """
+    return _hit(output, _ASKS) or _hit(output, _ASKS_MORE)
 
 
 def violation(step_text: str, output: str) -> Optional[str]:
@@ -100,6 +105,17 @@ def violation(step_text: str, output: str) -> Optional[str]:
 
     Both must be present: the step forbade it and the output did it anyway.
     """
+    # §17.1236b — the more specific finding first: asking about something the
+    # operator already ANSWERED is a worse failure than asking when told not to,
+    # and it says far more to the retry.
+    both = reopens_settled(step_text, output)
+    if both:
+        s_sentence, o_sentence = both
+        return (f'the output asks about something this step records as ALREADY ANSWERED. '
+                f'The step says: "{s_sentence}". The output says: "{o_sentence}". Do not '
+                f're-ask a question the operator has settled — read the answer out of the '
+                f'step and build on it. Re-asking a settled question is the specific thing '
+                f'the operator has objected to.')
     told = forbids_asking(step_text)
     if not told:
         return None
@@ -111,3 +127,104 @@ def violation(step_text: str, output: str) -> Optional[str]:
             f'technology, so decide it, say in plain words what it means for them, and deliver '
             f'the step. If something genuinely cannot be decided without them, that belongs in a '
             f'decision node, not in place of this step\'s work.')
+
+
+# ---------------------------------------------------------------------------
+# §17.1236b — measured against the SECOND live draw, which shared no wording
+# with the first.
+#
+# ADD100, retried: it opened
+#
+#     ## Decision needed: Should the control panel be reachable from outside your home?
+#     The one thing you did not say is whether you want to open this panel from
+#     outside your home … Here are the options, in plain words:
+#
+# while the step's own description carried, in the operator's words, *"They were
+# asked and answered: 'yes it should be accessible outside'. The previous attempt
+# put outside access out of scope and deferred it; that deferral is now closed."*
+#
+# Two lessons. The vocabulary of deferring is much wider than one draw shows, so
+# `_ASKS_MORE` extends it from real text rather than imagination. And this is not
+# merely asking when told not to — it is asking a question the operator has
+# ALREADY ANSWERED, which is decidable on its own: the step says a topic is
+# settled and the output says the same topic is open.
+# ---------------------------------------------------------------------------
+
+_ASKS_MORE = re.compile(
+    r"(?i)##\s*Decision\s+needed\b|\bdecision\s+needed\s*:"
+    r"|you\s+(?:did\s*not|didn'?t|have\s+not|haven'?t)\s+(?:say|said|tell|told|decide|decided|specify)\b"
+    r"|the\s+one\s+thing\s+you\s+(?:did\s*not|didn'?t|have\s+not)\b"
+    r"|here\s+are\s+the\s+options\b|which\s+of\s+these\b"
+    r"|before\s+I\s+can\s+(?:build|do|finish|start)\b"
+    r"|awaiting\s+your\s+(?:answer|choice|decision)\b")
+
+#: the step recording that something IS decided.
+_SETTLED = re.compile(
+    r"(?i)(?:were|was)\s+asked\s+and\s+answered"
+    r"|deferral\s+is\s+now\s+closed|no\s+longer\s+(?:open|deferred)"
+    r"|already\s+(?:decided|answered|settled|chosen)"
+    r"|(?:is|are)\s+(?:now\s+)?settled\b"
+    r"|(?:is|are)\s+IN\s+scope\s+for\s+this\s+step"
+    r"|they\s+(?:answered|said|told\s+us)\b")
+
+#: the output claiming something is NOT decided.
+_REOPENS = re.compile(
+    r"(?i)you\s+(?:did\s*not|didn'?t|have\s+not|haven'?t)\s+(?:say|said|tell|told|decide|decided|specify)"
+    r"|##\s*Decision\s+needed|\bdecision\s+needed\s*:"
+    r"|(?:still\s+)?(?:undecided|not\s+decided)\b|has\s+not\s+been\s+decided\b"
+    r"|the\s+one\s+thing\s+you\b")
+
+#: words too generic to establish that two sentences are about the same thing.
+_TOPIC_STOP = frozenset({
+    "this", "that", "the", "and", "for", "with", "you", "your", "want", "whether",
+    "from", "only", "when", "what", "which", "should", "would", "could", "will",
+    "them", "they", "their", "have", "has", "was", "were", "been", "step", "thing",
+    "things", "said", "say", "asked", "answered", "decided", "decision", "needed",
+    "operator", "engine", "now", "closed", "scope", "settled", "already", "yes",
+    "not", "did", "there", "here", "into", "onto", "about", "just", "also", "more",
+    "previous", "attempt", "put", "make", "made", "does", "done", "some", "then",
+})
+
+
+def _topic(sentence: str) -> set[str]:
+    return {w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", sentence or "")
+            if w.lower() not in _TOPIC_STOP}
+
+
+def _sentences(text_value: str, pattern: re.Pattern, paras: int) -> list[str]:
+    out: list[str] = []
+    for para in re.split(r"\n\s*\n", str(text_value or ""))[:paras]:
+        for sentence in re.split(r"(?<=[.!?])\s+|\n", para):
+            if pattern.search(sentence):
+                out.append(" ".join(sentence.split())[:260])
+    return out
+
+
+def reopens_settled(step_text: str, output: str):
+    """``(the step's sentence, the output's sentence)`` for a topic the step
+    records as decided and the output treats as open, else ``None``.
+
+    Matched on shared DISTINGUISHING words: the vocabulary of asking is stripped
+    first and two real words must overlap, so "outside"/"access"/"panel" alone
+    cannot pair two unrelated sentences. A false positive here fails work that
+    was actually done, so it is deliberately hard to trip.
+    """
+    settled = _sentences(step_text, _SETTLED, paras=40)
+    if not settled:
+        return None
+    reopened = _sentences(output, _REOPENS, paras=_PARAS)
+    if not reopened:
+        return None
+    for s in settled:
+        st = _topic(s)
+        for r in reopened:
+            shared = st & _topic(r)
+            # Two shared words, OR one distinctive long word. Measured on the real
+            # pair: the step's "that deferral is now closed" (about outside
+            # access) and the output's "Should the control panel be reachable from
+            # outside your home?" share exactly ONE word — `outside` — and they
+            # are unmistakably the same subject. Requiring two missed it, and a
+            # gate that misses the case it was written for is not a gate.
+            if len(shared) >= 2 or any(len(w) >= 6 for w in shared):
+                return s, r
+    return None

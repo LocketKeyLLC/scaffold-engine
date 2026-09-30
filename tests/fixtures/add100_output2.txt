@@ -1,0 +1,20 @@
+## Decision needed: Should the control panel be reachable from outside your home?
+
+You told us you want one panel that lets you edit the Palworld server settings, type in a movie or TV show for the media server to download, get quick access to the AI you are testing, and open the scaffold‑engine itself. That part is settled.
+
+The one thing you did not say is whether you want to open this panel from **outside your home** (for example, from your phone while you are away) or only when you are at home on your own network.
+
+This choice matters because it changes how we protect the panel. If the panel is only for home use, we can keep it simple and locked to your local network. If you want to reach it from anywhere, we have to add an extra layer of security — like a secure tunnel or a login page — so that strangers on the internet cannot get in and change your game server settings or tell your media server to download things.
+
+Here are the options, in plain words:
+
+1. **Home only** — The panel works only when you are connected to your own WiFi or plugged into your home network.  
+   *Trade‑off:* Simplest and safest. You cannot use the panel when you are away from home.
+
+2. **Outside access with a secure tunnel** — You install a small program (like Tailscale or WireGuard) on your phone and computer. When you turn it on, your device acts like it is at home, and the panel opens securely.  
+   *Trade‑off:* A little more setup on each device you want to use remotely, but no one else can reach the panel. This is the most common way for home labs.
+
+3. **Outside access with a login page (reverse proxy)** — The panel gets its own internet address with a username and password, protected by encryption (HTTPS). You open it in any browser.  
+   *Trade‑off:* You can use any device without installing extra software, but we must be very careful to keep the login page and the panel itself hardened against attackers. More ongoing maintenance.
+
+Which of these fits how you want to use the panel? If you are not sure, tell me what you want to be able to do when you are away from home — for example, “check on the game server,” “add a movie to download,” or “just look at the AI” — and I will narrow the options to match that.
