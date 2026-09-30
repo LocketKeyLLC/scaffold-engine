@@ -37,6 +37,12 @@ from typing import Any, Optional
 
 logger = logging.getLogger("scaffold")
 
+
+#: §17.1244 — how long the runner may spend on ONE approved command. The
+#: engine's own ceiling (`settings.mcp_call_timeout`) must be at least this,
+#: or it abandons a write it is still allowing the runner to perform.
+RUN_COMMAND_TIMEOUT_S = 180
+
 MARK = "[local-runner]"
 WRITE_TOOL = "run_supervised"
 POLICY_TOOL = "write_policy"
@@ -392,7 +398,7 @@ async def run_block(spec, commands: list[str], *, on_progress=None,
     done: list[dict] = []
     for i, cmd in enumerate(commands, 1):
         ap = mint_approval(cmd, token)
-        payload = {"command": cmd, "approval": ap, "timeout_s": 180}
+        payload = {"command": cmd, "approval": ap, "timeout_s": RUN_COMMAND_TIMEOUT_S}
         needed = {n: v for n, v in (env or {}).items() if f"${n}" in cmd or "${" + n + "}" in cmd}
         if needed:
             payload["env"] = needed

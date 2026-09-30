@@ -106,19 +106,32 @@ async def _open_session(spec: McpServerSpec) -> AsyncIterator[Any]:
         return
 
     # streamable_http
+    import httpx2
     from mcp.client.streamable_http import streamable_http_client
 
-    if spec.headers:
-        import httpx2
-
-        async with httpx2.AsyncClient(headers=spec.headers) as http_client:
-            async with streamable_http_client(spec.endpoint, http_client=http_client) as streams:
-                read, write = streams[0], streams[1]
-                async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
-                    await session.initialize()
-                    yield session
-    else:
-        async with streamable_http_client(spec.endpoint) as streams:
+    # §17.1244 — the transport's read timeout, which nothing was setting.
+    #
+    # `streamable_http_client` in this SDK takes no timeout of its own: it uses
+    # the httpx client it is given, or builds one with httpx's defaults. httpx2's
+    # default is **5 seconds**. So every call over this transport had a 5-second
+    # read timeout while `ClientSession` was told 60 — and a tool call whose
+    # answer took longer than five seconds lost its response with
+    #
+    #     MCPError: SSE stream ended without a response
+    #
+    # Three supervised runs died that way in one evening, each on a command that
+    # is simply not instant: `pct start 111` (ADD50), `pct start 120` (ADD110),
+    # `pveam update && pveam available …` (ADD111). Everything that succeeded was
+    # fast — `pct list`, `pct status`, `curl` against a local API. The engine
+    # then reported "the connection to pve-runner dropped", which read as a flaky
+    # helper and was actually our own five-second clock.
+    #
+    # One client for both branches, with the read timeout tied to the call
+    # timeout: the answer arrives on the SSE stream, so that stream has to be
+    # allowed to stay quiet for as long as the command may run.
+    _timeout = httpx2.Timeout(connect=10.0, read=timeout + 30.0, write=30.0, pool=10.0)
+    async with httpx2.AsyncClient(headers=spec.headers or None, timeout=_timeout) as http_client:
+        async with streamable_http_client(spec.endpoint, http_client=http_client) as streams:
             read, write = streams[0], streams[1]
             async with ClientSession(read, write, read_timeout_seconds=timeout) as session:
                 await session.initialize()
