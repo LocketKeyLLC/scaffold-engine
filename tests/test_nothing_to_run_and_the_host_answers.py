@@ -272,3 +272,66 @@ async def test_a_finished_session_is_not_live():
     sql = str(db.execute.await_args.args[0])
     for done in ("completed", "handed_off", "cancelled", "failed"):
         assert done in sql
+
+
+# ── §17.1229b: a multi-word name, and the host's own address ──────────────
+
+
+def test_a_multi_word_prefix_finds_its_service_and_a_generic_one_finds_nothing():
+    by = rd.guests_by_name(PCT_LIST)
+    assert rd.match_guest("PROWLARR_CONTAINER", by) == "105"
+    assert rd.match_guest("MEDIA_SONARR_LXC", by) == "108"
+    # nothing in these names is a service — they are about the host
+    assert rd.match_guest("PROXMOX_NODE", by) is None
+    assert rd.match_guest("HOST", by) is None
+    assert rd.match_guest("CONTAINER", by) is None
+
+
+def test_service_words_strips_the_generic_ones():
+    assert rd.service_words("PROWLARR_CONTAINER") == ["prowlarr"]
+    assert rd.service_words("PROXMOX_NODE") == []
+    assert rd.service_words("") == []
+
+
+@pytest.mark.asyncio
+async def test_the_hosts_own_address_is_read_and_not_guessed_when_there_are_several():
+    """Live: PROXMOX_NODE_IP came back empty with two ledger guesses. `pct list`
+    cannot answer it — the host itself can, and with several addresses the
+    operator still picks."""
+    inputs = [{"name": "PROXMOX_NODE_IP"}]
+    with patch.object(rd, "_read", AsyncMock(side_effect=lambda spec, c:
+                      "192.168.1.26 192.168.1.127 127.0.0.1\n" if c == "hostname -I" else "")):
+        await rd._discover_guest_inputs(inputs, SimpleNamespace(name="pve-runner"))
+    i = inputs[0]
+    assert not i.get("value")                          # two candidates → no guess
+    assert [s["value"] for s in i["suggestions"]] == ["192.168.1.26", "192.168.1.127"]
+    assert "hostname -I" in i["suggestions"][0]["source"]
+
+
+@pytest.mark.asyncio
+async def test_a_single_host_address_is_prefilled():
+    inputs = [{"name": "HOST_IP"}]
+    with patch.object(rd, "_read", AsyncMock(side_effect=lambda spec, c:
+                      "10.0.0.5\n" if c == "hostname -I" else "")):
+        await rd._discover_guest_inputs(inputs, SimpleNamespace(name="r"))
+    assert inputs[0]["value"] == "10.0.0.5"
+
+
+@pytest.mark.asyncio
+async def test_a_host_shaped_name_never_probes_a_guest():
+    """The whole point of the generic-word list: no `pct exec` against a guest
+    that happens to share a word with 'node'."""
+    calls: list[str] = []
+
+    async def _rec(spec, c):
+        calls.append(c)
+        return "10.0.0.5\n" if c == "hostname -I" else PCT_LIST if c == "pct list" else ""
+
+    with patch.object(rd, "_read", _rec):
+        await rd._discover_guest_inputs([{"name": "PROXMOX_NODE_IP"}], SimpleNamespace(name="r"))
+    assert not any(c.startswith("pct exec") for c in calls), calls
+
+
+def test_loopback_is_never_offered():
+    assert rd._all_ipv4("127.0.0.1 10.1.1.1 10.1.1.1") == ["10.1.1.1"]
+    assert rd._all_ipv4("") == []

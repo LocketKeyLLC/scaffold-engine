@@ -62,10 +62,35 @@ _STORAGE_NAMES = re.compile(r"^(STORAGE|STORAGE_NAME|STORAGE_ID|POOL|TARGET_STOR
 # The name carries the SERVICE (`PROWLARR_IP` → prowlarr), matched against the
 # guest names `pct list` reports, so nothing is guessed from a bare `CONTAINER_IP`
 # (§17.1189(E) — an unqualified name drew the operator's public address).
-_CTID_NAMES = re.compile(r"^([A-Z][A-Z0-9]*)_(?:CTID|CT_ID|CONTAINER_ID|LXC_ID|VMID)$")
-_IP_NAMES = re.compile(r"^([A-Z][A-Z0-9]*)_(?:IP|IP_ADDRESS|ADDR|HOST)$")
-_APIKEY_NAMES = re.compile(r"^([A-Z][A-Z0-9]*)_API_KEY$")
+#
+# The service part may be several words (`PROWLARR_CONTAINER_IP`), so it allows
+# underscores and `service_words` picks the distinguishing one. Generic words are
+# NOT a service: `PROXMOX_NODE_IP` is the HOST's address, and matching it against
+# a guest called "node" would be §17.1189(E) all over again.
+_CTID_NAMES = re.compile(r"^([A-Z][A-Z0-9_]*?)_(?:CTID|CT_ID|CONTAINER_ID|LXC_ID|VMID)$")
+_IP_NAMES = re.compile(r"^([A-Z][A-Z0-9_]*?)_(?:IP|IP_ADDRESS|ADDR)$")
+_APIKEY_NAMES = re.compile(r"^([A-Z][A-Z0-9_]*?)_API_KEY$")
 _NODE_NAMES = re.compile(r"^(?:PROXMOX_)?NODE(?:_NAME)?$")
+#: names for the HOST's own address, which `pct list` cannot answer.
+_HOST_IP_NAMES = re.compile(r"^(?:PROXMOX_)?(?:NODE|HOST|PVE|SERVER)_(?:IP|IP_ADDRESS|ADDR)$")
+
+#: words that name no service. A placeholder made only of these is about the
+#: host or is simply unqualified, and must draw nothing from the guest list.
+_GENERIC_WORDS = frozenset({
+    "PROXMOX", "PVE", "NODE", "HOST", "SERVER", "LOCAL", "TARGET", "REMOTE",
+    "CONTAINER", "LXC", "VM", "GUEST", "CT", "THE", "MY", "MAIN", "PRIMARY",
+    "SERVICE", "APP", "DOCKER",
+})
+
+
+def service_words(prefix: str) -> list[str]:
+    """The distinguishing words in a placeholder's prefix, longest first.
+
+    ``PROWLARR_CONTAINER`` -> ``["prowlarr"]``; ``PROXMOX_NODE`` -> ``[]``,
+    because nothing in it names a service.
+    """
+    parts = [w for w in (prefix or "").split("_") if w and w not in _GENERIC_WORDS]
+    return sorted({w.lower() for w in parts}, key=len, reverse=True)
 
 #: `pct list` rows: VMID Status Lock Name — the name is the last column.
 _PCT_NAMED = re.compile(r"^\s*(\d{3,5})\s+(\S+)(?:\s+\S*)?\s+(\S+)\s*$", re.M)
@@ -89,21 +114,34 @@ def guests_by_name(text_out: str) -> dict[str, str]:
 def match_guest(service: str, by_name: dict[str, str]) -> Optional[str]:
     """The ctid whose guest name IS, or clearly contains, this service.
 
-    Exact first, then a unique substring hit. Two candidates means the engine
-    must not pick: a wrong ctid here runs a write against the wrong container.
+    `service` is a placeholder PREFIX: its generic words are stripped first, then
+    each remaining word is tried longest-first — exact match, then a unique
+    substring hit. A prefix with no distinguishing word (``PROXMOX_NODE``) and an
+    ambiguous one both resolve to None: a wrong ctid here runs a write against
+    the wrong container.
     """
-    svc = (service or "").strip().lower()
-    if not svc:
-        return None
-    if svc in by_name:
-        return by_name[svc]
-    hits = sorted({cid for name, cid in by_name.items() if svc in name or name in svc})
-    return hits[0] if len(hits) == 1 else None
+    for svc in service_words(service):
+        if svc in by_name:
+            return by_name[svc]
+        hits = sorted({cid for name, cid in by_name.items() if svc in name or name in svc})
+        if len(hits) == 1:
+            return hits[0]
+    return None
 
 
 def first_ipv4(text_out: str) -> Optional[str]:
     m = _IPV4.search(text_out or "")
     return m.group(1) if m else None
+
+
+def _all_ipv4(text_out: str) -> list[str]:
+    """Every non-loopback IPv4, in order, deduplicated — a host usually has
+    several and choosing for the operator is how the wrong interface gets used."""
+    out: list[str] = []
+    for m in _IPV4.finditer(text_out or ""):
+        if m.group(1) not in out:
+            out.append(m.group(1))
+    return out
 
 
 def apikey_from_config(text_out: str) -> Optional[str]:
@@ -217,7 +255,8 @@ async def _discover_guest_inputs(inputs: list[dict], spec) -> None:
     runner = getattr(spec, "name", "the runner") or "the runner"
     names = {i["name"]: i for i in pend if i.get("name")}
     ctid_want = {n: m.group(1) for n, m in ((n, _CTID_NAMES.match(n)) for n in names) if m}
-    ip_want = {n: m.group(1) for n, m in ((n, _IP_NAMES.match(n)) for n in names) if m}
+    ip_want = {n: m.group(1) for n, m in ((n, _IP_NAMES.match(n)) for n in names)
+               if m and not _HOST_IP_NAMES.match(n)}
     key_want = {n: m.group(1) for n, m in ((n, _APIKEY_NAMES.match(n)) for n in names) if m}
     node_want = [n for n in names if _NODE_NAMES.match(n)]
 
@@ -228,6 +267,20 @@ async def _discover_guest_inputs(inputs: list[dict], spec) -> None:
                 names[n]["value"] = host[0].strip()
                 names[n]["suggestions"] = [_sugg(host[0].strip(), runner, "hostname")]
                 logger.warning("runbook_input_discovered name=%s kind=node value=%s", n, host[0].strip())
+
+    # the HOST's own address — `pct list` cannot answer this one, and a name made
+    # only of generic words (`PROXMOX_NODE_IP`) reaches no guest by design.
+    host_ip_want = [n for n in names if _HOST_IP_NAMES.match(n)]
+    if host_ip_want:
+        addrs = _all_ipv4(await _read(spec, "hostname -I"))
+        for n in host_ip_want:
+            if not addrs:
+                continue
+            names[n]["suggestions"] = [_sugg(a, runner, "hostname -I on the host") for a in addrs[:MAX_PER_INPUT]]
+            if len(addrs) == 1:
+                names[n]["value"] = addrs[0]
+            logger.warning("runbook_input_discovered name=%s kind=host_ip found=%d prefilled=%s",
+                           n, len(addrs), len(addrs) == 1)
 
     if not (ctid_want or ip_want or key_want):
         return
