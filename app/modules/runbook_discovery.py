@@ -361,3 +361,102 @@ async def _read(spec, command: str) -> str:
     except Exception as exc:
         logger.warning("runbook_discovery_read_failed cmd=%r err=%r", command[:60], exc)
         return ""
+
+
+# ---------------------------------------------------------------------------
+# §17.1242 — the hardware is readable too.
+#
+# §17.1229 taught the engine to read guests, their addresses and their API keys
+# off the host. It did not teach it to read the HARDWARE, and the very next step
+# stopped to ask about it. Live, ADD100:
+#
+#     ## Before I build: two things to decide
+#     **1. What is the second graphics card?**
+#     The panel's scaffold-engine tile needs to know what GPUs it can actually
+#     use. The Tesla P40 is known. The second card is not.
+#
+# One command answers it — `lspci -nn | grep -Ei "vga|3d controller"` on the
+# host the engine already had an open read-only channel to:
+#
+#     02:00.0 3D controller  — NVIDIA GP102GL [Tesla P40]
+#     83:00.0 VGA controller — NVIDIA GP106 [GeForce GTX 1060 3GB]
+#     08:01.0 VGA controller — Matrox MGA G200eW   (the board's console video)
+#
+# It was one of the ambiguities the operator answered "I am unsure" to during
+# refinement, and being unsure about your own hardware is exactly the case where
+# asking again is useless and reading is trivial.
+# ---------------------------------------------------------------------------
+
+#: an `lspci -nn` display-adapter line: slot, class, vendor+model, ids.
+_LSPCI_GPU = re.compile(
+    r"^(\S+)\s+(VGA compatible controller|3D controller|Display controller)\s*(?:\[[0-9a-f]{4}\])?:\s*(.+?)\s*$",
+    re.M | re.I)
+
+#: the vendor:device id and the revision, which are not part of a model name.
+#: Stripped FIRST — otherwise the bracket match below reads `[102b:0532]` as the
+#: model and a Matrox G200 is reported to the operator as "102b:0532".
+_LSPCI_TAIL = re.compile(r"\s*\[[0-9a-f]{4}:[0-9a-f]{4}\]\s*(?:\(rev\s+[0-9a-f]+\)\s*)?$", re.I)
+#: a bracketed marketing name at the end of what is left: `GP102GL [Tesla P40]`.
+_LSPCI_MODEL = re.compile(r"\[([^\]\[]{3,40})\]\s*$")
+#: the vendor prefix, dropped so "NVIDIA Corporation GP106" reads as "GP106".
+_LSPCI_VENDOR = re.compile(
+    r"(?i)^(?:NVIDIA Corporation|Advanced Micro Devices, Inc\.|AMD|ATI Technologies Inc|"
+    r"Intel Corporation|Matrox Electronics Systems Ltd\.|ASPEED Technology, Inc\.)\s*")
+
+#: adapters that are a server board's console video, not something to compute on.
+_CONSOLE_VIDEO = re.compile(r"(?i)\bmatrox\b|\bast\d{3,4}\b|\baspeed\b|G200")
+
+_GPU_NAMES = re.compile(r"^(GPU|GPUS|GPU_MODEL|GRAPHICS_CARD|SECOND_GPU|GPU_LIST|VGA)$")
+
+
+def gpus_from_lspci(text_out: str) -> list[dict]:
+    """``[{slot, model, raw, compute}]`` for every display adapter, in slot order.
+
+    `compute` is False for a board's own console video (Matrox/ASPEED), which is
+    the distinction that actually matters: it is why "there are three cards" is
+    the wrong answer and "two you can compute on, one that drives the screen" is
+    the right one.
+    """
+    out: list[dict] = []
+    for m in _LSPCI_GPU.finditer(text_out or ""):
+        slot, desc = m.group(1), m.group(3).strip()
+        core = _LSPCI_TAIL.sub("", desc).strip()
+        name = _LSPCI_MODEL.search(core)
+        model = (name.group(1) if name else _LSPCI_VENDOR.sub("", core)).strip()
+        out.append({"slot": slot, "model": model, "raw": desc,
+                    "compute": not bool(_CONSOLE_VIDEO.search(desc))})
+    return out
+
+
+def describe_gpus(gpus: list[dict]) -> str:
+    """One line per adapter, said the way it matters to the operator."""
+    if not gpus:
+        return ""
+    lines = []
+    for g in gpus:
+        tail = "" if g["compute"] else "  (the board's console video — not for running models)"
+        lines.append(f"  {g['slot']} — {g['model']}{tail}")
+    return "\n".join(lines)
+
+
+async def hardware_facts(spec) -> str:
+    """§17.1242 — the display adapters this host actually has, read now.
+
+    A block for the draft prompt, empty when the host cannot be read. Never a
+    model, never a guess — the same rule §17.1212 set.
+    """
+    if spec is None:
+        return ""
+    gpus = gpus_from_lspci(await _read(spec, 'lspci -nn | grep -Ei "vga|3d controller|display controller"'))
+    if not gpus:
+        return ""
+    compute = [g for g in gpus if g["compute"]]
+    logger.warning("hardware_facts_read adapters=%d compute=%d", len(gpus), len(compute))
+    return ("\n\nGRAPHICS HARDWARE ON THIS HOST (read just now — do NOT ask the operator about it):\n"
+            + describe_gpus(gpus)
+            + (f"\n\nSo there {'is' if len(compute) == 1 else 'are'} {len(compute)} card"
+               f"{'' if len(compute) == 1 else 's'} that can run models"
+               + (f": {', '.join(g['model'] for g in compute)}." if compute else ".")
+               + " Treat the largest-memory one as the model-running GPU. This question is ANSWERED;"
+                 " if the operator said they were unsure about their hardware, that is precisely why"
+                 " it is read rather than asked."))

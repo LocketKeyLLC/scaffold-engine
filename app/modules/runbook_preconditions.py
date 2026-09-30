@@ -44,6 +44,14 @@ _QM_ROW = re.compile(r"^\s*(\d{3,5})\s+(\S+)\s+(\S+)", re.M)
 #: Verbs that need the guest actually RUNNING, not merely defined.
 _NEEDS_RUNNING = frozenset({"exec", "enter", "push", "pull"})
 
+#: §17.1240 — verbs whose job is ALREADY DONE, which is not the same as working.
+#: `pct start` on a running container exits non-zero ("already running"), so a
+#: retry of a start that succeeded fails, and a step that is genuinely finished
+#: gets recorded as broken. Live: ADD50's `pct start 111` worked, its response
+#: was lost, and every retry after that could only fail because 111 was up. The
+#: remedy is the guard chain CHANNEL_RULES already asks for.
+_ALREADY = {"start": "running", "stop": "stopped", "shutdown": "stopped"}
+
 
 def guests_in(commands: list[str]) -> list[tuple[str, str, str]]:
     """``[(tool, verb, id)]`` the commands address, in order, deduplicated."""
@@ -104,6 +112,15 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None)
                     f"{'container' if is_ct else 'VM'} {gid} is {status}, so `{tool} {verb}` fails before it starts."
                     + (f" {fix} is the step that starts it, and it has not run yet." if fix
                        else f" Start it first (`{tool} start {gid}`)."))})
+        elif verb in _ALREADY:
+            status = cts.get(gid) if is_ct else vms.get(gid)
+            if status and status == _ALREADY[verb]:
+                kind = "container" if is_ct else "VM"
+                out.append({"command": cmd, "why": (
+                    f"{kind} {gid} is ALREADY {status}, and `{tool} {verb}` on it exits non-zero — so "
+                    f"this step would be recorded as broken for work that is already done. Make it "
+                    f"idempotent instead: `{tool} status {gid} | grep -q {status} || {tool} {verb} {gid}`, "
+                    f"where the check and the action are each a whole command.")})
     if out:
         logger.warning("preconditions_unmet count=%d first=%r", len(out), out[0]["why"][:120])
     return out

@@ -663,8 +663,14 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     # project." Names only — a value never enters a prompt.
     prompt += await stored_values_block()
     # §17.1232 — what machines exist, so the draft addresses the right one.
+    # §17.1242 — and what hardware is in it, so it stops asking about the GPUs.
     if for_channel and spec is not None:
         prompt += await host_inventory(spec)
+        try:
+            from app.modules.runbook_discovery import hardware_facts
+            prompt += await hardware_facts(spec)
+        except Exception as exc:
+            logger.warning("hardware_facts_failed err=%r", exc)
     if upstream:
         prompt = f"{prompt}\n\n{upstream}"
     if retry_note:

@@ -791,6 +791,14 @@ class NodeInsertInput(BaseModel):
     edited_by: str | None = None
 
 
+class DecisionReviseInput(BaseModel):
+    """§17.1241 — body for POST /nodes/{job_id}/{node_key}/revise."""
+    choice: str = Field(min_length=1, max_length=2000,
+                        description="What the operator's answer is NOW, in their words.")
+    note: str | None = Field(default=None, max_length=4000)
+    edited_by: str | None = None
+
+
 class NodeReorderInput(BaseModel):
     """Body for POST /nodes/{job_id}/reorder."""
     ordered_keys: list[str]

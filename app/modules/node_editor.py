@@ -687,3 +687,66 @@ async def reset_node(
     )
     return {"status": "ok", "node_key": node_key, "reset": reset_keys,
             "downstream_reset": sorted(downstream)}
+
+
+async def revise_decision(
+    job_id: str, node_key: str, *, choice: str, note: str = "",
+    edited_by: str | None = None, db: AsyncSession,
+) -> dict:
+    """§17.1241 — the operator changed their mind, and there was no way to say so.
+
+    A decision is recorded once, into the node's ``output_text``, and downstream
+    steps read it as their specification. Nothing could revise it. Live: ADD99
+    ("what should the control panel do for you?") was answered, and the operator
+    then corrected the answer — four capabilities down to three. The recorded
+    decision still said four, ADD100 read the record over the corrected
+    description, and built four. Getting the record right took resetting the
+    decision node, running the job until the executor re-parked it, and
+    answering the pause a second time — three steps and a full run, for a
+    sentence.
+
+    So: rewrite the record in place, keep the pre-image (§17.1211), and reset the
+    steps that were built on the old answer so they build on the new one. That
+    cascade is the POINT here, unlike §17.1226's — work derived from a decision
+    the operator has changed is work against a spec that no longer exists.
+
+    The node must be a ``decision`` that has already been answered; anything else
+    is a different operation (``reset_node`` to ask again, ``mark_satisfied`` to
+    correct a status).
+    """
+    if not (choice or "").strip():
+        return {"error": "choice is required — a revision has to say what the answer is now",
+                "http_status": 422}
+    nodes = await _load_nodes(db, job_id)
+    node = next((n for n in nodes if n["node_key"] == node_key), None)
+    if not node:
+        return {"error": f"node {node_key} not found", "http_status": 404}
+    if (node.get("node_type") or "") != "decision":
+        return {"error": f"{node_key} is not a decision node", "http_status": 409}
+    if node["status"] != "done":
+        return {"error": f"{node_key} has not been answered yet (it is {node['status']}) — "
+                         f"there is nothing to revise", "http_status": 409}
+
+    from app.modules.decision_pause import decision_record
+    prior = (await db.execute(
+        text("SELECT output_text FROM dag_nodes WHERE job_id = :j AND node_key = :nk"),
+        {"j": job_id, "nk": node_key})).scalar() or ""
+    record = decision_record(choice, note, None)
+
+    await db.execute(
+        text("UPDATE dag_nodes SET output_text = :out, updated_at = NOW(), "
+             "last_verification_reason = :why WHERE job_id = :j AND node_key = :nk"),
+        {"j": job_id, "nk": node_key, "out": record,
+         "why": "decision revised by the operator (§17.1241)"})
+    # the steps built on the old answer have to be built again
+    downstream = sorted(_transitive_downstream(nodes, node_key))
+    if downstream:
+        await _reset_keys(db, job_id, downstream)
+        await _reopen_job(db, job_id)
+    await _audit(db, job_id, node_key, "revise_decision",
+                 {"output_text": prior[:8000]},
+                 {"output_text": record[:8000], "cascade": downstream}, edited_by)
+    await db.commit()
+    logger.info("decision_revised job=%s node=%s cascade=%d", job_id, node_key, len(downstream))
+    return {"status": "ok", "node_key": node_key, "decision": record,
+            "rebuilt": downstream}

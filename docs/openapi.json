@@ -1362,6 +1362,46 @@
         "title": "DecideResult",
         "type": "object"
       },
+      "DecisionReviseInput": {
+        "description": "§17.1241 — body for POST /nodes/{job_id}/{node_key}/revise.",
+        "properties": {
+          "choice": {
+            "description": "What the operator's answer is NOW, in their words.",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Choice",
+            "type": "string"
+          },
+          "edited_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited By"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "choice"
+        ],
+        "title": "DecisionReviseInput",
+        "type": "object"
+      },
       "DedupLogEntry": {
         "additionalProperties": true,
         "description": "One row of ``GET /rag/dedup``'s ``entries`` list.",
@@ -11660,6 +11700,72 @@
           }
         ],
         "summary": "Node Reset"
+      }
+    },
+    "/nodes/{job_id}/{node_key}/revise": {
+      "post": {
+        "description": "§17.1241 — the operator changed their mind about an answered decision.\nRewrites the record and rebuilds what was built on the old answer.",
+        "operationId": "node_revise_decision_nodes__job_id___node_key__revise_post",
+        "parameters": [
+          {
+            "description": "UUID (8-4-4-4-12 hex)",
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "description": "UUID (8-4-4-4-12 hex)",
+              "format": "uuid",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "node_key",
+            "required": true,
+            "schema": {
+              "title": "Node Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionReviseInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "Node Revise Decision"
       }
     },
     "/nodes/{job_id}/{node_key}/satisfied": {

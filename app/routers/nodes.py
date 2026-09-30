@@ -24,6 +24,7 @@ from app.schemas import (
     NodeReorderInput,
     NodeResetInput,
     NodeSatisfiedInput,
+    DecisionReviseInput,
 )
 from app.utils.ids import UuidPath
 
@@ -141,6 +142,21 @@ async def node_reorder(
     await _guard(db, principal, job_id)
     return _dispatch(await node_editor.reorder_nodes(
         job_id, body.ordered_keys,
+        edited_by=_attributed(principal, body.edited_by), db=db,
+    ))
+
+
+@router.post("/nodes/{job_id}/{node_key}/revise")
+async def node_revise_decision(
+    job_id: UuidPath, node_key: str, body: DecisionReviseInput,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+):
+    """§17.1241 — the operator changed their mind about an answered decision.
+    Rewrites the record and rebuilds what was built on the old answer."""
+    await _guard(db, principal, job_id)
+    return _dispatch(await node_editor.revise_decision(
+        job_id, node_key, choice=body.choice, note=body.note or "",
         edited_by=_attributed(principal, body.edited_by), db=db,
     ))
 
