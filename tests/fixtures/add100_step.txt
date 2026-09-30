@@ -1,0 +1,16 @@
+Rework the control-panel backend and frontend in LXC 111 so it does the things chosen in ADD99 and nothing it was never asked for. Keep it editable: whatever is on the page should be changeable later without rebuilding it from scratch. Done when the operator opens it and every item they picked in ADD99 works.
+
+OPERATOR'S CORRECTIONS after the first attempt — these override anything read differently before, including ADD99's recorded note:
+
+  1. THREE capabilities, not four. Their words: "finally only the engine, because I want to test larger local models on the graphics cards." There is NO separate 'quick access to the AI' tile. scaffold-engine itself is the AI surface in the panel, and the reason is that they want to test larger local models on the graphics cards — so the engine's own surface is what has to be reachable, not a shortcut to some other AI.
+
+  2. It MUST be reachable from outside the house. They were asked and answered: "yes it should be accessible outside". The previous attempt put outside access out of scope and deferred it; that deferral is now closed. Outside access is IN scope for this step.
+
+So build exactly these three, one page, one stop:
+  a. Edit the Palworld server's settings from the panel — the settings themselves ('switches etc'), not just start/stop.
+  b. A box to type a movie or TV show name that makes the media server go and fetch it (the Radarr/Sonarr request path), driven from the panel.
+  c. scaffold-engine reachable in the panel, to test and use — for running larger local models on the graphics cards.
+
+Still NOT asked for, so do not add: a general status dashboard, disk-space widgets, or a generic app launcher.
+
+On outside access: the operator is not expected to know the technology (§17.1219). Do not ask them to choose between a reverse proxy and a VPN in those terms. Pick the approach, say in plain words what it means for them (what they type into their phone, what they have to keep working), and secure it — this panel can start and stop machines and reaches their media stack, so it is exposed to the internet only behind authentication.

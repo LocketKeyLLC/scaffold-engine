@@ -1,0 +1,52 @@
+## What is already decided — your four things
+
+Whatever we build, the panel must do these four things, and only these:
+
+1. **Edit the Palworld server settings from the panel.** The actual in-game/server settings — the switches, values, and options — not just a start/stop button. You change a setting here, the server uses it.
+2. **A request box for movies and TV shows.** You type a name, the media server goes and gets it. One box, no digging through menus.
+3. **Quick access to the AI you are testing.** A way to reach that AI environment from the panel.
+4. **scaffold-engine reachable in the panel.** So you can test and use it from the same place.
+
+These four are fixed. I will not add a status dashboard, disk-space widgets, or an app launcher — you did not ask for those, and I will not widen the scope.
+
+## What the tech choice decides — why I am asking
+
+The four things above are the *what*. The question below is the *how*: what the panel is made of and how much of it we build versus take off the shelf. This matters because it decides:
+
+- **How much it can actually do.** Some options can only show buttons and links; others can read and write the Palworld settings and send your movie request to the download tools directly.
+- **How much work it is to build and keep working.**
+- **How simple and secure it is** — especially since outside access must be encrypted and password-protected (that part is already decided and will apply to every option).
+
+I cannot build the panel until this is chosen, because the choice changes what the panel is. That is why I am asking now instead of guessing.
+
+## The question: how should the panel be built?
+
+**Option A — A ready-made dashboard (examples: Homepage, Dashy).**
+A pre-built web page you install and arrange.
+- Good: quick to set up, low effort, looks clean.
+- Bad: it is mostly buttons and links. It can point to the Palworld settings, the media tools, the AI, and scaffold-engine — but it cannot edit Palworld settings itself, and it cannot take a typed movie name and go download it. It would mostly send you to other tools. This option does **not** fully do things 1 and 2.
+
+**Option B — Extend an existing admin tool (example: Cockpit).**
+A server-management page that already exists, with add-ons.
+- Good: handles server stuff well, less custom work than building from scratch.
+- Bad: it is not designed for movie requests or Palworld settings. You would still be stitching things together, and it would not feel like one stop.
+
+**Option C — A purpose-built panel for exactly your four things.**
+A single page with four areas: Palworld settings (switches and fields), the movie/TV request box, the AI access area, and the scaffold-engine area. A small program on the server does the actual work — reads and writes the Palworld settings, sends your request to the download tools.
+- Good: does exactly the four things, in one place, and can be kept simple and locked down.
+- Bad: more work to build and maintain than a ready-made option.
+
+**Option D — A purpose-built panel with more room to grow.**
+Same as Option C, but with a fuller program behind it, so it can grow later — more settings, more controls, more of the things you might want next.
+- Good: most flexible; can expand without a rebuild.
+- Bad: the most work to build and the most to keep running.
+
+## If none of these feels right
+
+Tell me which of the four things matters most to you, and whether you would rather **click switches** or **type things** when you use the panel. I will narrow the options down from there.
+
+## After you answer
+
+I will produce the full build for the panel — the layout, the settings it exposes, how the request box works, how the AI and scaffold-engine are reached, and how it is secured. That is the rebuild, and it comes immediately after your choice.
+
+One thing I am deliberately **not** deciding for you: whether the panel is reachable from outside the house or only at home. You did not answer that earlier, so I will ask it at the step where it actually matters (secure outside access). I will not assume LAN-only just because it is the safer default.

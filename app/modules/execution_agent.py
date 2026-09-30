@@ -2000,12 +2000,26 @@ async def execute_next_node(
         _self_blocked = declares_itself_blocked(output)
     except Exception as exc:
         logger.warning("self_blocked_check_failed node=%s err=%r", node_key, exc)
+    # §17.1236 — and a step that forbade asking must not answer with a question.
+    _asked_anyway = None
+    try:
+        from app.modules.step_constraints import violation as _constraint_violation
+        _asked_anyway = _constraint_violation(
+            " ".join(str(node_snapshot.get(k) or "") for k in
+                     ("description", "prompt_template", "title")),
+            output)
+    except Exception as exc:
+        logger.warning("step_constraint_check_failed node=%s err=%r", node_key, exc)
     if _self_blocked:
         logger.warning("node_declares_itself_blocked node=%s sentence=%r", node_key, _self_blocked)
         verify_status = "fail"
         reason, confidence = (
             f"the step's own output says it cannot be carried out yet: \"{_self_blocked}\" — "
             "nothing was executed, so it is not finished", 0.0)
+    elif _asked_anyway:
+        logger.warning("node_asked_when_told_not_to node=%s", node_key)
+        verify_status = "fail"
+        reason, confidence = _asked_anyway, 0.0
     elif skip_verify:
         verify_status = "skipped"
         reason, confidence = "verification skipped", 0.0
