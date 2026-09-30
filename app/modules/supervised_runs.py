@@ -83,7 +83,8 @@ _NOT_ALLOWED = "not on the write-allow list"
 
 #: §17.1234 adds "cannot report an HTTP error" — a shape the engine can fix
 #: itself, so the redraft must recognise it as one.
-_SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error")
+_SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
+                   "ON THE HOST")
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -552,6 +553,56 @@ def declares_itself_blocked(text_value: str) -> Optional[str]:
                              if _SELF_BLOCKED.search(sn)), para.strip())
             return " ".join(sentence.split())[:300]
     return None
+
+
+#: an interpreter that EXECUTES whatever it is handed on stdin.
+_INTERPRETER = re.compile(r"^(?:ba|da|z|k)?sh\b|^python[0-9.]*\b|^perl\b|^ruby\b|^node\b")
+#: entering a guest — everything after `--` runs INSIDE it, and nothing after a
+#: pipe does.
+_GUEST_ENTRY = re.compile(r"^(?:pct\s+(?:exec|enter)|qm\s+guest\s+exec)\b")
+
+
+def pipe_escapes_the_guest(commands: list[str]) -> list[dict]:
+    """§17.1248 — a pipe after `pct exec` runs the right-hand side on the HOST.
+
+    Live, ADD111's resuming draft:
+
+        pct exec 130 -- curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended
+
+    The shell splits that into `pct exec 130 -- curl …` and `bash /dev/stdin
+    --unattended`. So `curl` fetches the Pi-hole installer inside container 130
+    and hands it to a shell on the PROXMOX HOST — which would have installed
+    Pi-hole on the host itself, taking port 53 and the host's resolver with it.
+    The attempt before this one had it right, inside `bash -c "…"`; the redraft
+    moved the pipe out and nothing noticed, because every existing check judges
+    the segments separately and each of these segments is individually fine.
+
+    That is the whole point: the danger is not in either half, it is in the
+    boundary between them. Refused as a SHAPE problem so §17.1196's redraft
+    fixes it, with the correction named — put the pipeline inside the guest.
+    """
+    from app.modules.assist_supervised import split_segments
+    out: list[dict] = []
+    for c in commands or []:
+        segs = [x.strip() for x in split_segments(str(c)) if x.strip()]
+        if len(segs) < 2 or not _GUEST_ENTRY.search(segs[0]):
+            continue
+        # only a PIPE carries data across; `&&` / `;` just sequence host commands,
+        # which is a different (and legitimate) thing.
+        if "|" not in re.sub(r"\|\|", "", str(c)):
+            continue
+        after = [x for x in segs[1:] if _INTERPRETER.search(x)]
+        if not after:
+            continue
+        guest = re.search(r"\b(\d{3,5})\b", segs[0])
+        gid = guest.group(1) if guest else "the guest"
+        out.append({"command": str(c), "why": (
+            f"this pipes out of {gid} and into `{after[0].split()[0]}` ON THE HOST. Everything after "
+            f"`--` runs inside the guest; everything after the `|` does not — so the script fetched "
+            f"in {gid} would be executed by the Proxmox host itself. Put the whole pipeline inside "
+            f"the guest instead: `pct exec {gid} -- bash -c \"… | {after[0]}\"`, one self-contained "
+            f"command, and nothing crosses the boundary.")})
+    return out
 
 
 def curl_writes_without_fail(commands: list[str]) -> list[dict]:
@@ -1148,6 +1199,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # engine made, so it joins the gate's refusals and the §17.1196 redraft gets
     # a chance to fix it before the operator ever sees the block.
     refused = refused + curl_writes_without_fail(cmds)
+    # §17.1248 — a pipe out of `pct exec` executes on the HOST.
+    refused = refused + pipe_escapes_the_guest(cmds)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner

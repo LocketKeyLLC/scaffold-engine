@@ -109,3 +109,68 @@ def test_the_reason_is_truncated_so_one_failure_cannot_eat_the_prompt():
     long_reason = "x" * 5000
     b = sr.attempt_feedback({"last_verification_reason": long_reason, "output_text": REPORT})
     assert len(b) < 3000
+
+
+# ── §17.1248: a pipe after `pct exec` runs on the HOST ────────────────────
+
+import pytest
+from types import SimpleNamespace
+
+BAD = "pct exec 130 -- curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended"
+GOOD = 'pct exec 130 -- bash -c "curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended"'
+
+
+def test_the_live_draft_that_would_have_installed_pihole_on_the_host():
+    """§17.1247's resuming draft produced BAD. The shell splits it into
+    `pct exec 130 -- curl …` and `bash /dev/stdin --unattended`, so the installer
+    fetched inside 130 would have been executed by the Proxmox host — taking port
+    53 and the host's resolver with it. The attempt before had it right."""
+    got = sr.pipe_escapes_the_guest([BAD])
+    assert len(got) == 1
+    why = got[0]["why"]
+    assert "ON THE HOST" in why and "130" in why
+    assert 'pct exec 130 -- bash -c' in why          # the correction is named
+
+
+def test_the_correct_form_is_allowed():
+    assert sr.pipe_escapes_the_guest([GOOD]) == []
+    assert sr.pipe_escapes_the_guest(['pct exec 130 -- bash -c "a | python3 -"']) == []
+
+
+def test_a_host_side_filter_of_guest_output_is_fine():
+    """`grep`/`awk` reading what a guest printed is the ordinary, correct shape —
+    only an INTERPRETER on the right-hand side executes what it is handed."""
+    for ok in ("pct exec 130 -- ss -tlnp | grep :53",
+               "pct exec 130 -- cat /etc/hosts | awk '{print $1}'",
+               "qm guest exec 106 -- ls | wc -l"):
+        assert sr.pipe_escapes_the_guest([ok]) == [], ok
+
+
+def test_sequencing_is_not_piping():
+    """`&&` and `;` run host commands in order and carry no data across the
+    boundary, which is a different and legitimate thing."""
+    for ok in ("pct exec 130 -- true && pct start 131",
+               "pct exec 130 -- true ; echo done"):
+        assert sr.pipe_escapes_the_guest([ok]) == [], ok
+
+
+def test_a_pipe_with_no_guest_entry_is_not_its_business():
+    assert sr.pipe_escapes_the_guest(["curl -s http://x | bash"]) == []
+    assert sr.pipe_escapes_the_guest(["pct list | grep pihole"]) == []
+
+
+def test_the_redraft_treats_it_as_a_shape_it_can_fix():
+    note = sr.shape_retry_note({"refused": sr.pipe_escapes_the_guest([BAD])})
+    assert note and "ON THE HOST" in note
+    assert "ON THE HOST" in sr._SHAPE_REFUSALS
+
+
+def test_frame_run_withholds_run_for_such_a_block():
+    frame = sr.frame_run({"node_key": "ADD111", "title": "Set up Pi-hole"},
+                         f"## Run this\n\n```bash\n{BAD}\n```\n",
+                         SimpleNamespace(name="pve-runner"), {"allow": ["pct"]})
+    assert frame["refused"] and frame["suggested"] == "myself"
+    frame_ok = sr.frame_run({"node_key": "ADD111", "title": "Set up Pi-hole"},
+                            f"## Run this\n\n```bash\n{GOOD}\n```\n",
+                            SimpleNamespace(name="pve-runner"), {"allow": ["pct"]})
+    assert frame_ok["refused"] == [] and frame_ok["suggested"] == "run"
