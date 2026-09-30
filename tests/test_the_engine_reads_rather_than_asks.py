@@ -189,3 +189,49 @@ def test_the_revise_route_exists():
     src = inspect.getsource(r)
     assert '@router.post("/nodes/{job_id}/{node_key}/revise")' in src
     assert "revise_decision(" in src and "choice=body.choice" in src
+
+
+# ── §17.1243: a create is not blocked by the thing not existing yet ────────
+
+
+@pytest.mark.asyncio
+async def test_a_create_and_the_commands_after_it_are_not_refused():
+    """Live ADD111: `pct create 130 …` was refused with "there is no guest 130 on
+    this host", and `pct start 130` / `pct exec 130 -- …` LATER IN THE SAME BLOCK
+    were refused for the same reason. A correct 11-command runbook was unrunnable
+    and the frame fell back to "I'll do it myself"."""
+    block = ["pct create 130 local:vztmpl/debian-12.tar.zst --hostname pihole",
+             "pct start 130",
+             "pct exec 130 -- bash -c 'apt update'"]
+    with patch.object(rp, "_read", AsyncMock(side_effect=lambda spec, c: PCT if c == "pct list" else QM)):
+        assert await rp.unmet(block, SimpleNamespace(name="r")) == []
+
+
+@pytest.mark.asyncio
+async def test_a_create_onto_a_taken_id_IS_refused():
+    """The opposite reason, which is the real one — and Proxmox shares one id
+    space, so a VM's id collides with `pct create` too. Live, the engine offered
+    CTID 100 while 100 is the gpu-vm (here the fixture's VM is 106)."""
+    with patch.object(rp, "_read", AsyncMock(side_effect=lambda spec, c: PCT if c == "pct list" else QM)):
+        ct = await rp.unmet(["pct create 111 tmpl"], SimpleNamespace(name="r"))
+        vm = await rp.unmet(["pct create 106 tmpl"], SimpleNamespace(name="r"))
+    assert ct and "already taken" in ct[0]["why"] and "a container" in ct[0]["why"]
+    assert vm and "already taken" in vm[0]["why"] and "a VM" in vm[0]["why"]
+    assert "one id space" in vm[0]["why"]
+
+
+@pytest.mark.asyncio
+async def test_an_exec_on_a_guest_nobody_creates_is_still_refused():
+    """The vacuity check: the fix must not make every missing guest acceptable."""
+    with patch.object(rp, "_read", AsyncMock(side_effect=lambda spec, c: PCT if c == "pct list" else QM)):
+        got = await rp.unmet(["pct exec 999 -- true"], SimpleNamespace(name="r"))
+    assert got and "there is no guest 999" in got[0]["why"]
+
+
+@pytest.mark.asyncio
+async def test_order_matters_a_start_BEFORE_its_create_is_still_refused():
+    """`made` is built in command order, so a block that starts a guest before
+    creating it is still caught — that block really is broken."""
+    with patch.object(rp, "_read", AsyncMock(side_effect=lambda spec, c: PCT if c == "pct list" else QM)):
+        got = await rp.unmet(["pct start 130", "pct create 130 tmpl"], SimpleNamespace(name="r"))
+    assert got and "there is no guest 130" in got[0]["why"]

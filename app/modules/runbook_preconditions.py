@@ -52,6 +52,16 @@ _NEEDS_RUNNING = frozenset({"exec", "enter", "push", "pull"})
 #: remedy is the guard chain CHANNEL_RULES already asks for.
 _ALREADY = {"start": "running", "stop": "stopped", "shutdown": "stopped"}
 
+#: §17.1243 — verbs that BRING A GUEST INTO EXISTENCE. For these, "there is no
+#: guest N on this host" is not a blocker, it is the reason the command is being
+#: run. Live, ADD111 (set up Pi-hole): `pct create 130 …` was refused with "there
+#: is no guest 130 on this host — `pct list` and `qm list` do not have it", and
+#: `pct start 130` and `pct exec 130 -- …` later in the SAME block were refused
+#: for the same reason, so a correct 11-command runbook was unrunnable and the
+#: frame fell back to "I'll do it myself". A create is refused only for the
+#: opposite reason: the id is already taken.
+_CREATES = frozenset({"create", "restore", "clone"})
+
 
 def guests_in(commands: list[str]) -> list[tuple[str, str, str]]:
     """``[(tool, verb, id)]`` the commands address, in order, deduplicated."""
@@ -92,9 +102,25 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None)
         return []
 
     out: list[dict] = []
+    # §17.1243 — guests an earlier command in this same block brings into being.
+    # `guests_in` preserves command order, so a create is always seen before the
+    # start and the exec that follow it.
+    made: set[str] = set()
     for tool, verb, gid in guests:
         cmd = next((c for c in commands if re.search(rf"\b{tool}\s+{verb}\s+{gid}\b", str(c))), f"{tool} {verb} {gid}")
         is_ct, is_vm = gid in cts, gid in vms
+        if verb in _CREATES:
+            if is_ct or is_vm:
+                out.append({"command": cmd, "why": (
+                    f"id {gid} is already taken on this host — it is "
+                    f"{'a container' if is_ct else 'a VM'} — so `{tool} {verb} {gid}` would collide "
+                    f"with it. Proxmox shares one id space between containers and VMs: pick an id "
+                    f"that is in neither `pct list` nor `qm list`.")})
+            else:
+                made.add(gid)
+            continue
+        if gid in made:
+            continue                  # created earlier in this very block
         if tool == "pct" and is_vm and not is_ct:
             out.append({"command": cmd, "why": (
                 f"{gid} is a VM on this host, not a container — `pct` cannot address it. "
