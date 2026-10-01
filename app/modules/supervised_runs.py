@@ -799,7 +799,8 @@ def attempt_feedback(node: dict) -> str:
 
 
 async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
-                        for_channel: bool = True, retry_note: str = "", spec=None) -> str:
+                        for_channel: bool = True, retry_note: str = "", spec=None,
+                        environment: dict | None = None) -> str:
     """The same runbook the executor would have written (its prompt and
     system), so the operator approves what Auto mode would have handed them.
 
@@ -810,7 +811,7 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     from app import model_router
     from app.modules.prompt_assembly import EXECUTION_SYSTEM_RUNBOOK, build_base_prompt
     b = brief if isinstance(brief, dict) else {"description": str(brief or "")}
-    prompt = build_base_prompt(node, b)
+    prompt = build_base_prompt(node, b, environment)
     # §17.1222 — a value the operator already gave once must never be asked for
     # again. The store, the `$NAME` reference and the out-of-band delivery all
     # existed (§17.1191/1193); what did not was the drafter KNOWING the names,

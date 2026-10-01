@@ -653,8 +653,14 @@ def _brief_essentials(brief: dict) -> str:
     return "\n\n".join(parts)
 
 
-def build_base_prompt(node: dict, brief: dict) -> str:
-    """The bare task prompt, before grounding or upstream injection."""
+def build_base_prompt(node: dict, brief: dict, environment: dict | None = None) -> str:
+    """The bare task prompt, before grounding or upstream injection.
+
+    §17.1250 — ``environment`` is the operator's ledger (``{"profile": …}``). It
+    was invisible here, so it was invisible to AUTO mode entirely: every consumer
+    of ``environment.profile`` was an assist module, and this function — the one
+    place every step's guide AND runbook is assembled — never mentioned it.
+    """
     template = node.get("prompt_template") or ""
     title = node.get("title") or ""
     goal = (brief or {}).get("description", "") if brief else ""
@@ -680,6 +686,21 @@ def build_base_prompt(node: dict, brief: dict) -> str:
     #
     # Rendered as instructions, because that is what they are, and skipped when
     # the template already carries the same text so nothing is said twice.
+    # §17.1250 — the operator's environment, which auto mode never saw.
+    #
+    # The profile is where their standing constraints live: "root@pve in ONE
+    # interactive shell" (§17.700) and, recorded tonight, "the router is reached
+    # through the My Spectrum APP, not a LAN web page — do NOT write a step that
+    # says open a browser to 192.168.1.1 and log in".
+    #
+    # ADD112 then wrote exactly that: "check the router's admin page directly …
+    # Open a browser to `http://<gateway-ip>` and log in with the credentials
+    # printed on the router's label." Not disobedience — the constraint had no
+    # path to the prompt. Same shape as §17.1237's missing description.
+    prof = str((environment or {}).get("profile") or "").strip()
+    if prof:
+        tail += ("\n\nTHE OPERATOR'S ENVIRONMENT — standing constraints, not suggestions. A step "
+                 "that contradicts any of this is wrong however well it is written:\n" + prof)
     desc = str(node.get("description") or "").strip()
     if desc and desc not in template:
         tail += ("\n\nWHAT THIS STEP MUST DO — from the plan, including any correction the "
@@ -819,7 +840,12 @@ async def assemble_step_context(
     upstream = await fetch_upstream_outputs(db, job_id, depends_on)
     upstream, truncated_keys = truncate_upstream_outputs(upstream)
 
-    base_prompt = build_base_prompt(node, brief)
+    from app.modules.runbook_inputs import job_environment
+    try:
+        _env = await job_environment(db, job_id)
+    except Exception:
+        _env = {}
+    base_prompt = build_base_prompt(node, brief, _env)
 
     grounding = ""
     grounding_kind = None

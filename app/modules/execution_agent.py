@@ -978,7 +978,7 @@ async def _fetch_rag_context(query: str, top_k: int = 2, domain: str | None = No
 _system_for_tool = system_for_tool
 
 
-def _build_prompt(node: dict, brief: dict) -> str:
+def _build_prompt(node: dict, brief: dict, environment: dict | None = None) -> str:
     """Build execution prompt from node template + brief context.
 
     §17.854 (audit A3) — delegates to ``prompt_assembly.build_base_prompt`` so
@@ -992,7 +992,7 @@ def _build_prompt(node: dict, brief: dict) -> str:
     non-empty, a "Reviewer feedback" block is prepended (autonomous-only) so a
     retry sees the prior rejection instead of re-emitting the identical output.
     """
-    body = build_base_prompt(node, brief)
+    body = build_base_prompt(node, brief, environment)
     feedback = _format_reviewer_feedback(node)
     return f"{feedback}{body}" if feedback else body
 
@@ -1642,7 +1642,15 @@ async def execute_next_node(
     # retry-feedback loop on the subsequent /exec/retry.
     try:
         # Build raw prompt.
-        raw_prompt = _build_prompt(node_snapshot, brief)
+        # §17.1250 — the operator's standing constraints reach auto mode too.
+        try:
+            from app.modules.runbook_inputs import job_environment
+            async with async_session() as _edb:
+                _node_env = await job_environment(_edb, job_id)
+        except Exception as exc:
+            logger.warning("job_environment_unreadable job=%s err=%r", job_id, exc)
+            _node_env = {}
+        raw_prompt = _build_prompt(node_snapshot, brief, _node_env)
         # §17.1042 — the optimizer may rewrite the TASK only. Grounding blocks
         # and the upstream block are attached VERBATIM after it: live (parallel
         # run 2e74196b) the "minimum tokens" rewrite of the whole assembled
@@ -2516,10 +2524,13 @@ async def _pause_for_decision(job_id: str) -> dict | None:
             return None
         spec, policy = ch
         _brief = brief_full if isinstance(brief_full, dict) else brief
-        runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec)
+        # §17.1188 — pins, system map, facts. §17.1250 — and the operator's
+        # standing constraints, which every draft below must see, so it is read
+        # BEFORE the first one rather than after it.
         from app.modules.runbook_inputs import job_environment
         async with async_session() as db:
-            _env = await job_environment(db, job_id)          # §17.1188 — pins, system map, facts
+            _env = await job_environment(db, job_id)
+        runbook = await supervised_runs.draft_runbook(run_node, _brief, up_block, spec=spec, environment=_env)
         # §17.1213 — ask the host whether this block can work at all, before
         # offering it. ADD21 ran `pct exec 111` against a stopped container and
         # ADD82 ran `pct exec 106` against a VM; one `pct list` + `qm list`
@@ -2549,7 +2560,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         if fix:
             logger.warning("supervised_run_redraft job=%s node=%s refusals=%s", job_id,
                            run_node.get("node_key"), "; ".join(r["why"] for r in frame["refused"])[:200])
-            retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix, spec=spec)
+            retry = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix, spec=spec, environment=_env)
             if retry:
                 second = supervised_runs.frame_run(run_node, retry, spec, policy, env=_env,
                                                    preconditions=_pre)
@@ -2572,7 +2583,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                 if _nc:
                     logger.warning("supervised_run_no_commands_redraft job=%s node=%s runbook_chars=%d",
                                    job_id, run_node.get("node_key"), len(runbook or ""))
-                    _api = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=_nc, spec=spec)
+                    _api = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=_nc, spec=spec, environment=_env)
                     if _api:
                         _apif = supervised_runs.frame_run(run_node, _api, spec, policy, env=_env,
                                                           preconditions=_pre)
@@ -2599,7 +2610,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                 logger.warning("runbook_coverage_redraft job=%s node=%s missing=%s", job_id,
                                run_node.get("node_key"), "; ".join(_missing)[:200])
                 _again = await supervised_runs.draft_runbook(
-                    run_node, _brief, up_block, retry_note=coverage_retry_note(_missing), spec=spec)
+                    run_node, _brief, up_block, retry_note=coverage_retry_note(_missing), spec=spec, environment=_env)
                 if _again:
                     _third = supervised_runs.frame_run(run_node, _again, spec, policy,
                                                        env=_env, preconditions=_pre)
