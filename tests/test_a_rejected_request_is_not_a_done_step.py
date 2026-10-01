@@ -506,94 +506,6 @@ def test_the_executor_redrafts_and_only_trades_up():
     assert src.index("all_reads_for_a_changing_step") < src.index("runbook_coverage")
 
 
-# ── §17.1255: an inline script whose quoting cannot work ──────────────────
-
-
-BAD_INLINE = ("curl -s http://h/api | python3 -c 'import sys, json; "
-              'data=json.load(sys.stdin); print(f"Name: {d[\\"name\\"]}")\'')
-
-
-def test_the_live_one_liner_is_refused():
-    """ADD96's read step was otherwise right — one read-only command, no
-    refusals — and died on its own quoting:
-        SyntaxError: unexpected character after line continuation character
-    Inside single quotes the shell passes a backslash through untouched, so
-    Python received a literal \\" ."""
-    got = sr.inline_script_quoting([BAD_INLINE])
-    assert len(got) == 1
-    why = got[0]["why"]
-    assert "cannot parse" in why
-    assert "-o /tmp/x.json" in why or "write the output to a file" in why
-
-
-def test_a_double_quoted_payload_is_left_alone():
-    """There `\\"` is how you escape, so it is correct."""
-    assert sr.inline_script_quoting(['python3 -c "import json; print(json.dumps({\\"a\\": 1}))"']) == []
-
-
-def test_plain_quoting_inside_single_quotes_is_fine():
-    ok = "curl -s http://h/api | python3 -c 'import sys, json; print(json.load(sys.stdin)[\"name\"])'"
-    assert sr.inline_script_quoting([ok]) == []
-
-
-def test_commands_with_no_inline_script_are_not_its_business():
-    for c in ("pct status 130", "curl -s http://h/api | grep name",
-              "pct exec 130 -- bash -c 'echo hi'"):
-        assert sr.inline_script_quoting([c]) == [], c
-
-
-def test_perl_and_node_count_too():
-    for interp in ("perl -e", "ruby -e", "node -e"):
-        c = f"""{interp} 'print \\"x\\"'"""
-        assert sr.inline_script_quoting([c]), c
-
-
-def test_the_redraft_treats_it_as_a_shape_it_can_fix():
-    note = sr.shape_retry_note({"refused": sr.inline_script_quoting([BAD_INLINE])})
-    assert note and "cannot parse" in note
-    assert "cannot parse" in sr._SHAPE_REFUSALS
-
-
-# ── §17.1255b: the same quoting bug in a script being WRITTEN ─────────────
-
-BAD_SCRIPT = """printf '%s\\n' 'import json' 'print(f"x {d[\\"name\\"]}")' | tee /tmp/add.py"""
-
-
-def test_a_script_written_with_escaped_quotes_is_refused():
-    """§17.1255 refused `python3 -c '… \\" …'`. The next draft did the right thing
-    structurally — printf | tee a file, then run it — and put the SAME escapes in
-    the lines it wrote, so the file landed with literal backslashes and Python
-    would refuse it. The gate only looked at `-c` payloads."""
-    got = sr.code_written_with_escaped_quotes([BAD_SCRIPT])
-    assert len(got) == 1
-    why = got[0]["why"]
-    assert "/tmp/add.py" in why
-    assert "backslash is literal" in why
-
-
-def test_a_clean_script_is_allowed():
-    ok = """printf '%s\\n' 'import json' 'print("hello")' | tee /tmp/add.py"""
-    assert sr.code_written_with_escaped_quotes([ok]) == []
-
-
-def test_a_json_body_may_legitimately_escape_a_quote():
-    """`curl -d '{"a": "x\\"y"}'` wants that backslash — it is JSON, not code."""
-    assert sr.code_written_with_escaped_quotes(
-        ['curl -s -X POST http://h/api -d \'{"a": "x\\"y"}\'']) == []
-
-
-def test_a_non_code_file_is_not_its_business():
-    """Only .py/.sh/.pl/.rb/.js targets — a Caddyfile or nginx conf is not code
-    this rule understands."""
-    assert sr.code_written_with_escaped_quotes(
-        ["printf '%s\\n' 'server { }' | tee /etc/nginx/x.conf"]) == []
-
-
-def test_the_shape_marker_lets_the_redraft_fix_it():
-    note = sr.shape_retry_note({"refused": sr.code_written_with_escaped_quotes([BAD_SCRIPT])})
-    assert note and "cannot parse" in note
-
-
 # ── §17.1256: a written script reads a secret the runner never passes ─────
 
 WRITE_SCRIPT = ("printf '%s\\n' 'import os' 'KEY = os.environ[\"PROWLARR_API_KEY\"]' "
@@ -661,3 +573,107 @@ def test_the_channel_rules_state_the_runners_injection_rule():
     which is why §17.1247's feedback could not get the model there."""
     assert "does not inherit a stored value" in sr.CHANNEL_RULES
     assert 'NAME="$NAME" python3 /tmp/x.py' in sr.CHANNEL_RULES
+
+
+def test_the_channel_rules_show_HOW_to_write_a_script_safely():
+    """§17.1256c — three drafts in a row put `\\"` inside single-quoted printf
+    arguments and the gate refused each one. A prohibition was not enough; the
+    rules now carry a worked example whose quoting needs no escaping.
+
+    The example is also checked against the gate that refuses the bad form, and
+    against itself: it must be one line, carry a literal backslash-n for printf,
+    and escape nothing. Getting that right in the source took three attempts of
+    my own, which is the whole reason a worked example is worth more than a rule.
+    """
+    R = sr.CHANNEL_RULES
+    assert "Wrap each `printf` argument in DOUBLE quotes" in R
+    i = R.find("    printf")
+    assert i > 0, "no worked example in the channel rules"
+    example = R[i:R.find("| tee /tmp/x.py") + 15]
+    assert "cfg.split('<ApiKey>')" in example          # it shows reading a key
+    assert chr(10) not in example, "the example must be one command on one line"
+    assert chr(92) + "n" in example, "printf needs a literal backslash-n"
+    assert chr(92) + chr(34) not in example, "the example escapes a quote"
+    assert sr.payload_will_not_compile([example.strip()]) == [], \
+        "the example's own script does not compile — it would be refused by §17.1257"
+
+
+# ── §17.1257: compile the payload, instead of a pattern per shape ──────────
+#
+# The operator, after a run of near-identical defects: "Have you looked for an
+# underlying issue that may exist since we keep just putting a bandaid on to a
+# gushing wound." There was one. The engine generates source for a SECOND
+# interpreter and validated only the shell — and its own shell parser calls every
+# one of these commands fine, because they are (`parse_error=False`). The defect
+# was always in the Python being handed over, which nothing compiled.
+#
+# §17.1255 pattern-matched `-c` payloads with escaped quotes. §17.1255b added a
+# second pattern when the identical mistake appeared in a written script. Three
+# drafts produced it anyway, and so did three of my own attempts at the rule.
+# `ast.parse` answers it generically, with the real compiler message. Both narrow
+# gates are deleted; these tests now cover the live cases through the new one.
+
+BAD_DASH_C = 'curl -s http://h/api | python3 -c \'import sys; print(f"x {d[\\"name\\"]}")\''
+BAD_SCRIPT = """printf '%s\\n' 'import json' 'print(f"x {d[\\"name\\"]}")' | tee /tmp/add.py"""
+
+
+def test_the_live_dash_c_payload_is_refused_with_the_real_error():
+    got = sr.payload_will_not_compile([BAD_DASH_C])
+    assert len(got) == 1
+    why = got[0]["why"]
+    assert "the `python -c` payload" in why
+    assert "not valid Python" in why
+    assert "line 1" in why
+    assert "certain, not a guess" in why
+
+
+def test_the_live_written_script_is_refused_with_its_line_number():
+    got = sr.payload_will_not_compile([BAD_SCRIPT])
+    assert len(got) == 1
+    why = got[0]["why"]
+    assert "/tmp/add.py" in why
+    assert "line 2" in why, why          # the offending line, not the whole file
+
+
+def test_payloads_that_compile_are_allowed():
+    for ok in ('curl -s http://h/api | python3 -c \'import sys; print(sys.argv)\'',
+               """printf '%s\\n' "import json" "print(json.dumps({'a': 1}))" | tee /tmp/add.py"""):
+        assert sr.payload_will_not_compile([ok]) == [], ok
+
+
+def test_it_only_looks_where_python_is_actually_handed_over():
+    """A JSON body legitimately escapes a quote; an nginx conf is not Python; a
+    plain command hands nothing to an interpreter."""
+    for none in ('pct status 130',
+                 'curl -s -X POST http://h/api -d \'{"a": "x\\"y"}\'',
+                 "printf '%s\\n' 'server { }' | tee /etc/nginx/x.conf"):
+        assert sr.payload_will_not_compile([none]) == [], none
+
+
+def test_unsplittable_quoting_is_itself_a_finding():
+    """If the shell words cannot be split, nothing can say what the file holds."""
+    got = sr.payload_will_not_compile(["printf '%s\\n' 'unclosed | tee /tmp/x.py"])
+    assert got and "cannot even be split" in got[0]["why"]
+
+
+def test_the_shell_parser_would_NOT_have_caught_these():
+    """The honest reason a new check was needed rather than reusing what existed:
+    these commands are valid shell. That is why a shell-level gate could never
+    have closed this family."""
+    from app.modules.shell_ast import analyze
+    for c in (BAD_DASH_C, BAD_SCRIPT):
+        assert analyze(c).parse_error is False, c
+
+
+def test_the_superseded_gates_are_gone():
+    """Fewer moving parts is the point of the exercise."""
+    assert not hasattr(sr, "inline_script_quoting")
+    assert not hasattr(sr, "code_written_with_escaped_quotes")
+    import inspect
+    src = inspect.getsource(sr.frame_run)
+    assert "payload_will_not_compile(cmds)" in src
+
+
+def test_it_is_a_shape_the_redraft_can_fix():
+    note = sr.shape_retry_note({"refused": sr.payload_will_not_compile([BAD_SCRIPT])})
+    assert note and "not valid Python" in note

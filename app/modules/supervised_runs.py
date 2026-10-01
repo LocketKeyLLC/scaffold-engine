@@ -23,8 +23,10 @@ channel is open: hands-on steps are executable — one approval each.
 from __future__ import annotations
 
 import json
+import ast
 import asyncio
 import logging
+import shlex
 import re
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -84,7 +86,8 @@ _NOT_ALLOWED = "not on the write-allow list"
 #: §17.1234 adds "cannot report an HTTP error" — a shape the engine can fix
 #: itself, so the redraft must recognise it as one.
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
-                   "ON THE HOST", "cannot parse", "only passes a stored value")
+                   "ON THE HOST", "not valid Python", "cannot even be split",
+                   "only passes a stored value")
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -441,6 +444,9 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - If you can CHECK something with a command under "## Verify", you can DO it with a command under "## Run this". A Verify section full of `curl …/api/v1/…` calls beside a Run section of UI clicks is the specific contradiction to avoid: the same API that answers the check also makes the change.
 - A `curl` that CHANGES something must fail loudly: add `--fail-with-body` (so an HTTP 400/401/404/500 exits non-zero and still shows the server's message). Without it `curl -s` exits 0 having fetched an error page, and a step that changed nothing is reported as done — live, nine `POST`s to an API answered "must be greater than 0" and every one "succeeded". A read under "## Verify" may stay a plain `curl -s`.
 - A service's own API key usually lives in that service's own config file on the machine, and reading it there beats depending on a stored copy: it cannot be stale, nothing secret has to cross into your commands, and the value never appears in the block or any log. An *arr app keeps it in the `<ApiKey>` element of the `config.xml` under its `-data=` directory (find that with `systemctl show <svc> -p ExecStart --value` rather than guessing the path). Prefer that to `$NAME` whenever the key is on a machine you can read.
+- WRITING A SCRIPT, exactly. Wrap each `printf` argument in DOUBLE quotes and use SINGLE quotes inside the code; then nothing needs escaping and the file parses. Never put a backslash before a quote in a `printf` argument -- the shell keeps the backslash and the interpreter chokes on it. Like this:
+    printf '%s\\n' "import json, urllib.request" "cfg = open('/tmp/config.xml').read()" "key = cfg.split('<ApiKey>')[1].split('<')[0]" "print(key[:4])" | tee /tmp/x.py
+  and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
 - A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
 """
@@ -629,79 +635,6 @@ _CODE_TARGET = re.compile(r"\btee\s+(?:-a\s+)?(\S+\.(?:py|sh|pl|rb|js|bash))\b",
 _SQ_ARG = re.compile(r"'((?:[^']){0,4000}?)'")
 
 
-def code_written_with_escaped_quotes(commands: list[str]) -> list[dict]:
-    """§17.1255b — the same quoting bug, in a script being written rather than run.
-
-    §17.1255 refused `python3 -c '… \" …'`. The next draft did the right thing
-    structurally — `printf '%s\n' … | tee /tmp/add_indexers.py` then run the file,
-    which is how the channel carries a script — and put the SAME escapes in the
-    lines it wrote:
-
-        print(f"FAILED: {idx[\\"name\\"]} - {result[\\"error\\"]}")
-
-    Inside a single-quoted shell argument the backslash is literal, so the file
-    lands containing `\"` and Python refuses to parse it. The gate only looked at
-    `-c` payloads, so a file being written slipped past.
-
-    Scoped to code: a `tee` whose target is a .py/.sh/.pl/.rb/.js file. A
-    single-quoted JSON body in a `curl -d '{"a": "x\"y"}'` legitimately wants that
-    backslash, so commands that are not writing code are left alone.
-    """
-    out: list[dict] = []
-    for c in commands or []:
-        cmd = str(c)
-        target = _CODE_TARGET.search(cmd)
-        if not target:
-            continue
-        bad = [a for a in _SQ_ARG.findall(cmd) if '\\"' in a or "\\'" in a]
-        if not bad:
-            continue
-        out.append({"command": cmd, "why": (
-            f"the script being written into {target.group(1)} cannot parse: inside a single-quoted "
-            f"shell argument a backslash is literal, so a line like {bad[0][:70]!r} reaches the file "
-            f"with the backslashes still in it. Do not escape quotes inside `printf '…'` arguments — "
-            f"single quotes already protect a \" — so write the line with plain double quotes, or "
-            f"use single quotes inside the code and double quotes around the printf argument.")})
-    return out
-
-
-def inline_script_quoting(commands: list[str]) -> list[dict]:
-    """§17.1255 — `\\"` inside a single-quoted `-c` payload reaches the interpreter.
-
-    Live, ADD96's read step. The draft was otherwise right — one read-only command,
-    no refusals — and it died on its own quoting:
-
-        python3 -c 'import sys, json; … print(f"Name: {d[\\"name\\"]}") …'
-        SyntaxError: unexpected character after line continuation character
-
-    Inside single quotes the shell passes a backslash through untouched, so Python
-    received a literal `\\"` and could not parse it. This is never what was meant
-    and never works, so it is a shape problem the engine can fix itself rather
-    than a dead end for the operator.
-
-    Narrow: only a `-c`/`-e` payload opened with a single quote, and only when it
-    contains a backslash-escaped quote. A double-quoted payload (where `\\"` is
-    how you escape) and an ordinary quoted string are both left alone.
-    """
-    out: list[dict] = []
-    for c in commands or []:
-        cmd = str(c)
-        m = _INLINE_SCRIPT.search(cmd)
-        if not m:
-            continue
-        end = cmd.find("'", m.end())
-        payload = cmd[m.end():end if end > 0 else len(cmd)]
-        if '\\"' not in payload and "\\'" not in payload:
-            continue
-        out.append({"command": cmd, "why": (
-            "this inline script cannot parse: inside single quotes the shell passes a backslash "
-            "through untouched, so the interpreter receives a literal \\\" and fails with a syntax "
-            "error. Do not escape quotes inside a `-c '…'` payload. Either use only single-level "
-            "quoting inside it (plain \" marks are fine there), or split it in two — write the "
-            "output to a file with `-o /tmp/x.json` in one command and parse that file in the next, "
-            "which is clearer and each command stays self-contained.")})
-    return out
-
 
 #: §17.1256 — a secret name a written script expects from its environment.
 _SCRIPT_ENV_READ = re.compile(
@@ -764,6 +697,98 @@ def script_secret_not_passed(commands: list[str]) -> list[dict]:
                 f"starts with no such variable and fails. Put the reference in this command: "
                 f'`{first}="${first}" python3 {path}`. The value still never appears in the block; '
                 f"the runner expands it on the machine.")})
+    return out
+
+
+#: §17.1257 — where a command hands source to another interpreter.
+_PY_DASH_C = re.compile(r"python[0-9.]*\s+-c\s+('[^']*'|\"[^\"]*\")")
+_PY_FILE_WRITE = re.compile(r"\btee\s+(?:-a\s+)?(\S+\.py)\b", re.I)
+
+
+def _printf_lines(cmd: str) -> Optional[list[str]]:
+    """The lines a `printf '%s\\n' "a" "b" …` writes, or None if unsplittable."""
+    if "printf" not in cmd:
+        return None
+    body = cmd.split("printf", 1)[1].split("|", 1)[0]
+    try:
+        args = shlex.split(body)
+    except ValueError:
+        return None
+    return args[1:] if len(args) > 1 else []
+
+
+def python_payloads(cmd: str) -> list[tuple[str, Optional[str]]]:
+    """``[(what it is, the Python source)]`` this command hands to an interpreter.
+
+    A ``None`` source means the shell words could not even be split, which is a
+    finding in itself.
+    """
+    out: list[tuple[str, Optional[str]]] = []
+    m = _PY_DASH_C.search(cmd)
+    if m:
+        out.append(("the `python -c` payload", m.group(1)[1:-1]))
+    target = _PY_FILE_WRITE.search(cmd)
+    if target:
+        lines = _printf_lines(cmd)
+        if lines is None:
+            out.append((f"the script written to {target.group(1)}", None))
+        elif lines:
+            out.append((f"the script written to {target.group(1)}", "\n".join(lines)))
+    return out
+
+
+def payload_will_not_compile(commands: list[str]) -> list[dict]:
+    """§17.1257 — compile the code the block hands to another interpreter.
+
+    THE UNDERLYING ISSUE behind a run of near-identical defects. The engine
+    generates source for a second interpreter — `python3 -c '…'`, or a script
+    written out with `printf … | tee x.py` — and validated only the SHELL. Its own
+    shell parser says every one of these commands is fine, because they are:
+    `parse_error=False`. The defect is in the Python being handed over, and
+    nothing ever looked at it.
+
+    So each new way of malforming that payload needed its own pattern. §17.1255
+    added one for `-c` payloads with escaped quotes; §17.1255b added another when
+    the identical mistake appeared in a written script; three drafts in a row
+    produced it anyway, and so did three of my own attempts at the rule. That is
+    not a sequence of unrelated bugs, it is one missing check.
+
+    `ast.parse` answers it directly and generically, with the real compiler
+    message and a line number, and it catches shapes nobody has seen yet. It
+    supersedes §17.1255 and §17.1255b, which are deleted.
+
+    Note what this does NOT do: a payload can compile perfectly and still be
+    wrong (§17.1248's pipe crossing a guest boundary, §17.1256's missing secret,
+    §17.1234's silent HTTP failure). Those are semantics, not syntax, and they
+    keep their own rules. This closes the syntax family only — but it closes it
+    properly rather than one shape at a time.
+    """
+    out: list[dict] = []
+    for c in commands or []:
+        cmd = str(c)
+        for what, src in python_payloads(cmd):
+            if src is None:
+                out.append({"command": cmd, "why": (
+                    f"{what} cannot even be split into shell words — the quoting is unbalanced, so "
+                    f"nothing can tell what the file would contain. Rewrite it with one short "
+                    f"argument per line and no escaped quotes.")})
+                continue
+            try:
+                ast.parse(src)
+            except SyntaxError as exc:
+                line = (src.splitlines()[exc.lineno - 1].strip()
+                        if exc.lineno and exc.lineno <= len(src.splitlines()) else "")
+                out.append({"command": cmd, "why": (
+                    f"{what} is not valid Python and would fail the moment it ran: "
+                    f"{exc.msg} (line {exc.lineno})"
+                    + (f" -- {line[:120]!r}" if line else "")
+                    + ". This was compiled before offering it, so the error is certain, not a "
+                      "guess. Fix the source: inside a single-quoted shell argument a backslash is "
+                      "literal, so never escape a quote there.")})
+            except (ValueError, RecursionError) as exc:
+                out.append({"command": cmd, "why": (
+                    f"{what} could not be compiled ({type(exc).__name__}), so it cannot be offered "
+                    f"as runnable.")})
     return out
 
 
@@ -1440,9 +1465,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1248 — a pipe out of `pct exec` executes on the HOST.
     refused = refused + pipe_escapes_the_guest(cmds)
     # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.
-    refused = refused + inline_script_quoting(cmds)
-    # §17.1255b — and the same bug in a script being written to a file.
-    refused = refused + code_written_with_escaped_quotes(cmds)
+    # §17.1257 — compile what the block hands to another interpreter. Supersedes
+    # §17.1255 and §17.1255b, which pattern-matched two shapes of the same bug.
+    refused = refused + payload_will_not_compile(cmds)
     # §17.1256 — a written script that reads a secret the runner never passes.
     refused = refused + script_secret_not_passed(cmds)
     runner = getattr(spec, "name", "the runner") or "the runner"
