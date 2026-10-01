@@ -84,7 +84,7 @@ _NOT_ALLOWED = "not on the write-allow list"
 #: §17.1234 adds "cannot report an HTTP error" — a shape the engine can fix
 #: itself, so the redraft must recognise it as one.
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
-                   "ON THE HOST", "cannot parse")
+                   "ON THE HOST", "cannot parse", "only passes a stored value")
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -440,6 +440,8 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - DO the work with an API or a CLI, never by describing the web UI. "Open the Prowlarr web UI and go to Settings → Apps → Add Application", "click Test, then Save" is not something this channel can carry out — it produces a runbook with no commands at all, and the step falls back to the operator doing it by hand. Almost every service here has an HTTP API: drive it with `curl` (`curl -s -X POST http://HOST:9696/api/v1/indexer -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' -d '{…}'`), or its own CLI where it has one.
 - If you can CHECK something with a command under "## Verify", you can DO it with a command under "## Run this". A Verify section full of `curl …/api/v1/…` calls beside a Run section of UI clicks is the specific contradiction to avoid: the same API that answers the check also makes the change.
 - A `curl` that CHANGES something must fail loudly: add `--fail-with-body` (so an HTTP 400/401/404/500 exits non-zero and still shows the server's message). Without it `curl -s` exits 0 having fetched an error page, and a step that changed nothing is reported as done — live, nine `POST`s to an API answered "must be greater than 0" and every one "succeeded". A read under "## Verify" may stay a plain `curl -s`.
+- A service's own API key usually lives in that service's own config file on the machine, and reading it there beats depending on a stored copy: it cannot be stale, nothing secret has to cross into your commands, and the value never appears in the block or any log. An *arr app keeps it in the `<ApiKey>` element of the `config.xml` under its `-data=` directory (find that with `systemctl show <svc> -p ExecStart --value` rather than guessing the path). Prefer that to `$NAME` whenever the key is on a machine you can read.
+- A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
 """
 
@@ -698,6 +700,70 @@ def inline_script_quoting(commands: list[str]) -> list[dict]:
             "quoting inside it (plain \" marks are fine there), or split it in two — write the "
             "output to a file with `-o /tmp/x.json` in one command and parse that file in the next, "
             "which is clearer and each command stays self-contained.")})
+    return out
+
+
+#: §17.1256 — a secret name a written script expects from its environment.
+_SCRIPT_ENV_READ = re.compile(
+    r"""os\.environ(?:\.get)?\s*[\[(]\s*["']([A-Z][A-Z0-9_]{2,60})["']"""
+    r"""|ENV\s*\[\s*["']([A-Z][A-Z0-9_]{2,60})["']"""
+    r"""|getenv\s*\(\s*["']([A-Z][A-Z0-9_]{2,60})["']""")
+
+#: the file a `tee` is writing, when that file is a script.
+_TEE_SCRIPT = re.compile(r"\btee\s+(?:-a\s+)?(\S+\.(?:py|sh|pl|rb|js|bash))\b", re.I)
+
+
+def script_secret_not_passed(commands: list[str]) -> list[dict]:
+    """§17.1256 — a written script reads a secret the command running it never gets.
+
+    The runner injects a secret only into commands whose TEXT references it:
+
+        needed = {n: v for n, v in env.items() if f"${n}" in cmd …}
+
+    So `printf … | tee /tmp/add_indexers.py` followed by a bare
+    `python3 /tmp/add_indexers.py` cannot work: the script asks for
+    `os.environ["PROWLARR_API_KEY"]` and the process is started with no such
+    variable. Live, ADD115 died on exactly that —
+
+        KeyError: 'PROWLARR_API_KEY'
+
+    and the redraft, told the reason by §17.1247, "fixed" it by switching to
+    `os.environ.get(...)`: no exception, `KEY = None`, and every POST would have
+    failed 401 instead. The model cannot reason its way here because the rule is
+    internal to the runner, so the engine has to say it.
+
+    The remedy is one prefix: `NAME="$NAME" python3 /tmp/x.py`, which puts the
+    reference in the command text where the runner looks, without the value ever
+    appearing in the block.
+    """
+    cmds = [str(c) for c in (commands or [])]
+    wanted: dict[str, set] = {}          # script path -> secret names it reads
+    for c in cmds:
+        tee = _TEE_SCRIPT.search(c)
+        if not tee:
+            continue
+        names = {g for m in _SCRIPT_ENV_READ.finditer(c) for g in m.groups() if g}
+        if names:
+            wanted.setdefault(tee.group(1), set()).update(names)
+    if not wanted:
+        return []
+    out: list[dict] = []
+    for c in cmds:
+        if _TEE_SCRIPT.search(c):
+            continue                      # the command that WRITES it is fine
+        for path, names in wanted.items():
+            if path not in c:
+                continue
+            missing = sorted(n for n in names if f"${n}" not in c and "${" + n + "}" not in c)
+            if not missing:
+                continue
+            first = missing[0]
+            out.append({"command": c, "why": (
+                f"this runs {path}, which reads {', '.join(missing)} from its environment — and the "
+                f"runner only passes a stored value into a command that MENTIONS it, so the script "
+                f"starts with no such variable and fails. Put the reference in this command: "
+                f'`{first}="${first}" python3 {path}`. The value still never appears in the block; '
+                f"the runner expands it on the machine.")})
     return out
 
 
@@ -1377,6 +1443,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + inline_script_quoting(cmds)
     # §17.1255b — and the same bug in a script being written to a file.
     refused = refused + code_written_with_escaped_quotes(cmds)
+    # §17.1256 — a written script that reads a secret the runner never passes.
+    refused = refused + script_secret_not_passed(cmds)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner

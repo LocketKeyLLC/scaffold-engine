@@ -592,3 +592,72 @@ def test_a_non_code_file_is_not_its_business():
 def test_the_shape_marker_lets_the_redraft_fix_it():
     note = sr.shape_retry_note({"refused": sr.code_written_with_escaped_quotes([BAD_SCRIPT])})
     assert note and "cannot parse" in note
+
+
+# ── §17.1256: a written script reads a secret the runner never passes ─────
+
+WRITE_SCRIPT = ("printf '%s\\n' 'import os' 'KEY = os.environ[\"PROWLARR_API_KEY\"]' "
+                "| tee /tmp/add_indexers.py")
+
+
+def test_the_live_failure_is_caught():
+    """ADD115 died on `KeyError: 'PROWLARR_API_KEY'`. The runner injects a stored
+    value only into a command whose TEXT references it, so a bare
+    `python3 /tmp/add_indexers.py` starts with no such variable."""
+    got = sr.script_secret_not_passed([WRITE_SCRIPT, "python3 /tmp/add_indexers.py"])
+    assert len(got) == 1
+    why = got[0]["why"]
+    assert "PROWLARR_API_KEY" in why
+    assert 'PROWLARR_API_KEY="$PROWLARR_API_KEY" python3 /tmp/add_indexers.py' in why
+    assert "never appears in the block" in why
+
+
+def test_passing_the_secret_is_allowed():
+    ok = 'PROWLARR_API_KEY="$PROWLARR_API_KEY" python3 /tmp/add_indexers.py'
+    assert sr.script_secret_not_passed([WRITE_SCRIPT, ok]) == []
+
+
+def test_the_get_variant_is_caught_too():
+    """Told the reason by §17.1247, the redraft switched to `os.environ.get(...)`
+    — no exception, KEY None, every POST 401. Swallowing the error is not fixing
+    it."""
+    w = ("printf '%s\\n' 'import os' 'K = os.environ.get(\"PROWLARR_API_KEY\")' "
+         "| tee /tmp/x.py")
+    assert sr.script_secret_not_passed([w, "python3 /tmp/x.py"])
+
+
+def test_a_script_that_reads_no_secret_is_fine():
+    assert sr.script_secret_not_passed(
+        ["printf '%s\\n' 'print(1)' | tee /tmp/y.py", "python3 /tmp/y.py"]) == []
+
+
+def test_the_command_that_writes_the_script_is_not_itself_at_fault():
+    assert sr.script_secret_not_passed([WRITE_SCRIPT]) == []
+
+
+def test_a_script_nobody_runs_in_this_block_is_not_flagged():
+    """Only the command that executes it can be wrong."""
+    assert sr.script_secret_not_passed([WRITE_SCRIPT, "ls -l /tmp"]) == []
+
+
+def test_it_is_a_shape_the_redraft_can_fix():
+    note = sr.shape_retry_note({"refused": sr.script_secret_not_passed(
+        [WRITE_SCRIPT, "python3 /tmp/add_indexers.py"])})
+    assert note and "only passes a stored value" in note
+
+
+def test_the_channel_rules_prefer_reading_a_key_off_the_machine():
+    """§17.1256b — the operator's point: a service keeps its own key in its own
+    config, so nothing has to be threaded into a script at all. Better than the
+    stored copy on three counts — it cannot be stale, nothing secret crosses into
+    the commands, and the value never appears in the block or any log."""
+    assert "reading it there beats depending on a stored copy" in sr.CHANNEL_RULES
+    assert "<ApiKey>" in sr.CHANNEL_RULES
+    assert "systemctl show <svc> -p ExecStart --value" in sr.CHANNEL_RULES
+
+
+def test_the_channel_rules_state_the_runners_injection_rule():
+    """The rule is internal to the runner, so nothing but the prompt can say it —
+    which is why §17.1247's feedback could not get the model there."""
+    assert "does not inherit a stored value" in sr.CHANNEL_RULES
+    assert 'NAME="$NAME" python3 /tmp/x.py' in sr.CHANNEL_RULES
