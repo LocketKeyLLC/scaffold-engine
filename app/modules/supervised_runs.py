@@ -562,6 +562,57 @@ _INTERPRETER = re.compile(r"^(?:ba|da|z|k)?sh\b|^python[0-9.]*\b|^perl\b|^ruby\b
 _GUEST_ENTRY = re.compile(r"^(?:pct\s+(?:exec|enter)|qm\s+guest\s+exec)\b")
 
 
+def all_reads_for_a_changing_step(commands: list[str], node: dict) -> str:
+    """§17.1254 — a block that only LOOKS, for a step that must CHANGE something.
+
+    Live, ADD96 ("Add the search sources to Prowlarr and connect it to Radarr and
+    Sonarr"). One draft produced 24 commands: read the indexer schema, then a
+    `curl -X POST …/api/v1/indexer` per public tracker. The next draft of the SAME
+    step produced two — both `GET …/api/v1/indexer/schema`. Nothing added
+    anything. Run was offered, the gate was clean, and approving it would have
+    marked the step done having changed nothing: the false-`done` family §17.1233
+    and §17.1235 exist to close.
+
+    Nothing else catches this. The shape gate judges each command and two reads
+    are individually fine; §17.1227 needs ZERO commands; §17.1215's coverage pass
+    compares the block against commands quoted in the step TEXT, and this step
+    quotes none — it just says what to achieve.
+
+    So: when `step_classify` says the step changes a machine and every drafted
+    command is read-only, the block cannot be what the step is for. Returned as a
+    retry note, because the answer is a better draft and not a refusal the
+    operator has to interpret.
+    """
+    from app.modules.assist_supervised import read_only, split_segments
+    from app.modules.step_classify import step_is_hands_on
+    cmds = [str(c) for c in (commands or []) if str(c).strip()]
+    if not cmds:
+        return ""                                  # §17.1227 owns the empty case
+    on, _why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {})
+    if not on:
+        return ""                                  # a reading step may legitimately only read
+    for c in cmds:
+        for seg in split_segments(c):
+            if seg.strip() and not read_only(seg)[0]:
+                return ""                          # something changes; fine
+    lines = [
+        "EVERY COMMAND IN YOUR DRAFT ONLY LOOKS AT THINGS. This step has to CHANGE something -- "
+        "that is why it is being run through the channel -- and nothing in the block does.",
+        "",
+        "What you wrote:",
+    ]
+    lines += [f"  - {c[:150]}" for c in cmds[:8]]
+    lines += [
+        "",
+        "Reading is how you find out WHAT to change; it is not the change. Keep the reads if they "
+        "tell you something you need, then add the commands that actually do the work -- and make "
+        "them fail loudly (`--fail-with-body` on a `curl` that writes) so a rejection is not "
+        "mistaken for success. If the step genuinely cannot be done through this channel, say so in "
+        "one line instead of drafting a block that looks busy and changes nothing.",
+    ]
+    return "\n".join(lines)
+
+
 def pipe_escapes_the_guest(commands: list[str]) -> list[dict]:
     """§17.1248 — a pipe after `pct exec` runs the right-hand side on the HOST.
 

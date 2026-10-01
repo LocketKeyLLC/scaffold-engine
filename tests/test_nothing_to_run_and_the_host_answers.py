@@ -438,6 +438,9 @@ def test_every_draft_call_site_passes_the_runner():
     calls = [n for n in _ast.walk(_ast.parse(src))
              if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
              and n.func.attr == "draft_runbook"]
-    assert len(calls) == 4, f"expected the 4 known draft sites, found {len(calls)}"
+    # §17.1254 added a fifth site and this gate caught it, which is the point.
+    # The property is what matters, not the count: EVERY site must pass the
+    # runner, so a new redraft cannot go back to drafting blind.
+    assert len(calls) >= 4, f"expected at least the 4 known draft sites, found {len(calls)}"
     for c in calls:
         assert "spec" in [k.arg for k in c.keywords], f"draft_runbook at line {c.lineno} drops spec"

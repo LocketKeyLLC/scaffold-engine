@@ -445,3 +445,62 @@ def test_the_command_list_is_never_truncated_by_the_display_cap():
     cmds = sr.runbook_commands(long_rb)
     assert len(cmds) == min(30, sr.MAX_RUN_COMMANDS)    # bounded by MAX_RUN_COMMANDS, not the display cap
     assert sr.MAX_RUN_COMMANDS != sr.RUNBOOK_DISPLAY_CHARS
+
+
+# ── §17.1254: a block that only looks, for a step that must change ────────
+
+
+ADD96_NODE = {
+    "title": "Add the search sources to Prowlarr and connect it to Radarr and Sonarr",
+    "tool": "LLM",
+    "description": "Add every working public indexer. Done when the indexer list is populated.",
+    "prompt_template": "Run `curl -X POST http://h:9696/api/v1/indexer` for each one.",
+}
+SCHEMA_READS = ['curl -s -H "X-Api-Key: $K" "http://h:9696/api/v1/indexer/schema"',
+                'curl -s -H "X-Api-Key: $K" "http://h:9696/api/v1/indexer/schema" | head -c 100']
+
+
+def test_the_live_two_read_draft_is_caught():
+    """One draft of ADD96 produced 24 commands — read the schema, then a POST per
+    tracker. The next draft of the SAME step produced these two reads. Run was
+    offered and the gate was clean; approving it would have marked the step done
+    having added nothing."""
+    note = sr.all_reads_for_a_changing_step(SCHEMA_READS, ADD96_NODE)
+    assert note and "ONLY LOOKS AT THINGS" in note
+    assert "indexer/schema" in note                  # it quotes what was written
+    assert "--fail-with-body" in note                # and names the correction
+
+
+def test_a_block_that_changes_something_is_silent():
+    writes = SCHEMA_READS + ['curl -s --fail-with-body -X POST "http://h:9696/api/v1/indexer" -d "{}"']
+    assert sr.all_reads_for_a_changing_step(writes, ADD96_NODE) == ""
+
+
+def test_the_empty_case_belongs_to_17_1227():
+    assert sr.all_reads_for_a_changing_step([], ADD96_NODE) == ""
+    assert sr.all_reads_for_a_changing_step(["   "], ADD96_NODE) == ""
+
+
+def test_a_step_that_only_reads_may_only_read():
+    """ADD113 ("review what the lab exposes") is reads by design — the gate must
+    be silent unless step_classify says the step CHANGES a machine."""
+    reading = {"title": "Review what the home lab exposes", "tool": "LLM",
+               "description": "Read the listening ports and report them."}
+    assert sr.all_reads_for_a_changing_step(SCHEMA_READS, reading) == ""
+
+
+def test_a_write_hidden_in_a_later_segment_still_counts():
+    """Segments are judged individually, so a pipeline whose second half writes
+    is not an all-reads block."""
+    mixed = ['curl -s "http://h/api" | tee /etc/thing.conf']
+    assert sr.all_reads_for_a_changing_step(mixed, ADD96_NODE) == ""
+
+
+def test_the_executor_redrafts_and_only_trades_up():
+    import inspect
+    from app.modules import execution_agent as ea
+    src = inspect.getsource(ea._pause_for_decision)
+    assert "all_reads_for_a_changing_step(frame.get(\"commands\") or [], run_node)" in src
+    # the replacement must itself not be all-reads
+    assert "not supervised_runs.all_reads_for_a_changing_step(" in src
+    assert src.index("all_reads_for_a_changing_step") < src.index("runbook_coverage")

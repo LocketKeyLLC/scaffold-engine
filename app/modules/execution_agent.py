@@ -2597,6 +2597,28 @@ async def _pause_for_decision(job_id: str) -> dict | None:
             except Exception as exc:
                 logger.warning("no_commands_redraft_failed job=%s node=%s err=%r", job_id,
                                run_node.get("node_key"), exc)
+        # §17.1254 — and does the block CHANGE anything? A draft of pure reads
+        # for a step that must change something would be approved, run cleanly
+        # and mark the step done having done nothing.
+        try:
+            _ro = supervised_runs.all_reads_for_a_changing_step(frame.get("commands") or [], run_node)
+            if _ro:
+                logger.warning("supervised_run_all_reads_redraft job=%s node=%s commands=%d",
+                               job_id, run_node.get("node_key"), len(frame.get("commands") or []))
+                _wr = await supervised_runs.draft_runbook(run_node, _brief, up_block,
+                                                          retry_note=_ro, spec=spec, environment=_env)
+                if _wr:
+                    _wrf = supervised_runs.frame_run(run_node, _wr, spec, policy, env=_env,
+                                                     preconditions=_pre)
+                    # only trade UP: a redraft that still only reads is no better
+                    if _wrf.get("commands") and not supervised_runs.all_reads_for_a_changing_step(
+                            _wrf["commands"], run_node):
+                        frame = _wrf
+                        logger.warning("supervised_run_all_reads_redraft_clean job=%s node=%s commands=%d",
+                                       job_id, run_node.get("node_key"), len(_wrf["commands"]))
+        except Exception as exc:
+            logger.warning("all_reads_check_failed job=%s node=%s err=%r", job_id,
+                           run_node.get("node_key"), exc)
         # §17.1215 — and does the block actually DO the step? The gate judges
         # shape and §17.1213 judges the machine; neither notices a draft that
         # quietly leaves out what the step spelled out. One redraft with the

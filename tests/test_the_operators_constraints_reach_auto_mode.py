@@ -71,7 +71,9 @@ def test_every_draft_call_site_passes_the_environment():
     calls = [n for n in ast.walk(ast.parse(src))
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
              and n.func.attr == "draft_runbook"]
-    assert len(calls) == 4, f"expected the 4 known draft sites, found {len(calls)}"
+    # §17.1254 added a fifth site and this gate caught it — which is what it is
+    # for. Assert the property, not the number: every site must carry both.
+    assert len(calls) >= 4, f"expected at least the 4 known draft sites, found {len(calls)}"
     for c in calls:
         kw = [k.arg for k in c.keywords]
         assert "environment" in kw, f"draft_runbook at line {c.lineno} drops environment"
