@@ -180,7 +180,21 @@ async def list_machines(db: AsyncSession = Depends(get_db)) -> dict:
         # nobody predicted; this trusts the machine with whatever the operator
         # approves, which is the decision they are already making per block.
         "install_trusted": _es.install_line(ctx, prefixes=[_sw.ANY], secrets_file=_secrets_file),
-        "trust_mode": ("approve" if _sw.ANY in ((policy or {}).get("allow") or []) else "list"),
+        # §17.1272 — "list" was asserted whenever the policy was MISSING, which
+        # on a cold cache is every page load after a restart. The page then told
+        # an operator whose runner is set to ANY that it was in list mode, and
+        # offered the "turn trust on" line for trust they already had. Unknown
+        # is its own answer and the only honest one here.
+        "trust_mode": ("unknown" if not known_policy else
+                       ("approve" if _sw.ANY in ((policy or {}).get("allow") or []) else "list")),
+        # §17.1272 — and the install lines are only safe to offer once that is
+        # known. They REPLACE the runner's lists, and §17.1198/§17.1204 keep them
+        # from taking anything away by unioning in what the machine already
+        # allows — read from `policy`. With no policy that union is empty, so the
+        # very mechanism that prevents a downgrade silently produces one: the
+        # line built on a cold cache dropped ANY, `pct create` and `lvremove`
+        # from a trusted runner. A line nobody can vouch for is not offered.
+        "install_ready": bool(known_policy),
         "mcp_enabled": bool(settings.mcp_tool_enabled),
     }
 

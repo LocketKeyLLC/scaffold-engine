@@ -32,6 +32,8 @@ export default function machines(container, params, opts = {}) {
           el("div", { class: "sub", text: "The machine the engine may reach, what it is allowed to run there, and the values it holds for it." })),
     body);
 
+  let probed = false;            // §17.1272 — once per mount, never a loop
+  let probeError = "";           // …and if it could not be read, say so
   async function load() {
     mount(body, loading("Reading what is connected…"));
     let d;
@@ -42,6 +44,25 @@ export default function machines(container, params, opts = {}) {
       return;
     }
     if (disposed) return;
+    // §17.1272 — the engine only reads this machine's permissions from a cache,
+    // and that cache is empty after every restart. Rather than render a page
+    // that does not know what it is looking at — and offer an install line
+    // built from that ignorance — find out once, then render. The probe is the
+    // same one the Test button runs, and it fills the cache for everyone.
+    if (!probed && d.runner && d.write_channel && d.write_channel.checked === false) {
+      probed = true;
+      try {
+        await api.post("/setup/machines/probe", {});
+        d = await api.get("/setup/machines");
+      } catch (e) {
+        // The page is still worth showing — it will say it does not know, and
+        // withhold the install lines rather than build them from ignorance.
+        // Saying WHY beats a silent catch: the operator is on this page because
+        // something is already wrong with the machine.
+        probeError = (e && (e.detail || e.message)) || "the machine did not answer";
+      }
+      if (disposed) return;
+    }
     mount(body, connectCard(d), controlCard(d), activityCard(d), channelCard(d), secretsCard(d));
   }
 
@@ -229,6 +250,9 @@ export default function machines(container, params, opts = {}) {
     });
     // §17.1199 — the trust-level alternative to enumerating commands
     w.trusted = d.trust_mode === "approve";
+    // §17.1272 — the install lines are built from what the machine currently
+    // allows, so they are only offered once that is known. See `install_ready`.
+    const ready = d.install_ready !== false;
     const trustedInstall = el("pre", { class: "md-pre machines-install", text: d.install_trusted || "" });
     const copyTrusted = el("button", { class: "btn btn-sm", text: "⧉ copy the trusted line" });
     copyTrusted.addEventListener("click", async () => {
@@ -253,21 +277,27 @@ export default function machines(container, params, opts = {}) {
             el("p", { class: "sub cap-line", text: "And these it must be allowed to READ as root — on a Proxmox host even a check goes through /etc/pve, so an unprivileged runner cannot look at all:" }),
             el("ul", {}, ...reads.map((p) => el("li", { class: "sub", text: `${p.prefix} — ${p.why}` }))))
         : null,
-      el("p", { class: "sub cap-line", text: "Run this once on the machine — it installs or replaces the helper with exactly these allowed:" }),
-      install,
-      el("div", { class: "row row-wrap cap-actions" }, copy),
+      ready
+        ? el("p", { class: "sub cap-line", text: "Run this once on the machine — it installs or replaces the helper with exactly these allowed:" })
+        : el("p", { class: "sub cap-line warn-line", text:
+            "The engine has not read this machine's current permissions yet"
+            + (probeError ? ` (${probeError})` : "")
+            + ", and the install line is built by ADDING to them — offering it now could take away something "
+            + "that is already allowed there. Press Test above, then reload." }),
+      ready ? install : null,
+      ready ? el("div", { class: "row row-wrap cap-actions" }, copy) : null,
       // §17.1199 — the list above can only be completed by FAILING: each step
       // turns up a command nobody predicted, and each one costs a console
       // round-trip. The operator already approves every block; this offers the
       // trust level that matches the decision they are actually making.
       el("hr", { class: "cap-rule" }),
-      el("p", { class: "cap-summary", text: w.trusted
+      !ready ? null : el("p", { class: "cap-summary", text: w.trusted
         ? "This machine is set to run anything you approve. Each block still stops for your approval, each command is still signed, and the never-allowed list (host power, disk destroyers) still refuses."
         : "Or: stop listing commands. The list above grows every time a step needs something nobody predicted, and each addition costs you a paste on the machine. You already read and approve every block — this makes that the whole decision." }),
       w.trusted ? null : el("p", { class: "sub cap-line warn-line", text:
         "What changes: the runner may run any command the engine puts in front of you, as root, once you press the approve button for that block. What does not: nothing runs unapproved, every command is signed and single-use, and the never-allowed list still refuses host power and disk destroyers." }),
-      w.trusted ? null : trustedInstall,
-      w.trusted ? null : el("div", { class: "row row-wrap cap-actions" }, copyTrusted));
+      (w.trusted || !ready) ? null : trustedInstall,
+      (w.trusted || !ready) ? null : el("div", { class: "row row-wrap cap-actions" }, copyTrusted));
   }
 
   // ── 3. the values it holds ─────────────────────────────────────────
