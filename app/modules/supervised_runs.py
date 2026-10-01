@@ -452,6 +452,8 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
   and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
 - AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
 - A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
+- WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped.
+- YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next.
 - A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
 """
@@ -813,7 +815,15 @@ _FAIL_LINE = re.compile(
 _UNREACHABLE = re.compile(
     r"(?i)\b(?:50[234]|bad gateway|service unavailable|gateway time-?out|timed?\s*out|"
     r"timeout|connection refused|connection reset|no route to host|unable to connect|"
-    r"could not resolve|name or service not known|temporary failure in name resolution)\b")
+    r"could not resolve|name or service not known|temporary failure in name resolution|"
+    # §17.1266 — measured on the real run. ADD115's second indexer came back
+    # "Unable to access 16mag.net, blocked by CloudFlare Protection", which none
+    # of the above matches, so a tracker that is simply unusable was classified
+    # as a malformed request and the step stopped at 2 of 89. A phrase list is
+    # always one phrase short; these are the classes a THIRD PARTY owns.
+    r"unable to (?:access|reach|retrieve|fetch)|blocked by|cloudflare|captcha|"
+    r"forbidden|unauthorized by|no such host|certificate|ssl error|handshake|"
+    r"site is down|offline|not responding|dns)\b")
 
 #: §17.1263 — a line reporting that one thing actually landed. If any did, the
 #: block was not spinning on one mistake; it was working through a list.
@@ -1258,6 +1268,40 @@ _NEEDS_CURRENCY = re.compile(
     r"|\bcurrent(?:ly)?\s+(?:working|available|live|up|active|maintained)\b")
 
 
+#: §17.1262c — words that name the WORK rather than the THING. A currency
+#: question is about the thing: a search for "add every public indexer Prowlarr
+#: listed and connect it to Radarr" returns tutorials on how to add indexers,
+#: which is not what was asked. Measured live on ADD115: the query that went out
+#: was the step's title and the five sources were how-to pages.
+_TASK_WORD = frozenset("""
+add adds adding added install installs installing installed configure configures configured
+connect connects connecting connected set sets setting give gives given write writes writing
+create creates creating enable enables enabling disable remove removes delete update updates
+run runs running make makes making use uses using put puts point points pointing verify check
+every all each both listed list the a an and or but it its their them this that these those
+to for from of on in into with at by as step steps so then also again more most
+""".split())
+
+#: §17.1262c — the two kinds of currency question, by the cue the step used.
+#: "install the LATEST driver" wants a version; "which public indexers STILL
+#: WORK" wants liveness. Asking the second shape for the first would be wrong.
+_WANTS_VERSION = re.compile(r"(?i)\b(?:latest|newest|up[- ]to[- ]date|current(?:ly)?\s+(?:version|release))\b")
+
+
+def _subject_of(title: str) -> str:
+    """The THING a step is about — its title with the task words taken out.
+
+    Only the first clause: "Add every public indexer Prowlarr listed, and
+    connect it to Radarr and Sonarr" is two jobs, and the currency question
+    belongs to the first one.
+    """
+    head = re.split(r"[,:;]|\s+and\s+(?:connect|configure|set|install|point|enable|add|give)\b",
+                    str(title or ""), maxsplit=1)[0]
+    words = [w.strip(".,;:()'\"`") for w in head.split()]
+    keep = [w for w in words if w and w.lower() not in _TASK_WORD]
+    return " ".join(keep[:8])
+
+
 def currency_question(node: dict) -> str:
     """The question to research for this step, or "" when it needs no web lookup.
 
@@ -1277,16 +1321,28 @@ def currency_question(node: dict) -> str:
     week, which changes constantly. That second question is exactly what a web
     search answers and what no amount of reading the machine can.
 
+    §17.1262c — and it has to be ASKED as a currency question. The first cut
+    searched the step's title, so the live query read "Prowlarr add all public
+    indexers connect Radarr Sonarr": grounded correctly, aimed at the wrong
+    thing, and five how-to pages came back. The subject is the step's thing with
+    the task words removed, and the framing comes from the cue the step used --
+    a version question for "latest", a liveness question for "still works".
+
     Narrow on purpose: only step wording that actually asks about currency or
     availability triggers a lookup. A step about this host's own disks or
     containers is answered by reading the host (§17.1212/1229/1232), and
     researching it would be slower and worse.
     """
-    title = str((node or {}).get("title") or "")
     body = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
     if not _NEEDS_CURRENCY.search(body):
         return ""
-    return title.strip()[:200] or body.strip()[:200]
+    subject = _subject_of(str((node or {}).get("title") or ""))
+    if not subject:
+        return ""
+    year = datetime.now(timezone.utc).year
+    if _WANTS_VERSION.search(body):
+        return f"{subject} latest version {year}"[:200]
+    return f"{subject} still working {year}"[:200]
 
 
 async def research_for_step(node: dict, environment: dict | None = None) -> str:
@@ -1490,6 +1546,66 @@ def runbook_commands(text_out: str) -> list[str]:
         except Exception as exc:
             logger.warning("inline_command_extract_failed err=%r", exc)
     return out[:MAX_RUN_COMMANDS]
+
+
+#: §17.1265 — a backticked line under ## Verify, at any length. The extractor
+#: below caps an inline literal at 200 characters, which is right for a command
+#: and wrong for COUNTING what the drafter wrote: ADD115's three checks were 227
+#: characters each, so nothing even reached the read-only judge.
+_VERIFY_CANDIDATE = re.compile(r"`([^`\n]{2,600})`")
+#: The shape that actually disqualified them — a command substitution. Measured:
+#: `read_only_command` returns False for the whole line, True for each half.
+_VERIFY_SUBST = re.compile(r"\$\(")
+
+
+def verify_not_runnable(runbook: str) -> str:
+    r"""§17.1265 — the Verify section wrote checks this channel cannot run.
+
+    Measured on the real draft, not inferred. ADD115 parked with THREE correct
+    checks written under ``## Verify`` -- an indexer count from Prowlarr, from
+    Radarr and from Sonarr -- and the frame carried ``verify: []``. Each was one
+    clever line:
+
+        curl -s http://…/api/v1/indexer -H "X-Api-Key: $(pct exec 102 -- cat
+        /var/lib/prowlarr/config.xml | sed -n 's|.*<ApiKey>\(.*\)</ApiKey>.*|\1|p')"
+        | python3 -c "import sys,json; print(len(json.load(sys.stdin)))"
+
+    227 characters, and `read_only_command` refuses it. Both halves are fine on
+    their own -- `pct exec 102 -- cat <config>` is a read, `curl -s <url>` is a
+    read -- so the channel could have verified the step perfectly well. The
+    silence was the problem: the step would have been judged ONLY on the counts
+    its own script printed, which is the thing §17.1231/1239 exist to prevent.
+
+    Fires only when nothing survived extraction AND a candidate was disqualified
+    for a nameable reason (a substitution, or past the length a command takes).
+    A Verify section whose backticks hold expected VALUES ("expect `status:
+    running`") is short, substitution-free, and correctly ignored here.
+    """
+    body = _section(runbook, "Verify")
+    if not body.strip() or verify_commands(runbook):
+        return ""
+    prose = _FENCE_RE.sub(" ", body)
+    cands = [m.group(1).strip() for m in _VERIFY_CANDIDATE.finditer(prose)]
+    cands += [ln.strip() for fence in _FENCE_RE.findall(body)
+              for ln in fence.splitlines() if ln.strip()]
+    bad = [c for c in cands if _VERIFY_SUBST.search(c) or len(c) > 200]
+    if not bad:
+        return ""
+    logger.warning("verify_not_runnable candidates=%d first=%r", len(bad), bad[0][:120])
+    return (
+        "YOUR VERIFY SECTION CANNOT BE RUN, so this step would be approved with nothing to check it "
+        "against. This one could not be used:\n\n"
+        f"    {bad[0][:300]}\n\n"
+        "It is refused for the same reason the run commands are: a check goes through the read-only "
+        "channel as ONE SIMPLE COMMAND, so `$(...)` substitution and a pipe into an interpreter are "
+        "out. Split it. Each half is allowed on its own -- read the value in one check and use it in "
+        "the next, and let the operator compare the two:\n\n"
+        "    ## Verify\n"
+        "    - the API key this service is using: `pct exec 102 -- cat /var/lib/prowlarr/config.xml`\n"
+        "    - how many indexers it now has (paste the key from the previous check): "
+        "`curl -s -H \"X-Api-Key: <PROWLARR_API_KEY>\" http://<PROWLARR_IP>:9696/api/v1/indexer`\n\n"
+        "Rewrite ## Verify as checks of that shape. Keep ## Run this exactly as it is -- it was "
+        "accepted, and only the checks are being redrawn.")
 
 
 def verify_commands(text_out: str) -> list[str]:

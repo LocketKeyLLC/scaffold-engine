@@ -457,6 +457,20 @@ class DecideResult(BaseModel):
     # §17.1186 — what a run pause did: resolved | delegated | ran | failed | runbook | skipped
     outcome: str = "resolved"
     node_status: str | None = None
+    # §17.1266 — and WHAT HAPPENED. §17.1261 put the run's detail into
+    # `resolve_decision`'s return and this model silently dropped every field of
+    # it, because a response_model filters what it does not declare. Live: the
+    # operator approved ADD115, the block stopped on its second indexer, and the
+    # answer was `{"outcome": "failed", "node_status": "failed"}` — no reason, no
+    # executed count, none of the diagnosis the engine had already paid a web
+    # search for. Fixing the function below the surface fixed nothing a caller
+    # could see; this is the surface (feedback: verify the OPERATOR'S surface).
+    executed: list[dict] | None = None      # the commands that ran, with output
+    verify: str | None = None               # the read-only checks' report
+    reason: str | None = None               # why it stopped, when it stopped
+    diagnosis: str | None = None            # §17.1230 — the researched diagnosis
+    unknown_outcome: bool | None = None     # §17.1201 — the runner dropped mid-block
+    confirmed_after_drop: bool | None = None
 
 
 class SkipNodeInput(BaseModel):

@@ -6,7 +6,7 @@ import { storage } from "./storage.js";
 // Visible build stamp. Bump per UI change round — it exists so "is my tab
 // running the latest UI?" is answerable at a glance instead of by diffing
 // pixels (the §17.840/§17.842 stale-module debugging sink).
-export const UI_BUILD = "r34";   // §17.1217 — show the step it is ON, not where the cursor stopped
+export const UI_BUILD = "r35";   // §17.1217 — show the step it is ON, not where the cursor stopped
 
 export const THEME_KEY = "scaffold_theme";
 export const DENSITY_KEY = "scaffold_density";

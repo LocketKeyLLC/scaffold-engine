@@ -12,7 +12,9 @@ current up to date and available indexers."*
              list of dead third parties is not that, and stopping on the first
              corpse adds none of the ones that work.
 """
+import pathlib
 import re
+from datetime import datetime, timezone
 
 import pytest
 
@@ -127,3 +129,189 @@ def test_the_lookup_is_grounded_by_an_approved_builder():
     assert "derive_need(" in src and "finalize_query(" in src
     assert re.search(r"research_one\(question=query", src), \
         "the grounded query must be what is actually searched"
+
+
+# ───────────────────────────────── §17.1262c — ask a currency question
+
+_REAL_ADD115 = {
+    "node_key": "ADD115",
+    "title": "Add every public indexer Prowlarr listed, and connect it to Radarr and Sonarr",
+    "description": ("ADD96's output is the authoritative list: 88 public indexer definitions this "
+                    "Prowlarr ships. Add as many as possible; which ones are still working is the "
+                    "question the schema cannot answer."),
+}
+
+
+def test_the_question_is_about_the_thing_not_the_task():
+    """Measured live: the query that went out was the step's title, so five
+    how-to pages came back for a question about what is still alive."""
+    q = sr.currency_question(_REAL_ADD115)
+    assert "indexer" in q.lower() and "prowlarr" in q.lower()
+    assert "still working" in q.lower()
+    assert str(datetime.now(timezone.utc).year) in q
+    for task_word in ("add", "connect"):
+        assert task_word not in q.lower().split(), f"{task_word!r} is the work, not the subject"
+
+
+def test_only_the_first_clause_is_the_subject():
+    """"…, and connect it to Radarr and Sonarr" is a second job; the currency
+    question belongs to the first."""
+    assert "radarr" not in sr.currency_question(_REAL_ADD115).lower()
+
+
+def test_a_latest_step_asks_for_a_version_not_liveness():
+    q = sr.currency_question({
+        "title": "Install the NVIDIA driver 580.173.02 on the Proxmox host",
+        "description": "Use the latest driver available for this card."})
+    assert "latest version" in q.lower() and "still working" not in q.lower()
+    assert "nvidia" in q.lower()
+
+
+def test_a_step_about_this_machine_still_asks_nothing():
+    """§17.1262's narrowness survives §17.1262c: reading the host beats a search."""
+    assert sr.currency_question({
+        "title": "Give the media-stack containers working DNS (point them at Pi-hole)",
+        "description": "pct set each container --nameserver 192.168.1.30"}) == ""
+
+
+# ───────────────────────────────── §17.1265 — a step that cannot be checked
+
+_CLEVER = ('curl -s http://192.168.1.21:9696/api/v1/indexer -H "X-Api-Key: $(pct exec 102 -- cat '
+           '/var/lib/prowlarr/config.xml | sed -n \'s/.*<ApiKey>\\(.*\\)<\\/ApiKey>.*/\\1/p\')" '
+           '| python3 -c "import sys,json; print(len(json.load(sys.stdin)))"')
+
+
+def _runbook(verify_body: str) -> str:
+    return ("## Run this\n\n```bash\npct exec 102 -- systemctl restart prowlarr\n```\n\n"
+            f"## Verify\n\n{verify_body}\n\n## Rollback\n\n- none\n")
+
+
+def test_the_real_dropped_check_is_caught():
+    """ADD115 parked with three checks like this and `verify: []`."""
+    rb = _runbook(f"- Indexer count in Prowlarr: `{_CLEVER}`")
+    assert sr.verify_commands(rb) == [], "precondition: the channel does refuse this"
+    note = sr.verify_not_runnable(rb)
+    assert note and "CANNOT BE RUN" in note
+    assert "$(...)" in note and "Split it" in note
+    assert "## Verify" in note, "the redraft needs the shape it should produce"
+    assert "Keep ## Run this exactly as it is" in note
+
+
+def test_a_runnable_check_is_left_alone():
+    rb = _runbook("- how many indexers: `curl -s http://192.168.1.21:9696/api/v1/indexer`")
+    assert sr.verify_commands(rb), "precondition: this one survives extraction"
+    assert sr.verify_not_runnable(rb) == ""
+
+
+def test_expected_values_in_backticks_are_not_commands():
+    """The false positive this must not have: a Verify section whose backticks
+    hold what to EXPECT rather than what to run."""
+    rb = _runbook("- `pct status 130` - expect `status: running`")
+    assert sr.verify_not_runnable(rb) == ""
+
+
+def test_a_verifyless_runbook_is_not_blamed_for_a_substitution():
+    """No Verify section at all is a different defect (§17.1227's family); this
+    check must stay silent rather than invent a reason."""
+    assert sr.verify_not_runnable("## Run this\n\n```bash\npct start 130\n```\n") == ""
+
+
+def test_the_verify_redraft_is_wired_and_trades_up():
+    """A detector nobody calls is the §17.906 defect; and a redraft that loses
+    the commands must never replace a good draft (§17.1211)."""
+    import ast as _ast
+    src = (pathlib.Path(sr.__file__).parent / "execution_agent.py").read_text(encoding="utf-8")
+    assert "supervised_runs.verify_not_runnable(runbook)" in src
+    i = src.index("verify_not_runnable(runbook)")
+    window = src[i:i + 1400]
+    assert '_vf.get("commands") and _vf.get("verify")' in window, "must trade UP on both"
+    _ast.parse(src)
+
+
+# ───────────────────── §17.1266 — whose fault, and does the caller hear it
+
+_CLOUDFLARE = "Unable to access 16mag.net, blocked by CloudFlare Protection."
+
+
+def test_the_real_cloudflare_body_is_an_availability_failure():
+    """Measured on the live run: ADD115's second indexer came back with this,
+    the block called it a validation failure and stopped at 2 of 89."""
+    assert sr._UNREACHABLE.search(_CLOUDFLARE)
+
+
+@pytest.mark.parametrize("body", [
+    "'App Profile Id' must be greater than '0'",
+    "Should be unique",
+    "Name must not be empty",
+])
+def test_a_named_field_is_still_our_mistake(body):
+    """The widened classes must not swallow the errors that MUST stop a step —
+    those are the ones one diagnosis fixes for all 89."""
+    assert not sr._UNREACHABLE.search(body)
+
+
+@pytest.mark.parametrize("body", [
+    "Unable to connect to indexer",
+    "The request timed out",
+    "502 Bad Gateway",
+    "blocked by CloudFlare Protection",
+    "captcha required",
+    "certificate has expired",
+])
+def test_every_third_party_class_is_recognised(body):
+    assert sr._UNREACHABLE.search(body)
+
+
+def test_the_drafter_is_told_to_read_the_body_not_match_phrases():
+    rules = sr.CHANNEL_RULES
+    assert "WHOSE FAULT IT IS" in rules
+    assert "propertyName" in rules, "the shape discriminator, not a phrase list"
+    low = rules.lower()
+    assert "skip it" in low and "stop at the first one" in low
+
+
+def test_the_decide_response_carries_what_happened():
+    """§17.1261 put the run's detail in the function; the response_model dropped
+    every field of it, so a caller got `failed` and nothing else."""
+    from app.schemas import DecideResult
+    fields = set(DecideResult.model_fields)
+    for f in ("executed", "verify", "reason", "diagnosis", "unknown_outcome"):
+        assert f in fields, f"DecideResult silently drops {f!r} from resolve_run"
+
+
+def test_every_run_detail_key_is_declared_on_the_surface():
+    """The drift guard: a new key on either terminal path of `resolve_run` must
+    reach the API, or §17.1261 regresses quietly the way it did once."""
+    import ast as _ast
+    from app.schemas import DecideResult
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    fn = next(n for n in _ast.walk(tree)
+              if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and n.name == "resolve_run")
+    emitted: set[str] = set()
+    for node in _ast.walk(fn):
+        if isinstance(node, _ast.Return) and isinstance(node.value, _ast.Dict):
+            for k in node.value.keys:
+                if isinstance(k, _ast.Constant) and isinstance(k.value, str):
+                    emitted.add(k.value)
+    # Consumed by resolve_decision itself rather than reported onwards.
+    internal = {"outcome", "node_key", "record", "node_status", "choices"}
+    # A key may reach the operator either as a response field or in the route's
+    # own error detail — both are surfaces; neither being true is the defect.
+    route = (pathlib.Path(sr.__file__).parents[1] / "routers" / "jobs.py").read_text(encoding="utf-8")
+    i = route.index("async def decide_endpoint(")
+    detail = route[i:route.index("\n@router.", i + 1) if "\n@router." in route[i:] else len(route)]
+    undeclared = sorted(k for k in emitted - internal - set(DecideResult.model_fields)
+                        if f'"{k}"' not in detail)
+    assert not undeclared, (
+        "resolve_run returns these and neither DecideResult nor the route's error "
+        f"detail names them, so no caller ever sees them: {undeclared}")
+
+
+def test_the_spa_says_why_instead_of_pointing_elsewhere():
+    """§17.1266 — the engine knew the reason and told the operator to go find it."""
+    spa = (pathlib.Path(sr.__file__).parents[1] / "ui" / "static" / "views" / "theater.js")
+    src = spa.read_text(encoding="utf-8")
+    assert "res.reason" in src, "the reason reaches the response; the surface must use it"
+    i = src.index("res.reason")
+    assert "stopped:" in src[i:i + 600]

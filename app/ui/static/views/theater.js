@@ -919,8 +919,14 @@ export function renderTheater(container, jobId, ctx = {}) {
         const st = res.node_status || (choice === "skip" ? "skipped" : "done");
         ensureNode(nodeKey, { status: st });
         renderNodes();
+        // §17.1266 — say WHY it stopped, here, instead of sending them to look
+        // for it. The reason reaches the response now that DecideResult declares
+        // it; "see the node's output" was the engine knowing and not saying.
+        const why = String(res.reason || "").split("\n").find((l) => l.trim()) || "";
         toast(res.outcome === "ran" ? `${nodeKey} ran on ${d.runner || "the runner"} — continuing.`
-            : res.outcome === "failed" ? `${nodeKey} stopped at a failed command — see the node's output.`
+            : res.outcome === "failed" ? (why
+                ? `${nodeKey} stopped: ${why.length > 160 ? why.slice(0, 160) + "…" : why}`
+                : `${nodeKey} stopped at a failed command — see the node's output.`)
             : res.outcome === "runbook" ? `${nodeKey} kept as a runbook for you — continuing.`
             : `${nodeKey} ${st} — continuing.`, res.outcome === "failed" ? "warn" : "ok");
         if (res.run_started && !running) attachRun();

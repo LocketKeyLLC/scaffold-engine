@@ -226,6 +226,11 @@ async def decide_endpoint(
             "error": ("the engine cannot run this block" if outcome["outcome"] == "not_runnable"
                       else "no runner with an open write channel is registered"),
             "refused": outcome.get("refused") or [], "node_key": body.node_key,
+            # §17.1266 — `resolve_run` names the values the runner has no entry
+            # for (§17.1191: nothing to type, the value belongs ON that machine)
+            # and this detail dropped them, so the 409 said the block could not
+            # run without saying what was missing from where.
+            "secrets_missing": outcome.get("secrets_missing") or [],
         })
     # Restart the detached run (§17.1007): the response returns at once and the
     # Run stage attaches to the run via /execute/all, which is idempotent.

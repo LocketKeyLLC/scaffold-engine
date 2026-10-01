@@ -2610,6 +2610,31 @@ async def _pause_for_decision(job_id: str) -> dict | None:
             except Exception as exc:
                 logger.warning("no_commands_redraft_failed job=%s node=%s err=%r", job_id,
                                run_node.get("node_key"), exc)
+        # §17.1265 — and can the step be CHECKED? A draft whose Verify section
+        # the channel cannot run is approved with nothing judging it: live,
+        # ADD115 parked with three correct checks and `verify: []`, because each
+        # was one 227-character line with a `$(...)` in it. The run commands are
+        # kept; only the checks are redrawn.
+        try:
+            _nv = supervised_runs.verify_not_runnable(runbook)
+            if _nv:
+                logger.warning("supervised_run_verify_redraft job=%s node=%s verify=%d",
+                               job_id, run_node.get("node_key"), len(frame.get("verify") or []))
+                _vb = await supervised_runs.draft_runbook(run_node, _brief, up_block,
+                                                         retry_note=_nv, spec=spec, environment=_env)
+                if _vb:
+                    _vf = supervised_runs.frame_run(run_node, _vb, spec, policy, env=_env,
+                                                   preconditions=_pre)
+                    # §17.1211's rule — only ever trade UP: the redraft must keep
+                    # the commands AND actually gain a runnable check.
+                    if _vf.get("commands") and _vf.get("verify"):
+                        frame = _vf
+                        logger.warning("supervised_run_verify_redraft_clean job=%s node=%s commands=%d verify=%d",
+                                       job_id, run_node.get("node_key"),
+                                       len(_vf["commands"]), len(_vf["verify"]))
+        except Exception as exc:
+            logger.warning("verify_check_failed job=%s node=%s err=%r", job_id,
+                           run_node.get("node_key"), exc)
         # §17.1254 — and does the block CHANGE anything? A draft of pure reads
         # for a step that must change something would be approved, run cleanly
         # and mark the step done having done nothing.
