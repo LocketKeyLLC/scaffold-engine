@@ -244,9 +244,17 @@ async def resolve_decision(
                  "at": now, "result": res["outcome"], "node_status": res.get("node_status"),
                  "inputs": sorted((inputs or {}).keys())}       # names only — a value may be a secret
         outcome = res["outcome"]
+        # §17.1261 — what actually happened has to reach the caller. The
+        # early-return path above splats this detail; the final return dropped it,
+        # so a run that worked answered `executed: 0` and a run that failed gave
+        # no `reason`, no `verify` and none of the researched `diagnosis`. Errors
+        # carried detail, successes did not. The commands and their output are
+        # already masked by `resolve_run` (§17.1193), so this leaks nothing.
+        run_detail = {k: v for k, v in res.items() if k not in ("outcome", "node_key", "record")}
     elif delegate:
         entry = {"by": "engine", "at": now}
         outcome = "delegated"
+        run_detail = {}
     else:
         rec = decision_record(choice or "", note, waiting)
         upd = await db.execute(
@@ -259,6 +267,7 @@ async def resolve_decision(
             return {"outcome": "node_gone"}
         entry = {"by": "operator", "choice": (choice or "").strip(), "note": (note or "").strip(), "at": now}
         outcome = "resolved"
+        run_detail = {}
     decisions = _as_dict(md.get("decisions"))
     decisions[node_key] = entry
     await db.execute(
@@ -269,7 +278,7 @@ async def resolve_decision(
     await transition(db, job_id, to="executing", expected_from=(STATUS,), reason=f"decided:{node_key}")
     await db.commit()
     logger.info("decision_pause_%s job=%s node=%s", outcome, job_id, node_key)
-    return {"outcome": outcome, "node_key": node_key, "record": entry}
+    return {"outcome": outcome, "node_key": node_key, "record": entry, **run_detail}
 
 
 def _as_dict(v: Any) -> dict:

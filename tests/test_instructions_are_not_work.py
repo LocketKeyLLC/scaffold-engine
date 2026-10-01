@@ -194,3 +194,84 @@ def test_pending_hands_on_recovers_before_handing_the_node_over():
     import inspect
     src = inspect.getsource(sr.pending_hands_on)
     assert "recover_prior_attempt(db, job_id, node)" in src
+
+
+# ── §17.1261: what happened has to reach the caller ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_successful_run_reports_what_it_executed():
+    """Live: ADD116 did the work and the API answered `executed: 0 | ok: 0`. The
+    early-return path splatted the run detail; the FINAL return dropped it, so
+    errors carried detail and successes did not."""
+    from unittest.mock import MagicMock
+    from app.modules import decision_pause as dp
+
+    waiting = {"kind": "run", "node_key": "ADD116", "runbook": "r",
+               "commands": ["pct set 102 --nameserver \"192.168.1.30 1.1.1.1\""],
+               "verify": [], "refused": []}
+    db = AsyncMock()
+    row = MagicMock()
+    row.mappings.return_value.first.return_value = {
+        "status": "awaiting_decision", "metadata": {"awaiting_decision": waiting}}
+    upd = MagicMock(); upd.rowcount = 1
+    db.execute = AsyncMock(side_effect=[row, upd, upd])
+    ran = {"outcome": "ran", "node_status": "done",
+           "executed": [{"command": "pct set 102 …", "ok": True, "exit": 0, "output": ""}],
+           "verify": "$ pct exec 102 -- getent hosts github.com\n140.82.113.4"}
+    with patch("app.modules.supervised_runs.resolve_run", new=AsyncMock(return_value=ran)), \
+         patch.object(dp, "transition", new=AsyncMock(return_value=True)):
+        out = await dp.resolve_decision(db, "j", "ADD116", choice="run")
+    assert out["outcome"] == "ran"
+    assert len(out["executed"]) == 1, "the executed list must reach the caller"
+    assert "140.82.113.4" in out["verify"]
+    assert out["record"]["result"] == "ran"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_run_reports_its_reason_and_diagnosis():
+    """A plain `failed` is not in the early-return list either, so it fell through
+    to the same lossy return — no reason, no verify, and none of the research."""
+    from unittest.mock import MagicMock
+    from app.modules import decision_pause as dp
+
+    waiting = {"kind": "run", "node_key": "ADD116", "runbook": "r",
+               "commands": ["pct set 102 --nameserver 192.168.1.30 1.1.1.1"],
+               "verify": [], "refused": []}
+    db = AsyncMock()
+    row = MagicMock()
+    row.mappings.return_value.first.return_value = {
+        "status": "awaiting_decision", "metadata": {"awaiting_decision": waiting}}
+    upd = MagicMock(); upd.rowcount = 1
+    db.execute = AsyncMock(side_effect=[row, upd, upd])
+    failed = {"outcome": "failed", "node_status": "failed",
+              "executed": [{"command": "pct set 102 …", "ok": False, "exit": 255,
+                            "output": "400 too many arguments"}],
+              "reason": "`pct set …` exited 255: 400 too many arguments",
+              "diagnosis": "`--nameserver` takes one quoted space-separated list."}
+    with patch("app.modules.supervised_runs.resolve_run", new=AsyncMock(return_value=failed)), \
+         patch.object(dp, "transition", new=AsyncMock(return_value=True)):
+        out = await dp.resolve_decision(db, "j", "ADD116", choice="run")
+    assert out["outcome"] == "failed"
+    assert "400 too many arguments" in out["reason"]
+    assert "one quoted space-separated list" in out["diagnosis"]
+    assert out["executed"][0]["exit"] == 255
+
+
+@pytest.mark.asyncio
+async def test_a_plain_decision_carries_no_run_detail():
+    """A `decision` node has no run, so there is nothing to splat and the shape
+    must stay exactly as it was."""
+    from unittest.mock import MagicMock
+    from app.modules import decision_pause as dp
+
+    db = AsyncMock()
+    row = MagicMock()
+    row.mappings.return_value.first.return_value = {
+        "status": "awaiting_decision", "metadata": {"awaiting_decision": {"node_key": "ADD99"}}}
+    upd = MagicMock(); upd.rowcount = 1
+    db.execute = AsyncMock(side_effect=[row, upd, upd])
+    with patch.object(dp, "transition", new=AsyncMock(return_value=True)):
+        out = await dp.resolve_decision(db, "j", "ADD99", choice="Status & control")
+    assert out["outcome"] == "resolved"
+    assert set(out) == {"outcome", "node_key", "record"}

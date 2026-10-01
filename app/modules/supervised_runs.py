@@ -452,6 +452,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
   and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
 - AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
 - A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
+- A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
 """
 
@@ -802,6 +803,24 @@ _FAIL_LINE = re.compile(
     r"((?:HTTP\s*(?:Error\s*)?\d{3})|(?:\b[45]\d\d\b)|(?:Bad Request)|(?:Unauthorized)|(?:Forbidden))")
 
 
+#: §17.1263 — a status the REMOTE end owns. 400/401/403/422 say the request was
+#: wrong: ours to fix, and identical every time it is sent. 502/503/504, a
+#: refused connection or a timeout say the thing being configured is DOWN, which
+#: is that thing's problem. Live, ADD115: the first attempt sent 88 malformed
+#: bodies (one diagnosis, discarded 88 times — §17.1258 is right about that), and
+#: the attempt after it hit genuinely dead trackers. Treating the second like the
+#: first stops the step on the first corpse and adds none of the ones that work.
+_UNREACHABLE = re.compile(
+    r"(?i)\b(?:50[234]|bad gateway|service unavailable|gateway time-?out|timed?\s*out|"
+    r"timeout|connection refused|connection reset|no route to host|unable to connect|"
+    r"could not resolve|name or service not known|temporary failure in name resolution)\b")
+
+#: §17.1263 — a line reporting that one thing actually landed. If any did, the
+#: block was not spinning on one mistake; it was working through a list.
+_OK_LINE = re.compile(
+    r"(?im)^\s*(?:added|created|ok|success(?:fully)?|configured|installed|enabled|done)\b[:\s]")
+
+
 def repeated_identical_failures(output: str, *, threshold: int = 3) -> Optional[str]:
     """§17.1258 — a block that repeated a failing call instead of stopping at it.
 
@@ -828,6 +847,13 @@ def repeated_identical_failures(output: str, *, threshold: int = 3) -> Optional[
         counts[m.group(1).strip().lower()] = counts.get(m.group(1).strip().lower(), 0) + 1
     if not counts:
         return None
+    # §17.1263 — a dead third party is not the engine repeating its own mistake.
+    # Once something in the run has landed, an unreachable remote is a thing to
+    # skip and report, not a reason to abandon the rest of the list.
+    if _OK_LINE.search(output or ""):
+        counts = {e: c for e, c in counts.items() if not _UNREACHABLE.search(e)}
+        if not counts:
+            return None
     err, n = max(counts.items(), key=lambda kv: kv[1])
     if n < threshold:
         return None
@@ -1217,6 +1243,106 @@ def attempt_feedback(node: dict) -> str:
     return "\n".join(lines)
 
 
+#: §17.1262 — step wording that asks for the state of the world right now. Only
+#: these pull a web query: research costs a search and a model call, and most
+#: steps are about this machine, which the engine reads directly instead.
+#: Bare `working`, `available`, `reachable` and `alive` are deliberately ABSENT.
+#: "Give the containers working DNS" is about this machine and is answered by
+#: reading it (§17.1212/1229/1232); a web search there would be slower and worse.
+#: Only currency or liveness of something OUTSIDE this host earns a lookup.
+_NEEDS_CURRENCY = re.compile(
+    r"(?i)\b(?:currently|up[- ]to[- ]date|latest|newest"
+    r"|still\s+(?:works?|working|up|alive|available|maintained)"
+    r"|maintained|deprecated|retired|shut\s*down|defunct"
+    r"|as\s+many\s+as\s+possible|which\s+ones?)\b"
+    r"|\bcurrent(?:ly)?\s+(?:working|available|live|up|active|maintained)\b")
+
+
+def currency_question(node: dict) -> str:
+    """The question to research for this step, or "" when it needs no web lookup.
+
+    §17.1262 — the operator, after 89 indexer adds found most trackers dead:
+    "this is the exact reason for the researcher component to be wired up to
+    fixing issues. It should find the most current up to date and available
+    indexers."
+
+    They are right, and the gap is structural in the same way as the others
+    today. Research IS wired into `diagnose_failure`, so the engine researches a
+    step AFTER it fails. It was never wired into DRAFTING one, so a step whose
+    content depends on the state of the world is written from the model's memory
+    and then discovers reality one 502 at a time.
+
+    Prowlarr's schema is the authority on what definitions EXIST -- shipped with
+    the version, static. It says nothing about which trackers are ALIVE this
+    week, which changes constantly. That second question is exactly what a web
+    search answers and what no amount of reading the machine can.
+
+    Narrow on purpose: only step wording that actually asks about currency or
+    availability triggers a lookup. A step about this host's own disks or
+    containers is answered by reading the host (§17.1212/1229/1232), and
+    researching it would be slower and worse.
+    """
+    title = str((node or {}).get("title") or "")
+    body = " ".join(str((node or {}).get(k) or "") for k in ("title", "description", "prompt_template"))
+    if not _NEEDS_CURRENCY.search(body):
+        return ""
+    return title.strip()[:200] or body.strip()[:200]
+
+
+async def research_for_step(node: dict, environment: dict | None = None) -> str:
+    """§17.1262 — current external facts for a step whose content depends on them.
+
+    §17.1262b — the query carries the operator's SYSTEM, not just the step's own
+    words, because that is the difference between a generic list and a usable
+    one. "public indexers that still work" retrieves somebody else's setup; the
+    same question with this machine's nouns in it retrieves the ones that work
+    with what the operator actually runs. ``derive_need`` reads the step's goal
+    and the environment profile for named hardware, and ``finalize_query`` makes
+    those terms a rule rather than a hint — §17.1021 measured a generator
+    dropping the model number three times when merely asked.
+
+    Fail-soft in every direction: no currency wording, no sources, or any error
+    leaves the prompt exactly as it was. A draft without research is the old
+    behaviour, which is survivable; a draft blocked on a failed search is not.
+    """
+    question = currency_question(node)
+    if not question:
+        return ""
+    key = str((node or {}).get("node_key") or "?")
+    profile = str((environment or {}).get("profile") or "")
+    try:
+        from app.modules.assist_evidence import derive_need, finalize_query
+        from app.modules.assist_research_lib import _render_research_block, research_one
+        need = derive_need(
+            question,
+            title=str((node or {}).get("title") or ""),
+            goal_terms=question,
+            operator_notes=[ln.strip() for ln in profile.splitlines() if ln.strip()],
+        )
+        query = finalize_query(need, question, node_key=key) or question
+        res = await research_one(question=query,
+                                 node_key=key,
+                                 synthesize=False,
+                                 goal_terms=question,
+                                 context_hint=profile[:600] or None,
+                                 prerequisite_env=environment or None)
+        sources = (res or {}).get("sources") or []
+        block = _render_research_block(sources)
+    except Exception as exc:
+        logger.warning("step_research_failed node=%s err=%r",
+                       (node or {}).get("node_key"), exc)
+        return ""
+    if not block:
+        return ""
+    logger.warning("step_research_attached node=%s sources=%d q=%r",
+                   key, len(sources), query[:120])
+    return ("\n\n" + block
+            + "\n\nUse these to decide WHICH of the things this machine offers are worth using right "
+              "now. What the machine lists is what EXISTS; whether each one still works is what these "
+              "sources are for. Prefer the ones they confirm are alive, and do not spend the step on "
+              "ones they say are dead or retired.")
+
+
 async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
                         for_channel: bool = True, retry_note: str = "", spec=None,
                         environment: dict | None = None) -> str:
@@ -1240,6 +1366,11 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     # project." Names only — a value never enters a prompt.
     # §17.1247 — what the last attempt at this step did, and why it stopped.
     prompt += attempt_feedback(node)
+    # §17.1262 — what the machine lists is what EXISTS; whether it still works
+    # today is a web question, and research was only ever wired into diagnosing
+    # a failure rather than drafting the step.
+    if for_channel:
+        prompt += await research_for_step(node, environment)
     prompt += await stored_values_block()
     # §17.1232 — what machines exist, so the draft addresses the right one.
     # §17.1242 — and what hardware is in it, so it stops asking about the GPUs.
