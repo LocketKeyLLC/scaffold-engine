@@ -452,6 +452,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
   and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
 - AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
 - A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
+- ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably (20 or so per command, several commands), and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is.
 - WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped.
 - YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next.
 - A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not.
@@ -1196,6 +1197,10 @@ def diagnosis_of(report: str) -> str:
     return (body[:nxt] if nxt > 0 else body).strip()
 
 
+#: §17.1267 — the runner's own words when a command runs out of time.
+_TIMED_OUT = re.compile(r"(?i)timed?\s*out after (\d+)\s*s")
+
+
 def attempt_feedback(node: dict) -> str:
     """§17.1247 — what the LAST attempt at this step did, and why it stopped.
 
@@ -1223,6 +1228,13 @@ def attempt_feedback(node: dict) -> str:
     if not reason:
         return ""
     ran = executed_commands(str(node.get("output_text") or ""))
+    # §17.1267 — a timeout is not a mistake in the commands, it is work that did
+    # not fit the budget, and the remedy is specific. Live, ADD115: the script
+    # classified every refusal correctly and was killed at 180s partway through
+    # 89 indexers, each POST of which makes the service connection-test a remote
+    # tracker. Without this the next draft reads "exited None: (timed out)" and
+    # has no reason to write anything different.
+    budget = _TIMED_OUT.search(reason)
     lines = [
         "\n\nTHE PREVIOUS ATTEMPT AT THIS STEP FAILED. Do not repeat it.",
         "",
@@ -1242,6 +1254,21 @@ def attempt_feedback(node: dict) -> str:
             "`pct status N | grep -q running || pct start N` — because a create or a start that "
             "has already happened fails the second time and would stop this attempt at the very "
             "first command.",
+        ]
+    if budget:
+        secs = budget.group(1)
+        lines += [
+            "",
+            f"THAT WAS A TIME BUDGET, NOT A MISTAKE. The command was killed at {secs}s with the work "
+            "part-finished, and because it was killed there is no record of how much of it landed. "
+            "The commands themselves may have been right.",
+            "",
+            "So do not send the same single command again — it will be killed at the same place. "
+            "Split the work into batches that each finish well inside the budget (around 20 items per "
+            "command), and make each batch RESUMABLE so re-running one costs nothing: treat a thing "
+            "that is already there as success and move on, never as an error. Then the batches can be "
+            "sent as separate commands, each one reporting what it did, and a batch that runs out of "
+            "time loses only itself.",
         ]
     lines += ["", "Address the reason above specifically. If it was a value you did not read off the "
                   "machine, read it. If it was a command the runner may not run, do not send it again."]
@@ -1561,45 +1588,63 @@ _VERIFY_SUBST = re.compile(r"\$\(")
 def verify_not_runnable(runbook: str) -> str:
     r"""§17.1265 — the Verify section wrote checks this channel cannot run.
 
-    Measured on the real draft, not inferred. ADD115 parked with THREE correct
-    checks written under ``## Verify`` -- an indexer count from Prowlarr, from
-    Radarr and from Sonarr -- and the frame carried ``verify: []``. Each was one
-    clever line:
+    Measured on the real draft, not inferred. ADD115 parked with checks written
+    under ``## Verify`` and ``verify: []`` in the frame -- twice, for two
+    different reasons:
 
-        curl -s http://…/api/v1/indexer -H "X-Api-Key: $(pct exec 102 -- cat
-        /var/lib/prowlarr/config.xml | sed -n 's|.*<ApiKey>\(.*\)</ApiKey>.*|\1|p')"
-        | python3 -c "import sys,json; print(len(json.load(sys.stdin)))"
+        curl … -H "X-Api-Key: $(pct exec 102 -- cat …)" | python3 -c "…"
+        curl … -H "X-Api-Key: $PROWLARR_API_KEY"        | python3 -c "…"
 
-    227 characters, and `read_only_command` refuses it. Both halves are fine on
-    their own -- `pct exec 102 -- cat <config>` is a read, `curl -s <url>` is a
-    read -- so the channel could have verified the step perfectly well. The
-    silence was the problem: the step would have been judged ONLY on the counts
-    its own script printed, which is the thing §17.1231/1239 exist to prevent.
+    §17.1265's first cut asked whether a candidate used ``$(…)`` or ran past the
+    length a command takes, which was the first draft's reason and not the
+    second's: the redraft that followed piped into an interpreter instead, the
+    detector stayed silent, and the step parked unverifiable again. A detector
+    that names the shapes it has seen is one shape short, every time (the same
+    lesson as §17.1266's phrase list).
 
-    Fires only when nothing survived extraction AND a candidate was disqualified
-    for a nameable reason (a substitution, or past the length a command takes).
-    A Verify section whose backticks hold expected VALUES ("expect `status:
-    running`") is short, substitution-free, and correctly ignored here.
+    So the question is the one that actually matters: did the drafter write
+    something command-shaped under ``## Verify``, and did NONE of it survive? The
+    candidates come from ``step_commands``, which already tells a command from a
+    path or a value, and the survivors from ``verify_commands``. Candidates and
+    no survivors is the defect, whatever the reason -- and the step would
+    otherwise be judged only on what its own script chose to print.
+
+    The channel can verify this perfectly well: ``pct exec 102 -- cat <config>``
+    is a read and ``curl -s <url>`` is a read. What it cannot take is the two
+    welded into one clever line.
     """
     body = _section(runbook, "Verify")
     if not body.strip() or verify_commands(runbook):
         return ""
-    prose = _FENCE_RE.sub(" ", body)
-    cands = [m.group(1).strip() for m in _VERIFY_CANDIDATE.finditer(prose)]
-    cands += [ln.strip() for fence in _FENCE_RE.findall(body)
-              for ln in fence.splitlines() if ln.strip()]
-    bad = [c for c in cands if _VERIFY_SUBST.search(c) or len(c) > 200]
-    if not bad:
+    try:
+        from app.modules.step_classify import step_commands
+        cands = [c for c, _s in step_commands(body)]
+    except Exception as exc:                      # a judge that cannot run refuses nothing
+        logger.warning("verify_candidates_failed err=%r", exc)
         return ""
-    logger.warning("verify_not_runnable candidates=%d first=%r", len(bad), bad[0][:120])
+    if not cands:
+        return ""
+    def _why(c: str) -> str:
+        return ("it uses `$(...)` command substitution" if "$(" in c
+                else "it pipes into an interpreter" if "|" in c
+                else f"it is {len(c)} characters long" if len(c) > 200
+                else "running a script this step just wrote is not a check of anything"
+                if re.match(r"^(?:python3?|bash|sh)\s+/tmp/", c)
+                else "")
+    # Quote the candidate whose problem can be NAMED. Live, ADD115's first
+    # candidate was `python3 /tmp/add_indexers.py` while the informative ones --
+    # a pipe into an interpreter -- were four lines below it.
+    first = next((c for c in cands if _why(c)), cands[0])
+    why = _why(first) or "the read-only channel does not accept it as written"
+    logger.warning("verify_not_runnable candidates=%d why=%s first=%r", len(cands), why, first[:120])
     return (
         "YOUR VERIFY SECTION CANNOT BE RUN, so this step would be approved with nothing to check it "
-        "against. This one could not be used:\n\n"
-        f"    {bad[0][:300]}\n\n"
-        "It is refused for the same reason the run commands are: a check goes through the read-only "
-        "channel as ONE SIMPLE COMMAND, so `$(...)` substitution and a pipe into an interpreter are "
-        "out. Split it. Each half is allowed on its own -- read the value in one check and use it in "
-        "the next, and let the operator compare the two:\n\n"
+        f"against. This one could not be used because {why}:\n\n"
+        f"    {first[:300]}\n\n"
+        "A check goes through the read-only channel as ONE SIMPLE COMMAND: no `$(...)`, no pipe into "
+        "`python3 -c`, and not a script you wrote in this step (running it again is not a check). "
+        "Split it. Each half is allowed on its own -- read the value in one check and use it in the "
+        "next, and let the operator compare the two:\n\n"
         "    ## Verify\n"
         "    - the API key this service is using: `pct exec 102 -- cat /var/lib/prowlarr/config.xml`\n"
         "    - how many indexers it now has (paste the key from the previous check): "

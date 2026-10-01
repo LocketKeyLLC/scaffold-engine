@@ -1,0 +1,15 @@
+## Run this
+
+```bash
+pct exec 102 -- systemctl restart prowlarr
+```
+
+## Verify
+
+- Indexers added: `python3 /tmp/add_indexers.py` output shows `added: N` where N is the number successfully added
+- Applications connected: `python3 /tmp/add_apps.py` output shows `added application: Radarr` and `added application: Sonarr`
+- Sync triggered: `python3 /tmp/add_apps.py` output shows `sync triggered`
+- Prowlarr lists indexers: `curl -s http://192.168.1.21:9696/api/v1/indexer -H "X-Api-Key: $PROWLARR_API_KEY" | python3 -c "import sys,json; data=json.load(sys.stdin); print(len(data))"`
+- Radarr shows indexers: `curl -s http://192.168.1.22:7878/api/v3/indexer -H "X-Api-Key: $RADARR_API_KEY" | python3 -c "import sys,json; data=json.load(sys.stdin); print(len(data))"`
+- Sonarr shows indexers: `curl -s http://192.168.1.23:8989/api/v3/indexer -H "X-Api-Key: $SONARR_API_KEY" | python3 -c "import sys,json; data=json.load(sys.stdin); print(len(data))"`
+

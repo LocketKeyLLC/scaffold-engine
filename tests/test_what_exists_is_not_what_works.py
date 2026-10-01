@@ -186,8 +186,22 @@ def _runbook(verify_body: str) -> str:
             f"## Verify\n\n{verify_body}\n\n## Rollback\n\n- none\n")
 
 
+def test_the_draft_that_actually_parked_unverifiable_is_caught():
+    """§17.1265's REAL input, saved from the live frame. The first cut of this
+    detector asked whether a candidate used `$(…)` or ran long -- which was the
+    first draft's reason and not this one's. This draft piped into an
+    interpreter and ran a script it had just written, the detector stayed silent,
+    and the step parked unverifiable a second time."""
+    rb = (pathlib.Path(__file__).parent / "fixtures" / "add115_verify_section.txt").read_text(encoding="utf-8")
+    assert sr.verify_commands(rb) == [], "precondition: nothing survives extraction"
+    note = sr.verify_not_runnable(rb)
+    assert note and "CANNOT BE RUN" in note
+    assert "is not a check of anything" in note or "pipes into an interpreter" in note, \
+        "the refusal must NAME why, not just say no"
+
+
 def test_the_real_dropped_check_is_caught():
-    """ADD115 parked with three checks like this and `verify: []`."""
+    """ADD115's FIRST draft: the same empty `verify`, a different reason."""
     rb = _runbook(f"- Indexer count in Prowlarr: `{_CLEVER}`")
     assert sr.verify_commands(rb) == [], "precondition: the channel does refuse this"
     note = sr.verify_not_runnable(rb)
@@ -315,3 +329,56 @@ def test_the_spa_says_why_instead_of_pointing_elsewhere():
     assert "res.reason" in src, "the reason reaches the response; the surface must use it"
     i = src.index("res.reason")
     assert "stopped:" in src[i:i + 600]
+
+
+# ─────────────── §17.1267 — a budget failure, and a response that is filled
+
+_TIMED_OUT_REASON = ("supervised run stopped — `python3 /tmp/add_indexers.py` "
+                     "exited None:  (timed out after 180s)")
+
+
+def test_a_timeout_is_told_apart_from_a_mistake():
+    """Live ADD115: the script classified every refusal correctly and was killed
+    at 180s partway through 89 indexers. Without this the next draft reads
+    "exited None: (timed out)" and has no reason to write anything different."""
+    fb = sr.attempt_feedback({"last_verification_reason": _TIMED_OUT_REASON, "output_text": ""})
+    assert "TIME BUDGET, NOT A MISTAKE" in fb
+    assert "180s" in fb, "the budget it blew must be named"
+    assert "RESUMABLE" in fb and "20 items per" in fb, "the remedy must be concrete"
+
+
+def test_an_ordinary_failure_gets_no_budget_lecture():
+    fb = sr.attempt_feedback({
+        "last_verification_reason": "supervised run stopped — `pct start 111` exited 255: already running",
+        "output_text": ""})
+    assert fb and "TIME BUDGET" not in fb
+
+
+def test_the_drafter_knows_the_budget_before_it_writes():
+    """§17.1189's lesson: tell the prompt the consumer's constraints. The drafter
+    put 89 remote connection tests in one command because nothing said it had
+    180 seconds."""
+    rules = sr.CHANNEL_RULES
+    assert "ONE COMMAND GETS 180 SECONDS" in rules
+    low = rules.lower()
+    assert "batches" in low and "resumable" in low
+
+
+def test_the_budget_in_the_rules_matches_the_one_enforced():
+    """A number written in a prompt and a number enforced in code drift; live,
+    the rule would be a lie the first time the timeout changed."""
+    from app.modules.assist_supervised import RUN_COMMAND_TIMEOUT_S
+    assert f"ONE COMMAND GETS {int(RUN_COMMAND_TIMEOUT_S)} SECONDS" in sr.CHANNEL_RULES
+
+
+def test_the_route_fills_the_response_it_declares():
+    """§17.1266 declared the fields and this construction still named six, so the
+    response carried `reason: null` on a run that had a reason — the same defect
+    one layer up. A model cannot invent a value the handler never passes."""
+    route = (pathlib.Path(sr.__file__).parents[1] / "routers" / "jobs.py").read_text(encoding="utf-8")
+    i = route.index("async def decide_endpoint(")
+    body = route[i:]
+    j = body.index("return DecideResult(")
+    construction = body[j:body.index(")", body.index("confirmed_after_drop", j)) + 1]
+    for field in ("executed", "verify", "reason", "diagnosis", "unknown_outcome", "confirmed_after_drop"):
+        assert f"{field}=outcome.get(" in construction, f"the route never fills {field!r}"

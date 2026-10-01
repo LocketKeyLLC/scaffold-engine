@@ -246,6 +246,15 @@ async def decide_endpoint(
         resolved="engine" if outcome["outcome"] == "delegated" else "operator",
         status="executing", run_started=run_started,
         outcome=outcome["outcome"], node_status=(outcome.get("record") or {}).get("node_status"),
+        # §17.1267 — and FILL them. §17.1266 declared these fields on the model
+        # and this construction still named six, so the response carried
+        # `reason: null` on a run that had a reason: the same defect one layer up,
+        # found by running it rather than by reading the model. A response_model
+        # cannot invent a value the handler does not pass.
+        executed=outcome.get("executed"), verify=outcome.get("verify"),
+        reason=outcome.get("reason"), diagnosis=outcome.get("diagnosis"),
+        unknown_outcome=outcome.get("unknown_outcome"),
+        confirmed_after_drop=outcome.get("confirmed_after_drop"),
     )
 
 
