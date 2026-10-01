@@ -2616,7 +2616,12 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         # was one 227-character line with a `$(...)` in it. The run commands are
         # kept; only the checks are redrawn.
         try:
-            _nv = supervised_runs.verify_not_runnable(runbook)
+            # §17.1269 — and only when the block can run at all. A frame already
+            # carrying a shape refusal has a bigger problem than its checks, and
+            # redrafting for the checks swapped a correct budget refusal for a
+            # draft of invalid Python: two unrunnable frames, the second one less
+            # informative. The refusal path above owns that case.
+            _nv = "" if frame.get("refused") else supervised_runs.verify_not_runnable(runbook)
             if _nv:
                 logger.warning("supervised_run_verify_redraft job=%s node=%s verify=%d",
                                job_id, run_node.get("node_key"), len(frame.get("verify") or []))
@@ -2627,7 +2632,8 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                                                    preconditions=_pre)
                     # §17.1211's rule — only ever trade UP: the redraft must keep
                     # the commands AND actually gain a runnable check.
-                    if _vf.get("commands") and _vf.get("verify"):
+                    # §17.1269 — never trade a runnable block for a refused one.
+                    if _vf.get("commands") and _vf.get("verify") and not _vf.get("refused"):
                         frame = _vf
                         logger.warning("supervised_run_verify_redraft_clean job=%s node=%s commands=%d verify=%d",
                                        job_id, run_node.get("node_key"),

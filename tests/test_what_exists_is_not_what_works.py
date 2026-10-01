@@ -446,3 +446,71 @@ def test_the_gate_reaches_the_frame():
     i = src.index("def frame_run(")
     assert "loops_the_network_without_a_budget(cmds)" in src[i:], \
         "the gate must be called from frame_run, not merely exist"
+
+
+# ──────── §17.1269 — a refusal nobody can redraft is a dead end for the operator
+
+def _refusal_producers() -> dict:
+    """The functions `frame_run` adds to `refused` — `refused + NAME(cmds)`."""
+    import ast as _ast
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    frame = next(n for n in _ast.walk(tree)
+                 if isinstance(n, _ast.FunctionDef) and n.name == "frame_run")
+    names: set[str] = set()
+    for node in _ast.walk(frame):
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add) \
+                and isinstance(node.right, _ast.Call):
+            fn = getattr(node.right.func, "id", None)
+            if fn:
+                names.add(fn)
+    bodies = {n.name: n for n in _ast.walk(tree)
+              if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and n.name in names}
+    return bodies
+
+
+def test_the_refusal_producers_are_discoverable():
+    """If this finds nothing, the gate below is vacuous."""
+    assert len(_refusal_producers()) >= 4, sorted(_refusal_producers())
+
+
+@pytest.mark.parametrize("name", sorted(_refusal_producers()))
+def test_every_shape_refusal_can_be_redrafted(name):
+    """§17.1269 — `shape_retry_note` matches a refusal by its TEXT against
+    `_SHAPE_REFUSALS`. A producer whose wording matches nothing there gets no
+    redraft, so the operator is handed a greyed-out Run and no way forward.
+
+    Live, §17.1268's first outing: the budget refusal was correct, unregistered,
+    and therefore a dead end — `suggested: myself`, options `myself, skip`.
+    """
+    import ast as _ast
+    fn = _refusal_producers()[name]
+    literals = " ".join(n.value for n in _ast.walk(fn)
+                        if isinstance(n, _ast.Constant) and isinstance(n.value, str))
+    assert any(s in literals for s in sr._SHAPE_REFUSALS), (
+        f"{name}() refuses the engine's own block and none of its wording is in "
+        f"_SHAPE_REFUSALS, so shape_retry_note cannot recognise it and no redraft "
+        f"will happen. Add the distinctive phrase to the registry.")
+
+
+def test_the_budget_refusal_reaches_a_redraft():
+    """End to end on the real script: refused, recognised, and the note tells the
+    drafter what to do instead."""
+    frame = {"kind": "run", "refused": sr.loops_the_network_without_a_budget(
+        [_fixture("add115_unbounded_loop.txt")])}
+    assert frame["refused"], "precondition: the real script is refused"
+    note = sr.shape_retry_note(frame)
+    assert note, "an unregistered refusal produces no redraft — the §17.1269 dead end"
+    assert "batches" in note and "[:20]" in note
+    assert f"{sr._RUN_BUDGET_S} seconds" in note
+
+
+def test_the_verify_redraft_never_trades_a_runnable_block_for_a_refused_one():
+    """§17.1269 — my own §17.1265 redraft swapped a correct budget refusal for a
+    draft of invalid Python: two unrunnable frames, the second less informative."""
+    src = (pathlib.Path(sr.__file__).parent / "execution_agent.py").read_text(encoding="utf-8")
+    i = src.index("verify_not_runnable(runbook)")
+    assert 'frame.get("refused") else supervised_runs.verify_not_runnable' in src[i - 200:i + 60], \
+        "the verify redraft must not run on an already-refused frame"
+    assert '_vf.get("verify") and not _vf.get("refused")' in src[i:i + 1600], \
+        "and must not accept a replacement that is itself refused"

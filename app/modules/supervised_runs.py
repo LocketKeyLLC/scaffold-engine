@@ -85,9 +85,16 @@ _NOT_ALLOWED = "not on the write-allow list"
 
 #: §17.1234 adds "cannot report an HTTP error" — a shape the engine can fix
 #: itself, so the redraft must recognise it as one.
+#: §17.1269 — every refusal the ENGINE makes about its own block's shape must be
+#: listed here, or `shape_retry_note` does not recognise it, no redraft happens,
+#: and the operator is handed a greyed-out Run with nothing to do about it. That
+#: is exactly what §17.1268 did on its first live outing: the budget refusal was
+#: correct, unregistered, and therefore a dead end. A test below walks every
+#: refusal-producing function and fails when one's text matches nothing here.
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
                    "ON THE HOST", "not valid Python", "cannot even be split",
-                   "only passes a stored value")
+                   "only passes a stored value",
+                   "waits on something off this machine")        # §17.1268
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -149,7 +156,11 @@ def shape_retry_note(frame: dict) -> str:
     return (
         "YOUR PREVIOUS DRAFT WAS REFUSED BY THE RUNNER'S GATE — rewrite it so every command can run.\n"
         f"{lines}\n"
-        "Rules that were broken, restated: each command runs alone, in its own shell. No `$(…)` or backticks "
+        "Rules that were broken, restated: each command runs alone, in its own shell. "
+        f"A command gets {_RUN_BUDGET_S} seconds, so work that waits on something off this machine many "
+        "times over must be cut into batches (`items[:20]`, or ten if each one waits on a remote service) "
+        "and sent as several commands, each one treating a thing that is already there as success. "
+        "No `$(…)` or backticks "
         "ANYWHERE — including to build a list for a loop; write the list out literally (`for i in 1 2 3; do …; "
         "done`) or, better, drop the loop and state the checks as separate commands. No heredoc: write a file with "
         "`printf '%s\\n' 'line' | tee /path`. No `>`/`>>` redirects. A retry/wait loop is rarely worth it here — "
@@ -452,7 +463,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
   and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
 - AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
 - A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
-- ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably (20 or so per command, several commands), and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is.
+- ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably -- twenty per command, or ten when each one waits on a remote service that may be slow or dead, across several commands, and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is.
 - WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped.
 - YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next.
 - A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not.
@@ -754,7 +765,7 @@ _NETWORK_CALL = frozenset({
 })
 
 
-def _literal_names(tree: "ast.AST") -> set[str]:
+def _literal_names(tree) -> set[str]:
     """Names this source assigns a literal collection to, and never anything else.
 
     `apps = [{…Radarr…}, {…Sonarr…}]` then `for app in apps:` is two items and
@@ -778,7 +789,7 @@ def _literal_names(tree: "ast.AST") -> set[str]:
     return literal - other
 
 
-def _bounded(it: "ast.AST", literal_names: set[str] | None = None) -> bool:
+def _bounded(it, literal_names: set[str] | None = None) -> bool:
     """Is this iterable something whose size the draft itself fixed?
 
     A literal list or tuple is bounded by construction, whether it is written in
@@ -850,9 +861,11 @@ def loops_the_network_without_a_budget(commands: list[str]) -> list[dict]:
                     + (", with a sleep inside the loop as well" if sleeps else "")
                     + f". One command gets {_RUN_BUDGET_S} seconds and is KILLED at that point, with no "
                     f"record of how much of the work landed, so a run over 89 of anything cannot be "
-                    f"offered. Bound it: take a slice of a size you choose (`{where}[:20]`) and send "
+                    f"offered. Bound it: take a slice of a size YOU choose (`{where}[:20]`, or fewer) and send "
                     f"several commands, each one resumable -- treat a thing that is already there as "
-                    f"success and move on. Then a batch that runs out of time loses only itself.")})
+                    f"success and move on. Pick the size so a batch finishes well inside the budget: if "
+                    f"every item waits on a remote service that may answer slowly or not at all, ten is "
+                    f"safer than twenty. Then a batch that runs out of time loses only itself.")})
                 break                         # one finding per payload is enough
     if out:
         logger.warning("network_loop_without_budget count=%d first=%r", len(out), out[0]["why"][:120])
