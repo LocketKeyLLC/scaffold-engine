@@ -447,6 +447,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - WRITING A SCRIPT, exactly. Wrap each `printf` argument in DOUBLE quotes and use SINGLE quotes inside the code; then nothing needs escaping and the file parses. Never put a backslash before a quote in a `printf` argument -- the shell keeps the backslash and the interpreter chokes on it. Like this:
     printf '%s\\n' "import json, urllib.request" "cfg = open('/tmp/config.xml').read()" "key = cfg.split('<ApiKey>')[1].split('<')[0]" "print(key[:4])" | tee /tmp/x.py
   and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
+- AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
 - A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
 """
@@ -790,6 +791,51 @@ def payload_will_not_compile(commands: list[str]) -> list[dict]:
                     f"{what} could not be compiled ({type(exc).__name__}), so it cannot be offered "
                     f"as runnable.")})
     return out
+
+
+#: §17.1258 — the same failure, over and over, instead of one diagnosis.
+_FAIL_LINE = re.compile(
+    r"(?im)^\s*(?:failed|error|skip(?:ped)?)\b[:\s].*?"
+    r"((?:HTTP\s*(?:Error\s*)?\d{3})|(?:\b[45]\d\d\b)|(?:Bad Request)|(?:Unauthorized)|(?:Forbidden))")
+
+
+def repeated_identical_failures(output: str, *, threshold: int = 3) -> Optional[str]:
+    """§17.1258 — a block that repeated a failing call instead of stopping at it.
+
+    ADD115's script read Prowlarr's schema correctly and then POSTed all 88 public
+    definitions. Every one came back `HTTP Error 400: Bad Request`, and the output
+    was 88 lines of
+
+        failed: Anidex - HTTP Error 400: Bad Request
+        failed: NewStudio - HTTP Error 400: Bad Request
+        …
+
+    Prowlarr says in the response BODY exactly which property it rejected -- the
+    first attempt at this step had already been told `'App Profile Id' must be
+    greater than '0'` -- and the script discarded that 88 times over. The
+    operator got no diagnosis and the engine learned nothing it could act on.
+
+    One failure is information. The same failure 88 times is the same information,
+    with the useful part thrown away. So when a run's output shows one error
+    repeated, the step fails with THAT as the reason, which §17.1247 then carries
+    into the next draft.
+    """
+    counts: dict[str, int] = {}
+    for m in _FAIL_LINE.finditer(output or ""):
+        counts[m.group(1).strip().lower()] = counts.get(m.group(1).strip().lower(), 0) + 1
+    if not counts:
+        return None
+    err, n = max(counts.items(), key=lambda kv: kv[1])
+    if n < threshold:
+        return None
+    return (
+        f"the block hit the SAME failure {n} times -- {err!r} -- and carried on instead of stopping "
+        f"at the first one. One failure is information; the same failure {n} times is the same "
+        f"information with the useful part discarded. The service says in its RESPONSE BODY which "
+        f"field it rejected, and that body was never shown.\n\n"
+        f"Next attempt: do the operation ONCE, and if it fails print the full response body and "
+        f"stop. Fix the body from what the service says, then do the rest. Do not write a loop that "
+        f"swallows an error into a one-line summary.")
 
 
 def pipe_escapes_the_guest(commands: list[str]) -> list[dict]:
@@ -1756,6 +1802,16 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
         except Exception as exc:
             verify_out = f"(verify could not run: {exc})"
     output = mask_secrets(_executed_report(runbook, spec.name, executed, verify_out), values, need)
+    # §17.1258 — a block that repeated one failure is not a success, whatever the
+    # exit codes said. The commands "worked"; the work did not.
+    _repeated = repeated_identical_failures(
+        "\n".join(str(e.get("output") or "") for e in executed))
+    if _repeated and ok:
+        ok = False
+        repeated_reason = _repeated
+        logger.warning("supervised_run_repeated_failure job=%s node=%s", job_id, node_key)
+    else:
+        repeated_reason = ""
     if confirmed_after_drop:
         output += ("\n\n## The response was lost, the work was not\n\nThe connection to "
                    f"{spec.name} dropped before `{dropped[-1]['command'][:80]}` answered, so the engine "
@@ -1813,6 +1869,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
          + "; ".join(str(v.get("reason") or v.get("claim") or "")[:120] for v in refuted[:3])
          + ". A command that fetched an error page still exits 0 — the check is what settles it.")
         if refuted else
+        repeated_reason if repeated_reason else
         ("the runner ran nothing" if not last else
          (f"the runner refused `{last['command'][:80]}`: {last['output'][:200]}" if last.get("refused")
           else f"`{last['command'][:80]}` exited {last['exit']}: {last['output'][-300:]}")), values, need)

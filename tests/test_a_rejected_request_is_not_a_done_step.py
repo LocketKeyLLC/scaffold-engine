@@ -677,3 +677,63 @@ def test_the_superseded_gates_are_gone():
 def test_it_is_a_shape_the_redraft_can_fix():
     note = sr.shape_retry_note({"refused": sr.payload_will_not_compile([BAD_SCRIPT])})
     assert note and "not valid Python" in note
+
+
+# ── §17.1258: one failure is information; the same one 88 times is not ─────
+#
+# The operator: "Was the underlying issue that caused the mess up addressed?"
+# §17.1257 fixed "the engine writes code it never compiles" — and ADD115's
+# payload compiled perfectly. The layer that actually produced the Prowlarr mess
+# was different: bodies written from memory instead of from the API's contract,
+# and the first rejection thrown away by firing all 88 and summarising.
+#
+# Invented across that one thread: the template version, the indexer names, the
+# `Torznab` implementation, `priority: 0`, and a missing `appProfileId` — five
+# values asserted without reading the authority, while Prowlarr was willing to
+# name the problem on the first try.
+
+LIVE_88 = "\n".join(f"failed: Name{i} - HTTP Error 400: Bad Request" for i in range(88))
+
+
+def test_the_live_88_identical_failures_are_caught():
+    r = sr.repeated_identical_failures(LIVE_88)
+    assert r
+    assert "88 times" in r
+    assert "RESPONSE BODY" in r
+    assert "do the operation ONCE" in r
+
+
+def test_one_or_two_failures_are_not_a_pattern():
+    one = "failed: Anidex - HTTP Error 400: Bad Request"
+    assert sr.repeated_identical_failures(one) is None
+    assert sr.repeated_identical_failures(one + "\nfailed: b - HTTP Error 400: Bad Request") is None
+
+
+def test_three_DIFFERENT_errors_are_not_a_repeat():
+    """Distinct failures are distinct information and must not be collapsed."""
+    mixed = ("failed: a - HTTP Error 400: Bad Request\n"
+             "failed: b - HTTP Error 401: Unauthorized\n"
+             "failed: c - HTTP Error 404: Not Found")
+    assert sr.repeated_identical_failures(mixed) is None
+
+
+def test_success_output_is_silent():
+    assert sr.repeated_identical_failures("ADDED: Anidex\nADDED: NewStudio\nTotal: 88 added, 0 failed") is None
+    assert sr.repeated_identical_failures("") is None
+    assert sr.repeated_identical_failures(None) is None
+
+
+def test_a_repeating_block_is_not_recorded_as_a_success():
+    """The commands exited 0 — the script ran fine. The WORK did not happen, and
+    that is what the node has to say."""
+    import inspect
+    src = inspect.getsource(sr.resolve_run)
+    assert "repeated_identical_failures(" in src
+    assert "if _repeated and ok:" in src
+    assert "repeated_reason if repeated_reason else" in src
+
+
+def test_the_channel_rules_tell_the_drafter_to_ask_the_api_first():
+    assert "AN API TELLS YOU ITS OWN RULES" in sr.CHANNEL_RULES
+    assert "App Profile Id" in sr.CHANNEL_RULES          # the real error, quoted
+    assert "print the full response body and stop" in sr.CHANNEL_RULES
