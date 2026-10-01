@@ -241,3 +241,56 @@ def test_every_step_prompt_goes_through_the_one_place_that_asks():
     src = inspect.getsource(pa.build_base_prompt)
     assert "ask_first_block(questions_for_step(" in src, src
     assert "except Exception:" in src, "a prompt must never fail to assemble over this"
+
+
+# ── §17.1251: a passing mention must not attach a question to a step ──────
+
+
+ROUTER_AMB = "Proxmox VE version and current storage/network configuration"
+PANEL_AMB = "Preferred tech stack and hosting for the custom UI control panel"
+
+
+def _brief(amb):
+    return {"ambiguities": [amb], "user_feedback": f"Q: {amb}\nA: Unsure"}
+
+
+def test_a_question_does_not_attach_to_a_step_it_has_nothing_to_do_with():
+    """Live ADD112 ("Point the Spectrum router's DNS at Pi-hole"): the title
+    shares ZERO words with the Proxmox-configuration ambiguity. The three that
+    matched — proxmox, network, configuration — all came from a description
+    sentence saying that anything needing the Proxmox host belongs in a DIFFERENT
+    step. The step then opened by asking it, and flagged the mismatch itself:
+    "even though it appears unrelated to the router-configuration step"."""
+    title = "Point the Spectrum router's DNS at Pi-hole so every device uses it"
+    desc = ("If something genuinely has to be checked on the Proxmox host, that belongs in its "
+            "own step. network configuration")
+    assert ua.questions_for_step(title, _brief(ROUTER_AMB), description=desc) == []
+
+
+def test_the_case_this_was_built_for_still_works():
+    """§17.1221's whole purpose — the control-panel question reaching the
+    control-panel step — must survive the tightening."""
+    assert ua.questions_for_step("Rebuild the control panel to do what was chosen in ADD99",
+                              _brief(PANEL_AMB))
+    assert ua.questions_for_step("Build control panel backend", _brief(PANEL_AMB),
+                              description="the control panel stack")
+
+
+def test_a_step_whose_subject_IS_the_question_still_gets_it():
+    assert ua.questions_for_step("Reconcile the Proxmox storage and network configuration",
+                              _brief(ROUTER_AMB))
+
+
+def test_one_title_word_alone_is_not_enough():
+    """The threshold is still two shared words overall — the title just has to
+    contribute at least one of them."""
+    assert ua.questions_for_step("Configure Proxmox firewall rules", _brief(ROUTER_AMB)) == []
+
+
+def test_the_description_can_corroborate_but_not_carry():
+    title = "Install the control panel stack"
+    # title gives 'control'/'panel'; description adds nothing it needs
+    assert ua.questions_for_step(title, _brief(PANEL_AMB))
+    # a title with no shared word cannot be rescued by the description
+    assert ua.questions_for_step("Install Jellyfin", _brief(PANEL_AMB),
+                              description="tech stack hosting custom UI control panel") == []

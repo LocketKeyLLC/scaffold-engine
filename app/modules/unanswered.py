@@ -275,8 +275,25 @@ def questions_for_step(title: str, brief: dict, *, description: str = "") -> lis
     open_items = unresolved(brief or {})
     if not open_items:
         return []
-    mine = _keywords(f"{title} {description}")
-    return [q for q in open_items if len(_keywords(q) & mine) >= 2]
+    # §17.1251 — at least one shared word must come from the TITLE.
+    #
+    # The description was weighted the same as the title, so a passing mention in
+    # a long one attached a question to a step it had nothing to do with. Live,
+    # ADD112 ("Point the Spectrum router's DNS at Pi-hole"): the title shares ZERO
+    # words with "Proxmox VE version and current storage/network configuration",
+    # and the three that matched — proxmox, network, configuration — all came
+    # from a description sentence saying that anything needing the Proxmox host
+    # belongs in a different step. The step then opened by asking it, and said so
+    # itself: "The task instruction requires me to open with this question, even
+    # though it appears unrelated to the router-configuration step."
+    #
+    # The title is the step's subject. A question belongs to a step when it is
+    # about that subject; the description can corroborate but cannot carry it
+    # alone.
+    want = _keywords(title)
+    mine = want | _keywords(description)
+    return [q for q in open_items
+            if len(_keywords(q) & mine) >= 2 and (_keywords(q) & want)]
 
 
 def ask_first_block(questions: list[str]) -> str:
