@@ -2023,12 +2023,25 @@ async def execute_next_node(
             output)
     except Exception as exc:
         logger.warning("step_constraint_check_failed node=%s err=%r", node_key, exc)
+    # §17.1259 — instructions for a machine the engine can reach are not work.
+    _only_instructions = None
+    try:
+        from app.modules.supervised_runs import wrote_instructions_instead_of_doing_it
+        async with async_session() as _idb:
+            _only_instructions = await wrote_instructions_instead_of_doing_it(
+                output, node_snapshot, _idb)
+    except Exception as exc:
+        logger.warning("instructions_not_work_check_failed node=%s err=%r", node_key, exc)
     if _self_blocked:
         logger.warning("node_declares_itself_blocked node=%s sentence=%r", node_key, _self_blocked)
         verify_status = "fail"
         reason, confidence = (
             f"the step's own output says it cannot be carried out yet: \"{_self_blocked}\" — "
             "nothing was executed, so it is not finished", 0.0)
+    elif _only_instructions:
+        logger.warning("node_wrote_instructions_not_work node=%s", node_key)
+        verify_status = "fail"
+        reason, confidence = _only_instructions, 0.0
     elif _asked_anyway:
         logger.warning("node_asked_when_told_not_to node=%s", node_key)
         verify_status = "fail"

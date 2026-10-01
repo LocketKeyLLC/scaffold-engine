@@ -285,6 +285,9 @@ async def pending_hands_on(db: AsyncSession, job_id: str) -> Optional[dict]:
     )).mappings().all()
     for r in rows:
         node = dict(r)
+        # §17.1260 — `reset` nulls output_text and last_verification_reason, the
+        # two fields §17.1247 reads. Put them back from the pre-image.
+        node = await recover_prior_attempt(db, job_id, node)
         # §17.1245 — a decision is consumed by the attempt it authorised. Skip the
         # node only while that answer still belongs to THIS attempt.
         _entry = decided.get(node["node_key"])
@@ -838,6 +841,78 @@ def repeated_identical_failures(output: str, *, threshold: int = 3) -> Optional[
         f"swallows an error into a one-line summary.")
 
 
+async def wrote_instructions_instead_of_doing_it(output: str, node: dict, db) -> Optional[str]:
+    """§17.1259 — a step that wrote a runbook for a machine the engine can reach.
+
+    THE honest answer to "a step can be marked finished having done nothing". A
+    step with no shell backend writes instructions and the node still goes to
+    `done`. The `runbook_only` flag exists in the SSE payload; the STATUS does
+    not know, so the job's counts and every downstream dependency treat
+    instructions as work.
+
+    Live, and not cosmetic. ADD116 ("give the media-stack containers working
+    DNS") was marked done having produced 1,582 characters of prose. DNS stayed
+    broken on all five containers -- and because it was `done`, ADD115 unblocked
+    and ran straight into the wall ADD116 was created to remove. ADD97 and ADD98
+    did the same earlier; ADD98 is "prove it end to end: ask for one film and
+    watch it arrive", recorded finished having proven nothing.
+
+    The discriminator is WHOSE machine. If the prose carries commands for a host
+    the runner can reach, the engine could have run them and chose to describe
+    them instead -- that is not done. If the work is elsewhere (an app on the
+    operator's phone, a router with no API), prose is the correct and only
+    output, so the check stays silent.
+
+    Fail-soft: no channel, no commands in the prose, or an unreadable channel all
+    leave the step exactly as it was.
+    """
+    text_value = str(output or "")
+    if not text_value.strip() or "## Executed on" in text_value:
+        return None                      # it really ran; nothing to judge here
+    try:
+        from app.modules.step_classify import step_is_hands_on
+        cmds = runbook_commands(text_value)
+        if not cmds:
+            return None                  # pure guidance, nothing it could have run
+        ch = await channel(db)
+        if ch is None:
+            return None                  # no write channel: prose is all it could do
+        spec, _policy = ch
+        pre = await _unmet_for(cmds, spec)
+    except Exception as exc:
+        logger.warning("instructions_check_failed err=%r", exc)
+        return None
+    on, _why = step_is_hands_on(dict(node) if hasattr(node, "keys") else {})
+    reachable = [c for c in cmds if _targets_this_host(c)]
+    if not reachable:
+        return None                      # the work is on something else entirely
+    return (
+        f"this step produced INSTRUCTIONS, not work. It wrote {len(cmds)} command"
+        f"{'' if len(cmds) == 1 else 's'} for a machine the engine can reach"
+        + (f" (for example `{reachable[0][:70]}`)" if reachable else "")
+        + ", the write channel to that machine is open, and none of them ran. A step that describes "
+          "what should happen has not made it happen, so it is not done -- and anything depending on "
+          "it would start from a false premise.\n\n"
+        "Either run it through the channel, or if it genuinely cannot be run there say so in one "
+        "line and name what blocks it."
+        + (f"\n\nThe host also already contradicts part of it: {pre[0]['why'][:160]}" if pre else ""))
+
+
+def _targets_this_host(cmd: str) -> bool:
+    """Is this a command for the Proxmox host or a guest on it?"""
+    head = (str(cmd).strip().split() or [""])[0]
+    return head in {"pct", "qm", "pvesm", "pveam", "pvesh", "pvenode", "systemctl",
+                    "ip", "sed", "tee", "printf", "apt-get", "apt", "curl", "dig", "getent"}
+
+
+async def _unmet_for(cmds: list[str], spec) -> list[dict]:
+    try:
+        from app.modules.runbook_preconditions import unmet
+        return await unmet(cmds, spec)
+    except Exception:
+        return []
+
+
 def pipe_escapes_the_guest(commands: list[str]) -> list[dict]:
     """§17.1248 — a pipe after `pct exec` runs the right-hand side on the HOST.
 
@@ -1022,6 +1097,69 @@ def executed_commands(report: str) -> list[str]:
     return [m.group(1).strip() for m in re.finditer(r"^\$ (.+)$", body, re.M)]
 
 
+async def recover_prior_attempt(db: AsyncSession, job_id: str, node: dict) -> dict:
+    """§17.1260 — put back what `reset` deleted, so the next draft can read it.
+
+    The operator: "With the fails, shouldn't the engine also be using the
+    research component to assist it?" It does. `diagnose_failure` researched
+    ADD115's failure and produced a 6,548-character diagnosis. And then the retry
+    path deleted it: `_reset_keys` sets `output_text = NULL` and
+    `last_verification_reason = NULL`, which are precisely the two fields
+    §17.1247 reads to tell the next draft what happened.
+
+    So §17.1247 worked after a `reask` -- the node keeps its record -- and was
+    INERT after a `reset`, which is the ordinary way to retry a step. ADD115 has
+    seven reset pre-images, the largest holding 23,201 bytes of executed report
+    and researched diagnosis, every one of them written to `dag_node_edits` by
+    §17.1211 and never read back.
+
+    Nothing is lost, it was simply in the wrong place. This reads the most recent
+    `reset` pre-image and fills the blanks, so the engine stops paying for
+    research it then throws away. Fail-soft: anything unreadable leaves the node
+    as it was.
+    """
+    out = dict(node)
+    if str(out.get("output_text") or "").strip() and str(out.get("last_verification_reason") or "").strip():
+        return out                       # the live row still has it
+    try:
+        row = (await db.execute(
+            text("SELECT before FROM dag_node_edits "
+                 " WHERE job_id = :j AND node_key = :nk AND op = 'reset' "
+                 "   AND before ? 'output_text' "
+                 " ORDER BY created_at DESC LIMIT 1"),
+            {"j": job_id, "nk": out.get("node_key")})).scalar()
+    except Exception as exc:
+        logger.warning("prior_attempt_unreadable job=%s node=%s err=%r",
+                       job_id, out.get("node_key"), exc)
+        return out
+    before = _as_dict(row)
+    if not before:
+        return out
+    for field in ("output_text", "last_verification_reason"):
+        if not str(out.get(field) or "").strip() and str(before.get(field) or "").strip():
+            out[field] = before[field]
+    if out is not node:
+        logger.warning("prior_attempt_recovered job=%s node=%s chars=%d",
+                       job_id, out.get("node_key"), len(str(out.get("output_text") or "")))
+    return out
+
+
+def diagnosis_of(report: str) -> str:
+    """§17.1260 — the researched diagnosis an earlier attempt produced.
+
+    `diagnose_failure` writes it under "## What went wrong, and what to try" --
+    that is where the RESEARCH lands. `attempt_feedback` carried the one-line
+    reason and the command list and skipped this entirely, so the engine
+    researched a failure and then told the next draft only the headline.
+    """
+    i = (report or "").find("## What went wrong")
+    if i < 0:
+        return ""
+    body = report[i:]
+    nxt = body.find("\n## ", 4)
+    return (body[:nxt] if nxt > 0 else body).strip()
+
+
 def attempt_feedback(node: dict) -> str:
     """§17.1247 — what the LAST attempt at this step did, and why it stopped.
 
@@ -1071,6 +1209,11 @@ def attempt_feedback(node: dict) -> str:
         ]
     lines += ["", "Address the reason above specifically. If it was a value you did not read off the "
                   "machine, read it. If it was a command the runner may not run, do not send it again."]
+    # §17.1260 — and the diagnosis the engine already researched for this failure.
+    diag = diagnosis_of(str(node.get("output_text") or ""))
+    if diag:
+        lines += ["", "THE ENGINE ALREADY RESEARCHED THIS FAILURE. Its findings, which cost a web "
+                      "search and a model call and must not be ignored:", "", diag[:3000]]
     return "\n".join(lines)
 
 

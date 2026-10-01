@@ -94,7 +94,11 @@ async def test_pending_hands_on_skips_decided_and_decision_nodes_and_human_steps
     r3 = MagicMock()   # ADD50's row: written BEFORE the answer, so the answer stands
     r3.mappings.return_value.first.return_value = {"updated_at": _answered - timedelta(seconds=5)}
     db.execute = AsyncMock(side_effect=[r1, r2, r3])
-    with patch.object(settings, "shell_tool_enabled", False), patch.object(settings, "mcp_tool_enabled", True):
+    # §17.1260 added a pre-image lookup per node; this test is about SELECTION,
+    # so the recovery is stubbed rather than padding the mock sequence.
+    with patch.object(settings, "shell_tool_enabled", False), \
+         patch.object(settings, "mcp_tool_enabled", True), \
+         patch.object(sr, "recover_prior_attempt", AsyncMock(side_effect=lambda db, j, n: n)):
         node = await sr.pending_hands_on(db, "j")
     assert node["node_key"] == "ADD88" and node["hands_on_reason"] == "writes:tee -a"
     sql = db.execute.await_args_list[1].args[0].text
@@ -878,7 +882,8 @@ async def test_a_SPENT_decision_no_longer_hides_a_node(monkeypatch):
     r3 = MagicMock()   # written AFTER the answer — the reset — so the answer is spent
     r3.mappings.return_value.first.return_value = {"updated_at": answered + timedelta(minutes=3)}
     db.execute = AsyncMock(side_effect=[r1, r2, r3])
-    with patch.object(settings, "shell_tool_enabled", False):
+    with patch.object(settings, "shell_tool_enabled", False), \
+         patch.object(sr, "recover_prior_attempt", AsyncMock(side_effect=lambda db, j, n: n)):
         node = await sr.pending_hands_on(db, "j")
     assert node is not None and node["node_key"] == "ADD111", \
         "a step reset after a failed approved run must be offered for approval again"
