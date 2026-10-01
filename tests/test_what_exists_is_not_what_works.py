@@ -514,3 +514,58 @@ def test_the_verify_redraft_never_trades_a_runnable_block_for_a_refused_one():
         "the verify redraft must not run on an already-refused frame"
     assert '_vf.get("verify") and not _vf.get("refused")' in src[i:i + 1600], \
         "and must not accept a replacement that is itself refused"
+
+
+# ───── §17.1270 — fix the provable mistake, prove the fix, and say you made it
+
+def test_the_quoting_mistake_that_killed_three_drafts_is_repaired():
+    """The REAL refused command, saved from the live frame. Three of four drafts
+    for this step died on `print(f"added: {entry[\\"name\\"]}")` — §17.1257 caught
+    it every time, the rule and a worked example were both in the prompt, and the
+    redraft made the same mistake again."""
+    cmd = _fixture("add115_escaped_quotes.txt")
+    assert sr.payload_will_not_compile([cmd]), "precondition: it really does not compile"
+    fixed, repairs = sr.repair_shell_quoted_payloads([cmd])
+    assert repairs, "the engine must correct what is provably a mistake"
+    assert not sr.payload_will_not_compile(fixed), "and the repair must be PROVEN by compiling"
+    assert "single-quoted shell word" in repairs[0]["why"]
+
+
+def test_a_payload_broken_some_other_way_is_left_alone():
+    """The repair is only ever applied where the quoting proves the backslash
+    cannot have been meant; anything else stays refused with its own reason."""
+    bad = "printf '%s\\n' 'def f(' | tee /tmp/x.py"
+    fixed, repairs = sr.repair_shell_quoted_payloads([bad])
+    assert fixed == [bad] and repairs == []
+    assert sr.payload_will_not_compile(fixed), "§17.1257 still owns this one"
+
+
+def test_a_valid_command_is_untouched():
+    ok = 'printf \'%s\\n\' \'print("hi")\' | tee /tmp/ok.py'
+    assert sr.repair_shell_quoted_payloads([ok]) == ([ok], [])
+
+
+def test_a_backslash_outside_single_quotes_is_not_touched():
+    """`"\\""` in a double-quoted word IS an escape and means something."""
+    cmd = 'curl -s -H "X-Api-Key: \\"abc\\"" http://x/api'
+    assert sr._unescape_in_single_quotes(cmd) == cmd
+
+
+def test_the_operator_is_told_the_script_was_corrected():
+    """§17.1270 — an approval is for what is on screen. A repaired command is a
+    changed command, so the frame carries it and the card says so."""
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("def frame_run(")
+    assert '"engine_fixed": [r["why"] for r in _repairs]' in src[i:]
+    spa = (pathlib.Path(sr.__file__).parents[1] / "ui" / "static" / "views" / "theater.js")
+    js = spa.read_text(encoding="utf-8")
+    assert "d.engine_fixed" in js and "corrected" in js
+
+
+def test_the_repair_runs_before_anything_is_refused_for_it():
+    """Order matters: repair, then judge. The other way round refuses a command
+    the engine was about to fix."""
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("def frame_run(")
+    body = src[i:]
+    assert body.index("repair_shell_quoted_payloads(cmds)") < body.index("refused + payload_will_not_compile(cmds)")

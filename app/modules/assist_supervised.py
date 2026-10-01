@@ -143,6 +143,22 @@ def approval_message(approval_id: str, nonce: str, exp: int, command: str) -> by
     return f"{approval_id}\n{nonce}\n{exp}\n{command}".encode()
 
 
+#: §17.1271 — the MCP tool that puts a FILE on the machine, and the name of the
+#: verb inside the signed message. Byte-equal to the runner's copy (a parity test
+#: compares the sources), because both ends must derive the same bytes or every
+#: write is refused.
+WRITE_FILE_TOOL = "write_file"
+WRITE_FILE_VERB = "write_file"
+
+
+def write_file_message(path: str, content: str) -> str:
+    """The one-line canonical form of "write exactly these bytes to this path"."""
+    import hashlib
+    digest = hashlib.sha256((content or "").encode()).hexdigest()
+    return f"{WRITE_FILE_VERB} {path} sha256:{digest}"
+
+
+
 # ---------------------------------------------------------------------------
 # Engine-side adapters onto the state-check gate (the runner has its own copies).
 # ---------------------------------------------------------------------------
@@ -283,6 +299,11 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
         names = {t.get("name") for t in await mcp_client.list_tools(spec, use_cache=use_cache)}
         if WRITE_TOOL not in names or POLICY_TOOL not in names:
             return None
+        # §17.1271 — whether this runner can be handed a FILE. An older helper
+        # cannot, and the drafter must not then be told to use a notation the
+        # machine will refuse, so the capability travels with the policy rather
+        # than being assumed from the write channel being on.
+        can_write_files = WRITE_FILE_TOOL in names
         res = await mcp_client.call_tool(spec, POLICY_TOOL, {})
         raw = res.text or ""
         st = getattr(res, "structured", None)
@@ -294,6 +315,7 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
         _policy_cache[name] = (time.monotonic() + 60.0, None)
         _setup_cache[name] = (time.monotonic() + 60.0, None)
         return None
+    pol["can_write_files"] = can_write_files
     allow = [str(a) for a in (pol.get("allow") or []) if str(a).strip()]
     # §17.1191 — the NAMES the runner can resolve (`$NAME` in a command), never
     # their values. An older helper does not report the field; [] then means
@@ -379,6 +401,61 @@ def _exit_of(text_out: str) -> tuple[Optional[int], str]:
         return None, text_out or ""
     code = None if m.group(1) == "timeout" else int(m.group(1))
     return code, (text_out or "")[m.end():]
+
+
+async def write_files_on(spec, files: list[dict]) -> list[dict]:
+    """§17.1271 — put each file on the machine, with its own signed approval.
+
+    THE UNDERLYING ISSUE behind a run of near-identical defects. The channel
+    forbids a heredoc and a redirect for good reasons, and then the only way left
+    to put a 90-line script on the machine was
+    ``printf '%s\n' 'line' 'line' … | tee /path`` -- where the shell's quoting
+    and the script's own quoting collide. Three of four drafts for ADD115 died
+    exactly there, on the same mistake, with the rule and a worked example in the
+    prompt both times. §17.1270 repairs one shape of it; this removes the need
+    to quote at all.
+
+    The content crosses as an MCP parameter. No shell sees it, so nothing in it
+    needs escaping, and the approval covers the path and a digest of the exact
+    bytes -- neither can be swapped after the operator approved the block.
+
+    Returns one record per file in order, stopping at the first failure, in the
+    same shape ``run_block`` returns so the step's report reads as one sequence.
+    """
+    from app.modules import mcp_client
+    token = runner_token(spec)
+    done: list[dict] = []
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        ap = mint_approval(write_file_message(path, body), token)
+        try:
+            res = await mcp_client.call_tool(
+                spec, WRITE_FILE_TOOL, {"path": path, "content": body, "approval": ap})
+            raw = res.text or ""
+            st = getattr(res, "structured", None)
+            if isinstance(st, dict) and isinstance(st.get("result"), str):
+                raw = st["result"]
+            unreachable = False
+        except Exception as exc:
+            # §17.1201 — a transport error is not a result: nobody knows whether
+            # the file landed, and that is reported as such rather than as a
+            # failure to write.
+            raw = f"(runner error: {exc})"
+            unreachable = True
+        failed = unreachable or raw.strip().startswith("(")
+        # The same record shape `run_block` returns, so a step's report and its
+        # success computation read one sequence and need no special case.
+        done.append({"command": f"write {path} ({len(body.encode())} bytes)",
+                     "output": raw, "exit": (None if unreachable else (1 if failed else 0)),
+                     "ok": (not failed), "approval_id": ap["id"], "refused": False,
+                     "unreachable": unreachable, "informational": False})
+        if failed:
+            logger.warning("write_file_failed runner=%s path=%s out=%r",
+                           getattr(spec, "name", "?"), path, raw[:160])
+            break
+        logger.info("write_file_ok runner=%s path=%s bytes=%d",
+                    getattr(spec, "name", "?"), path, len(body.encode()))
+    return done
 
 
 async def run_block(spec, commands: list[str], *, on_progress=None,

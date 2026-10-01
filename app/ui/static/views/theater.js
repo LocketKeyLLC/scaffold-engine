@@ -950,6 +950,26 @@ export function renderTheater(container, jobId, ctx = {}) {
         el("div", { class: "summary-title", text: "This step changes a machine — the run stopped for your approval" }),
         el("div", { class: "summary-where" }, el("span", { class: "mono", text: nodeKey }), el("span", { text: ` · ${d.title || ""}` })),
         el("div", { class: "decision-q", text: d.question || "" }),
+        // §17.1270 — the engine corrected the script before offering it, so say
+        // so: an approval is for what is on screen, not for a silent rewrite.
+        (Array.isArray(d.engine_fixed) && d.engine_fixed.length)
+          ? el("div", { class: "decision-detail dim",
+                        text: `The engine corrected ${d.engine_fixed.length === 1 ? "one thing" : `${d.engine_fixed.length} things`} in this script before offering it — ${d.engine_fixed[0]}` })
+          : null,
+        // §17.1271 — the block writes files as well as running commands, and an
+        // approval covers both. Each path with its size, and the content folded
+        // away so a 90-line script does not bury the question.
+        (Array.isArray(d.files) && d.files.length)
+          ? el("div", { class: "decision-files" },
+              el("div", { class: "decision-run-label",
+                          text: `Would write ${d.files.length === 1 ? "this file" : `these ${d.files.length} files`} on ${d.runner || "the runner"} first:` }),
+              ...d.files.map((f) => {
+                const det = el("details", { class: "decision-file" });
+                det.appendChild(el("summary", { class: "mono", text: `${f.path} — ${f.lines} lines, ${f.bytes} bytes` }));
+                det.appendChild(el("pre", { class: "decision-file-body mono", text: String(f.content || "") }));
+                return det;
+              }))
+          : null,
         cmds.length ? el("div", { class: "decision-run-label", text: `Would run on ${d.runner || "the runner"}${d.sudo ? " (as root for the allowed commands)" : ""}, in order, stopping at the first failure:` }) : null,
         inputRows.length ? el("div", { class: "decision-inputs" },
           // §17.1212 — when the engine read a value off the machine it says so,

@@ -471,6 +471,37 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 """
 
 
+#: §17.1271 — only shown when the runner on the other end actually has the
+#: `write_file` tool. An older helper does not, and telling the drafter to use a
+#: notation that machine would refuse is how a capability becomes a trap.
+FILE_RULES = """
+WRITING A FILE: THIS MACHINE TAKES FILES DIRECTLY, so never build one with `printf … | tee`.
+Put it in its own section and the engine hands the content to the machine as-is -- no shell touches it,
+so NOTHING in it needs escaping. Write the code exactly as the interpreter will see it:
+
+## Write these files
+
+### /tmp/add_indexers.py
+```python
+import json, urllib.request
+entry = {"name": "Anidex"}
+print(f"added: {entry["name"]}")
+```
+
+## Run this
+
+```bash
+python3 /tmp/add_indexers.py
+```
+
+Quotes inside quotes are fine there, because there is no shell to confuse. That is the whole reason this
+exists: a script built with `printf '%s\n' '…'` has to escape its own quotes, and an escaped quote inside a
+single-quoted shell word is a literal backslash the interpreter then refuses. Use the section, and the
+problem cannot happen. Files are written before the commands run, in the order you list them, and the
+engine compiles a `.py` file before offering it -- so a syntax error is caught before the operator is asked.
+"""
+
+
 def no_commands_retry_note(step_text: str, runbook: str) -> str:
     """§17.1227 — the draft described a web UI, so there is nothing to run.
 
@@ -870,6 +901,77 @@ def loops_the_network_without_a_budget(commands: list[str]) -> list[dict]:
     if out:
         logger.warning("network_loop_without_budget count=%d first=%r", len(out), out[0]["why"][:120])
     return out
+
+
+def _unescape_in_single_quotes(cmd: str) -> str:
+    r"""``\"`` inside a ``'…'`` shell word becomes ``"``; everything else is left
+    exactly as it was.
+
+    POSIX single quotes have no escapes at all, so a backslash between them is a
+    literal backslash and reaches the interpreter. Removing it is the whole
+    repair, and it is only ever applied where the quoting says the backslash
+    cannot have been meant.
+    """
+    out: list[str] = []
+    i, in_single = 0, False
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "'":
+            in_single = not in_single
+            out.append(c)
+            i += 1
+            continue
+        if in_single and c == "\\" and i + 1 < len(cmd) and cmd[i + 1] == '"':
+            out.append('"')                 # drop the backslash, keep the quote
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def repair_shell_quoted_payloads(commands: list[str]) -> tuple[list[str], list[dict]]:
+    """§17.1270 — fix the engine's own recurring quoting mistake instead of
+    refusing it for the fourth time.
+
+    THREE of four drafts for ADD115 died on the same thing: a script written with
+    ``printf '%s\n' 'line' 'line' …`` containing ``print(f"added: {entry[\"name\"]}")``.
+    Inside a single-quoted shell word that backslash is literal, so the
+    interpreter is handed ``{entry[\"name\"]}`` and refuses it. §17.1257 catches it
+    every time, §17.1255's rule and a worked example are both in the prompt, and
+    the redraft makes the same mistake again -- so the prompt is not where this
+    gets fixed.
+
+    It does not need judgment. POSIX single quotes have no escapes, the backslash
+    cannot have been intended, and removing it is a transformation whose result
+    is PROVEN before use: the repaired command's payload must compile when the
+    original's did not. If it does not compile, nothing is changed and §17.1257
+    refuses as before. That is the deterministic half of the split this project
+    already relies on -- propagate what is provable, ask about what is not.
+
+    Returns the commands to use and a record of every repair, for the log and for
+    the operator-facing note (a changed command is never a silent change).
+    """
+    out: list[str] = []
+    repairs: list[dict] = []
+    for cmd in commands or []:
+        text_value = str(cmd)
+        if not payload_will_not_compile([text_value]):
+            out.append(text_value)
+            continue
+        candidate = _unescape_in_single_quotes(text_value)
+        if candidate != text_value and not payload_will_not_compile([candidate]):
+            out.append(candidate)
+            repairs.append({"command": text_value, "repaired": candidate, "why": (
+                "a quote was escaped inside a single-quoted shell word, where a backslash is "
+                "literal and reaches the interpreter. The backslashes were removed and the "
+                "payload compiles; nothing else was changed.")})
+        else:
+            out.append(text_value)          # §17.1257 reports it, unrepaired
+    if repairs:
+        logger.warning("payload_quotes_repaired count=%d first=%r",
+                       len(repairs), repairs[0]["command"][:120])
+    return out, repairs
 
 
 def payload_will_not_compile(commands: list[str]) -> list[dict]:
@@ -1613,6 +1715,17 @@ async def draft_runbook(node: dict, brief: dict | str, upstream: str = "", *,
     from app.config import settings
     from app.utils.llm_retry import generate_until_nonempty
     system = EXECUTION_SYSTEM_RUNBOOK + ("\n" + CHANNEL_RULES if for_channel else "")
+    # §17.1271 — the file notation is offered only when the runner can take a
+    # file. Read from the cached policy here, in ONE place, rather than threaded
+    # through every draft call site: six sites that each had to remember would
+    # drift, which is how §17.1237 hid behind four green tests.
+    if for_channel and spec is not None:
+        try:
+            from app.modules.assist_supervised import write_policy
+            if ((await write_policy(spec)) or {}).get("can_write_files"):
+                system += "\n" + FILE_RULES
+        except Exception as exc:
+            logger.warning("file_rules_capability_unreadable err=%r", exc)
     # think=False from the first draw, not only as a rescue: on the generate
     # path model_router reads `response` and DISCARDS `thinking` (§17.683), so
     # the reasoning is pure cost here — §17.1126 measured the same-length
@@ -1644,6 +1757,91 @@ def _section(text_out: str, name: str) -> str:
 
 
 _MULTILINE_RE = re.compile(r"<<-?\s*['\"]?\w+|^\s*(?:for|while|until)\s.*\bdo\s*$|^\s*if\s.*\bthen\s*$", re.M)
+
+
+#: §17.1271 — one written file inside a ``## Write these files`` section:
+#:
+#:     ### /tmp/add_indexers.py
+#:     ```python
+#:     <the script, exactly as the interpreter will see it>
+#:     ```
+#:
+#: The path is a sub-heading and the content is one fence. No shell is involved
+#: anywhere in that, which is the entire point.
+_FILE_HEAD_RE = re.compile(r"^\s{0,3}###\s+(/\S+)\s*$", re.M)
+#: A written file is a script, not a payload: past this something is wrong.
+FILE_MAX_BYTES = 256 * 1024
+#: Which contents the engine can CHECK before sending. Anything else is written
+#: as given -- the engine does not invent judgments it cannot make.
+_COMPILED_SUFFIXES = (".py",)
+
+
+def file_writes(text_out: str) -> list[dict]:
+    """``[{path, content}]`` the runbook asks to be written, in order.
+
+    Deliberately strict about the shape: a path heading must be followed by a
+    fence, because a path with prose under it is not a file and guessing would
+    write whatever the drafter was thinking out loud.
+    """
+    body = _section(text_out, "Write these files") or _section(text_out, "Write this file")
+    if not body.strip():
+        return []
+    out: list[dict] = []
+    heads = list(_FILE_HEAD_RE.finditer(body))
+    for i, h in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
+        fences = _FENCE_RE.findall(body[h.end():end])
+        if not fences:
+            logger.warning("file_write_without_fence path=%r", h.group(1))
+            continue
+        out.append({"path": h.group(1).strip(), "content": fences[0]})
+    return out
+
+
+def file_writes_will_not_work(files: list[dict]) -> list[dict]:
+    """§17.1271 — refuse a written file the machine would reject or the
+    interpreter could not run, before the operator is asked to approve it.
+
+    The same bargain as §17.1257: the engine can compile what it is about to
+    hand to another interpreter, so it does, and a refusal here is certain
+    rather than a guess. What it cannot judge -- the content of a config file,
+    say -- it does not pretend to.
+    """
+    out: list[dict] = []
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        what = f"the file {path}"
+        if not path.startswith("/"):
+            out.append({"command": what, "why": (
+                f"{path!r} is not an absolute path, and the runner refuses a relative one because "
+                f"what it resolves to depends on where the runner happens to be running.")})
+            continue
+        if ".." in path.split("/"):
+            out.append({"command": what, "why": f"{path!r} contains '..', which the runner refuses."})
+            continue
+        size = len(body.encode())
+        if not body.strip():
+            out.append({"command": what, "why": "the file is empty — nothing was written in its fence."})
+            continue
+        if size > FILE_MAX_BYTES:
+            out.append({"command": what, "why": (
+                f"{size} bytes is past the {FILE_MAX_BYTES}-byte limit for a written file.")})
+            continue
+        if path.endswith(_COMPILED_SUFFIXES):
+            try:
+                compile(body, path, "exec")
+            except (SyntaxError, ValueError) as exc:
+                out.append({"command": what, "why": (
+                    f"{path} is not valid Python and would fail the moment it ran: {exc}. This was "
+                    f"compiled before offering it, so the error is certain, not a guess. Nothing here "
+                    f"goes through a shell, so write the code plainly -- quotes need no escaping.")})
+                continue
+            except RecursionError:
+                out.append({"command": what, "why": f"{path} could not be compiled, so it cannot be offered."})
+                continue
+    if out:
+        logger.warning("file_writes_refused count=%d first=%r", len(out), out[0]["why"][:120])
+    return out
 
 
 def runbook_commands(text_out: str) -> list[str]:
@@ -2052,6 +2250,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     from app.modules.assist_supervised import gate_block
     cmds = runbook_commands(runbook)
     verify = verify_commands(runbook)
+    # §17.1271 — files the runbook asks to be written. They go across as MCP
+    # parameters with no shell involved, so their content needs no quoting; the
+    # engine compiles what it can before offering them.
+    files = file_writes(runbook) if (policy or {}).get("can_write_files") else []
     inputs = inputs_for(cmds, verify, runbook)
     # §17.1191 — a secret is resolved BY THE RUNNER or not at all; it is never
     # typed here and never travels through the engine.
@@ -2077,6 +2279,11 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + curl_writes_without_fail(cmds)
     # §17.1248 — a pipe out of `pct exec` executes on the HOST.
     refused = refused + pipe_escapes_the_guest(cmds)
+    # §17.1270 — repair the one quoting mistake that is provably a mistake, and
+    # prove the repair by compiling it, before anything is refused for it.
+    cmds, _repairs = repair_shell_quoted_payloads(cmds)
+    # §17.1271 — and judge the written files the same way the commands are judged.
+    refused = refused + file_writes_will_not_work(files)
     # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.
     # §17.1257 — compile what the block hands to another interpreter. Supersedes
     # §17.1255 and §17.1255b, which pattern-matched two shapes of the same bug.
@@ -2105,6 +2312,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                     "tradeoff": "the step counts as a plan, not as executed"})
     options.append({"id": "skip", "label": "Skip this step", "fit": "not needed on this machine",
                     "tradeoff": "steps that depend on it may not make sense"})
+    # §17.1271 — writing a file IS work the block does, so a step whose commands
+    # are a single `python3 /tmp/x.py` plus the file it needs is a normal block.
+    _has_work = bool(cmds or files)
     q = ((f"Run step {node.get('node_key')} — {node.get('title') or ''} — on {runner}?"
           + (f" It needs {len(inputs)} value{'s' if len(inputs) != 1 else ''} from you first." if inputs else "")) if cmds and not refused
          else f"Step {node.get('node_key')} — {node.get('title') or ''} — changes a machine, and the engine cannot run it as written.")
@@ -2117,6 +2327,14 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
                  "some of its commands are not on the runner's allow-list — see the refusals")),
         "runner": runner, "commands": cmds, "verify": verify, "refused": refused,
         "inputs": inputs,
+        # §17.1271 — the operator approves the FILES as well as the commands, so
+        # the frame carries each path, its size and its content.
+        "files": [{"path": f["path"], "bytes": len(str(f["content"]).encode()),
+                   "lines": str(f["content"]).count("\n") + (0 if str(f["content"]).endswith("\n") else 1),
+                   "content": f["content"]} for f in files],
+        # §17.1270 — a command the engine CORRECTED is a changed command, and the
+        # operator approves what they are shown. Never a silent repair.
+        "engine_fixed": [r["why"] for r in _repairs],
         "secrets_resolved": secrets_resolved, "secrets_missing": secrets_missing,
         "runbook": _runbook_for_display(runbook, cmds), "allow": list(policy.get("allow") or []),
         "sudo": bool(policy.get("sudo")),
@@ -2303,12 +2521,22 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     if refs:
         from app.modules import runner_secrets as _rs
         secret_env = await _rs.values_for(db, refs)
-    logger.warning("supervised_run_started job=%s node=%s runner=%s commands=%d secrets=%d",
-                   job_id, node_key, spec.name, len(runnable), len(secret_env))
-    executed = await _sw.run_block(spec, runnable, env=secret_env)
+    # §17.1271 — the files this block needs, written first and each one with its
+    # own signed approval. They come BEFORE the commands because the commands are
+    # what run them, and a failure to write stops the block exactly as a failed
+    # command does: the records share one shape and one sequence.
+    _files = [{"path": f["path"], "content": f["content"]}
+              for f in (waiting.get("files") or []) if (f or {}).get("path")]
+    logger.warning("supervised_run_started job=%s node=%s runner=%s files=%d commands=%d secrets=%d",
+                   job_id, node_key, spec.name, len(_files), len(runnable), len(secret_env))
+    executed = await _sw.write_files_on(spec, _files) if _files else []
+    _wrote_all = len(executed) == len(_files) and all(e["ok"] for e in executed)
+    if _wrote_all:
+        executed = executed + await _sw.run_block(spec, runnable, env=secret_env)
     # §17.1201 — a read that answered "no" is not a failed block (`grep` exits 1
     # when the thing it looked for is gone, which is often the check passing).
-    ok = (bool(executed) and len(executed) == len(runnable)
+    # §17.1271 — every file and every command, all of them accounted for.
+    ok = (bool(executed) and len(executed) == len(_files) + len(runnable)
           and all(e["ok"] or e.get("informational") for e in executed))
     # §17.1225 — a lost RESPONSE is not a failed COMMAND. `dropped` is computed
     # here, before the verify decision, because the verify probes are exactly
