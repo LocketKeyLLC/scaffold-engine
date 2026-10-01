@@ -80,6 +80,57 @@ def command_writes(cmd: str) -> Optional[bool]:
     return False
 
 
+#: §17.1253 — a sentence that names a command in order to RULE IT OUT.
+#:
+#: The classifier reads a step's description for commands and takes any write as
+#: proof the step does host work. It cannot tell a command being performed from
+#: one being forbidden, and a correction written into a description is usually
+#: phrased as a prohibition. Live, ADD112 ("point the Spectrum router's DNS at
+#: Pi-hole") is work the operator does in an APP — it had been producing prose
+#: correctly — until a note was added saying "do NOT run `pct exec 130 --
+#: /usr/local/bin/pihole -a enabledhcp`". That one quoted command flipped the
+#: step to hands-on, so instead of a walkthrough it was claimed and handed back
+#: for approval, and the operator got nothing.
+#:
+#: Only a sentence counts here, so a FENCED command — the step's actual work —
+#: is never excused: `step_commands` gives fenced lines an empty sentence.
+_FORBIDDEN = re.compile(
+    r"(?i)\bdo\s*not\b|\bdon'?t\b|\bnever\b|\bavoid\b|\bmust\s+not\b"
+    # safe once the match has to PRECEDE the command (see `forbidden_for`):
+    # these read as prohibitions when they introduce it and as description when
+    # they trail it.
+    r"|\bcannot\b|\bcan'?t\b|\binstead\s+of\b|\brather\s+than\b"
+    r"|\bwas\s+wrong\b|\bgot\s+wrong\b|\bwent\s+wrong\b"
+    r"|\bprevious\s+(?:attempt|draft|output)\b|\blast\s+attempt\b"
+    # `no longer` and `failed` are deliberately ABSENT: live, "Done when `ip
+    # -brief link show veth105i0` reports master vmbr0 (no longer fwbr105i0)" is
+    # an expected end state, and reading it as a prohibition turned a real
+    # hands-on step into prose.
+    r"|\bout\s+of\s+scope\s+for\b")
+
+
+def forbidden_for(sentence: str, cmd: str) -> bool:
+    """§17.1253 — does this sentence name THIS command in order to rule it out?
+
+    The prohibition must come BEFORE the command. "Do NOT run `pct exec …`"
+    forbids it; "Done when `ip -brief link show veth105i0` reports master vmbr0
+    (no longer fwbr105i0)" describes the expected end state and happens to
+    contain a negative afterwards — the first version read that as a prohibition
+    and turned a real hands-on step into prose, which is the direction that
+    actually loses work.
+
+    Narrow on both axes, then: only words that genuinely frame a prohibition or a
+    post-mortem, and only ahead of the command they are about.
+    """
+    if not sentence or not cmd:
+        return False
+    at = sentence.find(cmd[:40]) if len(cmd) >= 8 else sentence.find(cmd)
+    if at < 0:
+        at = len(sentence)
+    m = _FORBIDDEN.search(sentence)
+    return bool(m) and m.start() < at
+
+
 def step_commands(text: str) -> list[tuple[str, str]]:
     """``[(command, sentence)]`` — every command literal in the step text
     (fenced lines and inline code / quoted runs that parse as a command) with
@@ -146,10 +197,14 @@ def step_is_hands_on(node: dict, *, shell_backend: bool | None = None, mcp_enabl
     cmds = step_commands(text)
     if not cmds:
         return False, ""
-    for cmd, _sentence in cmds:
+    for cmd, sentence in cmds:
+        if forbidden_for(sentence, cmd):
+            continue                              # §17.1253 — quoted to be avoided
         if command_writes(cmd):
             return True, f"writes:{cmd[:60]}"
     for cmd, sentence in cmds:
+        if forbidden_for(sentence, cmd):
+            continue
         if sentence and _OBSERVE_RE.search(sentence) and _parses(cmd):
             return True, f"observed:{cmd[:60]}"
     host = _HOST_RE.search(text)

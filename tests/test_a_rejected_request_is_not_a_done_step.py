@@ -405,3 +405,43 @@ async def test_a_check_that_answers_is_not_read_twice(monkeypatch):
         out = await sr.resolve_run(db, "j", "X", "run", waiting)
     assert probes.await_count == 1
     assert out["outcome"] == "failed" and "did NOT show its goal met" in out["reason"]
+
+
+# ── §17.1252: the operator approves what they READ ────────────────────────
+
+
+def test_a_short_runbook_is_carried_whole():
+    rb = "## Run this\n\n```bash\npct start 130\n```\n"
+    assert sr._runbook_for_display(rb, ["pct start 130"]) == rb
+
+
+def test_a_cut_runbook_says_so_and_names_what_is_missing():
+    """Live ADD96: its runbook is over 12,000 characters because every indexer is
+    a `curl` with a JSON body, so the stored prose stopped mid-command. Parsing
+    the STORED text back yields 19 commands while the block that would actually
+    run has 24 — five commands were going to execute that the operator had not
+    been shown, with nothing saying the text had been cut."""
+    long_rb = "## Run this\n\n" + ("x" * (sr.RUNBOOK_DISPLAY_CHARS + 4000))
+    out = sr._runbook_for_display(long_rb, ["cmd"] * 24)
+    assert "cut off here" in out
+    assert "24 commands" in out
+    assert "that list is what runs" in out
+    # and the shown prose is still the beginning of the real thing
+    assert out.startswith("## Run this")
+
+
+def test_the_frame_carries_the_notice_not_a_bare_slice():
+    import inspect
+    src = inspect.getsource(sr.frame_run)
+    assert "_runbook_for_display(runbook, cmds)" in src
+    assert "runbook[:12000]" not in src, "a bare slice hides the cut"
+
+
+def test_the_command_list_is_never_truncated_by_the_display_cap():
+    """The prose is for reading; the list is what runs. The cap must touch only
+    the prose."""
+    long_rb = "## Run this\n\n```bash\n" + "\n".join(f"pct exec 130 -- echo {i}" for i in range(30)) + "\n```\n"
+    assert len(long_rb) < sr.RUNBOOK_DISPLAY_CHARS      # the prose fits
+    cmds = sr.runbook_commands(long_rb)
+    assert len(cmds) == min(30, sr.MAX_RUN_COMMANDS)    # bounded by MAX_RUN_COMMANDS, not the display cap
+    assert sr.MAX_RUN_COMMANDS != sr.RUNBOOK_DISPLAY_CHARS

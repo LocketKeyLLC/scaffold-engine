@@ -1163,6 +1163,38 @@ def apply_runner_secrets(commands: list[str], verify: list[str], inputs: list[di
     return cmds_out, verify_out, kept, resolved, [n for n in missing if n in blocked]
 
 
+#: how much of the runbook the frame carries. The frame rides in job metadata,
+#: so it cannot be unbounded.
+RUNBOOK_DISPLAY_CHARS = 12000
+
+
+def _runbook_for_display(runbook: str, cmds: list[str]) -> str:
+    """§17.1252 — the operator approves what they READ, so a cut must say so.
+
+    The frame carried `runbook[:12000]` while `commands` was parsed from the FULL
+    text. Live, ADD96 ("add the search sources to Prowlarr"): its runbook is over
+    12,000 characters because every indexer is a `curl` with a JSON body, so the
+    stored prose stopped mid-command and parsing it back yields 19 commands —
+    while the block that would actually run has 24. Five commands were going to
+    execute that were not in what the operator was shown, with nothing saying the
+    text had been cut.
+
+    The command list in the frame is authoritative and complete; the prose is for
+    reading. So when the prose is cut, say it plainly, say how much is missing,
+    and point at the list that is not.
+    """
+    text_value = str(runbook or "")
+    if len(text_value) <= RUNBOOK_DISPLAY_CHARS:
+        return text_value
+    return (text_value[:RUNBOOK_DISPLAY_CHARS].rstrip()
+            + f"\n\n---\n\n**This write-up is cut off here.** It is "
+              f"{len(text_value):,} characters long and only the first "
+              f"{RUNBOOK_DISPLAY_CHARS:,} are shown. The full block is "
+              f"{len(cmds)} command{'' if len(cmds) == 1 else 's'} — every one of them is listed "
+              f"above the write-up, and that list is what runs. Read it rather than this text if "
+              f"the two seem to disagree.")
+
+
 def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] = None,
               preconditions: Optional[list[dict]] = None) -> dict:
     """The ``awaiting_decision`` frame for a hands-on step: what would run,
@@ -1233,7 +1265,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
         "runner": runner, "commands": cmds, "verify": verify, "refused": refused,
         "inputs": inputs,
         "secrets_resolved": secrets_resolved, "secrets_missing": secrets_missing,
-        "runbook": runbook[:12000], "allow": list(policy.get("allow") or []), "sudo": bool(policy.get("sudo")),
+        "runbook": _runbook_for_display(runbook, cmds), "allow": list(policy.get("allow") or []),
+        "sudo": bool(policy.get("sudo")),
         "hands_on_reason": node.get("hands_on_reason") or "",
     }
 
