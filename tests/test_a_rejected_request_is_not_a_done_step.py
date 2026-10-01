@@ -552,3 +552,43 @@ def test_the_redraft_treats_it_as_a_shape_it_can_fix():
     note = sr.shape_retry_note({"refused": sr.inline_script_quoting([BAD_INLINE])})
     assert note and "cannot parse" in note
     assert "cannot parse" in sr._SHAPE_REFUSALS
+
+
+# ── §17.1255b: the same quoting bug in a script being WRITTEN ─────────────
+
+BAD_SCRIPT = """printf '%s\\n' 'import json' 'print(f"x {d[\\"name\\"]}")' | tee /tmp/add.py"""
+
+
+def test_a_script_written_with_escaped_quotes_is_refused():
+    """§17.1255 refused `python3 -c '… \\" …'`. The next draft did the right thing
+    structurally — printf | tee a file, then run it — and put the SAME escapes in
+    the lines it wrote, so the file landed with literal backslashes and Python
+    would refuse it. The gate only looked at `-c` payloads."""
+    got = sr.code_written_with_escaped_quotes([BAD_SCRIPT])
+    assert len(got) == 1
+    why = got[0]["why"]
+    assert "/tmp/add.py" in why
+    assert "backslash is literal" in why
+
+
+def test_a_clean_script_is_allowed():
+    ok = """printf '%s\\n' 'import json' 'print("hello")' | tee /tmp/add.py"""
+    assert sr.code_written_with_escaped_quotes([ok]) == []
+
+
+def test_a_json_body_may_legitimately_escape_a_quote():
+    """`curl -d '{"a": "x\\"y"}'` wants that backslash — it is JSON, not code."""
+    assert sr.code_written_with_escaped_quotes(
+        ['curl -s -X POST http://h/api -d \'{"a": "x\\"y"}\'']) == []
+
+
+def test_a_non_code_file_is_not_its_business():
+    """Only .py/.sh/.pl/.rb/.js targets — a Caddyfile or nginx conf is not code
+    this rule understands."""
+    assert sr.code_written_with_escaped_quotes(
+        ["printf '%s\\n' 'server { }' | tee /etc/nginx/x.conf"]) == []
+
+
+def test_the_shape_marker_lets_the_redraft_fix_it():
+    note = sr.shape_retry_note({"refused": sr.code_written_with_escaped_quotes([BAD_SCRIPT])})
+    assert note and "cannot parse" in note

@@ -618,6 +618,51 @@ _INLINE_SCRIPT = re.compile(
     r"(?:python[0-9.]*|perl|ruby|node)\s+-(?:c|e)\s+'", re.I)
 
 
+#: §17.1255b — a file being WRITTEN that is itself code.
+_CODE_TARGET = re.compile(r"\btee\s+(?:-a\s+)?(\S+\.(?:py|sh|pl|rb|js|bash))\b", re.I)
+
+#: a single-quoted shell argument. Inside one, `\"` is never necessary — the
+#: quotes already protect a double quote — so it reaches the file or the
+#: interpreter as a literal backslash.
+_SQ_ARG = re.compile(r"'((?:[^']){0,4000}?)'")
+
+
+def code_written_with_escaped_quotes(commands: list[str]) -> list[dict]:
+    """§17.1255b — the same quoting bug, in a script being written rather than run.
+
+    §17.1255 refused `python3 -c '… \" …'`. The next draft did the right thing
+    structurally — `printf '%s\n' … | tee /tmp/add_indexers.py` then run the file,
+    which is how the channel carries a script — and put the SAME escapes in the
+    lines it wrote:
+
+        print(f"FAILED: {idx[\\"name\\"]} - {result[\\"error\\"]}")
+
+    Inside a single-quoted shell argument the backslash is literal, so the file
+    lands containing `\"` and Python refuses to parse it. The gate only looked at
+    `-c` payloads, so a file being written slipped past.
+
+    Scoped to code: a `tee` whose target is a .py/.sh/.pl/.rb/.js file. A
+    single-quoted JSON body in a `curl -d '{"a": "x\"y"}'` legitimately wants that
+    backslash, so commands that are not writing code are left alone.
+    """
+    out: list[dict] = []
+    for c in commands or []:
+        cmd = str(c)
+        target = _CODE_TARGET.search(cmd)
+        if not target:
+            continue
+        bad = [a for a in _SQ_ARG.findall(cmd) if '\\"' in a or "\\'" in a]
+        if not bad:
+            continue
+        out.append({"command": cmd, "why": (
+            f"the script being written into {target.group(1)} cannot parse: inside a single-quoted "
+            f"shell argument a backslash is literal, so a line like {bad[0][:70]!r} reaches the file "
+            f"with the backslashes still in it. Do not escape quotes inside `printf '…'` arguments — "
+            f"single quotes already protect a \" — so write the line with plain double quotes, or "
+            f"use single quotes inside the code and double quotes around the printf argument.")})
+    return out
+
+
 def inline_script_quoting(commands: list[str]) -> list[dict]:
     """§17.1255 — `\\"` inside a single-quoted `-c` payload reaches the interpreter.
 
@@ -1330,6 +1375,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + pipe_escapes_the_guest(cmds)
     # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.
     refused = refused + inline_script_quoting(cmds)
+    # §17.1255b — and the same bug in a script being written to a file.
+    refused = refused + code_written_with_escaped_quotes(cmds)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner
