@@ -84,7 +84,7 @@ _NOT_ALLOWED = "not on the write-allow list"
 #: §17.1234 adds "cannot report an HTTP error" — a shape the engine can fix
 #: itself, so the redraft must recognise it as one.
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
-                   "ON THE HOST")
+                   "ON THE HOST", "cannot parse")
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -611,6 +611,49 @@ def all_reads_for_a_changing_step(commands: list[str], node: dict) -> str:
         "one line instead of drafting a block that looks busy and changes nothing.",
     ]
     return "\n".join(lines)
+
+
+#: §17.1255 — an inline interpreter script whose quoting cannot work.
+_INLINE_SCRIPT = re.compile(
+    r"(?:python[0-9.]*|perl|ruby|node)\s+-(?:c|e)\s+'", re.I)
+
+
+def inline_script_quoting(commands: list[str]) -> list[dict]:
+    """§17.1255 — `\\"` inside a single-quoted `-c` payload reaches the interpreter.
+
+    Live, ADD96's read step. The draft was otherwise right — one read-only command,
+    no refusals — and it died on its own quoting:
+
+        python3 -c 'import sys, json; … print(f"Name: {d[\\"name\\"]}") …'
+        SyntaxError: unexpected character after line continuation character
+
+    Inside single quotes the shell passes a backslash through untouched, so Python
+    received a literal `\\"` and could not parse it. This is never what was meant
+    and never works, so it is a shape problem the engine can fix itself rather
+    than a dead end for the operator.
+
+    Narrow: only a `-c`/`-e` payload opened with a single quote, and only when it
+    contains a backslash-escaped quote. A double-quoted payload (where `\\"` is
+    how you escape) and an ordinary quoted string are both left alone.
+    """
+    out: list[dict] = []
+    for c in commands or []:
+        cmd = str(c)
+        m = _INLINE_SCRIPT.search(cmd)
+        if not m:
+            continue
+        end = cmd.find("'", m.end())
+        payload = cmd[m.end():end if end > 0 else len(cmd)]
+        if '\\"' not in payload and "\\'" not in payload:
+            continue
+        out.append({"command": cmd, "why": (
+            "this inline script cannot parse: inside single quotes the shell passes a backslash "
+            "through untouched, so the interpreter receives a literal \\\" and fails with a syntax "
+            "error. Do not escape quotes inside a `-c '…'` payload. Either use only single-level "
+            "quoting inside it (plain \" marks are fine there), or split it in two — write the "
+            "output to a file with `-o /tmp/x.json` in one command and parse that file in the next, "
+            "which is clearer and each command stays self-contained.")})
+    return out
 
 
 def pipe_escapes_the_guest(commands: list[str]) -> list[dict]:
@@ -1285,6 +1328,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + curl_writes_without_fail(cmds)
     # §17.1248 — a pipe out of `pct exec` executes on the HOST.
     refused = refused + pipe_escapes_the_guest(cmds)
+    # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.
+    refused = refused + inline_script_quoting(cmds)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner

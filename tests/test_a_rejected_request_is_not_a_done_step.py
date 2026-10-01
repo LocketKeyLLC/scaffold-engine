@@ -504,3 +504,51 @@ def test_the_executor_redrafts_and_only_trades_up():
     # the replacement must itself not be all-reads
     assert "not supervised_runs.all_reads_for_a_changing_step(" in src
     assert src.index("all_reads_for_a_changing_step") < src.index("runbook_coverage")
+
+
+# ── §17.1255: an inline script whose quoting cannot work ──────────────────
+
+
+BAD_INLINE = ("curl -s http://h/api | python3 -c 'import sys, json; "
+              'data=json.load(sys.stdin); print(f"Name: {d[\\"name\\"]}")\'')
+
+
+def test_the_live_one_liner_is_refused():
+    """ADD96's read step was otherwise right — one read-only command, no
+    refusals — and died on its own quoting:
+        SyntaxError: unexpected character after line continuation character
+    Inside single quotes the shell passes a backslash through untouched, so
+    Python received a literal \\" ."""
+    got = sr.inline_script_quoting([BAD_INLINE])
+    assert len(got) == 1
+    why = got[0]["why"]
+    assert "cannot parse" in why
+    assert "-o /tmp/x.json" in why or "write the output to a file" in why
+
+
+def test_a_double_quoted_payload_is_left_alone():
+    """There `\\"` is how you escape, so it is correct."""
+    assert sr.inline_script_quoting(['python3 -c "import json; print(json.dumps({\\"a\\": 1}))"']) == []
+
+
+def test_plain_quoting_inside_single_quotes_is_fine():
+    ok = "curl -s http://h/api | python3 -c 'import sys, json; print(json.load(sys.stdin)[\"name\"])'"
+    assert sr.inline_script_quoting([ok]) == []
+
+
+def test_commands_with_no_inline_script_are_not_its_business():
+    for c in ("pct status 130", "curl -s http://h/api | grep name",
+              "pct exec 130 -- bash -c 'echo hi'"):
+        assert sr.inline_script_quoting([c]) == [], c
+
+
+def test_perl_and_node_count_too():
+    for interp in ("perl -e", "ruby -e", "node -e"):
+        c = f"""{interp} 'print \\"x\\"'"""
+        assert sr.inline_script_quoting([c]), c
+
+
+def test_the_redraft_treats_it_as_a_shape_it_can_fix():
+    note = sr.shape_retry_note({"refused": sr.inline_script_quoting([BAD_INLINE])})
+    assert note and "cannot parse" in note
+    assert "cannot parse" in sr._SHAPE_REFUSALS
