@@ -239,3 +239,57 @@ async def test_order_matters_a_start_BEFORE_its_create_is_still_refused():
     with patch.object(rp, "_read", AsyncMock(side_effect=lambda spec, c: PCT if c == "pct list" else QM)):
         got = await rp.unmet(["pct start 130", "pct create 130 tmpl"], SimpleNamespace(name="r"))
     assert got and "there is no guest 130" in got[0]["why"]
+
+
+# ── §17.1249: the gate refused the remedy it recommends ───────────────────
+
+RUNNING_130 = """VMID       Status     Lock         Name
+       130 running                 pihole
+       120 stopped                 caddy-proxy
+"""
+
+
+async def _un(cmd):
+    with patch.object(rp, "_read", AsyncMock(side_effect=lambda spec, c: RUNNING_130 if c == "pct list" else "")):
+        return await rp.unmet([cmd], SimpleNamespace(name="r"))
+
+
+@pytest.mark.asyncio
+async def test_the_idempotent_guard_form_is_allowed():
+    """Live: this exact command was the SINGLE refusal standing between ADD111
+    and a correct block — and it is the form §17.1240's own refusal asks for.
+    `guests_in` saw a `start` on a running container and never noticed the `||`."""
+    assert await _un("pct status 130 | grep -q running || pct start 130") == []
+
+
+@pytest.mark.asyncio
+async def test_a_bare_start_on_a_running_container_is_still_refused():
+    """The vacuity check — §17.1240 must keep biting where it should."""
+    got = await _un("pct start 130")
+    assert got and "ALREADY running" in got[0]["why"]
+
+
+@pytest.mark.asyncio
+async def test_the_guard_form_on_a_stopped_container_is_fine_too():
+    assert await _un("pct status 120 | grep -q running || pct start 120") == []
+
+
+@pytest.mark.asyncio
+async def test_a_guard_on_a_DIFFERENT_guest_does_not_launder_the_action():
+    """`|| pct start 130` guarded by a check on 999 is not guarded at all."""
+    got = await _un("pct status 999 | grep -q running || pct start 130")
+    assert got, "an unrelated check must not make the action idempotent"
+
+
+@pytest.mark.asyncio
+async def test_an_unguarded_exec_on_a_stopped_guest_still_fails():
+    got = await _un("pct exec 120 -- true")
+    assert got and "is stopped" in got[0]["why"]
+
+
+def test_guarded_needs_the_action_after_the_or():
+    """Order matters: the action has to be the FALLBACK, not the check."""
+    assert rp._guarded("pct status 130 | grep -q running || pct start 130", "pct", "start", "130")
+    # the action first, with something after it, is not a guard
+    assert not rp._guarded("pct start 130 || echo failed", "pct", "start", "130")
+    assert not rp._guarded("pct start 130", "pct", "start", "130")

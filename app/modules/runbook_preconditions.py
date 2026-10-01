@@ -143,7 +143,7 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None)
                        else f" Start it first (`{tool} start {gid}`)."))})
         elif verb in _ALREADY:
             status = cts.get(gid) if is_ct else vms.get(gid)
-            if status and status == _ALREADY[verb]:
+            if status and status == _ALREADY[verb] and not _guarded(cmd, tool, verb, gid):
                 kind = "container" if is_ct else "VM"
                 out.append({"command": cmd, "why": (
                     f"{kind} {gid} is ALREADY {status}, and `{tool} {verb}` on it exits non-zero — so "
@@ -153,6 +153,33 @@ async def unmet(commands: list[str], spec, *, plan: Optional[list[dict]] = None)
     if out:
         logger.warning("preconditions_unmet count=%d first=%r", len(out), out[0]["why"][:120])
     return out
+
+
+def _guarded(cmd: str, tool: str, verb: str, gid: str) -> bool:
+    """§17.1249 — is this action already behind a check on the same guest?
+
+    `pct status 130 | grep -q running || pct start 130` is the idempotent form
+    §17.1240's OWN refusal asks for, and §17.1240 refused it: `guests_in` sees a
+    `start` on a running container and never notices the `||` in front of it. A
+    gate that rejects the remedy it recommends is worse than no gate — live, it
+    was the single refusal standing between ADD111 and a correct block.
+
+    Guarded means: the action sits after a `||`, and something before it reads
+    the same guest. That is the whole shape — a check that fails hands over to
+    the fix, and a check that passes skips it.
+    """
+    text_value = str(cmd or "")
+    if "||" not in text_value:
+        return False
+    action = re.compile(rf"\b{re.escape(tool)}\s+{re.escape(verb)}\s+{re.escape(gid)}\b")
+    parts = text_value.split("||")
+    for i, part in enumerate(parts):
+        if i == 0 or not action.search(part):
+            continue
+        before = "||".join(parts[:i])
+        if re.search(rf"\b{re.escape(gid)}\b", before):
+            return True
+    return False
 
 
 def _step_that_starts(gid: str, plan: Optional[list[dict]]) -> Optional[str]:
