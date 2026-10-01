@@ -745,6 +745,120 @@ def python_payloads(cmd: str) -> list[tuple[str, Optional[str]]]:
     return out
 
 
+#: §17.1268 — the calls that wait on something outside this machine. A loop
+#: around one of these is where a command's time budget goes.
+_NETWORK_CALL = frozenset({
+    "urlopen", "request", "Request", "get", "post", "put", "delete", "patch",
+    "head", "getresponse", "connect", "sendall", "recv", "check_output", "run",
+    "call", "check_call", "Popen",
+})
+
+
+def _literal_names(tree: "ast.AST") -> set[str]:
+    """Names this source assigns a literal collection to, and never anything else.
+
+    `apps = [{…Radarr…}, {…Sonarr…}]` then `for app in apps:` is two items and
+    always will be -- the apps half of ADD115, which must keep working. A name
+    that is ALSO assigned something else (a response, a filter over one) is not
+    counted, because then its size is whatever that was.
+    """
+    import ast
+    literal: set[str] = set()
+    other: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        value = node.value
+        for t in targets:
+            if not isinstance(t, ast.Name):
+                continue
+            (literal if isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict))
+             else other).add(t.id)
+    return literal - other
+
+
+def _bounded(it: "ast.AST", literal_names: set[str] | None = None) -> bool:
+    """Is this iterable something whose size the draft itself fixed?
+
+    A literal list or tuple is bounded by construction, whether it is written in
+    the loop or assigned to a name just above it. A slice or `islice` is the
+    author saying how many. A bare name holding whatever a service returned is
+    not.
+    """
+    import ast
+    names = literal_names or set()
+    if isinstance(it, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+        return True
+    if isinstance(it, ast.Subscript):                   # public[:20]
+        return True
+    if isinstance(it, ast.Name):
+        return it.id in names
+    if isinstance(it, ast.Call):
+        name = getattr(it.func, "attr", None) or getattr(it.func, "id", None)
+        if name in ("islice", "range"):
+            return True
+        if name in ("enumerate", "list", "sorted", "reversed", "tuple"):
+            return bool(it.args) and _bounded(it.args[0], names)
+    return False
+
+
+def loops_the_network_without_a_budget(commands: list[str]) -> list[dict]:
+    """§17.1268 — a block that cannot finish in the time it is given.
+
+    §17.1267 told the drafter a command gets 180 seconds and asked for batches.
+    The very next draft looped over all 89 indexers again -- each POST making the
+    service connection-test a remote tracker -- and put a `time.sleep(1)` INSIDE
+    the loop, which is strictly worse than the attempt that had just been killed.
+    A rule the prompt states and the draft ignores is not a fail-safe, so this is
+    the gate (feedback: fail-safes are a registry; gates must bite).
+
+    The question is the one that can be answered from the source: does a loop
+    whose body waits on something off this machine run over a collection the
+    draft itself did not bound? A literal list is bounded -- `for app in [radarr,
+    sonarr]` is two items, which is why the apps half of this very step passes.
+    A name holding whatever an API returned is not, and `public[:20]` is the
+    remedy, stated by the author.
+
+    Reuses §17.1257's payload extraction: the source is already in hand, and the
+    AST it compiles is already proof the code is real.
+    """
+    import ast
+    out: list[dict] = []
+    for cmd in commands or []:
+        for what, source in python_payloads(str(cmd)):
+            if not source:
+                continue
+            try:
+                tree = ast.parse(source)
+            except (SyntaxError, ValueError, RecursionError):
+                continue                      # §17.1257 reports that, not this
+            names = _literal_names(tree)
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.For, ast.AsyncFor)) or _bounded(node.iter, names):
+                    continue
+                calls = [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                         and (getattr(c.func, "attr", None) or getattr(c.func, "id", None)) in _NETWORK_CALL]
+                if not calls:
+                    continue
+                sleeps = [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                          and getattr(c.func, "attr", None) == "sleep"]
+                where = ast.unparse(node.iter)[:60]
+                out.append({"command": cmd, "why": (
+                    f"{what} loops over `{where}` -- however many that service returns -- and every pass "
+                    f"waits on something off this machine"
+                    + (", with a sleep inside the loop as well" if sleeps else "")
+                    + f". One command gets {_RUN_BUDGET_S} seconds and is KILLED at that point, with no "
+                    f"record of how much of the work landed, so a run over 89 of anything cannot be "
+                    f"offered. Bound it: take a slice of a size you choose (`{where}[:20]`) and send "
+                    f"several commands, each one resumable -- treat a thing that is already there as "
+                    f"success and move on. Then a batch that runs out of time loses only itself.")})
+                break                         # one finding per payload is enough
+    if out:
+        logger.warning("network_loop_without_budget count=%d first=%r", len(out), out[0]["why"][:120])
+    return out
+
+
 def payload_will_not_compile(commands: list[str]) -> list[dict]:
     """§17.1257 — compile the code the block hands to another interpreter.
 
@@ -1196,6 +1310,11 @@ def diagnosis_of(report: str) -> str:
     nxt = body.find("\n## ", 4)
     return (body[:nxt] if nxt > 0 else body).strip()
 
+
+#: §17.1268 — the one place the per-command budget is named for prose and gate
+#: alike; `assist_supervised.RUN_COMMAND_TIMEOUT_S` is what actually enforces it
+#: and a test ties the two together.
+_RUN_BUDGET_S = 180
 
 #: §17.1267 — the runner's own words when a command runs out of time.
 _TIMED_OUT = re.compile(r"(?i)timed?\s*out after (\d+)\s*s")
@@ -1951,6 +2070,10 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + payload_will_not_compile(cmds)
     # §17.1256 — a written script that reads a secret the runner never passes.
     refused = refused + script_secret_not_passed(cmds)
+    # §17.1268 — work that cannot finish in the time one command is given. A
+    # refusal rather than a rule, because §17.1267 put the budget in the prompt
+    # and the next draft looped over all 89 again with a sleep added.
+    refused = refused + loops_the_network_without_a_budget(cmds)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner

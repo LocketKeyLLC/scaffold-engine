@@ -382,3 +382,67 @@ def test_the_route_fills_the_response_it_declares():
     construction = body[j:body.index(")", body.index("confirmed_after_drop", j)) + 1]
     for field in ("executed", "verify", "reason", "diagnosis", "unknown_outcome", "confirmed_after_drop"):
         assert f"{field}=outcome.get(" in construction, f"the route never fills {field!r}"
+
+
+# ───────────── §17.1268 — work that cannot finish in the time it is given
+
+def _fixture(name: str) -> str:
+    return (pathlib.Path(__file__).parent / "fixtures" / name).read_text(encoding="utf-8").strip()
+
+
+def test_the_real_unbounded_script_is_refused():
+    """§17.1267 put the 180s budget in the prompt; the very next draft looped
+    over all 89 indexers again AND added `time.sleep(1)` inside the loop. A rule
+    the draft ignores is not a fail-safe."""
+    found = sr.loops_the_network_without_a_budget([_fixture("add115_unbounded_loop.txt")])
+    assert found, "the draft that would certainly time out must not be offered"
+    why = found[0]["why"]
+    assert "enumerate(public)" in why, "name the collection it cannot bound"
+    assert "sleep inside the loop" in why, "the aggravating factor is worth saying"
+    assert "[:20]" in why and "resumable" in why, "the remedy must be concrete"
+    assert "180 seconds" in why
+
+
+def test_a_literal_list_is_bounded_even_through_a_name():
+    """The apps half of this very step: `apps = [radarr, sonarr]` then `for app
+    in apps:` is two items and must keep working."""
+    cmd = ("printf '%s\\n' 'import json, urllib.request' "
+           "'apps = [{\"name\": \"Radarr\"}, {\"name\": \"Sonarr\"}]' "
+           "'for app in apps:' '    urllib.request.urlopen(\"http://x/api\", json.dumps(app).encode())' "
+           "| tee /tmp/add_apps.py")
+    assert sr.loops_the_network_without_a_budget([cmd]) == []
+
+
+def test_a_name_assigned_a_response_too_is_not_bounded():
+    """A name that is ALSO assigned something else has whatever size that was."""
+    cmd = ("printf '%s\\n' 'import urllib.request' 'items = [1, 2]' 'items = fetch()' "
+           "'for i in items:' '    urllib.request.urlopen(\"http://x\")' | tee /tmp/x.py")
+    assert sr.loops_the_network_without_a_budget([cmd])
+
+
+def test_an_author_chosen_slice_is_allowed():
+    cmd = ("printf '%s\\n' 'import urllib.request' 'public = fetch()' 'for e in public[:20]:' "
+           "'    urllib.request.urlopen(\"http://x\")' | tee /tmp/b.py")
+    assert sr.loops_the_network_without_a_budget([cmd]) == []
+
+
+def test_a_loop_that_touches_nothing_remote_is_allowed():
+    cmd = "printf '%s\\n' 'for p in paths:' '    print(open(p).read())' | tee /tmp/l.py"
+    assert sr.loops_the_network_without_a_budget([cmd]) == []
+
+
+def test_the_budget_is_named_once_for_prose_and_gate():
+    """A number in a prompt and a number in a refusal drift; both come from one
+    constant, and that constant must match what actually kills the command."""
+    from app.modules.assist_supervised import RUN_COMMAND_TIMEOUT_S
+    assert sr._RUN_BUDGET_S == int(RUN_COMMAND_TIMEOUT_S)
+    assert f"ONE COMMAND GETS {sr._RUN_BUDGET_S} SECONDS" in sr.CHANNEL_RULES
+
+
+def test_the_gate_reaches_the_frame():
+    """A detector nobody calls is the §17.906 defect — it must join the refusals
+    that turn Run off and trigger the §17.1196 redraft."""
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("def frame_run(")
+    assert "loops_the_network_without_a_budget(cmds)" in src[i:], \
+        "the gate must be called from frame_run, not merely exist"
