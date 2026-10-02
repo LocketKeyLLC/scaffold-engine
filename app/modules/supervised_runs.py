@@ -2710,10 +2710,41 @@ def fill_files(files: list[dict], values: dict[str, str]) -> tuple[list[dict], l
     return out, problems
 
 
-def check_inputs(names: list[str], values: dict | None) -> tuple[dict[str, str], list[dict]]:
-    """``(clean values, problems)`` — every name present and shell-safe (no
-    whitespace, quotes, or shell metacharacters; the value is spliced into a
-    command verbatim, so the gate must be able to read it as one token)."""
+def placeholder_contexts(name: str, texts: list[str]) -> set[str]:
+    """§17.1282 — where ``<NAME>`` sits across a block's commands, checks and
+    files: ``bare`` (a shell word of its own), ``dq`` (inside ``"…"``) or ``sq``
+    (inside ``'…'``). The value's safety rule depends on which."""
+    out: set[str] = set()
+    pat = re.compile(rf"<{re.escape(name)}>")
+    for t in texts or []:
+        t = str(t or "")
+        spans = _quote_spans(t)
+        for m in pat.finditer(t):
+            ctx = "bare"
+            for start, end, q in spans:
+                if start < m.start() and m.end() <= end:
+                    ctx = "dq" if q == '"' else "sq"
+                    break
+            out.add(ctx)
+    return out
+
+
+_DQ_UNSAFE = re.compile(r'["$`\\\n\r]')
+_SQ_UNSAFE = re.compile(r"['\n\r]")
+_QUOTED_MAX = 4096
+
+
+def check_inputs(names: list[str], values: dict | None,
+                 texts: Optional[list[str]] = None) -> tuple[dict[str, str], list[dict]]:
+    """``(clean values, problems)`` — every name present and safe WHERE IT IS
+    SPLICED. A bare placeholder must be one shell token (no whitespace, quotes
+    or metacharacters; the gate has to read it as one word). §17.1282 — one
+    inside ``"…"`` may hold spaces and up to 4 KB but no ``"``, ``$``, backtick,
+    backslash or newline; inside ``'…'`` no ``'`` or newline. Live, the engine
+    read the host's own `ssh-rsa AAAA… root@pve` off the machine, prefilled it
+    into ``echo "<OPERATOR_SSH_PUBKEY>" >> ~/.ssh/authorized_keys``, and then
+    refused the value at approval for containing spaces. Without ``texts`` the
+    bare rule applies everywhere (the historical behaviour)."""
     values = values or {}
     clean: dict[str, str] = {}
     problems: list[dict] = []
@@ -2721,10 +2752,23 @@ def check_inputs(names: list[str], values: dict | None) -> tuple[dict[str, str],
         v = str(values.get(n, "") if isinstance(values, dict) else "").strip()
         if not v:
             problems.append({"name": n, "why": "missing"})
-        elif not _SAFE_VALUE_RE.match(v):
-            problems.append({"name": n, "why": "letters, digits and . / : @ % + = , ~ - _ only — no spaces, quotes or shell characters"})
+            continue
+        ctx = placeholder_contexts(n, texts or []) if texts else {"bare"}
+        if not ctx or "bare" in ctx:
+            if not _SAFE_VALUE_RE.match(v):
+                problems.append({"name": n, "why": "letters, digits and . / : @ % + = , ~ - _ only — no spaces, quotes or shell characters"})
+                continue
         else:
-            clean[n] = v
+            if len(v) > _QUOTED_MAX:
+                problems.append({"name": n, "why": f"longer than {_QUOTED_MAX} characters"})
+                continue
+            if "dq" in ctx and _DQ_UNSAFE.search(v):
+                problems.append({"name": n, "why": 'spliced inside double quotes: no " $ ` \\ or line breaks'})
+                continue
+            if "sq" in ctx and _SQ_UNSAFE.search(v):
+                problems.append({"name": n, "why": "spliced inside single quotes: no ' or line breaks"})
+                continue
+        clean[n] = v
     return clean, problems
 
 
@@ -3154,7 +3198,9 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     secrets_asked = [i for i in asked if i.get("secret")]
     values: dict[str, str] = {}
     if asked:                                     # §17.1187 — the values the runbook asked for, checked
-        _all, problems = check_inputs([i["name"] for i in asked], inputs)
+        _all, problems = check_inputs([i["name"] for i in asked], inputs,
+                                      texts=commands + verify_cmds + [str((f or {}).get("content") or "")
+                                                                       for f in waiting.get("files") or []])
         if problems:
             return {"outcome": "inputs_missing", "problems": problems, "inputs": asked}
         values = {k: v for k, v in _all.items() if k in {i["name"] for i in need}}
