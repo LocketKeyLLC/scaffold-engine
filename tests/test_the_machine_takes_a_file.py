@@ -234,3 +234,78 @@ def test_a_write_record_has_the_same_shape_as_a_command_record():
     rec = src[i:src.index("async def run_block(", i)]
     for field in ('"ok"', '"exit"', '"unreachable"', '"informational"', '"command"', '"output"'):
         assert field in rec, f"a write record is missing {field}"
+
+
+# ───── §17.1273 — a capability that never reaches its reader is dead code
+
+@pytest.mark.asyncio
+async def test_write_policy_RETURNS_the_capability(monkeypatch):
+    """§17.1273 — this is the test §17.1271 should have had.
+
+    `can_write_files` was set on the parsed response and then dropped by the
+    fresh dict `write_policy` returns, so no caller ever saw it: the file
+    notation was never added to a prompt and `frame_run` never parsed a file
+    section, on a runner that HAD the tool. Live, measured in the trace: the
+    system prompt came back 8,014 characters with no file rule in it.
+
+    The §17.1271 test asserted that the ASSIGNMENT existed in the source, which
+    is vacuous with respect to what the function hands back. This drives the real
+    function and reads its return value.
+    """
+    import json as _json
+    from app.modules import mcp_client
+
+    class _Res:
+        def __init__(self, text): self.text, self.structured = text, None
+
+    async def _tools(spec, *, use_cache=True):
+        return [{"name": n} for n in ("run_readonly", "write_policy", "write_file", "run_supervised")]
+
+    async def _call(spec, tool, args):
+        return _Res(_json.dumps({"allow": ["ANY"], "sudo": True, "helper": "18", "secrets": []}))
+
+    monkeypatch.setattr(mcp_client, "list_tools", _tools)
+    monkeypatch.setattr(mcp_client, "call_tool", _call)
+    spec = type("S", (), {"name": "t-write-file", "headers": {}})()
+    pol = await sw.write_policy(spec, use_cache=False)
+    assert pol is not None
+    assert pol.get("can_write_files") is True, "the capability must reach the caller"
+
+
+@pytest.mark.asyncio
+async def test_an_older_helper_reports_it_cannot(monkeypatch):
+    """And the other direction, so the flag is not simply always true."""
+    import json as _json
+    from app.modules import mcp_client
+
+    class _Res:
+        def __init__(self, text): self.text, self.structured = text, None
+
+    async def _tools(spec, *, use_cache=True):
+        return [{"name": n} for n in ("run_readonly", "write_policy", "run_supervised")]
+
+    async def _call(spec, tool, args):
+        return _Res(_json.dumps({"allow": ["ANY"], "sudo": True, "helper": "17", "secrets": []}))
+
+    monkeypatch.setattr(mcp_client, "list_tools", _tools)
+    monkeypatch.setattr(mcp_client, "call_tool", _call)
+    spec = type("S", (), {"name": "t-no-write-file", "headers": {}})()
+    pol = await sw.write_policy(spec, use_cache=False)
+    assert pol is not None and pol.get("can_write_files") is False
+
+
+def test_every_capability_the_probe_learns_is_carried_to_callers():
+    """The drift guard: a key set on `pol` and then not listed in the dict the
+    function returns is invisible, which is how this one hid."""
+    import ast
+    src = pathlib.Path(sw.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "write_policy")
+    body = ast.unparse(fn)
+    # keys the probe assigns onto the parsed response for later use
+    assigned = {m for m in ("can_write_files",) if f"pol['{m}']" in body or f'pol["{m}"]' in body}
+    i = body.index("out = ")
+    returned = body[i:]
+    missing = sorted(k for k in assigned if k not in returned)
+    assert not missing, f"write_policy learns {missing} and never hands it to a caller"

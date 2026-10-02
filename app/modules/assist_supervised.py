@@ -332,9 +332,17 @@ async def write_policy(spec, *, use_cache: bool = True) -> Optional[dict]:
         "sudo_allow": ([str(a) for a in pol["sudo_allow"] if str(a).strip()]
                        if isinstance(pol.get("sudo_allow"), list) else None),
         "secrets_file": (str(pol["secrets_file"]) if pol.get("secrets_file") else None),
+        "can_write_files": can_write_files,          # §17.1273
     })
+    # §17.1273 — `can_write_files` is set on `pol` above and this dict is what
+    # CALLERS get, so leaving it out killed the whole §17.1271 path silently:
+    # `draft_runbook` never added the file notation to the prompt and `frame_run`
+    # never parsed a file section, on a runner that had the tool. The same defect
+    # as §17.1266 — a value declared in one place and never carried to the
+    # surface that reads it — and the test for it asserted the ASSIGNMENT rather
+    # than the returned dict, which is no test at all.
     out = ({"allow": allow, "sudo": bool(pol.get("sudo")), "helper": str(pol.get("helper") or ""),
-            "secrets": secrets} if allow else None)
+            "secrets": secrets, "can_write_files": can_write_files} if allow else None)
     _policy_cache[name] = (time.monotonic() + _POLICY_TTL, out)
     return out
 

@@ -149,7 +149,11 @@ async def test_write_policy_is_none_without_the_tool_or_with_an_empty_list():
     sw.clear_policy_cache()                      # the empty answer above was cached for this runner
     with patch("app.modules.mcp_client.list_tools", new=AsyncMock(return_value=[{"name": "run_supervised"}, {"name": "write_policy"}])), \
          patch("app.modules.mcp_client.call_tool", new=AsyncMock(return_value=res)):
-        assert await sw.write_policy(spec) == {"allow": ["pct set"], "sudo": True, "helper": "11", "secrets": []}
+        # §17.1273 — the contract gained `can_write_files`: whether this runner can
+        # be handed a FILE rather than a shell command that builds one. False here,
+        # because the tool list above has no `write_file` (helper v11).
+        assert await sw.write_policy(spec) == {"allow": ["pct set"], "sudo": True, "helper": "11",
+                                              "secrets": [], "can_write_files": False}
 
 
 # ── the runner side ──────────────────────────────────────────────────────
