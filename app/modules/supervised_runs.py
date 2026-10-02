@@ -101,7 +101,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "by a phrase list",                             # §17.1278b
                    "without reading the body's `propertyName`",    # §17.1278c
                    "has no 'needs_input' verdict",                 # §17.1279
-                   "a secret cannot be written into a file")       # §17.1280
+                   "a secret cannot be written into a file",       # §17.1280
+                   "elevates only the first command of a line")    # §17.1283
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -1265,6 +1266,50 @@ def loop_dies_on_one_dead_party(commands: list[str], files: Optional[list[dict]]
             break                                       # one finding per payload is enough
     if out:
         logger.warning("network_loop_dies_on_hang count=%d first=%r", len(out), out[0]["why"][:120])
+    return out
+
+
+#: §17.1283 — the first helper that elevates a compound line as a whole.
+WHOLE_LINE_SUDO_HELPER = 19
+
+
+def compound_write_on_a_head_only_runner(commands: list[str], policy: Optional[dict]) -> list[dict]:
+    """§17.1283 — a runner older than helper 19 prefixes `sudo -n` to the
+    command STRING, so only the first simple command of a line is elevated.
+    Live: `qm status 110 | grep -q running || qm start 110` -- the guard form
+    §17.1240 recommends -- ran its check as root and its `qm start` unprivileged
+    (`ipcc_send_rec … Unable to load access control list`), and ADD26 failed on
+    its first command. Until the runner is updated, a write after `|`, `||`,
+    `&&` or `;` cannot run as root there; the remedy that needs no update is one
+    command per line -- and the host inventory in the prompt already says whether
+    the guest is running, so the guard is usually unnecessary.
+    """
+    pol = policy or {}
+    try:
+        helper = int(str(pol.get("helper") or "0"))
+    except ValueError:
+        helper = 0
+    if not pol.get("sudo") or helper >= WHOLE_LINE_SUDO_HELPER:
+        return []
+    from app.modules.assist_state_check import read_only_command
+    from app.modules.assist_supervised import split_segments
+    out: list[dict] = []
+    for cmd in commands or []:
+        segs = split_segments(str(cmd))
+        if len(segs) < 2:
+            continue
+        writes = [sg for sg in segs[1:] if sg.strip() and not read_only_command(sg)]
+        if not writes:
+            continue
+        out.append({"command": str(cmd), "why": (
+            f"this runner (helper {helper}) elevates only the first command of a line, so `{writes[0].strip()[:60]}` "
+            f"after the operator would run unprivileged and fail on pmxcfs -- live, `qm start 110` did exactly that "
+            f"behind `qm status 110 | grep -q running ||`. Write ONE command per line: the host inventory above says "
+            f"whether the guest is running, so when it is stopped write the start alone (`qm start 110`), and when it "
+            f"is running leave the start out. (Updating the runner to helper {WHOLE_LINE_SUDO_HELPER} -- Settings → "
+            f"Machines, the install line -- elevates whole lines; until then, one command per line.)")})
+    if out:
+        logger.warning("compound_write_on_head_only_runner count=%d helper=%s", len(out), helper)
     return out
 
 
@@ -2991,6 +3036,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + curl_writes_without_fail(cmds)
     # §17.1248 — a pipe out of `pct exec` executes on the HOST.
     refused = refused + pipe_escapes_the_guest(cmds)
+    # §17.1283 — a runner older than helper 19 elevates only the head of a line.
+    refused = refused + compound_write_on_a_head_only_runner(cmds, policy)
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
