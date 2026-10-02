@@ -94,7 +94,9 @@ _NOT_ALLOWED = "not on the write-allow list"
 _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report an HTTP error",
                    "ON THE HOST", "not valid Python", "cannot even be split",
                    "only passes a stored value",
-                   "waits on something off this machine")        # §17.1268
+                   "waits on something off this machine",         # §17.1268
+                   "dies at the first one that hangs",            # §17.1274
+                   "against a")                                    # §17.1274 slice × timeout
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -463,10 +465,10 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
   and then run it as its own command: `python3 /tmp/x.py`. Keep each line short; a long line is where the quoting goes wrong.
 - AN API TELLS YOU ITS OWN RULES -- ask it once before doing it 88 times. Do not write a request body from memory: a schema or template an API hands you is what it ACCEPTS as a description, not necessarily a valid body to post back. Do the operation ONCE, and if it is rejected print the full response body and stop; a service says in that body exactly which field it refused (Prowlarr: "'App Profile Id' must be greater than '0'"). Fix the body from what it said, then do the rest. A loop that swallows each error into a one-line summary turns one useful diagnosis into dozens of useless lines and changes nothing.
 - A SCRIPT you write does not inherit a stored value. The runner passes one only into a command whose text mentions `$NAME`, so `printf … | tee /tmp/x.py` then a bare `python3 /tmp/x.py` starts with no such variable. Either have the script read the key off the machine (above), or put the reference in the command that runs it: `NAME="$NAME" python3 /tmp/x.py`.
-- ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably -- twenty per command, or ten when each one waits on a remote service that may be slow or dead, across several commands, and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is.
+- ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably -- twenty per command, or ten when each one waits on a remote service that may be slow or dead, across several commands, and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is. And give every request its OWN short timeout -- about 15 seconds -- so a batch cannot outlive the budget even if every item hangs: ten items at `timeout=60` is 600 seconds, not 180.
 - WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped.
 - YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next.
-- A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not.
+- A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not. A thing that HANGS is not an HTTP status: `urlopen` raises TimeoutError or urllib.error.URLError, so `except HTTPError` alone lets one slow tracker kill the whole run with no summary -- catch `(urllib.error.URLError, TimeoutError, OSError)` around the call, INSIDE the loop, and record that item as unreachable exactly like a 502.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
 """
 
@@ -696,7 +698,7 @@ _SCRIPT_ENV_READ = re.compile(
 _TEE_SCRIPT = re.compile(r"\btee\s+(?:-a\s+)?(\S+\.(?:py|sh|pl|rb|js|bash))\b", re.I)
 
 
-def script_secret_not_passed(commands: list[str]) -> list[dict]:
+def script_secret_not_passed(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1256 — a written script reads a secret the command running it never gets.
 
     The runner injects a secret only into commands whose TEXT references it:
@@ -728,6 +730,11 @@ def script_secret_not_passed(commands: list[str]) -> list[dict]:
         names = {g for m in _SCRIPT_ENV_READ.finditer(c) for g in m.groups() if g}
         if names:
             wanted.setdefault(tee.group(1), set()).update(names)
+    for f in files or []:                 # §17.1274 — a file written through the channel is a script too
+        path = str((f or {}).get("path") or "")
+        names = {g for m in _SCRIPT_ENV_READ.finditer(str((f or {}).get("content") or "")) for g in m.groups() if g}
+        if path and names:
+            wanted.setdefault(path, set()).update(names)
     if not wanted:
         return []
     out: list[dict] = []
@@ -785,6 +792,33 @@ def python_payloads(cmd: str) -> list[tuple[str, Optional[str]]]:
         elif lines:
             out.append((f"the script written to {target.group(1)}", "\n".join(lines)))
     return out
+
+
+def _py_sources(commands: list[str], files: Optional[list[dict]] = None) -> list[tuple[str, Optional[str], str]]:
+    """§17.1274 — every piece of Python this block hands to an interpreter, from
+    BOTH places it can come from: a ``-c`` / ``printf | tee`` payload inside a
+    command (§17.1257) and a file written through the §17.1271 channel. Yields
+    ``(what it is, the source, the label a refusal names)``.
+
+    The gates below read only the commands until the live ADD115 frame came back
+    ``refused: []`` with a 103-line script looping over every public indexer in
+    ``files`` — the day the file channel opened, every payload gate went blind
+    to the thing it was written for (feedback: a gate goes blind when code moves).
+    """
+    out: list[tuple[str, Optional[str], str]] = []
+    for cmd in commands or []:
+        for what, source in python_payloads(str(cmd)):
+            out.append((what, source, str(cmd)))
+    for f in files or []:
+        path = str((f or {}).get("path") or "")
+        if path.endswith(".py"):
+            label = f"the file {path}"
+            out.append((label, str((f or {}).get("content") or ""), label))
+    return out
+
+
+def _callee(call) -> Optional[str]:
+    return getattr(call.func, "attr", None) or getattr(call.func, "id", None)
 
 
 #: §17.1268 — the calls that wait on something outside this machine. A loop
@@ -845,7 +879,183 @@ def _bounded(it, literal_names: set[str] | None = None) -> bool:
     return False
 
 
-def loops_the_network_without_a_budget(commands: list[str]) -> list[dict]:
+def _literal_iter(it, literal_names: set[str]) -> bool:
+    """Is this iterable a collection the draft WROTE OUT -- `apps = [radarr,
+    sonarr]` -- as opposed to a slice of something a service returned? The
+    former is this machine's own things; the latter is third parties, which is
+    where §17.1263's survive-a-corpse rule applies."""
+    import ast
+    if isinstance(it, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+        return True
+    if isinstance(it, ast.Name):
+        return it.id in literal_names
+    if isinstance(it, ast.Call):
+        name = _callee(it)
+        if name == "range":
+            return True
+        if name in ("enumerate", "list", "sorted", "reversed", "tuple"):
+            return bool(it.args) and _literal_iter(it.args[0], literal_names)
+    return False
+
+
+def _network_wrappers(tree) -> set[str]:
+    """§17.1274 — functions defined in this source whose body reaches a network
+    call, directly or through another such function. ``def api_post(…):
+    urlopen(…)`` then ``for entry in public: api_post(…)`` waits on the network
+    exactly as much as the bare call does; a gate matching call NAMES passed the
+    live script because the loop body said `api_post`, not `urlopen`."""
+    import ast
+    defs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    wrappers: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, fn in defs.items():
+            if name in wrappers:
+                continue
+            reach = _NETWORK_CALL | wrappers
+            if any(isinstance(c, ast.Call) and _callee(c) in reach for c in ast.walk(fn)):
+                wrappers.add(name)
+                changed = True
+    return wrappers
+
+
+def _slice_bound(it) -> Optional[int]:
+    """How many items ``public[:20]`` is, when the author wrote the number."""
+    import ast
+    if isinstance(it, ast.Call) and _callee(it) in ("enumerate", "list", "sorted", "reversed", "tuple") and it.args:
+        return _slice_bound(it.args[0])
+    if isinstance(it, ast.Subscript) and isinstance(it.slice, ast.Slice):
+        up, lo = it.slice.upper, it.slice.lower
+        if isinstance(up, ast.Constant) and isinstance(up.value, int):
+            start = lo.value if isinstance(lo, ast.Constant) and isinstance(lo.value, int) else 0
+            return max(0, up.value - start)
+    return None
+
+
+def _request_timeouts(tree) -> list[float]:
+    """Literal ``timeout=`` seconds on the network calls in this source."""
+    import ast
+    out: list[float] = []
+    for c in ast.walk(tree):
+        if isinstance(c, ast.Call) and _callee(c) in _NETWORK_CALL:
+            for kw in c.keywords:
+                if kw.arg == "timeout" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, (int, float)):
+                    out.append(float(kw.value.value))
+    return out
+
+
+#: §17.1274 — handler types that survive a HANG. `HTTPError` is deliberately
+#: absent: it is what the live script caught, and a socket timeout is not one.
+_SURVIVES_A_HANG = frozenset({"Exception", "BaseException", "OSError", "IOError", "URLError", "TimeoutError",
+                              "timeout", "error", "ConnectionError", "RequestException", "RemoteDisconnected"})
+
+
+def _handlers_survive(try_node) -> bool:
+    import ast
+    for h in try_node.handlers:
+        if h.type is None:
+            return True                                 # bare except
+        types = h.type.elts if isinstance(h.type, ast.Tuple) else [h.type]
+        if any((getattr(t, "attr", None) or getattr(t, "id", None)) in _SURVIVES_A_HANG for t in types):
+            return True
+    return False
+
+
+def _call_guarded(call, scope) -> bool:
+    """Is `call` inside a try, within `scope`, whose handlers would survive a hang?"""
+    import ast
+    for t in ast.walk(scope):
+        if not isinstance(t, ast.Try):
+            continue
+        if any(c is call for stmt in t.body for c in ast.walk(stmt)) and _handlers_survive(t):
+            return True
+    return False
+
+
+def _wrapper_survives(name: str, defs: dict, wrappers: set[str], seen: Optional[set] = None) -> bool:
+    """Does this wrapper guard its OWN network calls (transitively)?"""
+    import ast
+    seen = seen or set()
+    fn = defs.get(name)
+    if fn is None or name in seen:
+        return False
+    seen.add(name)
+    reach = _NETWORK_CALL | wrappers
+    inner = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and _callee(c) in reach]
+    if not inner:
+        return True
+    for c in inner:
+        if _call_guarded(c, fn):
+            continue
+        if _callee(c) in wrappers and _wrapper_survives(_callee(c), defs, wrappers, seen):
+            continue
+        return False
+    return True
+
+
+def loop_dies_on_one_dead_party(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1274 — a loop over third parties that one of them can kill.
+
+    Live, ADD115's script walked 89 public indexers, classified 20 corpses
+    correctly off their HTTP bodies (§17.1263/1266) and then met a tracker that
+    HUNG: ``urlopen`` raised ``TimeoutError``, which is not an ``HTTPError``, so
+    the only ``except`` in the loop never fired — traceback, exit 1, step
+    failed, 0 added, no summary. The rule it broke had been in CHANNEL_RULES
+    since §17.1263 as prose; a rule the draft ignores is not a fail-safe
+    (§17.1268), so this is the gate.
+
+    Decidable from the source: a loop over something that is NOT a literal the
+    draft wrote out (`apps = [radarr, sonarr]` is this machine's own things and
+    is left alone) whose body reaches a network call — directly or through a
+    wrapper (§17.1274's `_network_wrappers`) — with no enclosing ``try`` that
+    would survive a hang, at the call site or inside the wrapper.
+    """
+    import ast
+    out: list[dict] = []
+    for what, source, label in _py_sources(commands, files):
+        if not source:
+            continue
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError, RecursionError):
+            continue                                    # §17.1257 reports that, not this
+        names = _literal_names(tree)
+        defs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        wrappers = _network_wrappers(tree)
+        reach = _NETWORK_CALL | wrappers
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.For, ast.AsyncFor)) or _literal_iter(node.iter, names):
+                continue
+            calls = [c for c in ast.walk(node) if isinstance(c, ast.Call) and _callee(c) in reach]
+            if not calls:
+                continue
+            exposed = []
+            for c in calls:
+                name = _callee(c)
+                if _call_guarded(c, node):
+                    continue
+                if name in wrappers and _wrapper_survives(name, defs, wrappers):
+                    continue
+                exposed.append(name)
+            if not exposed:
+                continue
+            where = ast.unparse(node.iter)[:60]
+            out.append({"command": label, "why": (
+                f"{what} loops over `{where}` -- things outside this machine -- and reaches the network "
+                f"through `{exposed[0]}` with nothing catching a HANG. `urlopen` raises TimeoutError or "
+                f"urllib.error.URLError when a tracker does not answer, which is not an HTTPError, so this run "
+                f"dies at the first one that hangs, with no summary and no record of the rest -- live, that was "
+                f"indexer 40 of 89. Catch `(urllib.error.URLError, TimeoutError, OSError)` around that call, INSIDE "
+                f"the loop, and record the item as unreachable exactly like a 502 (the rule this block already "
+                f"applies to HTTP errors).")})
+            break                                       # one finding per payload is enough
+    if out:
+        logger.warning("network_loop_dies_on_hang count=%d first=%r", len(out), out[0]["why"][:120])
+    return out
+
+
+def loops_the_network_without_a_budget(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1268 — a block that cannot finish in the time it is given.
 
     §17.1267 told the drafter a command gets 180 seconds and asked for batches.
@@ -864,40 +1074,56 @@ def loops_the_network_without_a_budget(commands: list[str]) -> list[dict]:
 
     Reuses §17.1257's payload extraction: the source is already in hand, and the
     AST it compiles is already proof the code is real.
+
+    §17.1274 — reads written FILES as well as command payloads, follows the
+    loop's calls through local wrappers (`api_post`), and does the arithmetic on
+    a bounded slice: `public[:10]` at `timeout=60` is 600 seconds, not a batch.
     """
     import ast
     out: list[dict] = []
-    for cmd in commands or []:
-        for what, source in python_payloads(str(cmd)):
-            if not source:
+    for what, source, label in _py_sources(commands, files):
+        if not source:
+            continue
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError, RecursionError):
+            continue                      # §17.1257 reports that, not this
+        names = _literal_names(tree)
+        remote = _NETWORK_CALL | _network_wrappers(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.For, ast.AsyncFor)):
                 continue
-            try:
-                tree = ast.parse(source)
-            except (SyntaxError, ValueError, RecursionError):
-                continue                      # §17.1257 reports that, not this
-            names = _literal_names(tree)
-            for node in ast.walk(tree):
-                if not isinstance(node, (ast.For, ast.AsyncFor)) or _bounded(node.iter, names):
-                    continue
-                calls = [c for c in ast.walk(node) if isinstance(c, ast.Call)
-                         and (getattr(c.func, "attr", None) or getattr(c.func, "id", None)) in _NETWORK_CALL]
-                if not calls:
-                    continue
-                sleeps = [c for c in ast.walk(node) if isinstance(c, ast.Call)
-                          and getattr(c.func, "attr", None) == "sleep"]
-                where = ast.unparse(node.iter)[:60]
-                out.append({"command": cmd, "why": (
-                    f"{what} loops over `{where}` -- however many that service returns -- and every pass "
-                    f"waits on something off this machine"
-                    + (", with a sleep inside the loop as well" if sleeps else "")
-                    + f". One command gets {_RUN_BUDGET_S} seconds and is KILLED at that point, with no "
-                    f"record of how much of the work landed, so a run over 89 of anything cannot be "
-                    f"offered. Bound it: take a slice of a size YOU choose (`{where}[:20]`, or fewer) and send "
-                    f"several commands, each one resumable -- treat a thing that is already there as "
-                    f"success and move on. Pick the size so a batch finishes well inside the budget: if "
-                    f"every item waits on a remote service that may answer slowly or not at all, ten is "
-                    f"safer than twenty. Then a batch that runs out of time loses only itself.")})
-                break                         # one finding per payload is enough
+            calls = [c for c in ast.walk(node) if isinstance(c, ast.Call) and _callee(c) in remote]
+            if not calls:
+                continue
+            where = ast.unparse(node.iter)[:60]
+            if _bounded(node.iter, names):
+                n, tos = _slice_bound(node.iter), _request_timeouts(tree)
+                if n and tos and n * max(tos) > _RUN_BUDGET_S:
+                    out.append({"command": label, "why": (
+                        f"{what} loops over `{where}` -- {n} items -- and each request may wait "
+                        f"`timeout={max(tos):g}` seconds: {n * max(tos):g} seconds against a {_RUN_BUDGET_S}-second "
+                        f"budget if every item hangs, and one command is KILLED at {_RUN_BUDGET_S}. Give each request "
+                        f"a short timeout (`timeout=15`) or take fewer items, so the batch finishes well inside the "
+                        f"budget even when every item waits on something off this machine.")})
+                    break
+                continue
+            sleeps = [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                      and getattr(c.func, "attr", None) == "sleep"]
+            via = sorted({_callee(c) for c in calls} - _NETWORK_CALL)
+            out.append({"command": label, "why": (
+                f"{what} loops over `{where}` -- however many that service returns -- and every pass "
+                f"waits on something off this machine"
+                + (f" (through `{via[0]}`)" if via else "")
+                + (", with a sleep inside the loop as well" if sleeps else "")
+                + f". One command gets {_RUN_BUDGET_S} seconds and is KILLED at that point, with no "
+                f"record of how much of the work landed, so a run over 89 of anything cannot be "
+                f"offered. Bound it: take a slice of a size YOU choose (`{where}[:20]`, or fewer) and send "
+                f"several commands, each one resumable -- treat a thing that is already there as "
+                f"success and move on. Pick the size so a batch finishes well inside the budget: if "
+                f"every item waits on a remote service that may answer slowly or not at all, ten is "
+                f"safer than twenty. Then a batch that runs out of time loses only itself.")})
+            break                             # one finding per payload is enough
     if out:
         logger.warning("network_loop_without_budget count=%d first=%r", len(out), out[0]["why"][:120])
     return out
@@ -2289,11 +2515,15 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1255 and §17.1255b, which pattern-matched two shapes of the same bug.
     refused = refused + payload_will_not_compile(cmds)
     # §17.1256 — a written script that reads a secret the runner never passes.
-    refused = refused + script_secret_not_passed(cmds)
+    refused = refused + script_secret_not_passed(cmds, files)
     # §17.1268 — work that cannot finish in the time one command is given. A
     # refusal rather than a rule, because §17.1267 put the budget in the prompt
     # and the next draft looped over all 89 again with a sleep added.
-    refused = refused + loops_the_network_without_a_budget(cmds)
+    refused = refused + loops_the_network_without_a_budget(cmds, files)
+    # §17.1274 — a loop over third parties must survive one of them hanging; the
+    # live script died at indexer 40 of 89 on a TimeoutError its `except HTTPError`
+    # never saw. Prose since §17.1263; a gate now.
+    refused = refused + loop_dies_on_one_dead_party(cmds, files)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner

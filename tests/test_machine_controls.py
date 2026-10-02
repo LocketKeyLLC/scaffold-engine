@@ -32,7 +32,7 @@ def test_only_the_tools_that_carry_a_command_are_recorded():
     itself, and the probe calls them on every page load — they would bury the
     rows that are actually work."""
     import app.modules.mcp_client as mc
-    assert mc._COMMAND_TOOLS == ra.COMMAND_TOOLS == ("run_readonly", "run_supervised")
+    assert mc._COMMAND_TOOLS == ra.COMMAND_TOOLS == ("run_readonly", "run_supervised", "write_file")  # §17.1274
     assert "write_policy" not in ra.COMMAND_TOOLS and "list_tools" not in ra.COMMAND_TOOLS
 
 
