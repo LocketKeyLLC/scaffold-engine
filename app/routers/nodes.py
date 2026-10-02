@@ -186,4 +186,5 @@ async def node_reset(
     edited_by = _attributed(principal, body.edited_by if body else None)
     return _dispatch(await node_editor.reset_node(
         job_id, node_key, edited_by=edited_by, db=db,
+        cascade=bool(body.cascade) if body else False,      # §17.1284
     ))

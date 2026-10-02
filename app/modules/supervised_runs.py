@@ -536,6 +536,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped. Do not write that branch yourself -- paste this helper into the script and call it on the parsed 400 body:
 """ + WHOSE_FAULT_HELPER + """
   'unreachable' -> record the name, continue; 'needs_input' -> record "needs configuration: <name> (<field>)", continue; 'bad_request' -> print the body, stop; 'duplicate' -> already present. Live, the 88th definition was "Torrent RSS Feed" -- a generic template whose BaseUrl must be typed -- and a script that stopped there called a template a bad request.
+- REACHING A MACHINE OVER SSH FOR THE FIRST TIME: nothing can type a password here, and the host key is unknown. A password the store holds goes to ssh through sshpass's environment, never argv: `apt-get install -y sshpass` if it is missing, then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new -i /root/.ssh/id_rsa.pub user@host` (the same prefix works for `ssh` and `scp`). After that, key auth works and `ssh -o BatchMode=yes user@host true` is the check. A VM you just STARTED is not up yet: wait for it with a loop of reads (`for i in 1 2 3 4 5 6 7 8 9 10 11 12; do ping -c 1 -W 2 host >/dev/null 2>&1 && break; sleep 5; done`) before the first ssh -- a loop of reads is one line, elevated or not.
 - YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next.
 - A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not. A thing that HANGS is not an HTTP status: `urlopen` raises TimeoutError or urllib.error.URLError, so `except HTTPError` alone lets one slow tracker kill the whole run with no summary -- catch `(urllib.error.URLError, TimeoutError, OSError)` around the call, INSIDE the loop, and record that item as unreachable exactly like a 502.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
@@ -1272,6 +1273,15 @@ def loop_dies_on_one_dead_party(commands: list[str], files: Optional[list[dict]]
 #: §17.1283 — the first helper that elevates a compound line as a whole.
 WHOLE_LINE_SUDO_HELPER = 19
 
+_SHELL_WORDS = frozenset({"do", "done", "then", "else", "elif", "fi", "break", "continue", "true", "false",
+                          "esac", "exit", ":", "wait"})
+
+
+def _shell_keyword_only(segment: str) -> bool:
+    """A segment that is a shell keyword (or `exit N` / `true`) rather than a program."""
+    words = (segment or "").strip().split()
+    return bool(words) and words[0] in _SHELL_WORDS and all(w in _SHELL_WORDS or w.isdigit() for w in words)
+
 
 def compound_write_on_a_head_only_runner(commands: list[str], policy: Optional[dict]) -> list[dict]:
     """§17.1283 — a runner older than helper 19 prefixes `sudo -n` to the
@@ -1298,7 +1308,12 @@ def compound_write_on_a_head_only_runner(commands: list[str], policy: Optional[d
         segs = split_segments(str(cmd))
         if len(segs) < 2:
             continue
-        writes = [sg for sg in segs[1:] if sg.strip() and not read_only_command(sg)]
+        # §17.1284b — `do`, `done`, `break`, `then`, `fi` are the shell's own
+        # words, not commands: the first live outing refused the drafter's wait
+        # loop (`for …; do ping … && break; sleep 5; done`) for them, the
+        # redraft dropped the wait, and ssh ran into a VM one second into its boot.
+        writes = [sg for sg in segs[1:]
+                  if sg.strip() and not _shell_keyword_only(sg) and not read_only_command(sg)]
         if not writes:
             continue
         out.append({"command": str(cmd), "why": (

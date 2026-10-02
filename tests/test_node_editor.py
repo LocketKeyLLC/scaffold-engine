@@ -222,10 +222,11 @@ class TestReset:
             _node("T3", status="done", deps=["T2"]),
         ]
         with _patch_load(nodes):
-            r = await node_editor.reset_node("j", "T1", db=_db())
+            r = await node_editor.reset_node("j", "T1", db=_db(), cascade=True)
         assert r["status"] == "ok"
         assert r["reset"] == ["T1", "T2", "T3"]
         assert r["downstream_reset"] == ["T2", "T3"]
+        assert r["downstream_kept"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -291,3 +292,31 @@ async def test_insert_node_reopens_terminal_job():
         "SET status = 'executing'" in s and "compiled_output = NULL" in s
         for s in sqls
     ), "insert_node did not call _reopen_job"
+
+
+# ───── §17.1284 — the cascade is opt-in
+
+@pytest.mark.asyncio
+async def test_a_retry_of_one_node_touches_nothing_else_by_default():
+    """Live: resetting ADD26 (failed) reset sixteen nodes behind it, un-doing
+    one `done` and twelve `skipped` steps settled weeks earlier."""
+    nodes = [
+        _node("T1", status="failed"), _node("T2", status="done", deps=["T1"]),
+        _node("T3", status="skipped", deps=["T2"]), _node("T4", status="pending", deps=["T3"]),
+    ]
+    with _patch_load(nodes):
+        r = await node_editor.reset_node("j", "T1", db=_db())
+    assert r["status"] == "ok"
+    assert r["reset"] == ["T1"], "only the node asked for"
+    assert r["downstream_reset"] == []
+    assert r["downstream_kept"] == ["T2", "T3", "T4"], "what was NOT touched is said"
+
+
+def test_the_route_and_its_model_default_to_no_cascade():
+    import inspect, pathlib
+    from app import schemas
+    from app.routers import nodes as nodes_router
+    assert schemas.NodeResetInput().cascade is False
+    src = pathlib.Path(inspect.getfile(nodes_router)).read_text(encoding="utf-8")
+    i = src.index("async def node_reset(")
+    assert "cascade=bool(body.cascade) if body else False" in src[i:i + 1200]
