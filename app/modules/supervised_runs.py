@@ -100,7 +100,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "whether the KEY `propertyName` appears",       # §17.1278
                    "by a phrase list",                             # §17.1278b
                    "without reading the body's `propertyName`",    # §17.1278c
-                   "has no 'needs_input' verdict")                 # §17.1279
+                   "has no 'needs_input' verdict",                 # §17.1279
+                   "a secret cannot be written into a file")       # §17.1280
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -2659,12 +2660,54 @@ def step_text(node: dict) -> str:
     return "\n".join(seen)
 
 
-def inputs_for(commands: list[str], verify: list[str], runbook: str) -> list[dict]:
-    """``[{name, hint, secret}]`` — the values the operator must supply."""
+def inputs_for(commands: list[str], verify: list[str], runbook: str,
+               files: Optional[list[dict]] = None) -> list[dict]:
+    """``[{name, hint, secret}]`` — the values the operator must supply.
+
+    §17.1280 — a placeholder inside a WRITTEN FILE is an input too. Live, both
+    scripts carried `PROWLARR_URL = "http://<PROWLARR_IP>:9696"`; this read only
+    the commands, so the frame said `inputs: []`, nothing was asked or
+    discovered, and the file reached the disk with the literal `<PROWLARR_IP>`,
+    which `urlopen` then tried to resolve as a hostname.
+    """
     hints = input_hints(runbook)
     from app.modules.runbook_inputs import secret_name       # §17.1275 — one definition
-    return [{"name": n, "hint": hints.get(n, ""), "secret": secret_name(n)}
-            for n in placeholders(list(commands) + list(verify))]
+    texts = list(commands) + list(verify) + [str((f or {}).get("content") or "") for f in files or []]
+    return [{"name": n, "hint": hints.get(n, ""), "secret": secret_name(n)} for n in placeholders(texts)]
+
+
+def secrets_in_files(files: Optional[list[dict]], inputs: list[dict]) -> list[dict]:
+    """§17.1280 — a SECRET placeholder inside a file cannot be filled: the runner
+    expands `$NAME` in a COMMAND's environment, never inside a file's bytes, and
+    writing the value into a file on disk is the leak §17.1191 exists to stop."""
+    secret = {i["name"] for i in inputs or [] if i.get("secret")}
+    out: list[dict] = []
+    for f in files or []:
+        found = [n for n in placeholders([str((f or {}).get("content") or "")]) if n in secret]
+        if found:
+            out.append({"command": f"the file {(f or {}).get('path')}", "why": (
+                f"the file {(f or {}).get('path')} contains <{found[0]}>, a secret, and a secret cannot be "
+                f"written into a file: the runner expands `$NAME` only in a command's environment, and a "
+                f"value on disk is the leak the store exists to prevent. Read it on the machine instead "
+                f"(a *arr key is the `<ApiKey>` in its config.xml, via `pct exec`), or pass it as an "
+                f"environment variable -- `{found[0]}=\"${found[0]}\" python3 {(f or {}).get('path')}` -- "
+                f"and read `os.environ[\"{found[0]}\"]` in the script.")})
+    return out
+
+
+def fill_files(files: list[dict], values: dict[str, str]) -> tuple[list[dict], list[dict]]:
+    """§17.1280 — ``(files with placeholders substituted, problems)``. A placeholder
+    left over after substitution is a problem, never a file on disk: `<PROWLARR_IP>`
+    written verbatim became `Name or service not known` live."""
+    out: list[dict] = []
+    problems: list[dict] = []
+    for f in files or []:
+        content = substitute([str((f or {}).get("content") or "")], values or {})[0]
+        left = placeholders([content])
+        for n in left:
+            problems.append({"name": n, "why": f"missing (used in the file {(f or {}).get('path')})"})
+        out.append({**f, "content": content})
+    return out, problems
 
 
 def check_inputs(names: list[str], values: dict | None) -> tuple[dict[str, str], list[dict]]:
@@ -2873,7 +2916,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # parameters with no shell involved, so their content needs no quoting; the
     # engine compiles what it can before offering them.
     files = file_writes(runbook) if (policy or {}).get("can_write_files") else []
-    inputs = inputs_for(cmds, verify, runbook)
+    inputs = inputs_for(cmds, verify, runbook, files)      # §17.1280 — a file's placeholders are inputs too
     # §17.1191 — a secret is resolved BY THE RUNNER or not at all; it is never
     # typed here and never travels through the engine.
     cmds, verify, inputs, secrets_resolved, secrets_missing = apply_runner_secrets(cmds, verify, inputs, policy)
@@ -2890,6 +2933,12 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     _dummies = {i["name"]: "x" for i in inputs}
     _dummies.update({n: "x" for n in secrets_missing})
     shape = substitute(cmds, _dummies) if _dummies else cmds
+    # §17.1280 — the gates judge the files as they will be WRITTEN (placeholders
+    # filled with a dummy); the frame keeps them as drafted so resolve fills the
+    # real values. A secret placeholder in a file has no fill and is refused.
+    shape_files = ([{**f, "content": substitute([str(f.get("content") or "")], _dummies)[0]} for f in files]
+                   if _dummies else files)
+    _secret_files = secrets_in_files(files, inputs)
     runnable, refused = gate_block(shape, policy.get("allow") or [])
     refused = list(refused) + list(preconditions or [])      # §17.1213
     # §17.1234 — a write that cannot report an HTTP error is a SHAPE problem the
@@ -2902,24 +2951,24 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
     # §17.1271 — and judge the written files the same way the commands are judged.
-    refused = refused + file_writes_will_not_work(files)
+    refused = refused + file_writes_will_not_work(shape_files) + _secret_files
     # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.
     # §17.1257 — compile what the block hands to another interpreter. Supersedes
     # §17.1255 and §17.1255b, which pattern-matched two shapes of the same bug.
     refused = refused + payload_will_not_compile(cmds)
     # §17.1256 — a written script that reads a secret the runner never passes.
-    refused = refused + script_secret_not_passed(cmds, files)
+    refused = refused + script_secret_not_passed(cmds, shape_files)
     # §17.1268 — work that cannot finish in the time one command is given. A
     # refusal rather than a rule, because §17.1267 put the budget in the prompt
     # and the next draft looped over all 89 again with a sleep added.
-    refused = refused + loops_the_network_without_a_budget(cmds, files)
+    refused = refused + loops_the_network_without_a_budget(cmds, shape_files)
     # §17.1274 — a loop over third parties must survive one of them hanging; the
     # live script died at indexer 40 of 89 on a TimeoutError its `except HTTPError`
     # never saw. Prose since §17.1263; a gate now.
-    refused = refused + loop_dies_on_one_dead_party(cmds, files)
+    refused = refused + loop_dies_on_one_dead_party(cmds, shape_files)
     # §17.1278 — and it must tell a dead tracker from a bad request the way the
     # service does: by whether a field is NAMED, not whether the key is present.
-    refused = refused + classifies_by_key_presence(cmds, files)
+    refused = refused + classifies_by_key_presence(cmds, shape_files)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner
@@ -3154,6 +3203,12 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
     # command does: the records share one shape and one sequence.
     _files = [{"path": f["path"], "content": f["content"]}
               for f in (waiting.get("files") or []) if (f or {}).get("path")]
+    # §17.1280 — the values the operator supplied (or the machine answered) go
+    # into the files as well as the commands; a placeholder left over is a
+    # problem to report, never bytes on disk.
+    _files, _left = fill_files(_files, values)
+    if _left:
+        return {"outcome": "inputs_missing", "problems": _left, "inputs": asked}
     logger.warning("supervised_run_started job=%s node=%s runner=%s files=%d commands=%d secrets=%d",
                    job_id, node_key, spec.name, len(_files), len(runnable), len(secret_env))
     executed = await _sw.write_files_on(spec, _files) if _files else []

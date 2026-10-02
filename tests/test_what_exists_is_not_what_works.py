@@ -444,7 +444,7 @@ def test_the_gate_reaches_the_frame():
     that turn Run off and trigger the §17.1196 redraft."""
     src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
     i = src.index("def frame_run(")
-    assert "loops_the_network_without_a_budget(cmds, files)" in src[i:], \
+    assert "loops_the_network_without_a_budget(cmds, shape_files)" in src[i:], \
         "the gate must be called from frame_run, not merely exist"
 
 
