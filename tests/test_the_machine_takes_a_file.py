@@ -1412,3 +1412,47 @@ def test_the_1288_refusals_are_registered_for_redraft():
     from app.modules import supervised_runs as sr
     for sig in ("appears only in the verify", "inside an ssh command line", "reads the neighbour table cold"):
         assert sig in sr._SHAPE_REFUSALS
+
+
+# ───── §17.1288e — the refusal outranks the step's own text
+
+def test_the_retry_note_outranks_a_specification_that_says_no_way_in():
+    """Live: ADD82's specification said "the host has NO way in … done at the
+    console" and quoted the host-side lines; the redraft obeyed it over the
+    refusal twice in a row. The note must say which wins."""
+    from app.modules import supervised_runs as sr
+    frame = {"refused": sr.commands_never_reach_the_guest(ADD82_CMDS, ADD82), "file_channel": True}
+    assert frame["refused"], "fixture: the host-side block is refused"
+    note = sr.shape_retry_note(frame)
+    assert "THIS NOTE OUTRANKS THE SPECIFICATION ABOVE" in note
+    assert '"no way in"' in note and '"done at the console"' in note
+    assert "inside the script's ssh payload" in note
+    assert "YOUR REDRAFT REPEATED" not in note
+
+
+def test_a_redraft_refused_for_the_same_kind_is_told_so_once():
+    from app.modules import supervised_runs as sr
+    first = {"refused": sr.commands_never_reach_the_guest(ADD82_CMDS, ADD82), "file_channel": True}
+    second = {"refused": sr.commands_never_reach_the_guest(ADD82_CMDS[:2], ADD82), "file_channel": True}
+    assert sr.refusal_kinds(first) == sr.refusal_kinds(second)
+    note = sr.shape_retry_note(second, previous=first, repeated=True)
+    assert note.startswith("YOUR PREVIOUS DRAFT WAS REFUSED BY THE RUNNER'S GATE")
+    assert "YOUR REDRAFT REPEATED THE SAME REFUSED SHAPE" in note
+    assert "THE DRAFT BEFORE THAT was refused for something different" not in note, "it was not different"
+    assert "THIS NOTE OUTRANKS THE SPECIFICATION ABOVE" in note
+
+
+def test_the_pause_tries_a_third_time_on_a_repeated_kind_too():
+    """Wiring: identical kinds get the one bounded extra draft, flagged `repeated`."""
+    import ast
+    from app.modules import execution_agent as ea
+    src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
+    i = src.index("async def _pause_for_decision(")
+    body = src[i:]
+    j = body.index("\nasync def ", 10) if "\nasync def " in body[10:] else len(body)
+    body = body[:j]
+    assert "or k2 == k1" in body, "a redraft refused for exactly the same kinds gets one more, told so"
+    assert "same=%s" in body, "the log says whether the third draft is for a repeat"
+    tree = ast.parse(src)
+    calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "shape_retry_note"]
+    assert any(any(k.arg == "repeated" for k in c.keywords) for c in calls), "the third note must carry `repeated`"
