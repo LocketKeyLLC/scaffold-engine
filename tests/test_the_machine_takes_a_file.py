@@ -444,7 +444,7 @@ def test_every_payload_gate_in_frame_run_sees_the_files():
     for c in ast.walk(fn):
         if isinstance(c, ast.Call) and getattr(c.func, "id", None) in gates:
             seen.add(c.func.id)
-            assert len(c.args) == 2 and ast.unparse(c.args[1]) == "files", f"{c.func.id} does not see the files"
+            assert len(c.args) == 2 and ast.unparse(c.args[1]) in ("files", "shape_files"), f"{c.func.id} does not see the files"
     assert seen == gates, f"frame_run does not call {gates - seen}"
 
 
@@ -807,7 +807,7 @@ def test_the_key_presence_gate_sees_the_files_in_frame_run():
     tree = ast.parse(pathlib.Path(sr.__file__).read_text(encoding="utf-8"))
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "frame_run")
     calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "classifies_by_key_presence"]
-    assert calls and len(calls[0].args) == 2 and ast.unparse(calls[0].args[1]) == "files"
+    assert calls and len(calls[0].args) == 2 and ast.unparse(calls[0].args[1]) in ("files", "shape_files")
 
 
 def test_the_live_output_is_judged_as_stopped_on_a_dead_party():
@@ -946,3 +946,78 @@ def test_unreachable_lines_are_not_repeated_failures():
     from app.modules import supervised_runs as sr
     out = "\n".join(f"unreachable: tracker{i} (HTTP 400: blocked by CloudFlare)" for i in range(38))
     assert sr.repeated_identical_failures(out) is None
+
+
+# ───── §17.1280 — a placeholder inside a written file is an input too
+#
+# Live: both scripts carried `PROWLARR_URL = "http://<PROWLARR_IP>:9696"`; the
+# placeholder pipeline read commands and verify lines only, the frame said
+# `inputs: []`, nothing was asked or discovered, and the file reached the disk
+# with the literal `<PROWLARR_IP>` -- `urlopen error [Errno -2] Name or service
+# not known`.
+
+def test_the_live_files_placeholders_are_inputs():
+    from app.modules import supervised_runs as sr
+    files = [{"path": "/tmp/add_indexers.py", "content": _fx("add115_file_placeholders.py")},
+             {"path": "/tmp/connect_apps.py", "content": _fx("add115_file_placeholders_apps.py")}]
+    cmds = ["python3 /tmp/add_indexers.py 0 10", "python3 /tmp/connect_apps.py"]
+    assert sr.inputs_for(cmds, [], "") == [], "the commands alone name no input -- which is how it got through"
+    names = [i["name"] for i in sr.inputs_for(cmds, [], "", files)]
+    assert names == ["PROWLARR_IP", "RADARR_IP", "SONARR_IP"], names
+    assert all(not i["secret"] for i in sr.inputs_for(cmds, [], "", files))
+
+
+def test_fill_files_substitutes_and_never_leaves_a_placeholder():
+    from app.modules import supervised_runs as sr
+    files = [{"path": "/tmp/x.py", "content": 'URL = "http://<PROWLARR_IP>:9696"\n'}]
+    filled, left = sr.fill_files(files, {"PROWLARR_IP": "192.168.1.21"})
+    assert filled[0]["content"] == 'URL = "http://192.168.1.21:9696"\n' and left == []
+    _, left = sr.fill_files(files, {})
+    assert left == [{"name": "PROWLARR_IP", "why": "missing (used in the file /tmp/x.py)"}]
+
+
+def test_a_secret_placeholder_in_a_file_is_refused_with_the_remedy():
+    from app.modules import supervised_runs as sr
+    files = [{"path": "/tmp/x.py", "content": 'KEY = "<PROWLARR_API_KEY>"\n'}]
+    inputs = sr.inputs_for(["python3 /tmp/x.py"], [], "", files)
+    found = sr.secrets_in_files(files, inputs)
+    assert found and "a secret cannot be written into a file" in found[0]["why"]
+    assert "config.xml" in found[0]["why"] and 'os.environ["PROWLARR_API_KEY"]' in found[0]["why"]
+    assert any(s in found[0]["why"] for s in sr._SHAPE_REFUSALS)
+    assert sr.secrets_in_files([{"path": "/tmp/y.py", "content": 'IP = "<PROWLARR_IP>"\n'}],
+                               sr.inputs_for([], [], "", [{"path": "/tmp/y.py", "content": 'IP = "<PROWLARR_IP>"\n'}])) == []
+
+
+def test_frame_run_asks_for_a_files_placeholder_and_keeps_the_file_as_drafted():
+    from app.modules import supervised_runs as sr
+    runbook = ("## Write these files\n### /tmp/x.py\n```python\nimport urllib.request\n"
+               "URL = \"http://<PROWLARR_IP>:9696\"\nurllib.request.urlopen(URL, timeout=15)\n```\n\n"
+               "## Run this\n```bash\npython3 /tmp/x.py\n```\n\n## Verify\n- `pct list`\n")
+    spec = type("S", (), {"name": "t", "headers": {}})()
+    frame = sr.frame_run({"node_key": "X", "title": "t"}, runbook, spec, {"allow": ["ANY"], "can_write_files": True})
+    assert [i["name"] for i in frame["inputs"]] == ["PROWLARR_IP"]
+    assert "<PROWLARR_IP>" in frame["files"][0]["content"], "the frame keeps the draft; resolve fills the real value"
+    assert frame["refused"] == [], frame["refused"]
+    assert "run" in {o["id"] for o in frame["options"]}
+
+
+def test_resolve_run_fills_the_files_before_writing_them():
+    from app.modules import supervised_runs as sr
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("async def resolve_run(")
+    body = src[i:]
+    assert body.index("_files, _left = fill_files(_files, values)") < body.index("write_files_on(spec, _files)")
+    assert '"outcome": "inputs_missing", "problems": _left' in body
+
+
+def test_every_payload_gate_in_frame_run_judges_the_filled_files():
+    """The gates must see the file as it will be written (dummies in), and the
+    secret check must run: a `<X>` outside a string would otherwise look like a
+    syntax error, and a secret would be asked for instead of refused."""
+    from app.modules import supervised_runs as sr
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("def frame_run("); body = src[i:src.index("\ndef ", i + 10)]
+    for g in ("file_writes_will_not_work", "script_secret_not_passed", "loops_the_network_without_a_budget",
+              "loop_dies_on_one_dead_party", "classifies_by_key_presence"):
+        assert f"{g}(cmds, shape_files)" in body or f"{g}(shape_files)" in body, g
+    assert "secrets_in_files(files, inputs)" in body
