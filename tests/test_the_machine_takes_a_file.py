@@ -1392,7 +1392,9 @@ def test_frame_run_refuses_the_live_add82_script_for_all_three():
     assert "appears only in the verify" not in kinds
     assert frame["verify"] == [ADD82_VERIFY[0]]
     assert [i["name"] for i in frame["inputs"]] == ["PALWORLD_USER"], "PALWORLD_IP left with the check"
-    assert len(frame["engine_fixed"]) == 1 and "dropped the check" in frame["engine_fixed"][0]
+    assert any("dropped the check" in w for w in frame["engine_fixed"])
+    # §17.1288o — this first live script also had set -e lookups its wait expected empty; repaired, said
+    assert any("added `|| true`" in w for w in frame["engine_fixed"])
 
 
 def test_a_check_the_run_cannot_fill_is_dropped_only_when_another_check_remains():
@@ -1404,7 +1406,7 @@ def test_a_check_the_run_cannot_fill_is_dropped_only_when_another_check_remains(
     spec = type("S", (), {"name": "pve-runner", "headers": {}})()
     frame = sr.frame_run(ADD82, runbook, spec, policy)
     assert "appears only in the verify" in sr.refusal_kinds(frame)
-    assert frame["verify"] == [ADD82_VERIFY[1]] and frame["engine_fixed"] == []
+    assert frame["verify"] == [ADD82_VERIFY[1]] and not any("dropped the check" in w for w in frame["engine_fixed"])
     assert "PALWORLD_IP" in [i["name"] for i in frame["inputs"]]
 
 
@@ -1767,3 +1769,40 @@ def test_the_pause_persists_the_correction_with_a_pre_image():
     tree = ast.parse(src)
     calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "edit_node"]
     assert calls, "node_editor.edit_node is the ONE path that writes a node with its pre-image"
+
+
+# ───── §17.1288o — under set -e a lookup that finds nothing ends the script
+
+def test_the_script_that_ran_is_repaired_where_set_e_would_kill_its_wait():
+    from app.modules import supervised_runs as sr
+    files = [{"path": "/tmp/install_agent_106.sh", "content": _fx("add82_install_agent_106_v4.sh")}]
+    fixed, repairs = sr.repair_lookups_under_set_e(files)
+    body = fixed[0]["content"]
+    assert "IP=$(ip neigh show | grep -i \"$MAC\" | grep -oP '^\\K[0-9.]+' | head -1 || true)" in body, body
+    assert "MAC=$(qm config 106 | sed -n" in body and "|| true)" not in body.split("\n")[3], "the MAC line has no grep: untouched"
+    assert len(repairs) == 1 and "added `|| true` to `IP=$(…)`" in repairs[0]["why"]
+    assert sr.repair_lookups_under_set_e(fixed)[1] == [], "idempotent"
+
+
+def test_the_repair_is_narrow():
+    from app.modules import supervised_runs as sr
+    no_set_e = [{"path": "/tmp/x.sh", "content": 'IP=$(ip neigh | grep x)\nif [ -z "$IP" ]; then exit 1; fi\n'}]
+    assert sr.repair_lookups_under_set_e(no_set_e)[1] == [], "without set -e an empty grep is harmless"
+    untested = [{"path": "/tmp/x.sh", "content": 'set -e\nIP=$(ip neigh | grep x)\necho "$IP"\n'}]
+    assert sr.repair_lookups_under_set_e(untested)[1] == [], "a value never tested is not a lookup the script expects empty"
+    py = [{"path": "/tmp/x.py", "content": 'set -e\nIP=$(grep x)\n[ -n "$IP" ]\n'}]
+    assert sr.repair_lookups_under_set_e(py)[1] == [], "only a bash script"
+
+
+def test_the_live_2311_runbook_now_parks_runnable_with_the_repair_shown():
+    from app.modules import supervised_runs as sr
+    rb = _fx("add82_runbook_2311_ran.md")
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    env = {"profile": "root@pve", "system_state": {"host": {"kind": "host", "attrs": {"ip": "192.168.1.156"}},
+                                                    "106": {"kind": "vm", "attrs": {"name": "palworld-server"}}}}
+    frame = sr.frame_run(ADD82, rb, spec, POLICY_MASS, env=env)
+    assert frame["refused"] == [], [r["why"][:100] for r in frame["refused"]]
+    assert [i["name"] for i in frame["inputs"]] == ["PALWORLD_USER"]
+    assert any("added `|| true`" in w for w in frame["engine_fixed"]) and any("dropped the check" in w for w in frame["engine_fixed"])
+    assert "|| true)" in frame["files"][0]["content"], "the frame carries the REPAIRED file -- the operator approves what runs"
+    assert "run" in {o["id"] for o in frame["options"]}

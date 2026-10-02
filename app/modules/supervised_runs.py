@@ -576,7 +576,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 """ + WHOSE_FAULT_HELPER + """
   'unreachable' -> record the name, continue; 'needs_input' -> record "needs configuration: <name> (<field>)", continue; 'bad_request' -> print the body, stop; 'duplicate' -> already present. Live, the 88th definition was "Torrent RSS Feed" -- a generic template whose BaseUrl must be typed -- and a script that stopped there called a template a bad request.
 - REACHING A MACHINE OVER SSH FOR THE FIRST TIME: nothing can type a password here, and the host key is unknown. A password the store holds goes to ssh through sshpass's environment, never argv: `apt-get install -y sshpass` if it is missing, then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new -i /root/.ssh/id_rsa.pub user@host` (the same prefix works for `ssh` and `scp`). After that, key auth works and `ssh -o BatchMode=yes user@host true` is the check. The ACCOUNT inside a guest is a placeholder named after the guest (`<PALWORLD_USER>@$IP`) unless a pin or the step's own text names it -- `root` is a guess (Ubuntu Server refuses root over ssh), and `root@pve` is the host's shell, not a guest's. The PASSWORD is `$MASS_PASSWORD`, by name, through the environment (`MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/x.sh`) -- never a new `<X_PASSWORD>` placeholder. A wait pings the guest's FOUND address (`$IP`), never a fixed one (the router or this host answer whether or not the guest is up). A secret never rides an ssh COMMAND LINE: `ssh host 'echo "$MASS_PASSWORD" | sudo -S …'` expands on the remote, where it is unset, and the double-quoted form puts the value in both machines' process lists. Feed it on stdin: `ssh -o BatchMode=yes user@host "sudo -S -p '' bash -c 'apt-get update && apt-get install -y x'" <<< "$MASS_PASSWORD"`. A VM you just STARTED is not up yet: wait for it with a loop of reads (`for i in 1 2 3 4 5 6 7 8 9 10 11 12; do ping -c 1 -W 2 host >/dev/null 2>&1 && break; sleep 5; done`) before the first ssh -- a loop of reads is one line, elevated or not.
-- A VM WITH NO GUEST AGENT IS STILL REACHABLE, and reaching it is your job, not the operator's. Its NIC's MAC is in `qm config N` (`net0: virtio=BC:24:…`); once the VM is up, the host's `ip neigh show` has that MAC beside its address -- but ONLY after a sweep has made the host talk to it (`nmap -sn <the bridge's /24> >/dev/null` when nmap is present, else `for h in $(seq 1 254); do ping -c 1 -W 1 <net>.$h >/dev/null 2>&1 & done; wait`); a VM that booted and spoke to the router alone never appears, however long you wait, so sweep before every read. Then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new <user>@<address>`, and do the step's work over `ssh <user>@<address> '…'` -- for the agent itself: `apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent`, checked with `qm agent N ping` on the host. Values must pass between those steps (the address found feeds the ssh), so write the WHOLE sequence as one bash script under ## Write these files and run it with `MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/<name>.sh`; inside a file `$(…)`, loops and variables are all fine. A step is the operator's ONLY when ssh itself is refused -- say which command refused and why, with the output.
+- A VM WITH NO GUEST AGENT IS STILL REACHABLE, and reaching it is your job, not the operator's. Its NIC's MAC is in `qm config N` (`net0: virtio=BC:24:…`); once the VM is up, the host's `ip neigh show` has that MAC beside its address -- but ONLY after a sweep has made the host talk to it (`nmap -sn <the bridge's /24> >/dev/null` when nmap is present, else `for h in $(seq 1 254); do ping -c 1 -W 1 <net>.$h >/dev/null 2>&1 & done; wait`); a VM that booted and spoke to the router alone never appears, however long you wait, so sweep before every read. Then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new <user>@<address>`, and do the step's work over `ssh <user>@<address> '…'` -- for the agent itself: `apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent`, checked with `qm agent N ping` on the host. Values must pass between those steps (the address found feeds the ssh), so write the WHOLE sequence as one bash script under ## Write these files and run it with `MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/<name>.sh`; inside a file `$(…)`, loops and variables are all fine -- but under `set -e` a lookup that may find nothing (`IP=$(ip neigh show | grep … )`) ends the script on the first empty pass: write `IP=$(… || true)` for every lookup a wait loop expects to be empty. A step is the operator's ONLY when ssh itself is refused -- say which command refused and why, with the output.
 - YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next. A check uses what the run used: a placeholder that appears only in a verify is a value the operator would type for nothing -- check from the host (`qm agent N ping`, `qm agent N exec -- systemctl is-active <unit>`) or in the script's last lines.
 - A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not. A thing that HANGS is not an HTTP status: `urlopen` raises TimeoutError or urllib.error.URLError, so `except HTTPError` alone lets one slow tracker kill the whole run with no summary -- catch `(urllib.error.URLError, TimeoutError, OSError)` around the call, INSIDE the loop, and record that item as unreachable exactly like a 502.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
@@ -3268,6 +3268,47 @@ def step_text_correction(node: Optional[dict], frame: dict, env: Optional[dict] 
             f"password is `$MASS_PASSWORD`, by name. Nothing here is done at a console by hand.")
 
 
+_SET_E_RE = re.compile(r"^\s*set\s+(?:-[a-zA-Z]*e[a-zA-Z]*|-o\s+errexit)\b", re.M)
+_LOOKUP_ASSIGN_RE = re.compile(r"^(?P<indent>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)=\$\((?P<pipe>[^\n]*\b(?:grep|pgrep)\b[^\n]*)\)\s*$", re.M)
+
+
+def repair_lookups_under_set_e(files: Optional[list[dict]]) -> tuple[list[dict], list[dict]]:
+    """§17.1288o — ``(files, repairs)``: under ``set -e`` a lookup that finds
+    nothing ends the script. Live (ADD82, 23:12 UTC): the script started VM 106
+    and on the first pass of its wait loop ran ``IP=$(ip neigh show | grep -i
+    "$MAC" | … | head -1)`` -- grep found nothing yet, exited 1, ``pipefail``
+    made that the pipeline's status, ``set -e`` made it the script's: exit 1
+    after ``MAC: …``, no message, the VM left booting. The script's own next
+    line was ``if [ -n "$IP" ]`` -- it EXPECTED the empty result. Proved in a
+    shell: ``set -euo pipefail; X=$(printf "" | grep x | head -1)`` exits 1;
+    with ``|| true`` inside the substitution it continues. The repair is that
+    ``|| true``, applied to every ``NAME=$(… grep …)`` assignment in a
+    ``set -e`` script whose value the script then tests, and said on the frame
+    (§17.1270: never a silent repair)."""
+    out: list[dict] = []
+    repairs: list[dict] = []
+    for f in files or []:
+        path, body = str((f or {}).get("path") or ""), str((f or {}).get("content") or "")
+        if not path.endswith(".sh") or not _SET_E_RE.search(body):
+            out.append(f)
+            continue
+        fixed = body
+        for m in _LOOKUP_ASSIGN_RE.finditer(body):
+            name, pipe = m.group("name"), m.group("pipe")
+            if re.search(r"\|\|\s*(?:true|:)\s*$", pipe):
+                continue                                     # already survives an empty result
+            if not re.search(rf"\[\s+-[nz]\s+\"?\$\{{?{re.escape(name)}\}}?\"?\s+\]|-z\s+\"\${re.escape(name)}\"", body):
+                continue                                     # the script never tests it: not a lookup that may be empty
+            fixed = fixed.replace(m.group(0), f"{m.group('indent')}{name}=$({pipe} || true)", 1)
+            repairs.append({"why": (
+                f"added `|| true` to `{name}=$(…)` in {path}: under `set -e` a `grep` that finds nothing ends "
+                f"the script, and this lookup is one the script itself expects to be empty (it tests "
+                f"`[ -n \"${name}\" ]`) -- live, the wait loop's first pass killed the run before the guest "
+                f"had booted.")})
+        out.append({**f, "content": fixed} if fixed != body else f)
+    return out, repairs
+
+
 def inputs_for(commands: list[str], verify: list[str], runbook: str,
                files: Optional[list[dict]] = None) -> list[dict]:
     """``[{name, hint, secret}]`` — the values the operator must supply.
@@ -3568,6 +3609,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # parameters with no shell involved, so their content needs no quoting; the
     # engine compiles what it can before offering them.
     files = file_writes(runbook) if (policy or {}).get("can_write_files") else []
+    files, _lookup_repairs = repair_lookups_under_set_e(files)   # §17.1288o — before anything reads them
     # §17.1288d — a check that needs a value the run never uses is dropped, not
     # refused: live, the third draft of ADD82 had fixed everything it was told
     # and still carried `ssh … <PALWORLD_IP>` in its Verify, so the frame parked
@@ -3622,7 +3664,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
-    _repairs = list(_repairs) + _vdrops                    # §17.1288d — a dropped check is a correction too
+    _repairs = list(_repairs) + _vdrops + _lookup_repairs  # §17.1288d/o — a dropped check, a repaired lookup: corrections too
     # §17.1271 — and judge the written files the same way the commands are judged.
     refused = refused + file_writes_will_not_work(shape_files) + _secret_files
     # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.
