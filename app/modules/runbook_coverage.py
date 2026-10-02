@@ -102,7 +102,39 @@ def _canon(cmd: str) -> str:
     return out
 
 
-def uncovered(step_text: str, drafted: list[str]) -> list[str]:
+_QUOTED = re.compile(r"""(['"])((?:(?!\1).)+)\1""")
+
+
+def _expand(drafted: list[str], files: Optional[list[dict]] = None) -> list[str]:
+    """§17.1287 — every place a step's command can be carried out: a command of
+    its own; a segment of a compound line; the payload inside an ``ssh host
+    '…'`` / ``pct exec N -- …`` / ``bash -c '…'`` quote; a line of a written
+    file (and ITS quoted payloads). Live, ADD82's clean redraft ran
+    `sudo apt-get install -y qemu-guest-agent` INSIDE `ssh user@$IP "…"` inside
+    a script -- and this pass, reading only top-level commands, called it
+    missing, redrafted, and accepted the refused host-side block because it
+    "covered" the words."""
+    out: list[str] = []
+    seeds = [str(c or "") for c in (drafted or [])]
+    for f in files or []:
+        seeds += str((f or {}).get("content") or "").splitlines()
+    seen: set[str] = set()
+    stack = list(seeds)
+    while stack:
+        t = stack.pop().strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        for m in _QUOTED.finditer(t):
+            stack.append(m.group(2))
+        for part in re.split(r"\s*(?:&&|\|\||;)\s*", t):
+            if part.strip() and part.strip() != t:
+                stack.append(part)
+    return out
+
+
+def uncovered(step_text: str, drafted: list[str], files: Optional[list[dict]] = None) -> list[str]:
     """Commands the step named that the draft does not carry out.
 
     Empty when the step names none — most steps describe intent in prose, and
@@ -111,7 +143,7 @@ def uncovered(step_text: str, drafted: list[str]) -> list[str]:
     want = commands_in(step_text)
     if not want:
         return []
-    have = {signature(_canon(c)) for c in (drafted or [])}
+    have = {signature(_canon(c)) for c in _expand(drafted, files)}
     missing = [c for c in want if signature(_canon(c)) not in have]
     if missing:
         logger.warning("runbook_coverage_gap missing=%d first=%r", len(missing), missing[0][:70])

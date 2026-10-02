@@ -117,7 +117,7 @@ def test_a_redraft_never_replaces_a_block_with_an_empty_one():
     import inspect
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea)
-    blk = src[src.index("runbook_coverage_redraft job="):][:900]
+    blk = src[src.index("runbook_coverage_redraft job="):][:1400]
     assert '_third.get("commands") and not uncovered(' in blk, blk
 
 
@@ -126,4 +126,44 @@ def test_the_replacement_must_itself_be_covered():
     import inspect
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea)
-    assert 'not uncovered(_step_text, _third["commands"])' in src
+    # §17.1287 — coverage is measured over the written files too, and the replacement may be no worse
+    assert 'not uncovered(_step_text, _third["commands"], _third.get("files") or [])' in src
+
+
+# ───── §17.1287 — a command carried out inside ssh, a payload or a written file counts
+
+import pathlib as _pl
+STEP_82 = (_pl.Path(__file__).parent / "fixtures" / "add82_description.txt").read_text(encoding="utf-8")   # the live step: a ```bash fence of four commands
+
+
+def test_a_command_run_over_ssh_inside_a_script_is_covered():
+    from app.modules import runbook_coverage as rc
+    script = ('IP=$(ip neigh show | grep -i bc:24:11:e8:9f:7a | awk \'{print $1}\')\n'
+              'ssh aedefruscio@$IP "sudo apt-get update && sudo apt-get install -y qemu-guest-agent && sudo systemctl enable --now qemu-guest-agent"\n'
+              'ssh aedefruscio@$IP "systemctl is-active qemu-guest-agent"\n')
+    cmds = ['MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/vm106_agent.sh']
+    assert rc.uncovered(STEP_82, cmds) != [], "the bare command alone carries none of them"
+    assert rc.uncovered(STEP_82, cmds, [{"path": "/tmp/vm106_agent.sh", "content": script}]) == []
+
+
+def test_a_payload_behind_pct_exec_or_bash_c_is_covered():
+    from app.modules import runbook_coverage as rc
+    assert rc.uncovered(STEP_82, ["pct exec 106 -- bash -c 'sudo apt-get update && sudo apt-get install -y qemu-guest-agent && sudo systemctl enable --now qemu-guest-agent && systemctl is-active qemu-guest-agent'"]) == []
+
+
+def test_a_draft_that_really_drops_a_command_is_still_caught():
+    from app.modules import runbook_coverage as rc
+    missing = rc.uncovered(STEP_82, ["ssh u@h 'sudo apt-get update'"])
+    assert any("qemu-guest-agent" in m for m in missing), missing
+    assert "sudo apt-get update" not in missing, "the one it did carry out, inside the ssh payload, is covered"
+
+
+def test_the_coverage_redraft_never_trades_a_runnable_block_for_a_refused_one():
+    import pathlib
+    from app.modules import execution_agent as ea
+    src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
+    i = src.index("from app.modules.runbook_coverage import coverage_retry_note, uncovered")
+    block = src[i:i + 2500]
+    assert 'uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])' in block, "coverage is measured over the files too"
+    assert '_no_worse = len(_third.get("refused") or []) <= len(frame.get("refused") or [])' in block, "§17.1269 at this site"
+    assert "and _no_worse:" in block

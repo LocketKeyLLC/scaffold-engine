@@ -1,0 +1,31 @@
+Install qemu-guest-agent inside the palworld-server guest (VM 106) and confirm it answers.
+
+MEASURED ON THE HOST (read-only, just checked):
+  qm status 106      -> running, booting from scsi0 (100G)
+  qm agent 106 ping  -> "QEMU guest agent is not running"
+  ip neigh           -> no entry for the VM's NIC bc:24:11:e8:9f:7a
+  qm config 106      -> agent: 1 is ALREADY set on the VM
+
+The host therefore has NO way in to this guest right now, and three methods are
+ruled out by that, not by preference:
+  - `pct exec 106` cannot address a VM at all (pct is for containers).
+  - `qm guest exec 106` needs the agent that this step installs. Chicken and egg.
+  - SSH needs an address, and the guest has no network presence the host can see.
+
+So this one is done at the console, by hand:
+  1. Open https://192.168.1.156:8006, select VM 106 (palworld-server), click Console.
+  2. Log in to the guest.
+  3. Install and start the agent:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y qemu-guest-agent
+sudo systemctl enable --now qemu-guest-agent
+systemctl is-active qemu-guest-agent
+```
+
+  4. If the guest has no network either, fix that first — apt cannot reach the
+     mirrors without it — and say so here rather than working around it.
+
+`agent: 1` is already set on the VM, so nothing is needed on the host side.
+Done when `qm agent 106 ping` answers from the host (that is ADD65).
