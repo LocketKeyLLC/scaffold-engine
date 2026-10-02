@@ -1382,11 +1382,30 @@ def test_frame_run_refuses_the_live_add82_script_for_all_three():
     frame = sr.frame_run(ADD82, runbook, spec, policy)
     assert frame["commands"] and frame["files"]
     kinds = sr.refusal_kinds(frame)
-    assert {"appears only in the verify", "inside an ssh command line", "reads the neighbour table cold"} <= kinds, kinds
+    assert {"inside an ssh command line", "reads the neighbour table cold"} <= kinds, kinds
     assert "runs in the runner's own shell on the Proxmox HOST" not in kinds, "the script does reach the guest"
     assert "run" not in {o["id"] for o in frame["options"]}
     for r in frame["refused"]:
         assert any(s in r["why"] for s in sr._SHAPE_REFUSALS), f"unredraftable refusal: {r['why'][:80]}"
+    # §17.1288d — the verify-only placeholder is TRIMMED, not refused: the check
+    # is gone from the frame, the input with it, and the frame says so.
+    assert "appears only in the verify" not in kinds
+    assert frame["verify"] == [ADD82_VERIFY[0]]
+    assert [i["name"] for i in frame["inputs"]] == ["PALWORLD_USER"], "PALWORLD_IP left with the check"
+    assert len(frame["engine_fixed"]) == 1 and "dropped the check" in frame["engine_fixed"][0]
+
+
+def test_a_check_the_run_cannot_fill_is_dropped_only_when_another_check_remains():
+    """§17.1288d — with no other check the refusal stands: the redraft must give one."""
+    from app.modules import supervised_runs as sr
+    runbook = ("## Write these files\n### /tmp/install_agent_106.sh\n```bash\n" + _fx("add82_install_agent_106.sh") +
+               "\n```\n\n## Run this\n```bash\n" + ADD82_RUN + "\n```\n\n## Verify\n- `" + ADD82_VERIFY[1] + "`\n")
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "19", "secrets": ["MASS_PASSWORD"], "can_write_files": True}
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    frame = sr.frame_run(ADD82, runbook, spec, policy)
+    assert "appears only in the verify" in sr.refusal_kinds(frame)
+    assert frame["verify"] == [ADD82_VERIFY[1]] and frame["engine_fixed"] == []
+    assert "PALWORLD_IP" in [i["name"] for i in frame["inputs"]]
 
 
 def test_the_1288_refusals_are_registered_for_redraft():

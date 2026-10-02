@@ -3232,6 +3232,22 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # parameters with no shell involved, so their content needs no quoting; the
     # engine compiles what it can before offering them.
     files = file_writes(runbook) if (policy or {}).get("can_write_files") else []
+    # §17.1288d — a check that needs a value the run never uses is dropped, not
+    # refused: live, the third draft of ADD82 had fixed everything it was told
+    # and still carried `ssh … <PALWORLD_IP>` in its Verify, so the frame parked
+    # on the host-side first draft with the operator's Run greyed out. The run
+    # is the operator's decision; a check the engine cannot fill is the
+    # engine's to remove, said on the frame (`engine_fixed`). When NO check
+    # would be left, the refusal stands and the redraft must supply one.
+    _vhits = verify_needs_a_value_the_run_never_used(cmds, verify, files)
+    _vdrops: list[dict] = []
+    if _vhits and any(v not in {h["command"] for h in _vhits} for v in verify):
+        _bad = {h["command"] for h in _vhits}
+        verify = [v for v in verify if v not in _bad]
+        _vdrops = [{"why": f"dropped the check `{h['command'][:120]}` -- {h['why'].split(':', 1)[0]}: the run "
+                           f"never uses that value, so nobody has it to type; the remaining checks stand"}
+                   for h in _vhits]
+        _vhits = []
     inputs = inputs_for(cmds, verify, runbook, files)      # §17.1280 — a file's placeholders are inputs too
     # §17.1191 — a secret is resolved BY THE RUNNER or not at all; it is never
     # typed here and never travels through the engine.
@@ -3270,6 +3286,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # §17.1270 — repair the one quoting mistake that is provably a mistake, and
     # prove the repair by compiling it, before anything is refused for it.
     cmds, _repairs = repair_shell_quoted_payloads(cmds)
+    _repairs = list(_repairs) + _vdrops                    # §17.1288d — a dropped check is a correction too
     # §17.1271 — and judge the written files the same way the commands are judged.
     refused = refused + file_writes_will_not_work(shape_files) + _secret_files
     # §17.1255 — an inline `-c '…'` payload with escaped quotes cannot parse.
@@ -3280,7 +3297,7 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + script_secret_not_passed(cmds, shape_files)
     # §17.1288 — a check must use what the run used; a secret rides no ssh
     # command line; the neighbour table is read warm. Three readings of one frame.
-    refused = refused + verify_needs_a_value_the_run_never_used(cmds, verify, shape_files)
+    refused = refused + _vhits                            # §17.1288 — only when no check would be left
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1268 — work that cannot finish in the time one command is given. A
