@@ -1,0 +1,8 @@
+VALIDATION FAILURE on Anidex: [
+  {
+    "isWarning": false,
+    "propertyName": "",
+    "errorMessage": "Unable to connect to indexer, indexer\u0027s server is unavailable. Try again later. HTTP request failed: [502:BadGateway] [GET] at [https://anidex.info/?page=search\u0026s=upload_timestamp\u0026o=desc\u0026group_id=0\u0026q=]",
+    "severity": "error"
+  }
+]

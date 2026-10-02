@@ -96,7 +96,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "only passes a stored value",
                    "waits on something off this machine",         # §17.1268
                    "dies at the first one that hangs",            # §17.1274
-                   "against a")                                    # §17.1274 slice × timeout
+                   "against a",                                    # §17.1274 slice × timeout
+                   "whether the KEY `propertyName` appears")       # §17.1278
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -1242,6 +1243,46 @@ def loop_dies_on_one_dead_party(commands: list[str], files: Optional[list[dict]]
     return out
 
 
+def classifies_by_key_presence(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1278 — a block that tells a malformed request from a dead third party
+    by whether the KEY `propertyName` appears in the body.
+
+    Live: `elif status == 400 and "propertyName" in str(resp):` → "VALIDATION
+    FAILURE" → `sys.exit(1)` on the FIRST indexer, whose body was
+    `"propertyName": ""` + "Unable to connect to indexer … 502". The key is always
+    there; the §17.1266 rule — and CHANNEL_RULES, in words — is whether a field is
+    NAMED. The model implemented the opposite of the sentence it was given, so the
+    sentence became a gate. Decidable from the source: a membership test of the
+    literal string "propertyName" against anything.
+    """
+    import ast
+    out: list[dict] = []
+    for what, source, label in _py_sources(commands, files):
+        if not source:
+            continue
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError, RecursionError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare) or not node.ops or not isinstance(node.ops[0], (ast.In, ast.NotIn)):
+                continue
+            left = node.left
+            if isinstance(left, ast.Constant) and isinstance(left.value, str) and left.value.strip().lower() == "propertyname":
+                out.append({"command": label, "why": (
+                    f"{what} decides whose fault a 400 is by whether the KEY `propertyName` appears in the "
+                    f"body (`{ast.unparse(node)[:80]}`) -- it always does: Prowlarr sends `\"propertyName\": \"\"` "
+                    f"for a tracker it cannot reach, which is how the live run called `Unable to connect to "
+                    f"indexer … 502` a validation failure and exited on the first of 89. Test whether a field "
+                    f"is NAMED, not whether the key exists: `named = any((e.get('propertyName') or '').strip() "
+                    f"for e in errors)` -- stop and print the body only when it is; otherwise record the item as "
+                    f"unreachable and continue.")})
+                break
+    if out:
+        logger.warning("classifies_by_key_presence count=%d", len(out))
+    return out
+
+
 def loops_the_network_without_a_budget(commands: list[str], files: Optional[list[dict]] = None) -> list[dict]:
     """§17.1268 — a block that cannot finish in the time it is given.
 
@@ -1504,6 +1545,36 @@ _UNREACHABLE = re.compile(
 #: block was not spinning on one mistake; it was working through a list.
 _OK_LINE = re.compile(
     r"(?im)^\s*(?:added|created|ok|success(?:fully)?|configured|installed|enabled|done)\b[:\s]")
+
+
+_EMPTY_PROP = re.compile(r'"propertyName"\s*:\s*""')
+_ERR_MSG = re.compile(r'"errorMessage"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_STOPPED_ON = re.compile(r"(?im)^\s*(?:VALIDATION FAILURE|FAILED|ERROR|STOPPED)[^\n:]*? on ([^:\n]+):")
+
+
+def stopped_on_a_dead_party(output: str) -> Optional[str]:
+    """§17.1278 — the block exited on an AVAILABILITY error it called a bad request.
+
+    Live: batch 1 of the first clean argv block stopped on its FIRST indexer —
+    `"propertyName": ""` with "Unable to connect to indexer … 502" — printed
+    "VALIDATION FAILURE" and exited 1. Nothing in the body was wrong; the tracker
+    was dead. The one-line reason the operator and the next draft would have seen
+    was the raw JSON. This names what actually happened, so §17.1247 carries the
+    right correction into the next draft: no field was named, so skip and go on.
+    """
+    o = output or ""
+    if not _EMPTY_PROP.search(o):
+        return None
+    dead = [m.group(1) for m in _ERR_MSG.finditer(o) if _UNREACHABLE.search(m.group(1))]
+    if not dead:
+        return None
+    m = _STOPPED_ON.search(o)
+    who = m.group(1).strip() if m else "that item"
+    return (f"the block stopped on {who}, which answered an AVAILABILITY error -- "
+            f"{dead[-1][:120]} -- with no field named (`\"propertyName\": \"\"`). That is the tracker's "
+            f"problem, not the request's: nothing in the body was wrong, and a run that stops here adds "
+            f"none of the trackers that work. Record it as unreachable by name and keep going through the "
+            f"rest of the list; stop and print the body only when the service NAMES a field.")
 
 
 def repeated_identical_failures(output: str, *, threshold: int = 3) -> Optional[str]:
@@ -2755,6 +2826,9 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     # live script died at indexer 40 of 89 on a TimeoutError its `except HTTPError`
     # never saw. Prose since §17.1263; a gate now.
     refused = refused + loop_dies_on_one_dead_party(cmds, files)
+    # §17.1278 — and it must tell a dead tracker from a bad request the way the
+    # service does: by whether a field is NAMED, not whether the key is present.
+    refused = refused + classifies_by_key_presence(cmds, files)
     runner = getattr(spec, "name", "the runner") or "the runner"
     options = []
     if secrets_missing:                          # §17.1191 — nothing to type; the value belongs on the runner
@@ -3109,6 +3183,13 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             await record_needs_root(db, job_id, [e["command"] for e in needs_root])
         except Exception as exc:
             logger.warning("needs_root_record_failed job=%s err=%r", job_id, exc)
+    # §17.1278 — a block that exited on a dead third party did not fail for the
+    # reason its own output claims.
+    dead_reason = (stopped_on_a_dead_party(str(last.get("output") or ""))
+                   if last and not last.get("ok") and not last.get("refused") and not dropped else None) or ""
+    if dead_reason:
+        dead_reason = f"`{last['command'][:80]}` exited {last['exit']}: " + dead_reason
+        logger.warning("supervised_run_stopped_on_dead_party job=%s node=%s", job_id, node_key)
     reason = mask_secrets(
         (f"the connection to {spec.name} dropped while `{dropped[-1]['command'][:80]}` was running "
          f"({dropped[-1]['output'][:120]}). "
@@ -3130,6 +3211,7 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
          + "; ".join(str(v.get("reason") or v.get("claim") or "")[:120] for v in refuted[:3])
          + ". A command that fetched an error page still exits 0 — the check is what settles it.")
         if refuted else
+        dead_reason if dead_reason else
         repeated_reason if repeated_reason else
         ("the runner ran nothing" if not last else
          (f"the runner refused `{last['command'][:80]}`: {last['output'][:200]}" if last.get("refused")
