@@ -2556,10 +2556,12 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         _plan_rows: list[dict] = []
         try:
             from app.modules.runbook_preconditions import read_inventory, unmet
+            from app.utils.savepoint import savepoint
             async with async_session() as db:
-                _plan = (await db.execute(
-                    text("SELECT node_key, title, status FROM dag_nodes WHERE job_id = :j"),
-                    {"j": job_id})).mappings().all()
+                async with savepoint(db):            # §17.1132 — optional read, swallowed on failure
+                    _plan = (await db.execute(
+                        text("SELECT node_key, title, status FROM dag_nodes WHERE job_id = :j"),
+                        {"j": job_id})).mappings().all()
             _plan_rows = [dict(r) for r in _plan]
             _inv = await read_inventory(spec)
         except Exception as exc:
