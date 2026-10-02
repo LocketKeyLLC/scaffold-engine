@@ -32,7 +32,8 @@ logger = logging.getLogger("scaffold")
 #: The tools that carry an operator-visible COMMAND. `write_policy` and the tool
 #: listings are how the engine asks a runner about itself, not work it did, and
 #: the probe calls those on every page load — they would bury the real rows.
-COMMAND_TOOLS = ("run_readonly", "run_supervised")
+#: §17.1274 — `write_file` (§17.1271) carries a path and content, and is a write.
+COMMAND_TOOLS = ("run_readonly", "run_supervised", "write_file")
 
 #: Bounded: this is "recently", not a log. ~200 entries covers a full state
 #: check (the live ones ran 23 and 24 probes) several times over.
@@ -54,7 +55,7 @@ def record(*, runner: str, tool: str, command: str, output: str = "", ran: bool 
             "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "runner": runner,
             "tool": tool,
-            "kind": "write" if tool == "run_supervised" else "read",
+            "kind": "write" if tool in ("run_supervised", "write_file") else "read",
             "command": (command or "")[:400],
             # The first line is what a list can show; the body is not kept, so
             # this never becomes a second copy of the machine's output.
@@ -128,6 +129,18 @@ def reset() -> None:
     _seq = _inflight_seq = 0
 
 
+def _command_of(tool: str, args: dict) -> str:
+    """What the list shows for one call. A command tool carries `command`; the
+    §17.1271 file tool carries a path and CONTENT, and the content is the one
+    thing this list must never keep (§17.1205: not a second copy of the
+    machine), so a write reads `write_file <path> (<n> bytes)`."""
+    a = args or {}
+    if tool == "write_file":
+        body = str(a.get("content") or "")
+        return f"write_file {a.get('path') or '?'} ({len(body.encode('utf-8', 'replace'))} bytes)"
+    return str(a.get("command") or "")
+
+
 def note_result(spec: Any, tool_name: str, args: dict, out: Any, token: Optional[int]) -> None:
     """The hook `mcp_client.call_tool` calls on the way OUT, for a tool that
     carries a command. Reads the runner's own refusal vocabulary, so a command
@@ -140,7 +153,7 @@ def note_result(spec: Any, tool_name: str, args: dict, out: Any, token: Optional
         text_out = ""
     why = not_evidence(text_out, bool(getattr(out, "is_error", False)))
     record(runner=getattr(spec, "name", "?") or "?", tool=tool_name,
-           command=str((args or {}).get("command") or ""), output=text_out,
+           command=_command_of(tool_name, args), output=text_out,
            ran=not why, why=why, ms=finished(token) if token is not None else None)
 
 
@@ -149,6 +162,6 @@ def note_failure(spec: Any, tool_name: str, args: dict, exc: BaseException,
     """A call that never came back. §17.1201 — that is not a command result and
     must not read as one, so it is recorded as a command that did not run."""
     record(runner=getattr(spec, "name", "?") or "?", tool=tool_name,
-           command=str((args or {}).get("command") or ""), output="",
+           command=_command_of(tool_name, args), output="",
            ran=False, why=f"the call to the runner did not come back ({type(exc).__name__})",
            ms=finished(token) if token is not None else None)

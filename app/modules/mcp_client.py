@@ -209,7 +209,7 @@ async def list_tools(spec: McpServerSpec, *, use_cache: bool = True) -> list[dic
 #: §17.1205 — kept here as a literal rather than imported, so recording cannot
 #: make a tool call fail on an import error. `runner_activity.COMMAND_TOOLS` is
 #: the same tuple and a test holds them equal.
-_COMMAND_TOOLS = ("run_readonly", "run_supervised")
+_COMMAND_TOOLS = ("run_readonly", "run_supervised", "write_file")
 
 
 def _note_failure(act, spec, tool_name: str, args: dict, exc: BaseException) -> None:

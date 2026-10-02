@@ -309,3 +309,190 @@ def test_every_capability_the_probe_learns_is_carried_to_callers():
     returned = body[i:]
     missing = sorted(k for k in assigned if k not in returned)
     assert not missing, f"write_policy learns {missing} and never hands it to a caller"
+
+
+# ───── §17.1274 — the gates read the file, follow the wrapper, and survive a corpse
+#
+# Live, the first frame drawn after §17.1273 made the file channel real came back
+# `refused: []` around a 103-line script looping over every public indexer, and
+# the run died at indexer 40 of 89 on a TimeoutError its `except HTTPError` never
+# saw. Two gates had gone blind the day the channel opened (they read commands,
+# the script was a FILE), one would have been blind anyway (the loop called a
+# local `api_post`, not `urlopen`), and the survive-a-corpse rule was prose.
+
+def _fx(name: str) -> str:
+    return (pathlib.Path(__file__).parent / "fixtures" / name).read_text(encoding="utf-8")
+
+
+def _file(path: str, content: str) -> list[dict]:
+    return [{"path": path, "content": content}]
+
+
+def test_the_live_file_that_ran_is_refused_as_a_file():
+    from app.modules import supervised_runs as sr
+    src = _fx("add115_file_loop.py")
+    assert sr.loops_the_network_without_a_budget(["python3 /tmp/add_indexers.py"]) == [], \
+        "the command alone says nothing about the file -- which is how it got through"
+    found = sr.loops_the_network_without_a_budget(["python3 /tmp/add_indexers.py"],
+                                                  _file("/tmp/add_indexers.py", src))
+    assert found, "the script that ran live loops over `public` -- however many the schema returns"
+    assert found[0]["command"] == "the file /tmp/add_indexers.py"
+    assert "`public`" in found[0]["why"] and "api_post" in found[0]["why"], found[0]["why"]
+
+
+def test_the_live_file_dies_on_one_hang():
+    from app.modules import supervised_runs as sr
+    found = sr.loop_dies_on_one_dead_party(["python3 /tmp/add_indexers.py"],
+                                           _file("/tmp/add_indexers.py", _fx("add115_file_loop.py")))
+    assert found and found[0]["command"] == "the file /tmp/add_indexers.py"
+    why = found[0]["why"]
+    assert "TimeoutError" in why and "api_post" in why and "dies at the first one that hangs" in why
+    assert "URLError" in why and "INSIDE" in why, "the remedy must be concrete"
+
+
+def test_the_apps_file_with_a_literal_list_is_left_alone():
+    """`apps = [radarr, sonarr]` is this machine's own two things; neither gate
+    may touch it -- the vacuity check that keeps the second half of ADD115 runnable."""
+    from app.modules import supervised_runs as sr
+    files = _file("/tmp/connect_apps.py", _fx("add115_file_apps.py"))
+    assert sr.loops_the_network_without_a_budget(["python3 /tmp/connect_apps.py"], files) == []
+    assert sr.loop_dies_on_one_dead_party(["python3 /tmp/connect_apps.py"], files) == []
+
+
+def test_a_wrapper_around_a_network_call_counts():
+    import ast
+    from app.modules import supervised_runs as sr
+    # named so it is NOT itself in _NETWORK_CALL -- the live wrapper was `api_post`
+    src = "import urllib.request\ndef send_it(u):\n    return urllib.request.urlopen(u)\npublic = fetch()\nfor e in public:\n    send_it(e)\n"
+    assert sr._network_wrappers(ast.parse(src)) == {"send_it"}
+    found = sr.loops_the_network_without_a_budget([], _file("/tmp/w.py", src))
+    assert found and "through `send_it`" in found[0]["why"]
+
+
+def test_a_wrapper_of_a_wrapper_counts_too():
+    import ast
+    from app.modules import supervised_runs as sr
+    src = ("import urllib.request\ndef raw(u):\n    return urllib.request.urlopen(u)\n"
+           "def post(u):\n    return raw(u)\npublic = fetch()\nfor e in public:\n    post(e)\n")
+    assert sr._network_wrappers(ast.parse(src)) == {"raw", "post"}
+    assert sr.loops_the_network_without_a_budget([], _file("/tmp/w.py", src))
+
+
+def test_a_local_helper_that_touches_nothing_remote_is_not_a_wrapper():
+    from app.modules import supervised_runs as sr
+    src = "def fmt(x):\n    return x.upper()\npublic = fetch()\nfor e in public:\n    print(fmt(e))\n"
+    assert sr.loops_the_network_without_a_budget([], _file("/tmp/f.py", src)) == []
+    assert sr.loop_dies_on_one_dead_party([], _file("/tmp/f.py", src)) == []
+
+
+def test_catching_the_hang_at_the_call_site_passes():
+    from app.modules import supervised_runs as sr
+    src = ("import urllib.request, urllib.error\npublic = fetch()\nfor e in public[:10]:\n"
+           "    try:\n        urllib.request.urlopen(e, timeout=15)\n"
+           "    except (urllib.error.URLError, TimeoutError):\n        print('unreachable')\n")
+    assert sr.loop_dies_on_one_dead_party([], _file("/tmp/g.py", src)) == []
+    assert sr.loops_the_network_without_a_budget([], _file("/tmp/g.py", src)) == [], "10 × 15 s fits in 180"
+
+
+def test_catching_the_hang_inside_the_wrapper_passes():
+    from app.modules import supervised_runs as sr
+    src = ("import urllib.request\ndef post(u):\n    try:\n        return urllib.request.urlopen(u, timeout=15)\n"
+           "    except Exception:\n        return None\npublic = fetch()\nfor e in public[:10]:\n    post(e)\n")
+    assert sr.loop_dies_on_one_dead_party([], _file("/tmp/h.py", src)) == []
+
+
+def test_catching_only_http_errors_is_not_surviving():
+    """Exactly the live shape: HTTPError is a status; a hang is an exception."""
+    from app.modules import supervised_runs as sr
+    src = ("import urllib.request, urllib.error\npublic = fetch()\nfor e in public[:10]:\n"
+           "    try:\n        urllib.request.urlopen(e, timeout=15)\n    except urllib.error.HTTPError:\n        pass\n")
+    assert sr.loop_dies_on_one_dead_party([], _file("/tmp/i.py", src))
+
+
+def test_a_slice_whose_timeouts_outlive_the_budget_is_refused():
+    from app.modules import supervised_runs as sr
+    src = "import urllib.request\npublic = fetch()\nfor e in public[:10]:\n    urllib.request.urlopen(e, timeout=60)\n"
+    found = sr.loops_the_network_without_a_budget([], _file("/tmp/j.py", src))
+    assert found and "600" in found[0]["why"] and "against a 180-second budget" in found[0]["why"], found
+    assert "timeout=15" in found[0]["why"]
+
+
+def test_a_slice_with_short_timeouts_is_a_batch():
+    from app.modules import supervised_runs as sr
+    src = "import urllib.request\npublic = fetch()\nfor e in public[:10]:\n    urllib.request.urlopen(e, timeout=15)\n"
+    assert sr.loops_the_network_without_a_budget([], _file("/tmp/k.py", src)) == []
+
+
+def test_a_written_script_reading_a_secret_the_command_never_passes():
+    from app.modules import supervised_runs as sr
+    files = _file("/tmp/x.py", 'import os\nk = os.environ["PROWLARR_API_KEY"]\n')
+    assert sr.script_secret_not_passed(["python3 /tmp/x.py"]) == [], "the command alone said nothing"
+    found = sr.script_secret_not_passed(["python3 /tmp/x.py"], files)
+    assert found and "PROWLARR_API_KEY" in found[0]["why"]
+    assert sr.script_secret_not_passed(['PROWLARR_API_KEY="$PROWLARR_API_KEY" python3 /tmp/x.py'], files) == []
+
+
+def test_every_payload_gate_in_frame_run_sees_the_files():
+    """The drift guard: a payload gate called with `cmds` alone is blind to the
+    §17.1271 channel, which is how the first three went blind."""
+    import ast
+    from app.modules import supervised_runs as sr
+    tree = ast.parse(pathlib.Path(sr.__file__).read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "frame_run")
+    gates = {"script_secret_not_passed", "loops_the_network_without_a_budget", "loop_dies_on_one_dead_party"}
+    seen = set()
+    for c in ast.walk(fn):
+        if isinstance(c, ast.Call) and getattr(c.func, "id", None) in gates:
+            seen.add(c.func.id)
+            assert len(c.args) == 2 and ast.unparse(c.args[1]) == "files", f"{c.func.id} does not see the files"
+    assert seen == gates, f"frame_run does not call {gates - seen}"
+
+
+def test_frame_run_withholds_run_for_a_looping_file():
+    """End to end at the frame: the file the operator would approve is refused
+    before Run is offered, and the refusal can be redrafted (§17.1269)."""
+    from app.modules import supervised_runs as sr
+    runbook = ("## Write these files\n### /tmp/loop.py\n```python\n" + _fx("add115_file_loop.py") +
+               "\n```\n\n## Run this\n```bash\npython3 /tmp/loop.py\n```\n\n## Verify\n- `pct list`\n")
+    policy = {"allow": ["ANY"], "sudo": True, "helper": "18", "secrets": [], "can_write_files": True}
+    spec = type("S", (), {"name": "t-runner", "headers": {}})()
+    frame = sr.frame_run({"node_key": "ADD115", "title": "t"}, runbook, spec, policy)
+    assert frame["files"] and frame["commands"] == ["python3 /tmp/loop.py"]
+    assert frame["refused"], "the looping file must be refused at the frame"
+    assert "run" not in {o["id"] for o in frame["options"]}
+    for r in frame["refused"]:
+        assert any(s in r["why"] for s in sr._SHAPE_REFUSALS), f"unredraftable refusal: {r['why'][:80]}"
+
+
+def test_the_new_refusals_are_registered_for_redraft():
+    from app.modules import supervised_runs as sr
+    assert "dies at the first one that hangs" in sr._SHAPE_REFUSALS
+    assert "against a" in sr._SHAPE_REFUSALS
+
+
+def test_the_rules_say_what_the_gates_enforce():
+    from app.modules import supervised_runs as sr
+    r = sr.CHANNEL_RULES
+    assert "URLError" in r and "TimeoutError" in r, "the hang-is-an-exception rule"
+    assert "timeout=60" in r and "600 seconds" in r, "the per-request timeout rule"
+
+
+def test_a_file_write_is_on_the_activity_list_without_its_content():
+    """§17.1205's list is how the operator watches the machine; §17.1271 added a
+    tool it never recorded. The content is the one thing it must not keep."""
+    import json as _json
+    from app.modules import runner_activity as ra
+    ra.reset()
+
+    class _Out:
+        text = "wrote /tmp/x.py (11 bytes, 1 lines)"
+        structured = None
+        is_error = False
+
+    spec = type("S", (), {"name": "r"})()
+    ra.note_result(spec, "write_file", {"path": "/tmp/x.py", "content": "SECRET BODY", "approval": "a"}, _Out(), None)
+    e = ra.recent()[0]
+    assert e["tool"] == "write_file" and e["kind"] == "write"
+    assert e["command"] == "write_file /tmp/x.py (11 bytes)"
+    assert "SECRET BODY" not in _json.dumps(e)
+    assert "write_file" in ra.COMMAND_TOOLS
