@@ -3857,8 +3857,13 @@
         "type": "object"
       },
       "NodeResetInput": {
-        "description": "Body for POST /nodes/{job_id}/{node_key}/reset.",
+        "description": "Body for POST /nodes/{job_id}/{node_key}/reset. §17.1284 — ``cascade``\nis opt-in: a retry of one step touches nothing else unless asked.",
         "properties": {
+          "cascade": {
+            "default": false,
+            "title": "Cascade",
+            "type": "boolean"
+          },
           "edited_by": {
             "anyOf": [
               {
