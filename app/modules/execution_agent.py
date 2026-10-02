@@ -2588,10 +2588,12 @@ async def _pause_for_decision(job_id: str) -> dict | None:
             run_node["description"] = _before.rstrip() + "\n\n" + _corr
             try:
                 from app.modules import node_editor
+                from app.utils.savepoint import savepoint
                 async with async_session() as db:
-                    _ed = await node_editor.edit_node(job_id, str(run_node.get("node_key") or ""),
-                                                      {"description": run_node["description"]},
-                                                      edited_by="engine:§17.1288n", db=db)
+                    async with savepoint(db):            # §17.1132 — optional work, its own SAVEPOINT
+                        _ed = await node_editor.edit_node(job_id, str(run_node.get("node_key") or ""),
+                                                          {"description": run_node["description"]},
+                                                          edited_by="engine:§17.1288n", db=db)
                     await db.commit()
                 logger.warning("step_text_reconciled job=%s node=%s persisted=%s", job_id,
                                run_node.get("node_key"), _ed.get("status") == "ok")
