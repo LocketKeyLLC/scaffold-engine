@@ -821,6 +821,74 @@ def _callee(call) -> Optional[str]:
     return getattr(call.func, "attr", None) or getattr(call.func, "id", None)
 
 
+#: §17.1276 — modules whose calls wait on something off this machine, and the
+#: constructors whose instances do (`s = requests.Session(); s.get(…)`).
+_NETWORK_MODULES = frozenset({"requests", "httpx", "urllib", "urllib2", "urllib3", "http", "socket",
+                              "subprocess", "aiohttp", "paramiko", "ftplib", "smtplib", "telnetlib"})
+_NETWORK_CTORS = frozenset({"Session", "Client", "AsyncClient", "HTTPConnection", "HTTPSConnection",
+                            "PoolManager", "ClientSession", "socket", "create_connection", "SSHClient"})
+#: attribute names that are the network whoever the receiver is.
+_NETWORK_UNAMBIGUOUS = frozenset({"urlopen", "getresponse", "sendall", "recv", "recv_into", "check_output",
+                                  "check_call", "Popen", "exec_command", "urlretrieve"})
+
+
+def _net_context(tree) -> tuple[set[str], set[str]]:
+    """``(roots, bare)``: the names whose attribute calls reach the network (imported
+    network modules and their aliases; receivers built from a network constructor),
+    and the bare names imported FROM a network module (``from requests import get``).
+
+    §17.1276 — the first live outing of the hang gate refused a draft that caught
+    every hang correctly, because `entry.get("name")` matched the bare name
+    list. `get` on a dict is not the network; `get` on `requests` is. Both gates
+    now ask WHO is being called, not only what the method is named."""
+    import ast
+    roots: set[str] = set()
+    bare: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                top = a.name.split(".")[0]
+                if top in _NETWORK_MODULES:
+                    roots.add((a.asname or a.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0]
+            if top in _NETWORK_MODULES:
+                for a in node.names:
+                    bare.add(a.asname or a.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            v = node.value
+            if isinstance(v, ast.Call) and _callee(v) in _NETWORK_CTORS:
+                for t in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                    if isinstance(t, ast.Name):
+                        roots.add(t.id)
+    return roots, bare
+
+
+def _root_name(expr) -> Optional[str]:
+    import ast
+    while isinstance(expr, ast.Attribute):
+        expr = expr.value
+    return expr.id if isinstance(expr, ast.Name) else None
+
+
+def _is_network_call(call, ctx: tuple[set[str], set[str]], wrappers: set[str] = frozenset()) -> bool:
+    """Does this call wait on something off the machine? A wrapper the source
+    defines counts (§17.1274). An ambiguous method (`get`, `post`, `run`, `call`,
+    `request`) counts only on a network receiver; an unambiguous one (`urlopen`,
+    `check_output`, `Popen`) counts anywhere; a bare name counts when it was
+    imported from a network module or is itself a wrapper."""
+    import ast
+    roots, bare = ctx
+    f = call.func
+    if isinstance(f, ast.Attribute):
+        if f.attr in _NETWORK_UNAMBIGUOUS:
+            return True
+        return f.attr in _NETWORK_CALL and _root_name(f.value) in roots
+    if isinstance(f, ast.Name):
+        return f.id in wrappers or f.id in bare and f.id in _NETWORK_CALL | _NETWORK_UNAMBIGUOUS
+    return False
+
+
 #: §17.1268 — the calls that wait on something outside this machine. A loop
 #: around one of these is where a command's time budget goes.
 _NETWORK_CALL = frozenset({
@@ -906,6 +974,7 @@ def _network_wrappers(tree) -> set[str]:
     live script because the loop body said `api_post`, not `urlopen`."""
     import ast
     defs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    ctx = _net_context(tree)
     wrappers: set[str] = set()
     changed = True
     while changed:
@@ -913,8 +982,7 @@ def _network_wrappers(tree) -> set[str]:
         for name, fn in defs.items():
             if name in wrappers:
                 continue
-            reach = _NETWORK_CALL | wrappers
-            if any(isinstance(c, ast.Call) and _callee(c) in reach for c in ast.walk(fn)):
+            if any(isinstance(c, ast.Call) and _is_network_call(c, ctx, wrappers) for c in ast.walk(fn)):
                 wrappers.add(name)
                 changed = True
     return wrappers
@@ -937,8 +1005,9 @@ def _request_timeouts(tree) -> list[float]:
     """Literal ``timeout=`` seconds on the network calls in this source."""
     import ast
     out: list[float] = []
+    ctx = _net_context(tree)
     for c in ast.walk(tree):
-        if isinstance(c, ast.Call) and _callee(c) in _NETWORK_CALL:
+        if isinstance(c, ast.Call) and _is_network_call(c, ctx):
             for kw in c.keywords:
                 if kw.arg == "timeout" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, (int, float)):
                     out.append(float(kw.value.value))
@@ -973,7 +1042,8 @@ def _call_guarded(call, scope) -> bool:
     return False
 
 
-def _wrapper_survives(name: str, defs: dict, wrappers: set[str], seen: Optional[set] = None) -> bool:
+def _wrapper_survives(name: str, defs: dict, wrappers: set[str], ctx: tuple[set[str], set[str]],
+                      seen: Optional[set] = None) -> bool:
     """Does this wrapper guard its OWN network calls (transitively)?"""
     import ast
     seen = seen or set()
@@ -981,14 +1051,13 @@ def _wrapper_survives(name: str, defs: dict, wrappers: set[str], seen: Optional[
     if fn is None or name in seen:
         return False
     seen.add(name)
-    reach = _NETWORK_CALL | wrappers
-    inner = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and _callee(c) in reach]
+    inner = [c for c in ast.walk(fn) if isinstance(c, ast.Call) and _is_network_call(c, ctx, wrappers)]
     if not inner:
         return True
     for c in inner:
         if _call_guarded(c, fn):
             continue
-        if _callee(c) in wrappers and _wrapper_survives(_callee(c), defs, wrappers, seen):
+        if _callee(c) in wrappers and _wrapper_survives(_callee(c), defs, wrappers, ctx, seen):
             continue
         return False
     return True
@@ -1022,12 +1091,12 @@ def loop_dies_on_one_dead_party(commands: list[str], files: Optional[list[dict]]
             continue                                    # §17.1257 reports that, not this
         names = _literal_names(tree)
         defs = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        ctx = _net_context(tree)
         wrappers = _network_wrappers(tree)
-        reach = _NETWORK_CALL | wrappers
         for node in ast.walk(tree):
             if not isinstance(node, (ast.For, ast.AsyncFor)) or _literal_iter(node.iter, names):
                 continue
-            calls = [c for c in ast.walk(node) if isinstance(c, ast.Call) and _callee(c) in reach]
+            calls = [c for c in ast.walk(node) if isinstance(c, ast.Call) and _is_network_call(c, ctx, wrappers)]
             if not calls:
                 continue
             exposed = []
@@ -1035,7 +1104,7 @@ def loop_dies_on_one_dead_party(commands: list[str], files: Optional[list[dict]]
                 name = _callee(c)
                 if _call_guarded(c, node):
                     continue
-                if name in wrappers and _wrapper_survives(name, defs, wrappers):
+                if name in wrappers and _wrapper_survives(name, defs, wrappers, ctx):
                     continue
                 exposed.append(name)
             if not exposed:
@@ -1089,11 +1158,12 @@ def loops_the_network_without_a_budget(commands: list[str], files: Optional[list
         except (SyntaxError, ValueError, RecursionError):
             continue                      # §17.1257 reports that, not this
         names = _literal_names(tree)
-        remote = _NETWORK_CALL | _network_wrappers(tree)
+        ctx = _net_context(tree)
+        wrappers = _network_wrappers(tree)
         for node in ast.walk(tree):
             if not isinstance(node, (ast.For, ast.AsyncFor)):
                 continue
-            calls = [c for c in ast.walk(node) if isinstance(c, ast.Call) and _callee(c) in remote]
+            calls = [c for c in ast.walk(node) if isinstance(c, ast.Call) and _is_network_call(c, ctx, wrappers)]
             if not calls:
                 continue
             where = ast.unparse(node.iter)[:60]
@@ -1110,7 +1180,18 @@ def loops_the_network_without_a_budget(commands: list[str], files: Optional[list
                 continue
             sleeps = [c for c in ast.walk(node) if isinstance(c, ast.Call)
                       and getattr(c.func, "attr", None) == "sleep"]
-            via = sorted({_callee(c) for c in calls} - _NETWORK_CALL)
+            via = sorted({_callee(c) for c in calls if _callee(c) in wrappers})
+            is_file = label.startswith("the file ")
+            path = label[len("the file "):] if is_file else "/tmp/x.py"
+            # §17.1276 — the remedy has to fit the channel. Told "send several
+            # commands", the live redraft batched INSIDE one script (`for i in
+            # range(0, len(public), 10)`) -- still one command, still one budget.
+            batching = (
+                f" On the file channel that means: write the script ONCE taking the slice bounds as "
+                f"arguments (`start, end = int(sys.argv[1]), int(sys.argv[2])`; `for item in {where}[start:end]:`), "
+                f"and list one command per batch under ## Run this -- `python3 {path} 0 10`, `python3 {path} 10 20`, "
+                f"… -- never a loop over batches inside one script, because one command is one budget."
+                if is_file else "")
             out.append({"command": label, "why": (
                 f"{what} loops over `{where}` -- however many that service returns -- and every pass "
                 f"waits on something off this machine"
@@ -1122,7 +1203,7 @@ def loops_the_network_without_a_budget(commands: list[str], files: Optional[list
                 f"several commands, each one resumable -- treat a thing that is already there as "
                 f"success and move on. Pick the size so a batch finishes well inside the budget: if "
                 f"every item waits on a remote service that may answer slowly or not at all, ten is "
-                f"safer than twenty. Then a batch that runs out of time loses only itself.")})
+                f"safer than twenty. Then a batch that runs out of time loses only itself." + batching)})
             break                             # one finding per payload is enough
     if out:
         logger.warning("network_loop_without_budget count=%d first=%r", len(out), out[0]["why"][:120])

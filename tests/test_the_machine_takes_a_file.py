@@ -496,3 +496,95 @@ def test_a_file_write_is_on_the_activity_list_without_its_content():
     assert e["command"] == "write_file /tmp/x.py (11 bytes)"
     assert "SECRET BODY" not in _json.dumps(e)
     assert "write_file" in ra.COMMAND_TOOLS
+
+
+# ───── §17.1276 — who is being called, not only what the method is named; and a
+# remedy that fits the file channel.
+#
+# The first live outing of §17.1274: the budget gate correctly refused `for entry
+# in public:`; the hang gate refused the SAME draft -- which caught every hang
+# correctly -- because `entry.get("name")` matched the bare name list. And the
+# redraft, told to "send several commands", batched INSIDE one script, which is
+# still one command and one budget.
+
+def test_a_dict_get_is_not_the_network():
+    from app.modules import supervised_runs as sr
+    src = ("import json\npublic = fetch()\nfor entry in public:\n    name = entry.get('name', 'x')\n"
+           "    body = dict(entry)\n    print(json.dumps(body))\n")
+    assert sr.loops_the_network_without_a_budget([], _file("/tmp/d.py", src)) == []
+    assert sr.loop_dies_on_one_dead_party([], _file("/tmp/d.py", src)) == []
+
+
+def test_the_hang_safe_live_draft_passes_the_hang_gate_and_only_the_budget_refuses():
+    """The real first draft after §17.1274 went live: it catches (URLError,
+    TimeoutError, socket.timeout, OSError) around api_post, loops over all 89."""
+    from app.modules import supervised_runs as sr
+    files = _file("/tmp/add_indexers.py", _fx("add115_file_hangsafe.py"))
+    assert sr.loop_dies_on_one_dead_party(["python3 /tmp/add_indexers.py"], files) == [], \
+        "a draft that catches the hang must not be refused for not catching it"
+    found = sr.loops_the_network_without_a_budget(["python3 /tmp/add_indexers.py"], files)
+    assert found and "`public`" in found[0]["why"] and "api_post" in found[0]["why"]
+
+
+def test_the_file_remedy_says_argv_slices_and_one_command_per_batch():
+    from app.modules import supervised_runs as sr
+    found = sr.loops_the_network_without_a_budget(["python3 /tmp/add_indexers.py"],
+                                                  _file("/tmp/add_indexers.py", _fx("add115_file_hangsafe.py")))
+    why = found[0]["why"]
+    assert "sys.argv" in why and "python3 /tmp/add_indexers.py 0 10" in why and "python3 /tmp/add_indexers.py 10 20" in why
+    assert "never a loop over batches inside one script" in why
+    # a command payload keeps the original remedy; the argv advice is the file channel's
+    cmd_found = sr.loops_the_network_without_a_budget([_fixture_cmd()])
+    assert cmd_found and "sys.argv" not in cmd_found[0]["why"]
+
+
+def _fixture_cmd() -> str:
+    return (pathlib.Path(__file__).parent / "fixtures" / "add115_unbounded_loop.txt").read_text(encoding="utf-8").strip()
+
+
+def test_batching_inside_one_script_is_still_one_budget():
+    from app.modules import supervised_runs as sr
+    src = ("import urllib.request\npublic = fetch()\nfor i in range(0, len(public), 10):\n"
+           "    batch = public[i:i + 10]\n    for e in batch:\n        urllib.request.urlopen(e, timeout=15)\n")
+    assert sr.loops_the_network_without_a_budget([], _file("/tmp/b.py", src)), "the whole list still runs in one command"
+
+
+def test_argv_slices_with_a_hang_safe_call_pass_both_gates():
+    from app.modules import supervised_runs as sr
+    src = ("import sys, urllib.request, urllib.error\nstart, end = int(sys.argv[1]), int(sys.argv[2])\n"
+           "public = fetch()\nfor e in public[start:end]:\n    try:\n        urllib.request.urlopen(e, timeout=15)\n"
+           "    except (urllib.error.URLError, TimeoutError, OSError):\n        print('unreachable')\n")
+    assert sr.loops_the_network_without_a_budget([], _file("/tmp/s.py", src)) == []
+    assert sr.loop_dies_on_one_dead_party([], _file("/tmp/s.py", src)) == []
+
+
+@pytest.mark.parametrize("src", [
+    "import requests\npublic = fetch()\nfor u in public:\n    requests.get(u)\n",
+    "import requests as rq\npublic = fetch()\nfor u in public:\n    rq.post(u, json={})\n",
+    "import requests\ns = requests.Session()\npublic = fetch()\nfor u in public:\n    s.get(u)\n",
+    "from requests import get\npublic = fetch()\nfor u in public:\n    get(u)\n",
+    "import httpx\nc = httpx.Client()\npublic = fetch()\nfor u in public:\n    c.get(u)\n",
+    "import subprocess\npublic = fetch()\nfor h in public:\n    subprocess.run(['ssh', h, 'true'])\n",
+])
+def test_a_network_receiver_is_the_network(src):
+    from app.modules import supervised_runs as sr
+    assert sr.loops_the_network_without_a_budget([], _file("/tmp/n.py", src)), src
+
+
+@pytest.mark.parametrize("src", [
+    "public = fetch()\nfor u in public:\n    get(u)\n",                       # bare `get`, imported from nowhere
+    "public = fetch()\nfor u in public:\n    cache.get(u)\n",                 # a cache, not a client
+    "public = fetch()\nfor u in public:\n    job.run()\n",                    # a method called run
+    "import re\npublic = fetch()\nfor u in public:\n    re.compile(u).match('x')\n",
+])
+def test_an_ambiguous_name_on_a_non_network_receiver_is_not(src):
+    from app.modules import supervised_runs as sr
+    assert sr.loops_the_network_without_a_budget([], _file("/tmp/m.py", src)) == [], src
+    assert sr.loop_dies_on_one_dead_party([], _file("/tmp/m.py", src)) == [], src
+
+
+def test_a_wrapper_is_still_found_through_the_receiver_rule():
+    import ast
+    from app.modules import supervised_runs as sr
+    src = "import requests\ndef fetch_one(u):\n    return requests.get(u)\ndef helper(x):\n    return x.get('k')\n"
+    assert sr._network_wrappers(ast.parse(src)) == {"fetch_one"}
