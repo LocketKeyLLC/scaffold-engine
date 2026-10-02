@@ -77,6 +77,19 @@ _APIKEY_NAMES = re.compile(r"^([A-Z][A-Z0-9_]*?)_API_KEY$")
 _NODE_NAMES = re.compile(r"^(?:PROXMOX_)?NODE(?:_NAME)?$")
 #: names for the HOST's own address, which `pct list` cannot answer.
 _HOST_IP_NAMES = re.compile(r"^(?:PROXMOX_)?(?:NODE|HOST|PVE|SERVER)_(?:IP|IP_ADDRESS|IPADDR|ADDR|ADDRESS)$")
+# §17.1275 — a public key the host can hand over. ADD26 ("Install the SSH public
+# key on the AI VM … so the Proxmox host can connect without a password") asked
+# the operator to paste <OPERATOR_PUBLIC_KEY>, encrypted. The key a step like
+# that installs is THIS HOST's — `/root/.ssh/id_rsa.pub`, 734 bytes, readable
+# through the channel the engine was already using — and a public key is not a
+# secret.
+_PUBKEY_NAMES = re.compile(r"^(?:[A-Z][A-Z0-9_]*_)?(?:SSH_)?(?:PUBLIC_KEY|PUBKEY|PUB_KEY|KEY_PUB)$")
+_PUBKEY_PATHS = ("/root/.ssh/id_ed25519.pub", "/root/.ssh/id_rsa.pub", "/root/.ssh/id_ecdsa.pub")
+_PUBKEY_LINE = re.compile(r"^((?:ssh-(?:rsa|ed25519|dss)|ecdsa-sha2-nistp\d+|sk-[\w@.-]+)\s+[A-Za-z0-9+/=]+(?:\s+\S+)?)\s*$", re.M)
+#: `qm list` rows: VMID NAME STATUS MEM(MB) BOOTDISK(GB) PID — a different
+#: column order from `pct list`, so a different pattern.
+_QM_NAMED = re.compile(r"^\s*(\d{3,5})\s+(\S+)\s+(running|stopped|paused|suspended|prelaunch)\b", re.M)
+_AGENT_IPV4 = re.compile(r'"ip-address"\s*:\s*"((?!127\.)\d{1,3}(?:\.\d{1,3}){3})"')
 
 #: words that name no service. A placeholder made only of these is about the
 #: host or is simply unqualified, and must draw nothing from the guest list.
@@ -131,6 +144,32 @@ def match_guest(service: str, by_name: dict[str, str]) -> Optional[str]:
         if len(hits) == 1:
             return hits[0]
     return None
+
+
+def vms_by_name(text_out: str) -> dict[str, tuple[str, str]]:
+    """``{lowercased vm name: (vmid, status)}`` from `qm list` (§17.1275)."""
+    out: dict[str, tuple[str, str]] = {}
+    for m in _QM_NAMED.finditer(text_out or ""):
+        name = m.group(2).strip().lower()
+        if name and name != "name":
+            out.setdefault(name, (m.group(1), m.group(3)))
+    return out
+
+
+def agent_ipv4s(text_out: str) -> list[str]:
+    """Guest addresses out of `qm agent <id> network-get-interfaces`, loopback
+    excluded, deduplicated, in order."""
+    out: list[str] = []
+    for m in _AGENT_IPV4.finditer(text_out or ""):
+        if m.group(1) not in out:
+            out.append(m.group(1))
+    return out
+
+
+def public_keys(text_out: str) -> list[str]:
+    """The key lines in what `cat …/*.pub` printed; error lines for missing
+    files are not keys and fall out."""
+    return list(dict.fromkeys(m.group(1).strip() for m in _PUBKEY_LINE.finditer(text_out or "")))
 
 
 def first_ipv4(text_out: str) -> Optional[str]:
@@ -286,15 +325,68 @@ async def _discover_guest_inputs(inputs: list[dict], spec) -> None:
             logger.warning("runbook_input_discovered name=%s kind=host_ip found=%d prefilled=%s",
                            n, len(addrs), len(addrs) == 1)
 
+    # §17.1275 — the host's own public key, for a step that lets THIS host in
+    # somewhere. One read of the three usual paths; `cat` on a missing one
+    # prints an error line, which is not a key and is dropped by the parser.
+    pubkey_want = [n for n in names if _PUBKEY_NAMES.match(n)]
+    if pubkey_want:
+        keys = public_keys(await _read(spec, "cat " + " ".join(_PUBKEY_PATHS)))
+        for n in pubkey_want:
+            if not keys:
+                continue
+            names[n]["secret"] = False
+            names[n]["suggestions"] = [_sugg(k, runner, "/root/.ssh/*.pub — this host's own public key, the one a step "
+                                                        "that lets THIS host connect must install") for k in keys[:MAX_PER_INPUT]]
+            if len(keys) == 1:
+                names[n]["value"] = keys[0]
+            logger.warning("runbook_input_discovered name=%s kind=pubkey found=%d prefilled=%s",
+                           n, len(keys), len(keys) == 1)
+
     if not (ctid_want or ip_want or key_want):
         return
     by_name = guests_by_name(await _read(spec, "pct list"))
-    if not by_name:
+    # §17.1275 — VMs are guests too. `pct list` knows nothing about VM 110
+    # (`ai-vm`); `qm list` does, and a RUNNING VM with the guest agent answers
+    # its own address. A stopped VM has no address to read, so nothing is said.
+    by_vm = vms_by_name(await _read(spec, "qm list")) if (ctid_want or ip_want) else {}
+    if not by_name and not by_vm:
         return
     # service -> ctid, resolved once and shared by all three kinds
     svc_ctid: dict[str, Optional[str]] = {}
     for svc in set(ctid_want.values()) | set(ip_want.values()) | set(key_want.values()):
-        svc_ctid[svc] = match_guest(svc, by_name)
+        svc_ctid[svc] = match_guest(svc, by_name) if by_name else None
+    svc_vm: dict[str, Optional[tuple[str, str]]] = {}
+    for svc in set(ctid_want.values()) | set(ip_want.values()):
+        if svc_ctid.get(svc):
+            continue
+        vid = match_guest(svc, {k: v[0] for k, v in by_vm.items()}) if by_vm else None
+        svc_vm[svc] = next((v for v in by_vm.values() if v[0] == vid), None) if vid else None
+
+    for n, svc in ctid_want.items():
+        vm = svc_vm.get(svc)
+        if vm and not svc_ctid.get(svc):
+            names[n]["value"] = vm[0]
+            names[n]["suggestions"] = [_sugg(vm[0], runner, f"qm list, VM named {svc.lower()}")]
+            logger.warning("runbook_input_discovered name=%s kind=vmid value=%s", n, vm[0])
+
+    for n, svc in ip_want.items():
+        vm = svc_vm.get(svc)
+        if not vm or svc_ctid.get(svc):
+            continue
+        vid, status = vm
+        if status != "running":
+            logger.warning("runbook_input_not_readable name=%s kind=ip vmid=%s status=%s", n, vid, status)
+            continue
+        addrs = agent_ipv4s(await _read(spec, f"qm agent {vid} network-get-interfaces"))
+        if not addrs:
+            continue
+        names[n]["suggestions"] = [_sugg(a, runner, f"qm agent {vid} network-get-interfaces") for a in addrs[:MAX_PER_INPUT]]
+        if len(addrs) == 1:
+            names[n]["value"] = addrs[0]
+        logger.warning("runbook_input_discovered name=%s kind=ip vmid=%s found=%d prefilled=%s",
+                       n, vid, len(addrs), len(addrs) == 1)
+    if not by_name:
+        return
 
     for n, svc in ctid_want.items():
         cid = svc_ctid.get(svc)
