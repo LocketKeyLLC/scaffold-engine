@@ -1715,3 +1715,55 @@ def test_a_wait_that_pings_a_fixed_address_is_refused():
     assert sr.waits_on_a_fixed_address(["ping -c 1 192.168.1.1"], ADD82) == [], "a single ping outside a loop is a check, not a wait"
     host_step = {"node_key": "ADD17", "title": "Install the NVIDIA driver on the Proxmox host", "description": "On the host."}
     assert sr.waits_on_a_fixed_address(one_line, host_step) == [], "only on a guest step"
+
+
+# ───── §17.1288n — a sweep in an earlier command warms the table for a later one
+
+def test_the_live_1160_runbook_is_refused_for_asking_the_address_alone():
+    from app.modules import supervised_runs as sr
+    rb = _fx("add82_runbook_2239_fourth.md")
+    spec = type("S", (), {"name": "pve-runner", "headers": {}})()
+    env = {"profile": "root@pve", "system_state": {"host": {"kind": "host", "attrs": {"ip": "192.168.1.156"}},
+                                                    "106": {"kind": "vm", "attrs": {"name": "palworld-server"}}}}
+    frame = sr.frame_run(ADD82, rb, spec, POLICY_MASS, env=env)
+    assert sr.refusal_kinds(frame) == {"reads the address itself and asks the operator for it"}, \
+        [r["why"][:90] for r in frame["refused"]]
+    assert sr.reads_the_neighbour_table_cold(["nmap -sn 192.168.1.0/24 >/dev/null 2>&1 || true",
+                                              "ip neigh show | grep -i 'bc:24:11:e8:9f:7a'"]) == []
+    assert sr.reads_the_neighbour_table_cold(["ip neigh show | grep -i 'bc:24:11:e8:9f:7a'",
+                                              "nmap -sn 192.168.1.0/24"]), "a sweep AFTER the read warms nothing"
+
+
+# ───── §17.1288n — the engine corrects its own stale step text
+
+def test_the_stale_no_way_in_description_gets_a_correction_from_the_refusal():
+    from app.modules import supervised_runs as sr
+    node = {**ADD82, "description": _fx("add82_description.txt")}
+    frame = {"refused": sr.commands_never_reach_the_guest(ADD82_CMDS, node)}
+    assert frame["refused"], "fixture: the host-side block is refused"
+    env = {"system_state": {"106": {"kind": "vm", "attrs": {"name": "palworld-server"}}}}
+    corr = sr.step_text_correction(node, frame, env)
+    assert corr.startswith("ENGINE CORRECTION (")
+    assert "SUPERSEDED" in corr and "no way in" in corr.lower() and "done at the console" in corr.lower()
+    assert "sshpass -e ssh-copy-id" in corr and "<PALWORLD_USER>" in corr and "$MASS_PASSWORD" in corr
+    assert "Nothing here is done at a console by hand." in corr
+    corrected = {**node, "description": node["description"] + "\n\n" + corr}
+    assert sr.step_text_correction(corrected, frame, env) == "", "idempotent: already corrected"
+    plain = {**ADD82, "description": "Install the agent inside VM 106."}
+    assert sr.step_text_correction(plain, frame, env) == "", "no stale claim, nothing to correct"
+    assert sr.step_text_correction(node, {"refused": [{"why": "a permission refusal"}]}, env) == "", "only a reach refusal"
+
+
+def test_the_pause_persists_the_correction_with_a_pre_image():
+    import ast
+    from app.modules import execution_agent as ea
+    src = pathlib.Path(ea.__file__).read_text(encoding="utf-8")
+    i = src.index("async def _pause_for_decision(")
+    body = src[i:src.index("\nasync def ", i + 10)]
+    assert "step_text_correction(run_node, frame" in body
+    assert body.index("step_text_correction(run_node, frame") < body.index("shape_retry_note(frame)"), \
+        "the text is corrected BEFORE the first redraft reads it"
+    assert 'edited_by="engine:§17.1288n"' in body and "step_text_reconciled" in body
+    tree = ast.parse(src)
+    calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "edit_node"]
+    assert calls, "node_editor.edit_node is the ONE path that writes a node with its pre-image"

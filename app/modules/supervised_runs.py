@@ -3007,9 +3007,14 @@ def reads_the_neighbour_table_cold(commands: list[str], files: Optional[list[dic
     texts = [("command", str(c)) for c in commands or []] + \
             [(str((f or {}).get("path") or "file"), str((f or {}).get("content") or "")) for f in files or []]
     out: list[dict] = []
+    # §17.1288n — a sweep in an EARLIER command warms the table for a later one:
+    # live (trace 1160) `nmap -sn …` was command 3 and `ip neigh show | grep <mac>`
+    # command 4, and the read was refused as cold. The block runs in order.
+    earlier = ""
     for where, body in texts:
         m = _NEIGH_READ_RE.search(body)
-        if not m or _SWEEP_RE.search(body[:m.start()]):
+        if not m or _SWEEP_RE.search(earlier + "\n" + body[:m.start()]):
+            earlier += "\n" + body
             continue
         line = body[body.rfind("\n", 0, m.start()) + 1:].split("\n", 1)[0].strip()
         out.append({"command": line[:200] if where == "command" else f"{where}: {line[:160]}", "why": (
@@ -3216,6 +3221,51 @@ def waits_on_a_fixed_address(commands: list[str], node: Optional[dict], files: O
                     f"for its MAC until the entry appears, then `ping -c 1 -W 2 \"$IP\"` and the first ssh.")}]
             depth = max(0, depth + opens - closes)
     return []
+
+
+_STALE_CLAIM_RE = re.compile(
+    r"no way in(?:to)?[^.\n]*|done at the console[^.\n]*|by hand[^.\n]*|at the (?:VM's |guest's )?console[^.\n]*"
+    r"|no network presence[^.\n]*|chicken and egg[^.\n]*", re.I)
+_CORRECTION_MARK = "ENGINE CORRECTION"
+#: the refusals that contradict a step's own text about how its guest is reached
+_REACH_REFUSAL_MARKS = ("runs in the runner's own shell on the Proxmox HOST",
+                        "nothing has put this host's key on guest", "is stopped (`")
+
+
+def step_text_correction(node: Optional[dict], frame: dict, env: Optional[dict] = None) -> str:
+    """§17.1288n — the paragraph to APPEND to a step's description when the
+    engine's own gate has just contradicted what that description says about
+    reaching the guest. Live, ADD82's description — written by an earlier
+    engine repair — said *"The host therefore has NO way in to this guest …
+    So this one is done at the console, by hand"*, and the draft prompt
+    presents the description as the specification that wins. Twelve reasks:
+    every first draft was host-side because the spec said so, and the chain
+    spent its rungs climbing out. §17.1288e told the redraft the note outranks
+    the text; this corrects the TEXT, so the next first draft starts right.
+    Returns "" when nothing in the description makes the stale claim, when
+    no refusal of that kind is in the frame, or when a correction is already
+    there (idempotent; the marker is checked)."""
+    desc = str((node or {}).get("description") or "")
+    if not desc or _CORRECTION_MARK in desc:
+        return ""
+    claims = [m.group(0).strip() for m in _STALE_CLAIM_RE.finditer(desc)]
+    if not claims:
+        return ""
+    whys = [str(r.get("why") or "") for r in (frame or {}).get("refused") or []]
+    hit = next((w for w in whys if any(mk in w for mk in _REACH_REFUSAL_MARKS)), "")
+    if not hit:
+        return ""
+    gm = _GUEST_SUBJECT_RE.search(step_text(node))
+    gid = gm.group(1) if gm else ""
+    account = f"<{_guest_word(step_text(node), gid, env)}_USER>" if gid else "<GUEST_USER>"
+    seen: set[str] = set()
+    distinct = [c for c in claims if not (c.lower()[:14] in seen or seen.add(c.lower()[:14]))]
+    quoted = "; ".join(f"\"{c[:60]}\"" for c in distinct[:5])
+    return (f"{_CORRECTION_MARK} ({datetime.now(timezone.utc).date().isoformat()}): the lines above that say {quoted} are SUPERSEDED -- "
+            f"the engine measured otherwise after they were written: {hit.rstrip()} "
+            f"The commands quoted above are the GUEST's and run inside it through that ssh. The account inside "
+            f"guest {gid or 'N'} is {account} (the operator fills it; nothing the engine holds names it); the "
+            f"password is `$MASS_PASSWORD`, by name. Nothing here is done at a console by hand.")
 
 
 def inputs_for(commands: list[str], verify: list[str], runbook: str,
