@@ -820,8 +820,10 @@ class NodeReorderInput(BaseModel):
 
 
 class NodeResetInput(BaseModel):
-    """Body for POST /nodes/{job_id}/{node_key}/reset."""
+    """Body for POST /nodes/{job_id}/{node_key}/reset. §17.1284 — ``cascade``
+    is opt-in: a retry of one step touches nothing else unless asked."""
     edited_by: str | None = None
+    cascade: bool = False
 
 
 class NodeSatisfiedInput(BaseModel):
