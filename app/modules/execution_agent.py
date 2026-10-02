@@ -2614,7 +2614,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                     # followed the step text over the refusal (live: "done at the
                     # console" twice). One more, told the note outranks the text.
                     # Still bounded: the third draft is the last either way.
-                    if second["commands"] and k2 and (not (k1 & k2) or k2 == k1):
+                    if (second["commands"] or second.get("files")) and k2 and (not (k1 & k2) or k2 == k1):
                         fix2 = supervised_runs.shape_retry_note(second, previous=frame, repeated=(k2 == k1))
                         if fix2:
                             logger.warning("supervised_run_redraft_again job=%s node=%s first=%s second=%s same=%s",
@@ -2642,7 +2642,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                                     # last draft, told everything; then the best frame by
                                     # refusals, a later draft winning a tie (it has every note).
                                     k3 = supervised_runs.refusal_kinds(third)
-                                    if third["commands"] and k3 and not (k3 & (k1 | k2)):
+                                    if (third["commands"] or third.get("files")) and k3 and not (k3 & (k1 | k2)):
                                         fix3 = supervised_runs.shape_retry_note(third, previous=second)
                                         if fix3:
                                             logger.warning("supervised_run_redraft_last job=%s node=%s third=%s",

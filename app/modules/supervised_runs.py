@@ -118,7 +118,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "is a container on this host, not a VM",        # §17.1213
                    "is ALREADY",                                   # §17.1240
                    "is already taken on this host",                # §17.1243
-                   "there is no guest")                            # §17.1213
+                   "there is no guest",                            # §17.1213
+                   "and nothing runs it")                          # §17.1288k
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -2560,6 +2561,20 @@ def _section(text_out: str, name: str) -> str:
     return ""
 
 
+def _without_sections(text_out: str, names: tuple) -> str:
+    """The runbook with the named ``## <name>`` sections cut out."""
+    text_value = text_out or ""
+    heads = list(_SECTION_RE.finditer(text_value))
+    keep, cursor = [], 0
+    for i, h in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text_value)
+        if any(h.group(1).lower().startswith(n.lower()) for n in names):
+            keep.append(text_value[cursor:h.start()])
+            cursor = end
+    keep.append(text_value[cursor:])
+    return "".join(keep)
+
+
 _MULTILINE_RE = re.compile(r"<<-?\s*['\"]?\w+|^\s*(?:for|while|until)\s.*\bdo\s*$|^\s*if\s.*\bthen\s*$", re.M)
 
 
@@ -2573,6 +2588,27 @@ _MULTILINE_RE = re.compile(r"<<-?\s*['\"]?\w+|^\s*(?:for|while|until)\s.*\bdo\s*
 #: The path is a sub-heading and the content is one fence. No shell is involved
 #: anywhere in that, which is the entire point.
 _FILE_HEAD_RE = re.compile(r"^\s{0,3}###\s+(/\S+)\s*$", re.M)
+_ANY_HEAD3_RE = re.compile(r"^\s{0,3}###\s+(.+?)\s*$", re.M)
+
+
+def _run_fences_after_the_files(text_out: str) -> list[str]:
+    """§17.1288k — fences under a NON-path `###` heading inside ## Write these
+    files are run commands. Live (trace 1148) the drafter wrote `## Run this` →
+    `### 1. Write the script` → `## Write these files` → the file → `### 2. Run
+    the script` → the command: a natural order, and a `##` inside the Run
+    section ended it before any fence, so the frame had a file and no command,
+    and the chain stopped because "nothing to redraft from"."""
+    body = _section(text_out, "Write these files") or _section(text_out, "Write this file")
+    if not body.strip():
+        return []
+    heads = list(_ANY_HEAD3_RE.finditer(body))
+    out: list[str] = []
+    for i, h in enumerate(heads):
+        if h.group(1).strip().startswith("/"):
+            continue
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
+        out.extend(_FENCE_RE.findall(body[h.end():end]))
+    return out
 #: A written file is a script, not a payload: past this something is wrong.
 FILE_MAX_BYTES = 256 * 1024
 #: Which contents the engine can CHECK before sending. Anything else is written
@@ -2592,8 +2628,9 @@ def file_writes(text_out: str) -> list[dict]:
         return []
     out: list[dict] = []
     heads = list(_FILE_HEAD_RE.finditer(body))
+    bounds = [m.start() for m in _ANY_HEAD3_RE.finditer(body)]      # §17.1288k — any `###` ends a file
     for i, h in enumerate(heads):
-        end = heads[i + 1].start() if i + 1 < len(heads) else len(body)
+        end = next((b for b in bounds if b > h.start()), len(body))
         fences = _FENCE_RE.findall(body[h.end():end])
         if not fences:
             logger.warning("file_write_without_fence path=%r", h.group(1))
@@ -2672,9 +2709,16 @@ def runbook_commands(text_out: str) -> list[str]:
     the real reason (``substitution/heredoc``), and the operator reads one
     honest refusal instead of five fictional ones."""
     from app.modules.assist_supervised import block_commands
-    body = _section(text_out, "Run this") or (text_out or "")
+    run_section = _section(text_out, "Run this")
+    body = run_section or (text_out or "")
+    fences = _FENCE_RE.findall(body)
+    if not run_section:
+        # §17.1288k — with no ## Run this at all, every fence is a command EXCEPT
+        # a written file's content: that is the file, not something to run.
+        file_bodies = {f["content"] for f in file_writes(text_out)}
+        fences = [f for f in fences if f not in file_bodies]
     out: list[str] = []
-    for fence in _FENCE_RE.findall(body):
+    for fence in fences + ([] if not run_section else _run_fences_after_the_files(text_out)):   # §17.1288k
         if _MULTILINE_RE.search(fence):
             whole = (fence or "").strip()
             if whole:
@@ -2708,7 +2752,11 @@ def runbook_commands(text_out: str) -> list[str]:
         try:
             from app.modules.step_classify import step_commands
             seen: set[str] = set()
-            for cmd, _sentence in step_commands(body):
+            # §17.1288k — with no ## Run this, the inline scan must not read a
+            # written file's content or the Verify/Rollback checks as commands.
+            scan = body if run_section else _without_sections(
+                text_out, ("Write these files", "Write this file", "Verify", "Rollback"))
+            for cmd, _sentence in step_commands(scan):
                 c = (cmd or "").strip()
                 if c and c not in seen:
                     seen.add(c)
@@ -3408,6 +3456,14 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
     # §17.1288h — a literal account into the step's guest is a guess.
     refused = refused + ssh_assumes_the_guests_account(cmds, node, env, files)
+    # §17.1288k — a file written and never run is a draft with nothing to run,
+    # said as a refusal so the redraft is told and the chain goes on.
+    if files and not cmds:
+        refused = refused + [{"command": f"the file {files[0].get('path')}", "why": (
+            f"writes {files[0].get('path')} and nothing runs it: no command under ## Run this names the file. "
+            f"Add the one that runs it there -- `MASS_PASSWORD=\"$MASS_PASSWORD\" bash {files[0].get('path')}` "
+            f"for a bash script that reads that secret -- after the ## Write these files section if you like, "
+            f"under its own `### Run the script` heading.")}]
     # §17.1268 — work that cannot finish in the time one command is given. A
     # refusal rather than a rule, because §17.1267 put the budget in the prompt
     # and the next draft looped over all 89 again with a sleep added.
