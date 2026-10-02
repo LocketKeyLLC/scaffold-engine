@@ -2595,11 +2595,15 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                     # is progress, not a loop -- one more try, told both. Bounded
                     # here: a third refusal parks on the best frame we have.
                     k1, k2 = supervised_runs.refusal_kinds(frame), supervised_runs.refusal_kinds(second)
-                    if second["commands"] and k2 and not (k1 & k2):
-                        fix2 = supervised_runs.shape_retry_note(second, previous=frame)
+                    # §17.1288e — and a redraft refused for EXACTLY the same kinds
+                    # followed the step text over the refusal (live: "done at the
+                    # console" twice). One more, told the note outranks the text.
+                    # Still bounded: the third draft is the last either way.
+                    if second["commands"] and k2 and (not (k1 & k2) or k2 == k1):
+                        fix2 = supervised_runs.shape_retry_note(second, previous=frame, repeated=(k2 == k1))
                         if fix2:
-                            logger.warning("supervised_run_redraft_again job=%s node=%s first=%s second=%s",
-                                           job_id, run_node.get("node_key"), sorted(k1), sorted(k2))
+                            logger.warning("supervised_run_redraft_again job=%s node=%s first=%s second=%s same=%s",
+                                           job_id, run_node.get("node_key"), sorted(k1), sorted(k2), k2 == k1)
                             again = await supervised_runs.draft_runbook(run_node, _brief, up_block, retry_note=fix2,
                                                                         spec=spec, environment=_env)
                             if again:

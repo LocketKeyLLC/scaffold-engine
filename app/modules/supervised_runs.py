@@ -153,7 +153,7 @@ def refusal_kinds(frame: dict) -> set[str]:
             for s in _SHAPE_REFUSALS if s in str(r.get("why") or "")}
 
 
-def shape_retry_note(frame: dict, previous: Optional[dict] = None) -> str:
+def shape_retry_note(frame: dict, previous: Optional[dict] = None, repeated: bool = False) -> str:
     """§17.1196 — the correction to feed back when the engine's own gate refused
     the engine's own block for its SHAPE, or ``""`` when there is nothing to fix.
 
@@ -178,7 +178,25 @@ def shape_retry_note(frame: dict, previous: Optional[dict] = None) -> str:
     # argv and dropped the hang handling: each fixed the refusal it was shown
     # and lost what the other had right. When the previous attempt was refused
     # for something ELSE, say so, so the next draft keeps both.
-    if previous and (previous or {}).get("refused"):
+    # §17.1288e — the step's own text can be the thing the refusal contradicts.
+    # Live, ADD82's specification (written by an earlier repair, before the
+    # engine knew how to reach a VM without an agent) said "the host has NO way
+    # in … done at the console, by hand" and quoted the four host-side lines;
+    # the draft prompt says the specification wins over the task line, and the
+    # redraft obeyed the specification over the refusal -- twice in a row at
+    # 18:03, after reaching the VM at 17:33. The refusal is what the engine
+    # measured AFTER that text was written, so it outranks the text, and the
+    # note has to say so where the specification said the opposite.
+    lines += ("\n\nTHIS NOTE OUTRANKS THE SPECIFICATION ABOVE wherever they disagree: the specification was "
+              "written before these refusals were measured. A text that says a machine has \"no way in\" or that "
+              "the step is \"done at the console\" is superseded by the way in the refusal names; the commands such "
+              "a text quotes for a console are the GUEST's commands and go inside the script's ssh payload. Never "
+              "answer a refusal with console steps or prose -- a draft with nothing the runner can run is the "
+              "worst outcome, and the same block again is the second worst.")
+    if repeated and previous and (previous or {}).get("refused"):
+        lines = ("YOUR REDRAFT REPEATED THE SAME REFUSED SHAPE -- it was refused for exactly what the draft before "
+                 "it was refused for. Do not restate the specification; follow the refusal.\n" + lines)
+    elif previous and (previous or {}).get("refused"):
         prev = "\n".join(f"- `{str(r.get('command') or '')[:160]}` — {r.get('why')}"
                           for r in previous["refused"])
         lines += ("\n\nTHE DRAFT BEFORE THAT was refused for something different:\n" + prev +
