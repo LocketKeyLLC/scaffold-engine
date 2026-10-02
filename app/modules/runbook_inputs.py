@@ -28,6 +28,7 @@ _ID_RE = re.compile(r"\b(?:VM|CT|LXC|container|vmid|ctid)\s*(\d{3,5})\b", re.I)
 _SECRET_RE = re.compile(r"PASS|SECRET|TOKEN|KEY|CREDENTIAL", re.I)
 #: §17.1275 — a PUBLIC key is public material: masking it, encrypting it and
 #: refusing to suggest it only stops the operator seeing what was installed.
+_GUEST_MENTION_RE = re.compile(r"\b(?:VM|CT|LXC|container|guest)\s*#?\s*\d{3,5}\b", re.I)
 _PUBLIC_RE = re.compile(r"PUBLIC|PUBKEY|PUB_KEY|_PUB\b", re.I)
 #: `aedefruscio@192.168.1.129` in a step's own words — whose account, on which machine.
 _USER_AT_HOST_RE = re.compile(r"(?<![\w<.-])([a-z_][a-z0-9_-]{0,31})@((?:\d{1,3}\.){3}\d{1,3}|[a-z0-9][a-z0-9.-]*[a-z0-9])\b")
@@ -147,6 +148,10 @@ def suggest_for(name: str, env: dict, text: str = "") -> list[dict]:
             host_addrs.add(str(attrs["ip"]).split("/")[0])
         if ekind in ("vm", "ct") and words and _mentions(f"{attrs.get('name') or attrs.get('hostname') or ''} {sid}", words):
             about_guest = True
+    # §17.1288h — or the step's own text names a guest and the placeholder's words
+    # (`PALWORLD_USER` ↔ "the palworld-server guest (VM 106)"), with no map to ask.
+    if not about_guest and words and text and _GUEST_MENTION_RE.search(text) and _mentions(text, words):
+        about_guest = True
     # §17.1275 — the step's OWN words. Live, ADD26 was titled "Install the SSH
     # public key on the AI VM (192.168.1.129)", its description said `ssh
     # aedefruscio@192.168.1.129`, and the frame asked for <AI_VM_IP> with no

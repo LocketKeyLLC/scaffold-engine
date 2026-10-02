@@ -106,7 +106,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "runs in the runner's own shell on the Proxmox HOST",   # §17.1285
                    "appears only in the verify",                   # §17.1288
                    "inside an ssh command line",                   # §17.1288b
-                   "reads the neighbour table cold")               # §17.1288c
+                   "reads the neighbour table cold",               # §17.1288c
+                   "is an assumption")                             # §17.1288h
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -558,7 +559,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped. Do not write that branch yourself -- paste this helper into the script and call it on the parsed 400 body:
 """ + WHOSE_FAULT_HELPER + """
   'unreachable' -> record the name, continue; 'needs_input' -> record "needs configuration: <name> (<field>)", continue; 'bad_request' -> print the body, stop; 'duplicate' -> already present. Live, the 88th definition was "Torrent RSS Feed" -- a generic template whose BaseUrl must be typed -- and a script that stopped there called a template a bad request.
-- REACHING A MACHINE OVER SSH FOR THE FIRST TIME: nothing can type a password here, and the host key is unknown. A password the store holds goes to ssh through sshpass's environment, never argv: `apt-get install -y sshpass` if it is missing, then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new -i /root/.ssh/id_rsa.pub user@host` (the same prefix works for `ssh` and `scp`). After that, key auth works and `ssh -o BatchMode=yes user@host true` is the check. A secret never rides an ssh COMMAND LINE: `ssh host 'echo "$MASS_PASSWORD" | sudo -S …'` expands on the remote, where it is unset, and the double-quoted form puts the value in both machines' process lists. Feed it on stdin: `ssh -o BatchMode=yes user@host "sudo -S -p '' bash -c 'apt-get update && apt-get install -y x'" <<< "$MASS_PASSWORD"`. A VM you just STARTED is not up yet: wait for it with a loop of reads (`for i in 1 2 3 4 5 6 7 8 9 10 11 12; do ping -c 1 -W 2 host >/dev/null 2>&1 && break; sleep 5; done`) before the first ssh -- a loop of reads is one line, elevated or not.
+- REACHING A MACHINE OVER SSH FOR THE FIRST TIME: nothing can type a password here, and the host key is unknown. A password the store holds goes to ssh through sshpass's environment, never argv: `apt-get install -y sshpass` if it is missing, then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new -i /root/.ssh/id_rsa.pub user@host` (the same prefix works for `ssh` and `scp`). After that, key auth works and `ssh -o BatchMode=yes user@host true` is the check. The ACCOUNT inside a guest is a placeholder named after the guest (`<PALWORLD_USER>@$IP`) unless a pin or the step's own text names it -- `root` is a guess (Ubuntu Server refuses root over ssh), and `root@pve` is the host's shell, not a guest's. A secret never rides an ssh COMMAND LINE: `ssh host 'echo "$MASS_PASSWORD" | sudo -S …'` expands on the remote, where it is unset, and the double-quoted form puts the value in both machines' process lists. Feed it on stdin: `ssh -o BatchMode=yes user@host "sudo -S -p '' bash -c 'apt-get update && apt-get install -y x'" <<< "$MASS_PASSWORD"`. A VM you just STARTED is not up yet: wait for it with a loop of reads (`for i in 1 2 3 4 5 6 7 8 9 10 11 12; do ping -c 1 -W 2 host >/dev/null 2>&1 && break; sleep 5; done`) before the first ssh -- a loop of reads is one line, elevated or not.
 - A VM WITH NO GUEST AGENT IS STILL REACHABLE, and reaching it is your job, not the operator's. Its NIC's MAC is in `qm config N` (`net0: virtio=BC:24:…`); once the VM is up, the host's `ip neigh show` has that MAC beside its address -- but ONLY after a sweep has made the host talk to it (`nmap -sn <the bridge's /24> >/dev/null` when nmap is present, else `for h in $(seq 1 254); do ping -c 1 -W 1 <net>.$h >/dev/null 2>&1 & done; wait`); a VM that booted and spoke to the router alone never appears, however long you wait, so sweep before every read. Then `SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new <user>@<address>`, and do the step's work over `ssh <user>@<address> '…'` -- for the agent itself: `apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent`, checked with `qm agent N ping` on the host. Values must pass between those steps (the address found feeds the ssh), so write the WHOLE sequence as one bash script under ## Write these files and run it with `MASS_PASSWORD="$MASS_PASSWORD" bash /tmp/<name>.sh`; inside a file `$(…)`, loops and variables are all fine. A step is the operator's ONLY when ssh itself is refused -- say which command refused and why, with the output.
 - YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next. A check uses what the run used: a placeholder that appears only in a verify is a value the operator would type for nothing -- check from the host (`qm agent N ping`, `qm agent N exec -- systemctl is-active <unit>`) or in the script's last lines.
 - A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not. A thing that HANGS is not an HTTP status: `urlopen` raises TimeoutError or urllib.error.URLError, so `except HTTPError` alone lets one slow tracker kill the whole run with no summary -- catch `(urllib.error.URLError, TimeoutError, OSError)` around the call, INSIDE the loop, and record that item as unreachable exactly like a 502.
@@ -2950,6 +2951,74 @@ def reads_the_neighbour_table_cold(commands: list[str], files: Optional[list[dic
     return out
 
 
+_SSH_LITERAL_USER_RE = re.compile(
+    r"(?<![\w./-])(?:ssh|ssh-copy-id|scp|sftp)(?![\w-])[^\n]*?\s(?:-o\s+\S+\s+|-\w\s+\S+\s+)*(?:-i\s+\S+\s+)?"
+    r"([a-z_][a-z0-9_-]{0,31})@(\S+)")
+
+
+def ssh_assumes_the_guests_account(commands: list[str], node: Optional[dict], env: Optional[dict],
+                                   files: Optional[list[dict]] = None) -> list[dict]:
+    """§17.1288h — a literal account on an ssh into the step's guest is a GUESS
+    unless something the engine holds names it. Live, ADD82's fourth clean draft
+    wrote `ssh-copy-id … root@"$IP"` and `ssh … root@"$IP"` into VM 106 -- an
+    Ubuntu Server 22.04 install (ADD5), which refuses root over ssh by default
+    and has no root password -- when every earlier frame had asked for
+    `<PALWORLD_USER>`. A pin names an account; the step's own text names one
+    (`aedefruscio@192.168.1.129`, ADD26); nothing names `root` inside a guest --
+    the shell's `root@pve` is the HOST's. The placeholder is the honest form:
+    the operator fills it once and it travels by name."""
+    from app.modules.runbook_inputs import _USER_AT_HOST_RE
+    subject = step_text(node) if node else ""
+    if not _GUEST_SUBJECT_RE.search(subject):
+        return []                                            # not a step about a guest
+    named = {u for u, _h in _USER_AT_HOST_RE.findall(subject)}
+    subs = (env or {}).get("substitutions") or {}
+    named |= {str(v) for k, v in (subs.items() if isinstance(subs, dict) else []) if "USER" in str(k).upper()}
+    texts = [("command", str(c)) for c in commands or []] + \
+            [(str((f or {}).get("path") or "file"), str((f or {}).get("content") or "")) for f in files or []]
+    out: list[dict] = []
+    gid = _GUEST_SUBJECT_RE.search(subject).group(1)
+    for where, body in texts:
+        for m in _SSH_LITERAL_USER_RE.finditer(body):
+            user = m.group(1)
+            if user in named or m.group(0).rstrip().endswith("@pve"):
+                continue
+            line = body[body.rfind("\n", 0, m.start()) + 1:].split("\n", 1)[0].strip()
+            out.append({"command": line[:200] if where == "command" else f"{where}: {line[:160]}", "why": (
+                f"`{user}@{m.group(2)[:40]}` -- the account inside guest {gid} is an assumption: no pin names "
+                f"it, the step's text names none, and no finished step logged in there as `{user}`. An "
+                f"Ubuntu Server guest refuses root over ssh by default and has no root password, so a guessed "
+                f"account fails at the first ssh-copy-id. Write a placeholder named after the guest, "
+                f"`<{_guest_word(subject, gid, env)}_USER>@$IP`, in the ssh-copy-id AND the ssh; the operator fills "
+                f"it once (they log in at the console with it) and the value travels by name.")})
+            break
+        if out:
+            break
+    return out
+
+
+_GUEST_NAME_RE = re.compile(r"\b([a-z][a-z0-9]+)(?:-[a-z0-9]+)+\b")   # `palworld-server`, `ai-vm`, `caddy-proxy`
+
+
+def _guest_word(subject: str, gid: str, env: Optional[dict] = None) -> str:
+    """The word a placeholder for guest `gid` is named after: the system map's
+    name for it when the map has one, else the hyphenated name nearest the
+    guest's mention in the step text (`palworld-server` → `PALWORLD`), else
+    `VM<id>`."""
+    state = (env or {}).get("system_state") or {}
+    ent = state.get(gid) if isinstance(state, dict) else None
+    attrs = (ent or {}).get("attrs") if isinstance(ent, dict) else None
+    label = str((attrs or {}).get("name") or (attrs or {}).get("hostname") or "")
+    if label:
+        return re.split(r"[^a-z0-9]", label.lower(), 1)[0].upper() or f"VM{gid}"
+    anchor = re.search(rf"\b{gid}\b", subject)
+    names = [(abs(m.start() - (anchor.start() if anchor else 0)), m.group(1)) for m in _GUEST_NAME_RE.finditer(subject)
+             if m.group(1).lower() not in ("qemu", "guest", "apt", "ssh", "ip", "ssh-copy")]
+    if names:
+        return min(names)[1].upper()
+    return f"VM{gid}"
+
+
 def inputs_for(commands: list[str], verify: list[str], runbook: str,
                files: Optional[list[dict]] = None) -> list[dict]:
     """``[{name, hint, secret}]`` — the values the operator must supply.
@@ -3318,6 +3387,8 @@ def frame_run(node: dict, runbook: str, spec, policy: dict, env: Optional[dict] 
     refused = refused + _vhits                            # §17.1288 — only when no check would be left
     refused = refused + secret_in_an_ssh_command_line(cmds, shape_files)
     refused = refused + reads_the_neighbour_table_cold(cmds, shape_files)
+    # §17.1288h — a literal account into the step's guest is a guess.
+    refused = refused + ssh_assumes_the_guests_account(cmds, node, env, files)
     # §17.1268 — work that cannot finish in the time one command is given. A
     # refusal rather than a rule, because §17.1267 put the budget in the prompt
     # and the next draft looped over all 89 again with a sleep added.
