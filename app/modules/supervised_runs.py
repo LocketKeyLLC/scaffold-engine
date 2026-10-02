@@ -99,7 +99,8 @@ _SHAPE_REFUSALS = ("substitution/heredoc", "redirect", "empty", "cannot report a
                    "against a",                                    # §17.1274 slice × timeout
                    "whether the KEY `propertyName` appears",       # §17.1278
                    "by a phrase list",                             # §17.1278b
-                   "without reading the body's `propertyName`")    # §17.1278c
+                   "without reading the body's `propertyName`",    # §17.1278c
+                   "has no 'needs_input' verdict")                 # §17.1279
 
 # §17.1198 — the same signatures the runner's own privilege note reads, so both
 # ends agree on "this failed because it could not read, not because the machine
@@ -499,12 +500,16 @@ async def write_prefixes_for_job(db: AsyncSession, job_id: str) -> list[dict]:
 #: never looked), so the drafter gets the code and the gate checks it was used.
 WHOSE_FAULT_HELPER = """
 def whose_fault(errors):
-    # a *arr 400 body is a list of {propertyName, errorMessage}
-    msgs = " ".join(str(e.get("errorMessage", "")) for e in errors if isinstance(e, dict)).lower()
+    # a *arr 400 body is a list of {propertyName, errorMessage, attemptedValue}
+    errors = [e for e in errors if isinstance(e, dict)]
+    msgs = " ".join(str(e.get("errorMessage", "")) for e in errors).lower()
     if "unique" in msgs or "already exists" in msgs:
         return "duplicate"
-    if any(str(e.get("propertyName") or "").strip() for e in errors if isinstance(e, dict)):
-        return "bad_request"          # a field is NAMED: our body is wrong -- stop and print it
+    named = [e for e in errors if str(e.get("propertyName") or "").strip()]
+    if named and all(e.get("attemptedValue") == "" for e in named):
+        return "needs_input"          # a field is NAMED and EMPTY: a template that wants a value only the operator has -- report it by name, go on
+    if named:
+        return "bad_request"          # a field is NAMED with a value: our body is wrong -- stop and print it
     return "unreachable"              # no field named: that tracker is down -- record it and go on
 """
 
@@ -528,7 +533,7 @@ Runnable-by-the-engine rules (this runbook may be carried out FOR the operator, 
 - ONE COMMAND GETS 180 SECONDS, and when it runs out the command is killed and the step fails with nothing to show for the work it did. So count what you are asking for: a loop over 89 things, each a call to a service OUTSIDE this machine that waits on a connection test, does not fit -- and a run that dies at 180s leaves no record of the 40 it managed. Split work like that into batches that each fit comfortably -- twenty per command, or ten when each one waits on a remote service that may be slow or dead, across several commands, and make every batch RESUMABLE -- treat "already present" as success, not as an error -- so re-running one costs nothing and a later batch never redoes an earlier one. A read that only looks at this machine is not the problem; waiting on something across the network, many times over, is. And give every request its OWN short timeout -- about 15 seconds -- so a batch cannot outlive the budget even if every item hangs: ten items at `timeout=60` is 600 seconds, not 180.
 - WHEN A SERVICE REFUSES SOMETHING YOU ARE ADDING, ITS OWN BODY SAYS WHOSE FAULT IT IS -- read that, do not guess from a list of phrases. A VALIDATION error names the field it refused (`"propertyName": "Name"`, `"'App Profile Id' must be greater than '0'"`): your body is wrong, so stop at the first one and print it. An AVAILABILITY error names no field and talks about reaching the thing (`"propertyName": ""` with `"Unable to access 16mag.net, blocked by CloudFlare Protection"`, "Unable to connect", "timed out", a captcha, a certificate): that one thing is unusable right now, so record its name, skip it, and keep going. Branch on THAT distinction -- whether a field is named -- and not on a hand-written list of error strings: live, a block matched four connection phrases, met "blocked by CloudFlare Protection" on its second indexer of 89, called it a validation failure and stopped. Do not write that branch yourself -- paste this helper into the script and call it on the parsed 400 body:
 """ + WHOSE_FAULT_HELPER + """
-  'unreachable' -> record the name, continue; 'bad_request' -> print the body, stop; 'duplicate' -> already present.
+  'unreachable' -> record the name, continue; 'needs_input' -> record "needs configuration: <name> (<field>)", continue; 'bad_request' -> print the body, stop; 'duplicate' -> already present. Live, the 88th definition was "Torrent RSS Feed" -- a generic template whose BaseUrl must be typed -- and a script that stopped there called a template a bad request.
 - YOUR VERIFY CHECKS GO THROUGH THE SAME CHANNEL as the run commands, so they obey the same rules: one simple read-only command each, no `$(...)` substitution, no pipe into `python3 -c`. A clever one-liner that reads a key and counts the results in one go is refused and the step is left with nothing checking it. Read the value in one check, use it in the next.
 - A LIST THE MACHINE HANDS YOU IS WHAT EXISTS, NOT WHAT WORKS. A schema, catalogue or definition list shipped with a service tells you what it can be CONFIGURED with; it says nothing about whether each of those things is still alive this week. Only the second question goes stale, and it is the one the web sources above answer. So: a rejection of your REQUEST (400, 422, "must be greater than") is your mistake — stop at the first one, print the body, fix it. A failure to REACH the thing (502, 503, timeout, refused) is that thing's problem — record it by name, skip it, and keep going through the rest of the list. Finish with a count of what landed and a line per one you skipped and why; a step that adds 35 of 89 and names the 54 corpses has done its job, and one that stops at the first corpse has not. A thing that HANGS is not an HTTP status: `urlopen` raises TimeoutError or urllib.error.URLError, so `except HTTPError` alone lets one slow tracker kill the whole run with no summary -- catch `(urllib.error.URLError, TimeoutError, OSError)` around the call, INSIDE the loop, and record that item as unreachable exactly like a 502.
 - A service that runs INSIDE a guest is reached at THAT guest's address, not the host's. Name the placeholder after the guest it belongs to — `<PROWLARR_IP>`, `<RADARR_IP>` — never `<PROXMOX_HOST_IP>` for something listening inside a container. The guest list below says which guest each service is in; the engine can read that guest's address off the host and fill it in, but only if you name it after the guest.
@@ -1320,6 +1325,17 @@ def classifies_by_key_presence(commands: list[str], files: Optional[list[dict]] 
                 f"`blocked by CloudFlare Protection`, `\"propertyName\": \"\"`). The verdict is in the body: "
                 f"paste and call `{WHOSE_FAULT_HELPER.strip()}` -- 'unreachable' is recorded by name and the loop "
                 f"continues; 'bad_request' stops and prints the body; 'duplicate' counts as already present.")})
+        # §17.1279 — a pasted `whose_fault` that predates `needs_input` stops on a
+        # template (live: "Torrent RSS Feed", `propertyName: BaseUrl`,
+        # `attemptedValue: ""`, batch 9 of 9, connect_apps never ran).
+        if not out and "def whose_fault" in source and "needs_input" not in source:
+            out.append({"command": label, "why": (
+                f"{what} carries an older `whose_fault` that has no 'needs_input' verdict, so a definition "
+                f"that is a TEMPLATE -- a field NAMED with an EMPTY attemptedValue, like \"Torrent RSS Feed\" "
+                f"wanting a BaseUrl only the operator can type -- is treated as a bad request and the whole run "
+                f"stops on it. Replace it with the current helper and call it the same way: "
+                f"`{WHOSE_FAULT_HELPER.strip()}` -- 'needs_input' is recorded as \"needs configuration: <name> "
+                f"(<field>)\" and the loop continues.")})
         if phrases and not out:
             out.append({"command": label, "why": (
                 f"{what} decides whether a tracker is unreachable by a phrase list ({', '.join(repr(p) for p in phrases[:4])}"
@@ -1600,7 +1616,31 @@ _OK_LINE = re.compile(
 
 _EMPTY_PROP = re.compile(r'"propertyName"\s*:\s*""')
 _ERR_MSG = re.compile(r'"errorMessage"\s*:\s*"((?:[^"\\]|\\.)*)"')
-_STOPPED_ON = re.compile(r"(?im)^\s*(?:VALIDATION FAILURE|FAILED|ERROR|STOPPED)[^\n:]*? on ([^:\n]+):")
+_STOPPED_ON = re.compile(r"(?im)^\s*(?:VALIDATION FAILURE|VALIDATION ERROR|BAD REQUEST|FAILED|ERROR|STOPPED)[^\n:]*? on ([^:\n]+):")
+
+
+_NAMED_EMPTY = re.compile(r'"propertyName"\s*:\s*"([A-Za-z][\w ]*)"[^}]*?"attemptedValue"\s*:\s*""', re.S)
+
+
+def stopped_on_a_template(output: str) -> Optional[str]:
+    """§17.1279 — the block exited on a definition that wants a value only the
+    operator has. Live: batches 1–8 clean (49 already present, 38 dead and
+    skipped by name), batch 9 stopped on "Torrent RSS Feed" -- `propertyName:
+    BaseUrl`, `attemptedValue: ""` -- a generic template, not a bad request,
+    and the tenth command (connect the apps) never ran."""
+    o = output or ""
+    if _EMPTY_PROP.search(o) and not _NAMED_EMPTY.search(o):
+        return None
+    m = _NAMED_EMPTY.search(o)
+    if not m:
+        return None
+    field = m.group(1)
+    who = _STOPPED_ON.search(o)
+    name = who.group(1).strip() if who else "that definition"
+    return (f"the block stopped on {name}, a definition whose `{field}` must be TYPED (`attemptedValue: \"\"`) -- "
+            f"a generic template, not a bad request: nothing in the body was wrong, the definition simply wants a "
+            f"value only the operator has. Record it as \"needs configuration: {name} ({field})\" and keep going; "
+            f"the commands after this one never ran.")
 
 
 def stopped_on_a_dead_party(output: str) -> Optional[str]:
@@ -3236,7 +3276,8 @@ async def resolve_run(db: AsyncSession, job_id: str, node_key: str, choice: str,
             logger.warning("needs_root_record_failed job=%s err=%r", job_id, exc)
     # §17.1278 — a block that exited on a dead third party did not fail for the
     # reason its own output claims.
-    dead_reason = (stopped_on_a_dead_party(str(last.get("output") or ""))
+    dead_reason = ((stopped_on_a_dead_party(str(last.get("output") or ""))
+                    or stopped_on_a_template(str(last.get("output") or "")))
                    if last and not last.get("ok") and not last.get("refused") and not dropped else None) or ""
     if dead_reason:
         dead_reason = f"`{last['command'][:80]}` exited {last['exit']}: " + dead_reason

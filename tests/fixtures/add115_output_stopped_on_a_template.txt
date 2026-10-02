@@ -1,0 +1,24 @@
+already present: xxxtor
+already present: YTS
+already present: Zamunda LIFE
+already present: Knaben
+already present: NZBIndex
+already present: SubsPlease
+already present: showRSS
+BAD REQUEST on Torrent RSS Feed: [
+  {
+    "isWarning": false,
+    "propertyName": "BaseUrl",
+    "errorMessage": "'Base Url' must not be empty.",
+    "attemptedValue": "",
+    "severity": "error"
+  },
+  {
+    "isWarning": false,
+    "propertyName": "BaseUrl",
+    "errorMessage": "must be valid URL that starts with http(s)://",
+    "attemptedValue": "",
+    "severity": "error"
+  }
+]
+Stopping. Added so far: 0, already present: 7, unreachable: 0
