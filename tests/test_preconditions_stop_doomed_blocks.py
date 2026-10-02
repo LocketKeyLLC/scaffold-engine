@@ -244,3 +244,21 @@ async def test_an_unreadable_host_still_refuses_nothing_about_a_stopped_guest():
     with patch("app.modules.mcp_client.call_tool", new=_host(pct="", qm="")):
         out = await pc.unmet([RUN], _spec(), plan=PLAN, files=_files(_script()), node=ADD82)
     assert all("is stopped" not in o["why"] for o in out), "a blocker is never invented out of blindness"
+
+
+@pytest.mark.asyncio
+async def test_the_live_third_draft_of_1927_is_refused_for_the_stopped_vm_alone():
+    """Trace 1142 (2026-10-02 19:28:00Z): every shape rule satisfied -- sweep,
+    MAC → neigh, sshpass ssh-copy-id, sudo on stdin, `<PALWORLD_USER>` -- and no
+    `qm start 106` while qm list says stopped. One refusal; with the guarded
+    start line, none."""
+    from app.modules import supervised_runs as sr
+    rb = _script("add82_runbook_1142.md")
+    cmds, files = sr.runbook_commands(rb), sr.file_writes(rb)
+    assert len(cmds) == 2 and len(files) == 1
+    with patch("app.modules.mcp_client.call_tool", new=_host(qm=QM_LIST_106_STOPPED)):
+        out = await pc.unmet(cmds, _spec(), plan=PLAN, files=files, node=ADD82)
+    assert len(out) == 1 and "VM 106 is stopped" in out[0]["why"], [o["why"][:80] for o in out]
+    started = [{**files[0], "content": "qm status 106 | grep -q running || qm start 106\n" + files[0]["content"]}]
+    with patch("app.modules.mcp_client.call_tool", new=_host(qm=QM_LIST_106_STOPPED)):
+        assert await pc.unmet(cmds, _spec(), plan=PLAN, files=started, node=ADD82) == []
