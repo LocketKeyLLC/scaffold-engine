@@ -148,6 +148,8 @@ def step_commands(text: str) -> list[tuple[str, str]]:
             cand = m.group(1).strip()
             if cand.startswith("/") or "=" in cand.split(" ", 1)[0]:
                 continue                          # a path or an assignment, not a command
+            if not _plausible_head(cand):
+                continue                          # §17.1288q — a quoted run of prose is not a command
             out.append((cand, sentence))
         bare = _INLINE_RE.sub(" ", sentence)
         for m in _BARE_RE.finditer(bare):           # zero-width after the head: heads may be adjacent
@@ -155,6 +157,34 @@ def step_commands(text: str) -> list[tuple[str, str]]:
             if rest and _known_command(m.group(1), rest.group(1)):
                 out.append((f"{m.group(1)} {rest.group(1).strip()}", sentence))
     return out
+
+
+_PROGRAM_HEADS = frozenset({
+    "sudo", "bash", "sh", "python3", "python", "tee", "printf", "echo", "apt", "apt-get", "dpkg", "pct", "qm",
+    "pvesm", "pveam", "systemctl", "service", "curl", "wget", "git", "docker", "pip", "pip3", "npm", "npx", "node",
+    "make", "install", "cp", "mv", "rm", "mkdir", "chmod", "chown", "ln", "ssh", "ssh-copy-id", "scp", "sshpass",
+    "nmap", "ip", "useradd", "adduser", "usermod", "passwd", "ufw", "iptables", "nft", "tar", "unzip", "cat",
+    "nano", "vi", "vim", "sed", "awk", "grep", "find", "ls", "cd", "export", "source", "env", "nohup", "timeout",
+    "lvextend", "lvresize", "resize2fs", "growpart", "mount", "umount", "reboot", "shutdown", "nvidia-smi",
+    "ollama", "wg", "wg-quick", "caddy", "pm2", "journalctl", "qemu-img", "pvesh",
+})
+
+
+def _plausible_head(cand: str) -> bool:
+    """§17.1288q — the first word of an inline literal must be a PROGRAM. Live,
+    ADD100's prose runbook ("the one thing you haven't chosen yet, and it
+    determines … how it's what …") was read as commands `t chosen yet, and it
+    determines …` and `s what`: `_INLINE_RE` takes a run between two
+    apostrophes for a quoted command, and nothing asked whether the head was
+    anything that runs. The guest gate then refused the fragments, Run was
+    withheld for a reason that was no reason, and the honest outcome -- a draft
+    with nothing to run, which has its own redraft -- never happened."""
+    from app.modules.assist_state_check import _READ_ONLY_HEADS, _SUBCOMMAND_HEADS
+    head = (cand.split(None, 1) or [""])[0]
+    if not head or len(head) < 2:
+        return False
+    base = head.rsplit("/", 1)[-1]
+    return ("/" in head) or base in _PROGRAM_HEADS or base in _SUBCOMMAND_HEADS or base in _READ_ONLY_HEADS
 
 
 def _known_command(head: str, rest: str) -> bool:

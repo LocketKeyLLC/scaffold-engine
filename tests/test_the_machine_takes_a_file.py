@@ -1806,3 +1806,29 @@ def test_the_live_2311_runbook_now_parks_runnable_with_the_repair_shown():
     assert any("added `|| true`" in w for w in frame["engine_fixed"]) and any("dropped the check" in w for w in frame["engine_fixed"])
     assert "|| true)" in frame["files"][0]["content"], "the frame carries the REPAIRED file -- the operator approves what runs"
     assert "run" in {o["id"] for o in frame["options"]}
+
+
+# ───── §17.1288q — a quoted run of prose is not a command
+
+def test_add100s_prose_runbook_yields_no_commands():
+    from app.modules import supervised_runs as sr
+    from app.modules.step_classify import step_commands
+    rb = _fx("add100_runbook_prose.md")
+    assert sr.runbook_commands(rb) == [], sr.runbook_commands(rb)
+    frags = [c for c, _s in step_commands(rb)]
+    assert not any(c.startswith(("t ", "s ")) for c in frags), frags
+
+
+def test_inline_commands_with_a_real_head_still_count():
+    from app.modules.step_classify import step_commands
+    cmds = [c for c, _s in step_commands("Run `sudo apt-get update` and then `pct start 120`. Then 'systemctl restart caddy'.")]
+    assert "sudo apt-get update" in cmds and "pct start 120" in cmds and "systemctl restart caddy" in cmds
+    cmds = [c for c, _s in step_commands("you haven't chosen yet, and it determines how it's built, how it's what")]
+    assert cmds == [], cmds
+
+
+def test_the_guest_gate_speaks_of_the_step_s_own_guest():
+    from app.modules import supervised_runs as sr
+    node = {"node_key": "ADD100", "title": "Rebuild the control panel in LXC 111", "description": "In container 111."}
+    hits = sr.commands_never_reach_the_guest(["sudo apt-get install -y nodejs"], node)
+    assert hits and "guest 111" in hits[0]["why"] and "qemu-guest-agent on the host instead of in VM 106" not in hits[0]["why"]

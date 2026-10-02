@@ -1459,7 +1459,8 @@ def commands_never_reach_the_guest(commands: list[str], node: Optional[dict],
     gid = ids[0]
     return [{"command": unreached[0], "why": (
         f"`{unreached[0][:70]}` runs in the runner's own shell on the Proxmox HOST, and the step is about "
-        f"VM/CT {gid} -- live, this would have installed qemu-guest-agent on the host instead of in VM 106 (a "
+        f"VM/CT {gid} -- it would change the HOST instead of guest {gid} (live, ADD82's agent install would have "
+        f"landed on the hypervisor) (a "
         f"`qm agent {gid} ping` beside it is a read and reaches nothing). Every command that CHANGES something must reach "
         f"the guest: a container with `pct exec {gid} -- <command>`; a VM with `qm guest exec {gid} -- <command>` "
         f"(needs the agent) or over ssh -- and a VM WITHOUT the agent is reached by finding its address from its MAC "
