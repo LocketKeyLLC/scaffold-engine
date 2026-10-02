@@ -145,5 +145,102 @@ def test_the_check_runs_before_the_frame_is_built():
     import inspect
     from app.modules import execution_agent as ea
     src = inspect.getsource(ea)
-    assert "runbook_preconditions import unmet" in src
-    assert src.index("_pre = await unmet(") < src.index("preconditions=_pre"), src[:0] or "check must precede framing"
+    assert "runbook_preconditions import read_inventory, unmet" in src
+    # §17.1288f — the inventory is read once, every draft is judged against it
+    assert src.index("_inv = await read_inventory(spec)") < src.index("preconditions=await _pre_for(")
+    assert "preconditions=_pre)" not in src, "a draft framed against the FIRST draft's preconditions"
+    i = src.index("async def _pause_for_decision(")
+    body = src[i:src.index("\nasync def ", i + 10)]
+    assert body.count("preconditions=await _pre_for(") == body.count("supervised_runs.frame_run("), \
+        "every frame_run in the pause must carry its own draft's preconditions"
+    assert "files=_f, node=run_node, inventory=_inv" in body
+
+
+# ───── §17.1288f/g — the live ADD82 script: VM 106 stopped and never started; ssh with no key of ours
+
+QM_LIST_106_STOPPED = QM_LIST.replace("106 palworld-server      running    8192               0.00 339509",
+                                      "106 palworld-server      stopped    8192             100.00 0")
+ADD82 = {"node_key": "ADD82", "title": "Install and enable QEMU Guest Agent in VM 106",
+         "description": "Install qemu-guest-agent inside the palworld-server guest (VM 106) and confirm it answers."}
+PLAN = [{"node_key": "ADD26", "title": "Install the SSH public key on the AI VM (192.168.1.129)", "status": "done"},
+        {"node_key": "ADD57", "title": "Start VM 106 (palworld-server)", "status": "skipped"}]
+RUN = 'MASS_PASSWORD="$MASS_PASSWORD" PALWORLD_USER="<PALWORLD_USER>" bash /tmp/install_agent_106.sh'
+
+
+def _script(name="add82_install_agent_106_v2.sh"):
+    import pathlib
+    return pathlib.Path(__file__).parent.joinpath("fixtures", name).read_text(encoding="utf-8")
+
+
+def _files(content):
+    return [{"path": "/tmp/install_agent_106.sh", "content": content}]
+
+
+@pytest.mark.asyncio
+async def test_the_live_script_is_refused_twice_before_it_is_sent():
+    with patch("app.modules.mcp_client.call_tool", new=_host(qm=QM_LIST_106_STOPPED)):
+        out = await pc.unmet([RUN], _spec(), plan=PLAN, files=_files(_script()), node=ADD82)
+    whys = [o["why"] for o in out]
+    assert len(out) == 2, whys
+    assert any("nothing has put this host's key on guest 106" in w and "sshpass -e ssh-copy-id" in w for w in whys)
+    assert any("VM 106 is stopped" in w and "nothing in this block starts it" in w
+               and "qm status 106 | grep -q running || qm start 106" in w for w in whys)
+    assert out[0]["command"].startswith("ssh -o BatchMode=yes"), "the refusal names the line"
+
+
+@pytest.mark.asyncio
+async def test_started_and_keyed_the_same_script_passes():
+    fixed = _script().replace("# Wait for the VM to be up",
+                              "qm status 106 | grep -q running || qm start 106\n# Wait for the VM to be up")
+    fixed = fixed.replace("# Install the agent over SSH",
+                          'SSHPASS="$MASS_PASSWORD" sshpass -e ssh-copy-id -o StrictHostKeyChecking=accept-new "$PALWORLD_USER@$IP"\n# Install the agent over SSH')
+    with patch("app.modules.mcp_client.call_tool", new=_host(qm=QM_LIST_106_STOPPED)):
+        assert await pc.unmet([RUN], _spec(), plan=PLAN, files=_files(fixed), node=ADD82) == []
+
+
+@pytest.mark.asyncio
+async def test_sshpass_on_the_ssh_itself_needs_no_key():
+    fixed = _script().replace("# Wait for the VM to be up",
+                              "qm status 106 | grep -q running || qm start 106\n# Wait for the VM to be up")
+    fixed = fixed.replace('ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$PALWORLD_USER@$IP"',
+                          'SSHPASS="$MASS_PASSWORD" sshpass -e ssh -o StrictHostKeyChecking=accept-new "$PALWORLD_USER@$IP"')
+    with patch("app.modules.mcp_client.call_tool", new=_host(qm=QM_LIST_106_STOPPED)):
+        assert await pc.unmet([RUN], _spec(), plan=PLAN, files=_files(fixed), node=ADD82) == []
+
+
+@pytest.mark.asyncio
+async def test_a_guest_a_finished_step_keyed_is_not_refused_for_a_key():
+    """ADD26 put the key on the AI VM (110, `ai-vm`): the plan names it by name, qm list by id."""
+    node = {"node_key": "ADD49", "title": "Make aiserver (VM 110) reachable on SSH port 22", "description": ""}
+    with patch("app.modules.mcp_client.call_tool", new=_host(qm=QM_LIST.replace("110 ai-vm                stopped", "110 ai-vm                running"))):
+        out = await pc.unmet(["ssh -o BatchMode=yes aedefruscio@192.168.1.129 'sudo systemctl status ssh'"],
+                             _spec(), plan=PLAN, node=node)
+    assert out == [], [o["why"][:80] for o in out]
+    assert pc.key_known_for("110", "ai-vm", PLAN) and pc.key_known_for("106", "palworld-server", PLAN) is None
+
+
+@pytest.mark.asyncio
+async def test_a_running_guest_is_not_refused_for_being_stopped():
+    with patch("app.modules.mcp_client.call_tool", new=_host()):      # 106 running in QM_LIST
+        out = await pc.unmet([RUN], _spec(), plan=PLAN, files=_files(_script()), node=ADD82)
+    assert len(out) == 1 and out[0]["why"].startswith("nothing has put this host's key on guest 106")
+
+
+@pytest.mark.asyncio
+async def test_the_inventory_is_reused_when_handed_in():
+    calls = []
+    async def counting(spec, tool, args):
+        calls.append(args["command"]); return await _host(qm=QM_LIST_106_STOPPED)(spec, tool, args)
+    with patch("app.modules.mcp_client.call_tool", new=counting):
+        inv = await pc.read_inventory(_spec())
+        assert inv["names"]["106"] == "palworld-server" and inv["vms"]["106"] == "stopped"
+        n = len(calls)
+        await pc.unmet([RUN], _spec(), plan=PLAN, files=_files(_script()), node=ADD82, inventory=inv)
+        assert len(calls) == n, "no second read of the host"
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_host_still_refuses_nothing_about_a_stopped_guest():
+    with patch("app.modules.mcp_client.call_tool", new=_host(pct="", qm="")):
+        out = await pc.unmet([RUN], _spec(), plan=PLAN, files=_files(_script()), node=ADD82)
+    assert all("is stopped" not in o["why"] for o in out), "a blocker is never invented out of blindness"
