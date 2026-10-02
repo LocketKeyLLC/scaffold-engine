@@ -262,3 +262,17 @@ async def test_the_live_third_draft_of_1927_is_refused_for_the_stopped_vm_alone(
     started = [{**files[0], "content": "qm status 106 | grep -q running || qm start 106\n" + files[0]["content"]}]
     with patch("app.modules.mcp_client.call_tool", new=_host(qm=QM_LIST_106_STOPPED)):
         assert await pc.unmet(cmds, _spec(), plan=PLAN, files=started, node=ADD82) == []
+
+
+@pytest.mark.asyncio
+async def test_a_start_through_a_variable_counts():
+    """§17.1288j — trace 1145: `VMID=106` … `qm start "$VMID"` starts 106."""
+    from app.modules import supervised_runs as sr
+    rb = _script("add82_runbook_1145.md")
+    cmds, files = sr.runbook_commands(rb), sr.file_writes(rb)
+    with patch("app.modules.mcp_client.call_tool", new=_host(qm=QM_LIST_106_STOPPED)):
+        out = await pc.unmet(cmds, _spec(), plan=PLAN, files=files, node=ADD82)
+    assert out == [], [o["why"][:100] for o in out]
+    assert pc._resolve_ids('VMID=106\nqm start "$VMID"\nqm status ${VMID} | grep -q running') == \
+        'VMID=106\nqm start 106\nqm status 106 | grep -q running'
+    assert pc._resolve_ids('X=5\nqm start "$X"') == 'X=5\nqm start "$X"', "a non-id value is left alone"
