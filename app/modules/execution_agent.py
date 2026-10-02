@@ -2556,10 +2556,12 @@ async def _pause_for_decision(job_id: str) -> dict | None:
         _plan_rows: list[dict] = []
         try:
             from app.modules.runbook_preconditions import read_inventory, unmet
+            from app.utils.savepoint import savepoint
             async with async_session() as db:
-                _plan = (await db.execute(
-                    text("SELECT node_key, title, status FROM dag_nodes WHERE job_id = :j"),
-                    {"j": job_id})).mappings().all()
+                async with savepoint(db):            # §17.1132 — optional read, swallowed on failure
+                    _plan = (await db.execute(
+                        text("SELECT node_key, title, status FROM dag_nodes WHERE job_id = :j"),
+                        {"j": job_id})).mappings().all()
             _plan_rows = [dict(r) for r in _plan]
             _inv = await read_inventory(spec)
         except Exception as exc:
@@ -2577,6 +2579,29 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                 return []
         frame = supervised_runs.frame_run(run_node, runbook, spec, policy, env=_env,
                                           preconditions=await _pre_for(runbook))
+        # §17.1288n — the gate just contradicted the step's own text about how
+        # its guest is reached ("no way in … done at the console"); the text is
+        # the engine's earlier judgment, so the engine corrects it -- appended,
+        # with the pre-image in dag_node_edits -- and every draft from here,
+        # this chain's and every later reask's, starts from the corrected spec.
+        _corr = supervised_runs.step_text_correction(run_node, frame, env=_env)
+        if _corr:
+            _before = str(run_node.get("description") or "")
+            run_node["description"] = _before.rstrip() + "\n\n" + _corr
+            try:
+                from app.modules import node_editor
+                from app.utils.savepoint import savepoint
+                async with async_session() as db:
+                    async with savepoint(db):            # §17.1132 — optional work, its own SAVEPOINT
+                        _ed = await node_editor.edit_node(job_id, str(run_node.get("node_key") or ""),
+                                                          {"description": run_node["description"]},
+                                                          edited_by="engine:§17.1288n", db=db)
+                    await db.commit()
+                logger.warning("step_text_reconciled job=%s node=%s persisted=%s", job_id,
+                               run_node.get("node_key"), _ed.get("status") == "ok")
+            except Exception as exc:
+                logger.warning("step_text_reconcile_failed job=%s node=%s err=%r",
+                               job_id, run_node.get("node_key"), exc)
         # §17.1196 — the engine wrote a block its OWN gate refuses, and handed
         # the operator the dead end: "the runner is active but the run button is
         # greyed out?? how do we continue?" A SHAPE refusal is the engine's
