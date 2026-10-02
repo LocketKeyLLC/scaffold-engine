@@ -588,3 +588,56 @@ def test_a_wrapper_is_still_found_through_the_receiver_rule():
     from app.modules import supervised_runs as sr
     src = "import requests\ndef fetch_one(u):\n    return requests.get(u)\ndef helper(x):\n    return x.get('k')\n"
     assert sr._network_wrappers(ast.parse(src)) == {"fetch_one"}
+
+
+# ───── §17.1276b — a constructor is not the network; the redraft note fits the channel
+
+def test_the_second_hang_safe_live_draft_passes_the_hang_gate():
+    """`req = urllib.request.Request(...)` is built OUTSIDE the wrapper's try and
+    sends nothing; the urlopen inside the try catches every hang. The hang gate
+    refused it live for the constructor."""
+    from app.modules import supervised_runs as sr
+    files = _file("/tmp/add_indexers.py", _fx("add115_file_hangsafe2.py"))
+    assert sr.loop_dies_on_one_dead_party(["python3 /tmp/add_indexers.py"], files) == []
+    found = sr.loops_the_network_without_a_budget(["python3 /tmp/add_indexers.py"], files)
+    assert found and "api_request" in found[0]["why"]
+
+
+def test_a_request_constructor_is_not_a_network_call():
+    import ast
+    from app.modules import supervised_runs as sr
+    src = "import urllib.request\nreq = urllib.request.Request('http://x')\n"
+    tree = ast.parse(src)
+    call = next(c for c in ast.walk(tree) if isinstance(c, ast.Call))
+    assert sr._is_network_call(call, sr._net_context(tree)) is False
+    assert "Request" not in sr._NETWORK_CALL
+
+
+def test_the_remedy_slices_the_collection_not_the_enumerate():
+    from app.modules import supervised_runs as sr
+    found = sr.loops_the_network_without_a_budget(["python3 /tmp/add_indexers.py"],
+                                                  _file("/tmp/add_indexers.py", _fx("add115_file_hangsafe2.py")))
+    why = found[0]["why"]
+    assert "`public_indexers[:20]`" in why and "public_indexers[start:end]" in why
+    assert "enumerate(public_indexers)[" not in why
+
+
+def test_the_redraft_note_fits_the_file_channel():
+    from app.modules import supervised_runs as sr
+    refused = [{"command": "the file /tmp/x.py", "why": "the file /tmp/x.py loops over `public` -- waits on something off this machine. Bound it."}]
+    note = sr.shape_retry_note({"refused": refused, "file_channel": True})
+    assert "## Write these files" in note and "sys.argv" in note and "python3 /tmp/x.py 0 10" in note
+    assert "printf '%s" not in note, "the file channel does not teach the printf | tee recipe"
+    assert "Never a loop over batches inside one script" in note
+    assert "URLError" in note
+    old = sr.shape_retry_note({"refused": refused, "file_channel": False})
+    assert "printf '%s" in old and "## Write these files" not in old, "a runner without the tool keeps the shell remedy"
+
+
+def test_the_frame_says_which_channel_it_was_drawn_for():
+    from app.modules import supervised_runs as sr
+    spec = type("S", (), {"name": "t", "headers": {}})()
+    runbook = "## Run this\n```bash\npct list\n```\n\n## Verify\n- `pct list`\n"
+    on = sr.frame_run({"node_key": "X", "title": "t"}, runbook, spec, {"allow": ["ANY"], "can_write_files": True})
+    off = sr.frame_run({"node_key": "X", "title": "t"}, runbook, spec, {"allow": ["ANY"], "can_write_files": False})
+    assert on["file_channel"] is True and off["file_channel"] is False
