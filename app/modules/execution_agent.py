@@ -2704,7 +2704,7 @@ async def _pause_for_decision(job_id: str) -> dict | None:
             from app.modules.runbook_coverage import coverage_retry_note, uncovered
             _step_text = " ".join(str(run_node.get(k) or "") for k in
                                   ("description", "prompt_template", "title"))
-            _missing = uncovered(_step_text, frame.get("commands") or [])
+            _missing = uncovered(_step_text, frame.get("commands") or [], frame.get("files") or [])
             if _missing:
                 logger.warning("runbook_coverage_redraft job=%s node=%s missing=%s", job_id,
                                run_node.get("node_key"), "; ".join(_missing)[:200])
@@ -2715,7 +2715,11 @@ async def _pause_for_decision(job_id: str) -> dict | None:
                                                        env=_env, preconditions=_pre)
                     # §17.1211's lesson in miniature: never replace a working
                     # block with an empty one.
-                    if _third.get("commands") and not uncovered(_step_text, _third["commands"]):
+                    # §17.1287 — and never a RUNNABLE block for a refused one: live, this
+                    # swapped a clean six-command ssh script for the refused host-side
+                    # block because the latter "covered" the step's quoted commands.
+                    _no_worse = len(_third.get("refused") or []) <= len(frame.get("refused") or [])
+                    if _third.get("commands") and not uncovered(_step_text, _third["commands"], _third.get("files") or []) and _no_worse:
                         frame = _third
                         logger.warning("runbook_coverage_redraft_clean job=%s node=%s", job_id,
                                        run_node.get("node_key"))
