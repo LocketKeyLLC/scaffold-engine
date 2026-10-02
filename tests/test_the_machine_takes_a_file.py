@@ -1216,3 +1216,42 @@ def test_the_rules_say_how_ssh_gets_a_held_password_and_a_wait():
     r = sr.CHANNEL_RULES
     assert 'SSHPASS="$MASS_PASSWORD" sshpass -e' in r and "StrictHostKeyChecking=accept-new" in r
     assert "apt-get install -y sshpass" in r and "A VM you just STARTED is not up yet" in r
+
+
+# ───── §17.1285 — a step about a guest whose commands never leave the host
+
+ADD82 = {"node_key": "ADD82", "title": "Install and enable QEMU Guest Agent in VM 106",
+         "description": "Install qemu-guest-agent inside the palworld-server guest (VM 106) and confirm it answers."}
+ADD82_CMDS = ["sudo apt-get update", "sudo apt-get install -y qemu-guest-agent",
+              "sudo systemctl enable --now qemu-guest-agent", "systemctl is-active qemu-guest-agent"]
+
+
+def test_the_live_host_side_draft_for_a_vm_step_is_refused():
+    from app.modules import supervised_runs as sr
+    found = sr.commands_never_reach_the_guest(ADD82_CMDS, ADD82)
+    assert found and "VM/CT 106" in found[0]["why"] and "qm guest exec 106" in found[0]["why"]
+    assert any(s in found[0]["why"] for s in sr._SHAPE_REFUSALS)
+
+
+@pytest.mark.parametrize("cmds", [
+    ["qm guest exec 106 -- apt-get install -y qemu-guest-agent"],
+    ["pct exec 102 -- apt-get install -y curl"],
+    ["qm set 106 --agent 1", "qm reboot 106"],                     # host-side work ON the guest
+    ["ssh root@192.168.1.129 'apt-get install -y qemu-guest-agent'"],
+    ["qm status 106", "qm agent 106 ping"],                         # reads only
+])
+def test_a_block_that_reaches_or_acts_on_the_guest_passes(cmds):
+    from app.modules import supervised_runs as sr
+    assert sr.commands_never_reach_the_guest(cmds, ADD82) == [], cmds
+
+
+def test_a_step_with_no_guest_subject_is_left_alone():
+    from app.modules import supervised_runs as sr
+    assert sr.commands_never_reach_the_guest(ADD82_CMDS, {"title": "Install the NVIDIA driver on the Proxmox host"}) == []
+
+
+def test_the_guest_gate_is_wired_into_frame_run():
+    from app.modules import supervised_runs as sr
+    src = pathlib.Path(sr.__file__).read_text(encoding="utf-8")
+    i = src.index("def frame_run("); body = src[i:src.index("\ndef ", i + 10)]
+    assert "commands_never_reach_the_guest(cmds, node)" in body
